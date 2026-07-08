@@ -23,7 +23,7 @@ final class TerminalServiceProtocolTests: XCTestCase {
         let controlRequest = TerminalControlRequest(command: "send", text: "hello", clientID: "ios-client", ownerEpoch: 7)
         let agentSignal = TerminalServiceAgentSignalEvent(
             id: "event-1", sessionID: "session-1", workspaceID: "workspace-1", workspacePath: "/srv/work", type: "blocked", label: "Mock Agent",
-            terminalTrackingID: "session-1", terminalNativeID: "session-1", codexThreadID: nil, environmentKeys: ["SPACES_TERMINAL_TRACKING_ID"],
+            terminalTrackingID: "session-1", environmentKeys: ["SPACES_TERMINAL_TRACKING_ID"],
             createdAt: "2026-06-11T00:00:00Z")
         let profileCommand = TerminalServiceProfileCommand.workspaceCreate(
             .init(projectID: "project-1", branch: "feature", baseBranch: "main", existingBranch: true))
@@ -57,13 +57,13 @@ final class TerminalServiceProtocolTests: XCTestCase {
             agentSignals: [
                 TerminalServiceAgentSignalEvent(
                     id: "event-1", sessionID: "session-1", workspaceID: "workspace-1", workspacePath: "/srv/work", type: "blocked",
-                    label: "Mock Agent", terminalTrackingID: "session-1", terminalNativeID: "session-1", codexThreadID: nil,
+                    label: "Mock Agent", terminalTrackingID: "session-1",
                     environmentKeys: ["SPACES_TERMINAL_TRACKING_ID"], createdAt: "2026-06-11T00:00:00Z")
             ],
             profile: TerminalServiceProfileCommandResponse(
                 message: "Created workspace.",
                 workspace: TerminalServiceProfileWorkspaceRecord(
-                    id: "workspace-1", projectID: "project-1", dir: "/srv/work", runtimePath: "/srv/work", dirname: "feature", branch: "feature",
+                    id: "workspace-1", projectID: "project-1", dir: "/srv/work", dirname: "feature", branch: "feature",
                     baseBranch: "main", isDefault: false, isArchived: false, isHidden: false, isRunning: false, lastLaunchedAt: nil, notes: nil),
                 terminalOutput: "recent output"),
             daemonStatus: TerminalServiceDaemonStatus(

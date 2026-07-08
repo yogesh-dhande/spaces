@@ -4,31 +4,31 @@ import systembridge
 @testable import workspacecore
 
 @Suite struct TerminalTrackingKeyTests {
-    @Test func runningProcessFocusIdentityPrefersNativeSessionID() {
+    @Test func runningProcessFocusIdentityUsesTrackingSessionID() {
         let record = RunningProcessRecord(
             id: "process-1", workspaceID: "workspace-1", templateName: "frontend", command: "npm run dev", terminalApp: TerminalHost.spaces.appName,
-            terminalTrackingID: nil, terminalNativeID: "native-session-1", pid: nil, status: .running, logPath: nil, lastOutputAt: nil,
+            terminalTrackingID: "session-1", pid: nil, status: .running, logPath: nil, lastOutputAt: nil,
             startedAt: "now", exitedAt: nil)
 
-        #expect(record.terminalFocusIdentity == .session("native-session-1"))
-        #expect(record.terminalTrackingIdentity == .session("native-session-1"))
+        #expect(record.terminalFocusIdentity == .session("session-1"))
+        #expect(record.terminalTrackingIdentity == .session("session-1"))
     }
 
-    @Test func windowFocusIdentityPrefersNativeSessionID() {
+    @Test func windowFocusIdentityUsesTrackingSessionID() {
         let record = WindowRecord(
             id: "window-1", workspaceID: "workspace-1", app: TerminalHost.spaces.appName, name: "frontend", detail: "npm run dev", targetURL: nil,
-            terminalTrackingID: nil, terminalNativeID: "native-session-2", role: "terminal", orderIndex: 0, lastSeenAt: "now")
+            terminalTrackingID: "session-2", role: "terminal", orderIndex: 0, lastSeenAt: "now")
 
-        #expect(record.terminalFocusIdentity == .session("native-session-2"))
-        #expect(record.terminalTrackingIdentity == .session("native-session-2"))
+        #expect(record.terminalFocusIdentity == .session("session-2"))
+        #expect(record.terminalTrackingIdentity == .session("session-2"))
     }
 
-    @Test func agentFocusIdentityPrefersNativeSessionID() {
+    @Test func agentFocusIdentityUsesTrackingSessionID() {
         let record = AgentWindowRecord(
-            id: "agent-1", workspaceID: "workspace-1", provider: .spaces, label: "Claude", terminalTrackingID: nil,
-            terminalNativeID: "native-session-3", codexThreadID: nil, status: .waiting, createdAt: "now", updatedAt: "now")
+            id: "agent-1", workspaceID: "workspace-1", provider: .spaces, label: "Claude", terminalTrackingID: "session-3",
+            sessionKey: nil, status: .waiting, createdAt: "now", updatedAt: "now")
 
-        #expect(record.terminalFocusIdentity == TerminalTrackingIdentity.session("native-session-3"))
-        #expect(record.terminalTrackingIdentity == TerminalTrackingIdentity.session("native-session-3"))
+        #expect(record.terminalFocusIdentity == TerminalTrackingIdentity.session("session-3"))
+        #expect(record.terminalTrackingIdentity == TerminalTrackingIdentity.session("session-3"))
     }
 }

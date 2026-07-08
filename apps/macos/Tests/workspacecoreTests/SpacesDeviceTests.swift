@@ -7,14 +7,14 @@ final class SpacesDeviceTests: XCTestCase {
         let store = try makeTemporaryStore()
         let project = makeProjectRecord(id: "project-12345678", dir: try makeTempDirectory().path)
         let workspace = WorkspaceRecord(
-            id: "workspace-12345678", projectID: project.id, dir: try makeTempDirectory().path, runtimePath: "/tmp/spaces/project/feature-a",
+            id: "workspace-12345678", projectID: project.id, dir: try makeTempDirectory().path,
             dirname: "feature-a", branch: "feature/a", isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
         try store.upsert(project: project)
 
         try store.upsert(workspace: workspace)
 
         let storedWorkspace = try XCTUnwrap(try store.workspace(id: workspace.id))
-        XCTAssertEqual(storedWorkspace.runtimePath, workspace.runtimePath)
+        XCTAssertEqual(storedWorkspace.dir, workspace.dir)
         XCTAssertEqual(storedWorkspace.branch, workspace.branch)
     }
 
@@ -53,13 +53,13 @@ final class SpacesDeviceTests: XCTestCase {
     func testPlannerBuildsRuntimeManifest() throws {
         let project = ProjectRecord(id: "project", name: "Project", dir: "/project", isGitRepo: true, defaultBranch: "main")
         let workspace = WorkspaceRecord(
-            id: "workspace", projectID: project.id, dir: "/project/.worktrees/feature", runtimePath: "/srv/spaces/project/feature", dirname: nil,
+            id: "workspace", projectID: project.id, dir: "/project/.worktrees/feature", dirname: nil,
             branch: "feature", isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
 
         let manifest = SpacesDevicePlanner.runtimeManifest(
             project: project, workspace: workspace, namedPorts: [WorkspaceRuntimePortMapping(id: "web", name: "web", port: 3000)])
 
-        XCTAssertEqual(manifest.localPath, workspace.runtimePath)
+        XCTAssertEqual(manifest.localPath, workspace.dir)
         XCTAssertEqual(manifest.processEnvironment["SPACES_WEB_PORT"], "3000")
         let slug = try XCTUnwrap(manifest.processEnvironment["SPACES_WORKSPACE_SLUG"])
         XCTAssertEqual(manifest.processEnvironment["SPACES_WEB_HOST"], "web.\(slug).localhost")

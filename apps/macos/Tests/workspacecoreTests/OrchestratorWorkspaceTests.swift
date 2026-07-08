@@ -75,11 +75,11 @@ extension OrchestratorTests {
         try store.upsertAgentWindow(
             AgentWindowRecord(
                 id: "agent-codex", workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "session-agent",
-                codexThreadID: nil, status: .idle, createdAt: "2026-07-01T00:00:02Z", updatedAt: "2026-07-01T00:00:02Z"))
+                sessionKey: nil, status: .idle, createdAt: "2026-07-01T00:00:02Z", updatedAt: "2026-07-01T00:00:02Z"))
         try store.upsert(
             window: WindowRecord(
                 id: "terminal-ad-hoc", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "Shell",
-                terminalTrackingID: "session-shell", terminalNativeID: "session-shell", role: .terminal, orderIndex: 300,
+                terminalTrackingID: "session-shell", role: .terminal, orderIndex: 300,
                 lastSeenAt: "2026-07-01T00:00:03Z"))
         let closed = TerminalCloseCapture()
         let terminated = TerminalTerminateCapture()

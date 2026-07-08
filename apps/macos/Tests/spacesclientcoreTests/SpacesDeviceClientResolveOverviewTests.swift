@@ -7,7 +7,7 @@ import spacesterminalcore
 
 /// Covers the embedded-status refresh path: a compatible device reads its wire-protocol verdict from
 /// the overview's inline frozen-core status (one round-trip), and the standalone `daemonStatus`
-/// handshake is issued only when the overview cannot carry the verdict.
+/// handshake is issued only when the overview itself fails to decode.
 final class SpacesDeviceClientResolveOverviewTests: XCTestCase {
     func testCompatibleEmbeddedStatusResolvesWithoutSecondHandshake() throws {
         let probe = RequestProbe()
@@ -32,18 +32,6 @@ final class SpacesDeviceClientResolveOverviewTests: XCTestCase {
         // Blocked: a wire-incompatible device must not surface its (stale) workspace data.
         XCTAssertNil(resolution.overview)
         XCTAssertEqual(probe.commandNames, ["overview"])
-    }
-
-    func testMissingEmbeddedStatusFallsBackToHandshakeButKeepsOverview() throws {
-        let probe = RequestProbe()
-        // An older daemon returns a decodable overview without the inline status field.
-        let resolution = try SpacesDeviceClient.resolveOverview(
-            device: Self.device, clientApp: Self.clientApp, profile: nil,
-            requestProvider: probe.provider(overviewStatus: nil, handshakeStatus: Self.status(protocolVersion: SpacesWireProtocol.version)))
-
-        XCTAssertEqual(resolution.compatibility, .compatible)
-        XCTAssertNotNil(resolution.overview)
-        XCTAssertEqual(probe.commandNames, ["overview", "daemonStatus"])
     }
 
     func testUndecodableOverviewFallsBackToHandshakeAndBlocks() throws {
@@ -96,8 +84,9 @@ private final class RequestProbe: @unchecked Sendable {
     }
 
     func provider(
-        overviewStatus: TerminalServiceDaemonStatus? = nil, overviewError: Error? = nil, handshakeStatus: TerminalServiceDaemonStatus? = nil,
-        handshakeError: Error? = nil
+        overviewStatus: TerminalServiceDaemonStatus = TerminalServiceDaemonStatus(
+            version: "1.0.0", artifactVersion: nil, certificateFingerprint: nil, activeSessionCount: 0, protocolVersion: SpacesWireProtocol.version),
+        overviewError: Error? = nil, handshakeStatus: TerminalServiceDaemonStatus? = nil, handshakeError: Error? = nil
     ) -> SpacesDeviceClient.DeviceRequestProvider {
         { request, _, _, _ in
             self.lock.lock()

@@ -35,26 +35,23 @@ public struct AgentWindowRecord: Codable, Sendable {
 
     public init(
         id: String, workspaceID: String, provider: AgentProvider, label: String?, runtimeTargetID: String? = nil, terminalTrackingID: String?,
-        terminalNativeID: String? = nil, codexThreadID: String?, status: AgentWindowStatus, createdAt: String, updatedAt: String
+        sessionKey: String?, status: AgentWindowStatus, createdAt: String, updatedAt: String
     ) {
-        let resolvedTrackingID = terminalTrackingID ?? terminalNativeID
         let terminalTarget: TerminalTargetRecord? =
-            if resolvedTrackingID != nil { TerminalTargetRecord(runtimeTargetID: runtimeTargetID, trackingID: resolvedTrackingID) } else { nil }
+            if terminalTrackingID != nil { TerminalTargetRecord(runtimeTargetID: runtimeTargetID, trackingID: terminalTrackingID) } else { nil }
         self.init(
             id: id, workspaceID: workspaceID, provider: provider, label: label, runtimeTargetID: runtimeTargetID, terminalTarget: terminalTarget,
-            sessionKey: codexThreadID, status: status, createdAt: createdAt, updatedAt: updatedAt)
+            sessionKey: sessionKey, status: status, createdAt: createdAt, updatedAt: updatedAt)
     }
 
     public init(
-        id: String, workspaceID: String, provider: AgentProvider, label: String?, terminalTrackingID: String?, terminalNativeID: String? = nil,
-        codexThreadID: String?, status: AgentWindowStatus, createdAt: String, updatedAt: String
+        id: String, workspaceID: String, provider: AgentProvider, label: String?, terminalTrackingID: String?,
+        sessionKey: String?, status: AgentWindowStatus, createdAt: String, updatedAt: String
     ) {
         self.init(
             id: id, workspaceID: workspaceID, provider: provider, label: label, runtimeTargetID: nil, terminalTrackingID: terminalTrackingID,
-            terminalNativeID: terminalNativeID, codexThreadID: codexThreadID, status: status, createdAt: createdAt, updatedAt: updatedAt)
+            sessionKey: sessionKey, status: status, createdAt: createdAt, updatedAt: updatedAt)
     }
 
     public var terminalTrackingID: String? { terminalTarget?.trackingID }
-    public var terminalNativeID: String? { terminalTarget?.trackingID }
-    public var codexThreadID: String? { sessionKey }
 }

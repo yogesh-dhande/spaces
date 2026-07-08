@@ -123,7 +123,7 @@ import workspacecore
         ]
         let agentWindows = [
             AgentWindowRecord(
-                id: "agent", workspaceID: "workspace", provider: .spaces, label: "Agent", terminalTrackingID: "session-agent", codexThreadID: nil,
+                id: "agent", workspaceID: "workspace", provider: .spaces, label: "Agent", terminalTrackingID: "session-agent", sessionKey: nil,
                 status: .spinning, createdAt: "now", updatedAt: "now")
         ]
 
@@ -153,7 +153,7 @@ import workspacecore
         let agentWindows = [
             AgentWindowRecord(
                 id: "agent", workspaceID: "workspace", provider: .spaces, label: "Claude Code CLI", terminalTrackingID: "spaces-spaces-token",
-                codexThreadID: nil, status: .idle, createdAt: "now", updatedAt: "now")
+                sessionKey: nil, status: .idle, createdAt: "now", updatedAt: "now")
         ]
 
         let entries = AppKitController.orderedWorkspaceRunProcessEntries(
@@ -169,21 +169,21 @@ import workspacecore
         let windows = [
             WindowRecord(
                 id: "win-web", workspaceID: "workspace", app: "Spaces", name: "web", detail: nil, targetURL: nil, terminalTrackingID: "spaces-web",
-                terminalNativeID: "spaces-web", role: "terminal", orderIndex: 200, lastSeenAt: "now"),
+                role: "terminal", orderIndex: 200, lastSeenAt: "now"),
             WindowRecord(
                 id: "win-shell", workspaceID: "workspace", app: "Spaces", name: "shell-1", detail: nil, targetURL: nil,
-                terminalTrackingID: "spaces-spaces-hook", terminalNativeID: nil, role: "terminal", orderIndex: 201, lastSeenAt: "now"),
+                terminalTrackingID: "spaces-spaces-hook", role: "terminal", orderIndex: 201, lastSeenAt: "now"),
         ]
         let processes = [
             RunningProcessRecord(
                 id: "process-web", workspaceID: "workspace", templateName: "web", command: "run web", terminalApp: "Spaces",
-                terminalTrackingID: "spaces-web", terminalNativeID: "spaces-web", pid: 1, status: .running, logPath: nil, lastOutputAt: nil,
+                terminalTrackingID: "spaces-web", pid: 1, status: .running, logPath: nil, lastOutputAt: nil,
                 startedAt: nil, exitedAt: nil)
         ]
         let agentWindows = [
             AgentWindowRecord(
                 id: "agent", workspaceID: "workspace", provider: .spaces, label: "Claude Code CLI", terminalTrackingID: "spaces-spaces-hook",
-                terminalNativeID: nil, codexThreadID: nil, status: .idle, createdAt: "now", updatedAt: "now")
+                sessionKey: nil, status: .idle, createdAt: "now", updatedAt: "now")
         ]
 
         let entries = AppKitController.orderedWorkspaceRunProcessEntries(
@@ -198,13 +198,13 @@ import workspacecore
         let windows = [
             WindowRecord(
                 id: "win-shell", workspaceID: "workspace", app: TerminalHost.spaces.appName, name: "shell-1", detail: "codex --model gpt-5",
-                targetURL: nil, terminalTrackingID: "spaces-session", terminalNativeID: "spaces-session", role: "terminal", orderIndex: 200,
+                targetURL: nil, terminalTrackingID: "spaces-session", role: "terminal", orderIndex: 200,
                 lastSeenAt: "now")
         ]
         let agentWindows = [
             AgentWindowRecord(
                 id: "agent", workspaceID: "workspace", provider: .spaces, label: "Codex", terminalTrackingID: "spaces-session",
-                terminalNativeID: "spaces-session", codexThreadID: nil, status: .idle, createdAt: "now", updatedAt: "now")
+                sessionKey: nil, status: .idle, createdAt: "now", updatedAt: "now")
         ]
 
         let titleByAgentID = AppKitController.codingAgentWindowTitleByAgentID(agentWindows: agentWindows, trackedWindows: windows)
@@ -216,12 +216,12 @@ import workspacecore
         let windows = [
             WindowRecord(
                 id: "win-shell", workspaceID: "workspace", app: TerminalHost.spaces.appName, name: "shell-1", detail: "codex", targetURL: nil,
-                terminalTrackingID: "spaces-session", terminalNativeID: "spaces-session", role: "terminal", orderIndex: 200, lastSeenAt: "now")
+                terminalTrackingID: "spaces-session", role: "terminal", orderIndex: 200, lastSeenAt: "now")
         ]
         let agentWindows = [
             AgentWindowRecord(
                 id: "agent", workspaceID: "workspace", provider: .spaces, label: "Codex", terminalTrackingID: "spaces-session",
-                terminalNativeID: "spaces-session", codexThreadID: nil, status: .idle, createdAt: "now", updatedAt: "now")
+                sessionKey: nil, status: .idle, createdAt: "now", updatedAt: "now")
         ]
 
         let titleByAgentID = AppKitController.codingAgentWindowTitleByAgentID(agentWindows: agentWindows, trackedWindows: windows)
@@ -233,7 +233,7 @@ import workspacecore
         let windows = [
             WindowRecord(
                 id: "win-shell", workspaceID: "workspace", app: TerminalHost.spaces.appName, name: "shell-1", detail: nil, targetURL: nil,
-                terminalTrackingID: "spaces-session", terminalNativeID: "spaces-session", role: "terminal", orderIndex: 200, lastSeenAt: "now")
+                terminalTrackingID: "spaces-session", role: "terminal", orderIndex: 200, lastSeenAt: "now")
         ]
 
         let entries = AppKitController.orderedWorkspaceRunProcessEntries(configuredProcesses: [], windows: windows, processes: [], agentWindows: [])
@@ -247,10 +247,10 @@ import workspacecore
         let windows = [
             WindowRecord(
                 id: "win-newer", workspaceID: "workspace", app: "Spaces", name: "shell-2", detail: "newer", targetURL: nil,
-                terminalTrackingID: "spaces-hook", terminalNativeID: nil, role: "terminal", orderIndex: 205, lastSeenAt: "now"),
+                terminalTrackingID: "spaces-hook", role: "terminal", orderIndex: 205, lastSeenAt: "now"),
             WindowRecord(
                 id: "win-older", workspaceID: "workspace", app: "Spaces", name: "shell-1", detail: "older", targetURL: nil,
-                terminalTrackingID: "spaces-hook", terminalNativeID: nil, role: "terminal", orderIndex: 201, lastSeenAt: "now"),
+                terminalTrackingID: "spaces-hook", role: "terminal", orderIndex: 201, lastSeenAt: "now"),
         ]
 
         let linkedWindows = AppKitController.preferredTerminalWindowsByTrackingKey(windows)
@@ -275,7 +275,7 @@ import workspacecore
         let agentWindows = [
             AgentWindowRecord(
                 id: "agent", workspaceID: "workspace", provider: .spaces, label: "Claude Code CLI", terminalTrackingID: "session-agent",
-                codexThreadID: nil, status: .spinning, createdAt: "now", updatedAt: "now")
+                sessionKey: nil, status: .spinning, createdAt: "now", updatedAt: "now")
         ]
 
         let processEntries = AppKitController.orderedWorkspaceRunProcessEntries(
@@ -306,10 +306,10 @@ import workspacecore
         let agentWindows = [
             AgentWindowRecord(
                 id: "configured", workspaceID: "workspace", provider: .spaces, label: "claude", terminalTrackingID: "session-claude",
-                codexThreadID: nil, status: .idle, createdAt: "now", updatedAt: "now"),
+                sessionKey: nil, status: .idle, createdAt: "now", updatedAt: "now"),
             AgentWindowRecord(
                 id: "adhoc", workspaceID: "workspace", provider: .spaces, label: "reviewer", terminalTrackingID: "session-reviewer",
-                codexThreadID: nil, status: .spinning, createdAt: "now", updatedAt: "now"),
+                sessionKey: nil, status: .spinning, createdAt: "now", updatedAt: "now"),
         ]
 
         let shortcutTargets = AppKitController.orderedWorkspaceRunShortcutTargets(
@@ -354,7 +354,7 @@ import workspacecore
         let agentWindows = [
             AgentWindowRecord(
                 id: "agent-unlabeled", workspaceID: "workspace", provider: .spaces, label: nil, terminalTrackingID: "spaces-hook-1",
-                terminalNativeID: "spaces-terminal-1", codexThreadID: nil, status: .waiting, createdAt: "now", updatedAt: "now")
+                sessionKey: nil, status: .waiting, createdAt: "now", updatedAt: "now")
         ]
 
         let shortcutIndices = AppKitController.workspaceDetailShortcutIndices(
@@ -367,11 +367,11 @@ import workspacecore
         let configuredAgentLaunchers = [AgentLauncher(name: "claude", command: "claude"), AgentLauncher(name: "codex", command: "codex")]
         let agentWindows = [
             AgentWindowRecord(
-                id: "matched", workspaceID: "workspace", provider: .spaces, label: "Claude", terminalTrackingID: "session-claude", codexThreadID: nil,
+                id: "matched", workspaceID: "workspace", provider: .spaces, label: "Claude", terminalTrackingID: "session-claude", sessionKey: nil,
                 status: .idle, createdAt: "now", updatedAt: "now"),
             AgentWindowRecord(
                 id: "adhoc", workspaceID: "workspace", provider: .spaces, label: "reviewer", terminalTrackingID: "session-reviewer",
-                codexThreadID: nil, status: .spinning, createdAt: "now", updatedAt: "now"),
+                sessionKey: nil, status: .spinning, createdAt: "now", updatedAt: "now"),
         ]
 
         let entries = AppKitController.resolvedCodingAgentRunEntries(configuredAgentLaunchers: configuredAgentLaunchers, agentWindows: agentWindows)
@@ -538,12 +538,12 @@ import workspacecore
         let agents = [
             AgentWindowRecord(
                 id: "agent-waiting", workspaceID: "workspace", provider: .spaces, label: "Waiting", terminalTrackingID: "session-1",
-                codexThreadID: nil, status: .waiting, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:01:00Z"),
+                sessionKey: nil, status: .waiting, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:01:00Z"),
             AgentWindowRecord(
-                id: "agent-done", workspaceID: "workspace", provider: .spaces, label: "Done", terminalTrackingID: "session-2", codexThreadID: nil,
+                id: "agent-done", workspaceID: "workspace", provider: .spaces, label: "Done", terminalTrackingID: "session-2", sessionKey: nil,
                 status: .done, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:02:00Z"),
             AgentWindowRecord(
-                id: "agent-idle", workspaceID: "workspace", provider: .spaces, label: "Idle", terminalTrackingID: "session-3", codexThreadID: nil,
+                id: "agent-idle", workspaceID: "workspace", provider: .spaces, label: "Idle", terminalTrackingID: "session-3", sessionKey: nil,
                 status: .idle, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:03:00Z"),
         ]
 

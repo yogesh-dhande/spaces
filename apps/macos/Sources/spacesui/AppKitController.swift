@@ -2436,7 +2436,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                     // render offline directly from the stored device record.
                     localDaemonStatus = nil
                     localCompatibility = nil
-                    localOverview = SpacesDeviceOverviewPayload(workspaces: [], sessions: [])
+                    localOverview = SpacesDeviceOverviewPayload.offlinePlaceholder
                     localOfflineMessage = bootstrapOfflineMessage
                 } else {
                     do {
@@ -2445,7 +2445,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                         localCompatibility = localResolution.compatibility
                         // A blocked (incompatible) device has no decodable overview to show; render the block
                         // from an empty snapshot instead.
-                        localOverview = localResolution.overview?.overview ?? SpacesDeviceOverviewPayload(workspaces: [], sessions: [])
+                        localOverview = localResolution.overview?.overview ?? SpacesDeviceOverviewPayload.offlinePlaceholder
                         localOfflineMessage = nil
                     } catch {
                         // Only a reachability failure degrades to offline. An error from a reachable daemon
@@ -2455,7 +2455,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                         guard SpacesDeviceClient.isLocalDaemonUnreachableError(error) else { throw error }
                         localDaemonStatus = nil
                         localCompatibility = nil
-                        localOverview = SpacesDeviceOverviewPayload(workspaces: [], sessions: [])
+                        localOverview = SpacesDeviceOverviewPayload.offlinePlaceholder
                         localOfflineMessage = error.localizedDescription
                     }
                 }
@@ -5859,7 +5859,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 let window = trackedWindows.first(where: {
                     guard $0.roleValue == .terminal else { return false }
                     if let trackingID = agentWindow.terminalTrackingID, !trackingID.isEmpty, $0.terminalTrackingID == trackingID { return true }
-                    if let nativeID = agentWindow.terminalNativeID, !nativeID.isEmpty, $0.terminalNativeID == nativeID { return true }
                     return false
                 })
             else { return }
@@ -10328,4 +10327,15 @@ extension String {
         let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
     }
+}
+
+extension SpacesDeviceOverviewPayload {
+    /// Empty stand-in rendered for an offline or wire-incompatible device, which has no decodable
+    /// overview. Its inline daemon status is never consulted — sidebar sections track live status
+    /// separately — so it advertises the unknown protocol version rather than a fabricated match.
+    fileprivate static let offlinePlaceholder = SpacesDeviceOverviewPayload(
+        workspaces: [], sessions: [],
+        daemonStatus: TerminalServiceDaemonStatus(
+            version: "", artifactVersion: nil, certificateFingerprint: nil, activeSessionCount: 0,
+            protocolVersion: TerminalServiceDaemonStatus.unknownProtocolVersion))
 }

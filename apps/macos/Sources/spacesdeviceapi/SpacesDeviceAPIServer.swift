@@ -1500,7 +1500,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 $0.templateName.localizedStandardCompare($1.templateName) == .orderedAscending
             }) {
                 guard process.terminalApp == TerminalHost.spaces.appName,
-                    let sessionID = normalizedTerminalSessionID(process.terminalNativeID ?? process.terminalTrackingID)
+                    let sessionID = normalizedTerminalSessionID(process.terminalTrackingID)
                 else { continue }
                 guard representedSessionIDs.insert(sessionID).inserted else { continue }
                 guard let entry = sessionsByID[sessionID] ?? terminalCatalogEntry(sessionID: sessionID) else { continue }
@@ -1514,7 +1514,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             for agent in agentsBySlot.values.compactMap(preferredAgentRecord).sorted(by: {
                 ($0.label ?? "").localizedStandardCompare($1.label ?? "") == .orderedAscending
             }) {
-                guard agent.provider == .spaces, let sessionID = normalizedTerminalSessionID(agent.terminalNativeID ?? agent.terminalTrackingID)
+                guard agent.provider == .spaces, let sessionID = normalizedTerminalSessionID(agent.terminalTrackingID)
                 else { continue }
                 guard representedSessionIDs.insert(sessionID).inserted else { continue }
                 guard let entry = sessionsByID[sessionID] ?? terminalCatalogEntry(sessionID: sessionID) else { continue }
@@ -1554,7 +1554,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     }
 
     private func agentRecordRank(_ record: AgentWindowRecord) -> Int {
-        if record.provider == .spaces, let sessionID = normalizedTerminalSessionID(record.terminalNativeID ?? record.terminalTrackingID),
+        if record.provider == .spaces, let sessionID = normalizedTerminalSessionID(record.terminalTrackingID),
             let paths = try? TerminalSessionPaths.forSession(id: sessionID),
             (try? TerminalSessionPersistence.readRuntimeState(paths: paths))?.state.isInteractive == true
         {
@@ -1969,7 +1969,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             } else { try orchestrator.runConfiguredProcess(workspaceID: workspaceID, processKey: processKey) }
         return try refreshedMutationResponse(
             context: context, message: "Ran process '\(processKey)'.", workspaceID: workspaceID,
-            sessionID: normalizedString(record.terminalNativeID ?? record.terminalTrackingID))
+            sessionID: normalizedString(record.terminalTrackingID))
     }
 
     private func handleStopWorkspaceProcessRequest(_ request: SpacesDeviceWorkspaceProcessMutationRequest, context: RequestContext) throws
@@ -2001,7 +2001,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             } else { try orchestrator.launchAgentLauncher(workspaceID: workspaceID, name: agentName) }
         return try refreshedMutationResponse(
             context: context, message: "Ran coding agent '\(agentName)'.", workspaceID: workspaceID,
-            sessionID: normalizedString(record.terminalNativeID ?? record.terminalTrackingID))
+            sessionID: normalizedString(record.terminalTrackingID))
     }
 
     private func handleStopCodingAgentRequest(_ request: SpacesDeviceCodingAgentMutationRequest, context: RequestContext) throws
@@ -2025,7 +2025,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         let record = try context.orchestrator().restartCodingAgent(workspaceID: workspaceID, agentID: agentID)
         return try refreshedMutationResponse(
             context: context, message: "Restarted coding agent.", workspaceID: workspaceID,
-            sessionID: normalizedString(record.terminalNativeID ?? record.terminalTrackingID))
+            sessionID: normalizedString(record.terminalTrackingID))
     }
 
     private func refreshedMutationResponse(

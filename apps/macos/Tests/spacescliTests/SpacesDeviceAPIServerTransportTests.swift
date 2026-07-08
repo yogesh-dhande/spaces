@@ -484,7 +484,7 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
             try store.upsert(
                 runningProcess: RunningProcessRecord(
                     id: "old-process", workspaceID: workspace.id, templateID: "process-api", templateName: "api", command: "echo old",
-                    terminalApp: TerminalHost.spaces.appName, terminalTrackingID: "old-session", terminalNativeID: "old-session", pid: 777,
+                    terminalApp: TerminalHost.spaces.appName, terminalTrackingID: "old-session", pid: 777,
                     status: .running, logPath: nil, lastOutputAt: nil, startedAt: "2026-06-18T12:00:01Z", exitedAt: nil))
             try store.upsert(
                 window: WindowRecord(
@@ -493,17 +493,17 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
             try store.upsert(
                 window: WindowRecord(
                     id: "shell-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell", detail: "zsh",
-                    terminalTrackingID: "shell-session", terminalNativeID: "shell-session", role: "terminal", orderIndex: 300,
+                    terminalTrackingID: "shell-session", role: "terminal", orderIndex: 300,
                     lastSeenAt: "2026-06-18T12:00:03Z"))
             try store.upsert(
                 window: WindowRecord(
                     id: "agent-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "Mock Agent", detail: "codex",
-                    terminalTrackingID: "agent-session", terminalNativeID: "agent-session", role: "terminal", orderIndex: 400,
+                    terminalTrackingID: "agent-session", role: "terminal", orderIndex: 400,
                     lastSeenAt: "2026-06-18T12:00:04Z"))
             try store.upsertAgentWindow(
                 AgentWindowRecord(
                     id: "old-agent", workspaceID: workspace.id, provider: .spaces, label: "Mock Agent", terminalTrackingID: "agent-session",
-                    terminalNativeID: "agent-session", codexThreadID: nil, status: .spinning, createdAt: "2026-06-18T12:00:04Z",
+                    sessionKey: nil, status: .spinning, createdAt: "2026-06-18T12:00:04Z",
                     updatedAt: "2026-06-18T12:00:04Z"))
 
             let clientApp = SpacesDeviceClientApp(
@@ -527,7 +527,7 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
             XCTAssertEqual(relaunchedProcess.templateID, "process-api")
             XCTAssertEqual(relaunchedProcess.templateName, "api")
             XCTAssertEqual(relaunchedProcess.status, .running)
-            XCTAssertNotEqual(relaunchedProcess.terminalNativeID, "old-session")
+            XCTAssertNotEqual(relaunchedProcess.terminalTrackingID, "old-session")
             XCTAssertTrue(try store.agentWindows(workspaceID: workspace.id).isEmpty)
             XCTAssertEqual(try store.windows(workspaceID: workspace.id).map(\.name), ["api"])
             let overviewWorkspace = try XCTUnwrap(response.overview?.workspaces.first(where: { $0.id == workspace.id }))
@@ -567,12 +567,12 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
             try store.upsertAgentWindow(
                 AgentWindowRecord(
                     id: "spinning-agent", workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "spin-session",
-                    terminalNativeID: "spin-session", codexThreadID: nil, status: .spinning, createdAt: "2026-06-18T12:00:04Z",
+                    sessionKey: nil, status: .spinning, createdAt: "2026-06-18T12:00:04Z",
                     updatedAt: "2026-06-18T12:00:04Z"))
             try store.upsertAgentWindow(
                 AgentWindowRecord(
                     id: "waiting-agent", workspaceID: workspace.id, provider: .spaces, label: "Claude", terminalTrackingID: "wait-session",
-                    terminalNativeID: "wait-session", codexThreadID: nil, status: .waiting, createdAt: "2026-06-18T12:00:05Z",
+                    sessionKey: nil, status: .waiting, createdAt: "2026-06-18T12:00:05Z",
                     updatedAt: "2026-06-18T12:00:05Z"))
 
             let clientApp = SpacesDeviceClientApp(

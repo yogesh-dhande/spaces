@@ -48,7 +48,7 @@ flowchart TD
     runtimeFiles[("~/.spaces/runtime")]
     workspaces[("~/spaces/workspaces")]
     tlsIdentity["TLS identity"]
-    pairedClients["paired-client token hashes"]
+    pairedClients["device-pairings.json\npaired-client token hashes (file store, not spaces.db)"]
     terminal["Ghostty session core\nper terminal session"]
     child["Shell / process / coding-agent child"]
   end
@@ -106,7 +106,7 @@ flowchart TD
 - Before a client database migration, the client creates a timestamped metadata-only backup. If migration fails, it restores the latest backup and surfaces a startup error. Pairing tokens stay in the client secret store and are not copied into SQLite backups.
 - The `spaces` CLI and its MCP server are Device API clients with the same per-profile identity, paired-device records, and credential files as the Mac app: `spaces device pair/list/remove` manage pairings, and `terminal list`, `terminal send text`, `terminal send bytes`, and `terminal tail` with `--device` (plus the MCP `device` arguments) ride the Device API `overview`, `sendTerminalInput`, and `tailTerminalOutput` commands. Local terminal commands without a device selector use the profile service socket and session files. The client SQLite connection sets a busy timeout because the app, CLI, and MCP server write pairing records from separate processes.
 - Direct Device API reachability is required through LAN, VPN, Tailscale, or equivalent network configuration. There is no relay transport.
-- macOS remote-device pairing, terminal attach, browser forwarding, and editor opening require SSH to the same device. The `--ssh` pairing path is thin sugar: it validates SSH with `BatchMode=yes` and `StrictHostKeyChecking=yes`, runs `~/.spaces/bin/spaces device pair --json` on the remote device to obtain its `spaces://pair` link, then redeems that link over the pinned-TLS Device API. Spaces never installs a remote daemon itself. A lightweight probe reads the remote OS (and, for Linux, the `/etc/os-release` ID and version) only to tailor install guidance whenever the remote cannot hand back a pairing window — whether `spaces` is missing outright or runs but returns no pairing metadata: an Ubuntu 24.04 device is given the version-pinned `scripts/spaces-install-linux.sh` one-liner to run there, and a Mac is directed to install the Spaces app and open it once. The remote command's exit code is treated as unreliable because Tailscale SSH (and some other non-OpenSSH transports) report exit 0 even when the remote command failed; a missing `~/.spaces/bin/spaces` then reaches the client as exit 0 with empty stdout. Not-installed detection therefore also inspects stderr for the shell's missing-binary text (`no such file` / `not found`) when stdout carries no pairing JSON, which is safe precisely because there is no pairing JSON to misread. Pairing uses the Device API at the effective OpenSSH `HostName` and returned API port, so SSH aliases resolve to direct LAN, VPN, or Tailscale endpoints without using daemon-advertised interface metadata.
+- macOS remote-device pairing, terminal attach, browser forwarding, and editor opening require SSH to the same device. The `--ssh` pairing path is thin sugar: it validates SSH with `BatchMode=yes` and `StrictHostKeyChecking=yes`, runs `~/.spaces/bin/spaces device pair --json` on the remote device to obtain its `spaces://pair` link, then redeems that link over the pinned-TLS Device API. Repo-local development profiles prefix that SSH pairing command with `SPACES_DB_PATH` and `SPACES_RUNTIME_DIR` for the matching remote `~/.spaces-dev/profiles/spaces/<profile-name>/` root, so the app and CLI pair with the same remote daemon that the dev launcher installed. Spaces never installs a remote daemon itself. A lightweight probe reads the remote OS (and, for Linux, the `/etc/os-release` ID and version) only to tailor install guidance whenever the remote cannot hand back a pairing window — whether `spaces` is missing outright or runs but returns no pairing metadata: an Ubuntu 24.04 device is given the version-pinned `scripts/spaces-install-linux.sh` one-liner to run there, and a Mac is directed to install the Spaces app and open it once. The remote command's exit code is treated as unreliable because Tailscale SSH (and some other non-OpenSSH transports) report exit 0 even when the remote command failed; a missing `~/.spaces/bin/spaces` then reaches the client as exit 0 with empty stdout. Not-installed detection therefore also inspects stderr for the shell's missing-binary text (`no such file` / `not found`) when stdout carries no pairing JSON, which is safe precisely because there is no pairing JSON to misread. Pairing uses the Device API at the effective OpenSSH `HostName` and returned API port, so SSH aliases resolve to direct LAN, VPN, or Tailscale endpoints without using daemon-advertised interface metadata.
 - Pairing is version-gated in both directions. The `spaces://pair` link (version 3) advertises the daemon's `SpacesWireProtocol.version` and app version; the redeeming client evaluates `SpacesWireCompatibility` and refuses an incompatible link before consuming the one-time window, and the daemon rejects a pair request whose `clientProtocolVersion` differs from its own before validating the code (an absent version reads as too old). The pre-authentication daemon gate discloses the daemon's app version, which is an accepted trade for never burning the window on an incompatible client.
 - The single Linux install/upgrade path is the user-run `scripts/spaces-install-linux.sh`, published as a release asset. It downloads the signed `spaces-remote-artifacts.json` for the requested version, verifies its Ed25519 signature against the embedded public key (kept in sync with `AppVersion.remoteArtifactPublicKey` by a `workspacecoreTests` drift test), checksums the matching Ubuntu 24.04 archive, and runs the bundled `install.sh` (which creates the managed helpers, creates the `~/.local/bin/spaces` PATH alias, and enables systemd user lingering before starting the user service so Spaces survives SSH disconnects).
 - iOS direct terminal control uses one serialized pinned-TLS command channel per daemon endpoint. TerminalService requests carry an optional top-level auth token and exactly one tagged command payload, so each command owns only its request-specific fields. Non-stream requests are newline-framed on that channel and must receive the expected response shape, such as `controlResponse` for control commands or `sessionState` for explicit state reads. Live render and ownership updates are delivered by the separate direct `subscribe` stream, so input, key, resize, and scroll control responses do not carry session snapshots.
@@ -177,7 +177,7 @@ Spaces uses the cross-platform dev-tool dotdir convention (all app state under `
 
 ### Device API and Remote Access
 - Each daemon creates or loads a self-signed TLS identity under `~/.spaces/runtime/daemon-tls`. macOS stores the identity as owner-readable PKCS#1 RSA private-key DER and certificate DER files that are loaded into an in-memory Security identity at daemon startup; Linux stores PEM files loaded into the OpenSSL listener. The Device API listener presents this identity on both platforms, and every client — macOS app, iOS app, and the `spaces` CLI/MCP — verifies the daemon's certificate fingerprint before sending any request. Pairing links (version 3) carry the daemon endpoint, nonce, short code, certificate fingerprint, wire-protocol version, and app version; there is no transport key.
-- The daemon stores paired-client token hashes and device metadata under daemon-owned state. The macOS client stores the issued token in the profile's `client-secrets` file store so the app, CLI, and MCP server can read it headlessly; the iOS client stores its issued token in Keychain. Both clients keep non-secret paired-device metadata in the client database.
+- The daemon stores paired-client token hashes and device metadata in its file-based `device-pairings.json` store under the daemon runtime root, not in `spaces.db`. The macOS client stores the issued token in the profile's `client-secrets` file store so the app, CLI, and MCP server can read it headlessly; the iOS client stores its issued token in Keychain. Both clients keep non-secret paired-device metadata in the client database.
 - The macOS sidebar renders one section per paired device. `AppKitController` holds a `DeviceSection` per device with an independent load state; the local device loads from the initial snapshot and each remote device's overview is fetched concurrently through `SpacesDeviceClient.overview(device:)`. When the local daemon is unreachable, the snapshot degrades the local section to `.offline` (carrying the failure reason) instead of failing wholesale, so the local Mac surfaces offline the same way a remote does; the Devices settings pane offers a Restart Local Daemon action that calls `TerminalService.relaunch()` directly (a crashed daemon has no control RPC) and then re-renders against a fresh status. The flat id-keyed `projects`/`workspacesByProject` lookups are rebuilt as the union of all loaded sections — safe because project and workspace ids are globally unique — and daemon mutations resolve their target device from the selected row, falling back to the local device. The iOS client keeps a single active-device selection. Each client stores its own paired-device metadata independently from daemon state so switching clients does not mutate any daemon's workspace records.
 - Remote sidebar sections stay live through a per-paired-device overview push subscription, not polling. The initial `SpacesDeviceClient.overview(device:)` fetch gives immediate population; `SidebarController` then opens a `subscribeOverview` stream per credentialed remote and applies pushed overviews. A dropped stream and a failed initial connect both schedule the same delayed retry that reopens any paired device without a live subscription, so an offline remote recovers on its own rather than staying stale until an unrelated sidebar reload. When an established stream drops, the section also transitions to `.offline` immediately (the same path a failed overview pull takes) so the sidebar shows the offline caption instead of stale projects/alerts while the retry runs; a graceful stream close that carries no transport error falls back to a descriptive offline reason. The offline transition clears the section's cached `overview` and rows (as the reachable-but-incompatible branch does), because id-based lookups such as `clientWorkspaceID(forTerminalSession:)` search section overviews directly — leaving a stale overview would resolve an offline remote's workspace/session ids while `deviceID(forWorkspaceID:)` falls back to the local daemon, misrouting terminal cleanup. If the offline device owned the current sidebar selection, its rows leave the merged data, so the detail pane would otherwise go stale and misroute actions to the local daemon; the offline transition detects that case and falls back to the alerts view, and it rebuilds the alerts detail whenever the alerts pane is already visible so its cards and focus map drop the removed device. Remote state has no local event channel, so this push is its only freshness source.
 - The daemon's `DeviceOverviewStreamServer` rebuilds and pushes a fresh overview when its source data changes, coalescing bursts into one broadcast. Database-backed changes raise `IPCNotification.databaseDidChange`; terminal runtime, title, and exit state lives outside the database and instead raises `TerminalOverviewSignal` (in-process, plus profile-scoped across processes on macOS so a daemon-hosted server hears app-hosted session changes). The overview server observes both so terminal-state-only changes still reach subscribers.
@@ -218,7 +218,7 @@ Spaces uses the cross-platform dev-tool dotdir convention (all app state under `
 ### Database
 - Installed/default daemon path: `~/.spaces/spaces.db`
 - Repo-local development default path: `~/.spaces-dev/profiles/spaces/<branch-slug>-<worktree-hash>/spaces.db`
-- Two SQLite databases with a strict ownership boundary. The daemon database (`spaces.db`) is device-runtime state owned by `spacesd`: projects, workspaces, runtime targets, running-process and agent-session rows, terminal metadata, daemon settings, paired-client token hashes, and global settings. The macOS client database (`spaces-client.db`, under `<profile-root>/Client/`, with timestamped backups under `Client/Backups/`) is client/desktop state owned by the app: paired-device metadata, client settings, per-device sidebar collapse state, panel layouts and panel-window frames, browser-session window IDs, and dismissed alert attention-item ids. The macOS GUI runs no in-process orchestrator over `spaces.db`: window focus, cycling, runtime controls, and terminal/workspace lookups are all reconstructed from the overview, and daemon-owned mutations go through the Device API. A client reads daemon-owned data over the Device API (overview/mutations), never by opening `spaces.db` directly, so the two databases are never SQL-joined; they correlate in application code by stable keys (`workspace_id`, `runtime_target_id`, terminal `session_id`/`tracking_id`). See the [Client Database](#client-database) schema for the client side.
+- Two SQLite databases with a strict ownership boundary. The daemon database (`spaces.db`) is device-runtime state owned by `spacesd`: projects, workspaces, runtime targets, running-process and agent-session rows, terminal metadata, daemon settings, and global settings. Paired-client token hashes live outside `spaces.db`, in the daemon's file-based `device-pairings.json` store (see [Device API and Remote Access](#device-api-and-remote-access)) — pairing credentials are file-only on both the daemon and client sides. The macOS client database (`spaces-client.db`, under `<profile-root>/Client/`, with timestamped backups under `Client/Backups/`) is client/desktop state owned by the app: paired-device metadata, client settings, per-device sidebar collapse state, panel layouts and panel-window frames, browser-session window IDs, and dismissed alert attention-item ids. The macOS GUI runs no in-process orchestrator over `spaces.db`: window focus, cycling, runtime controls, and terminal/workspace lookups are all reconstructed from the overview, and daemon-owned mutations go through the Device API. A client reads daemon-owned data over the Device API (overview/mutations), never by opening `spaces.db` directly, so the two databases are never SQL-joined; they correlate in application code by stable keys (`workspace_id`, `runtime_target_id`, terminal `session_id`/`tracking_id`). See the [Client Database](#client-database) schema for the client side.
 - E2E and demo harnesses may set `SPACES_CLIENT_DB_PATH` to bind Mac client metadata to an isolated profile database and `SPACES_CLIENT_SECRET_DIR` to bind paired-device tokens to an isolated secrets directory. Installed and normal development app launches use the resolved profile client database path and the profile's `client-secrets` file store.
 - SQLite should run in WAL mode with a busy timeout so overlapping GUI, CLI, and background work does not produce avoidable lock failures.
 - `migration_state.current_version` records the canonical schema version; `DatabaseSchema.currentVersion` (daemon) and `SpacesClientDatabase.currentVersion` (client) are the source of truth for the active version numbers.
@@ -256,7 +256,7 @@ Spaces uses the cross-platform dev-tool dotdir convention (all app state under `
 
 ## Data Model
 
-The canonical daemon schema is `DatabaseSchema.currentVersion == 3`. Foreign keys below reflect the SQLite schema. Terminal tables also correlate by `session_id` and `root_directory` because they are shared by local and daemon-hosted terminal persistence paths.
+The canonical daemon schema is `DatabaseSchema.currentVersion == 1`. Foreign keys below reflect the SQLite schema. Terminal tables also correlate by `session_id` and `root_directory` because they are shared by local and daemon-hosted terminal persistence paths.
 
 ```mermaid
 erDiagram
@@ -304,9 +304,7 @@ erDiagram
   workspaces {
     TEXT id PK
     TEXT project_id FK
-    TEXT title
     TEXT dir
-    TEXT runtime_path
     TEXT dirname
     TEXT branch
     TEXT base_branch
@@ -393,14 +391,12 @@ erDiagram
     TEXT app
     TEXT tracking_id
     INTEGER order_index
-    TEXT created_at
     TEXT updated_at
   }
 
   browser_targets {
     TEXT runtime_target_id PK
     TEXT target_url
-    TEXT resolved_url
   }
 
   agent_sessions {
@@ -424,7 +420,6 @@ erDiagram
     TEXT event_type
     TEXT source
     TEXT message
-    TEXT runtime_target_id FK
     TEXT created_at
   }
 
@@ -492,10 +487,7 @@ erDiagram
   terminal_remote_session_states {
     TEXT session_id PK
     TEXT root_directory
-    TEXT reason
     TEXT payload_json
-    TEXT emitted_at
-    TEXT updated_at
   }
 
   terminal_agent_signal_events {
@@ -508,8 +500,6 @@ erDiagram
     TEXT provider
     TEXT label
     TEXT terminal_tracking_id
-    TEXT terminal_native_id
-    TEXT codex_thread_id
     TEXT environment_keys_json
     TEXT created_at
     TEXT acknowledged_at
@@ -548,7 +538,6 @@ erDiagram
   runtime_targets ||--o| browser_targets : extends
   runtime_targets ||--o{ running_processes : focus_target
   runtime_targets ||--o{ agent_sessions : focus_target
-  runtime_targets ||--o{ agent_session_events : referenced_by
   agent_sessions ||--o{ agent_session_events : records
   terminal_sessions ||--o| terminal_runtime_states : state
   terminal_sessions ||--o{ terminal_clients : clients
@@ -687,11 +676,11 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 
 ### Runtime Target Model
 - `runtime_targets` is the canonical inventory of focusable runtime items for a workspace. Each row stores shared fields such as `type`, host app, durable terminal `tracking_id`, ordering, and display metadata. The persisted `type` is a string, surfaced through the `WindowRole` typed view, which distinguishes browser targets from terminals. It carries no window id; runtime items are correlated and focused by terminal session id (see [Window-ID ownership](#window-id-ownership)).
-- `browser_targets` extends browser runtime targets with the configured target URL and the last resolved URL.
+- `browser_targets` extends browser runtime targets with the configured target URL.
 - `agent_sessions` models logical coding-agent sessions separately from focusable windows. Each row links to a `runtime_target` when the session is focusable and stores agent-session state: provider, display label, status, provider session key, claimed launcher identity, durable Spaces `terminal_session_id`, and timestamps.
-- `agent_session_events` records signal-driven lifecycle updates and launcher-driven agent transitions. Lifecycle events keep the resolved runtime-target link plus a compact message containing the provider, label, tracking token, native terminal ID, provider session key, and the full set of environment key names seen by `spaces agent signal` for that event.
+- `agent_session_events` records signal-driven lifecycle updates and launcher-driven agent transitions. Lifecycle events keep a compact message containing the provider, label, tracking token, provider session key, and the full set of environment key names seen by `spaces agent signal` for that event.
 - `running_processes` is the canonical process-status record. Each row links to a `runtime_target` when focusable and stores process runtime state such as template identity, command, PID, status, log path, durable Spaces `terminal_session_id`, and timestamps.
-- Runtime targets are seeded as soon as a process or agent terminal is known, even before a separate window-reconciliation pass fills in a live `window_id`. That keeps process and agent rows linked to a single canonical target instead of caching terminal identity on the base row.
+- Runtime targets are seeded as soon as a process or agent terminal is known. They carry no window id (see [Window-ID ownership](#window-id-ownership)); they are correlated and focused purely by terminal-session identity (`tracking_id`), not filled in by a later window-reconciliation pass. That keeps process and agent rows linked to a single canonical target instead of caching terminal identity on the base row.
 - Configured process and coding-agent rows group by their reserved workspace slot and use `terminal_session_id` as the durable Spaces terminal session identity for focus, restart, final-frame viewing, and mobile overview. The linked runtime target's `tracking_id` mirrors the focusable terminal target while a window or terminal target exists. Replacement launch paths terminate and close the prior Spaces-backed session before deleting or rebinding the runtime row, which prevents orphaned configured sessions from reappearing as ad-hoc mobile rows. Exit and missing-window prune paths preserve configured coding-agent rows and their `terminal_session_id`; ad-hoc agent rows remain tied to their tracked terminal target and are removed when that target disappears.
 
 ### Data Modeling Guidelines
@@ -700,7 +689,7 @@ It also lets lifecycle state stay explicit while runtime health is derived from 
 - The `terminal_session_id` columns on `running_processes` and `agent_sessions` are deliberate durable Spaces session ownership fields. Keep them aligned with the matching Spaces terminal launch and use `runtime_targets.tracking_id` for focus/window correlation.
 - Agent-session records should describe logical session state, not terminal rendering implementation details. Provider-specific terminal metadata should stay in terminal persistence or event payloads unless the configured row needs a stable session identity.
 - Running-process records should describe process runtime and configured slot ownership, not terminal rendering internals. Process rows should link to the relevant runtime target for focus behavior instead of owning window-specific fields.
-- When a process or agent needs focus identity before a live window has been reconciled, seed or reuse a `runtime_target` record. When it needs durable final-frame or restart identity, persist the Spaces terminal session ID on the process or agent row.
+- When a process or agent needs focus identity, seed or reuse a `runtime_target` record from its terminal-session identity. When it needs durable final-frame or restart identity, persist the Spaces terminal session ID on the process or agent row.
 - Provider-specific naming should be avoided in shared schema. Generic fields such as `provider` and `session_key` are acceptable when the same concept exists across providers; fields named for one product should be treated as transitional and refactored away.
 - Add abstractions only when current behavior needs them. Extensibility matters, but speculative tables or fields should not be added before a real workflow requires them.
 - Prefer event history for debugging destructive transitions over piling more `last_*` and `*_reason` fields onto canonical state rows. When a target or session is rebound, detached, or pruned, the system should leave an inspectable event trail.

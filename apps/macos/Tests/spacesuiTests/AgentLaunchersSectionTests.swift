@@ -23,11 +23,11 @@ import workspacecore
 
         section.runtimeAgentWindows = [
             AgentWindowRecord(
-                id: "matched", workspaceID: "workspace", provider: .spaces, label: "Claude", terminalTrackingID: "session-claude", codexThreadID: nil,
+                id: "matched", workspaceID: "workspace", provider: .spaces, label: "Claude", terminalTrackingID: "session-claude", sessionKey: nil,
                 status: .idle, createdAt: "now", updatedAt: "now"),
             AgentWindowRecord(
                 id: "adhoc", workspaceID: "workspace", provider: .spaces, label: "reviewer", terminalTrackingID: "session-reviewer",
-                codexThreadID: nil, status: .spinning, createdAt: "now", updatedAt: "now"),
+                sessionKey: nil, status: .spinning, createdAt: "now", updatedAt: "now"),
         ]
 
         #expect(section.rowCount == 3)
@@ -74,7 +74,7 @@ import workspacecore
         section.runtimeAgentWindows = [
             AgentWindowRecord(
                 id: "adhoc", workspaceID: "workspace", provider: .spaces, label: "reviewer", terminalTrackingID: "session-reviewer",
-                codexThreadID: nil, status: .waiting, createdAt: "now", updatedAt: "now")
+                sessionKey: nil, status: .waiting, createdAt: "now", updatedAt: "now")
         ]
         section.runtimeWindowTitleByAgentWindowID = ["adhoc": "review notes"]
 
@@ -89,7 +89,7 @@ import workspacecore
         section.runtimeAgentWindows = [
             AgentWindowRecord(
                 id: "adhoc", workspaceID: "workspace", provider: .spaces, label: nil, terminalTrackingID: "ghostty-hook-1",
-                terminalNativeID: "ghostty-terminal-1", codexThreadID: nil, status: .waiting, createdAt: "now", updatedAt: "now")
+                sessionKey: nil, status: .waiting, createdAt: "now", updatedAt: "now")
         ]
         section.runtimeWindowTitleByAgentWindowID = ["adhoc": "shell-1"]
 
@@ -183,7 +183,7 @@ import workspacecore
         section.runtimeAgentWindows = [
             AgentWindowRecord(
                 id: "claude-runtime", workspaceID: "workspace", provider: .spaces, label: "claude", terminalTrackingID: "session-claude",
-                codexThreadID: nil, status: .idle, createdAt: "now", updatedAt: "now")
+                sessionKey: nil, status: .idle, createdAt: "now", updatedAt: "now")
         ]
         var stoppedID: String?
         var restartedID: String?

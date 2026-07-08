@@ -52,7 +52,7 @@ final class ProcessOnExitTests: XCTestCase {
         try store.setWorkspaceProcesses(workspaceID: workspace.id, processes: [ProcessTemplate(name: "api", command: "sleep 1", onExit: .notify)])
         let runningProcess = RunningProcessRecord(
             id: UUID().uuidString, workspaceID: workspace.id, templateName: "api", command: "sleep 1", terminalApp: "Terminal",
-            terminalTrackingID: nil, terminalNativeID: nil, pid: 2_000_000, status: .running, logPath: nil, lastOutputAt: nil,
+            terminalTrackingID: nil, pid: 2_000_000, status: .running, logPath: nil, lastOutputAt: nil,
             startedAt: "2020-01-01T00:00:00Z", exitedAt: nil)
         try store.upsert(runningProcess: runningProcess)
 

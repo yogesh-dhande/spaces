@@ -451,10 +451,10 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         // connect task below captures only Sendable values (not `self`).
         let onOverview: @Sendable (SpacesDeviceOverview) -> Void = { [weak self] overview in
             // A pushed overview comes from a reachable, decodable daemon; read its inline
-            // frozen-core status (if present) so the compatibility verdict rides along, the
-            // same way the polling `resolveOverview` path derives it.
+            // frozen-core status so the compatibility verdict rides along, the same way the
+            // polling `resolveOverview` path derives it.
             let daemonStatus = overview.overview.daemonStatus
-            let compatibility = daemonStatus.map { SpacesWireCompatibility.evaluate(daemonStatus: $0) }
+            let compatibility = SpacesWireCompatibility.evaluate(daemonStatus: daemonStatus)
             Task { @MainActor in
                 self?.applyRemoteDeviceSection(
                     deviceID: deviceID,

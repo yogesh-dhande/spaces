@@ -90,11 +90,11 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
             sessionID: "session-api", title: "api", workingDirectory: workspace.dir, workspaceID: workspace.id, attachmentSnapshot: .init())
         let runningProcess = RunningProcessRecord(
             id: "process-api", workspaceID: workspace.id, templateName: "api", command: "npm run dev", terminalApp: "Spaces",
-            terminalTrackingID: "session-api", terminalNativeID: "session-api", pid: 123, status: .running, logPath: nil, lastOutputAt: nil,
+            terminalTrackingID: "session-api", pid: 123, status: .running, logPath: nil, lastOutputAt: nil,
             startedAt: "now", exitedAt: nil)
         let exitedProcess = RunningProcessRecord(
             id: "process-worker", workspaceID: workspace.id, templateName: "worker", command: "npm run worker", terminalApp: "Spaces",
-            terminalTrackingID: "session-worker", terminalNativeID: "session-worker", pid: nil, status: .exited, logPath: nil, lastOutputAt: nil,
+            terminalTrackingID: "session-worker", pid: nil, status: .exited, logPath: nil, lastOutputAt: nil,
             startedAt: "now", exitedAt: "later")
 
         let overview = SpacesDeviceOverviewBuilder.build(
@@ -249,11 +249,11 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
             sessionID: "session-api", title: "old-api", workingDirectory: workspace.dir, workspaceID: workspace.id, attachmentSnapshot: .init())
         let runningProcess = RunningProcessRecord(
             id: "process-api", workspaceID: workspace.id, templateID: "template-api", templateName: "old-api", command: "npm run dev",
-            terminalApp: "Spaces", terminalTrackingID: "session-api", terminalNativeID: "session-api", pid: 123, status: .running, logPath: nil,
+            terminalApp: "Spaces", terminalTrackingID: "session-api", pid: 123, status: .running, logPath: nil,
             lastOutputAt: nil, startedAt: "now", exitedAt: nil)
         let processWindow = WindowRecord(
             id: "window-api", workspaceID: workspace.id, app: "Spaces", name: "old-api", terminalTrackingID: "session-api",
-            terminalNativeID: "session-api", role: "terminal", orderIndex: 1, lastSeenAt: "now")
+            role: "terminal", orderIndex: 1, lastSeenAt: "now")
 
         let overview = SpacesDeviceOverviewBuilder.build(
             projects: [project],
@@ -281,11 +281,11 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
         let codexSession = makeSessionCatalogEntry(
             sessionID: "session-codex", title: "Codex", workingDirectory: workspace.dir, workspaceID: workspace.id, attachmentSnapshot: .init())
         let configuredAgent = AgentWindowRecord(
-            id: "agent-codex", workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "session-codex", codexThreadID: nil,
+            id: "agent-codex", workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "session-codex", sessionKey: nil,
             status: .spinning, createdAt: "now", updatedAt: "now")
         let adHocAgent = AgentWindowRecord(
             id: "agent-review", workspaceID: workspace.id, provider: .spaces, label: "reviewer", terminalTrackingID: "missing-session",
-            codexThreadID: nil, status: .waiting, createdAt: "now", updatedAt: "now")
+            sessionKey: nil, status: .waiting, createdAt: "now", updatedAt: "now")
 
         let overview = SpacesDeviceOverviewBuilder.build(
             projects: [project],
@@ -314,7 +314,7 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
             sessionID: "session-codex", title: "Old Codex", workingDirectory: workspace.dir, workspaceID: workspace.id, attachmentSnapshot: .init())
         let configuredAgent = AgentWindowRecord(
             id: "agent-codex", workspaceID: workspace.id, provider: .spaces, label: "Old Codex", terminalTrackingID: "session-codex",
-            codexThreadID: nil, status: .spinning, createdAt: "now", updatedAt: "now")
+            sessionKey: nil, status: .spinning, createdAt: "now", updatedAt: "now")
         let claimedAgent = AgentWindowRecord(
             id: configuredAgent.id, workspaceID: configuredAgent.workspaceID, provider: configuredAgent.provider, label: configuredAgent.label,
             runtimeTargetID: configuredAgent.runtimeTargetID, terminalTarget: configuredAgent.terminalTarget, sessionKey: configuredAgent.sessionKey,
@@ -348,14 +348,14 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
             sessionID: "session-api", title: "api", workingDirectory: workspace.dir, workspaceID: workspace.id, attachmentSnapshot: .init())
         let process = RunningProcessRecord(
             id: "process-api", workspaceID: workspace.id, templateName: "api", command: "npm run dev", terminalApp: "Spaces",
-            terminalTrackingID: "session-api", terminalNativeID: "session-api", pid: 123, status: .running, logPath: nil, lastOutputAt: nil,
+            terminalTrackingID: "session-api", pid: 123, status: .running, logPath: nil, lastOutputAt: nil,
             startedAt: "now", exitedAt: nil)
         let terminalWindow = WindowRecord(
             id: "window-shell", workspaceID: workspace.id, app: "Spaces", name: "Shell", terminalTrackingID: "session-shell",
-            terminalNativeID: "session-shell", role: "terminal", orderIndex: 0, lastSeenAt: "now")
+            role: "terminal", orderIndex: 0, lastSeenAt: "now")
         let processWindow = WindowRecord(
             id: "window-api", workspaceID: workspace.id, app: "Spaces", name: "api", terminalTrackingID: "session-api",
-            terminalNativeID: "session-api", role: "terminal", orderIndex: 1, lastSeenAt: "now")
+            role: "terminal", orderIndex: 1, lastSeenAt: "now")
 
         let overview = SpacesDeviceOverviewBuilder.build(
             projects: [project],
@@ -393,7 +393,7 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
             id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false, isArchived: false,
             isRunning: true, lastLaunchedAt: nil)
         let terminalWindow = WindowRecord(
-            id: "window-shell", workspaceID: workspace.id, app: "Spaces", name: "Shell", terminalTrackingID: nil, terminalNativeID: nil,
+            id: "window-shell", workspaceID: workspace.id, app: "Spaces", name: "Shell", terminalTrackingID: nil,
             role: "terminal", orderIndex: 0, lastSeenAt: "now")
 
         let overview = SpacesDeviceOverviewBuilder.build(

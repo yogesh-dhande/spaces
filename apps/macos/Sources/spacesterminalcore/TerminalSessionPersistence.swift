@@ -304,19 +304,13 @@ public enum TerminalSessionPersistence {
                     bindings: [root, payload.sessionID])
                 try database.execute(
                     sql: """
-                        INSERT INTO terminal_remote_session_states(session_id, root_directory, reason, payload_json, emitted_at, updated_at)
-                        VALUES (?, ?, ?, ?, ?, ?)
+                        INSERT INTO terminal_remote_session_states(session_id, root_directory, payload_json)
+                        VALUES (?, ?, ?)
                         ON CONFLICT(session_id) DO UPDATE SET
                           root_directory = excluded.root_directory,
-                          reason = excluded.reason,
-                          payload_json = excluded.payload_json,
-                          emitted_at = excluded.emitted_at,
-                          updated_at = excluded.updated_at
+                          payload_json = excluded.payload_json
                         """,
-                    bindings: [
-                        payload.sessionID, root, payload.reason, payloadJSON, payload.emittedAt,
-                        GhosttyRemoteSessionStateTimestamp.string(from: Date()),
-                    ])
+                    bindings: [payload.sessionID, root, payloadJSON])
             }
         }
     }
@@ -441,9 +435,9 @@ public enum TerminalSessionPersistence {
                     sql: """
                         INSERT INTO terminal_agent_signal_events(
                           id, root_directory, session_id, event_type, workspace_id, workspace_path, provider, label, terminal_tracking_id,
-                          terminal_native_id, codex_thread_id, environment_keys_json, created_at, acknowledged_at
+                          environment_keys_json, created_at, acknowledged_at
                         )
-                        VALUES (?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, ?, NULL)
+                        VALUES (?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, NULL)
                         ON CONFLICT(id) DO UPDATE SET
                           root_directory = excluded.root_directory,
                           session_id = excluded.session_id,
@@ -453,15 +447,13 @@ public enum TerminalSessionPersistence {
                           provider = excluded.provider,
                           label = excluded.label,
                           terminal_tracking_id = excluded.terminal_tracking_id,
-                          terminal_native_id = excluded.terminal_native_id,
-                          codex_thread_id = excluded.codex_thread_id,
                           environment_keys_json = excluded.environment_keys_json,
                           created_at = excluded.created_at,
                           acknowledged_at = NULL
                         """,
                     bindings: [
                         event.id, root, event.sessionID, event.type, event.workspaceID ?? "", event.workspacePath ?? "", event.provider,
-                        event.label ?? "", event.terminalTrackingID ?? "", event.terminalNativeID ?? "", event.codexThreadID ?? "",
+                        event.label ?? "", event.terminalTrackingID ?? "",
                         environmentKeysJSON, event.createdAt,
                     ])
             }
@@ -476,7 +468,7 @@ public enum TerminalSessionPersistence {
             let rows = try database.queryRows(
                 sql: """
                     SELECT id, session_id, COALESCE(workspace_id, ''), COALESCE(workspace_path, ''), event_type, provider, COALESCE(label, ''),
-                           COALESCE(terminal_tracking_id, ''), COALESCE(terminal_native_id, ''), COALESCE(codex_thread_id, ''),
+                           COALESCE(terminal_tracking_id, ''),
                            environment_keys_json, created_at
                     FROM terminal_agent_signal_events
                     WHERE root_directory = ? AND session_id = ? AND acknowledged_at IS NULL
@@ -798,12 +790,11 @@ public enum TerminalSessionPersistence {
     }
 
     private static func decodeAgentSignalEvent(row: [String]) throws -> TerminalServiceAgentSignalEvent {
-        guard row.count >= 12 else { throw TerminalSessionPersistenceError.invalidRow("terminal_agent_signal_events") }
+        guard row.count >= 10 else { throw TerminalSessionPersistenceError.invalidRow("terminal_agent_signal_events") }
         return TerminalServiceAgentSignalEvent(
             id: row[0], sessionID: row[1], workspaceID: row[2].isEmpty ? nil : row[2], workspacePath: row[3].isEmpty ? nil : row[3], type: row[4],
             provider: row[5], label: row[6].isEmpty ? nil : row[6], terminalTrackingID: row[7].isEmpty ? nil : row[7],
-            terminalNativeID: row[8].isEmpty ? nil : row[8], codexThreadID: row[9].isEmpty ? nil : row[9],
-            environmentKeys: try decodeEnvironmentKeys(row[10]), createdAt: row[11])
+            environmentKeys: try decodeEnvironmentKeys(row[8]), createdAt: row[9])
     }
 
     private static func decodeRuntimeState(row: [String]) throws -> TerminalSessionRuntimeState {
