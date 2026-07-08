@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { SiteHeader } from "../components/site-header";
 import { SiteFooter } from "../components/site-footer";
+import { PrimaryButton } from "../components/primary-button";
 import { docsPageLinks } from "./content";
 
 export const metadata: Metadata = {
@@ -65,13 +66,10 @@ export default function DocsPage() {
             workspaces during parallel development.
           </p>
           <div className="mt-8 flex flex-wrap items-center gap-3">
-            <Link
-              href="/docs/getting-started"
-              className="btn-primary inline-flex items-center gap-2 rounded-full px-6 py-3 text-sm font-semibold"
-            >
+            <PrimaryButton href="/docs/getting-started">
               Getting Started
               <span aria-hidden>→</span>
-            </Link>
+            </PrimaryButton>
             <a
               href="#docs-map"
               className="inline-flex items-center gap-1.5 rounded-full px-5 py-3 text-sm font-semibold text-foreground-soft transition-colors hover:text-accent"

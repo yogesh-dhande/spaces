@@ -93,87 +93,39 @@ body {
   background-repeat: no-repeat, no-repeat, repeat;
 }
 
-.lp h1 {
-  font-size: clamp(2.1rem, 6.5vw, 4.3rem);
-  font-weight: 600;
-  line-height: 1.04;
-  letter-spacing: -0.01em;
+/* Hero scope marquee — the track holds two identical copies of the word list, so
+   translating it left by half its width loops seamlessly. Edges fade via a mask. */
+.marquee {
+  -webkit-mask-image: linear-gradient(
+    to right,
+    transparent,
+    black 8%,
+    black 92%,
+    transparent
+  );
+  mask-image: linear-gradient(
+    to right,
+    transparent,
+    black 8%,
+    black 92%,
+    transparent
+  );
 }
 
-.lp h2 {
-  font-size: clamp(1.5rem, 3.5vw, 2.3rem);
-  font-weight: 600;
-  line-height: 1.15;
-  letter-spacing: -0.01em;
+.marquee-track {
+  animation: marqueeScroll 26s linear infinite;
 }
 
-.lp h3 {
-  font-weight: 600;
-  letter-spacing: -0.01em;
-}
-
-.btn-primary {
-  background: #3dc6b8;
-  color: #0f1517;
-  box-shadow: inset 0 0 0 1px color-mix(in oklab, #fff 16%, transparent);
-}
-
-.btn-primary:hover {
-  background: color-mix(in oklab, #3dc6b8 88%, white);
-}
-
-/* Hero rotating word — CSS-only crossfade, no JavaScript. Every word stays in the
-   DOM (aria-hidden) with an invisible sizer holding the line width steady. */
-.hero-rotator {
-  position: relative;
-  display: inline-block;
-  color: var(--accent);
-}
-
-.hero-rotator-sizer {
-  visibility: hidden;
-}
-
-.hero-rotator-word {
-  position: absolute;
-  left: 0;
-  top: 0;
-  white-space: nowrap;
-  opacity: 0;
-  animation: heroWordCycle 12.5s var(--ease-out) infinite;
-}
-
-@keyframes heroWordCycle {
-  0% {
-    opacity: 0;
-    transform: translateY(0.16em);
-  }
-  4% {
-    opacity: 1;
-    transform: translateY(0);
-  }
-  18% {
-    opacity: 1;
-    transform: translateY(0);
-  }
-  24% {
-    opacity: 0;
-    transform: translateY(-0.16em);
-  }
-  100% {
-    opacity: 0;
-    transform: translateY(-0.16em);
+@keyframes marqueeScroll {
+  to {
+    transform: translateX(-50%);
   }
 }
 
-/* Respect reduced motion: hold the first word steady, no cycling. */
+/* Respect reduced motion: hold the list still. */
 @media (prefers-reduced-motion: reduce) {
-  .hero-rotator-word {
+  .marquee-track {
     animation: none;
-  }
-  .hero-rotator-word:first-of-type {
-    opacity: 1;
-    transform: none;
   }
 }
 

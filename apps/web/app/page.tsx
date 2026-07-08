@@ -2,11 +2,19 @@
 import Link from "next/link";
 import { SiteHeader } from "./components/site-header";
 import { SiteFooter } from "./components/site-footer";
+import { PrimaryButton } from "./components/primary-button";
 
 const githubReleasesURL = "https://github.com/yogesh-dhande/spaces/releases/latest";
 
-// Hero headline cycles through these one at a time (CSS-only crossfade in globals.css).
-const heroWords = ["agent", "worktree", "process", "port", "window"];
+// Scope strip under the hero headline — the surfaces Spaces puts under one roof.
+const heroScope = [
+  "agents",
+  "worktrees",
+  "ports",
+  "processes",
+  "windows",
+  "remote machines",
+];
 
 type Pillar = {
   title: string;
@@ -205,7 +213,6 @@ const faqItems: FaqItem[] = [
       <ul className="ml-4 list-disc space-y-1">
         <li>macOS 14 Sonoma or later</li>
         <li>Google Chrome, used for browser sessions</li>
-        <li>Spaces ships its own terminal, so workspaces do not depend on external terminal apps.</li>
       </ul>
     ),
   },
@@ -230,12 +237,12 @@ const faqItems: FaqItem[] = [
     ),
   },
   {
-    question: "Can I use it with a remote or cloud machine?",
+    question: "Can I use it with a Mac Mini or cloud VM?",
     answer: (
       <>
-        Yes. Pair another Mac or an Ubuntu 24.04 Linux box — including a cloud
-        VM — over SSH with pinned TLS. Each machine runs its own{" "}
-        <code>spacesd</code> daemon and shows up as its own section in the
+        Yes. Pair another Mac or a Ubuntu box — including a cloud
+        VM — over SSH with pinned TLS. Each machine runs its own
+        daemon and shows up as its own section in the
         sidebar, so you manage its projects, workspaces, terminals, and agents
         from the Mac in front of you. Because sessions run on the daemon, a
         remote build or agent keeps running after you disconnect or close your
@@ -268,49 +275,13 @@ const faqItems: FaqItem[] = [
     ),
   },
   {
-    question: "Who is Spaces not for?",
-    answer: (
-      <>
-        <p className="mb-3">
-          Spaces makes opinionated tradeoffs to prioritize speed and
-          flexibility. They may not suit everyone.
-        </p>
-        <ul className="ml-4 list-disc space-y-2">
-          <li>
-            <span className="font-semibold text-foreground">
-              If you keep your window count low.
-            </span>{" "}
-            Spaces opens a dedicated window for every tab, terminal, and
-            editor instance so you can lay them out across your screens and
-            recall them on demand. The upside is speed and flexibility —
-            focusing a window takes 20–30 ms, versus 200 ms to a full second
-            to reconcile and focus a specific tab in Chrome as you add or
-            move them. It also lets you view any two windows side by side
-            (even from different workspaces) with your favorite tiling window
-            manager. If a sparse desktop matters more to you than instant
-            recall, Spaces will feel like clutter.
-          </li>
-          <li>
-            <span className="font-semibold text-foreground">
-              If you must use macOS full-screen mode.
-            </span>{" "}
-            macOS puts each full-screen window in its own desktop space, so
-            focusing another window forces the OS to transition between
-            desktops. Spaces still works, but it shines when you stay in
-            windowed mode.
-          </li>
-        </ul>
-      </>
-    ),
-  },
-  {
     question: "Is there a mobile app?",
     answer: (
       <>
         Yes. The Spaces iOS app pairs with your Mac by scanning a QR code. From
         your phone you can browse a workspace&apos;s live terminal sessions, watch
-        a coding agent&apos;s output, and relaunch the Mac app if it quits while
-        you&apos;re away. See the{" "}
+        a coding agent&apos;s output, or start new sessions even while
+        you&apos;re away from your Mac. See the{" "}
         <Link href="/docs/ios" className="text-accent hover:underline">
           iOS companion
         </Link>{" "}
@@ -322,7 +293,7 @@ const faqItems: FaqItem[] = [
     question: "Do you collect any data?",
     answer: (
       <>
-        No. Spaces runs entirely on your Mac and does not send your data to Spaces
+        No. Spaces runs entirely on your devices and does not send your data to Spaces
         or any third party. Pairing connects only to your own devices — your
         iPhone or another machine you control.
       </>
@@ -384,53 +355,52 @@ export default function HomePage() {
 
       {/* ── Hero ── */}
       <section className="relative">
-        <div className="mx-auto w-full max-w-7xl px-6 pt-14 md:pt-20">
-          <div className="max-w-3xl">
+        <div className="mx-auto grid w-full max-w-7xl items-center gap-12 px-6 pt-14 md:pt-20 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)] lg:gap-10">
+          {/* Left: copy */}
+          <div className="min-w-0">
             <p className="inline-flex items-center gap-2 font-mono text-[0.7rem] uppercase tracking-[0.18em] text-foreground-soft">
               <span className="h-1.5 w-1.5 rounded-full bg-accent" />
               macOS + iOS · open source
             </p>
-            <h1 className="mt-5 text-4xl font-semibold leading-[1.02] tracking-tight md:text-5xl lg:text-6xl">
-              {/* Keep "Manage every {word}" on one line at md+ so the headline is two lines, not three */}
-              <span className="md:whitespace-nowrap">
-                Manage every{" "}
-                <span
-                  className="hero-rotator"
-                  aria-label="agents, worktrees, processes, ports, and windows"
-                >
-                  {/* Invisible sizer reserves the widest word's width so the line never reflows */}
-                  <span className="hero-rotator-sizer" aria-hidden>
-                    worktree
-                  </span>
-                  {heroWords.map((word, i) => (
-                    <span
-                      key={word}
-                      className="hero-rotator-word"
-                      style={{ animationDelay: `${i * 2.5}s` }}
-                      aria-hidden
-                    >
-                      {word}
-                    </span>
-                  ))}
-                </span>
-              </span>
-              <br />
-              in one place
+            <h1 className="mt-5 text-[clamp(2rem,4vw,3.5rem)] font-semibold leading-[1.04] tracking-[-0.01em]">
+              Manage <span className="text-accent">parallel coding sessions</span>
             </h1>
-            <p className="mt-6 max-w-xl text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
+
+            {/* Scope marquee — infinite left scroll between two hairlines, edges faded. */}
+            <div className="marquee relative mt-6 overflow-hidden border-y border-line/70 py-3">
+              <span className="sr-only">
+                Manage agents, worktrees, ports, processes, windows, and remote machines.
+              </span>
+              <div
+                className="marquee-track flex w-max items-center font-mono text-sm text-foreground-soft md:text-base"
+                aria-hidden
+              >
+                {[0, 1].map((copy) => (
+                  <div key={copy} className="flex shrink-0 items-center">
+                    {heroScope.map((item) => (
+                      <span key={item} className="flex items-center whitespace-nowrap">
+                        {item}
+                        <span className="mx-4 text-accent">·</span>
+                      </span>
+                    ))}
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <p className="mt-7 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
               Group coding agents, processes, ports, browser tabs, and code editor into
               isolated per-branch workspaces — run them on your Mac or a
               remote Linux box, and pick any session up on your iPhone.
             </p>
             <div className="mt-8 flex flex-wrap items-center gap-3">
-              <Link
+              <PrimaryButton
                 href={githubReleasesURL}
-                className="btn-primary inline-flex items-center gap-2 rounded-full px-6 py-3 text-sm font-semibold"
                 target="_blank"
                 rel="noopener noreferrer"
               >
                 Download
-              </Link>
+              </PrimaryButton>
               <Link
                 href="/docs"
                 className="inline-flex items-center gap-1.5 rounded-full border border-line px-5 py-3 text-sm font-semibold transition-colors hover:border-accent hover:text-accent"
@@ -440,18 +410,17 @@ export default function HomePage() {
               </Link>
             </div>
 
-            <dl className="mt-8 grid max-w-xl grid-cols-3 gap-6 border-t border-line/70 pt-7">
+            <dl className="mt-8 grid grid-cols-3 gap-6 border-t border-line/70 pt-7">
               <SpecItem label="Client" value="macOS + iOS" />
               <SpecItem label="Daemon" value="macOS + Linux" />
               <SpecItem label="Price" value="Free" />
             </dl>
           </div>
-        </div>
 
-        <div className="mx-auto mt-12 w-full max-w-7xl px-6 md:mt-16">
+          {/* Right: screenshot */}
           <figure className="relative overflow-hidden rounded-xl border border-line/80 bg-surface/70 shadow-[0_40px_100px_-60px_color-mix(in_oklab,var(--ink)_55%,transparent)]">
             <img
-              src="/media/hero2.png"
+              src="/media/hero.png"
               alt="The Spaces app showing workspaces, terminals, editors, and live agent status side by side"
               className="h-auto w-full"
               fetchPriority="high"
@@ -464,8 +433,8 @@ export default function HomePage() {
       <section id="manage" className="mt-24 border-t border-line/70">
         <div className="mx-auto w-full max-w-7xl px-6 py-20 md:py-24">
           <div className="max-w-3xl">
-            <h2 className="text-3xl font-semibold leading-tight tracking-tight md:text-5xl">
-              Run <span className="text-accent">parallel coding sessions</span>
+            <h2 className="text-[clamp(1.5rem,3.5vw,2.3rem)] font-semibold leading-[1.15] tracking-[-0.01em]">
+              Your workflow, <span className="text-accent">minus the friction</span>
             </h2>
             <p className="mt-5 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
               Run a few coding sessions at once and the moving parts multiply —
@@ -486,7 +455,7 @@ export default function HomePage() {
       <section className="border-t border-line/70 bg-background-soft/40">
         <div className="mx-auto w-full max-w-7xl px-6 py-24">
           <div className="max-w-3xl">
-            <h2 className="text-3xl font-semibold leading-tight tracking-tight md:text-5xl">
+            <h2 className="text-[clamp(1.5rem,3.5vw,2.3rem)] font-semibold leading-[1.15] tracking-[-0.01em]">
               One workspace per task.{" "}
               <span className="text-accent">Open, switch, and close as a unit.</span>
             </h2>
@@ -535,8 +504,8 @@ export default function HomePage() {
               <span className="h-1.5 w-1.5 rounded-full bg-accent" />
               Remote machines
             </p>
-            <h2 className="mt-5 text-3xl font-semibold leading-tight tracking-tight md:text-5xl">
-              One Mac. <span className="text-accent">Every machine.</span>
+            <h2 className="mt-5 text-[clamp(1.5rem,3.5vw,2.3rem)] font-semibold leading-[1.15] tracking-[-0.01em]">
+              Connect to all machines <span className="text-accent whitespace-nowrap">from one Mac</span>
             </h2>
             <p className="mt-5 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
               Pair another Mac or a cloud Linux box over SSH with pinned TLS.
@@ -577,8 +546,8 @@ export default function HomePage() {
                 <span className="h-1.5 w-1.5 rounded-full bg-accent" />
                 iOS companion
               </p>
-              <h2 className="mt-5 text-3xl font-semibold leading-tight tracking-tight md:text-5xl">
-                Take it <span className="text-accent">with you.</span>
+              <h2 className="mt-5 text-[clamp(1.5rem,3.5vw,2.3rem)] font-semibold leading-[1.15] tracking-[-0.01em]">
+                Remote control <span className="text-accent whitespace-nowrap">from your iPhone</span>
               </h2>
               <p className="mt-5 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
                 Pair the Spaces iOS app with a QR code. Browse live terminal
@@ -613,8 +582,8 @@ export default function HomePage() {
       <section className="border-t border-line/70">
         <div className="mx-auto w-full max-w-7xl px-6 py-24">
           <div className="max-w-3xl">
-            <h2 className="text-3xl font-semibold leading-tight tracking-tight md:text-5xl">
-              Built for <span className="text-accent">the keyboard.</span>
+            <h2 className="text-[clamp(1.5rem,3.5vw,2.3rem)] font-semibold leading-[1.15] tracking-[-0.01em]">
+              Built for <span className="text-accent">the keyboard</span>
             </h2>
             <p className="mt-5 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
               Context switching is a keystroke, not a hunt. Navigate and act
@@ -638,9 +607,9 @@ export default function HomePage() {
       <section className="border-t border-line/70 bg-background-soft/40">
         <div className="mx-auto w-full max-w-7xl px-6 py-24">
           <div className="max-w-3xl">
-            <h2 className="text-3xl font-semibold leading-tight tracking-tight md:text-5xl">
-              Get to any window with{" "}
-              <span className="text-accent">a few keystrokes</span>
+            <h2 className="text-[clamp(1.5rem,3.5vw,2.3rem)] font-semibold leading-[1.15] tracking-[-0.01em]">
+              Get to any window{" "}
+              <span className="text-accent whitespace-nowrap">with a few keystrokes</span>
             </h2>
             <p className="mt-5 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
               Numbered shortcuts focus any window in the active workspace.
@@ -674,7 +643,7 @@ export default function HomePage() {
       <section id="features" className="border-t border-line/70">
         <div className="mx-auto w-full max-w-7xl px-6 py-20 md:py-24">
           <div className="flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
-            <h2 className="text-3xl font-semibold leading-tight tracking-tight md:text-5xl">
+            <h2 className="text-[clamp(1.5rem,3.5vw,2.3rem)] font-semibold leading-[1.15] tracking-[-0.01em]">
               Capabilities
             </h2>
             <p className="font-mono text-xs tracking-[0.16em] tabular-nums">
@@ -695,8 +664,8 @@ export default function HomePage() {
       <section id="faq" className="border-t border-line/70 bg-background-soft/40">
         <div className="mx-auto w-full max-w-7xl px-6 py-20 md:py-24">
           <div className="max-w-3xl">
-            <h2 className="text-3xl font-semibold leading-tight tracking-tight md:text-5xl">
-              You may be wondering.
+            <h2 className="text-[clamp(1.5rem,3.5vw,2.3rem)] font-semibold leading-[1.15] tracking-[-0.01em]">
+              FAQ
             </h2>
             <p className="mt-5 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
               Common questions about setup, tools, and the app. Still stuck?{" "}
@@ -735,22 +704,21 @@ export default function HomePage() {
       {/* ── CTA ── */}
       <section className="border-t border-line/70">
         <div className="mx-auto w-full max-w-7xl px-6 py-24 md:py-28">
-          <h2 className="max-w-2xl text-3xl font-semibold leading-tight tracking-tight md:text-5xl">
-            Try it on <span className="text-accent">your repo.</span>
+          <h2 className="max-w-2xl text-[clamp(1.5rem,3.5vw,2.3rem)] font-semibold leading-[1.15] tracking-[-0.01em]">
+            Run it on your Mac
           </h2>
           <p className="mt-4 max-w-2xl text-base leading-7 text-foreground-soft md:text-lg">
             Native macOS, signed DMG, in-app updates via Sparkle. Free and
             open source.
           </p>
           <div className="mt-8 flex flex-wrap gap-3">
-            <Link
+            <PrimaryButton
               href={githubReleasesURL}
-              className="btn-primary inline-flex items-center gap-2 rounded-full px-6 py-3 text-sm font-semibold"
               target="_blank"
               rel="noopener noreferrer"
             >
               Download
-            </Link>
+            </PrimaryButton>
             <Link
               href="/docs"
               className="inline-flex items-center gap-1.5 rounded-full border border-line px-5 py-3 text-sm font-semibold transition-colors hover:border-accent hover:text-accent"
