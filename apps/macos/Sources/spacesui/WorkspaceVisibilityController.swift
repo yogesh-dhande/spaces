@@ -152,7 +152,9 @@ import workspacecore
             symbol: "line.3.horizontal.decrease.circle", title: "Workspaces", closeAction: #selector(AppKitController.closeWorkspaceVisibilityWindow))
         let root = NSView()
         root.wantsLayer = true
-        root.layer?.backgroundColor = host.sidebarPanelBackgroundColor().cgColor
+        bindAppearanceReactiveLayer(root) { [unowned host] view in
+            view.layer?.backgroundColor = host.sidebarPanelBackgroundColor().cgColor
+        }
         let headerDivider = host.settingsHairlineDivider()
         for view in [header, headerDivider, filterRow, tableScroll] {
             view.translatesAutoresizingMaskIntoConstraints = false

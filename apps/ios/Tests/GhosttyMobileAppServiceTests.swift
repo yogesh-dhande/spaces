@@ -335,6 +335,74 @@
             XCTAssertEqual(payload.client?.kind, .remoteViewer)
         }
 
+        func testStartingSessionAttachSendsResolvedAppearance() async throws {
+            let defaults = UserDefaults.standard
+            let originalAppearance = defaults.string(forKey: AppAppearanceStorage.key)
+            defaults.set(AppAppearanceMode.light.rawValue, forKey: AppAppearanceStorage.key)
+            defer {
+                if let originalAppearance {
+                    defaults.set(originalAppearance, forKey: AppAppearanceStorage.key)
+                } else {
+                    defaults.removeObject(forKey: AppAppearanceStorage.key)
+                }
+            }
+
+            let recorder = DeviceAPIRequestRecorder()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            let model = TerminalViewerModel(
+                session: session(state: .starting),
+                settings: settings(),
+                onAuthenticationRequired: { _ in },
+                bridgeClient: bridgeClient)
+
+            model.start()
+            for _ in 0..<40 {
+                if await recorder.containsTerminalControlAction(.attach) { break }
+                try await Task.sleep(for: .milliseconds(25))
+            }
+            model.stop()
+
+            let requests = await recorder.snapshot()
+            let attachPayload = requests.compactMap { request -> SpacesDeviceTerminalControlRequest? in
+                if case .terminalControl(let payload) = request.command, payload.action == .attach { return payload }
+                return nil
+            }.first
+            let payload = try XCTUnwrap(attachPayload, "Expected the starting terminal connect to send an attach request.")
+            XCTAssertEqual(payload.appearance, .light)
+        }
+
+        func testAppearanceChangeSendsSetAppearanceThroughBridge() async throws {
+            let recorder = DeviceAPIRequestRecorder()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.append(request)
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            let model = TerminalViewerModel(
+                session: session(),
+                settings: settings(),
+                onAuthenticationRequired: { _ in },
+                bridgeClient: bridgeClient)
+
+            await model.sendAppearance(.dark)
+
+            let requests = await recorder.snapshot()
+            let setAppearancePayload = requests.compactMap { request -> SpacesDeviceTerminalControlRequest? in
+                if case .terminalControl(let payload) = request.command, payload.action == .setAppearance { return payload }
+                return nil
+            }.first
+            let payload = try XCTUnwrap(setAppearancePayload, "Expected sendAppearance to send a setAppearance control request.")
+            XCTAssertEqual(payload.appearance, .dark)
+            XCTAssertEqual(payload.sessionID, "terminal-session")
+
+            // A repeat of the same appearance dedupes against the last value sent, issuing no second request.
+            await model.sendAppearance(.dark)
+            let setAppearanceCount = await recorder.countTerminalControlAction(.setAppearance)
+            XCTAssertEqual(setAppearanceCount, 1)
+        }
+
         func testStartingSessionRetriesUnavailableAttachWithoutMarkingEnded() async throws {
             let recorder = DeviceAPIRequestRecorder()
             let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in

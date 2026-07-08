@@ -232,7 +232,9 @@ public enum SpacesDeviceClient {
         device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp, profile: SpacesProfile?, requestProvider: DeviceRequestProvider
     ) throws -> TerminalServiceDaemonStatus {
         let response = try requestProvider(.init(command: .daemonStatus), device, clientApp, profile)
-        guard let status = response.daemonStatus else { throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode) }
+        guard let status = response.daemonStatus else {
+            throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode)
+        }
         return status
     }
 
@@ -302,7 +304,9 @@ public enum SpacesDeviceClient {
         dir: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
     ) throws -> SpacesDeviceProjectPreview {
         let response = try request(.init(command: .previewProject(.init(dir: dir))), device: device, clientApp: clientApp, profile: profile)
-        guard let preview = response.projectPreview else { throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode) }
+        guard let preview = response.projectPreview else {
+            throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode)
+        }
         return preview
     }
 
@@ -328,7 +332,9 @@ public enum SpacesDeviceClient {
         gitURL: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
     ) throws -> SpacesDeviceGitProjectPreview {
         let response = try request(.init(command: .previewGitProject(.init(gitURL: gitURL))), device: device, clientApp: clientApp, profile: profile)
-        guard let preview = response.gitProjectPreview else { throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode) }
+        guard let preview = response.gitProjectPreview else {
+            throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode)
+        }
         return preview
     }
 
@@ -534,7 +540,9 @@ public enum SpacesDeviceClient {
     ) throws -> String {
         let response = try request(
             .init(command: .tailTerminalOutput(.init(sessionID: sessionID, lines: lines))), device: device, clientApp: clientApp, profile: profile)
-        guard let output = response.terminalOutput else { throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode) }
+        guard let output = response.terminalOutput else {
+            throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode)
+        }
         return output
     }
 

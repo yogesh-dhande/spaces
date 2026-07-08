@@ -283,7 +283,9 @@ struct DeviceRemoveCommand: ParsableCommand {
 struct TerminalCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "terminal", abstract: "Manage Spaces terminal sessions.",
-        subcommands: [TerminalListCommand.self, TerminalCommandCommand.self, TerminalSendCommand.self, TerminalTailCommand.self, TerminalShowCommand.self])
+        subcommands: [
+            TerminalListCommand.self, TerminalCommandCommand.self, TerminalSendCommand.self, TerminalTailCommand.self, TerminalShowCommand.self,
+        ])
 }
 
 struct TerminalListCommand: ParsableCommand {
@@ -374,9 +376,7 @@ struct TerminalSendTextCommand: ParsableCommand {
     @Flag(name: .long, help: "Append a newline after the text.") var newline = false
     @Option(name: .long, help: "Paired device name or ID. Defaults to this machine's local sessions.") var device: String?
 
-    func run() throws {
-        try sendTerminalInput(.text(text), sessionID: sessionID, appendNewline: newline, device: device)
-    }
+    func run() throws { try sendTerminalInput(.text(text), sessionID: sessionID, appendNewline: newline, device: device) }
 }
 
 struct TerminalSendBytesCommand: ParsableCommand {

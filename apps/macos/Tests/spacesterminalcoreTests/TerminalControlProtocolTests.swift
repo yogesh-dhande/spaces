@@ -60,6 +60,29 @@ final class TerminalControlProtocolTests: XCTestCase {
         XCTAssertEqual(decoded.resizeSerial, 8)
     }
 
+    func testSetAppearanceRequestRoundTripsThroughCodec() throws {
+        let request = TerminalControlRequest(command: .setAppearance(TerminalControlSetAppearancePayload(clientID: "viewer-1", appearance: .dark)))
+
+        let decoded = try TerminalControlCodec.decodeRequest(TerminalControlCodec.encodeRequest(request))
+
+        XCTAssertEqual(decoded.command, "setAppearance")
+        XCTAssertEqual(decoded.commandValue.name, "setAppearance")
+        // Appearance is a per-client view preference, so it must not be owner-gated on the wire.
+        XCTAssertEqual(decoded.commandValue.requiresOwnerClientID, false)
+        XCTAssertEqual(decoded.clientID, "viewer-1")
+        XCTAssertEqual(decoded.appearance, .dark)
+        guard case .setAppearance(let payload) = decoded.commandValue else {
+            return XCTFail("Expected a setAppearance command, got '\(decoded.commandValue.name)'.")
+        }
+        XCTAssertEqual(payload.clientID, "viewer-1")
+        XCTAssertEqual(payload.appearance, .dark)
+    }
+
+    func testSetAppearanceWithoutAppearanceReportsMissingPayload() throws {
+        let request = try TerminalControlCodec.decodeRequest(#"{"command":"setAppearance","clientID":"viewer-1"}"#.data(using: .utf8)!)
+        XCTAssertEqual(request.commandValue.requiredPayloadFailureMessage, "Missing appearance.")
+    }
+
     func testTypedCommandWrapperReportsMissingPayloadFields() throws {
         let send = try TerminalControlCodec.decodeRequest(#"{"command":"send","clientID":"client-1"}"#.data(using: .utf8)!)
         let attach = try TerminalControlCodec.decodeRequest(#"{"command":"attach","clientID":"legacy-extra"}"#.data(using: .utf8)!)

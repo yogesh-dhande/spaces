@@ -200,7 +200,8 @@ final class SpacesCommandTests: XCTestCase {
 
     func testTerminalCommandPublicSubcommands() {
         let subcommands = TerminalCommand.configuration.subcommands.map { String(describing: $0) }
-        XCTAssertEqual(subcommands, ["TerminalListCommand", "TerminalCommandCommand", "TerminalSendCommand", "TerminalTailCommand", "TerminalShowCommand"])
+        XCTAssertEqual(
+            subcommands, ["TerminalListCommand", "TerminalCommandCommand", "TerminalSendCommand", "TerminalTailCommand", "TerminalShowCommand"])
     }
 
     func testRemovedTerminalCommandsAndFormsAreUnavailable() {

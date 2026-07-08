@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import base64
 import json
 import math
 import subprocess
@@ -12,6 +13,15 @@ from pathlib import Path
 PROCESS_NAME = "parity-process"
 AGENT_NAME = "parity-agent"
 REMOTE_WEB_SESSION_NAME = "remote-web"
+
+# Terminal background colors the Spaces theme (spaces-brand) exports per appearance, packed as
+# 0x00RRGGBB — the same form a decoded render frame carries as defaultBackgroundRGB. Kept in sync with
+# ThemeRegistry.spacesBrand{Light,Dark}Terminal.background in
+# apps/macos/Sources/spacesterminalcore/Theming/ThemeRegistry.swift.
+TERMINAL_BACKGROUND_RGB = {
+    "light": (248 << 16) | (247 << 8) | 241,
+    "dark": (15 << 16) | (21 << 8) | 23,
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -397,6 +407,104 @@ def run_terminal_latency_probe(
     }
 
 
+def decode_full_frame_default_background_rgb(render_update_b64: str) -> int:
+    """Decodes a self-contained (full) render update and returns its default background RGB (0x00RRGGBB).
+
+    The `state` Device API command always exports a full self-contained frame, so only the full-frame
+    header + snapshot prologue is parsed here; deltas are never returned by `state`. Mirrors the GRTU v2
+    wire format decoded by profile_device_api.sh / e2e_mobile_latency.sh.
+    """
+    data = base64.b64decode(render_update_b64)
+    offset = 0
+
+    def take(count: int) -> bytes:
+        nonlocal offset
+        if offset + count > len(data):
+            raise ValueError("truncated render update")
+        chunk = data[offset : offset + count]
+        offset += count
+        return chunk
+
+    if take(4) != b"GRTU":
+        raise ValueError("invalid render update magic")
+    version = take(1)[0]
+    if version != 2:
+        raise ValueError(f"unsupported render update version {version}")
+    kind_byte = take(1)[0]
+    if kind_byte != 1:
+        raise ValueError(f"expected a full render frame from state, got kind {kind_byte}")
+    take(2)  # reserved padding
+    take(8)  # session revision
+    take(8)  # base revision
+    take(8)  # target revision
+    take(8)  # owner epoch
+    take(2)  # columns
+    take(2)  # rows
+    take(int.from_bytes(take(2), "little"))  # fallbackReason string
+    take(2)  # cursor column
+    take(2)  # cursor row
+    take(1)  # cursor visible
+    take(4)  # default foreground RGB
+    return int.from_bytes(take(4), "little") & 0xFFFFFF  # default background RGB
+
+
+def read_terminal_default_background_rgb(args: argparse.Namespace, app: dict, session_id: str) -> int | None:
+    response = send("state", {"sessionID": session_id}, args, app)
+    state = result(response, "terminalState", f"state {session_id}")
+    render_update = state.get("renderUpdate")
+    if not render_update:
+        return None
+    try:
+        return decode_full_frame_default_background_rgb(render_update)
+    except ValueError:
+        return None
+
+
+def assert_appearance_flip_retheme(args: argparse.Namespace, app: dict, session_id: str) -> dict:
+    """Flips the terminal's light/dark appearance through the Device API and asserts the daemon re-themes
+    the live session: a subsequent full render frame must carry the target variant's default background
+    RGB. Deliberately cheap — one flip plus a bounded poll — and exercises the same client request path the
+    harness uses everywhere else. setAppearance is not owner-gated, so a throwaway client id is fine."""
+    client_id = str(uuid.uuid4()).upper()
+    before_rgb = read_terminal_default_background_rgb(args, app, session_id)
+    # Flip to whichever variant differs from what the terminal currently renders so the assertion observes
+    # a real re-theme rather than a no-op.
+    target = "light" if before_rgb == TERMINAL_BACKGROUND_RGB["dark"] else "dark"
+    expected_rgb = TERMINAL_BACKGROUND_RGB[target]
+    require_ok(
+        send(
+            "terminalControl",
+            terminal_control_payload("setAppearance", session_id, clientID=client_id, appearance=target),
+            args,
+            app,
+        ),
+        f"setAppearance {target}",
+    )
+
+    observed = {"rgb": before_rgb}
+
+    def retheme_landed():
+        # The macOS daemon applies terminal colors on its io thread, so poll a fresh full frame per
+        # attempt until the recolor lands (or the bounded wait elapses).
+        rgb = read_terminal_default_background_rgb(args, app, session_id)
+        observed["rgb"] = rgb
+        return rgb == expected_rgb
+
+    try:
+        wait_for(retheme_landed, f"terminal to re-theme to {target}", timeout=15.0, interval=0.25)
+    except TimeoutError as error:
+        raise AssertionError(
+            f"setAppearance({target}) did not re-theme the live session: "
+            f"expected defaultBackgroundRGB #{expected_rgb:06x}, "
+            f"observed #{(observed['rgb'] or 0):06x} (before flip #{(before_rgb or 0):06x})"
+        ) from error
+    return {
+        "appearance": target,
+        "expectedBackgroundRGB": f"#{expected_rgb:06x}",
+        "beforeBackgroundRGB": f"#{(before_rgb or 0):06x}",
+    }
+
+
 def wait_for_process_row(args: argparse.Namespace, app: dict, workspace_id: str, state: str) -> dict:
     def attempt():
         workspace = workspace_overview(args, app, workspace_id)
@@ -495,6 +603,9 @@ def run(args: argparse.Namespace) -> dict:
         latency_output_path = Path(args.terminal_latency_json)
         latency_output_path.parent.mkdir(parents=True, exist_ok=True)
         latency_output_path.write_text(json.dumps(terminal_latency_summary, indent=2, sort_keys=True) + "\n")
+    # Live re-theming: flip the terminal's light/dark appearance and confirm the daemon re-themes the
+    # already-rendering session (decoded render-frame background switches to the target variant).
+    appearance_flip = assert_appearance_flip_retheme(args, app, terminal_session_id)
     # Agent send/tail round trip: one-shot input lands without any attach/owner handshake and
     # the rendered tail echoes it back.
     tail_marker = f"parity-send-tail-{uuid.uuid4().hex[:8]}"
@@ -630,6 +741,7 @@ def run(args: argparse.Namespace) -> dict:
         "defaultWorkspaceID": default_workspace_id,
         "workspaceID": workspace_id,
         "terminalSessionID": terminal_session_id,
+        "terminalAppearanceFlip": appearance_flip,
         "processID": process_id,
         "agentID": agent_id,
         "agentSessionID": agent_session_id,

@@ -90,7 +90,9 @@ import workspacecore
         host.clearWorkspaceDetailFooter()
         for view in host.detailContainer.subviews { view.removeFromSuperview() }
         host.detailContainer.wantsLayer = true
-        host.detailContainer.layer?.backgroundColor = host.sidebarPanelBackgroundColor().cgColor
+        bindAppearanceReactiveLayer(host.detailContainer) { [unowned host] view in
+            view.layer?.backgroundColor = host.sidebarPanelBackgroundColor().cgColor
+        }
 
         let groups = buildAlertsGroups()
         let stack = NSStackView()
@@ -118,7 +120,9 @@ import workspacecore
             let sep = NSView()
             sep.translatesAutoresizingMaskIntoConstraints = false
             sep.wantsLayer = true
-            sep.layer?.backgroundColor = host.sidebarCardBorderColor(isSelected: false).cgColor
+            bindAppearanceReactiveLayer(sep) { [unowned host] view in
+                view.layer?.backgroundColor = host.sidebarCardBorderColor(isSelected: false).cgColor
+            }
             sep.heightAnchor.constraint(equalToConstant: 1).isActive = true
             stack.addArrangedSubview(sep)
             host.constrainFormFieldToFillWidth(sep, in: stack)

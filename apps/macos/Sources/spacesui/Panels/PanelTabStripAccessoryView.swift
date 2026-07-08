@@ -14,7 +14,11 @@ import AppKit
     }
 
     private var stripLeadingConstraint: NSLayoutConstraint!
-    private var clipConstraintsInstalled = false
+    /// The clip/self spanning constraints currently installed, and the titlebar they
+    /// pin to. Kept so a titlebar rebuild (see `installClipSpanningConstraintsIfNeeded`)
+    /// can be detected and the constraints re-established rather than left orphaned.
+    private var spanningConstraints: [NSLayoutConstraint] = []
+    private weak var constrainedTitlebar: NSView?
 
     init() {
         super.init(frame: .zero)
@@ -31,7 +35,7 @@ import AppKit
     @available(*, unavailable) required init?(coder: NSCoder) { nil }
 
     override func layout() {
-        installClipConstraintsIfNeeded()
+        installClipSpanningConstraintsIfNeeded()
         super.layout()
         syncStripLeading()
     }
@@ -41,15 +45,24 @@ import AppKit
     /// natural origin (just right of the traffic lights), pin it to span to the
     /// titlebar's trailing edge and fill it — the same technique Ghostty's titlebar
     /// tabs use to occupy the full row.
-    private func installClipConstraintsIfNeeded() {
-        guard !clipConstraintsInstalled, let clip = superview, let titlebar = clip.superview,
+    ///
+    /// Re-runnable rather than one-shot: the clip→titlebar constraints live on the
+    /// titlebar, and AppKit rebuilds the titlebar container on an `NSApp.appearance`
+    /// change (light/dark switch), discarding them and collapsing the strip back to
+    /// its fitting width — the tab list then loses all its width and only the action
+    /// buttons remain visible. Detecting that the titlebar changed (or any spanning
+    /// constraint went inactive) re-establishes the span so the strip self-heals on
+    /// the next layout pass.
+    private func installClipSpanningConstraintsIfNeeded() {
+        guard let clip = superview, let titlebar = clip.superview,
             NSStringFromClass(type(of: clip)).contains("NSTitlebarAccessoryClipView"), clip.frame.origin.x > 0
         else { return }
-        clipConstraintsInstalled = true
+        guard constrainedTitlebar !== titlebar || !spanningConstraints.allSatisfy(\.isActive) else { return }
+        NSLayoutConstraint.deactivate(spanningConstraints)
         let leadingConstant = clip.frame.origin.x
         clip.translatesAutoresizingMaskIntoConstraints = false
         translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
+        spanningConstraints = [
             clip.leadingAnchor.constraint(equalTo: titlebar.leadingAnchor, constant: leadingConstant),
             clip.trailingAnchor.constraint(equalTo: titlebar.trailingAnchor),
             clip.topAnchor.constraint(equalTo: titlebar.topAnchor),
@@ -58,7 +71,9 @@ import AppKit
             trailingAnchor.constraint(equalTo: clip.trailingAnchor),
             topAnchor.constraint(equalTo: clip.topAnchor),
             bottomAnchor.constraint(equalTo: clip.bottomAnchor),
-        ])
+        ]
+        NSLayoutConstraint.activate(spanningConstraints)
+        constrainedTitlebar = titlebar
     }
 
     /// The accessory's window origin is owned by AppKit, so the strip's leading

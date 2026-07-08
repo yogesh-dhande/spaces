@@ -143,11 +143,13 @@ enum Theme {
     @MainActor static func applySecondaryStyle(to button: NSButton) {
         button.isBordered = false
         button.wantsLayer = true
-        button.layer?.backgroundColor = NSColor.controlColor.cgColor
         button.layer?.cornerRadius = 5
         button.layer?.masksToBounds = true
         button.layer?.borderWidth = 1
-        button.layer?.borderColor = NSColor.separatorColor.cgColor
+        bindAppearanceReactiveLayer(button) { view in
+            view.layer?.backgroundColor = NSColor.controlColor.cgColor
+            view.layer?.borderColor = NSColor.separatorColor.cgColor
+        }
         button.contentTintColor = .labelColor
         button.attributedTitle = NSAttributedString(
             string: button.title, attributes: [.foregroundColor: NSColor.labelColor, .font: NSFont.systemFont(ofSize: 13)])

@@ -1,5 +1,6 @@
 import SwiftUI
 import spacesdevicecore
+import spacesterminalcore
 
 struct ConnectionSettingsView: View {
     @Environment(\.dismiss) private var dismiss
@@ -14,6 +15,7 @@ struct ConnectionSettingsView: View {
     @State private var isShowingScanner = false
     @State private var isPairing = false
     @State private var errorMessage: String?
+    @AppStorage(AppAppearanceStorage.key) private var appearanceMode: AppAppearanceMode = .default
     private let initialPairingLink: SpacesDevicePairingLink?
     let pairedDevices: [SpacesMobilePairedDeviceRecord]
     let activeDeviceID: String?
@@ -86,6 +88,14 @@ struct ConnectionSettingsView: View {
                         Text(errorMessage)
                             .font(.footnote)
                             .foregroundStyle(.red)
+                    }
+                }
+
+                Section("Appearance") {
+                    Picker("Theme", selection: $appearanceMode) {
+                        ForEach(AppAppearanceMode.allCases, id: \.self) { mode in
+                            Text(mode.displayName).tag(mode)
+                        }
                     }
                 }
             }

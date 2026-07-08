@@ -211,12 +211,19 @@ Remote Device API runs cache the Linux daemon archive under `apps/macos/.build/l
 The lower-level Linux artifact build command is:
 
 ```bash
-docker run --rm --platform linux/amd64 \
+docker run --rm --init --platform linux/amd64 \
   -v "$PWD":/workspace \
+  -v spaces-linux-zig:/root/spaces-zig-cache \
+  -v spaces-linux-swift:/root/spaces-swift-cache \
   -w /workspace \
+  -e ZIG_LOCAL_CACHE_DIR=/root/spaces-zig-cache/local -e ZIG_GLOBAL_CACHE_DIR=/root/spaces-zig-cache/global \
+  -e SPACES_LINUX_SWIFT_BUILD_PATH=/root/spaces-swift-cache/build -e SPACES_LINUX_SWIFT_CACHE_PATH=/root/spaces-swift-cache/cache \
+  -e SPACES_LINUX_SWIFT_CONFIG_PATH=/root/spaces-swift-cache/config -e SPACES_LINUX_SWIFT_SECURITY_PATH=/root/spaces-swift-cache/security \
   swift:6.2-noble \
   bash -lc 'apt-get update && apt-get install -y curl git xz-utils python3 pkg-config libsqlite3-dev libssl-dev openssl coreutils && apps/macos/scripts/build_linux_spacesd_artifact.sh --arch x86_64'
 ```
+
+The zig and SwiftPM cache/build paths must live in named Docker volumes, not on the bind-mounted workspace: lock acquisition over Docker Desktop's macOS file sharing can deadlock the ghostty-vt `zig build` (workers park in `futex_wait` with finished compile children unreaped and container CPU pinned at 0%). Named volumes live on the Docker Desktop Linux VM's own filesystem where POSIX locking works, and they persist across runs so caches survive between builds. Sources are read from the mount and the artifact is written back to `dist/linux/` on the mount; only lock-holding state stays in the volumes.
 
 Use `--platform linux/arm64` with `--arch arm64` for the Ubuntu arm64 artifact. The archive contains `bin/spacesd`, `bin/spaces`, `install.sh`, the `spacesd-bin` executable, `libghostty-vt`, and the Swift runtime libraries needed on stock Ubuntu 24.04. The install script places the release under `~/.spaces/daemon/releases/<version>/`, updates `~/.spaces/daemon/current`, updates `~/.spaces/bin/spacesd` and `~/.spaces/bin/spaces`, points `~/.local/bin/spaces` to the managed CLI helper, creates `~/.spaces/runtime`, `~/spaces/workspaces`, and `~/spaces/repos`, installs `~/.config/systemd/user/spacesd.service`, enables user lingering so the service survives SSH disconnects, enables the user service, and restarts it. If the Linux account cannot enable lingering itself, run `sudo loginctl enable-linger <user>` on the Linux device and retry.
 

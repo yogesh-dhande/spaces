@@ -8,9 +8,15 @@ source "$repo_root/scripts/spaces-e2e-env.sh"
 
 git_common_dir="$(git -C "$repo_root" rev-parse --path-format=absolute --git-common-dir)"
 linux_cache_root="$app_root/.build/linux-e2e-cache"
-zig_cache_root="$linux_cache_root/zig"
-swiftpm_cache_root="$linux_cache_root/swiftpm"
 artifact_cache_root="$linux_cache_root/artifacts"
+
+# The zig and SwiftPM mutable build/cache state lives in named Docker volumes rather
+# than host bind mounts (see the docker invocation below for why). Name them per
+# worktree from a short stable hash of the repo root so concurrent worktrees keep
+# isolated build state; the hash keeps the names within Docker's [a-zA-Z0-9_.-] rule.
+repo_hash="$(printf '%s' "$repo_root" | shasum -a 256 | awk '{print substr($1, 1, 8)}')"
+zig_cache_volume="spaces-linux-zig-$repo_hash"
+swift_cache_volume="spaces-linux-swift-$repo_hash"
 
 spaces_e2e_require_remote_host_env "$repo_root"
 
@@ -184,15 +190,25 @@ if valid_cached_archive "$cached_archive_path" "$cached_archive_sha256_path"; th
   cp "$cached_archive_sha256_path" "$archive_path.sha256"
 else
   echo "==> Building $artifact_id with Swift 6.2 Noble Docker" >&2
-  mkdir -p "$zig_cache_root" "$swiftpm_cache_root"
-  docker_args=(run --rm --platform "$docker_platform")
+  # Keep zig and SwiftPM cache/build state in named Docker volumes, not host bind mounts:
+  # lock acquisition over Docker Desktop's macOS file sharing deadlocks the ghostty-vt
+  # `zig build`. Volumes live on the Linux VM's own filesystem where POSIX locking works,
+  # and they persist across runs so incremental deploys stay fast. Sources and the emitted
+  # artifact still flow through the /workspace mount.
+  docker_args=(run --rm --init --platform "$docker_platform")
   if [[ "$git_common_dir" != "$repo_root/.git" ]]; then
     docker_args+=(-v "$git_common_dir:$git_common_dir")
   fi
   docker "${docker_args[@]}" \
     -v "$repo_root:/workspace" \
-    -v "$zig_cache_root:/root/.cache/zig" \
-    -v "$swiftpm_cache_root:/root/.cache/org.swift.swiftpm" \
+    -v "$zig_cache_volume:/root/spaces-zig-cache" \
+    -v "$swift_cache_volume:/root/spaces-swift-cache" \
+    -e ZIG_LOCAL_CACHE_DIR=/root/spaces-zig-cache/local \
+    -e ZIG_GLOBAL_CACHE_DIR=/root/spaces-zig-cache/global \
+    -e SPACES_LINUX_SWIFT_BUILD_PATH=/root/spaces-swift-cache/build \
+    -e SPACES_LINUX_SWIFT_CACHE_PATH=/root/spaces-swift-cache/cache \
+    -e SPACES_LINUX_SWIFT_CONFIG_PATH=/root/spaces-swift-cache/config \
+    -e SPACES_LINUX_SWIFT_SECURITY_PATH=/root/spaces-swift-cache/security \
     -w /workspace \
     swift:6.2-noble \
     bash -lc '

@@ -72,6 +72,8 @@ public struct TerminalControlRequest: Codable, Sendable, Equatable {
             self.init(
                 command: command.name, authToken: authToken, clientID: payload.clientID, ownerEpoch: payload.ownerEpoch,
                 scrollHorizontal: payload.scrollHorizontal, scrollVertical: payload.scrollVertical, scrollMods: payload.scrollMods)
+        case .setAppearance(let payload):
+            self.init(command: command.name, authToken: authToken, clientID: payload.clientID, appearance: payload.appearance)
         case .unsupported(let name): self.init(command: name, authToken: authToken)
         }
     }
@@ -220,6 +222,18 @@ public struct TerminalControlResizePayload: Sendable, Equatable {
     }
 }
 
+public struct TerminalControlSetAppearancePayload: Sendable, Equatable {
+    /// The client requesting the appearance change. Carried for lease-touch/tracing only; appearance
+    /// is deliberately not owner-gated (see the session core's handler).
+    public let clientID: String?
+    public let appearance: ThemeAppearance?
+
+    public init(clientID: String?, appearance: ThemeAppearance?) {
+        self.clientID = clientID
+        self.appearance = appearance
+    }
+}
+
 public struct TerminalControlScrollPayload: Sendable, Equatable {
     public let clientID: String?
     public let ownerEpoch: UInt64?
@@ -246,6 +260,7 @@ public enum TerminalControlCommand: Sendable, Equatable {
     case clearScreen(TerminalControlOwnerPayload)
     case resize(TerminalControlResizePayload)
     case scroll(TerminalControlScrollPayload)
+    case setAppearance(TerminalControlSetAppearancePayload)
     case unsupported(String)
 
     public init(request: TerminalControlRequest) {
@@ -273,6 +288,8 @@ public enum TerminalControlCommand: Sendable, Equatable {
                 TerminalControlScrollPayload(
                     clientID: request.clientID, ownerEpoch: request.ownerEpoch, scrollHorizontal: request.scrollHorizontal,
                     scrollVertical: request.scrollVertical, scrollMods: request.scrollMods))
+        case "setAppearance":
+            self = .setAppearance(TerminalControlSetAppearancePayload(clientID: request.clientID, appearance: request.appearance))
         default: self = .unsupported(request.command)
         }
     }
@@ -288,6 +305,7 @@ public enum TerminalControlCommand: Sendable, Equatable {
         case .clearScreen: "clearScreen"
         case .resize: "resize"
         case .scroll: "scroll"
+        case .setAppearance: "setAppearance"
         case .unsupported(let name): name
         }
     }
@@ -295,14 +313,15 @@ public enum TerminalControlCommand: Sendable, Equatable {
     public var requiresOwnerClientID: Bool {
         switch self {
         case .send, .key, .clearScreen, .resize, .scroll: true
-        case .attach, .detach, .heartbeat, .takeover, .unsupported: false
+        // setAppearance is a per-client view preference, not an ownership-gated mutation.
+        case .attach, .detach, .heartbeat, .takeover, .setAppearance, .unsupported: false
         }
     }
 
     public var includesSessionStateOnSuccess: Bool {
         switch self {
         case .takeover: true
-        case .attach, .detach, .heartbeat, .send, .key, .clearScreen, .resize, .scroll, .unsupported: false
+        case .attach, .detach, .heartbeat, .send, .key, .clearScreen, .resize, .scroll, .setAppearance, .unsupported: false
         }
     }
 
@@ -314,13 +333,14 @@ public enum TerminalControlCommand: Sendable, Equatable {
         case .key(let payload): payload.key == nil ? "Unsupported terminal key." : nil
         case .resize(let payload):
             if let columns = payload.columns, let rows = payload.rows, columns > 0, rows > 0 { nil } else { "Missing terminal size." }
+        case .setAppearance(let payload): payload.appearance == nil ? "Missing appearance." : nil
         case .clearScreen, .scroll, .unsupported: nil
         }
     }
 
     public static func isMobileTerminalControlName(_ name: String) -> Bool {
         switch name {
-        case "attach", "detach", "heartbeat", "takeover", "send", "key", "clearScreen", "resize", "scroll": true
+        case "attach", "detach", "heartbeat", "takeover", "send", "key", "clearScreen", "resize", "scroll", "setAppearance": true
         default: false
         }
     }
