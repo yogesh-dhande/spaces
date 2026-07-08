@@ -44,4 +44,25 @@ struct SidebarBrowserSessionTeardownTests {
             previous: ["ws-1": status("ws-1", isRunning: false)], current: ["ws-1": status("ws-1", isRunning: true)])
         #expect(ids.isEmpty)
     }
+
+    @Test func synchronousQuitBrowserCleanupClosesTrackedURLScopedTabsAndClearsTracking() {
+        let tracked = [
+            AppKitController.BrowserSessionWindowTracking(targetURL: "http://127.0.0.1:3000", windowID: 101),
+            AppKitController.BrowserSessionWindowTracking(targetURL: "http://127.0.0.1:5173", windowID: 102),
+        ]
+        var closeRequests: [String] = []
+        var didClearTracking = false
+
+        AppKitController.closeLocalBrowserSessionWindowsSynchronously(
+            workspaceID: "workspace-1",
+            configuredBrowserSessionTargetURLs: ["http://127.0.0.1:3000", "http://127.0.0.1:3000/admin", "http://127.0.0.1:5173"],
+            trackedWindowIDs: { tracked }, chromeIsRunning: { true },
+            closeMatchingTabsInWindow: { windowID, urlPrefix, excludedURLPrefixes in
+                closeRequests.append("\(windowID):\(urlPrefix):\(excludedURLPrefixes.joined(separator: ","))")
+                return true
+            }, clearTrackedWindowIDs: { didClearTracking = true })
+
+        #expect(closeRequests == ["101:http://127.0.0.1:3000:http://127.0.0.1:3000/admin", "102:http://127.0.0.1:5173:"])
+        #expect(didClearTracking)
+    }
 }

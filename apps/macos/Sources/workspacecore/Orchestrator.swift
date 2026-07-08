@@ -904,6 +904,13 @@ public final class WorkspaceOrchestrator {
                 closedBuiltInTerminalSessionIDs.insert(sessionID)
             }
         }
+        // CLI-created shells are workspace-owned by launch metadata even when no runtime-target row exists.
+        for sessionID in try liveAdHocBuiltInTerminalSessionIDs(workspaceID: workspace.id) {
+            if !closedBuiltInTerminalSessionIDs.contains(sessionID) {
+                terminateBuiltInTerminalSession(sessionID)
+                closedBuiltInTerminalSessionIDs.insert(sessionID)
+            }
+        }
         if waitForTerminalExit { waitForBuiltInTerminalSessionsToExit(closedBuiltInTerminalSessionIDs) }
         try store.deleteRunningProcesses(workspaceID: workspace.id)
         try store.deleteWindows(workspaceID: workspace.id)
@@ -1171,6 +1178,13 @@ public final class WorkspaceOrchestrator {
         guard !workspace.isArchived else { throw WorkspaceError.invalidArgument(message: "Workspace is archived.") }
         let assignedPorts = try store.workspacePortsAssigned(workspaceID: workspaceID)
         let sessionID = UUID().uuidString
+        let trimmedTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let sessionTitle: String
+        if let trimmedTitle, !trimmedTitle.isEmpty {
+            sessionTitle = trimmedTitle
+        } else {
+            sessionTitle = try generatedAdHocTerminalWindowName(workspaceID: workspace.id)
+        }
         let runtimePlan = try workspaceRuntimePlan(project: project, workspace: workspace, assignedPorts: assignedPorts)
         let env = terminalLaunchEnvironment(
             base: buildWorkspaceEnv(
@@ -1186,11 +1200,24 @@ public final class WorkspaceOrchestrator {
         }
         let launchCommand = commandPrefixedWithShellEnvironment(rawCommand, env: env)
         let launchConfiguration = TerminalSessionLaunchConfiguration(
-            sessionID: sessionID, backend: .ghosttyEmbedded, lifetimePolicy: .persistent, title: title ?? "shell", workingDirectory: workspace.dir,
+            sessionID: sessionID, backend: .ghosttyEmbedded, lifetimePolicy: .persistent, title: sessionTitle, workingDirectory: workspace.dir,
             shell: shellPath, command: launchCommand, createdAt: nowISO8601(), workspaceID: workspace.id, kind: .shell)
 
         let session = try builtInTerminalSessionLauncher(launchConfiguration)
-        try markWorkspaceRunningIfNeeded(workspace)
+        let windowRecordID = UUID().uuidString
+        do {
+            let existing = try store.windows(workspaceID: workspace.id)
+            try store.upsert(
+                window: WindowRecord(
+                    id: windowRecordID, workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: sessionTitle, detail: nil,
+                    targetURL: nil, terminalTrackingID: session.id, terminalNativeID: session.id, role: "terminal",
+                    orderIndex: Self.nextWindowOrderIndex(existing: existing, role: "terminal", orderOffset: 200), lastSeenAt: nowISO8601()))
+            try markWorkspaceRunningIfNeeded(workspace)
+        } catch {
+            terminateBuiltInTerminalSession(session.id)
+            try? store.deleteWindow(id: windowRecordID)
+            throw error
+        }
         return session
     }
 

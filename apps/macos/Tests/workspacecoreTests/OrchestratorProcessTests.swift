@@ -1205,6 +1205,45 @@ extension OrchestratorTests {
         XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, false)
     }
 
+    func testStopWorkspaceCompletesWhenAdHocTerminalCatalogCannotBeEnumerated() throws {
+        let store = try makeTemporaryStore()
+        let terminateCapture = TerminalTerminateCapture()
+        let orchestrator = WorkspaceOrchestrator(
+            store: store, builtInTerminalSessionTerminator: { sessionID in terminateCapture.sessionIDs.append(sessionID) })
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
+        let sessionID = "spaces-session-stop-catalog-unavailable"
+        try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: "running-process-spaces-catalog-unavailable", workspaceID: workspace.id, templateName: "api", command: "npm run api",
+                terminalApp: TerminalHost.spaces.appName, terminalTrackingID: sessionID, terminalNativeID: sessionID, pid: nil, status: .running,
+                logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+
+        let originalDatabasePath = ProcessInfo.processInfo.environment[SpacesProfile.databasePathEnvironmentVariable]
+        let unavailableDatabasePath = root.appendingPathComponent("catalog-db-unavailable", isDirectory: true)
+        try FileManager.default.createDirectory(at: unavailableDatabasePath, withIntermediateDirectories: true)
+        setenv(SpacesProfile.databasePathEnvironmentVariable, unavailableDatabasePath.path, 1)
+        defer {
+            if let originalDatabasePath {
+                setenv(SpacesProfile.databasePathEnvironmentVariable, originalDatabasePath, 1)
+            } else {
+                unsetenv(SpacesProfile.databasePathEnvironmentVariable)
+            }
+        }
+
+        let outcome = try orchestrator.stopWorkspace(workspaceID: workspace.id)
+
+        XCTAssertFalse(outcome.skippedStopScriptBecauseWorkspaceDirectoryMissing)
+        XCTAssertEqual(terminateCapture.sessionIDs, [sessionID])
+        XCTAssertTrue(try store.runningProcesses(workspaceID: workspace.id).isEmpty)
+        XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
+        XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, false)
+    }
+
     func testUserClosedBuiltInTerminalSessionLeavesOwningProcessRunning() throws {
         let store = try makeTemporaryStore()
         let closeCapture = TerminalCloseCapture()

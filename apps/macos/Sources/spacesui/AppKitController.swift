@@ -529,11 +529,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 return .terminateNow
             case .stopAll:
                 keepsTerminalSessionsRunningDuringTermination = false
-                let stoppedCount = Self.stopAllBuiltInTerminalSessions(liveSessions: liveSessions)
-                guard stoppedCount == liveSessions.count else {
-                    showError(WorkspaceError.invalidArgument(message: "Unable to stop all terminal sessions before quitting."))
-                    return .terminateCancel
-                }
+                let cleanupResult = performStopAllQuitCleanup(liveSessions: liveSessions)
+                guard cleanupResult.succeeded else { return handleStopAllQuitCleanupFailure(cleanupResult) }
                 return .terminateNow
             case .cancel: return .terminateCancel
             }
@@ -934,8 +931,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             let trackedTargetURLs = trackedWindows.map(\.targetURL)
             let configuredTargetURLs = Self.browserSessionTargetURLs(resolvedSessions: resolvedSessions)
             let openBrowserSessions = resolvedSessions.compactMap { session -> BrowserSession? in
-                guard let url = session.url, !url.isEmpty,
-                    trackedTargetURLs.contains(where: { Self.browserSessionTargetURL($0, matches: url) })
+                guard let url = session.url, !url.isEmpty, trackedTargetURLs.contains(where: { Self.browserSessionTargetURL($0, matches: url) })
                 else { return nil }
                 let siblingTargetURLs = Self.browserSessionSiblingTargetURLs(targetURL: url, targetURLs: configuredTargetURLs)
                 guard snapshot.tabs.contains(where: { Self.browserTabURL($0.url, matchesBrowserSessionTargetURL: url, excluding: siblingTargetURLs) })
@@ -988,7 +984,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return browserTabURLIsExactTarget(candidateURL, targetURL: targetURL)
     }
 
-    nonisolated static func browserTabURL(_ tabURL: String, matchesBrowserSessionTargetURL targetURL: String, excluding siblingTargetURLs: [String]) -> Bool {
+    nonisolated static func browserTabURL(_ tabURL: String, matchesBrowserSessionTargetURL targetURL: String, excluding siblingTargetURLs: [String])
+        -> Bool
+    {
         guard !targetURL.isEmpty else { return false }
         if browserTabURLIsExactTarget(tabURL, targetURL: targetURL) { return true }
         guard tabURL.hasPrefix(targetURL) else { return false }
@@ -1729,9 +1727,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                     command: .setAppearance(TerminalControlSetAppearancePayload(clientID: clientID, appearance: appearance))),
                 requestSender: requestSender, applyState: applyState)
             return appearance
-        } catch {
-            return lastAppliedAppearance
-        }
+        } catch { return lastAppliedAppearance }
     }
 
     private func applyRemoteAgentSignals(_ events: [TerminalServiceAgentSignalEvent]) -> [String] {
@@ -2143,19 +2139,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     nonisolated static func liveBuiltInTerminalSessions(listSessions: () throws -> [TerminalServiceSessionSummary] = TerminalService.listSessions)
         -> [TerminalServiceSessionSummary]
     { (try? listSessions()) ?? [] }
-
-    @discardableResult nonisolated static func stopAllBuiltInTerminalSessions(
-        liveSessions: [TerminalServiceSessionSummary], terminateSession: (String) throws -> Void = { try TerminalService.terminateSession(id: $0) }
-    ) -> Int {
-        var stoppedCount = 0
-        for session in liveSessions {
-            do {
-                try terminateSession(session.id)
-                stoppedCount += 1
-            } catch { fputs("spaces: failed to stop terminal session \(session.id): \(error)\n", stderr) }
-        }
-        return stoppedCount
-    }
 
     private func presentTerminalQuitDialog(liveSessionCount: Int) -> TerminalQuitDialogChoice {
         let alert = NSAlert()
@@ -3516,9 +3499,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let container = NSView()
         container.translatesAutoresizingMaskIntoConstraints = false
         container.wantsLayer = true
-        bindAppearanceReactiveLayer(container) { [weak self] view in
-            view.layer?.backgroundColor = self?.sidebarPanelBackgroundColor().cgColor
-        }
+        bindAppearanceReactiveLayer(container) { [weak self] view in view.layer?.backgroundColor = self?.sidebarPanelBackgroundColor().cgColor }
 
         let topBarRow = sidebar.makeSidebarTopBarRow()
         topBarRow.translatesAutoresizingMaskIntoConstraints = false
@@ -3618,15 +3599,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let container = NSView()
         container.translatesAutoresizingMaskIntoConstraints = false
         container.wantsLayer = true
-        bindAppearanceReactiveLayer(container) { [weak self] view in
-            view.layer?.backgroundColor = self?.sidebarPanelBackgroundColor().cgColor
-        }
+        bindAppearanceReactiveLayer(container) { [weak self] view in view.layer?.backgroundColor = self?.sidebarPanelBackgroundColor().cgColor }
 
         detailContainer.translatesAutoresizingMaskIntoConstraints = false
         detailContainer.wantsLayer = true
-        bindAppearanceReactiveLayer(detailContainer) { [weak self] view in
-            view.layer?.backgroundColor = self?.sidebarPanelBackgroundColor().cgColor
-        }
+        bindAppearanceReactiveLayer(detailContainer) { [weak self] view in view.layer?.backgroundColor = self?.sidebarPanelBackgroundColor().cgColor }
 
         // The right panel's own footer strip: workspace details for the selected
         // workspace (populated by the detail paths), empty otherwise.
@@ -4376,8 +4353,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         container.layer?.cornerRadius = UIRadius.compact
         container.layer?.borderWidth = 1
         container.layer?.masksToBounds = true
-        bindAppearanceReactiveLayer(container) { [weak self] view in
-            view.layer?.borderColor = self?.sidebarCardBorderColor(isSelected: false).cgColor
+        bindAppearanceReactiveLayer(container) { [weak self] view in view.layer?.borderColor = self?.sidebarCardBorderColor(isSelected: false).cgColor
         }
 
         let captureWidth: CGFloat = 140
@@ -4923,8 +4899,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private func addProjectSourceRow(icon: String, title: String, subtitle: String, accessibilityID: String) -> ClickableRowView {
         let container = ClickableRowView(isInteractive: true)
         container.layer?.borderWidth = 1
-        bindAppearanceReactiveLayer(container) { [weak self] view in
-            view.layer?.borderColor = self?.sidebarCardBorderColor(isSelected: false).cgColor
+        bindAppearanceReactiveLayer(container) { [weak self] view in view.layer?.borderColor = self?.sidebarCardBorderColor(isSelected: false).cgColor
         }
         container.setAccessibilityElement(true)
         container.setAccessibilityRole(.button)
@@ -5038,9 +5013,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     func presentFormWindow(existing: NSWindow?, header: NSView, hosting stack: NSStackView) -> NSWindow {
         let root = NSView()
         root.wantsLayer = true
-        bindAppearanceReactiveLayer(root) { [weak self] view in
-            view.layer?.backgroundColor = self?.sidebarPanelBackgroundColor().cgColor
-        }
+        bindAppearanceReactiveLayer(root) { [weak self] view in view.layer?.backgroundColor = self?.sidebarPanelBackgroundColor().cgColor }
 
         let headerDivider = settingsHairlineDivider()
         let body = NSView()
@@ -5301,9 +5274,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         panelTabStripAccessory.isHidden = true
         for view in detailContainer.subviews { view.removeFromSuperview() }
         detailContainer.wantsLayer = true
-        bindAppearanceReactiveLayer(detailContainer) { [weak self] view in
-            view.layer?.backgroundColor = self?.sidebarPanelBackgroundColor().cgColor
-        }
+        bindAppearanceReactiveLayer(detailContainer) { [weak self] view in view.layer?.backgroundColor = self?.sidebarPanelBackgroundColor().cgColor }
         // Every workspace-detail surface (panel, loading, setup) shares the footer
         // strip with the workspace's identity and actions.
         if let (_, workspace) = findWorkspace(id: workspaceID) {
@@ -6667,9 +6638,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         scroll.wantsLayer = true
         scroll.layer?.cornerRadius = UIRadius.compact
         scroll.layer?.borderWidth = 1
-        bindAppearanceReactiveLayer(scroll) { [weak self] view in
-            view.layer?.borderColor = self?.sidebarCardBorderColor(isSelected: false).cgColor
-        }
+        bindAppearanceReactiveLayer(scroll) { [weak self] view in view.layer?.borderColor = self?.sidebarCardBorderColor(isSelected: false).cgColor }
         textView.drawsBackground = true
         textView.backgroundColor = inputBg
         textView.textColor = .textColor
@@ -6933,8 +6902,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let selectable = Self.addProjectDeviceIsSelectable(loadState: section.loadState)
         let container = ClickableRowView(isInteractive: selectable)
         container.layer?.borderWidth = 1
-        bindAppearanceReactiveLayer(container) { [weak self] view in
-            view.layer?.borderColor = self?.sidebarCardBorderColor(isSelected: false).cgColor
+        bindAppearanceReactiveLayer(container) { [weak self] view in view.layer?.borderColor = self?.sidebarCardBorderColor(isSelected: false).cgColor
         }
         container.alphaValue = selectable ? 1 : 0.55
         container.setAccessibilityElement(true)
@@ -7706,27 +7674,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// re-observes the same stopped workspace finds nothing to close.
     func closeLocalBrowserSessionWindows(workspaceID: String, configuredBrowserSessionTargetURLs: [String]) {
         Task.detached(priority: .utility) {
-            let store = ClientBrowserWindowIDStore()
-            guard let tracked = try? store.windowIDs(workspaceID: workspaceID), !tracked.isEmpty else { return }
-            let chrome = ChromeAdapter()
-            // Gate on `isRunning()` (a no-Apple-Events check) so stopping a workspace never launches
-            // Chrome: if the user already quit Chrome, the tracked tabs are gone — scripting Chrome
-            // would only relaunch it. Just clear the tracking rows below.
-            if chrome.isRunning() {
-                // Close only the session's matching tab, never the whole window: the window may hold
-                // other tabs the user opened, and a tracked id can be stale (Chrome reuses window
-                // ids after a restart) so the URL must still match.
-                let trackedTargetURLs = tracked.map(\.targetURL)
-                let teardownTargetURLs = AppKitController.browserSessionTeardownTargetURLs(
-                    configuredTargetURLs: configuredBrowserSessionTargetURLs, trackedTargetURLs: trackedTargetURLs)
-                for entry in tracked {
-                    _ = try? chrome.closeMatchingTabsInWindow(
-                        windowID: entry.windowID, urlPrefix: entry.targetURL,
-                        excludingURLPrefixes: AppKitController.browserSessionSiblingTargetURLs(
-                            targetURL: entry.targetURL, targetURLs: teardownTargetURLs))
-                }
-            }
-            try? store.clearAll(workspaceID: workspaceID)
+            Self.closeLocalBrowserSessionWindowsSynchronously(
+                workspaceID: workspaceID, configuredBrowserSessionTargetURLs: configuredBrowserSessionTargetURLs)
         }
     }
 
@@ -8839,8 +8788,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             if let trackedID {
                 let chromeStartedAt = Date()
                 let didFocus =
-                    (try? chrome.focusMatchingTabInWindow(
-                        windowID: trackedID, urlPrefix: targetURL, excludingURLPrefixes: siblingTargetURLs)) ?? false
+                    (try? chrome.focusMatchingTabInWindow(windowID: trackedID, urlPrefix: targetURL, excludingURLPrefixes: siblingTargetURLs))
+                    ?? false
                 chromeAppleScriptMS += TerminalPerformance.elapsedMS(since: chromeStartedAt)
                 if didFocus {
                     return BrowserFocusResult(
@@ -9026,16 +8975,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                             try manager.routedURL(targetURL: $0, workspace: workspace, device: device).absoluteString
                         }
                         return .success(RoutedBrowserFocusTarget(targetURL: routedURL, siblingTargetURLs: routedSiblingTargetURLs))
-                    } catch {
-                        return .failure(error)
-                    }
+                    } catch { return .failure(error) }
                 }.value
                 switch routeResult {
                 case .success(let routedTarget):
                     refreshVisibleServicePortDisplays(deviceID: device.id)
                     await focusLocalChromeTab(
-                        workspaceID: workspaceID, targetURL: routedTarget.targetURL.absoluteString,
-                        siblingTargetURLs: routedTarget.siblingTargetURLs, fallbackURL: routedTarget.targetURL)
+                        workspaceID: workspaceID, targetURL: routedTarget.targetURL.absoluteString, siblingTargetURLs: routedTarget.siblingTargetURLs,
+                        fallbackURL: routedTarget.targetURL)
                 case .failure(let error):
                     showError(error)
                     return nil
