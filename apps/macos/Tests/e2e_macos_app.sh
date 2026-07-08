@@ -3236,6 +3236,26 @@ end run
 APPLESCRIPT
 }
 
+chrome_close_tabs_for_url() {
+  local url_prefix="$1"
+  osascript - "$url_prefix" <<'APPLESCRIPT' >/dev/null
+on run argv
+  set targetPrefix to item 1 of argv
+  tell application "Google Chrome"
+    repeat with w in windows
+      set tabCount to count of tabs of w
+      repeat with i from tabCount to 1 by -1
+        set tabURL to URL of tab i of w
+        if tabURL is not missing value and tabURL starts with targetPrefix then
+          close tab i of w
+        end if
+      end repeat
+    end repeat
+  end tell
+end run
+APPLESCRIPT
+}
+
 # Closes only the harness's own fixture tabs (file:// fixtures or the 20000-20011 fixture
 # ports). Chrome closes any window whose last tab is removed, so dedicated fixture windows
 # disappear while the user's own windows and tabs are never touched — even if a fixture tab
@@ -4623,11 +4643,10 @@ wait_for_terminal_session_live_render() {
   fail "timed out waiting for live terminal render: $label session=$session_id"
 }
 
-# Strictly verifies the cycle focused a browser session's dedicated Chrome window: Chrome is
-# the frontmost app, its front window is that specific window (by Chrome window id), and its
-# active tab is the session URL. A Chrome window's AppleScript id is a Chrome-level id, not a
-# desktop window id, so the desktop-side check is "Chrome is frontmost"; the exact window is
-# pinned by the Chrome window id the caller captured for that URL.
+# Strictly verifies the cycle focused a browser session's tracked Chrome tab: Chrome is frontmost,
+# its front window is the tracked window, and its active tab is the session URL. A Chrome window's
+# AppleScript id is a Chrome-level id, not a desktop window id, so the desktop-side check is
+# "Chrome is frontmost"; the exact window is pinned by the Chrome window id captured for that URL.
 wait_for_browser_cycle_target_focus() {
   local docs_window_id="$1"
   local docs_url="$2"
@@ -4655,8 +4674,8 @@ wait_for_cycle_target_focus() {
   case "$cycle_target" in
     browser:*)
       # Browser windows are client state in the thin client: the cycle's browser target is the
-      # dedicated Chrome window the app opened for that browser-session URL. Verify focus strictly
-      # by that Chrome window id + URL with Chrome frontmost (no daemon id, no fallback).
+      # tracked Chrome tab the app opened or adopted for that browser-session URL. Verify focus
+      # strictly by Chrome window id + URL with Chrome frontmost (no daemon id, no fallback).
       local browser_target_url browser_target_window_id
       browser_target_url="${cycle_target#browser:}"
       browser_target_window_id="$(wait_for_chrome_window_id_for_url "$browser_target_url" "$cycle_target")"
@@ -5472,6 +5491,8 @@ PY
     wait_for_condition "chrome_front_url" "$browser_admin_url"
     admin_window_id="$(wait_for_chrome_window_id_for_url "$browser_admin_url" "admin")"
     wait_for_condition "chrome_window_active_url $admin_window_id" "$browser_admin_url"
+    [[ "$admin_window_id" == "$docs_window_id" ]] \
+      || fail "admin browser session opened outside the existing workspace Chrome window: docs=$docs_window_id admin=$admin_window_id"
 
     run_spaces_logged /tmp/spaces-e2e-cycle-opened-admin-seed-docs.log open docs "$workspace_dir"
     transition_pause "$host seed docs focus before opened admin cycle check"
@@ -5493,8 +5514,8 @@ PY
       browser:${browser_admin_url}) ;;
       *) fail "opened admin browser session did not participate in cycling, got '$cycle_target'" ;;
     esac
-    chrome_close_window_id "$admin_window_id"
-    transition_pause "$host close admin browser after cycle inclusion check"
+    chrome_close_tabs_for_url "$browser_admin_url"
+    transition_pause "$host close admin browser tab after cycle inclusion check"
     local admin_close_deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
     while (( SECONDS < admin_close_deadline )); do
       [[ -z "$(chrome_window_id_for_url "$browser_admin_url")" ]] && break

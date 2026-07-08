@@ -30,10 +30,11 @@ export default function BrowserSessionsDocsPage() {
         <h2 className="text-2xl font-semibold tracking-tight">Opening and Focusing</h2>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• Sessions stay closed when the workspace launches, so startup stays fast even with many URLs attached.</li>
-          <li>• Focus a session with <code>cmd+1</code>…<code>cmd+0</code> or the command palette, and Spaces opens it in its own Chrome window — or brings the existing one forward.</li>
-          <li>• Next/previous window cycling includes a browser session only after its tracked Chrome window is open.</li>
-          <li>• If you close a session&apos;s Chrome window and then focus it again, Spaces reopens it.</li>
-          <li>• Stopping the workspace closes the session windows Spaces opened.</li>
+          <li>• Focus a session with <code>cmd+1</code>…<code>cmd+0</code> or the command palette, and Spaces opens it as a Chrome tab in the workspace&apos;s tracked Chrome window when one is available.</li>
+          <li>• If you move a session tab to another Chrome window, direct focus finds that matching URL and updates tracking.</li>
+          <li>• Next/previous window cycling includes a browser session only after its tracked Chrome tab is open.</li>
+          <li>• If you close a session&apos;s Chrome tab and then focus it again, Spaces reopens it.</li>
+          <li>• Stopping the workspace closes the session tabs Spaces opened or adopted.</li>
         </ul>
       </article>
 

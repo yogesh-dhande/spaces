@@ -47,7 +47,7 @@ export default function WorkspacesDocsPage() {
           <li>• Renaming the branch inline renames the underlying git branch.</li>
           <li>• Add, remove, or rename services per workspace.</li>
           <li>• Edit a process command while the workspace is running and Spaces asks to confirm, then restarts just that process.</li>
-          <li>• Add a browser session and it opens in Chrome when you focus it.</li>
+          <li>• Add a browser session and it opens as a Chrome tab when you focus it.</li>
           <li>• The GUI is the place to edit workspace settings after creation. The CLI stays focused on workspace creation, launch, and agent events.</li>
         </ul>
       </article>

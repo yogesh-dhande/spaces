@@ -38,7 +38,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/window-management",
     title: "Window Management",
     summary:
-      "Spaces tracks workspace Chrome windows and terminal panes so direct shortcuts can open or focus targets and cycling stays inside already-open windows.",
+      "Spaces tracks workspace Chrome tabs and terminal panes so direct shortcuts can open or focus targets and cycling stays inside already-open windows.",
   },
   {
     href: "/docs/processes",

@@ -244,9 +244,9 @@ public final class SpacesClientDatabase {
             })
     }
 
-    /// Records the dedicated Chrome window opened for a workspace browser session on the local
+    /// Records the Chrome window containing a workspace browser-session tab on the local
     /// desktop. A browser "window" is client/desktop-local state (not daemon state), keyed by
-    /// the session's resolved target URL so re-focus returns to the same window.
+    /// the session's resolved target URL so re-focus returns to the same tab location.
     public func setBrowserSessionWindowID(deviceID: String, workspaceID: String, targetURL: String, windowID: Int) throws {
         try execute(
             sql: """
@@ -270,8 +270,8 @@ public final class SpacesClientDatabase {
             bindings: [deviceID, workspaceID, targetURL])
     }
 
-    /// Every dedicated Chrome window tracked for a workspace's browser sessions, so the GUI can
-    /// close them all when the workspace stops.
+    /// Every tracked Chrome window/tab mapping for a workspace's browser sessions, so the GUI can
+    /// close the session tabs when the workspace stops.
     public func browserSessionWindowIDs(deviceID: String, workspaceID: String) throws -> [(targetURL: String, windowID: Int)] {
         try queryRows(
             sql: "SELECT target_url, window_id FROM browser_session_window_ids WHERE device_id = ? AND workspace_id = ?",
@@ -640,9 +640,9 @@ public final class SpacesClientDatabase {
 
         """
 
-    // Browser session windows are client/desktop-local: the dedicated Chrome window opened for
-    // a workspace browser session exists only on this desktop and is keyed by the session's
-    // resolved target URL. Keeping it client-side replaces the daemon's former
+    // Browser session windows are client/desktop-local: the Chrome window containing a workspace
+    // browser-session tab exists only on this desktop and is keyed by the session's resolved
+    // target URL. Keeping it client-side replaces the daemon's former
     // `extracted_window_id` so the daemon persists no desktop overlay.
     private static let browserSessionWindowIDsSchemaSQL = """
             CREATE TABLE IF NOT EXISTS browser_session_window_ids (

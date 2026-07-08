@@ -24,21 +24,21 @@ Spaces provides a desktop app and a CLI for power users and coding agents.
 ## Key Design Decisions
 - Separate window per process.
   Dedicated process windows keep each terminal focus target stable because Spaces cannot predict which terminals a user will want side by side later.
-- Browser sessions are lazy bookmarks that open into dedicated Chrome windows only when focused.
-  Some workspaces may carry many useful URLs, but opening all of them during launch or restart is wasteful when the user may only need a subset in a given session.
-- Focus a browser session by activating its tracked Chrome window and selecting the tab whose URL matches the session, falling back to the first tab when no match is found.
-  Matching by URL keeps focus on the intended page even when the user reorders tabs or appends new ones during normal browsing in that window.
+- Browser sessions are lazy bookmarks that open in Chrome only when focused.
+  Some workspaces may carry many useful URLs, but opening all of them during launch or restart is wasteful when the user may only need a subset in a given session. Focused sessions for the same workspace share an existing workspace Chrome window as tabs when one is available.
+- Focus a browser session by URL.
+  Spaces uses the tracked Chrome window when available, scans Chrome windows to adopt a matching tab that the user moved by hand, and opens the URL as a tab in an existing workspace Chrome window when the session is not already open.
 - Closing a terminal pane detaches the client from the session it hosted.
   Closing a process or coding-agent pane leaves the runtime running and recoverable through focus. Closing an ad hoc terminal's pane stops that ad hoc session. Explicit Stop and Restart controls own process and coding-agent runtime termination.
 - Keep workspace lifecycle separate from runtime health.
   `Running` and `Stopped` should stay easy to explain, while failed processes or stale tracked windows surface as warnings on top of that lifecycle state.
-- Require explicit tracked-window targets for GUI-driven and harness-driven focus.
+- Require explicit named targets for GUI-driven and harness-driven focus.
   Focus should not guess which window the user meant, because arbitrary focus becomes unpredictable as workspaces collect multiple windows.
-  Example: one workspace may have a frontend browser, an admin browser, an API terminal, and a coding-agent terminal all open at once. If the user clicks Focus in the GUI or a test harness focuses a named target, Spaces should not silently pick whichever window was captured first or happened to survive most recently. The user may want the admin browser now and the coding-agent terminal five seconds later. Requiring an explicit tracked window target keeps focus behavior deterministic.
+  Example: one workspace may have a frontend browser, an admin browser, an API terminal, and a coding-agent terminal all open at once. If the user clicks Focus in the GUI or a test harness focuses a named target, Spaces should not silently pick whichever target was captured first or happened to survive most recently. The user may want the admin browser now and the coding-agent terminal five seconds later. Requiring an explicit target name keeps focus behavior deterministic.
 - Never resize or reposition tracked windows unless initiated by the user.
   Spaces should respect where the user placed each tracked window, because it cannot infer whether the user wants side-by-side windows, overlapping windows, or some other layout that includes non-Spaces windows.
 - Never control windows that Spaces does not explicitly track.
-  Spaces should not hide, move, resize, or otherwise manipulate unrelated windows, because the user may intentionally keep an untracked window visible next to a tracked workspace window.
+  Spaces should not hide, move, resize, close, or otherwise manipulate unrelated windows, because the user may intentionally keep an untracked window visible next to a tracked workspace window. Direct browser-session focus may adopt a Chrome tab whose URL matches the focused workspace session, so user-moved session tabs keep working.
 - Keep coding-agent events explicit.
   Workspace creation, start, and restart actions must not infer agent lifecycle, because only the agent can accurately report when it actually initialized, started active work, is blocked, is done, or exited.
 - Use explicit names as the stable identity surface for focusable browser sessions, processes, and coding-agent terminals.
@@ -74,12 +74,12 @@ Running and stopped should be easy to explain:
 - Stale runtime leftovers should not silently change `Stopped` back to `Running`; they should surface as warnings on top of the existing lifecycle state.
 
 ### Window Set
-A workspace owns a tracked set of dedicated windows, such as:
+A workspace owns a tracked set of focus targets, such as:
 - process terminals
-- browser windows for browser sessions that have been opened on demand
+- browser-session tabs in Chrome windows that have been opened or adopted on demand
 - coding-agent terminal windows
 
-Spaces focuses those windows; it does not decide their geometry.
+Spaces focuses those targets; it does not decide window geometry.
 
 ### Terminal sessions
 Every terminal runs in the built-in terminal, never an external terminal app. A workspace can hold three kinds:
@@ -129,7 +129,7 @@ Every terminal runs in the built-in terminal, never an external terminal app. A 
 - Sidebar workspaces under a project are ordered with the default workspace first, then the rest sorted alphabetically by display name (branch, or folder name for non-git) using natural, case-insensitive comparison, so the list is easy to scan.
 - A workspace row can expand to show a compact vertical list of its runtime targets beneath it — browser sessions, configured processes (running or not), ad hoc terminals, and coding agents — in the same order the numbered window shortcuts use. Window cycling uses the open-window subset of that order. Each target row shows a kind icon tinted by run state (running, exited, or not started) and the target name. When the workspace is selected, target rows lead with their `⌘<number>` shortcut chip to the left of the kind icon, matching the command palette's chip-icon-title ordering; every target row reserves the chip's slot whether or not it renders, so rows stay vertically aligned across workspaces. A non-git project's flat row lists its single workspace's targets the same way, and its own disclosure chevron collapses them.
 - Workspace rows are collapsed by default and only reveal their runtime-target list when expanded. A workspace with at least one runtime target carries a right-edge disclosure chevron; a workspace with no runtime targets shows no chevron. Clicking a workspace row — or one of its target rows — pins it open, so it stays expanded even after the selection moves away, until the user collapses it with the chevron. Leader-arrow navigation instead expands the selected workspace only transiently, as a preview: it collapses again as soon as the selection moves off it, unless it was pinned open by a click. Clicking the chevron toggles a workspace's expansion without changing the selection, and can collapse even the currently selected workspace. This expanded state lives in memory: it survives sidebar refreshes but not an app restart, where every workspace returns to collapsed.
-- Left-clicking a sidebar target row selects the owning workspace and opens or focuses the target — the same behavior as its numbered shortcut or a command-palette row: terminal-backed targets open or focus their pane in the workspace's panel, browser sessions open or focus their dedicated Chrome window, and not-yet-running configured processes and agent launchers start and open their terminal pane.
+- Left-clicking a sidebar target row selects the owning workspace and opens or focuses the target — the same behavior as its numbered shortcut or a command-palette row: terminal-backed targets open or focus their pane in the workspace's panel, browser sessions open or focus their Chrome tab, and not-yet-running configured processes and agent launchers start and open their terminal pane.
 - The selected workspace's right panel is a tabbed terminal panel scoped to that workspace, and nothing else: one flat tab strip at the top, the selected tab's panes filling the rest edge to edge, and the workspace footer strip at the bottom. The main window shows no window title: the tab strip sits in the titlebar row itself, sharing it with the traffic lights (it starts at the sidebar divider and follows it), and the app identity row lives in the sidebar footer. The titlebar row keeps its native behaviors — dragging and double-click zoom work from its empty areas, including the tab strip's unoccupied space. Each tab holds one or more panes; every pane hosts a terminal session (future content kinds may join). A terminal session has at most one pane anywhere — opening an already-open session focuses its existing pane instead of duplicating it. Tabs are wide by default, each taking an equal share of the strip's width; as more tabs open they shrink to fit until they reach a minimum width, after which the strip scrolls.
 - Tabs render flat — no pill or chip outline — with the selected tab marked by full-color text and an accent underline; each tab has a close glyph. Clicking a tab selects it and returns keyboard focus to the pane that most recently held focus in that tab. Right-clicking a tab offers Rename, which edits the tab's name in place — the title becomes an inline field, like sidebar row renames (Return or clicking away saves, Esc cancels); a custom tab name persists with the layout and survives relaunch, and clearing it returns the tab to its derived title (its first pane's target). Tabs can be named independently of their panes' sessions, which matters once a tab holds several panes.
 - Panes carry no chrome of their own — no header, border, or outline; the terminal surface fills the pane. Pane and derived tab titles use the runtime target's name (the same name the sidebar target row shows, e.g. `codex` or `npm:dev`), not the terminal's own window title. The tab strip's right side holds the pane actions: split right, split down (both act on the selected tab's focused pane), and new tab. Splitting opens the command palette in a session-picker mode listing `New terminal session` first and then existing sessions in scope — the workspace's sessions for a workspace panel, and every loaded device's sessions across all workspaces for a panel window. The picker shows up to ten rows before any typing, and typing searches the full list. The chosen session fills the new pane, moving it from any pane it already occupied. Pane and tab sizes from divider drags persist.
@@ -250,7 +250,7 @@ Every terminal runs in the built-in terminal, never an external terminal app. A 
 - Terminal panes carry no runtime controls of their own; start, stop, and restart for the pane's process, coding agent, or ad hoc session live on the sidebar target rows' context menu. Kept-open exited terminals keep showing their final render and stay stoppable/restartable from the sidebar while the configured row still exists.
 - App-level configuration is changed in the app only, not through `spaces`.
 - The project and workspace editors validate process commands when they are saved. Process commands must be non-empty.
-- Stop shuts down tracked runtime state and closes tracked dedicated windows safely.
+- Stop shuts down tracked runtime state and closes tracked browser-session tabs safely.
 - Restart performs a stop followed by a fresh launch.
 - `workspace start` is the idempotent "ensure running" path:
   - if stopped, it launches the workspace
@@ -280,16 +280,16 @@ Every terminal runs in the built-in terminal, never an external terminal app. A 
   - `Stopped` workspaces can still have stale tracked runtime leftovers that need cleanup or recovery
 
 ## Window Management and Focus
-- Workspaces map to a tracked set of dedicated windows.
+- Workspaces map to tracked focus targets: terminal panes and browser-session tabs in tracked Chrome windows.
 - Spaces should focus the correct window or workspace quickly, even when switching across apps.
 - Browser focus should match the intended browser session by URL, not by window title.
-- When focusing an already-open browser session, Spaces should activate Chrome and select the tab whose URL matches the session, falling back to the first tab in that tracked window when no matching tab is found.
+- When focusing a browser session, Spaces should first try the tracked Chrome window, then scan all Chrome windows for a tab whose URL matches the session so a user-moved tab can be adopted. If the session is not open, Spaces should open it as a tab in an existing tracked workspace Chrome window when one is available, otherwise in a new Chrome window.
 - Terminal focus should land on the intended dedicated process or agent session.
 - After the GUI focuses or opens an external window, Spaces should hide itself immediately so the target app stays unobstructed.
 - When a workspace detail view becomes visible, Spaces should refresh workspace windows and process state asynchronously so stale rows reconcile shortly after the page appears.
 - If tracked windows become stale during next/previous window cycling, Spaces should skip them and continue to the next live target.
 - Spaces should not poll in the background to verify whether a tracked browser-session window still exists; it should validate that on demand when the user focuses that browser session.
-- If direct window focus from the app targets a stale browser session, Spaces should reopen that session in a new Chrome window and update tracking without showing an error modal first.
+- If direct window focus from the app targets a stale browser session, Spaces should adopt an existing matching Chrome tab or reopen that session in a tracked workspace Chrome window and update tracking without showing an error modal first.
 - If direct window focus from the app targets a stale process window, Spaces should first try to recover silently by reopening the built-in session when the process is still running. If the process is no longer running, Spaces should show a modal warning with `Recover (Cmd+R)` and `Cancel (Esc)`, and the explicit recovery action should restart it inside the built-in terminal.
   - coding-agent windows only show the error state and do not offer recovery
 - Spaces should still reconcile stale tracked windows in the background instead of forcing the user to repair state manually.
@@ -326,7 +326,7 @@ Every terminal runs in the built-in terminal, never an external terminal app. A 
 - The first command-palette result should stay selected by default, arrow keys should move the selection, and `Enter` should execute the same target-level focus/open action used by the numbered window shortcuts.
 - Leader-based previous/next window cycling should follow the most recently focused targets within the workspace rather than the static workspace definition order. Each repeated cycle sequence should traverse a frozen ordering snapshot so `previous` and `next` walk the full target set instead of bouncing between the last two windows.
 - Leader-based next/previous window cycling should always mean window cycling, even when the main Spaces window is focused.
-- Leader-based previous/next window cycling should include only already-open workspace windows: browser sessions whose resolved URL is present in their tracked Chrome window, and terminal-backed process, ad hoc terminal, and coding-agent targets whose Spaces pane is open. Unopened browser sessions, not-yet-running configured processes, configured agent launchers, and terminal sessions without a pane stay available through direct focus but are skipped by cycling.
+- Leader-based previous/next window cycling should include only already-open workspace windows: browser sessions whose resolved URL is present in their tracked Chrome window, and terminal-backed process, ad hoc terminal, and coding-agent targets whose Spaces pane is open. Direct browser-session focus updates tracking when it adopts a user-moved tab, so cycling follows that tab after focus. Unopened browser sessions, not-yet-running configured processes, configured agent launchers, and terminal sessions without a pane stay available through direct focus but are skipped by cycling.
 - Window rows in the selected workspace should expose numbered shortcuts for direct focus.
 - Numbered window focus shortcuts should keep the saved workspace-settings order for configured browser sessions and processes, and append newly added ad-hoc windows after those configured rows.
 - Window focus actions and numbered shortcuts should follow one target-level rule: make that target available immediately.

@@ -7468,8 +7468,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             switch result {
             case .success(let response):
                 // Restart goes through the daemon stop path; the daemon does not own the
-                // client-side dedicated Chrome windows, so close them here too for a clean
-                // restarted state (a later browser focus then opens a fresh window).
+                // client-side Chrome browser-session tabs, so close them here too for a clean
+                // restarted state (a later browser focus then opens fresh tabs).
                 self.closeLocalBrowserSessionWindows(workspaceID: id)
                 applyDeviceMutationResponse(response, selectedWorkspaceID: id)
             case .failure(let error): showError(error)
@@ -7512,11 +7512,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
-    /// Closes the workspace browser-session tabs the app opened (in their dedicated Chrome windows)
-    /// and clears their tracking rows. Browser-session windows are client/desktop-local, so the
+    /// Closes the workspace browser-session tabs the app opened or adopted and clears their
+    /// tracking rows. Browser-session tab locations are client/desktop-local, so the
     /// daemon cannot close them when a workspace stops — the GUI tears them down here. A no-op when
-    /// the workspace has no tracked browser windows (e.g. a remote workspace, whose browser sessions
-    /// open a URL without a dedicated tracked window).
+    /// the workspace has no tracked browser-session tabs.
     ///
     /// Called from two disjoint triggers: the GUI's own stop/restart/archive handlers (eager, and
     /// the only reliable signal for a restart's transient stop), and the sidebar's daemon-observed
@@ -8624,47 +8623,76 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         deviceSection(id: deviceID(forWorkspaceID: workspaceID))?.overview ?? localDeviceOverview
     }
 
-    /// Focuses the local Chrome window for a workspace browser session. A browser session is a
-    /// distinct client "window", so the app opens a dedicated Chrome window for it once and
-    /// tracks that window's id in client state (`ClientBrowserWindowIDStore`, keyed by the
-    /// resolved URL) — replacing the daemon's former `extracted_window_id`. Re-focus returns to
-    /// that specific window by id; only when it is gone does the app open a fresh dedicated
-    /// window. Scoping to the tracked window id means focus never lands on an unrelated window
-    /// that merely has the same URL open. `NSWorkspace.open` is a last resort when Chrome
-    /// cannot be scripted. Remote service sessions use this after their URL has been routed through
-    /// the Mac Caddy router.
+    /// Focuses the local Chrome tab for a workspace browser session. Browser-session window ids are
+    /// client state keyed by resolved URL; multiple browser sessions in the same workspace may point
+    /// at the same Chrome window so they stay grouped as tabs. Re-focus first uses the tracked window
+    /// id for the fast path, then scans all Chrome windows for a matching URL so a tab the user moved
+    /// by hand is adopted into tracking instead of duplicated. `NSWorkspace.open` is a last resort
+    /// when Chrome cannot be scripted. Remote service sessions use this after their URL has been
+    /// routed through the Mac Caddy router.
     private func focusLocalChromeTab(workspaceID: String, targetURL: String, fallbackURL: URL) async {
         let startedAt = Date()
         let result: BrowserFocusResult = await Task.detached(priority: .userInitiated) {
             let chrome = ChromeAdapter()
             let store = ClientBrowserWindowIDStore()
             let dbLookupStartedAt = Date()
-            let trackedID = try? store.windowID(workspaceID: workspaceID, targetURL: targetURL)
+            let trackedEntries = ((try? store.windowIDs(workspaceID: workspaceID)) ?? []).filter { $0.windowID > 0 }
+            let trackedID = trackedEntries.first(where: { $0.targetURL == targetURL })?.windowID
             let clientDBLookupMS = TerminalPerformance.elapsedMS(since: dbLookupStartedAt)
             var chromeAppleScriptMS = 0
+            var clientDBWriteMS = 0
             if let trackedID {
                 let chromeStartedAt = Date()
                 let didFocus = (try? chrome.focusMatchingTabInWindow(windowID: trackedID, urlPrefix: targetURL)) ?? false
                 chromeAppleScriptMS += TerminalPerformance.elapsedMS(since: chromeStartedAt)
                 if didFocus {
                     return BrowserFocusResult(
-                        focused: true, path: "focused_tracked", clientDBLookupMS: clientDBLookupMS, clientDBWriteMS: 0,
+                        focused: true, path: "focused_tracked", clientDBLookupMS: clientDBLookupMS, clientDBWriteMS: clientDBWriteMS,
                         chromeAppleScriptMS: chromeAppleScriptMS)
                 }
             }
+
+            let allWindowFocusStartedAt = Date()
+            let relocatedMatch = try? chrome.focusFirstMatchingTabMatch(urlPrefix: targetURL)
+            chromeAppleScriptMS += TerminalPerformance.elapsedMS(since: allWindowFocusStartedAt)
+            if let relocatedMatch {
+                let dbWriteStartedAt = Date()
+                try? store.setWindowID(workspaceID: workspaceID, targetURL: targetURL, windowID: relocatedMatch.windowID)
+                clientDBWriteMS += TerminalPerformance.elapsedMS(since: dbWriteStartedAt)
+                return BrowserFocusResult(
+                    focused: true, path: "focused_all_windows", clientDBLookupMS: clientDBLookupMS, clientDBWriteMS: clientDBWriteMS,
+                    chromeAppleScriptMS: chromeAppleScriptMS)
+            }
+
+            let candidateWindowIDs = trackedEntries.map(\.windowID)
+            let candidateURLPrefixes = trackedEntries.map(\.targetURL)
+            let groupedTabStartedAt = Date()
+            let groupedWindowID = try? chrome.openTabInFirstAvailableWindow(
+                windowIDs: candidateWindowIDs, containingAnyURLPrefix: candidateURLPrefixes, url: targetURL, background: false)
+            chromeAppleScriptMS += TerminalPerformance.elapsedMS(since: groupedTabStartedAt)
+            if let groupedWindowID {
+                let dbWriteStartedAt = Date()
+                try? store.setWindowID(workspaceID: workspaceID, targetURL: targetURL, windowID: groupedWindowID)
+                clientDBWriteMS += TerminalPerformance.elapsedMS(since: dbWriteStartedAt)
+                return BrowserFocusResult(
+                    focused: true, path: "opened_grouped_tab", clientDBLookupMS: clientDBLookupMS, clientDBWriteMS: clientDBWriteMS,
+                    chromeAppleScriptMS: chromeAppleScriptMS)
+            }
+
             let chromeStartedAt = Date()
             let newWindowID = (try? chrome.openWindow(url: targetURL, background: false)) ?? -1
             chromeAppleScriptMS += TerminalPerformance.elapsedMS(since: chromeStartedAt)
             guard newWindowID > 0 else {
                 return BrowserFocusResult(
-                    focused: false, path: "fallback", clientDBLookupMS: clientDBLookupMS, clientDBWriteMS: 0, chromeAppleScriptMS: chromeAppleScriptMS
-                )
+                    focused: false, path: "fallback", clientDBLookupMS: clientDBLookupMS, clientDBWriteMS: clientDBWriteMS,
+                    chromeAppleScriptMS: chromeAppleScriptMS)
             }
             let dbWriteStartedAt = Date()
             try? store.setWindowID(workspaceID: workspaceID, targetURL: targetURL, windowID: newWindowID)
+            clientDBWriteMS += TerminalPerformance.elapsedMS(since: dbWriteStartedAt)
             return BrowserFocusResult(
-                focused: true, path: "opened_window", clientDBLookupMS: clientDBLookupMS,
-                clientDBWriteMS: TerminalPerformance.elapsedMS(since: dbWriteStartedAt), chromeAppleScriptMS: chromeAppleScriptMS)
+                focused: true, path: "opened_window", clientDBLookupMS: clientDBLookupMS, clientDBWriteMS: clientDBWriteMS,
+                chromeAppleScriptMS: chromeAppleScriptMS)
         }.value
         if !result.focused { NSWorkspace.shared.open(fallbackURL) }
         logPerfMetric(

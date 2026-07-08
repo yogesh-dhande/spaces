@@ -39,6 +39,61 @@ public final class ChromeAdapter {
         return Int(output.trimmingCharacters(in: .whitespacesAndNewlines)) ?? -1
     }
 
+    public func openTabInFirstAvailableWindow(windowIDs: [Int], containingAnyURLPrefix urlPrefixes: [String], url: String, background: Bool = false)
+        throws -> Int?
+    {
+        var seenWindowIDs = Set<Int>()
+        let uniqueWindowIDs = windowIDs.filter { $0 > 0 && seenWindowIDs.insert($0).inserted }
+        var seenURLPrefixes = Set<String>()
+        let uniqueURLPrefixes = urlPrefixes.filter { !$0.isEmpty && seenURLPrefixes.insert($0).inserted }
+        guard !uniqueWindowIDs.isEmpty, !uniqueURLPrefixes.isEmpty else { return nil }
+        let requestedIDs = uniqueWindowIDs.map { "\"\($0)\"" }.joined(separator: ", ")
+        let requiredURLPrefixes = uniqueURLPrefixes.map { "\"\($0.replacingOccurrences(of: "\"", with: "\\\""))\"" }.joined(separator: ", ")
+        let escaped = url.replacingOccurrences(of: "\"", with: "\\\"")
+        let focusLines =
+            background
+            ? ""
+            : """
+                  set active tab index of w to count of tabs of w
+                  set index of w to 1
+                  activate
+            """
+        let script = """
+            set requestedWindowIDs to {\(requestedIDs)}
+            set workspaceURLPrefixes to {\(requiredURLPrefixes)}
+            tell application "Google Chrome"
+              repeat with requestedWindowID in requestedWindowIDs
+                repeat with w in windows
+                  if (id of w as string) is (requestedWindowID as string) then
+                    set hasWorkspaceTab to false
+                    repeat with existingTab in tabs of w
+                      set existingURL to URL of existingTab
+                      if existingURL is not missing value then
+                        repeat with workspaceURLPrefix in workspaceURLPrefixes
+                          if existingURL starts with (workspaceURLPrefix as string) then
+                            set hasWorkspaceTab to true
+                            exit repeat
+                          end if
+                        end repeat
+                      end if
+                      if hasWorkspaceTab then exit repeat
+                    end repeat
+                    if hasWorkspaceTab then
+                      make new tab at end of tabs of w with properties {URL:"\(escaped)"}
+            \(focusLines)
+                      return id of w as string
+                    end if
+                  end if
+                end repeat
+              end repeat
+            end tell
+            return ""
+            """
+        let output = try runChromeScript(script).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let windowID = Int(output), windowID > 0 else { return nil }
+        return windowID
+    }
+
     /// Closes the tabs whose URL begins with `urlPrefix` inside the Chrome window with the given
     /// AppleScript window id. Returns true when at least one matching tab was closed.
     ///
@@ -171,9 +226,8 @@ public final class ChromeAdapter {
 
     /// Focuses the tab matching `urlPrefix` within a specific window, raising that window.
     /// Returns false when the window no longer exists or no longer holds a matching tab, so
-    /// callers can reopen a dedicated window. Scoping to one window id (rather than scanning
-    /// all windows) keeps a browser session's focus on its own window and never on an
-    /// unrelated window that happens to have the same URL open.
+    /// callers can adopt a moved tab or reopen the session. Scoping to one window id keeps the
+    /// fast path on the window currently tracked for that browser-session URL.
     public func focusMatchingTabInWindow(windowID: Int, urlPrefix: String) throws -> Bool {
         let escaped = urlPrefix.replacingOccurrences(of: "\"", with: "\\\"")
         let script = """
@@ -203,11 +257,15 @@ public final class ChromeAdapter {
         return output == "1"
     }
 
-    public func focusFirstMatchingTab(urlPrefix: String) throws -> Bool {
+    public func focusFirstMatchingTab(urlPrefix: String) throws -> Bool { try focusFirstMatchingTabMatch(urlPrefix: urlPrefix) != nil }
+
+    public func focusFirstMatchingTabMatch(urlPrefix: String) throws -> ChromeWindowMatch? {
         let escaped = urlPrefix.replacingOccurrences(of: "\"", with: "\\\"")
         let script = """
             tell application "Google Chrome"
               repeat with w in windows
+                set wid to id of w
+                set titleText to title of w
                 set tabCount to count of tabs of w
                 repeat with i from 1 to tabCount
                   set u to URL of tab i of w
@@ -216,16 +274,16 @@ public final class ChromeAdapter {
                       set active tab index of w to i
                       set index of w to 1
                       activate
-                      return "1"
+                      return wid & "\\t" & i & "\\t" & titleText & "\\t" & u
                     end if
                   end if
                 end repeat
               end repeat
             end tell
-            return "0"
+            return ""
             """
-        let output = try runChromeScript(script).trimmingCharacters(in: .whitespacesAndNewlines)
-        return output == "1"
+        let output = try runChromeScript(script)
+        return Self.parseTabRows(output).first
     }
 
     public func extractTabToWindow(windowID: Int, tabIndex: Int) throws -> Int? {

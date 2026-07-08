@@ -315,7 +315,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     /// longer running, comparing the previous local-section runtime state against the just-fetched
     /// snapshot. This reload is the only channel through which the GUI learns about stop/archive
     /// actions taken outside it (the CLI, MCP, the Device API, or another device), so without this
-    /// diff those externally-stopped workspaces would leave their dedicated Chrome tabs and the
+    /// diff those externally-stopped workspaces would leave their tracked Chrome tabs and the
     /// client `browser_session_window_ids` rows alive. The GUI's own stop/restart/archive handlers
     /// already tear the tabs down eagerly; `closeLocalBrowserSessionWindows` is idempotent, so a
     /// workspace stopped through the GUI that also surfaces here closes nothing the second time.

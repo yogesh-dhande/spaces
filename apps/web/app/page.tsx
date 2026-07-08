@@ -158,9 +158,9 @@ const faqItems: FaqItem[] = [
             <span className="font-semibold text-foreground">
               If you keep your window count low.
             </span>{" "}
-            Spaces opens a dedicated window for every tab, terminal, and
-            editor instance so you can lay them out across your screens and
-            recall them on demand. The upside is speed and flexibility —
+            Spaces gives each browser session, terminal, and editor instance
+            a tracked focus target so you can lay them out across your screens
+            and recall them on demand. The upside is speed and flexibility —
             focusing a window takes 20–30 ms, versus 200 ms to a full second
             to reconcile and focus a specific tab in Chrome as you add or
             move them. It also lets you view any two windows side by side

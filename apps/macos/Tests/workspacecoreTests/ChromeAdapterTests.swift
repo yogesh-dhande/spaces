@@ -73,6 +73,68 @@ final class ChromeAdapterTests: XCTestCase {
             XCTAssertNil(snapshot.frontmostActiveTabURL)
         }
     }
+
+    func testFocusFirstMatchingTabMatchParsesFocusedTab() throws {
+        let scriptLog = FileManager.default.temporaryDirectory.appendingPathComponent("chrome-adapter-\(UUID().uuidString).applescript")
+        let mock = """
+            #!/bin/sh
+            printf '%s' "$2" > \(shellQuoted(scriptLog.path))
+            printf '303\t4\tMoved Docs\thttp://localhost:3000/docs\\n'
+            """
+
+        try withMockCommands(["osascript": mock]) {
+            let match = try ChromeAdapter().focusFirstMatchingTabMatch(urlPrefix: "http://localhost:3000")
+
+            XCTAssertEqual(match?.windowID, 303)
+            XCTAssertEqual(match?.tabIndex, 4)
+            XCTAssertEqual(match?.title, "Moved Docs")
+            XCTAssertEqual(match?.url, "http://localhost:3000/docs")
+
+            let script = try String(contentsOf: scriptLog, encoding: .utf8)
+            XCTAssertTrue(script.contains("repeat with w in windows"))
+            XCTAssertTrue(script.contains("set active tab index of w to i"))
+            XCTAssertTrue(script.contains("return wid &"))
+        }
+    }
+
+    func testOpenTabInFirstAvailableWindowReturnsFocusedWindowID() throws {
+        let scriptLog = FileManager.default.temporaryDirectory.appendingPathComponent("chrome-adapter-\(UUID().uuidString).applescript")
+        let mock = """
+            #!/bin/sh
+            printf '%s' "$2" > \(shellQuoted(scriptLog.path))
+            printf '202'
+            """
+
+        try withMockCommands(["osascript": mock]) {
+            let windowID = try ChromeAdapter().openTabInFirstAvailableWindow(
+                windowIDs: [202, 101, 202, -1, 0], containingAnyURLPrefix: ["http://localhost:3000", "http://localhost:3000"],
+                url: "http://localhost:4000/admin")
+
+            XCTAssertEqual(windowID, 202)
+
+            let script = try String(contentsOf: scriptLog, encoding: .utf8)
+            XCTAssertTrue(script.contains("set requestedWindowIDs to {\"202\", \"101\"}"))
+            XCTAssertTrue(script.contains("set workspaceURLPrefixes to {\"http://localhost:3000\"}"))
+            XCTAssertTrue(script.contains("if existingURL starts with (workspaceURLPrefix as string) then"))
+            XCTAssertTrue(script.contains("make new tab at end of tabs of w"))
+            XCTAssertTrue(script.contains("set active tab index of w to count of tabs of w"))
+        }
+    }
+
+    func testOpenTabInFirstAvailableWindowReturnsNilWithoutAppleScriptForEmptyInput() throws {
+        let mock = """
+            #!/bin/sh
+            exit 99
+            """
+
+        try withMockCommands(["osascript": mock]) {
+            XCTAssertNil(
+                try ChromeAdapter().openTabInFirstAvailableWindow(
+                    windowIDs: [], containingAnyURLPrefix: ["http://localhost:3000"], url: "http://localhost:4000/admin"))
+            XCTAssertNil(
+                try ChromeAdapter().openTabInFirstAvailableWindow(windowIDs: [202], containingAnyURLPrefix: [], url: "http://localhost:4000/admin"))
+        }
+    }
 }
 
 private func shellQuoted(_ value: String) -> String { "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'" }
