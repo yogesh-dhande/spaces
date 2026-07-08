@@ -1,17 +1,10 @@
 import ArgumentParser
-import Dispatch
 import Foundation
 import spacesclientcore
 import spacesdeviceapi
 import spacesdevicecore
 import spacesterminalcore
 import workspacecore
-
-#if canImport(Darwin)
-    import Darwin
-#elseif canImport(Glibc)
-    import Glibc
-#endif
 
 public struct SpacesCommand: ParsableCommand {
     public static let configuration = CommandConfiguration(
@@ -291,8 +284,7 @@ struct TerminalCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "terminal", abstract: "Manage Spaces terminal sessions.",
         subcommands: [
-            TerminalListCommand.self, TerminalCommandCommand.self, TerminalSendCommand.self, TerminalKeyCommand.self, TerminalTailCommand.self,
-            TerminalShowCommand.self, TerminalTakeoverCommand.self, TerminalProxyCommand.self,
+            TerminalListCommand.self, TerminalCommandCommand.self, TerminalSendCommand.self, TerminalTailCommand.self, TerminalShowCommand.self,
         ])
 }
 
@@ -371,49 +363,60 @@ struct TerminalCommandCommand: ParsableCommand {
 }
 
 struct TerminalSendCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "send", abstract: "Send text to a Spaces terminal session.")
+    static let configuration = CommandConfiguration(
+        commandName: "send", abstract: "Send text or raw bytes to a Spaces terminal session.",
+        subcommands: [TerminalSendTextCommand.self, TerminalSendBytesCommand.self])
+}
+
+struct TerminalSendTextCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "text", abstract: "Send UTF-8 text to a Spaces terminal session.")
 
     @Argument(help: "Terminal session ID.") var sessionID: String
     @Argument(help: "Text to send.") var text: String
     @Flag(name: .long, help: "Append a newline after the text.") var newline = false
     @Option(name: .long, help: "Paired device name or ID. Defaults to this machine's local sessions.") var device: String?
 
-    func run() throws {
-        if let device {
-            let record = try SpacesPairedDeviceSelection.resolve(device)
-            _ = try SpacesDeviceClient.sendTerminalInput(
-                sessionID: sessionID, text: text, appendNewline: newline, device: record, clientApp: cliDeviceClientApp())
-            print("Sent input to terminal session \(sessionID) on \(record.name)")
-            return
-        }
-        let paths = try TerminalSessionPaths.forSession(id: sessionID)
-        guard FileManager.default.fileExists(atPath: paths.controlSocketPath) else {
-            throw WorkspaceError.invalidArgument(message: "Terminal session '\(sessionID)' is not available.")
-        }
-        let response = try TerminalControlClient.send(
-            request: TerminalControlRequest(command: .send(.init(text: text, bytes: nil, clientID: nil, ownerEpoch: nil, appendNewline: newline))),
-            socketPath: paths.controlSocketPath)
-        guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
-        print("Sent input to terminal session \(sessionID)")
+    func run() throws { try sendTerminalInput(.text(text), sessionID: sessionID, appendNewline: newline, device: device) }
+}
+
+struct TerminalSendBytesCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "bytes", abstract: "Send decimal byte values to a Spaces terminal session.")
+
+    @Argument(help: "Terminal session ID.") var sessionID: String
+    @Argument(help: "Decimal byte value from 0 through 255.") var byte: TerminalByteArgument
+    @Argument(help: "Additional decimal byte values from 0 through 255.") var additionalBytes: [TerminalByteArgument] = []
+    @Option(name: .long, help: "Paired device name or ID. Defaults to this machine's local sessions.") var device: String?
+
+    var bytes: [TerminalByteArgument] { [byte] + additionalBytes }
+
+    func run() throws { try sendTerminalInput(.bytes(Data(bytes.map(\.value))), sessionID: sessionID, appendNewline: false, device: device) }
+}
+
+struct TerminalByteArgument: ExpressibleByArgument, Equatable {
+    let value: UInt8
+
+    init?(argument: String) {
+        guard !argument.isEmpty, argument.allSatisfy(\.isNumber), let intValue = Int(argument), (0...255).contains(intValue) else { return nil }
+        value = UInt8(intValue)
     }
 }
 
-struct TerminalKeyCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "key", abstract: "Send a named key or control chord to a Spaces terminal session.")
-
-    @Argument(help: "Terminal session ID.") var sessionID: String
-    @Argument(help: "Key spec such as enter, esc, up, down, ctrl+c, cmd+left, or cmd+k.") var key: String
-
-    func run() throws {
-        let paths = try TerminalSessionPaths.forSession(id: sessionID)
-        guard FileManager.default.fileExists(atPath: paths.controlSocketPath) else {
-            throw WorkspaceError.invalidArgument(message: "Terminal session '\(sessionID)' is not available.")
+private func sendTerminalInput(_ input: TerminalProfileInput, sessionID: String, appendNewline: Bool, device: String?) throws {
+    if let device {
+        let record = try SpacesPairedDeviceSelection.resolve(device)
+        let text: String?
+        let bytes: Data?
+        switch input {
+        case .text(let value): (text, bytes) = (value, nil)
+        case .bytes(let value): (text, bytes) = (nil, value)
         }
-        let response = try TerminalControlClient.send(
-            request: TerminalControlRequest(command: .key(.init(key: key, clientID: nil, ownerEpoch: nil))), socketPath: paths.controlSocketPath)
-        guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
-        print("Sent key to terminal session \(sessionID)")
+        _ = try SpacesDeviceClient.sendTerminalInput(
+            sessionID: sessionID, text: text, bytes: bytes, appendNewline: appendNewline, device: record, clientApp: cliDeviceClientApp())
+        print("Sent input to terminal session \(sessionID) on \(record.name)")
+        return
     }
+    _ = try TerminalService.sendProfileCommand(.terminalSend(.init(sessionID: sessionID, input: input, appendNewline: appendNewline)), timeout: 5)
+    print("Sent input to terminal session \(sessionID)")
 }
 
 struct TerminalTailCommand: ParsableCommand {
@@ -465,58 +468,6 @@ struct TerminalShowCommand: ParsableCommand {
         #else
             throw WorkspaceError.invalidArgument(message: "Native Spaces terminal windows are only available on macOS.")
         #endif
-    }
-}
-
-struct TerminalTakeoverCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "takeover", abstract: "Transfer terminal input ownership to a client.")
-
-    @Argument(help: "Terminal session ID.") var sessionID: String
-    @Argument(help: "Terminal client ID that should become the new owner.") var clientID: String
-
-    func run() throws {
-        let paths = try TerminalSessionPaths.forSession(id: sessionID)
-        guard FileManager.default.fileExists(atPath: paths.controlSocketPath) else {
-            throw WorkspaceError.invalidArgument(message: "Terminal session '\(sessionID)' is not available.")
-        }
-        let response = try TerminalControlClient.send(
-            request: TerminalControlRequest(command: .takeover(.init(clientID: clientID))), socketPath: paths.controlSocketPath)
-        guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
-        print("Transferred terminal ownership for session \(sessionID) to \(clientID)")
-    }
-}
-
-struct TerminalProxyCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(
-        commandName: "proxy", abstract: "Expose a Spaces terminal session over TCP for mobile or remote control.")
-
-    @Argument(help: "Terminal session ID.") var sessionID: String
-    @Option(name: .long, help: "TCP host to bind. Use 127.0.0.1 for local-only access.") var host = "127.0.0.1"
-    @Option(name: .long, help: "TCP port to bind. Use 0 to choose an ephemeral port.") var port = 0
-    @Option(name: .long, help: "Shared auth token required by remote clients.") var authToken: String
-
-    func run() throws {
-        let paths = try TerminalSessionPaths.forSession(id: sessionID)
-        guard FileManager.default.fileExists(atPath: paths.controlSocketPath) else {
-            throw WorkspaceError.invalidArgument(message: "Terminal session '\(sessionID)' is not available.")
-        }
-
-        let queue = DispatchQueue(label: "spaces.terminal.proxy.\(sessionID)")
-        let server = TerminalControlTCPServer(host: host, port: port, authToken: authToken, queue: queue) { request in
-            switch request.command {
-            case "tail":
-                if let clientID = request.clientID {
-                    _ = try? TerminalControlClient.send(
-                        request: TerminalControlRequest(command: .heartbeat(.init(clientID: clientID))), socketPath: paths.controlSocketPath)
-                }
-                let tailed = try TerminalOutputTail.tail(path: paths.outputPath, lineCount: max(request.lineCount ?? 40, 1))
-                return TerminalControlResponse(ok: true, message: tailed)
-            default: return try TerminalControlClient.send(request: request, socketPath: paths.controlSocketPath)
-            }
-        }
-        try server.start()
-        FileHandle.standardOutput.write(Data("Terminal proxy ready\tsession=\(sessionID)\thost=\(host)\tport=\(server.listeningPort)\n".utf8))
-        dispatchMain()
     }
 }
 

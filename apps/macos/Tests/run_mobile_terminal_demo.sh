@@ -1416,23 +1416,23 @@ spaces_demo_tail_secondary() {
 }
 
 spaces_demo_send() {
-  "\$SPACES_CLI" terminal send "\$SPACES_DEMO_SESSION_ID" "\$@"
+  "\$SPACES_CLI" terminal send text "\$SPACES_DEMO_SESSION_ID" "\$@"
 }
 
 spaces_demo_send_secondary() {
-  "\$SPACES_CLI" terminal send "\$SPACES_DEMO_SECONDARY_SESSION_ID" "\$@"
+  "\$SPACES_CLI" terminal send text "\$SPACES_DEMO_SECONDARY_SESSION_ID" "\$@"
 }
 
 spaces_demo_sendline() {
-  "\$SPACES_CLI" terminal send "\$SPACES_DEMO_SESSION_ID" "\$1" --newline
+  "\$SPACES_CLI" terminal send text "\$SPACES_DEMO_SESSION_ID" "\$1" --newline
 }
 
 spaces_demo_sendline_secondary() {
-  "\$SPACES_CLI" terminal send "\$SPACES_DEMO_SECONDARY_SESSION_ID" "\$1" --newline
+  "\$SPACES_CLI" terminal send text "\$SPACES_DEMO_SECONDARY_SESSION_ID" "\$1" --newline
 }
 
 spaces_demo_enter() {
-  "\$SPACES_CLI" terminal key "\$SPACES_DEMO_SESSION_ID" enter
+  "\$SPACES_CLI" terminal send bytes "\$SPACES_DEMO_SESSION_ID" 13
 }
 
 spaces_demo_mac_takeover() {

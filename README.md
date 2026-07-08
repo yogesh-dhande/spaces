@@ -38,11 +38,10 @@ spaces device pair                          # open a short-lived same-device pai
 spaces agent signal --workspace <id> --session <terminal-session-id> blocked
 spaces terminal command --command "cat"   # start a terminal session in the current directory's workspace
 spaces terminal list                      # inspect live session IDs and working directories
-spaces terminal send <session> "hello"    # write input to a session
-spaces terminal key <session> ctrl+c      # send a named key or control chord
+spaces terminal send text <session> "hello" --newline
+spaces terminal send bytes <session> 3    # send Ctrl+C as a raw byte
 spaces terminal tail <session> --lines 20 # read recent output
 spaces terminal show <session>            # open an owner-seeking window for a session
-spaces terminal takeover <session> <id>   # hand input ownership to another client
 ```
 
 Coding agents emit explicit `spaces agent signal` events from their terminals so the GUI knows which agents are working, waiting on a human, or done. See [coding-agent integration](https://usespaces.dev/docs/coding-agents).
@@ -65,7 +64,7 @@ Coding agents emit explicit `spaces agent signal` events from their terminals so
 ## How it works
 
 - The Spaces app tracks and focuses windows directly: its own AppKit windows for Spaces terminals, Chrome window IDs for browser sessions, Spaces terminal session IDs for processes and coding agents, and process IDs for cleaning up non-terminal processes.
-- Built-in process and ad hoc terminals run through the paired device's `spacesd`, so sessions survive app quits and lifetime, takeover, and `spaces terminal` controls share one daemon-owned boundary.
+- Built-in process and ad hoc terminals run through the paired device's `spacesd`, so sessions survive app quits and terminal input, ownership, and `spaces terminal` controls share one daemon-owned boundary.
 - Every Mac or Linux `spacesd` owns its own database, projects, workspaces, runtime rows, terminal sessions, and workspace filesystem. macOS and iOS apps are thin clients connected to one active paired device.
 - iOS pairing uses the short-lived QR/deep link from `spaces device pair` or the Mac Devices panel. Remote-device pairing validates SSH, opens the remote daemon's pairing window over `~/.spaces/bin/spaces device pair --json`, pins the daemon TLS identity, and stores the client token in Keychain. Pairing is version-gated: an incompatible daemon or client is rejected with an update prompt. Spaces does not install remote daemons — a remote Mac needs the Spaces app installed, and an Ubuntu 24.04 device is installed with the published `spaces-install-linux.sh` one-liner, which exposes the CLI at `~/.local/bin/spaces`.
 - The `spaces` CLI targets the same-machine daemon. Remote macOS terminal attach, browser forwarding, and editor opening use SSH to the paired device when those features are invoked from the Mac app.
