@@ -76,7 +76,58 @@ public final class ChromeAdapter {
         return (Int(output) ?? 0) > 0
     }
 
-    public func allTabs() throws -> [ChromeWindowMatch] { try queryTabs(urlPrefix: nil) }
+    public func allTabs() throws -> [ChromeWindowMatch] { try queryTabs(urlPrefix: nil, windowIDs: nil) }
+
+    /// Returns tabs from the requested Chrome AppleScript window ids without changing focus.
+    /// Window-cycle uses this to decide whether a workspace browser session is already open
+    /// in the client-tracked window, rather than accepting an unrelated tab with the same URL.
+    public func tabs(inWindowIDs windowIDs: [Int]) throws -> [ChromeWindowMatch] {
+        let uniqueWindowIDs = Array(Set(windowIDs.filter { $0 > 0 })).sorted()
+        guard !uniqueWindowIDs.isEmpty else { return [] }
+        return try queryTabs(urlPrefix: nil, windowIDs: uniqueWindowIDs)
+    }
+
+    /// Returns the requested-window tab list and the frontmost active tab URL from one Chrome
+    /// AppleScript invocation. Window cycling needs both values to build the open target set and
+    /// locate the current browser target, so keeping them together avoids an extra Apple Events round trip.
+    public func tabSnapshot(inWindowIDs windowIDs: [Int]) throws -> ChromeTabSnapshot {
+        let uniqueWindowIDs = Array(Set(windowIDs.filter { $0 > 0 })).sorted()
+        guard !uniqueWindowIDs.isEmpty else { return ChromeTabSnapshot(tabs: [], frontmostActiveTabURL: nil) }
+        let requestedIDs = uniqueWindowIDs.map { "\"\($0)\"" }.joined(separator: ", ")
+        let separator = "__SPACES_FRONTMOST_TABS__"
+        let script = """
+            set requestedWindowIDs to {\(requestedIDs)}
+            set frontmostURL to ""
+            set output to ""
+            tell application "Google Chrome"
+              if (count of windows) is not 0 then
+                set frontmostURL to URL of active tab of front window
+                if frontmostURL is missing value then
+                  set frontmostURL to ""
+                end if
+              end if
+              repeat with w in windows
+                set wid to id of w
+                if requestedWindowIDs contains (wid as string) then
+                  set titleText to title of w
+                  set tabCount to count of tabs of w
+                  repeat with i from 1 to tabCount
+                    set u to URL of tab i of w
+                    if u is not missing value then
+                      set output to output & wid & "\\t" & i & "\\t" & titleText & "\\t" & u & "\\n"
+                    end if
+                  end repeat
+                end if
+              end repeat
+            end tell
+            return frontmostURL & "\\n\(separator)\\n" & output
+            """
+        let output = try runChromeScript(script)
+        let split = output.components(separatedBy: "\n\(separator)\n")
+        let frontmostURL = split.first?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let tabRows = split.dropFirst().joined(separator: "\n\(separator)\n")
+        return ChromeTabSnapshot(tabs: Self.parseTabRows(tabRows), frontmostActiveTabURL: frontmostURL?.isEmpty == false ? frontmostURL : nil)
+    }
 
     public func focusTab(windowID: Int, tabIndex: Int) throws -> Bool {
         let script = """
@@ -224,7 +275,7 @@ public final class ChromeAdapter {
         return output.isEmpty ? nil : output
     }
 
-    private func queryTabs(urlPrefix: String?) throws -> [ChromeWindowMatch] {
+    private func queryTabs(urlPrefix: String?, windowIDs: [Int]?) throws -> [ChromeWindowMatch] {
         let filterCondition: String
         if let urlPrefix {
             let escaped = urlPrefix.replacingOccurrences(of: "\"", with: "\\\"")
@@ -232,26 +283,43 @@ public final class ChromeAdapter {
         } else {
             filterCondition = "if true then"
         }
+        let windowIDSetup: String
+        let windowIDCondition: String
+        if let windowIDs {
+            let requestedIDs = windowIDs.map { "\"\($0)\"" }.joined(separator: ", ")
+            windowIDSetup = "set requestedWindowIDs to {\(requestedIDs)}"
+            windowIDCondition = "if requestedWindowIDs contains (wid as string) then"
+        } else {
+            windowIDSetup = ""
+            windowIDCondition = "if true then"
+        }
         let script = """
+            \(windowIDSetup)
             set output to ""
             tell application "Google Chrome"
               repeat with w in windows
                 set wid to id of w
-                set titleText to title of w
-                set tabCount to count of tabs of w
-                repeat with i from 1 to tabCount
-                  set u to URL of tab i of w
-                  if u is not missing value then
-                    \(filterCondition)
-                      set output to output & wid & "\\t" & i & "\\t" & titleText & "\\t" & u & "\\n"
+                \(windowIDCondition)
+                  set titleText to title of w
+                  set tabCount to count of tabs of w
+                  repeat with i from 1 to tabCount
+                    set u to URL of tab i of w
+                    if u is not missing value then
+                      \(filterCondition)
+                        set output to output & wid & "\\t" & i & "\\t" & titleText & "\\t" & u & "\\n"
+                      end if
                     end if
-                  end if
-                end repeat
+                  end repeat
+                end if
               end repeat
             end tell
             return output
             """
         let output = try runChromeScript(script)
+        return Self.parseTabRows(output)
+    }
+
+    private static func parseTabRows(_ output: String) -> [ChromeWindowMatch] {
         var parsed: [ChromeWindowMatch] = []
         var syntheticTabIndexByWindow: [Int: Int] = [:]
         for line in output.split(separator: "\n") {

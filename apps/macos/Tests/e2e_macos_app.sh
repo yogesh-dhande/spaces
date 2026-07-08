@@ -90,6 +90,7 @@ MEASURED_CYCLE_TARGET=""
 SETUP_FIXTURES_ONLY=0
 PRESERVE_FIXTURES_ON_EXIT=0
 ONLY_WINDOW_CYCLE_PROFILE=0
+ONLY_WINDOW_CYCLE_SMALL=0
 PROFILE_RECORD_METRICS=1
 # Service names are DNS-safe labels; the port each service binds is injected as SPACES_<SERVICE>_PORT.
 APP_SERVICE_NAME="app"
@@ -281,6 +282,7 @@ Options:
   --pause-transitions            Add a 1 second pause after visible transitions.
   --setup-fixtures-only          Create projects/workspaces and leave the manual test environment running.
   --only-window-cycle-profile    Run only the single-workspace focus/cycle profiling path.
+  --only-window-cycle-small      Run only the small primary workspace app-side window-cycle profiling loop.
   --transition-pause-seconds N   Override the transition pause duration.
   --help                         Show this help text.
 EOF
@@ -309,6 +311,10 @@ parse_args() {
         ;;
       --only-window-cycle-profile)
         ONLY_WINDOW_CYCLE_PROFILE=1
+        shift
+        ;;
+      --only-window-cycle-small)
+        ONLY_WINDOW_CYCLE_SMALL=1
         shift
         ;;
       --transition-pause-seconds)
@@ -3213,6 +3219,23 @@ end run
 APPLESCRIPT
 }
 
+chrome_close_window_id() {
+  local window_id="$1"
+  osascript - "$window_id" <<'APPLESCRIPT' >/dev/null
+on run argv
+  set targetWindowIDText to item 1 of argv
+  tell application "Google Chrome"
+    repeat with w in windows
+      if (id of w as string) is targetWindowIDText then
+        close w
+        return
+      end if
+    end repeat
+  end tell
+end run
+APPLESCRIPT
+}
+
 # Closes only the harness's own fixture tabs (file:// fixtures or the 20000-20011 fixture
 # ports). Chrome closes any window whose last tab is removed, so dedicated fixture windows
 # disappear while the user's own windows and tabs are never touched — even if a fixture tab
@@ -4026,36 +4049,39 @@ print_metric_summary() {
     return 0
   fi
   printf 'Performance metrics:\n'
-  awk -F '\t' '
-    {
-      metric = $1
-      value = $2 + 0
-      host = "unknown"
-      scope = "single"
-      for (i = 3; i <= NF; i++) {
-        split($i, part, "=")
-        if (part[1] == "terminal_host") host = part[2]
-        if (part[1] == "workspace_scope") scope = part[2]
-      }
-      key = metric "|" host "|" scope
-      count[key] += 1
-      sum[key] += value
-      metric_name[key] = metric
-      metric_host[key] = host
-      metric_scope[key] = scope
-      if (!(key in min) || value < min[key]) min[key] = value
-      if (value > max[key]) max[key] = value
-      samples[key] = samples[key] (samples[key] == "" ? "" : ",") value
-    }
-    END {
-      for (key in count) {
-        avg = sum[key] / count[key]
-        printf "%s\t%s\t%s\t%d\t%.1f\t%d\t%d\t%s\n", metric_name[key], metric_host[key], metric_scope[key], count[key], avg, min[key], max[key], samples[key]
-      }
-    }
-  ' "$METRICS_LOG" | sort | while IFS=$'\t' read -r metric host scope count avg min max samples; do
-    printf '  %s [host=%s scope=%s]: avg=%sms min=%sms max=%sms samples=[%s]\n' "$metric" "$host" "$scope" "$avg" "$min" "$max" "$samples"
-  done
+  python3 - "$METRICS_LOG" <<'PY'
+import sys
+from collections import defaultdict
+
+metrics = defaultdict(list)
+with open(sys.argv[1]) as handle:
+    for raw_line in handle:
+        line = raw_line.strip()
+        if not line:
+            continue
+        parts = line.split("\t")
+        metric = parts[0]
+        value = int(parts[1])
+        metadata = {}
+        for part in parts[2:]:
+            key, _, raw_value = part.partition("=")
+            metadata[key] = raw_value
+        key = (metric, metadata.get("terminal_host", "unknown"), metadata.get("workspace_scope", "single"))
+        metrics[key].append(value)
+
+def percentile(samples, quantile):
+    ordered = sorted(samples)
+    index = max(int(len(ordered) * quantile + 0.999999) - 1, 0)
+    return ordered[min(index, len(ordered) - 1)]
+
+for (metric, host, scope), samples in sorted(metrics.items()):
+    raw = ",".join(str(sample) for sample in samples)
+    print(
+        f"  {metric} [host={host} scope={scope}]: "
+        f"count={len(samples)} p50={percentile(samples, 0.50)}ms "
+        f"p95={percentile(samples, 0.95)}ms max={max(samples)}ms samples=[{raw}]"
+    )
+PY
 }
 
 print_case_summary() {
@@ -4629,9 +4655,12 @@ wait_for_cycle_target_focus() {
   case "$cycle_target" in
     browser:*)
       # Browser windows are client state in the thin client: the cycle's browser target is the
-      # dedicated docs Chrome window the caller identified by URL. Verify focus strictly by the
-      # Chrome window id + URL with Chrome frontmost (no daemon id, no fallback).
-      wait_for_browser_cycle_target_focus "$docs_window_id" "${cycle_target#browser:}" "$cycle_target"
+      # dedicated Chrome window the app opened for that browser-session URL. Verify focus strictly
+      # by that Chrome window id + URL with Chrome frontmost (no daemon id, no fallback).
+      local browser_target_url browser_target_window_id
+      browser_target_url="${cycle_target#browser:}"
+      browser_target_window_id="$(wait_for_chrome_window_id_for_url "$browser_target_url" "$cycle_target")"
+      wait_for_browser_cycle_target_focus "$browser_target_window_id" "$browser_target_url" "$cycle_target"
       ;;
     terminal:*|process:*|agent:*)
       local target_name target_session_id
@@ -4755,6 +4784,273 @@ measure_spaces_cycle_transition() {
     "$workspace_scope" \
     "${cycle_focus_observed_elapsed_ms:-$cycle_focus_route_elapsed_ms}"
   MEASURED_CYCLE_TARGET="$cycle_target"
+}
+
+run_window_cycle_profile_loop() {
+  local host="$1"
+  local workspace_scope="$2"
+  local workspace_dir="$3"
+  local docs_window_id="$4"
+  local adhoc_name="$5"
+  local cycle_profile_iterations=1
+  local cycle_profile_warmups=0
+  local cycle_profile_iteration
+  local cycle_profile_recording_before="$PROFILE_RECORD_METRICS"
+  local browser_docs_url cycle_target
+
+  if (( ONLY_WINDOW_CYCLE_PROFILE == 1 || ONLY_WINDOW_CYCLE_SMALL == 1 )); then
+    cycle_profile_iterations="$REAL_SYSTEM_PROFILE_REPETITIONS"
+    cycle_profile_warmups="$REAL_SYSTEM_PROFILE_WARMUPS"
+  fi
+
+  for (( cycle_profile_iteration = 1; cycle_profile_iteration <= cycle_profile_warmups + cycle_profile_iterations; cycle_profile_iteration++ )); do
+    if (( cycle_profile_iteration <= cycle_profile_warmups )); then
+      PROFILE_RECORD_METRICS=0
+    else
+      PROFILE_RECORD_METRICS="$cycle_profile_recording_before"
+    fi
+
+    run_spaces_logged /tmp/spaces-e2e-cycle-seed-docs-final.log open docs "$workspace_dir"
+    activate_google_chrome
+    chrome_focus_window_if_present "$docs_window_id"
+    transition_pause "$host seed docs focus for cycling"
+    browser_docs_url="$(wait_for_workspace_window_url_by_name "$workspace_dir" "docs")"
+    wait_for_condition "chrome_front_url" "$browser_docs_url"
+    measure_spaces_cycle_transition \
+      "$host" \
+      "$workspace_scope" \
+      "$workspace_dir" \
+      "$docs_window_id" \
+      "browser_tracked_tab" \
+      "next" \
+      "$host cycle next browser to frontend" \
+      "terminal:frontend" \
+      "process:frontend"
+    cycle_target="$MEASURED_CYCLE_TARGET"
+    case "$cycle_target" in
+      terminal:frontend|process:frontend) ;;
+      *) fail "browser to frontend cycle target: expected frontend, got '$cycle_target'" ;;
+    esac
+
+    measure_spaces_cycle_transition \
+      "$host" \
+      "$workspace_scope" \
+      "$workspace_dir" \
+      "$docs_window_id" \
+      "process_tracked_tab" \
+      "previous" \
+      "$host cycle previous frontend to browser" \
+      "browser:*"
+    cycle_target="$MEASURED_CYCLE_TARGET"
+    case "$cycle_target" in
+      browser:*) ;;
+      *) fail "frontend to browser cycle target: expected browser, got '$cycle_target'" ;;
+    esac
+
+    run_spaces_logged /tmp/spaces-e2e-cycle-reseed-frontend-post-browser.log open frontend "$workspace_dir"
+    transition_pause "$host reseed frontend focus after browser round trip"
+    wait_for_spaces_front_window_title "frontend"
+
+    measure_spaces_cycle_transition \
+      "$host" \
+      "$workspace_scope" \
+      "$workspace_dir" \
+      "$docs_window_id" \
+      "process_tracked_tab" \
+      "next" \
+      "$host cycle next frontend to backend" \
+      "terminal:backend" \
+      "process:backend"
+    cycle_target="$MEASURED_CYCLE_TARGET"
+    case "$cycle_target" in
+      terminal:backend|process:backend) ;;
+      *) fail "frontend to backend cycle target: expected backend, got '$cycle_target'" ;;
+    esac
+
+    measure_spaces_cycle_transition \
+      "$host" \
+      "$workspace_scope" \
+      "$workspace_dir" \
+      "$docs_window_id" \
+      "process_tracked_tab" \
+      "next" \
+      "$host cycle next backend to ad hoc terminal" \
+      "terminal:${adhoc_name}"
+    cycle_target="$MEASURED_CYCLE_TARGET"
+    case "$cycle_target" in
+      terminal:${adhoc_name}) ;;
+      *) fail "backend to ad hoc cycle target: expected ${adhoc_name}, got '$cycle_target'" ;;
+    esac
+
+    measure_spaces_cycle_transition \
+      "$host" \
+      "$workspace_scope" \
+      "$workspace_dir" \
+      "$docs_window_id" \
+      "terminal_tracked_tab" \
+      "next" \
+      "$host cycle next ad hoc terminal to agent" \
+      "agent:*"
+    cycle_target="$MEASURED_CYCLE_TARGET"
+    case "$cycle_target" in
+      agent:*) ;;
+      *) fail "ad hoc terminal to agent cycle target: expected agent, got '$cycle_target'" ;;
+    esac
+
+    measure_spaces_cycle_transition \
+      "$host" \
+      "$workspace_scope" \
+      "$workspace_dir" \
+      "$docs_window_id" \
+      "agent_tracked_tab" \
+      "next" \
+      "$host cycle next agent to browser" \
+      "browser:*"
+    cycle_target="$MEASURED_CYCLE_TARGET"
+    case "$cycle_target" in
+      browser:*) ;;
+      *) fail "agent to browser cycle target: expected browser, got '$cycle_target'" ;;
+    esac
+
+    run_spaces_logged /tmp/spaces-e2e-cycle-reseed-agent-post-browser.log open "$MOCK_AGENT_LABEL" "$workspace_dir"
+    transition_pause "$host reseed agent focus after browser round trip"
+    wait_for_spaces_front_window_title "$MOCK_AGENT_LABEL"
+
+    measure_spaces_cycle_transition \
+      "$host" \
+      "$workspace_scope" \
+      "$workspace_dir" \
+      "$docs_window_id" \
+      "agent_tracked_tab" \
+      "previous" \
+      "$host cycle previous agent to ad hoc terminal" \
+      "terminal:${adhoc_name}"
+    cycle_target="$MEASURED_CYCLE_TARGET"
+    case "$cycle_target" in
+      terminal:${adhoc_name}) ;;
+      *) fail "agent to ad hoc cycle target: expected ${adhoc_name}, got '$cycle_target'" ;;
+    esac
+  done
+
+  PROFILE_RECORD_METRICS="$cycle_profile_recording_before"
+}
+
+open_ad_hoc_spaces_terminal_for_cycle_profile() {
+  local host="$1"
+  local workspace_dir="$2"
+  local dump_file="$3"
+  local adhoc_sessions_before adhoc_open_deadline adhoc_target
+
+  dump_workspace "$workspace_dir" "$dump_file"
+  adhoc_sessions_before="$(python3 - "$dump_file" <<'PY'
+import json, sys
+with open(sys.argv[1]) as fh:
+    data = json.load(fh)
+for window in data["windows"]:
+    if window.get("role") == "terminal":
+        session_id = window.get("terminalTrackingID") or window.get("terminalNativeID") or ""
+        if session_id:
+            print(session_id)
+PY
+)"
+  env HOME="$TMP_HOME" SPACES_DB_PATH="$TMP_DB" SPACES_RUNTIME_DIR="$TMP_RUNTIME_DIR" \
+    "$SPACES_E2E_CLI" open-workspace-terminal --workspace-dir "$workspace_dir" \
+    >/tmp/spaces-e2e-open-cycle-profile-adhoc-terminal.json
+  transition_pause "$host open ad hoc terminal for cycle profiling"
+
+  adhoc_open_deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+  while (( SECONDS < adhoc_open_deadline )); do
+    dump_workspace "$workspace_dir" "$dump_file"
+    adhoc_target="$(python3 - "$dump_file" "$adhoc_sessions_before" <<'PY'
+import json, sys
+known = {line.strip() for line in sys.argv[2].splitlines() if line.strip()}
+with open(sys.argv[1]) as fh:
+    data = json.load(fh)
+for window in data["windows"]:
+    if window.get("role") != "terminal":
+        continue
+    session_id = window.get("terminalTrackingID") or window.get("terminalNativeID") or ""
+    name = window.get("name") or ""
+    if session_id and session_id not in known:
+        print(f"{session_id}\t{name}")
+        break
+PY
+)"
+    if [[ -n "$adhoc_target" ]]; then
+      KNOWN_SPACES_ADHOC_SESSION_ID="${adhoc_target%%$'\t'*}"
+      KNOWN_SPACES_ADHOC_NAME="${adhoc_target#*$'\t'}"
+      [[ -n "$KNOWN_SPACES_ADHOC_NAME" ]] || KNOWN_SPACES_ADHOC_NAME="shell-1"
+      break
+    fi
+    sleep 0.2
+  done
+
+  [[ -n "$KNOWN_SPACES_ADHOC_SESSION_ID" ]] || fail "expected ad hoc terminal to open for cycle profiling"
+  wait_for_condition "spaces_built_in_terminal_focus_state" "owner"
+  wait_for_spaces_front_window_title "$KNOWN_SPACES_ADHOC_NAME"
+}
+
+run_window_cycle_small_assertions() {
+  local host="$1"
+  local workspace_dir="$2"
+  local docs_expected="${3:-Beacon docs sentinel}"
+  local backend_expected="${4:-\"workspace\": \"beacon-status\"}"
+  local dump_file="$TMP_ROOT/$host-window-cycle-small-dump.json"
+  local agent_script browser_docs_url docs_window_id backend_status_url
+
+  reset_fixture_runtime "$workspace_dir"
+  ensure_configured_terminal_host "$host"
+  agent_script="$(mock_agent_launcher_command "$host" "$workspace_dir")"
+  set_workspace_agent_launcher "$workspace_dir" "$MOCK_AGENT_LABEL" "$agent_script"
+
+  begin_case "$host: small window cycle profile setup"
+  run_spaces_logged /tmp/spaces-e2e-cycle-profile-start.log start "$workspace_dir"
+  activate_spaces_pid "$SPACES_PID"
+  transition_pause "$host activate Spaces before cycle profile setup"
+  run_spaces_logged /tmp/spaces-e2e-cycle-profile-open-docs.log open docs "$workspace_dir"
+  wait_for_workspace_running_state "$workspace_dir" "true"
+  transition_pause "$host open docs for cycle profile"
+  browser_docs_url="$(wait_for_workspace_window_url_by_name "$workspace_dir" "docs")"
+  wait_for_condition "chrome_front_url" "$browser_docs_url"
+  docs_window_id="$(wait_for_chrome_window_id_for_url "$browser_docs_url" "docs cycle profile")"
+  wait_for_condition "chrome_front_window_id" "$docs_window_id"
+  wait_for_condition "chrome_window_active_url $docs_window_id" "$browser_docs_url"
+  backend_status_url="$(backend_url_for_workspace "$workspace_dir" "/api/launch-status")"
+  ensure_workspace_http_ready "$host" "$workspace_dir" "$browser_docs_url" "$docs_expected" "$backend_status_url" "$backend_expected"
+
+  run_spaces_logged /tmp/spaces-e2e-cycle-profile-open-frontend.log open frontend "$workspace_dir"
+  transition_pause "$host open frontend for cycle profile"
+  KNOWN_SPACES_FRONTEND_SESSION_ID="$(wait_for_workspace_terminal_tracking_id "$workspace_dir" "frontend" "$dump_file")"
+  wait_for_condition "spaces_front_terminal_pane_session_id" "$KNOWN_SPACES_FRONTEND_SESSION_ID"
+  wait_for_spaces_front_window_title "frontend"
+  wait_for_terminal_session_live_render "$KNOWN_SPACES_FRONTEND_SESSION_ID" "$host frontend cycle profile"
+
+  run_spaces_logged /tmp/spaces-e2e-cycle-profile-open-backend.log open backend "$workspace_dir"
+  transition_pause "$host open backend for cycle profile"
+  KNOWN_SPACES_BACKEND_SESSION_ID="$(wait_for_workspace_terminal_tracking_id "$workspace_dir" "backend" "$dump_file")"
+  wait_for_condition "spaces_front_terminal_pane_session_id" "$KNOWN_SPACES_BACKEND_SESSION_ID"
+  wait_for_spaces_front_window_title "backend"
+  wait_for_terminal_session_live_render "$KNOWN_SPACES_BACKEND_SESSION_ID" "$host backend cycle profile"
+
+  run_spaces_logged /tmp/spaces-e2e-cycle-profile-open-agent.log open "$MOCK_AGENT_LABEL" "$workspace_dir"
+  transition_pause "$host open agent for cycle profile"
+  KNOWN_SPACES_AGENT_SESSION_ID="$(wait_for_workspace_terminal_tracking_id "$workspace_dir" "$MOCK_AGENT_LABEL" "$dump_file")"
+  wait_for_condition "spaces_front_terminal_pane_session_id" "$KNOWN_SPACES_AGENT_SESSION_ID"
+  wait_for_spaces_front_window_title "$MOCK_AGENT_LABEL"
+  wait_for_terminal_session_live_render "$KNOWN_SPACES_AGENT_SESSION_ID" "$host agent cycle profile"
+
+  open_ad_hoc_spaces_terminal_for_cycle_profile "$host" "$workspace_dir" "$dump_file"
+  dump_workspace "$workspace_dir" "$dump_file"
+  local workspace_title
+  workspace_title="$(json_get "$dump_file" "workspace.name")"
+  ui_show_workspace_detail "$workspace_dir" "$workspace_title"
+  sleep 0.5
+  pass_case
+
+  begin_case "$host: small workspace window cycling profile"
+  ensure_single_spaces_instance "$SPACES_PID"
+  run_window_cycle_profile_loop "$host" "single" "$workspace_dir" "$docs_window_id" "$KNOWN_SPACES_ADHOC_NAME"
+  pass_case
 }
 
 run_launch_and_focus_assertions() {
@@ -4976,10 +5272,12 @@ PY
     pass_case
 
   local docs_shortcut_index=1
+  local admin_shortcut_index=2
   local frontend_shortcut_index=3
   local agent_shortcut_index=5
   local adhoc_shortcut_index=6
   local agent_session_id
+  local cycle_target
   local adhoc_session_id=""
   local adhoc_name="shell-1"
 
@@ -5135,144 +5433,76 @@ PY
     run_spaces_logged /tmp/spaces-e2e-cycle-seed-adhoc.log open "$adhoc_name" "$workspace_dir"
     transition_pause "$host seed ad hoc terminal focus for cycling"
     wait_for_spaces_front_window_title "$adhoc_name"
-  fi
-    local cycle_profile_iterations=1
-    local cycle_profile_warmups=0
-    local cycle_profile_iteration
-    local cycle_profile_recording_before="$PROFILE_RECORD_METRICS"
-    if (( ONLY_WINDOW_CYCLE_PROFILE == 1 )); then
-      cycle_profile_iterations="$REAL_SYSTEM_PROFILE_REPETITIONS"
-      cycle_profile_warmups="$REAL_SYSTEM_PROFILE_WARMUPS"
-    fi
-    for (( cycle_profile_iteration = 1; cycle_profile_iteration <= cycle_profile_warmups + cycle_profile_iterations; cycle_profile_iteration++ )); do
-      if (( cycle_profile_iteration <= cycle_profile_warmups )); then
-        PROFILE_RECORD_METRICS=0
-      else
-        PROFILE_RECORD_METRICS="$cycle_profile_recording_before"
-      fi
-      run_spaces_logged /tmp/spaces-e2e-cycle-seed-docs-final.log open docs "$workspace_dir"
-      activate_google_chrome
-      chrome_focus_window_if_present "$docs_window_id"
-  transition_pause "$host seed docs focus for cycling"
-  browser_docs_url="$(wait_for_workspace_window_url_by_name "$workspace_dir" "docs")"
-  wait_for_condition "chrome_front_url" "$browser_docs_url"
-  local cycle_target
-  measure_spaces_cycle_transition \
+
+    local browser_admin_url admin_window_id
+    browser_admin_url="$(wait_for_workspace_window_url_by_name "$workspace_dir" "admin")"
+    [[ -z "$(chrome_window_id_for_url "$browser_admin_url")" ]] \
+      || fail "expected unopened admin browser session to be absent from Chrome before cmd+number"
+
+    run_spaces_logged /tmp/spaces-e2e-cycle-admin-skip-seed-docs.log open docs "$workspace_dir"
+    transition_pause "$host seed docs focus before unopened admin cycle check"
+    browser_docs_url="$(wait_for_workspace_window_url_by_name "$workspace_dir" "docs")"
+    wait_for_condition "chrome_front_url" "$browser_docs_url"
+    sleep 2.2
+    local admin_skip_log_start_line admin_skip_line admin_skip_target admin_skip_request_id
+    admin_skip_log_start_line=$(( $(app_log_line_count) + 1 ))
+    send_cycle_hotkey_with_ack next
+    transition_pause "$host cycle skips unopened admin browser session"
+    wait_for_app_log_pattern_from_line \
+      "spaces: perf metric=window_cycle workspace=${workspace_id} target=.* success=1 .* direction=next" \
+      "$admin_skip_log_start_line" >/dev/null
+    admin_skip_line="$APP_LOG_LAST_MATCH"
+    admin_skip_target="$(extract_perf_target "$admin_skip_line")"
+    admin_skip_request_id="$(extract_request_id "$admin_skip_line")"
+    [[ "$admin_skip_target" != "browser:${browser_admin_url}" ]] \
+      || fail "unopened admin browser session was included in window cycling"
+    case "$admin_skip_target" in
+      terminal:frontend|process:frontend)
+        wait_for_cycle_target_focus "$workspace_dir" "$admin_skip_target" "$docs_window_id" "$admin_skip_request_id"
+        ;;
+      *)
+        fail "expected cycle from docs to skip unopened admin and focus frontend, got '$admin_skip_target'"
+        ;;
+    esac
+
+    ui_show_workspace_detail "$workspace_dir" "$workspace_title"
+    sleep 0.5
+    send_spaces_window_shortcut_with_ack "$admin_shortcut_index"
+    transition_pause "$host cmd+number opens admin browser session"
+    wait_for_condition "chrome_front_url" "$browser_admin_url"
+    admin_window_id="$(wait_for_chrome_window_id_for_url "$browser_admin_url" "admin")"
+    wait_for_condition "chrome_window_active_url $admin_window_id" "$browser_admin_url"
+
+    run_spaces_logged /tmp/spaces-e2e-cycle-opened-admin-seed-docs.log open docs "$workspace_dir"
+    transition_pause "$host seed docs focus before opened admin cycle check"
+    browser_docs_url="$(wait_for_workspace_window_url_by_name "$workspace_dir" "docs")"
+    docs_window_id="$(wait_for_chrome_window_id_for_url "$browser_docs_url" "docs after admin opened")"
+    wait_for_condition "chrome_front_url" "$browser_docs_url"
+    sleep 2.2
+    measure_spaces_cycle_transition \
       "$host" \
       "single" \
       "$workspace_dir" \
       "$docs_window_id" \
       "browser_tracked_tab" \
       "next" \
-      "$host cycle next browser to frontend" \
-      "terminal:frontend" \
-      "process:frontend"
+      "$host cycle next docs to opened admin" \
+      "browser:${browser_admin_url}"
     cycle_target="$MEASURED_CYCLE_TARGET"
     case "$cycle_target" in
-      terminal:frontend|process:frontend) ;;
-      *) fail "browser to frontend cycle target: expected frontend, got '$cycle_target'" ;;
+      browser:${browser_admin_url}) ;;
+      *) fail "opened admin browser session did not participate in cycling, got '$cycle_target'" ;;
     esac
-
-    measure_spaces_cycle_transition \
-      "$host" \
-      "single" \
-      "$workspace_dir" \
-      "$docs_window_id" \
-      "process_tracked_tab" \
-      "previous" \
-      "$host cycle previous frontend to browser" \
-      "browser:*"
-    cycle_target="$MEASURED_CYCLE_TARGET"
-    case "$cycle_target" in
-      browser:*) ;;
-      *) fail "frontend to browser cycle target: expected browser, got '$cycle_target'" ;;
-    esac
-
-    run_spaces_logged /tmp/spaces-e2e-cycle-reseed-frontend-post-browser.log open frontend "$workspace_dir"
-    transition_pause "$host reseed frontend focus after browser round trip"
-    wait_for_spaces_front_window_title "frontend"
-
-    measure_spaces_cycle_transition \
-      "$host" \
-      "single" \
-      "$workspace_dir" \
-      "$docs_window_id" \
-      "process_tracked_tab" \
-      "next" \
-      "$host cycle next frontend to backend" \
-      "terminal:backend" \
-      "process:backend"
-    cycle_target="$MEASURED_CYCLE_TARGET"
-    case "$cycle_target" in
-      terminal:backend|process:backend) ;;
-      *) fail "frontend to backend cycle target: expected backend, got '$cycle_target'" ;;
-    esac
-
-    measure_spaces_cycle_transition \
-      "$host" \
-      "single" \
-      "$workspace_dir" \
-      "$docs_window_id" \
-      "process_tracked_tab" \
-      "next" \
-      "$host cycle next backend to ad hoc terminal" \
-      "terminal:${adhoc_name}"
-    cycle_target="$MEASURED_CYCLE_TARGET"
-    case "$cycle_target" in
-      terminal:${adhoc_name}) ;;
-      *) fail "backend to ad hoc cycle target: expected ${adhoc_name}, got '$cycle_target'" ;;
-    esac
-
-    measure_spaces_cycle_transition \
-      "$host" \
-      "single" \
-      "$workspace_dir" \
-      "$docs_window_id" \
-      "terminal_tracked_tab" \
-      "next" \
-      "$host cycle next ad hoc terminal to agent" \
-      "agent:*"
-    cycle_target="$MEASURED_CYCLE_TARGET"
-    case "$cycle_target" in
-      agent:*) ;;
-      *) fail "ad hoc terminal to agent cycle target: expected agent, got '$cycle_target'" ;;
-    esac
-
-    measure_spaces_cycle_transition \
-      "$host" \
-      "single" \
-      "$workspace_dir" \
-      "$docs_window_id" \
-      "agent_tracked_tab" \
-      "next" \
-      "$host cycle next agent to browser" \
-      "browser:*"
-    cycle_target="$MEASURED_CYCLE_TARGET"
-    case "$cycle_target" in
-      browser:*) ;;
-      *) fail "agent to browser cycle target: expected browser, got '$cycle_target'" ;;
-    esac
-
-    run_spaces_logged /tmp/spaces-e2e-cycle-reseed-agent-post-browser.log open "$MOCK_AGENT_LABEL" "$workspace_dir"
-    transition_pause "$host reseed agent focus after browser round trip"
-    wait_for_spaces_front_window_title "$MOCK_AGENT_LABEL"
-
-    measure_spaces_cycle_transition \
-      "$host" \
-      "single" \
-      "$workspace_dir" \
-      "$docs_window_id" \
-      "agent_tracked_tab" \
-      "previous" \
-      "$host cycle previous agent to ad hoc terminal" \
-      "terminal:${adhoc_name}"
-    cycle_target="$MEASURED_CYCLE_TARGET"
-    case "$cycle_target" in
-      terminal:${adhoc_name}) ;;
-      *) fail "agent to ad hoc cycle target: expected ${adhoc_name}, got '$cycle_target'" ;;
-    esac
+    chrome_close_window_id "$admin_window_id"
+    transition_pause "$host close admin browser after cycle inclusion check"
+    local admin_close_deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+    while (( SECONDS < admin_close_deadline )); do
+      [[ -z "$(chrome_window_id_for_url "$browser_admin_url")" ]] && break
+      sleep 0.2
     done
-    PROFILE_RECORD_METRICS="$cycle_profile_recording_before"
+    [[ -z "$(chrome_window_id_for_url "$browser_admin_url")" ]] || fail "admin browser session stayed open after cleanup"
+  fi
+  run_window_cycle_profile_loop "$host" "single" "$workspace_dir" "$docs_window_id" "$adhoc_name"
   if is_spaces_terminal_target "$host"; then
     assert_spaces_cpu_not_above "spaces_app.cpu_after_window_cycle" "$SPACES_SUSTAINED_CPU_BUDGET_PCT" "$host" "single"
   fi
@@ -5882,6 +6112,11 @@ Manual fixture environment is ready:
   Scout redesign docs:  $SCOUT_BRANCH_DOCS_URL
   Spaces PID: $SPACES_PID
 EOF
+    return 0
+  fi
+
+  if (( ONLY_WINDOW_CYCLE_SMALL == 1 )); then
+    run_window_cycle_small_assertions "local-primary" "$workspace_dir" "Beacon docs sentinel" '"workspace": "beacon-status"'
     return 0
   fi
 

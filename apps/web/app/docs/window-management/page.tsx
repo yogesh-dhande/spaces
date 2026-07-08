@@ -16,11 +16,11 @@ export default function WindowManagementDocsPage() {
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">What Spaces Tracks</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          When a workspace launches, Spaces opens one window per thing it runs and remembers each one:
+          Spaces remembers the client windows that belong to a workspace:
         </p>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• A terminal window per process or coding agent</li>
-          <li>• A Chrome window per browser session.</li>
+          <li>• Spaces terminal panes for processes, coding agents, and ad hoc terminals.</li>
+          <li>• Dedicated Chrome windows for browser sessions after you focus those sessions.</li>
         </ul>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           Place those windows wherever you want. Spaces never moves, resizes, or tiles them without explicit user action — and never touches windows it didn&apos;t open.
@@ -40,9 +40,9 @@ export default function WindowManagementDocsPage() {
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Direct Window Focus from the UI</h2>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
-          <li>• <code>cmd+1</code> through <code>cmd+9</code> focus windows 1 through 9 of the selected workspace.</li>
+          <li>• <code>cmd+1</code> through <code>cmd+0</code> open or focus targets 1 through 10 of the selected workspace.</li>
           <li>• Click a row in the workspace&apos;s window list to focus that window.</li>
-          <li>• Use <code>cmd+alt+]</code> and <code>cmd+alt+[</code> to cycle through the current workspace&apos;s windows in recent-use order.</li>
+          <li>• Use <code>cmd+alt+]</code> and <code>cmd+alt+[</code> to cycle through already-open Chrome browser-session windows and Spaces terminal panes in the current workspace.</li>
           <li>• A brief color pulse (optional) flashes on terminal windows so you can see where focus landed.</li>
         </ul>
       </article>

@@ -341,6 +341,23 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         var routeCompletedAt: Date?
     }
 
+    private struct BrowserCycleState: Sendable {
+        let openBrowserSessions: [BrowserSession]
+        let frontmostURL: String?
+        let clientDBLookupMS: Int
+        let chromeAppleScriptMS: Int
+        let trackedWindowCount: Int
+        let trackedTabCount: Int
+    }
+
+    private struct BrowserFocusResult: Sendable {
+        let focused: Bool
+        let path: String
+        let clientDBLookupMS: Int
+        let clientDBWriteMS: Int
+        let chromeAppleScriptMS: Int
+    }
+
     private struct TerminalSessionWindowStateDump: Codable {
         let sessionID: String
         let requestedMode: String
@@ -721,9 +738,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// browser-focus matcher, since a browser session resolves to the same name).
     private func focusWorkspaceWindowByName(workspaceID: String, name: String) async {
         let startedAt = Date()
-        func logResult(_ success: Bool) {
-            logPerfMetric("named_window_focus", target: name, elapsedMS: windowShortcutElapsedMS(since: startedAt), success: success)
+        var targetResolutionMS = 0
+        var routeMS = 0
+        func logResult(_ success: Bool, reason: String = "") {
+            let reasonDetail = reason.isEmpty ? "" : " reason=\(reason)"
+            logPerfMetric(
+                "named_window_focus", target: name, elapsedMS: windowShortcutElapsedMS(since: startedAt), success: success,
+                detail: "target_resolution_ms=\(targetResolutionMS) route_ms=\(routeMS)\(reasonDetail)")
         }
+        let resolutionStartedAt = Date()
         guard let context = focusableWindowContext(workspaceID: workspaceID),
             let target = context.targets.first(where: {
                 Self.focusableWindowName(for: $0, detail: context.detail, browserSessions: context.browserSessions).map {
@@ -731,14 +754,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 } ?? false
             })
         else {
-            logResult(false)
+            targetResolutionMS = windowShortcutElapsedMS(since: resolutionStartedAt)
+            logResult(false, reason: "no_match")
             return
         }
+        targetResolutionMS = windowShortcutElapsedMS(since: resolutionStartedAt)
         let resolution = Self.windowShortcutTargetResolution(target, workspaceID: workspaceID, detail: context.detail, overview: context.overview)
+        let routeStartedAt = Date()
         guard let action = await executeWindowFocusResolution(resolution) else {
-            logResult(false)
+            routeMS = windowShortcutElapsedMS(since: routeStartedAt)
+            logResult(false, reason: "focus_failed")
             return
         }
+        routeMS = windowShortcutElapsedMS(since: routeStartedAt)
         logResult(true)
         hideAfterSuccessfulExternalWindowAction(action)
     }
@@ -748,9 +776,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// real-system E2E correlates; also emits `process_focus` for the non-correlated path.
     private func focusWorkspaceProcess(workspaceID: String, processName: String, requestID: String?) async {
         let startedAt = Date()
-        func logResult(_ success: Bool) {
-            logPerfMetric("process_focus", target: processName, elapsedMS: windowShortcutElapsedMS(since: startedAt), success: success)
+        var targetResolutionMS = 0
+        var routeMS = 0
+        func logResult(_ success: Bool, reason: String = "") {
+            let requestDetail = requestID.map { " request_id=\($0)" } ?? ""
+            let reasonDetail = reason.isEmpty ? "" : " reason=\(reason)"
+            logPerfMetric(
+                "process_focus", target: processName, elapsedMS: windowShortcutElapsedMS(since: startedAt), success: success,
+                detail: "target_resolution_ms=\(targetResolutionMS) route_ms=\(routeMS)\(requestDetail)\(reasonDetail)")
         }
+        let resolutionStartedAt = Date()
         guard let context = focusableWindowContext(workspaceID: workspaceID),
             let target = context.targets.first(where: { target in
                 guard target.kind == .process, let id = target.processID,
@@ -759,14 +794,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 return Self.normalizedRunRowName(rowName) == Self.normalizedRunRowName(processName)
             })
         else {
-            logResult(false)
+            targetResolutionMS = windowShortcutElapsedMS(since: resolutionStartedAt)
+            logResult(false, reason: "no_match")
             return
         }
+        targetResolutionMS = windowShortcutElapsedMS(since: resolutionStartedAt)
         let resolution = Self.windowShortcutTargetResolution(target, workspaceID: workspaceID, detail: context.detail, overview: context.overview)
+        let routeStartedAt = Date()
         guard let action = await executeWindowFocusResolution(resolution, requestID: requestID) else {
-            logResult(false)
+            routeMS = windowShortcutElapsedMS(since: routeStartedAt)
+            logResult(false, reason: "focus_failed")
             return
         }
+        routeMS = windowShortcutElapsedMS(since: routeStartedAt)
         logResult(true)
         hideAfterSuccessfulExternalWindowAction(action)
     }
@@ -781,62 +821,50 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// rebuilds the focusable targets from the workspace's overview, resolves the current
     /// target from the focused terminal session / frontmost Chrome tab / remembered
     /// cursor, advances, and focuses through the shared `executeWindowFocusResolution`.
-    private func cycleWorkspaceWindow(workspaceID: String, delta: Int, preferredTerminalSessionID: String?) async {
+    private func cycleWorkspaceWindow(workspaceID: String, delta: Int, preferredTerminalSessionID: String?, requestID: String? = nil) async {
         let cycleStartedAt = Date()
         let direction = delta > 0 ? "next" : "previous"
         // The real-system E2E waits for this `window_cycle` perf line, so emit it on both
         // success and failure (matching the orchestrator's format) — it is a parsed surface.
-        func logCycleMetric(target: String, success: Bool) {
+        func logCycleMetric(target: String, success: Bool, detail extraDetail: String = "") {
+            let requestDetail = requestID.map { " request_id=\($0)" } ?? ""
+            let suffix = extraDetail.isEmpty ? "" : " \(extraDetail)"
             TerminalPerformance.logWorkspaceMetric(
                 "window_cycle", workspaceID: workspaceID, target: target, elapsedMS: windowShortcutElapsedMS(since: cycleStartedAt), success: success,
-                detail: "direction=\(direction)")
+                detail: "direction=\(direction)\(requestDetail)\(suffix)")
         }
         guard let overview = overview(forWorkspaceID: workspaceID), let detail = Self.workspaceDetail(workspaceID, in: overview) else {
             logCycleMetric(target: "none", success: false)
             return
         }
-        // A "window" is client state, so a configured browser session is only a cycle target
-        // when it currently has an open Chrome tab. Scan Chrome once (when any browser is
-        // configured) for the open tab URLs and the frontmost tab URL; the latter resolves
-        // the current target when no built-in terminal session is focused.
-        let chromeState: (openTabURLs: [String], frontmostURL: String?) =
-            detail.config.resolvedBrowserSessions.isEmpty
-            ? ([], nil)
-            : await Task.detached(priority: .userInitiated) {
-                let chrome = ChromeAdapter()
-                guard chrome.isAvailable() else { return ([], nil) }
-                return ((try? chrome.allTabs())?.map(\.url) ?? [], try? chrome.frontmostActiveTabURL())
-            }.value
-        let openBrowserSessions = detail.config.resolvedBrowserSessions.filter { session in
-            guard let url = session.url, !url.isEmpty else { return false }
-            return chromeState.openTabURLs.contains { $0.hasPrefix(url) }
-        }.map(Self.localBrowserSession(from:))
+        let cycleSession = validCycleSession(workspaceID: workspaceID)
+        let targetResolutionStartedAt = Date()
+        let browserCycleState = await trackedBrowserCycleState(workspaceID: workspaceID, detail: detail)
+        let openTerminalSessionIDs = Set(panelCoordinator.openTerminalSessionIDs(workspaceID: workspaceID))
 
         // Cycle over the same ordered targets the numbered shortcuts use, limited to running
         // windows (open browsers, running processes/terminals, agents) — not launch actions.
-        let targets = Self.workspaceShortcutTargets(detail: detail, browserSessions: openBrowserSessions).filter { target in
-            switch target.kind {
-            case .browser, .process, .window, .agent: return true
-            case .missingConfiguredProcess, .agentLauncher: return false
-            }
-        }
+        let targets = Self.cycleWindowTargets(
+            detail: detail, browserSessions: browserCycleState.openBrowserSessions, openTerminalSessionIDs: openTerminalSessionIDs)
+        let targetResolutionMS = windowShortcutElapsedMS(since: targetResolutionStartedAt)
+        let resolutionDetail =
+            "target_resolution_ms=\(targetResolutionMS) client_db_lookup_ms=\(browserCycleState.clientDBLookupMS) chrome_applescript_ms=\(browserCycleState.chromeAppleScriptMS) tracked_browser_windows=\(browserCycleState.trackedWindowCount) tracked_browser_tabs=\(browserCycleState.trackedTabCount) open_terminal_panes=\(openTerminalSessionIDs.count)"
         guard !targets.isEmpty else {
-            logCycleMetric(target: "none", success: false)
+            logCycleMetric(target: "none", success: false, detail: resolutionDetail)
             return
         }
 
         let cursorKeys = targets.map { Self.cycleCursorKey(for: $0, detail: detail) }
         let cursor = windowNavigationCursorByWorkspace[workspaceID]
-        let frontmostBrowserURL = (preferredTerminalSessionID?.isEmpty == false) ? nil : chromeState.frontmostURL
+        let frontmostBrowserURL = (preferredTerminalSessionID?.isEmpty == false) ? nil : browserCycleState.frontmostURL
         let currentIndex = Self.cycleCurrentIndex(
             targets: targets, detail: detail, focusedTerminalSessionID: preferredTerminalSessionID, frontmostBrowserURL: frontmostBrowserURL,
             cursorKeys: cursorKeys, cursor: cursor)
-        let ordering = WorkspaceWindowCycle.cycleOrdering(
-            cursors: cursorKeys, currentIndex: currentIndex, session: validCycleSession(workspaceID: workspaceID))
+        let ordering = WorkspaceWindowCycle.cycleOrdering(cursors: cursorKeys, currentIndex: currentIndex, session: cycleSession)
         let orderedTargets = ordering.indices.map { targets[$0] }
         let orderedCursors = ordering.indices.map { cursorKeys[$0] }
         guard !orderedTargets.isEmpty else {
-            logCycleMetric(target: "none", success: false)
+            logCycleMetric(target: "none", success: false, detail: resolutionDetail)
             return
         }
         let startIndex = WorkspaceWindowCycle.nextIndex(orderedCount: orderedTargets.count, orderedCurrentIndex: ordering.currentIndex, delta: delta)
@@ -847,27 +875,74 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             let candidateIndex = (startIndex + (attempt * delta) + (orderedTargets.count * 4)) % orderedTargets.count
             let resolution = Self.windowShortcutTargetResolution(
                 orderedTargets[candidateIndex], workspaceID: workspaceID, detail: detail, overview: overview)
-            if let action = await executeWindowFocusResolution(resolution) {
+            if let action = await executeWindowFocusResolution(resolution, requestID: requestID) {
                 focusedAction = action
                 resolvedIndex = candidateIndex
                 break
             }
         }
         guard let action = focusedAction else {
-            logCycleMetric(target: Self.cycleDebugName(for: orderedTargets[startIndex], detail: detail), success: false)
+            logCycleMetric(target: Self.cycleDebugName(for: orderedTargets[startIndex], detail: detail), success: false, detail: resolutionDetail)
             return
         }
 
         windowNavigationCursorByWorkspace[workspaceID] = orderedCursors[resolvedIndex]
         windowNavigationCycleSessionByWorkspace[workspaceID] = WorkspaceWindowCycle.CycleSession(
             orderedCursors: orderedCursors, currentIndex: resolvedIndex, lastUsedAt: Date())
-        logCycleMetric(target: Self.cycleDebugName(for: orderedTargets[resolvedIndex], detail: detail), success: true)
+        logCycleMetric(target: Self.cycleDebugName(for: orderedTargets[resolvedIndex], detail: detail), success: true, detail: resolutionDetail)
 
         let hidesApp: Bool
         switch action {
         case .focus(let value), .open(let value): hidesApp = value
         }
         if hidesApp { hideAfterSuccessfulExternalWindowAction(action) } else { commandPalette.dismissCommandPaletteForBuiltInWindowNavigation() }
+    }
+
+    private func trackedBrowserCycleState(workspaceID: String, detail: SpacesDeviceWorkspaceDetailViewModel) async -> BrowserCycleState {
+        let resolvedSessions = detail.config.resolvedBrowserSessions
+        guard !resolvedSessions.isEmpty else {
+            return BrowserCycleState(
+                openBrowserSessions: [], frontmostURL: nil, clientDBLookupMS: 0, chromeAppleScriptMS: 0, trackedWindowCount: 0, trackedTabCount: 0)
+        }
+        return await Task.detached(priority: .userInitiated) {
+            let dbStartedAt = Date()
+            let trackedWindows = ((try? ClientBrowserWindowIDStore().windowIDs(workspaceID: workspaceID)) ?? []).filter { $0.windowID > 0 }
+            let clientDBLookupMS = TerminalPerformance.elapsedMS(since: dbStartedAt)
+            guard !trackedWindows.isEmpty else {
+                return BrowserCycleState(
+                    openBrowserSessions: [], frontmostURL: nil, clientDBLookupMS: clientDBLookupMS, chromeAppleScriptMS: 0, trackedWindowCount: 0,
+                    trackedTabCount: 0)
+            }
+
+            let chrome = ChromeAdapter()
+            let chromeStartedAt = Date()
+            let snapshot =
+                (try? chrome.tabSnapshot(inWindowIDs: trackedWindows.map(\.windowID))) ?? ChromeTabSnapshot(tabs: [], frontmostActiveTabURL: nil)
+            let chromeAppleScriptMS = TerminalPerformance.elapsedMS(since: chromeStartedAt)
+            let trackedTargetURLs = Set(trackedWindows.map(\.targetURL))
+            let openBrowserSessions = resolvedSessions.compactMap { session -> BrowserSession? in
+                guard let url = session.url, !url.isEmpty, trackedTargetURLs.contains(url) else { return nil }
+                guard snapshot.tabs.contains(where: { $0.url.hasPrefix(url) }) else { return nil }
+                return Self.localBrowserSession(from: session)
+            }
+            return BrowserCycleState(
+                openBrowserSessions: openBrowserSessions, frontmostURL: snapshot.frontmostActiveTabURL, clientDBLookupMS: clientDBLookupMS,
+                chromeAppleScriptMS: chromeAppleScriptMS, trackedWindowCount: trackedWindows.count, trackedTabCount: snapshot.tabs.count)
+        }.value
+    }
+
+    nonisolated static func cycleWindowTargets(
+        detail: SpacesDeviceWorkspaceDetailViewModel, browserSessions: [BrowserSession], openTerminalSessionIDs: Set<String>
+    ) -> [WorkspaceRunShortcutTarget] {
+        workspaceShortcutTargets(detail: detail, browserSessions: browserSessions).filter { target in
+            switch target.kind {
+            case .browser: return true
+            case .process, .window, .agent:
+                guard let sessionID = cycleTargetSessionID(for: target, detail: detail), !sessionID.isEmpty else { return false }
+                return openTerminalSessionIDs.contains(sessionID)
+            case .missingConfiguredProcess, .agentLauncher: return false
+            }
+        }
     }
 
     private func validCycleSession(workspaceID: String) -> WorkspaceWindowCycle.CycleSession? {
@@ -1209,8 +1284,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let overviewStartedAt = Date()
         let match = await Self.resolveSessionSummaryMatchOffMain(sessionID: sessionID, device: device, clientApp: clientApp)
         logPerfMetric(
-            "terminal_session_resolve_overview", target: "session=\(sessionID)",
-            elapsedMS: TerminalPerformance.elapsedMS(since: overviewStartedAt), success: match != nil)
+            "terminal_session_resolve_overview", target: "session=\(sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: overviewStartedAt),
+            success: match != nil)
         return match
     }
 
@@ -6088,7 +6163,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private func shortcutDisplayText(for setting: ShortcutSetting) -> String {
         if setting == .guiLeaderHotkey { return displayShortcutText(modifiers: shortcutLeaderModifiers) }
         guard let spec = shortcutSpec(for: setting) else { return setting.defaultSpec }
-        if setting.usesDigitRangeCapture { return displayShortcutText(spec, keyText: "1-9") }
+        if setting.usesDigitRangeCapture { return displayShortcutText(spec, keyText: "1-0") }
         return spec.normalized
     }
 
@@ -6099,14 +6174,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private func shortcutHint(for setting: ShortcutSetting) -> String {
         if setting == .guiLeaderHotkey { return displayShortcut(modifiers: shortcutLeaderModifiers) }
         guard let spec = shortcutSpec(for: setting) else { return setting.defaultSpec }
-        if setting.usesDigitRangeCapture { return displayShortcut(spec, keyText: "1-9") }
+        if setting.usesDigitRangeCapture { return displayShortcut(spec, keyText: "1-0") }
         return displayShortcut(spec)
     }
 
     func footerShortcutHint(for setting: ShortcutSetting) -> String {
         if setting == .guiLeaderHotkey { return displayShortcut(modifiers: shortcutLeaderModifiers, separator: " ") }
         guard let spec = shortcutSpec(for: setting) else { return setting.defaultSpec }
-        if setting.usesDigitRangeCapture { return displayShortcut(spec, separator: " ", keyText: "1-9") }
+        if setting.usesDigitRangeCapture { return displayShortcut(spec, separator: " ", keyText: "1-0") }
         return displayShortcut(spec, separator: " ")
     }
 
@@ -8522,7 +8597,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private func runWindowShortcut(index: Int, startedAt: Date) async {
         activeWindowShortcutProfile = WindowShortcutProfile(index: index, startedAt: startedAt)
         logWindowShortcutProfile("stage=received index=\(index) alerts=\(showingAlerts ? 1 : 0)")
-        await dispatchWindowShortcut(windowShortcutResolution(index: index), index: index, startedAt: startedAt)
+        let shortcutDispatchMS = windowShortcutElapsedMS(since: startedAt)
+        let resolutionStartedAt = Date()
+        let resolution = windowShortcutResolution(index: index)
+        let targetResolutionMS = windowShortcutElapsedMS(since: resolutionStartedAt)
+        await dispatchWindowShortcut(
+            resolution, index: index, startedAt: startedAt, shortcutDispatchMS: shortcutDispatchMS, targetResolutionMS: targetResolutionMS)
     }
 
     /// Resolves a window-shortcut press to a device-agnostic focus target. Alerts focus
@@ -8555,24 +8635,44 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// the Mac Caddy router.
     private func focusLocalChromeTab(workspaceID: String, targetURL: String, fallbackURL: URL) async {
         let startedAt = Date()
-        let result: (focused: Bool, path: String, focusMS: Int) = await Task.detached(priority: .userInitiated) {
+        let result: BrowserFocusResult = await Task.detached(priority: .userInitiated) {
             let chrome = ChromeAdapter()
-            let focusStartedAt = Date()
             let store = ClientBrowserWindowIDStore()
-            if let trackedID = try? store.windowID(workspaceID: workspaceID, targetURL: targetURL),
-                (try? chrome.focusMatchingTabInWindow(windowID: trackedID, urlPrefix: targetURL)) ?? false
-            {
-                return (true, "focused_tracked", TerminalPerformance.elapsedMS(since: focusStartedAt))
+            let dbLookupStartedAt = Date()
+            let trackedID = try? store.windowID(workspaceID: workspaceID, targetURL: targetURL)
+            let clientDBLookupMS = TerminalPerformance.elapsedMS(since: dbLookupStartedAt)
+            var chromeAppleScriptMS = 0
+            if let trackedID {
+                let chromeStartedAt = Date()
+                let didFocus = (try? chrome.focusMatchingTabInWindow(windowID: trackedID, urlPrefix: targetURL)) ?? false
+                chromeAppleScriptMS += TerminalPerformance.elapsedMS(since: chromeStartedAt)
+                if didFocus {
+                    return BrowserFocusResult(
+                        focused: true, path: "focused_tracked", clientDBLookupMS: clientDBLookupMS, clientDBWriteMS: 0,
+                        chromeAppleScriptMS: chromeAppleScriptMS)
+                }
             }
+            let chromeStartedAt = Date()
             let newWindowID = (try? chrome.openWindow(url: targetURL, background: false)) ?? -1
-            guard newWindowID > 0 else { return (false, "fallback", TerminalPerformance.elapsedMS(since: focusStartedAt)) }
+            chromeAppleScriptMS += TerminalPerformance.elapsedMS(since: chromeStartedAt)
+            guard newWindowID > 0 else {
+                return BrowserFocusResult(
+                    focused: false, path: "fallback", clientDBLookupMS: clientDBLookupMS, clientDBWriteMS: 0, chromeAppleScriptMS: chromeAppleScriptMS
+                )
+            }
+            let dbWriteStartedAt = Date()
             try? store.setWindowID(workspaceID: workspaceID, targetURL: targetURL, windowID: newWindowID)
-            return (true, "opened_window", TerminalPerformance.elapsedMS(since: focusStartedAt))
+            return BrowserFocusResult(
+                focused: true, path: "opened_window", clientDBLookupMS: clientDBLookupMS,
+                clientDBWriteMS: TerminalPerformance.elapsedMS(since: dbWriteStartedAt), chromeAppleScriptMS: chromeAppleScriptMS)
         }.value
         if !result.focused { NSWorkspace.shared.open(fallbackURL) }
         logPerfMetric(
             "browser_focus", target: URL(string: targetURL)?.host ?? targetURL, elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
-            success: result.focused, detail: "path=\(result.path) focus_ms=\(result.focusMS)")
+            success: result.focused,
+            detail:
+                "path=\(result.path) client_db_lookup_ms=\(result.clientDBLookupMS) client_db_write_ms=\(result.clientDBWriteMS) chrome_applescript_ms=\(result.chromeAppleScriptMS)"
+        )
     }
 
     /// Maps an explicit alerts/command-palette focus request to the same device-agnostic
@@ -8638,17 +8738,26 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// target, then applies the window-shortcut profiling and app-hide handling. The
     /// focus work itself lives in `executeWindowFocusResolution` so the cycle and
     /// command-palette paths reuse it.
-    private func dispatchWindowShortcut(_ resolution: DeviceWindowShortcutResolution, index: Int, startedAt: Date) async {
+    private func dispatchWindowShortcut(
+        _ resolution: DeviceWindowShortcutResolution, index: Int, startedAt: Date, shortcutDispatchMS: Int, targetResolutionMS: Int
+    ) async {
         let routeStartedAt = Date()
         let kind = Self.windowShortcutKind(for: resolution)
         guard let action = await executeWindowFocusResolution(resolution) else {
             logWindowShortcutProfile("stage=aborted index=\(index) kind=\(kind) elapsed_ms=\(windowShortcutElapsedMS(since: startedAt))")
-            logPerfMetric("window_shortcut", target: "index=\(index)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: false)
+            logPerfMetric(
+                "window_shortcut", target: "index=\(index)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: false,
+                detail:
+                    "kind=\(kind) shortcut_dispatch_ms=\(shortcutDispatchMS) target_resolution_ms=\(targetResolutionMS) route_ms=\(windowShortcutElapsedMS(since: routeStartedAt))"
+            )
             activeWindowShortcutProfile = nil
             return
         }
-        logWindowShortcutProfile("stage=route_done index=\(index) kind=\(kind) elapsed_ms=\(windowShortcutElapsedMS(since: routeStartedAt))")
-        logPerfMetric("window_shortcut", target: "index=\(index)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true)
+        let routeMS = windowShortcutElapsedMS(since: routeStartedAt)
+        logWindowShortcutProfile("stage=route_done index=\(index) kind=\(kind) elapsed_ms=\(routeMS)")
+        logPerfMetric(
+            "window_shortcut", target: "index=\(index)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true,
+            detail: "kind=\(kind) shortcut_dispatch_ms=\(shortcutDispatchMS) target_resolution_ms=\(targetResolutionMS) route_ms=\(routeMS)")
         hideAfterSuccessfulExternalWindowAction(action)
         activeWindowShortcutProfile = nil
     }
@@ -8720,10 +8829,27 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     @discardableResult private func openOrFocusTerminalTarget(_ request: DeviceTerminalOpenRequest, requestID: String? = nil) async -> Bool {
+        let startedAt = Date()
+        let requestDetail = requestID.map { " request_id=\($0)" } ?? ""
+        var requestResolveMS = 0
+        var existingPaneFocusMS = 0
+        var paneOpenMS = 0
+        var ownershipRequestMS = 0
+        var focusObservationMS = 0
+        var focusObserved = false
+        func logTerminalPaneFocus(success: Bool, reason: String = "") {
+            let reasonDetail = reason.isEmpty ? "" : " reason=\(reason)"
+            logPerfMetric(
+                "terminal_pane_focus", target: "session=\(request.sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: success,
+                detail:
+                    "request_resolution_ms=\(requestResolveMS) existing_pane_focus_ms=\(existingPaneFocusMS) pane_open_ms=\(paneOpenMS) ownership_request_ms=\(ownershipRequestMS) focus_observation_ms=\(focusObservationMS) focus_observed=\(focusObserved ? 1 : 0)\(requestDetail)\(reasonDetail)"
+            )
+        }
         // Window-focus terminal targets are always workspace-backed (they come from a
         // workspace's run-target list), so a missing device is a not-loaded state.
         guard deviceForWorkspaceMutation(workspaceID: request.workspaceID) != nil else {
             showDeviceNotLoadedError()
+            logTerminalPaneFocus(success: false, reason: "device_not_loaded")
             return false
         }
         Self.setClientActiveWorkspaceID(request.workspaceID)
@@ -8736,19 +8862,51 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         // A row-built resolution can predate the session's overview entry and lack the
         // real shell/command; recover them through the cold overview fetch so the pane's
         // seeded launch config never shows a placeholder (see makeTerminalPaneContent).
+        let requestResolveStartedAt = Date()
         let openRequest = request.shell == nil ? await resolveTerminalSessionPaneOpenRequest(sessionID: request.sessionID) ?? request : request
-        guard panelCoordinator.openOrFocusTerminalPane(openRequest) else { return false }
+        requestResolveMS = windowShortcutElapsedMS(since: requestResolveStartedAt)
+        let reusedExistingPane = panelCoordinator.placement(forSessionID: openRequest.sessionID) != nil
+        let paneFocusStartedAt = Date()
+        guard panelCoordinator.openOrFocusTerminalPane(openRequest) else {
+            if reusedExistingPane {
+                existingPaneFocusMS = windowShortcutElapsedMS(since: paneFocusStartedAt)
+            } else {
+                paneOpenMS = windowShortcutElapsedMS(since: paneFocusStartedAt)
+            }
+            logTerminalPaneFocus(success: false, reason: "pane_open_failed")
+            return false
+        }
+        if reusedExistingPane {
+            existingPaneFocusMS = windowShortcutElapsedMS(since: paneFocusStartedAt)
+        } else {
+            paneOpenMS = windowShortcutElapsedMS(since: paneFocusStartedAt)
+        }
         // Focusing a workspace terminal target (sidebar row, numbered shortcut, window
         // cycle, `focus-workspace-process`) is an owner-intent action: the user wants to
         // interact. Reclaim ownership like the owner-mode open IPC does, so a pane that was
         // closed and reopened (or is currently a viewer) reattaches as owner instead of the
         // takeover shell. The viewer-only `focusTerminalSessionWindow` IPC takes the
         // separate `openTerminalSessionPane(mode:.viewer)` path and never lands here.
+        let ownershipStartedAt = Date()
         panelCoordinator.content(forSessionID: openRequest.sessionID)?.requestOwnershipIfNeeded()
+        ownershipRequestMS = windowShortcutElapsedMS(since: ownershipStartedAt)
+        let focusObservationStartedAt = Date()
+        await Task.yield()
+        focusObserved = panelCoordinator.focusedSessionID() == openRequest.sessionID
+        focusObservationMS = windowShortcutElapsedMS(since: focusObservationStartedAt)
+        logTerminalPaneFocus(success: true)
         if let requestID, !requestID.isEmpty {
             logPerfMetric(
-                "terminal_window_focus_ipc", target: "session=\(openRequest.sessionID)", elapsedMS: 0, success: true,
-                detail: "route=pane request_id=\(requestID)")
+                "terminal_window_focus_ipc", target: "session=\(openRequest.sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt),
+                success: true,
+                detail:
+                    "route=pane request_resolution_ms=\(requestResolveMS) existing_pane_focus_ms=\(existingPaneFocusMS) pane_open_ms=\(paneOpenMS) ownership_request_ms=\(ownershipRequestMS) focus_observation_ms=\(focusObservationMS) focus_observed=\(focusObserved ? 1 : 0) request_id=\(requestID)"
+            )
+            if focusObserved {
+                logPerfMetric(
+                    "terminal_window_focus_observed", target: "session=\(openRequest.sessionID)",
+                    elapsedMS: windowShortcutElapsedMS(since: startedAt), success: true, detail: "route=pane request_id=\(requestID)")
+            }
         }
         return true
     }
@@ -8902,7 +9060,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         Task { @MainActor [weak self] in
             guard let self else { return }
             await self.cycleWorkspaceWindow(
-                workspaceID: workspaceID, delta: direction > 0 ? 1 : -1, preferredTerminalSessionID: preferredFocusedBuiltInTerminalSessionID)
+                workspaceID: workspaceID, delta: direction > 0 ? 1 : -1, preferredTerminalSessionID: preferredFocusedBuiltInTerminalSessionID,
+                requestID: requestID)
             self.logPerfMetric(
                 "global_window_navigation", target: "workspace=\(workspaceID)", elapsedMS: self.windowShortcutElapsedMS(since: startedAt),
                 success: true, detail: "direction=\(direction > 0 ? "next" : "previous") request_id=\(requestID)")
