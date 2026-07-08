@@ -4,13 +4,20 @@ import XCTest
 @testable import spacesterminalghostty
 
 final class GhosttyInputOutputResyncSchedulerTests: XCTestCase {
-    /// Spins the main run loop long enough for the 20ms local-echo resync delay to
-    /// fire, matching the timing idiom used by GhosttyEmbeddedSessionHostTests.
-    @MainActor private func spinMainLoop(_ seconds: TimeInterval = 0.05) {
-        RunLoop.main.run(until: Date().addingTimeInterval(seconds))
+    @MainActor private func waitForCondition(
+        _ description: String,
+        timeout: TimeInterval = 5,
+        condition: @escaping @MainActor () -> Bool
+    ) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if condition() { return }
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        XCTFail("Timed out waiting for \(description)")
     }
 
-    @MainActor func testInteractiveOutputWithPendingCommandSchedulesResync() {
+    @MainActor func testInteractiveOutputWithPendingCommandSchedulesResync() async {
         var resyncCount = 0
         let scheduler = GhosttyInputOutputResyncScheduler { resyncCount += 1 }
 
@@ -18,12 +25,12 @@ final class GhosttyInputOutputResyncSchedulerTests: XCTestCase {
         scheduler.handleOutputDidChange(interactive: true)
 
         XCTAssertTrue(scheduler.hasScheduledResync)
-        spinMainLoop()
+        await waitForCondition("pending command resync") { resyncCount == 1 }
         XCTAssertEqual(resyncCount, 1)
         XCTAssertFalse(scheduler.hasScheduledResync)
     }
 
-    @MainActor func testInteractiveOutputWithInFlightWorkItemReschedules() {
+    @MainActor func testInteractiveOutputWithInFlightWorkItemReschedules() async {
         var resyncCount = 0
         let scheduler = GhosttyInputOutputResyncScheduler { resyncCount += 1 }
 
@@ -36,22 +43,22 @@ final class GhosttyInputOutputResyncSchedulerTests: XCTestCase {
         scheduler.handleOutputDidChange(interactive: true)
         XCTAssertTrue(scheduler.hasScheduledResync)
 
-        spinMainLoop()
+        await waitForCondition("in-flight work item resync") { resyncCount == 1 }
         XCTAssertEqual(resyncCount, 1)
     }
 
-    @MainActor func testPlainInteractiveOutputCancelsWithoutScheduling() {
+    @MainActor func testPlainInteractiveOutputCancelsWithoutScheduling() async {
         var resyncCount = 0
         let scheduler = GhosttyInputOutputResyncScheduler { resyncCount += 1 }
 
         scheduler.handleOutputDidChange(interactive: true)
 
         XCTAssertFalse(scheduler.hasScheduledResync)
-        spinMainLoop()
+        try? await Task.sleep(nanoseconds: 50_000_000)
         XCTAssertEqual(resyncCount, 0)
     }
 
-    @MainActor func testBulkOutputWithPendingInputSchedulesResync() {
+    @MainActor func testBulkOutputWithPendingInputSchedulesResync() async {
         var resyncCount = 0
         let scheduler = GhosttyInputOutputResyncScheduler { resyncCount += 1 }
 
@@ -59,23 +66,23 @@ final class GhosttyInputOutputResyncSchedulerTests: XCTestCase {
         scheduler.handleOutputDidChange(interactive: false)
 
         XCTAssertTrue(scheduler.hasScheduledResync)
-        spinMainLoop()
+        await waitForCondition("pending input resync") { resyncCount == 1 }
         XCTAssertEqual(resyncCount, 1)
         XCTAssertFalse(scheduler.hasScheduledResync)
     }
 
-    @MainActor func testBulkOutputWithNothingPendingIsNoOp() {
+    @MainActor func testBulkOutputWithNothingPendingIsNoOp() async {
         var resyncCount = 0
         let scheduler = GhosttyInputOutputResyncScheduler { resyncCount += 1 }
 
         scheduler.handleOutputDidChange(interactive: false)
 
         XCTAssertFalse(scheduler.hasScheduledResync)
-        spinMainLoop()
+        try? await Task.sleep(nanoseconds: 50_000_000)
         XCTAssertEqual(resyncCount, 0)
     }
 
-    @MainActor func testCancelForTerminationCancelsWorkItemButKeepsInputPending() {
+    @MainActor func testCancelForTerminationCancelsWorkItemButKeepsInputPending() async {
         var resyncCount = 0
         let scheduler = GhosttyInputOutputResyncScheduler { resyncCount += 1 }
 
@@ -88,14 +95,14 @@ final class GhosttyInputOutputResyncSchedulerTests: XCTestCase {
 
         scheduler.cancelForTermination()
         XCTAssertFalse(scheduler.hasScheduledResync)
-        spinMainLoop()
+        try? await Task.sleep(nanoseconds: 50_000_000)
         XCTAssertEqual(resyncCount, 0)
 
         // Termination cleared the command flag and work item but left input-pending
         // intact, so a subsequent bulk output schedules another resync.
         scheduler.handleOutputDidChange(interactive: false)
         XCTAssertTrue(scheduler.hasScheduledResync)
-        spinMainLoop()
+        await waitForCondition("post-termination pending input resync") { resyncCount == 1 }
         XCTAssertEqual(resyncCount, 1)
     }
 }
