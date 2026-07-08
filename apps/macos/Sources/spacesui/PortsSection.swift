@@ -13,6 +13,7 @@ import workspacecore
     private var ports: [ServiceDefinition]
     private var collapsedDisplayPortTexts: [String?]
     private var collapsedDisplayURLs: [String?]
+    private let showsEnvironmentVariableHints: Bool
     private let rowsStack = NSStackView()
     private let countLabel = NSTextField(labelWithString: "")
     private var rows: [PortRowView] = []
@@ -20,10 +21,14 @@ import workspacecore
 
     // MARK: Init
 
-    init(ports: [ServiceDefinition] = [], collapsedDisplayPortTexts: [String?] = [], collapsedDisplayURLs: [String?] = [], subtitle: String? = nil) {
+    init(
+        ports: [ServiceDefinition] = [], collapsedDisplayPortTexts: [String?] = [], collapsedDisplayURLs: [String?] = [],
+        subtitle: String? = nil, showsEnvironmentVariableHints: Bool = false
+    ) {
         self.ports = ports
         self.collapsedDisplayPortTexts = collapsedDisplayPortTexts
         self.collapsedDisplayURLs = collapsedDisplayURLs
+        self.showsEnvironmentVariableHints = showsEnvironmentVariableHints
 
         let container = NSStackView()
         container.orientation = .vertical
@@ -94,7 +99,7 @@ import workspacecore
         rows.removeAll()
         for (index, port) in ports.enumerated() {
             let row = PortRowView(
-                port: port, portText: collapsedDisplayPortTexts[safe: index] ?? nil, displayURL: collapsedDisplayURLs[safe: index] ?? nil)
+                port: port, portText: collapsedDisplayPortTexts[safe: index] ?? nil, displayURL: collapsedDetailText(for: port, at: index))
             row.onBeginEdit = { [weak self] in self?.handleBeginEdit(row: row) }
             row.onCancel = { [weak self] in self?.handleCancel(row: row) }
             row.onSave = { [weak self] edited in self?.handleSave(row: row, edited: edited) }
@@ -107,6 +112,15 @@ import workspacecore
         countLabel.stringValue = "\(ports.count)"
         _ = animated
     }
+
+    private func collapsedDetailText(for port: ServiceDefinition, at index: Int) -> String? {
+        let displayURL = collapsedDisplayURLs[safe: index] ?? nil
+        let trimmedDisplayURL = displayURL?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard trimmedDisplayURL.isEmpty else { return trimmedDisplayURL }
+        guard showsEnvironmentVariableHints, ServiceName.isValidLabel(port.name) else { return displayURL }
+        return "\(ServiceName.portEnvVar(for: port.name)), \(ServiceName.urlEnvVar(for: port.name))"
+    }
+
     // MARK: Row callbacks
 
     private func handleBeginEdit(row: PortRowView) { row.enterEditing(prefill: nil, animated: true) }
@@ -128,7 +142,7 @@ import workspacecore
         if pendingDraftIndex == index { pendingDraftIndex = nil }
         row.exitEditing(animated: true)
         row.rebindCollapsedContent(
-            from: edited, portText: collapsedDisplayPortTexts[safe: index] ?? nil, displayURL: collapsedDisplayURLs[safe: index] ?? nil)
+            from: edited, portText: collapsedDisplayPortTexts[safe: index] ?? nil, displayURL: collapsedDetailText(for: edited, at: index))
         onCommit?(ports)
     }
 
@@ -279,6 +293,11 @@ import workspacecore
     var collapsedPrimaryTextIsSelectableForTesting: Bool { nameLabel.isSelectable }
     var collapsedPortTextForTesting: String { portLabel.isHidden ? "" : portLabel.stringValue }
     var collapsedDetailTextForTesting: String { detailLabel.stringValue }
+    func setEditingNameForTesting(_ name: String) { nameField?.stringValue = name }
+    func endEditingForTesting() {
+        guard let nameField else { return }
+        nameField.delegate?.controlTextDidEndEditing?(Notification(name: NSControl.textDidEndEditingNotification, object: nameField))
+    }
 
     private static func makeCollapsedLine(
         nameLabel: NSTextField, portLabel: NSTextField, detailLabel: NSTextField, onEdit: @escaping () -> Void, onRemove: @escaping () -> Void
@@ -316,25 +335,34 @@ import workspacecore
         nameField.setContentHuggingPriority(.defaultLow, for: .horizontal)
         nameField.setAccessibilityIdentifier("service-row-edit-name")
 
-        let cancelButton = buildActionButton(symbol: "xmark", tooltip: "Cancel") { _ in onCancel() }
+        let target = PortFormTarget()
+
+        let cancel = {
+            target.isCancelling = true
+            onCancel()
+        }
+        let cancelButton = buildActionButton(symbol: "xmark", tooltip: "Cancel") { _ in cancel() }
         cancelButton.setAccessibilityIdentifier("service-row-edit-cancel")
 
         // A service name is a DNS label (it becomes a hostname), so only commit valid labels.
-        let doSave = { [weak nameField] in
-            let name = nameField?.stringValue ?? ""
+        let doSave = { [weak nameField, weak target] in
+            guard let target, !target.didFinish, !target.isCancelling else { return }
+            let name = (nameField?.stringValue ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             guard ServiceName.isValidLabel(name) else { return }
-            onSave(ServiceDefinition(id: port.id, name: name.trimmingCharacters(in: .whitespacesAndNewlines)))
+            target.didFinish = true
+            onSave(ServiceDefinition(id: port.id, name: name))
         }
         let saveButton = buildActionButton(symbol: "checkmark", tooltip: "Save") { _ in doSave() }
         saveButton.setAccessibilityIdentifier("service-row-edit-save")
 
         let refreshSaveEnabled: () -> Void = { [weak saveButton, weak nameField] in
-            saveButton?.isEnabled = ServiceName.isValidLabel(nameField?.stringValue ?? "")
+            let name = (nameField?.stringValue ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            saveButton?.isEnabled = ServiceName.isValidLabel(name)
         }
 
-        let target = PortFormTarget()
-        target.onCancel = onCancel
+        target.onCancel = cancel
         target.onSave = doSave
+        target.onEditingEnded = doSave
         target.onTextChange = refreshSaveEnabled
         nameField.delegate = target
         refreshSaveEnabled()
@@ -370,10 +398,14 @@ import workspacecore
 @MainActor private final class PortFormTarget: NSObject, NSTextFieldDelegate {
     var onCancel: (() -> Void)?
     var onSave: (() -> Void)?
+    var onEditingEnded: (() -> Void)?
     var onTextChange: (() -> Void)?
+    var didFinish = false
+    var isCancelling = false
     @objc func triggerCancel() { onCancel?() }
     @objc func triggerSave() { onSave?() }
     func controlTextDidChange(_ obj: Notification) { onTextChange?() }
+    func controlTextDidEndEditing(_ obj: Notification) { onEditingEnded?() }
     func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
         if commandSelector == #selector(NSResponder.insertNewline(_:)) {
             onSave?()

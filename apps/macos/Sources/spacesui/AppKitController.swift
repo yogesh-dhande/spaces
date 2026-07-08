@@ -4466,7 +4466,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let stopScriptSection = ScriptSection(
             title: "Stop Script", editAccessibilityIdentifier: "stop-script-edit", formAccessibilityPrefix: "workspace-stop-script",
             value: projectSettings.stopScript ?? "", subtitle: "Runs after processes stop — on stop, restart, and archive.")
-        let portsSection = PortsSection(ports: projectSettings.ports, subtitle: "Per-workspace services, routed through Caddy.")
+        let portsSection = PortsSection(
+            ports: projectSettings.ports, subtitle: "Per-workspace services, routed through Caddy.", showsEnvironmentVariableHints: true)
         let processesSection = ProcessesSection(
             processes: projectSettings.processes, subtitle: "Commands that run inside the workspace.", showsRuntimeControls: false)
         let browserSessionsSection = BrowserSessionsSection(
@@ -4887,7 +4888,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let stopScriptSection = ScriptSection(
             title: "Stop Script", editAccessibilityIdentifier: "stop-script-edit", formAccessibilityPrefix: "workspace-stop-script", value: "",
             subtitle: "Runs after processes stop — on stop, restart, and archive.")
-        let portsSection = PortsSection(subtitle: "Per-workspace named ports, exposed as env vars.")
+        let portsSection = PortsSection(subtitle: "Per-workspace named ports, exposed as env vars.", showsEnvironmentVariableHints: true)
         let processesSection = ProcessesSection(subtitle: "Commands that run inside the workspace.", showsRuntimeControls: false)
         let browserSessionsSection = BrowserSessionsSection(subtitle: "Named URLs that open in Chrome when you focus them.")
         let agentLaunchersSection = AgentLaunchersSection(subtitle: "Coding agents that open in a Spaces terminal.", showsRuntimeControls: false)
@@ -6982,6 +6983,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     @objc private func saveProject(_ sender: NSButton) {
         commitEditing()
         guard let refs = Self.liveFormRefs(projectSettingsFieldRefs, forSenderTag: sender.tag) else { return }
+        guard validateServiceEditorsCommitted(refs.portsSection, before: "saving project settings") else { return }
         guard confirmProjectImportWorkspaceSyncIfNeeded(refs) else { return }
         do {
             try persistProjectFields(refs)
@@ -7162,7 +7164,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     @objc private func createProject(_ sender: NSButton) {
+        commitEditing()
         guard let refs = Self.liveFormRefs(addProjectFieldRefs, forSenderTag: sender.tag) else { return }
+        guard validateServiceEditorsCommitted(refs.portsSection, before: "creating the project") else { return }
         do {
             // The project is created on the device fixed in step 1; folder autocomplete and preview
             // used the same device.
@@ -9694,6 +9698,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             window.endEditing(for: nil)
             _ = window.makeFirstResponder(nil)
         }
+    }
+
+    private func validateServiceEditorsCommitted(_ portsSection: PortsSection, before action: String) -> Bool {
+        guard !portsSection.hasOpenEditor else {
+            showInfoMessage(
+                title: "Finish service name",
+                message:
+                    "Service names cannot be empty and must use lowercase letters, digits, or hyphens, starting and ending with a letter or digit, before \(action)."
+            )
+            return false
+        }
+        return true
     }
 
     private func presentProjectPortRemoveConfirmation(port: ServiceDefinition, confirm: @escaping (Bool) -> Void) {
