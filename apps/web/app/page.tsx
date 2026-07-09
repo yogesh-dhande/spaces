@@ -259,46 +259,10 @@ const faqItems: FaqItem[] = [
     ),
   },
   {
-    question: "Who is Spaces not for?",
-    answer: (
-      <>
-        <p className="mb-3">
-          Spaces makes opinionated tradeoffs to prioritize speed and
-          flexibility. They may not suit everyone.
-        </p>
-        <ul className="ml-4 list-disc space-y-2">
-          <li>
-            <span className="font-semibold text-foreground">
-              If you keep your window count low.
-            </span>{" "}
-            Spaces gives each browser session, terminal, and editor instance
-            a tracked focus target so you can lay them out across your screens
-            and recall them on demand. The upside is speed and flexibility —
-            focusing a window takes 20–30 ms, versus 200 ms to a full second
-            to reconcile and focus a specific tab in Chrome as you add or
-            move them. It also lets you view any two windows side by side
-            (even from different workspaces) with your favorite tiling window
-            manager. If a sparse desktop matters more to you than instant
-            recall, Spaces will feel like clutter.
-          </li>
-          <li>
-            <span className="font-semibold text-foreground">
-              If you must use macOS full-screen mode.
-            </span>{" "}
-            macOS puts each full-screen window in its own desktop space, so
-            focusing another window forces the OS to transition between
-            desktops. Spaces still works, but it shines when you stay in
-            windowed mode.
-          </li>
-        </ul>
-      </>
-    ),
-  },
-  {
     question: "Is there a mobile app?",
     answer: (
       <>
-        Yes. The Spaces iOS app pairs with your Mac by scanning a QR code. From
+        Coming soon! The Spaces iOS app pairs with your Mac by scanning a QR code. From
         your phone you can browse a workspace&apos;s live terminal sessions, watch
         a coding agent&apos;s output, or start new sessions even while
         you&apos;re away from your Mac. See the{" "}
@@ -465,9 +429,7 @@ export default function HomePage() {
             </div>
 
             <p className="mt-7 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
-              Group coding agents, processes, ports, browser tabs, and code editor into
-              isolated per-branch workspaces — run them on your Mac or a
-              remote Linux box, and pick any session up on your iPhone.
+              Parallel branches actually run in isolation. No port juggling, no .env copying, no shared-login bleed
             </p>
             <div className="mt-8 flex flex-wrap items-center gap-3">
               <PrimaryButton
