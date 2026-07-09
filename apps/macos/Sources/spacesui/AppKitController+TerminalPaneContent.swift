@@ -18,10 +18,10 @@ extension AppKitController {
             workspaceID = panelCoordinator.focusedSessionID().flatMap { clientWorkspaceID(forTerminalSession: $0) } ?? selectedWorkspaceID
         }
         guard let workspaceID else { return }
-        guard pendingNewTerminalPaneScopes.insert(scope).inserted else { return }
+        guard beginNewTerminalSessionCreation(workspaceID: workspaceID) else { return }
         createTerminalSessionForPane(workspaceID: workspaceID) { [weak self] request in
             guard let self else { return }
-            defer { self.pendingNewTerminalPaneScopes.remove(scope) }
+            defer { self.finishNewTerminalSessionCreation(workspaceID: workspaceID) }
             guard let request else { return }
             self.panelCoordinator.openSessionInNewTab(request, in: scope)
         }
@@ -186,7 +186,20 @@ extension AppKitController {
             switch choice {
             case nil: completion(nil)
             case .existingSession(let request): completion(request)
-            case .newTerminalSession(let workspaceID): self?.createTerminalSessionForPane(workspaceID: workspaceID, completion: completion)
+            case .newTerminalSession(let workspaceID):
+                guard let self else {
+                    completion(nil)
+                    return
+                }
+                guard self.beginNewTerminalSessionCreation(workspaceID: workspaceID) else {
+                    completion(nil)
+                    return
+                }
+                self.createTerminalSessionForPane(workspaceID: workspaceID) { [weak self] request in
+                    guard let self else { return }
+                    defer { self.finishNewTerminalSessionCreation(workspaceID: workspaceID) }
+                    completion(request)
+                }
             }
         }
     }

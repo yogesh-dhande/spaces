@@ -336,8 +336,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private var deferredExternalWindowHideTask: Task<Void, Never>?
     private var keepsTerminalSessionsRunningDuringTermination = false
     private var appToggleReturnApplicationProcessID: pid_t?
-    var pendingNewTerminalPaneScopes: Set<PanelScope> = []
-    private var pendingWorkspaceTerminalOpenWorkspaceIDs: Set<String> = []
+    private var pendingNewTerminalSessionWorkspaceIDs: Set<String> = []
+
+    @discardableResult func beginNewTerminalSessionCreation(workspaceID: String) -> Bool {
+        pendingNewTerminalSessionWorkspaceIDs.insert(workspaceID).inserted
+    }
+
+    func finishNewTerminalSessionCreation(workspaceID: String) {
+        pendingNewTerminalSessionWorkspaceIDs.remove(workspaceID)
+    }
 
     private struct WindowShortcutProfile {
         let index: Int
@@ -1848,7 +1855,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     /// Starts a fresh ad hoc terminal session on the workspace's owning daemon and
-    /// resolves the pane open request for it (split fill and new-tab paths).
+    /// resolves the pane open request for panel entry points.
     func createTerminalSessionForPane(workspaceID: String, completion: @escaping (DeviceTerminalOpenRequest?) -> Void) {
         guard let device = deviceForWorkspaceMutation(workspaceID: workspaceID) else {
             showDeviceNotLoadedError()
@@ -2031,7 +2038,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return !hasLiveAttachments
     }
 
-    private func terminateUnattachedAdHocBuiltInTerminalSessionIfNeeded(sessionID: String) {
+    func terminateUnattachedAdHocBuiltInTerminalSessionIfNeeded(sessionID: String) {
         guard !keepsTerminalSessionsRunningDuringTermination else { return }
         // A session owned by a configured process or agent is not ad hoc; the overview's
         // session kind tells us without a daemon-DB read.
@@ -8291,49 +8298,28 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     private func openWorkspaceTerminal(workspaceID: String, route: WorkspaceTerminalOpenRoute, completion: (() -> Void)? = nil) {
-        guard pendingWorkspaceTerminalOpenWorkspaceIDs.insert(workspaceID).inserted else {
+        guard beginNewTerminalSessionCreation(workspaceID: workspaceID) else {
             completion?()
             return
         }
         let startedAt = Date()
-        let workspaceDeviceID = deviceID(forWorkspaceID: workspaceID)
-        Task { @MainActor [weak self] in
+        createTerminalSessionForPane(workspaceID: workspaceID) { [weak self] request in
             guard let self else { return }
             defer {
-                self.pendingWorkspaceTerminalOpenWorkspaceIDs.remove(workspaceID)
+                self.finishNewTerminalSessionCreation(workspaceID: workspaceID)
                 completion?()
             }
-            if let device = deviceRecord(forDeviceID: workspaceDeviceID) {
-                let result = await Self.deviceMutation(device: device) { device in
-                    try SpacesDeviceClient.openWorkspaceTerminal(
-                        workspaceID: workspaceID, device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
-                }
-                switch result {
-                case .success(let response):
-                    applyDeviceMutationResponse(response, selectedWorkspaceID: workspaceID)
-                    // A fresh ad hoc session opens as a new tab in the workspace's panel.
-                    if let sessionID = response.sessionID,
-                        let request = Self.deviceTerminalOpenRequest(
-                            workspaceID: workspaceID, sessionID: sessionID, overview: response.overview ?? overview(forWorkspaceID: workspaceID))
-                    {
-                        panelCoordinator.openSessionInNewTab(request)
-                    }
-                    hideAfterSuccessfulExternalWindowAction(.open(hidesApp: false))
-                    logPerfMetric(
-                        "workspace_terminal_open_ui", target: "workspace=\(workspaceID)", elapsedMS: windowShortcutElapsedMS(since: startedAt),
-                        success: true, detail: "route=\(route.rawValue)")
-                case .failure(let error):
-                    logPerfMetric(
-                        "workspace_terminal_open_ui", target: "workspace=\(workspaceID)", elapsedMS: windowShortcutElapsedMS(since: startedAt),
-                        success: false, detail: "route=\(route.rawValue)")
-                    showError(error)
-                }
+            guard let request else {
+                logPerfMetric(
+                    "workspace_terminal_open_ui", target: "workspace=\(workspaceID)", elapsedMS: windowShortcutElapsedMS(since: startedAt),
+                    success: false, detail: "route=\(route.rawValue)")
                 return
             }
+            panelCoordinator.openSessionInNewTab(request)
+            hideAfterSuccessfulExternalWindowAction(.open(hidesApp: false))
             logPerfMetric(
                 "workspace_terminal_open_ui", target: "workspace=\(workspaceID)", elapsedMS: windowShortcutElapsedMS(since: startedAt),
-                success: false, detail: "route=\(route.rawValue)")
-            showDeviceNotLoadedError()
+                success: true, detail: "route=\(route.rawValue)")
         }
     }
 

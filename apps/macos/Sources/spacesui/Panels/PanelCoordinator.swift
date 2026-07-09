@@ -384,12 +384,13 @@ import spacesterminalcore
     private func closeContent(for pane: Pane) {
         guard let sessionID = pane.content.terminalSessionID, let content = contentControllers.removeValue(forKey: sessionID) else { return }
         contentPreparationTasks.removeValue(forKey: sessionID)?.cancel()
-        // Closing detaches the pane's client and, once the daemon has processed that detach, runs the
-        // unattached ad hoc cleanup against the authoritative snapshot (via the pane's close-detach
-        // hook). The cleanup is driven directly from the close because this controller's own state
-        // stream is torn down here, so the detach would no longer surface as an attachment-state
-        // change to observe. An ad hoc shell stops only when no other client is still attached.
+        // Live terminal content runs unattached ad hoc cleanup through its close-detach hook.
+        // A preparing placeholder has no embedded client to detach, but the daemon shell already
+        // exists, so a removed placeholder runs the same snapshot-checked cleanup directly.
         content.close()
+        if content is TerminalPanePlaceholderContentController {
+            host.terminateUnattachedAdHocBuiltInTerminalSessionIfNeeded(sessionID: sessionID)
+        }
     }
 
     private func beginSplit(scope: PanelScope, paneID: String, direction: PaneSplitDirection) {
@@ -511,6 +512,9 @@ import spacesterminalcore
         previous.close()
         guard let placement = placement(forSessionID: sessionID) else { return }
         render(scope: placement.scope)
+        if let pane = PanelLayoutEngine.pane(withID: placement.paneID, in: layout(for: placement.scope)) {
+            activateContentIfVisible(scope: placement.scope, pane: pane)
+        }
         activateFocusedPane(scope: placement.scope)
     }
 
