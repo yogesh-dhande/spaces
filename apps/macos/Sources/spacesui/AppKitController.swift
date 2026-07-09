@@ -6820,41 +6820,46 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return ((try? database.pairedDevices()) ?? []).filter { $0.id != SpacesPairedDeviceRecord.localDeviceID }
     }
 
-    /// Devices whose agent-hook auto-install is currently running. This de-dupes overlapping launch
-    /// and connect signals, while completed probes are removed so later reconnects can discover
-    /// coding agents installed after app launch. Per-agent "already handled" markers live in the
-    /// client DB and prevent repeated installs.
+    /// Devices whose agent-hook auto-install is currently running. This de-dupes overlapping triggers
+    /// for the same device, while completed probes are removed so later reconnects can discover coding
+    /// agents installed after app launch. Per-agent "already handled" markers live in the client DB and
+    /// prevent repeated installs.
     private var agentHooksAutoInstallInFlightDeviceIDs: Set<String> = []
 
-    /// Auto-installs Spaces coding-agent hooks on every known device (This Mac + paired remotes) that
-    /// is not already being probed. Safe to call repeatedly — on app launch, after pairing a remote,
-    /// and whenever a remote reconnects. The actual once-per-(device, agent) decision and the
-    /// idempotent install live in `AgentHooksAutoInstaller`.
-    func autoInstallAgentHooksForKnownDevices() {
-        guard let database = try? clientDatabase() else { return }
-        var candidates: [SpacesPairedDeviceRecord] = []
-        if let local = try? database.pairedDevice(id: SpacesPairedDeviceRecord.localDeviceID) { candidates.append(local) }
-        candidates.append(contentsOf: macPairedDevices())
-        let toProbe = candidates.filter { agentHooksAutoInstallInFlightDeviceIDs.insert($0.id).inserted }
-        guard !toProbe.isEmpty else { return }
+    /// Auto-installs Spaces coding-agent hooks on the local device.
+    func autoInstallLocalAgentHooks() {
+        guard let database = try? clientDatabase(), let local = try? database.pairedDevice(id: SpacesPairedDeviceRecord.localDeviceID) else { return }
+        autoInstallAgentHooks(for: local)
+    }
+
+    /// Auto-installs Spaces coding-agent hooks on `device`, unless a probe for it is already running.
+    ///
+    /// Called on the edge into a usable daemon — the local one on its first healthy sidebar load, a
+    /// remote when it is paired or its overview stream connects. Only that device is probed: a trigger
+    /// for one device says nothing about whether the others are reachable, and probing them anyway
+    /// would spend a request timeout apiece on every offline remote, on every edge. Safe to call
+    /// repeatedly; the once-per-(device, agent) decision and the idempotent install live in
+    /// `AgentHooksAutoInstaller`.
+    func autoInstallAgentHooks(for device: SpacesPairedDeviceRecord) {
+        guard agentHooksAutoInstallInFlightDeviceIDs.insert(device.id).inserted else { return }
         let profile = try? SpacesProfile.current()
-        // Process this trigger's candidates in order; the installer serializes marker persistence across overlapping triggers.
         Task.detached(priority: .utility) { [weak self] in
-            guard let database = try? SpacesClientDatabase.defaultDatabase() else {
-                for device in toProbe { await self?.markAgentHooksDeviceProbeFinished(device.id) }
-                return
-            }
-            for device in toProbe {
+            if let database = try? SpacesClientDatabase.defaultDatabase() {
                 do {
-                    let installed = try AgentHooksAutoInstaller.run(device: device, database: database, profile: profile)
-                    if !installed.isEmpty {
-                        NSLog("Spaces: auto-installed agent hooks on \(device.id): \(installed.map { $0.rawValue }.joined(separator: ", "))")
+                    let result = try AgentHooksAutoInstaller.run(device: device, database: database, profile: profile)
+                    if !result.installed.isEmpty {
+                        NSLog("Spaces: auto-installed agent hooks on \(device.id): \(result.installed.map(\.rawValue).joined(separator: ", "))")
+                    }
+                    // Also recorded per (device, agent) so Settings → Coding Agents can explain the row.
+                    // The agent stays unrecorded, so the next connect retries it.
+                    for failure in result.failures {
+                        NSLog("Spaces: agent hook install failed on \(device.id) for \(failure.kind.rawValue): \(failure.message)")
                     }
                 } catch {
                     NSLog("Spaces: agent hook auto-install deferred for \(device.id): \(error.localizedDescription)")
                 }
-                await self?.markAgentHooksDeviceProbeFinished(device.id)
             }
+            await self?.markAgentHooksDeviceProbeFinished(device.id)
         }
     }
 

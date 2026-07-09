@@ -106,14 +106,14 @@ import XCTest
         func testDaemonWireCompatibleWhenVersionsMatch() {
             let response = TerminalServiceResponse(
                 ok: true, message: "pong", daemonStatus: makeDaemonStatus(protocolVersion: SpacesWireProtocol.version))
-            XCTAssertNil(TerminalService.daemonWireIncompatibility(response))
+            XCTAssertNil(TerminalService.daemonWireIncompatibilityDetails(response)?.message)
             XCTAssertNoThrow(try TerminalService.assertDaemonWireCompatible(response))
         }
 
         func testDaemonWireIncompatibleWhenDaemonIsOlder() throws {
             let response = TerminalServiceResponse(
                 ok: true, message: "pong", daemonStatus: makeDaemonStatus(protocolVersion: SpacesWireProtocol.version - 1, activeSessionCount: 2))
-            let message = try XCTUnwrap(TerminalService.daemonWireIncompatibility(response))
+            let message = try XCTUnwrap(TerminalService.daemonWireIncompatibilityDetails(response)?.message)
             XCTAssertTrue(message.contains("Restart the daemon"))
             // Impact suffix appears when a restart would interrupt running work.
             XCTAssertTrue(message.contains("Restarting stops"))
@@ -130,7 +130,7 @@ import XCTest
         func testDaemonWireIncompatibleWhenClientIsOlder() throws {
             let response = TerminalServiceResponse(
                 ok: true, message: "pong", daemonStatus: makeDaemonStatus(protocolVersion: SpacesWireProtocol.version + 1))
-            let message = try XCTUnwrap(TerminalService.daemonWireIncompatibility(response))
+            let message = try XCTUnwrap(TerminalService.daemonWireIncompatibilityDetails(response)?.message)
             XCTAssertTrue(message.contains("Update Spaces"))
             XCTAssertThrowsError(try TerminalService.assertDaemonWireCompatible(response)) { error in
                 guard case TerminalServiceError.daemonWireIncompatible(let incompatibility) = error else {
@@ -144,7 +144,7 @@ import XCTest
         func testDaemonWireIncompatibleWhenStatusIsMissing() throws {
             // A daemon predating wire-version negotiation omits daemonStatus entirely; treat it as too old.
             let response = TerminalServiceResponse(ok: true, message: "pong")
-            XCTAssertNotNil(TerminalService.daemonWireIncompatibility(response))
+            XCTAssertNotNil(TerminalService.daemonWireIncompatibilityDetails(response)?.message)
         }
 
         private func makeDaemonStatus(protocolVersion: Int, activeSessionCount: Int = 0) -> TerminalServiceDaemonStatus {

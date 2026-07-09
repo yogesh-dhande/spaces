@@ -44,6 +44,9 @@ import workspacecore
     var codingAgentsDeviceID: String = SpacesPairedDeviceRecord.localDeviceID
     weak var codingAgentsRowsContainer: NSStackView?
     var codingAgentsStatus: [AgentHookStatus] = []
+    /// The last recorded install failure per agent on the selected device, so a row that Spaces tried
+    /// and failed to fix explains itself instead of only reporting "hooks not installed".
+    var codingAgentsFailures: [SupportedCodingAgentHook: String] = [:]
     /// Increments per reload so a stale in-flight fetch's result is discarded when the user switches devices.
     var codingAgentsReloadToken: Int = 0
     /// Increments per install so a stale completion cannot update rows for a different selected device.

@@ -4,7 +4,7 @@ import Foundation
 ///
 /// opencode auto-loads every file in `~/.config/opencode/plugin/` at startup (verified against
 /// opencode 1.16), so installation is a single whole-file write — inherently idempotent, with no
-/// user-config merge. The plugin reports lifecycle signals from inside the opencode process, reading
+/// user-config merge. The plugin reports lifecycle signals from inside the opencode process, running
 /// `spaces agent signal`, which reads Spaces session env vars and no-ops in other terminals.
 ///
 /// Signal mapping: plugin startup → `init`, `chat.message` hook → `working`, event-bus
@@ -13,8 +13,8 @@ import Foundation
 enum AgentHookOpencodePluginWriter {
     static let pluginFileName = "spaces-agent-signal.js"
 
-    static func install(pluginURL: URL, fileManager: FileManager = .default) throws {
-        try AgentHookConfigFile.write(pluginContents(), to: pluginURL, fileManager: fileManager)
+    static func install(pluginURL: URL, spacesExecutablePath: String, fileManager: FileManager = .default) throws {
+        try AgentHookConfigFile.write(pluginContents(spacesExecutablePath: spacesExecutablePath), to: pluginURL, fileManager: fileManager)
     }
 
     static func isInstalled(pluginURL: URL) -> Bool {
@@ -23,15 +23,20 @@ enum AgentHookOpencodePluginWriter {
     }
 
     /// The plugin source. Uses Bun's `$` shell helper (passed into every opencode plugin) to run the
-    /// `spaces` CLI from PATH; failures are swallowed so a signal never disrupts the agent.
-    static func pluginContents() -> String {
+    /// Spaces CLI at the absolute path resolved when hooks were installed, for the same reason the
+    /// shell hook commands do — see `AgentHookCommand`. Bun's `$` interpolates a JS value as a single
+    /// argument, so the path needs no shell quoting here. Failures are swallowed so a signal never
+    /// disrupts the agent.
+    static func pluginContents(spacesExecutablePath: String) -> String {
         return """
             // spaces-agent-signal — managed by Spaces (\(AgentHookCommand.marker)). Do not edit; reinstall from Spaces settings.
+
+            const SPACES_CLI = \(javaScriptStringLiteral(spacesExecutablePath))
 
             export const SpacesAgentSignal = async ({ $ }) => {
               const signal = async (event) => {
                 try {
-                  await $`spaces agent signal ${event}`.quiet()
+                  await $`${SPACES_CLI} agent signal ${event}`.quiet()
                 } catch {}
               }
               await signal("init")
@@ -47,5 +52,11 @@ enum AgentHookOpencodePluginWriter {
             }
 
             """
+    }
+
+    /// Renders `value` as a double-quoted JavaScript string literal.
+    private static func javaScriptStringLiteral(_ value: String) -> String {
+        let escaped = value.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+        return "\"\(escaped)\""
     }
 }

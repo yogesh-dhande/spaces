@@ -4,9 +4,10 @@ import Testing
 @testable import spacesterminalcore
 
 @Suite struct AgentHookInstallerTests {
-    /// Availability probing reads `PATH` and, on a miss, the user's login shell. Tests pin both: an
-    /// empty `PATH` (the common install directories still apply) and a stub shell probe, so no test
-    /// depends on the developer's environment or spawns a real interactive shell.
+    /// Availability probing reads `PATH`, then the common install directories, then the user's login
+    /// shell. Tests pin all three — an empty `PATH`, a `HomeScopedFileManager` that hides executables
+    /// outside the temporary home, and a stub shell probe — so no test depends on what is installed on
+    /// the developer's machine or spawns a real interactive shell.
     private let environment = ["PATH": ""]
 
     /// Stands in for the login-shell PATH probe and counts how often it is consulted.
@@ -44,20 +45,52 @@ import Testing
 
     @discardableResult
     private func install(
-        _ kinds: [SupportedCodingAgentHook], home: URL, fileManager: FileManager = .default, shell: ShellProbeSpy = ShellProbeSpy()
-    ) throws -> [AgentHookStatus] {
+        _ kinds: [SupportedCodingAgentHook], home: URL, fileManager: FileManager? = nil, shell: ShellProbeSpy = ShellProbeSpy()
+    ) throws -> AgentHookInstallOutcome {
         try AgentHookInstaller.install(
-            kinds, home: home, fileManager: fileManager, environment: environment, shellPathDirectoryResolver: shell.resolver)
+            kinds, home: home, fileManager: fileManager ?? HomeScopedFileManager(home: home), environment: environment,
+            shellPathDirectoryResolver: shell.resolver)
     }
 
-    private func status(home: URL, fileManager: FileManager = .default, shell: ShellProbeSpy = ShellProbeSpy()) -> [AgentHookStatus] {
-        AgentHookInstaller.status(home: home, fileManager: fileManager, environment: environment, shellPathDirectoryResolver: shell.resolver)
+    private func status(home: URL, fileManager: FileManager? = nil, shell: ShellProbeSpy = ShellProbeSpy()) -> [AgentHookStatus] {
+        AgentHookInstaller.status(
+            home: home, fileManager: fileManager ?? HomeScopedFileManager(home: home), environment: environment,
+            shellPathDirectoryResolver: shell.resolver)
     }
 
+    /// Availability probing scans real system directories (`/usr/local/bin`, `/opt/homebrew/bin`, …) in
+    /// addition to the home under test. A `spaces` or agent CLI installed on the machine running these
+    /// tests would otherwise satisfy the probe, so executables outside the temporary home are hidden.
+    /// Only the probe is scoped; reads and writes pass straight through.
+    private final class HomeScopedFileManager: FileManager {
+        private let homePath: String
+
+        init(home: URL) {
+            self.homePath = home.path
+            super.init()
+        }
+
+        override func isExecutableFile(atPath path: String) -> Bool {
+            path.hasPrefix(homePath + "/") && super.isExecutableFile(atPath: path)
+        }
+    }
+
+    /// Every install resolves the Spaces CLI to embed in the hook commands, so a home that has agents
+    /// but no `spaces` cannot install anything. Tests that install put both in `~/.local/bin`.
     private func makeAgentsAvailable(_ kinds: [SupportedCodingAgentHook], home: URL) throws {
+        try makeSpacesCLIAvailable(home: home)
         for name in Set(kinds.flatMap(\.executableNames)) {
             try makeExecutable(name: name, directory: home.appendingPathComponent(".local/bin", isDirectory: true))
         }
+    }
+
+    @discardableResult
+    private func makeSpacesCLIAvailable(home: URL) throws -> URL {
+        try makeExecutable(name: AgentHookCommand.spacesExecutableName, directory: home.appendingPathComponent(".local/bin", isDirectory: true))
+    }
+
+    private func spacesCLIPath(home: URL) -> String {
+        home.appendingPathComponent(".local/bin/\(AgentHookCommand.spacesExecutableName)").path
     }
 
     @discardableResult
@@ -162,6 +195,9 @@ import Testing
         #expect(hooks["Stop"] != nil)
     }
 
+    /// The seeded Spaces entry carries a stale `spaces` path, as it would after the CLI moved. Reinstall
+    /// must leave exactly one Spaces entry, pointing at the path resolved now, and keep the user's own
+    /// command in the same hook group.
     @Test func reinstallPreservesUserHookEntriesInsideMixedHookGroup() throws {
         let home = try makeHome()
         defer { try? FileManager.default.removeItem(at: home) }
@@ -169,6 +205,7 @@ import Testing
         let settings = home.appendingPathComponent(".claude/settings.json")
         try FileManager.default.createDirectory(at: settings.deletingLastPathComponent(), withIntermediateDirectories: true)
         let userCommand = "/opt/user/session-start"
+        let staleCommand = AgentHookCommand.signalCommand(event: .initialize, spacesExecutablePath: "/old/bin/spaces")
         let existing = """
             {
               "hooks": {
@@ -176,7 +213,7 @@ import Testing
                   {
                     "matcher": "",
                     "hooks": [
-                      { "type": "command", "command": "\(AgentHookCommand.signalCommand(event: .initialize))" },
+                      { "type": "command", "command": "\(staleCommand)" },
                       { "type": "command", "command": "\(userCommand)" }
                     ]
                   }
@@ -195,7 +232,9 @@ import Testing
         }
 
         #expect(commands.contains(userCommand))
-        #expect(commands.filter(AgentHookCommand.isSpacesOwned).count == 1)
+        let spacesCommands = commands.filter(AgentHookCommand.isSpacesOwned)
+        #expect(spacesCommands.count == 1)
+        #expect(spacesCommands.first?.contains(spacesCLIPath(home: home)) == true)
     }
 
     /// Agent configs are commonly symlinked into a dotfiles repo. An atomic write to the link path
@@ -276,9 +315,10 @@ import Testing
         let garbage = "{ this is not json"
         try garbage.write(to: settings, atomically: true, encoding: .utf8)
 
-        #expect(throws: (any Error).self) {
-            try install([.claudeCode], home: home)
-        }
+        let outcome = try install([.claudeCode], home: home)
+
+        #expect(outcome.failures.map(\.kind) == [.claudeCode])
+        #expect(outcome.agents.first { $0.kind == .claudeCode }?.hooksInstalled == false)
         #expect(read(settings) == garbage)
     }
 
@@ -442,16 +482,35 @@ import Testing
         }
     }
 
+    /// `hooks` is a boolean feature flag. A `hooks` key holding anything else means the config is
+    /// shaped in a way this editor does not understand, and overwriting it with `true` would silently
+    /// destroy whatever the user put there — so refuse, in every spelling the editor otherwise edits.
+    @Test func codexFeatureToggleRefusesToOverwriteANonBooleanHooksValue() throws {
+        let conflicts = [
+            "[features]\nhooks = { enabled = true }\n",  // `hooks` inside the [features] table
+            "features = { hooks = 1 }\n",  // `hooks` inside a top-level inline table
+            "features.hooks = \"yes\"\n",  // top-level dotted `features.hooks`
+        ]
+        for contents in conflicts {
+            #expect(throws: (any Error).self) { try AgentHookCodexFeatureToggle.updatedContents(contents) }
+        }
+    }
+
     @Test func codexInstallLeavesAConflictingConfigUntouched() throws {
         let home = try makeHome()
         defer { try? FileManager.default.removeItem(at: home) }
-        try makeAgentsAvailable([.codex], home: home)
+        try makeAgentsAvailable([.claudeCode, .codex], home: home)
         let config = home.appendingPathComponent(".codex/config.toml")
         try FileManager.default.createDirectory(at: config.deletingLastPathComponent(), withIntermediateDirectories: true)
         let original = "[[features]]\nname = \"a\"\n"
         try original.write(to: config, atomically: true, encoding: .utf8)
 
-        #expect(throws: (any Error).self) { try install([.codex], home: home) }
+        let outcome = try install([.claudeCode, .codex], home: home)
+
+        // Codex's config is untouchable, but that must not cost Claude Code its hooks.
+        #expect(outcome.failures.map(\.kind) == [.codex])
+        #expect(outcome.agents.first { $0.kind == .codex }?.hooksInstalled == false)
+        #expect(outcome.agents.first { $0.kind == .claudeCode }?.hooksInstalled == true)
         #expect(read(config) == original)
     }
 
@@ -528,39 +587,76 @@ import Testing
         defer { try? FileManager.default.removeItem(at: home) }
         let shimDirectory = home.appendingPathComponent(".asdf/shims", isDirectory: true)
         try makeExecutable(name: "codex", directory: shimDirectory)
+        // `spaces` lives there too, so resolving it, resolving codex, and the trailing status all ride
+        // the same probe rather than spawning a shell each.
+        try makeExecutable(name: AgentHookCommand.spacesExecutableName, directory: shimDirectory)
         let shell = ShellProbeSpy(directories: [shimDirectory.path])
 
-        let statuses = try install([.codex], home: home, shell: shell)
+        let outcome = try install([.codex], home: home, shell: shell)
 
         #expect(shell.invocationCount == 1)
-        #expect(statuses.first { $0.kind == .codex }?.available == true)
-        #expect(statuses.first { $0.kind == .codex }?.hooksInstalled == true)
+        #expect(outcome.failures.isEmpty)
+        #expect(outcome.agents.first { $0.kind == .codex }?.available == true)
+        #expect(outcome.agents.first { $0.kind == .codex }?.hooksInstalled == true)
     }
 
-    @Test func installRejectsUnavailableAgentsBeforeWritingConfig() throws {
+    /// An undetected agent is reported as a failure and writes nothing, while its detected siblings
+    /// still install: one missing CLI must not cost the whole batch.
+    @Test func installReportsUnavailableAgentsWithoutWritingTheirConfig() throws {
         let home = try makeHome()
         defer { try? FileManager.default.removeItem(at: home) }
-        let fileManager = StubFileManager()
+        try makeAgentsAvailable([.claudeCode], home: home)
 
-        #expect(throws: AgentHookInstallerError.unavailableAgents([.codex])) {
-            try install([.codex], home: home, fileManager: fileManager)
-        }
+        let outcome = try install([.claudeCode, .codex], home: home)
+
+        #expect(outcome.failures.map(\.kind) == [.codex])
+        #expect(outcome.agents.first { $0.kind == .claudeCode }?.hooksInstalled == true)
         #expect(!FileManager.default.fileExists(atPath: home.appendingPathComponent(".codex").path))
     }
 
-    @Test func hookCommandUsesPathResolvedSpacesAndMarker() {
-        let command = AgentHookCommand.signalCommand(event: .done)
-        #expect(command == "spaces agent signal done >/dev/null 2>&1 || true # \(AgentHookCommand.marker)")
+    /// Without the Spaces CLI every hook command would be unwritable, so nothing is installed at all.
+    @Test func installFailsWhenTheSpacesCLIIsNotFound() throws {
+        let home = try makeHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        try makeExecutable(name: "claude", directory: home.appendingPathComponent(".local/bin", isDirectory: true))
+
+        #expect(throws: AgentHookInstallerError.spacesCLINotFound) { try install([.claudeCode], home: home) }
+        #expect(!FileManager.default.fileExists(atPath: home.appendingPathComponent(".claude").path))
+    }
+
+    /// Hook commands invoke the resolved Spaces CLI by absolute path, not a bare `spaces` that would
+    /// depend on whatever PATH the agent happened to hand its hook process.
+    @Test func hookCommandUsesTheResolvedSpacesPathAndMarker() throws {
+        let home = try makeHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        try makeAgentsAvailable([.claudeCode], home: home)
+
+        try install([.claudeCode], home: home)
+
+        let contents = read(home.appendingPathComponent(".claude/settings.json"))
+        #expect(contents.contains("'\(spacesCLIPath(home: home))' agent signal done >/dev/null 2>&1 || true # \(AgentHookCommand.marker)"))
+        #expect(!contents.contains("\"command\" : \"spaces agent signal"))
+    }
+
+    @Test func hookCommandShellQuotesAPathContainingSpaces() {
+        let command = AgentHookCommand.signalCommand(event: .done, spacesExecutablePath: "/Users/a b/bin/spaces")
+        #expect(command == "'/Users/a b/bin/spaces' agent signal done >/dev/null 2>&1 || true # \(AgentHookCommand.marker)")
         #expect(AgentHookCommand.isSpacesOwned(command))
     }
 
-    @Test func opencodePluginUsesPathResolvedSpacesSignal() {
-        let contents = AgentHookOpencodePluginWriter.pluginContents()
+    @Test func opencodePluginInvokesTheResolvedSpacesPath() throws {
+        let home = try makeHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        try makeAgentsAvailable([.opencode], home: home)
 
-        #expect(contents.contains("spaces agent signal ${event}"))
+        try install([.opencode], home: home)
+
+        let contents = read(home.appendingPathComponent(".config/opencode/plugin/spaces-agent-signal.js"))
+        #expect(contents.contains("const SPACES_CLI = \"\(spacesCLIPath(home: home))\""))
+        #expect(contents.contains("$`${SPACES_CLI} agent signal ${event}`"))
+        #expect(!contents.contains("$`spaces agent signal"))
         #expect(!contents.contains("--workspace"))
         #expect(!contents.contains("--session"))
-        #expect(!contents.contains("SPACES_CLI"))
     }
 
     // MARK: - Login-shell PATH cache

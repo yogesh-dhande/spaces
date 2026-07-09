@@ -23,14 +23,42 @@ public struct AgentHookStatus: Sendable, Equatable, Codable {
     }
 }
 
+/// Why hooks could not be installed for one agent. Per-agent rather than per-request: one agent whose
+/// config Spaces refuses to edit must not prevent the others from being installed, and must not make a
+/// successful sibling look unattempted to the caller that records what it has already auto-installed.
+public struct AgentHookInstallFailure: Sendable, Equatable, Codable {
+    public let kind: SupportedCodingAgentHook
+    public let message: String
+
+    public init(kind: SupportedCodingAgentHook, message: String) {
+        self.kind = kind
+        self.message = message
+    }
+}
+
+/// The result of an install request: fresh status for every supported agent, plus one entry per agent
+/// that could not be installed. `failures` being empty is the only signal that everything requested
+/// landed.
+public struct AgentHookInstallOutcome: Sendable, Equatable, Codable {
+    public let agents: [AgentHookStatus]
+    public let failures: [AgentHookInstallFailure]
+
+    public init(agents: [AgentHookStatus], failures: [AgentHookInstallFailure]) {
+        self.agents = agents
+        self.failures = failures
+    }
+}
+
+/// A failure that stops the whole install request rather than one agent's share of it.
 public enum AgentHookInstallerError: Error, LocalizedError, Sendable, Equatable {
-    case unavailableAgents([SupportedCodingAgentHook])
+    /// Every hook command invokes the Spaces CLI by absolute path, so without it there is nothing
+    /// worth writing: the hooks would install and then silently never fire.
+    case spacesCLINotFound
 
     public var errorDescription: String? {
         switch self {
-        case .unavailableAgents(let kinds):
-            let names = kinds.map(\.displayName).joined(separator: ", ")
-            return "Cannot install hooks because these coding-agent CLIs were not detected on this machine: \(names)."
+        case .spacesCLINotFound:
+            return "Cannot install hooks because the `spaces` CLI was not found on this machine. Install the Spaces CLI, then retry."
         }
     }
 }
@@ -50,12 +78,13 @@ public enum AgentHookInstaller {
         return status(home: home, fileManager: fileManager, executableResolver: &executableResolver)
     }
 
-    /// Idempotently installs hooks for `kinds`, then returns fresh status for every supported agent.
-    /// A per-agent install failure surfaces immediately rather than being swallowed.
+    /// Idempotently installs hooks for `kinds`, then returns fresh status for every supported agent
+    /// alongside one failure entry per agent that could not be installed. Each agent is attempted
+    /// independently, so a config Spaces refuses to edit costs only that agent.
     @discardableResult
     public static func install(
         _ kinds: [SupportedCodingAgentHook], home: URL = defaultHome(), fileManager: FileManager = .default
-    ) throws -> [AgentHookStatus] {
+    ) throws -> AgentHookInstallOutcome {
         var executableResolver = ExecutableResolver(home: home, fileManager: fileManager)
         return try install(kinds, home: home, fileManager: fileManager, executableResolver: &executableResolver)
     }
@@ -79,7 +108,7 @@ public enum AgentHookInstaller {
     static func install(
         _ kinds: [SupportedCodingAgentHook], home: URL, fileManager: FileManager, environment: [String: String],
         shellPathDirectoryResolver: @escaping ShellPathDirectoryResolver
-    ) throws -> [AgentHookStatus] {
+    ) throws -> AgentHookInstallOutcome {
         var executableResolver = ExecutableResolver(
             home: home, fileManager: fileManager, environment: environment, shellPathDirectoryResolver: shellPathDirectoryResolver)
         return try install(kinds, home: home, fileManager: fileManager, executableResolver: &executableResolver)
@@ -98,15 +127,30 @@ public enum AgentHookInstaller {
 
     /// `install` and the `status` it returns share one resolver, so a login-shell probe costs at most
     /// one shell spawn per install rather than one per phase.
+    ///
+    /// An agent that is not available, or whose config cannot be edited, becomes a failure entry; the
+    /// remaining agents still install. Only a missing `spaces` CLI aborts the request, because every
+    /// hook command it would write invokes that binary by absolute path.
     private static func install(
         _ kinds: [SupportedCodingAgentHook], home: URL, fileManager: FileManager, executableResolver: inout ExecutableResolver
-    ) throws -> [AgentHookStatus] {
-        let unavailable = kinds.filter { !isAvailable($0, executableResolver: &executableResolver) }
-        guard unavailable.isEmpty else { throw AgentHookInstallerError.unavailableAgents(unavailable) }
-        for kind in kinds {
-            try kind.install(home: home, fileManager: fileManager)
+    ) throws -> AgentHookInstallOutcome {
+        guard let spacesExecutablePath = executableResolver.resolve(named: AgentHookCommand.spacesExecutableName) else {
+            throw AgentHookInstallerError.spacesCLINotFound
         }
-        return status(home: home, fileManager: fileManager, executableResolver: &executableResolver)
+        var failures: [AgentHookInstallFailure] = []
+        for kind in kinds {
+            guard isAvailable(kind, executableResolver: &executableResolver) else {
+                failures.append(.init(kind: kind, message: "\(kind.displayName) was not detected on this machine."))
+                continue
+            }
+            do {
+                try kind.install(home: home, fileManager: fileManager, spacesExecutablePath: spacesExecutablePath)
+            } catch {
+                failures.append(.init(kind: kind, message: error.localizedDescription))
+            }
+        }
+        return AgentHookInstallOutcome(
+            agents: status(home: home, fileManager: fileManager, executableResolver: &executableResolver), failures: failures)
     }
 
     private static func status(home: URL, fileManager: FileManager, executableResolver: inout ExecutableResolver) -> [AgentHookStatus] {
@@ -229,8 +273,10 @@ public enum AgentHookInstaller {
             self.now = now
         }
 
-        /// Holds the lock across `compute` so concurrent probes for the same home spawn one shell,
-        /// not one each.
+        /// Holds the lock across `compute` so concurrent probes spawn one shell, not one each. One lock
+        /// rather than one per home: a process serves exactly one home (its own user's), so the map is
+        /// keyed by home only to let tests exercise several without sharing state, and contention
+        /// between distinct homes cannot arise in production.
         func directories(home: URL, compute: () -> [String]) -> [String] {
             lock.lock()
             defer { lock.unlock() }
@@ -281,6 +327,13 @@ public enum AgentHookInstaller {
     /// has consumed the last chunk, so the output is read through to EOF before it is parsed —
     /// otherwise the marker line, which is printed last, can be lost and the shell PATH silently
     /// ignored.
+    ///
+    /// The shell is interactive (`-i`) because version managers put their shim directories on PATH
+    /// from `.zshrc`, which a login-only shell never sources. An interactive shell that inherits a
+    /// terminal on stdin, though, will touch that terminal — reconfiguring its modes, or taking
+    /// job-control signals that stop the probe until it times out. Both callers can have a terminal on
+    /// stdin (the `spaces` CLI always does), so stdin is redirected to /dev/null: nothing is ever
+    /// written to the shell, only read back from it.
     static func resolvedLoginShellPATH(shellPath: String, home: URL, environment: [String: String]) -> String? {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: shellPath)
@@ -291,6 +344,7 @@ public enum AgentHookInstaller {
             processEnvironment["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
         }
         process.environment = processEnvironment
+        process.standardInput = FileHandle.nullDevice
 
         let outputPipe = Pipe()
         let outputBuffer = PipeOutputBuffer()

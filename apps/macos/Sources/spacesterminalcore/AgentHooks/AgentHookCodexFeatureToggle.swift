@@ -18,16 +18,35 @@ enum AgentHookCodexFeatureToggle {
     private static let sectionName = "features"
     private static let hooksKey = "hooks"
 
-    /// `features` is already defined in a shape this line editor cannot extend. Appending a `[features]`
-    /// table beside it would produce a duplicate key or a table-type conflict, and Codex would fail to
-    /// parse the whole config — so refuse and leave the file untouched.
+    /// `features` (or `features.hooks`) is already defined in a shape this line editor cannot safely
+    /// edit. Appending a `[features]` table beside it would produce a duplicate key or a table-type
+    /// conflict, and rewriting a non-boolean `hooks` value would destroy user config — either way
+    /// Codex would fail to parse `config.toml`. So refuse and leave the file untouched.
     struct ConflictingFeaturesDefinitionError: LocalizedError, Equatable {
+        /// Names what is already there, e.g. "`features` as an array of tables (`[[features]]`)".
         let existingDefinition: String
 
         var errorDescription: String? {
-            "Cannot enable Codex hooks: config.toml already defines `features` as \(existingDefinition). "
+            "Cannot enable Codex hooks: config.toml already defines \(existingDefinition). "
                 + "Set `features.hooks = true` in that config yourself, then reinstall hooks."
         }
+    }
+
+    /// A `hooks = <value>` assignment, classified by whether this editor may rewrite it. Only a bool
+    /// literal is rewritten: `hooks` is a boolean feature flag, so any other value means the config is
+    /// shaped in a way we do not understand, and silently replacing it would lose the user's data.
+    private enum HooksAssignment {
+        case alreadyTrue
+        /// `hooks = false`, with the line rewritten to `true` (indentation and trailing comment kept).
+        case flippable(updatedLine: String)
+        case nonBoolean
+    }
+
+    /// A top-level `features = { … }` inline table, classified the same way.
+    private enum InlineFeaturesTable {
+        case hooksAlreadyTrue
+        case updated(line: String)
+        case nonBooleanHooks
     }
 
     static func ensureEnabled(fileURL: URL, fileManager: FileManager = .default) throws {
@@ -61,10 +80,8 @@ enum AgentHookCodexFeatureToggle {
         if let sectionIndex = lines.firstIndex(where: isFeaturesSectionHeader) {
             // Find the extent of the [features] table (up to the next table header or EOF).
             let sectionEnd = lines[(sectionIndex + 1)...].firstIndex(where: isAnySectionHeader) ?? lines.count
-            if let hooksIndex = lines[(sectionIndex + 1)..<sectionEnd].firstIndex(where: { hooksAssignmentUpdate(for: $0) != nil }),
-                let update = hooksAssignmentUpdate(for: lines[hooksIndex])
-            {
-                lines[hooksIndex] = update.updatedLine
+            if let hooksIndex = lines[(sectionIndex + 1)..<sectionEnd].firstIndex(where: { hooksAssignment(for: $0) != nil }) {
+                lines[hooksIndex] = try flippedHooksLine(lines[hooksIndex])
             } else {
                 lines.insert("\(hooksKey) = true", at: sectionIndex + 1)
             }
@@ -72,16 +89,19 @@ enum AgentHookCodexFeatureToggle {
         }
 
         let topLevelEnd = lines.firstIndex(where: isAnySectionHeader) ?? lines.count
-        if let inlineIndex = lines[..<topLevelEnd].firstIndex(where: { inlineFeaturesTableUpdate(for: $0) != nil }),
-            let update = inlineFeaturesTableUpdate(for: lines[inlineIndex])
-        {
-            lines[inlineIndex] = update.updatedLine
-            return lines.joined(separator: "\n")
+        if let inlineIndex = lines[..<topLevelEnd].firstIndex(where: { inlineFeaturesTable(for: $0) != nil }) {
+            switch inlineFeaturesTable(for: lines[inlineIndex]) {
+            case .updated(let line):
+                lines[inlineIndex] = line
+                return lines.joined(separator: "\n")
+            case .nonBooleanHooks:
+                throw ConflictingFeaturesDefinitionError(existingDefinition: nonBooleanHooksDefinition)
+            case .hooksAlreadyTrue, .none:
+                return nil  // unreachable: `featuresSectionHasHooksTrue` already returned above
+            }
         }
-        if let dottedHooksIndex = lines[..<topLevelEnd].firstIndex(where: { dottedFeaturesHooksUpdate(for: $0) != nil }),
-            let update = dottedFeaturesHooksUpdate(for: lines[dottedHooksIndex])
-        {
-            lines[dottedHooksIndex] = update.updatedLine
+        if let dottedHooksIndex = lines[..<topLevelEnd].firstIndex(where: { dottedFeaturesHooksAssignment(for: $0) != nil }) {
+            lines[dottedHooksIndex] = try flippedDottedHooksLine(lines[dottedHooksIndex])
             return lines.joined(separator: "\n")
         }
         if let dottedFeaturesIndex = lines[..<topLevelEnd].lastIndex(where: isDottedFeaturesAssignment) {
@@ -100,16 +120,43 @@ enum AgentHookCodexFeatureToggle {
         return prefix + separator + "[\(sectionName)]\n\(hooksKey) = true\n"
     }
 
+    /// Text for the "`features.hooks` is not a boolean" conflict, shared by the section, inline-table,
+    /// and dotted-key edit paths.
+    private static let nonBooleanHooksDefinition = "`\(sectionName).\(hooksKey)` with a value that is not `true` or `false`"
+
+    /// Rewrites a `hooks = false` line to `true`, or refuses when the value is not a bool literal.
+    private static func flippedHooksLine(_ line: String) throws -> String {
+        switch hooksAssignment(for: line) {
+        case .flippable(let updatedLine): return updatedLine
+        case .nonBoolean: throw ConflictingFeaturesDefinitionError(existingDefinition: nonBooleanHooksDefinition)
+        case .alreadyTrue, .none: return line  // unreachable: `featuresSectionHasHooksTrue` already returned
+        }
+    }
+
+    private static func flippedDottedHooksLine(_ line: String) throws -> String {
+        switch dottedFeaturesHooksAssignment(for: line) {
+        case .flippable(let updatedLine): return updatedLine
+        case .nonBoolean: throw ConflictingFeaturesDefinitionError(existingDefinition: nonBooleanHooksDefinition)
+        case .alreadyTrue, .none: return line  // unreachable: `featuresSectionHasHooksTrue` already returned
+        }
+    }
+
     private static func featuresSectionHasHooksTrue(_ contents: String) -> Bool {
         let lines = contents.components(separatedBy: "\n")
         if let sectionIndex = lines.firstIndex(where: isFeaturesSectionHeader) {
             let sectionEnd = lines[(sectionIndex + 1)...].firstIndex(where: isAnySectionHeader) ?? lines.count
-            if lines[(sectionIndex + 1)..<sectionEnd].contains(where: { hooksAssignmentUpdate(for: $0)?.hasHooksTrue == true }) { return true }
+            if lines[(sectionIndex + 1)..<sectionEnd].contains(where: { isAlreadyTrue(hooksAssignment(for: $0)) }) { return true }
         }
         let topLevelEnd = lines.firstIndex(where: isAnySectionHeader) ?? lines.count
-        return lines[..<topLevelEnd].contains {
-            inlineFeaturesTableUpdate(for: $0)?.hasHooksTrue == true || dottedFeaturesHooksUpdate(for: $0)?.hasHooksTrue == true
+        return lines[..<topLevelEnd].contains { line in
+            if case .hooksAlreadyTrue = inlineFeaturesTable(for: line) { return true }
+            return isAlreadyTrue(dottedFeaturesHooksAssignment(for: line))
         }
+    }
+
+    private static func isAlreadyTrue(_ assignment: HooksAssignment?) -> Bool {
+        if case .alreadyTrue = assignment { return true }
+        return false
     }
 
     private static func commentStripped(_ line: String) -> String { splitTrailingComment(line).code }
@@ -194,30 +241,46 @@ enum AgentHookCodexFeatureToggle {
     /// `[features.sub]` does not collide: TOML allows a super-table to be declared after its sub-table.
     private static func conflictingFeaturesDefinition(_ lines: [String]) -> String? {
         for line in lines {
-            if arrayOfTablesName(line) == sectionName { return "an array of tables (`[[\(sectionName)]]`)" }
+            if arrayOfTablesName(line) == sectionName { return "`\(sectionName)` as an array of tables (`[[\(sectionName)]]`)" }
             if sectionHeaderName(line) == "\(sectionName).\(hooksKey)" { return "a `[\(sectionName).\(hooksKey)]` table" }
         }
         let topLevelEnd = lines.firstIndex(where: isAnySectionHeader) ?? lines.count
         for line in lines[..<topLevelEnd] {
             let code = commentStripped(line)
             guard let equalsIndex = code.firstIndex(of: "="), unquotedKey(String(code[..<equalsIndex])) == sectionName else { continue }
-            return "a value that is not an inline table"
+            return "`\(sectionName)` as a value that is not an inline table"
         }
         return nil
     }
 
     /// A `hooks = <value>` assignment (bare or quoted key), as it appears inside a `[features]` table
     /// or as an inline-table entry. Indentation and any trailing comment survive the flip to `true`.
-    private static func hooksAssignmentUpdate(for line: String) -> (hasHooksTrue: Bool, updatedLine: String)? {
+    private static func hooksAssignment(for line: String) -> HooksAssignment? {
         let split = splitTrailingComment(line)
         let code = split.code
         guard let equalsIndex = code.firstIndex(of: "="), unquotedKey(String(code[..<equalsIndex])) == hooksKey else { return nil }
-        if trimmed(String(code[code.index(after: equalsIndex)...])) == "true" { return (true, line) }
-        let comment = split.comment.isEmpty ? "" : " " + split.comment
-        return (false, String(code[...equalsIndex]) + " true" + comment)
+        return assignment(code: code, equalsIndex: equalsIndex, comment: split.comment)
     }
 
-    private static func inlineFeaturesTableUpdate(for line: String) -> (hasHooksTrue: Bool, updatedLine: String)? {
+    private static func dottedFeaturesHooksAssignment(for line: String) -> HooksAssignment? {
+        let split = splitTrailingComment(line)
+        let code = split.code
+        guard let equalsIndex = code.firstIndex(of: "="), dottedKeyParts(in: code[..<equalsIndex]) == [sectionName, hooksKey] else {
+            return nil
+        }
+        return assignment(code: code, equalsIndex: equalsIndex, comment: split.comment)
+    }
+
+    /// Classifies the right-hand side of a `hooks` assignment whose key has already been matched.
+    private static func assignment(code: String, equalsIndex: String.Index, comment: String) -> HooksAssignment {
+        let value = trimmed(String(code[code.index(after: equalsIndex)...]))
+        if value == "true" { return .alreadyTrue }
+        guard value == "false" else { return .nonBoolean }
+        let trailingComment = comment.isEmpty ? "" : " " + comment
+        return .flippable(updatedLine: String(code[...equalsIndex]) + " true" + trailingComment)
+    }
+
+    private static func inlineFeaturesTable(for line: String) -> InlineFeaturesTable? {
         let split = splitTrailingComment(line)
         let code = split.code
         guard let equalsIndex = code.firstIndex(of: "="), unquotedKey(String(code[..<equalsIndex])) == sectionName else { return nil }
@@ -231,11 +294,13 @@ enum AgentHookCodexFeatureToggle {
         let bodyRange = code.index(after: openBraceIndex)..<closeBraceIndex
         let body = String(code[bodyRange])
         var entries = splitInlineTableEntries(body).map { trimmed($0) }.filter { !$0.isEmpty }
-        if entries.contains(where: { hooksAssignmentUpdate(for: $0)?.hasHooksTrue == true }) { return (true, line) }
-        if let hooksIndex = entries.firstIndex(where: { hooksAssignmentUpdate(for: $0) != nil }),
-            let update = hooksAssignmentUpdate(for: entries[hooksIndex])
-        {
-            entries[hooksIndex] = update.updatedLine
+        if entries.contains(where: { isAlreadyTrue(hooksAssignment(for: $0)) }) { return .hooksAlreadyTrue }
+        if let hooksIndex = entries.firstIndex(where: { hooksAssignment(for: $0) != nil }) {
+            switch hooksAssignment(for: entries[hooksIndex]) {
+            case .flippable(let updatedEntry): entries[hooksIndex] = updatedEntry
+            case .nonBoolean: return .nonBooleanHooks
+            case .alreadyTrue, .none: return .hooksAlreadyTrue  // unreachable: handled by the check above
+            }
         } else {
             entries.insert("\(hooksKey) = true", at: 0)
         }
@@ -245,18 +310,7 @@ enum AgentHookCodexFeatureToggle {
         let afterBody = String(code[bodyRange.upperBound...])
         let leadingSeparator = beforeBody.last.map { $0.isWhitespace ? "" : " " } ?? ""
         let trailingSeparator = afterBody.first.map { $0.isWhitespace ? "" : " " } ?? ""
-        return (false, beforeBody + leadingSeparator + updatedBody + trailingSeparator + afterBody + split.comment)
-    }
-
-    private static func dottedFeaturesHooksUpdate(for line: String) -> (hasHooksTrue: Bool, updatedLine: String)? {
-        let split = splitTrailingComment(line)
-        let code = split.code
-        guard let equalsIndex = code.firstIndex(of: "="), dottedKeyParts(in: code[..<equalsIndex]) == [sectionName, hooksKey] else {
-            return nil
-        }
-        if trimmed(String(code[code.index(after: equalsIndex)...])) == "true" { return (true, line) }
-        let comment = split.comment.isEmpty ? "" : " " + split.comment
-        return (false, String(code[...equalsIndex]) + " true" + comment)
+        return .updated(line: beforeBody + leadingSeparator + updatedBody + trailingSeparator + afterBody + split.comment)
     }
 
     private static func isDottedFeaturesAssignment(_ line: String) -> Bool {

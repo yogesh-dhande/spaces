@@ -1627,6 +1627,7 @@ public enum SpacesDeviceAPIResult: Sendable, Equatable {
     case terminalLinkChunk(SpacesDeviceTerminalLinkChunk)
     case terminalOutput(SpacesDeviceTerminalOutputResult)
     case agentHooksStatus(SpacesAgentHooksStatusPayload)
+    case agentHooksInstall(AgentHookInstallOutcome)
 }
 
 extension SpacesDeviceAPIResult: Codable {
@@ -1644,6 +1645,7 @@ extension SpacesDeviceAPIResult: Codable {
         case terminalLinkChunk
         case terminalOutput
         case agentHooksStatus
+        case agentHooksInstall
     }
 
     public init(from decoder: any Decoder) throws {
@@ -1666,6 +1668,7 @@ extension SpacesDeviceAPIResult: Codable {
         case .terminalLinkChunk: self = .terminalLinkChunk(try container.decode(SpacesDeviceTerminalLinkChunk.self, forKey: key))
         case .terminalOutput: self = .terminalOutput(try container.decode(SpacesDeviceTerminalOutputResult.self, forKey: key))
         case .agentHooksStatus: self = .agentHooksStatus(try container.decode(SpacesAgentHooksStatusPayload.self, forKey: key))
+        case .agentHooksInstall: self = .agentHooksInstall(try container.decode(AgentHookInstallOutcome.self, forKey: key))
         }
     }
 
@@ -1685,6 +1688,7 @@ extension SpacesDeviceAPIResult: Codable {
         case .terminalLinkChunk(let payload): try container.encode(payload, forKey: .terminalLinkChunk)
         case .terminalOutput(let payload): try container.encode(payload, forKey: .terminalOutput)
         case .agentHooksStatus(let payload): try container.encode(payload, forKey: .agentHooksStatus)
+        case .agentHooksInstall(let payload): try container.encode(payload, forKey: .agentHooksInstall)
         }
     }
 }
@@ -1744,6 +1748,8 @@ public struct SpacesDeviceAPIResponse: Codable, Sendable, Equatable {
     public var terminalOutput: String? { if case .terminalOutput(let payload) = result { payload.text } else { nil } }
 
     public var agentHooksStatus: SpacesAgentHooksStatusPayload? { if case .agentHooksStatus(let payload) = result { payload } else { nil } }
+
+    public var agentHooksInstall: AgentHookInstallOutcome? { if case .agentHooksInstall(let payload) = result { payload } else { nil } }
 }
 
 public enum SpacesDeviceAPICodec {

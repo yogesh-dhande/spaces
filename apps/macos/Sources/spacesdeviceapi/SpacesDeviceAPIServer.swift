@@ -1132,12 +1132,19 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
 
     /// Idempotently installs Spaces lifecycle hooks for the requested agents into this daemon's home
     /// directory, then returns fresh status for every supported agent. Rejects an empty request.
+    ///
+    /// A per-agent failure is reported inside the payload rather than as a rejected request: agents are
+    /// installed independently, and the caller has to learn which ones landed so it can record them and
+    /// retry only the rest. Only a missing `spaces` CLI, which makes every hook unwritable, throws.
     private func handleInstallAgentHooksRequest(_ payload: SpacesDeviceInstallAgentHooksRequest) throws -> SpacesDeviceAPIResponse {
         guard !payload.kinds.isEmpty else {
             return SpacesDeviceAPIResponse(ok: false, message: "No coding agents specified.", errorCode: .invalidArgument)
         }
-        let status = try AgentHookInstaller.install(payload.kinds)
-        return SpacesDeviceAPIResponse(ok: true, message: "Installed agent hooks.", result: .agentHooksStatus(.init(agents: status)))
+        let outcome = try AgentHookInstaller.install(payload.kinds)
+        let message =
+            outcome.failures.isEmpty
+            ? "Installed agent hooks." : "Installed agent hooks, except: \(outcome.failures.map(\.message).joined(separator: " "))"
+        return SpacesDeviceAPIResponse(ok: true, message: message, result: .agentHooksInstall(outcome))
     }
 
     private func authorize(_ request: SpacesDeviceAPIRequest) throws {
@@ -1170,7 +1177,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             case .gitCommandFailed, .dependencyMissing, .configError, .databaseMigrationFailed: return .internalError
             }
         }
-        if error is AgentHookInstallerError { return .invalidArgument }
+        // The daemon's host is missing the Spaces CLI every hook command needs; the request was well
+        // formed, so this is the host lacking a capability rather than a client mistake.
+        if error is AgentHookInstallerError { return .capabilityMissing }
         if error is DecodingError { return .invalidArgument }
         return .internalError
     }

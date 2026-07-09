@@ -57,8 +57,8 @@ final class SpacesCommandTests: XCTestCase {
         XCTAssertEqual(command.type, .done)
     }
 
-    func testAgentSignalResolvesContextFromEnvironment() {
-        let context = AgentSignalCommand.resolvedSignalContext(
+    func testAgentSignalResolvesContextFromEnvironment() throws {
+        let context = try AgentSignalCommand.resolvedSignalContext(
             workspace: nil, session: nil,
             environment: ["SPACES_WORKSPACE_ID": "workspace-env", "SPACES_TERMINAL_TRACKING_ID": "session-env"])
 
@@ -66,8 +66,8 @@ final class SpacesCommandTests: XCTestCase {
         XCTAssertEqual(context?.sessionID, "session-env")
     }
 
-    func testAgentSignalExplicitContextOverridesEnvironment() {
-        let context = AgentSignalCommand.resolvedSignalContext(
+    func testAgentSignalExplicitContextOverridesEnvironment() throws {
+        let context = try AgentSignalCommand.resolvedSignalContext(
             workspace: "workspace-explicit", session: "session-explicit",
             environment: ["SPACES_WORKSPACE_ID": "workspace-env", "SPACES_TERMINAL_TRACKING_ID": "session-env"])
 
@@ -75,14 +75,31 @@ final class SpacesCommandTests: XCTestCase {
         XCTAssertEqual(context?.sessionID, "session-explicit")
     }
 
-    func testAgentSignalMissingContextIsNoOp() {
-        XCTAssertNil(AgentSignalCommand.resolvedSignalContext(workspace: nil, session: nil, environment: [:]))
+    /// Outside a Spaces terminal, a hook that fires anyway must do nothing rather than fail.
+    func testAgentSignalMissingContextIsNoOp() throws {
+        XCTAssertNil(try AgentSignalCommand.resolvedSignalContext(workspace: nil, session: nil, environment: [:]))
     }
 
-    func testAgentHooksCommandExposesStatusOnly() {
-        let subcommands = AgentHooksCommand.configuration.subcommands.map { String(describing: $0) }
-        XCTAssertEqual(subcommands, ["AgentHooksStatusCommand"])
-        XCTAssertThrowsError(try AgentHooksCommand.parse(["install"]))
+    /// Naming one ID and not the other is a caller mistake, not "outside a Spaces terminal".
+    func testAgentSignalHalfSuppliedExplicitContextIsAnError() {
+        XCTAssertThrowsError(try AgentSignalCommand.resolvedSignalContext(workspace: "workspace-explicit", session: nil, environment: [:]))
+        XCTAssertThrowsError(try AgentSignalCommand.resolvedSignalContext(workspace: nil, session: "session-explicit", environment: [:]))
+    }
+
+    /// An explicit ID still combines with the environment for the other half.
+    func testAgentSignalExplicitWorkspaceCombinesWithEnvironmentSession() throws {
+        let context = try AgentSignalCommand.resolvedSignalContext(
+            workspace: "workspace-explicit", session: nil, environment: ["SPACES_TERMINAL_TRACKING_ID": "session-env"])
+
+        XCTAssertEqual(context?.workspaceID, "workspace-explicit")
+        XCTAssertEqual(context?.sessionID, "session-env")
+    }
+
+    /// Hook installation and status are owned by the app and the daemon, never the CLI or MCP.
+    func testAgentCommandExposesSignalOnly() {
+        let subcommands = AgentCommand.configuration.subcommands.map { String(describing: $0) }
+        XCTAssertEqual(subcommands, ["AgentSignalCommand"])
+        XCTAssertThrowsError(try AgentCommand.parseAsRoot(["hooks", "status"]))
     }
 
     func testTerminalListParses() throws { XCTAssertNoThrow(try TerminalListCommand.parse([])) }

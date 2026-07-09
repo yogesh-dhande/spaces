@@ -248,16 +248,20 @@ public enum SpacesDeviceClient {
         return payload.agents
     }
 
-    /// Idempotently installs Spaces lifecycle hooks for `kinds` on `device` (local or remote) and
-    /// returns fresh status for every supported agent.
+    /// Idempotently installs Spaces lifecycle hooks for `kinds` on `device` (local or remote). Returns
+    /// fresh status for every supported agent plus one failure entry per requested agent that could not
+    /// be installed — an install lands partially, so a non-empty `failures` does not mean nothing
+    /// happened. Throws only when the request itself fails.
     @discardableResult public static func installAgentHooks(
         _ kinds: [SupportedCodingAgentHook], device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
         profile: SpacesProfile? = nil
-    ) throws -> [AgentHookStatus] {
+    ) throws -> AgentHookInstallOutcome {
         let response = try request(
             .init(command: .installAgentHooks(.init(kinds: kinds))), device: device, clientApp: clientApp, profile: profile)
-        guard let payload = response.agentHooksStatus else { throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode) }
-        return payload.agents
+        guard let payload = response.agentHooksInstall else {
+            throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode)
+        }
+        return payload
     }
 
     /// Refreshes a device, reading its compatibility verdict from the overview's inline frozen-core

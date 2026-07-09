@@ -110,22 +110,11 @@ spaces agent signal exit`}</CodeBlock>
           <Flag name="<event>" description="Required event type: init, working, blocked, done, or exit." />
         </ul>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Spaces records agent lifecycle events only for Spaces-managed terminal sessions. Outside one, <code>spaces agent signal</code> exits successfully without reporting an event unless explicit IDs are supplied. Use <code>init</code> to establish the agent row; later events update that row, or establish one when the terminal runtime identifies the session as a coding agent.
+          Spaces records agent lifecycle events only for Spaces-managed terminal sessions. Outside one, <code>spaces agent signal</code> exits successfully without reporting an event. Passing <code>--workspace</code> without <code>--session</code>, or the reverse, is an error rather than a silent no-op. Use <code>init</code> to establish the agent row; later events update that row, or establish one when the terminal runtime identifies the session as a coding agent.
         </p>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           Agent labels come from configured launcher names or the terminal runtime when it identifies known Codex, Claude Code, and opencode foreground commands.
         </p>
-      </article>
-
-      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Agent Hooks</h2>
-        <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Spaces installs the lifecycle hooks for detected supported agent CLIs automatically on install and on connect, and Settings &rarr; Coding Agents manages them per device. This command reports local hook status for this machine.
-        </p>
-        <CodeBlock>{`spaces agent hooks status`}</CodeBlock>
-        <ul className="mt-3 space-y-1">
-          <Flag name="status" description="Lists supported agents on this machine with CLI detection and whether Spaces hooks are installed." />
-        </ul>
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">

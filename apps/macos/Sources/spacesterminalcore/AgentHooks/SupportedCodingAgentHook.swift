@@ -72,19 +72,21 @@ public enum SupportedCodingAgentHook: String, CaseIterable, Sendable, Codable {
 
     // MARK: - Per-agent install / status
 
-    func install(home: URL, fileManager: FileManager) throws {
+    func install(home: URL, fileManager: FileManager, spacesExecutablePath: String) throws {
         switch self {
         case .claudeCode:
             try AgentHookJSONWriter.install(
                 fileURL: configDirectoryURL(home: home).appendingPathComponent("settings.json"), bindings: jsonEventBindings,
-                fileManager: fileManager)
+                spacesExecutablePath: spacesExecutablePath, fileManager: fileManager)
         case .codex:
             let codexDir = configDirectoryURL(home: home)
             try AgentHookJSONWriter.install(
-                fileURL: codexDir.appendingPathComponent("hooks.json"), bindings: jsonEventBindings, fileManager: fileManager)
+                fileURL: codexDir.appendingPathComponent("hooks.json"), bindings: jsonEventBindings,
+                spacesExecutablePath: spacesExecutablePath, fileManager: fileManager)
             try AgentHookCodexFeatureToggle.ensureEnabled(fileURL: codexDir.appendingPathComponent("config.toml"), fileManager: fileManager)
         case .opencode:
-            try AgentHookOpencodePluginWriter.install(pluginURL: opencodePluginURL(home: home), fileManager: fileManager)
+            try AgentHookOpencodePluginWriter.install(
+                pluginURL: opencodePluginURL(home: home), spacesExecutablePath: spacesExecutablePath, fileManager: fileManager)
         }
     }
 

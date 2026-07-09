@@ -593,14 +593,10 @@ extension TerminalService {
     /// A ping response with no `daemonStatus` comes from a daemon predating wire-version negotiation,
     /// which counts as too old (never a match) — the same rule `TerminalServiceDaemonStatus` applies to
     /// a missing `protocolVersion`.
-    static func daemonWireIncompatibility(_ response: TerminalServiceResponse) -> String? {
-        daemonWireIncompatibilityDetails(response)?.message
-    }
-
     static func daemonWireIncompatibilityDetails(_ response: TerminalServiceResponse) -> TerminalServiceDaemonWireIncompatibility? {
         let verdict = response.daemonStatus.map(SpacesWireCompatibility.evaluate(daemonStatus:)) ?? .daemonTooOld
         guard !verdict.isCompatible else { return nil }
-        let message: String
+        var message: String
         switch verdict {
         case .clientTooOld:
             message = "The running spacesd daemon is newer than this Spaces build. Update Spaces to match the daemon, then retry."
@@ -609,7 +605,7 @@ extension TerminalService {
             // manager (launchd `KeepAlive` / systemd `Restart=always`) and outlives the app, and app
             // launch only adopts it. Restarting the daemon makes it exit and respawn from the updated
             // binary — the daemon restart control in the Spaces app (shown for this device) does exactly that.
-            var message =
+            message =
                 "The running spacesd daemon is older than this Spaces build needs. "
                 + "Restart the daemon to load the update, then retry."
             if let status = response.daemonStatus,
@@ -617,7 +613,6 @@ extension TerminalService {
             {
                 message += " Restarting stops the daemon's running terminals, processes, and agents."
             }
-            return TerminalServiceDaemonWireIncompatibility(verdict: verdict, status: response.daemonStatus, message: message)
         }
         return TerminalServiceDaemonWireIncompatibility(verdict: verdict, status: response.daemonStatus, message: message)
     }

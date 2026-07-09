@@ -28,7 +28,7 @@ enum AgentHookJSONWriter {
     }
 
     /// Writes the merged hooks to `fileURL`. Creates parent directories and the file as needed.
-    static func install(fileURL: URL, bindings: [EventBinding], fileManager: FileManager = .default) throws {
+    static func install(fileURL: URL, bindings: [EventBinding], spacesExecutablePath: String, fileManager: FileManager = .default) throws {
         var root = try loadRootObject(fileURL: fileURL, fileManager: fileManager)
         var hooks = (root["hooks"] as? [String: Any]) ?? [:]
 
@@ -47,7 +47,7 @@ enum AgentHookJSONWriter {
         // Re-add exactly one Spaces group per mapped event.
         for binding in bindings {
             var groups = (hooks[binding.eventName] as? [[String: Any]]) ?? []
-            groups.append(spacesGroup(event: binding.event))
+            groups.append(spacesGroup(event: binding.event, spacesExecutablePath: spacesExecutablePath))
             hooks[binding.eventName] = groups
         }
 
@@ -79,10 +79,10 @@ enum AgentHookJSONWriter {
         return dictionary
     }
 
-    private static func spacesGroup(event: AgentHookLifecycleEvent) -> [String: Any] {
+    private static func spacesGroup(event: AgentHookLifecycleEvent, spacesExecutablePath: String) -> [String: Any] {
         [
             "matcher": "",
-            "hooks": [["type": "command", "command": AgentHookCommand.signalCommand(event: event)]],
+            "hooks": [["type": "command", "command": AgentHookCommand.signalCommand(event: event, spacesExecutablePath: spacesExecutablePath)]],
         ]
     }
 

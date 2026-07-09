@@ -42,6 +42,24 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
         XCTAssertEqual(decoded.agentHooksStatus, payload)
     }
 
+    /// An install answers `ok` even when one agent failed, so the per-agent failures have to survive the
+    /// wire: they are the only way the client learns which agents to record and which to retry.
+    func testAgentHooksInstallResultCarriesPerAgentFailuresThroughResponse() throws {
+        let outcome = AgentHookInstallOutcome(
+            agents: [
+                AgentHookStatus(kind: .claudeCode, displayName: "Claude Code", available: true, hooksInstalled: true),
+                AgentHookStatus(kind: .codex, displayName: "Codex", available: true, hooksInstalled: false),
+            ],
+            failures: [AgentHookInstallFailure(kind: .codex, message: "config.toml already defines `features`.")])
+        let response = SpacesDeviceAPIResponse(ok: true, message: "Installed agent hooks.", result: .agentHooksInstall(outcome))
+
+        let decoded = try SpacesDeviceAPICodec.decodeResponse(SpacesDeviceAPICodec.encodeResponse(response))
+
+        XCTAssertEqual(decoded, response)
+        XCTAssertEqual(decoded.agentHooksInstall, outcome)
+        XCTAssertNil(decoded.agentHooksStatus)
+    }
+
     func testResponseErrorCodeEncodesWhenSetAndDecodesNilWhenAbsent() throws {
         let failure = SpacesDeviceAPIResponse(ok: false, message: "Terminal session 'abc' is not running.", errorCode: .sessionNotRunning)
         let failureData = try SpacesDeviceAPICodec.encodeResponse(failure)

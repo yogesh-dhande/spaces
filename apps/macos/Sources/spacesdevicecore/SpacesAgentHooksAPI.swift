@@ -10,7 +10,12 @@ public struct SpacesDeviceInstallAgentHooksRequest: Codable, Sendable, Equatable
 }
 
 /// Device API result payload carrying the availability + hook-install status of every supported
-/// coding agent on the daemon's host. Returned by both `agentHooksStatus` and `installAgentHooks`.
+/// coding agent on the daemon's host. Returned by `agentHooksStatus`.
+///
+/// `installAgentHooks` answers with `AgentHookInstallOutcome` instead, which carries the same statuses
+/// plus the per-agent failures only an install can produce. An install succeeds partially — one
+/// agent's uneditable config does not stop the others — so those failures travel alongside the status
+/// rather than replacing it with a rejected request.
 public struct SpacesAgentHooksStatusPayload: Codable, Sendable, Equatable {
     public let agents: [AgentHookStatus]
 

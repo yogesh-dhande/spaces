@@ -67,8 +67,16 @@ extension SettingsController {
         guard let id = sender.selectedItem?.representedObject as? String, id != codingAgentsDeviceID else { return }
         codingAgentsDeviceID = id
         codingAgentsStatus = []
+        codingAgentsFailures = [:]
         codingAgentsInstallingKind = nil
         reloadCodingAgentsStatus()
+    }
+
+    /// The last install failure recorded per agent on `deviceID`, written by auto-install and by the
+    /// manual install below.
+    private func loadCodingAgentsFailures(deviceID: String) -> [SupportedCodingAgentHook: String] {
+        guard let database = try? host.clientDatabase() else { return [:] }
+        return AgentHooksAutoInstaller.installFailures(deviceID: deviceID, database: database)
     }
 
     // MARK: - Status fetch
@@ -81,6 +89,7 @@ extension SettingsController {
             return
         }
         codingAgentsStatus = []
+        codingAgentsFailures = loadCodingAgentsFailures(deviceID: device.id)
         renderCodingAgentsRows(message: nil, isLoading: true)
         let profile = try? SpacesProfile.current()
         Task.detached(priority: .userInitiated) { [weak self] in
@@ -134,9 +143,15 @@ extension SettingsController {
         let name = NSTextField(labelWithString: kind.displayName)
         name.font = .systemFont(ofSize: 13, weight: .medium)
 
+        // A recorded failure explains a "hooks not installed" row that Spaces already tried and could
+        // not fix — most often a `config.toml` only the user can untangle. Once hooks are installed the
+        // message is stale by definition, so it is never shown then.
+        let failureMessage = installed ? nil : codingAgentsFailures[kind]
         let captionText: String
         if isLoading {
             captionText = "Checking availability and hooks"
+        } else if let failureMessage {
+            captionText = failureMessage
         } else if let status {
             if status.available && status.hooksInstalled {
                 captionText = "Detected, hooks installed"
@@ -154,7 +169,9 @@ extension SettingsController {
         }
         let caption = NSTextField(labelWithString: captionText)
         caption.font = .systemFont(ofSize: 11)
-        caption.textColor = .secondaryLabelColor
+        caption.textColor = (failureMessage != nil && !isLoading) ? .systemRed : .secondaryLabelColor
+        caption.lineBreakMode = .byWordWrapping
+        caption.maximumNumberOfLines = 3
 
         let labelStack = NSStackView(views: [name, caption])
         labelStack.orientation = .vertical
@@ -205,18 +222,30 @@ extension SettingsController {
         renderCodingAgentsRows(message: nil, isLoading: false)
         let profile = try? SpacesProfile.current()
         Task.detached(priority: .userInitiated) { [weak self] in
-            let result = Result { try SpacesDeviceClient.installAgentHooks([kind], device: device, profile: profile) }
+            let result = Result { () -> AgentHookInstallOutcome in
+                let outcome = try SpacesDeviceClient.installAgentHooks([kind], device: device, profile: profile)
+                // Keep the recorded failure for this agent in step with what just happened, so the row
+                // stops explaining a problem the user has fixed.
+                if let database = try? SpacesClientDatabase.defaultDatabase() {
+                    try? AgentHooksAutoInstaller.recordInstallFailures(
+                        deviceID: deviceID, attempted: [kind], failures: outcome.failures, database: database)
+                }
+                return outcome
+            }
             await self?.applyCodingAgentsInstall(result, token: token, deviceID: deviceID)
         }
     }
 
-    private func applyCodingAgentsInstall(_ result: Result<[AgentHookStatus], any Error>, token: Int, deviceID: String) {
+    /// An install request can succeed while the agent it targeted fails, so the per-agent failures are
+    /// what decide whether the user sees an error.
+    private func applyCodingAgentsInstall(_ result: Result<AgentHookInstallOutcome, any Error>, token: Int, deviceID: String) {
         guard token == codingAgentsInstallToken, deviceID == codingAgentsDeviceID else { return }
         codingAgentsInstallingKind = nil
         switch result {
-        case .success(let status):
-            codingAgentsStatus = status
-            renderCodingAgentsRows(message: nil, isLoading: false)
+        case .success(let outcome):
+            codingAgentsStatus = outcome.agents
+            codingAgentsFailures = loadCodingAgentsFailures(deviceID: deviceID)
+            renderCodingAgentsRows(message: outcome.failures.first.map { "Install failed: \($0.message)" }, isLoading: false)
         case .failure(let error):
             renderCodingAgentsRows(message: "Install failed: \(error.localizedDescription)", isLoading: false)
         }

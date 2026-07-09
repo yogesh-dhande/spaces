@@ -105,26 +105,7 @@ struct WorkspaceRestartCommand: ParsableCommand {
 
 struct AgentCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
-        commandName: "agent", abstract: "Manage coding-agent lifecycle state.",
-        subcommands: [AgentSignalCommand.self, AgentHooksCommand.self])
-}
-
-struct AgentHooksCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(
-        commandName: "hooks", abstract: "Inspect Spaces lifecycle hooks for local coding agents.", subcommands: [AgentHooksStatusCommand.self])
-}
-
-struct AgentHooksStatusCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(
-        commandName: "status", abstract: "Show which local coding-agent CLIs are detected and have Spaces hooks installed.")
-
-    func run() throws {
-        let context = CLIContext()
-        context.output.emitLines(
-            AgentHookInstaller.status().map { status in
-                "\(status.kind.rawValue)\tavailable=\(status.available)\thooks=\(status.hooksInstalled)"
-            })
-    }
+        commandName: "agent", abstract: "Manage coding-agent lifecycle state.", subcommands: [AgentSignalCommand.self])
 }
 
 struct AgentSignalCommand: ParsableCommand {
@@ -137,20 +118,31 @@ struct AgentSignalCommand: ParsableCommand {
     var type: AgentEventType
 
     func run() throws {
-        guard let context = Self.resolvedSignalContext(workspace: workspace, session: session, environment: ProcessInfo.processInfo.environment) else {
-            return
-        }
+        guard let context = try Self.resolvedSignalContext(workspace: workspace, session: session, environment: ProcessInfo.processInfo.environment)
+        else { return }
         let cliContext = CLIContext()
         _ = try TerminalService.sendProfileCommand(
             .agentSignal(.init(workspaceID: context.workspaceID, terminalSessionID: context.sessionID, event: type.rawValue)))
         cliContext.output.emit("Agent \(type.rawValue): workspace=\(context.workspaceID)")
     }
 
-    static func resolvedSignalContext(workspace: String?, session: String?, environment: [String: String]) -> (workspaceID: String, sessionID: String)? {
+    /// Resolves the workspace and session to signal for, or `nil` when this is not a Spaces-managed
+    /// terminal and the caller supplied nothing — the case that lets globally-installed agent hooks run
+    /// harmlessly in any terminal.
+    ///
+    /// Passing one ID explicitly and not the other is a different situation: the caller meant to name a
+    /// session, so silently reporting nothing would hide their mistake. That errors instead.
+    static func resolvedSignalContext(workspace: String?, session: String?, environment: [String: String]) throws -> (
+        workspaceID: String, sessionID: String
+    )? {
         let workspaceID = nonEmpty(workspace) ?? nonEmpty(environment["SPACES_WORKSPACE_ID"])
         let sessionID = nonEmpty(session) ?? nonEmpty(environment[WorkspaceOrchestrator.terminalTrackingIDEnvVar])
-        guard let workspaceID, let sessionID else { return nil }
-        return (workspaceID, sessionID)
+        if let workspaceID, let sessionID { return (workspaceID, sessionID) }
+        guard nonEmpty(workspace) == nil, nonEmpty(session) == nil else {
+            throw ValidationError(
+                "--workspace and --session must be given together, or both omitted to use the Spaces terminal environment.")
+        }
+        return nil
     }
 
     private static func nonEmpty(_ value: String?) -> String? {

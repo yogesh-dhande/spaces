@@ -2,8 +2,9 @@ import type { Metadata } from "next";
 import { DocsShell } from "../components/docs-shell";
 import { CopyablePrompt } from "../components/copyable-prompt";
 
+// Spaces embeds the absolute path it resolved for the CLI; `/usr/local/bin/spaces` stands in here.
 const spacesAgentSignalCommand = (event: string) =>
-  `spaces agent signal ${event} >/dev/null 2>&1 || true # spaces-agent-hook`;
+  `'/usr/local/bin/spaces' agent signal ${event} >/dev/null 2>&1 || true # spaces-agent-hook`;
 
 const CLAUDE_PROMPT = `Add global Spaces lifecycle hooks to ~/.claude/settings.json so this agent
 reports its state to Spaces.
@@ -77,10 +78,13 @@ export default function CodingAgentsDocsPage() {
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Hooks Install Themselves</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Spaces wires these lifecycle hooks up for you. When you install Spaces, and whenever you connect a device, Spaces installs <code>spaces agent signal</code> hooks for every supported agent CLI it detects — Claude Code in <code>~/.claude/settings.json</code>, Codex in <code>~/.codex/hooks.json</code>, and opencode as a plugin in <code>~/.config/opencode/plugin/</code>. The hooks assume <code>spaces</code> is available on <code>PATH</code>. The command only reports from Spaces-managed terminals and does nothing anywhere else, so nothing else in your setup changes.
+          Spaces wires these lifecycle hooks up for you. When you install Spaces, and whenever you connect a device, Spaces installs <code>spaces agent signal</code> hooks for every supported agent CLI it detects — Claude Code in <code>~/.claude/settings.json</code>, Codex in <code>~/.codex/hooks.json</code>, and opencode as a plugin in <code>~/.config/opencode/plugin/</code>. Each hook calls the Spaces CLI by the absolute path found when the hooks were installed, so it runs no matter what <code>PATH</code> your agent hands it; if you move or reinstall the CLI, reinstall the hooks from Settings &rarr; Coding Agents. The command only reports from Spaces-managed terminals and does nothing anywhere else, so nothing else in your setup changes.
         </p>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           Installation preserves your existing hooks and settings and never duplicates an entry, so it is safe to run again. It happens once per device and agent: if you remove a Spaces hook it stays removed, and a detected agent without Spaces hooks is picked up the next time that device connects.
+        </p>
+        <p className="mt-3 text-sm leading-7 text-foreground-soft">
+          Agents install independently, so one that Spaces will not touch — a Codex <code>config.toml</code> that already defines <code>features</code> in a shape Spaces refuses to rewrite, say — does not stop the others. That agent&apos;s row in Settings explains what stopped it, and Spaces tries again the next time the device connects.
         </p>
       </article>
 

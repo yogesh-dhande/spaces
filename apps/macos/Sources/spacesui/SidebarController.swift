@@ -284,13 +284,13 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         // Auto-install hooks on the edge into a usable local daemon: the first successful load, a
         // restart resolving a compatibility block, or a daemon that came back. A launch with the local
         // daemon offline or wire-incompatible would otherwise burn its only attempt on a request that
-        // cannot succeed, leaving This Mac without hooks until an app relaunch or an unrelated remote
-        // reconnect. Remote devices get the equivalent trigger when their overview stream connects.
+        // cannot succeed, leaving This Mac without hooks until an app relaunch. Remote devices get the
+        // equivalent trigger when their own overview stream connects.
         if AppKitController.daemonBecameUsable(
             previousLoadState: previousLocalSection?.loadState, previousCompatibility: previousLocalSection?.compatibility,
             loadState: localLoadState, compatibility: snapshot.localCompatibility)
         {
-            host.autoInstallAgentHooksForKnownDevices()
+            host.autoInstallLocalAgentHooks()
         }
         tearDownBrowserSessionsForLocallyStoppedWorkspaces(
             previous: previousLocalSection?.workspaceRuntimeStatusByID, current: snapshot.workspaceRuntimeStatusByID,
@@ -503,8 +503,11 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
                 return
             }
             self.remoteOverviewSubscriptions[deviceID] = client
-            // The remote is reachable now; ensure its agent hooks are installed (guarded, once per session).
-            self.host.autoInstallAgentHooksForKnownDevices()
+            // This remote is reachable now, so ensure its agent hooks are installed. Other devices are
+            // left alone: their own connect edge triggers them.
+            if let device = self.host.macPairedDevices().first(where: { $0.id == deviceID }) {
+                self.host.autoInstallAgentHooks(for: device)
+            }
         }
     }
 
