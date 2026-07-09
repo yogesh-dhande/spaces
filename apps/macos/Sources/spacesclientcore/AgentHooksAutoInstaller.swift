@@ -41,23 +41,27 @@ public enum AgentHooksAutoInstaller {
     /// Runs the auto-install for `device`: reads status, installs any fresh agents, and persists the
     /// updated recorded set. Returns the agents installed on this pass. Throws on daemon/DB failure;
     /// callers treat a failure as "try again next connect."
+    ///
+    /// The device round trips run outside `recordedSettingsLock`, which guards only the marker
+    /// read-modify-write: a slow or unreachable remote must not stall another device's auto-install
+    /// behind a 60-second install timeout. Concurrent runs stay correct because `saveRecorded` merges
+    /// per device key, and a single device is never probed concurrently (the caller holds an in-flight
+    /// set per device).
     @discardableResult public static func run(
         device: SpacesPairedDeviceRecord, database: SpacesClientDatabase, clientApp: SpacesDeviceClientApp = SpacesDeviceClient.macOSClientApp(),
         profile: SpacesProfile? = nil
     ) throws -> [SupportedCodingAgentHook] {
-        try recordedSettingsLock.withLock {
-            let status = try SpacesDeviceClient.agentHooksStatus(device: device, clientApp: clientApp, profile: profile)
-            let recordedByDevice = loadRecorded(database: database)
-            let alreadyRecorded = Set((recordedByDevice[device.id] ?? []).compactMap(SupportedCodingAgentHook.init(rawValue:)))
-            let decision = plan(status: status, alreadyRecorded: alreadyRecorded)
+        let status = try SpacesDeviceClient.agentHooksStatus(device: device, clientApp: clientApp, profile: profile)
+        let recordedByDevice = recordedSettingsLock.withLock { loadRecorded(database: database) }
+        let alreadyRecorded = Set((recordedByDevice[device.id] ?? []).compactMap(SupportedCodingAgentHook.init(rawValue:)))
+        let decision = plan(status: status, alreadyRecorded: alreadyRecorded)
 
-            guard decision.recorded != alreadyRecorded else { return [] }  // nothing new to record or install
-            if !decision.install.isEmpty {
-                _ = try SpacesDeviceClient.installAgentHooks(decision.install, device: device, clientApp: clientApp, profile: profile)
-            }
-            try saveRecordedUnlocked([device.id: decision.recorded.map { $0.rawValue }.sorted()], database: database)
-            return decision.install
+        guard decision.recorded != alreadyRecorded else { return [] }  // nothing new to record or install
+        if !decision.install.isEmpty {
+            _ = try SpacesDeviceClient.installAgentHooks(decision.install, device: device, clientApp: clientApp, profile: profile)
         }
+        try saveRecorded([device.id: decision.recorded.map { $0.rawValue }.sorted()], database: database)
+        return decision.install
     }
 
     // MARK: - Marker persistence
@@ -69,16 +73,16 @@ public enum AgentHooksAutoInstaller {
         return decoded
     }
 
+    /// Merges `recorded` into the stored map under the lock, per device key, so a run that started
+    /// from a snapshot taken before another device's run finished cannot drop that device's markers.
     static func saveRecorded(_ recorded: [String: [String]], database: SpacesClientDatabase) throws {
-        try recordedSettingsLock.withLock { try saveRecordedUnlocked(recorded, database: database) }
-    }
-
-    private static func saveRecordedUnlocked(_ recorded: [String: [String]], database: SpacesClientDatabase) throws {
-        var latest = loadRecorded(database: database)
-        for (deviceID, kinds) in recorded {
-            latest[deviceID] = kinds.sorted()
+        try recordedSettingsLock.withLock {
+            var latest = loadRecorded(database: database)
+            for (deviceID, kinds) in recorded {
+                latest[deviceID] = kinds.sorted()
+            }
+            let data = try JSONEncoder().encode(latest)
+            try database.setSetting(key: ClientSettingsKey.agentHooksAutoInstalled, value: String(decoding: data, as: UTF8.self))
         }
-        let data = try JSONEncoder().encode(latest)
-        try database.setSetting(key: ClientSettingsKey.agentHooksAutoInstalled, value: String(decoding: data, as: UTF8.self))
     }
 }

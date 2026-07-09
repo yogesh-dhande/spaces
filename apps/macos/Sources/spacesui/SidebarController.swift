@@ -281,6 +281,17 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         // If the local block was showing and the daemon is now compatible, drop the obsolete block
         // (canPreserveDetailPaneAfterSidebarReload was evaluated against the stale pre-reload verdict).
         host.clearCompatibilityBlockIfResolved(deviceID: snapshot.localDeviceID)
+        // Auto-install hooks on the edge into a usable local daemon: the first successful load, a
+        // restart resolving a compatibility block, or a daemon that came back. A launch with the local
+        // daemon offline or wire-incompatible would otherwise burn its only attempt on a request that
+        // cannot succeed, leaving This Mac without hooks until an app relaunch or an unrelated remote
+        // reconnect. Remote devices get the equivalent trigger when their overview stream connects.
+        if AppKitController.daemonBecameUsable(
+            previousLoadState: previousLocalSection?.loadState, previousCompatibility: previousLocalSection?.compatibility,
+            loadState: localLoadState, compatibility: snapshot.localCompatibility)
+        {
+            host.autoInstallAgentHooksForKnownDevices()
+        }
         tearDownBrowserSessionsForLocallyStoppedWorkspaces(
             previous: previousLocalSection?.workspaceRuntimeStatusByID, current: snapshot.workspaceRuntimeStatusByID,
             previousOverview: previousLocalSection?.overview)

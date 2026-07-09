@@ -2039,6 +2039,25 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// parity-with-remote contract directly testable.
     nonisolated static func localDeviceLoadState(offlineMessage: String?) -> SidebarDeviceLoadState { offlineMessage.map { .offline($0) } ?? .loaded }
 
+    /// Whether a device that could not serve daemon requests can now, so one-shot connect work
+    /// (agent-hook auto-install) runs on the edge into a usable daemon rather than only at app launch.
+    /// A daemon that is offline, still loading, or wire-incompatible cannot answer `agentHooksStatus`;
+    /// the first snapshot (`previous == nil`) that finds it usable is itself an edge.
+    nonisolated static func daemonBecameUsable(
+        previousLoadState: SidebarDeviceLoadState?, previousCompatibility: SpacesWireCompatibility?, loadState: SidebarDeviceLoadState,
+        compatibility: SpacesWireCompatibility?
+    ) -> Bool {
+        guard daemonIsUsable(loadState: loadState, compatibility: compatibility) else { return false }
+        guard let previousLoadState else { return true }
+        return !daemonIsUsable(loadState: previousLoadState, compatibility: previousCompatibility)
+    }
+
+    /// A nil verdict means no handshake has been read yet, which does not by itself make the daemon
+    /// unusable; only an explicit incompatible verdict does.
+    private nonisolated static func daemonIsUsable(loadState: SidebarDeviceLoadState, compatibility: SpacesWireCompatibility?) -> Bool {
+        loadState == .loaded && (compatibility?.isCompatible ?? true)
+    }
+
     /// One paired device's slice of the sidebar. The sidebar shows every paired
     /// device at once; each section loads independently so a slow or unreachable
     /// device does not block the others.
@@ -3680,11 +3699,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         sidebar.sidebarThemeColor(light: light, dark: dark, alpha: alpha)
     }
 
+    /// Agent-hook auto-install is not started here: a launch-time attempt would run before the local
+    /// daemon is known reachable and would consume its only pass. Each device triggers it when its own
+    /// daemon becomes usable — the local device on its first healthy sidebar load, a remote when its
+    /// overview stream connects.
     func startBackgroundServicesIfNeeded() {
         guard !didStartBackgroundServices else { return }
         didStartBackgroundServices = true
         sidebar.startRemoteOverviewSubscriptions()
-        autoInstallAgentHooksForKnownDevices()
     }
 
     private func stopBackgroundServices() {

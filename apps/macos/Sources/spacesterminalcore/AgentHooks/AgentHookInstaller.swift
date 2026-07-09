@@ -47,49 +47,42 @@ public enum AgentHookInstaller {
     /// Reports availability + hook status for every supported agent.
     public static func status(home: URL = defaultHome(), fileManager: FileManager = .default) -> [AgentHookStatus] {
         var executableResolver = ExecutableResolver(home: home, fileManager: fileManager)
-        var statuses: [AgentHookStatus] = []
-        for kind in SupportedCodingAgentHook.allCases {
-            statuses.append(AgentHookStatus(
-                kind: kind, displayName: kind.displayName, available: isAvailable(kind, executableResolver: &executableResolver),
-                hooksInstalled: kind.hooksInstalled(home: home, fileManager: fileManager)))
-        }
-        return statuses
+        return status(home: home, fileManager: fileManager, executableResolver: &executableResolver)
     }
 
     /// Idempotently installs hooks for `kinds`, then returns fresh status for every supported agent.
-    /// A per-agent install failure surfaces immediately rather than being swallowed. `cliPath` is
-    /// accepted for source compatibility; generated hooks invoke `spaces` from PATH.
+    /// A per-agent install failure surfaces immediately rather than being swallowed.
     @discardableResult
     public static func install(
-        _ kinds: [SupportedCodingAgentHook], home: URL = defaultHome(), cliPath: String = "spaces",
-        fileManager: FileManager = .default
+        _ kinds: [SupportedCodingAgentHook], home: URL = defaultHome(), fileManager: FileManager = .default
     ) throws -> [AgentHookStatus] {
         var executableResolver = ExecutableResolver(home: home, fileManager: fileManager)
-        var unavailable: [SupportedCodingAgentHook] = []
-        for kind in kinds {
-            if !isAvailable(kind, executableResolver: &executableResolver) { unavailable.append(kind) }
-        }
-        guard unavailable.isEmpty else { throw AgentHookInstallerError.unavailableAgents(unavailable) }
-        for kind in kinds {
-            try kind.install(home: home, cliPath: cliPath, fileManager: fileManager)
-        }
-        return status(home: home, fileManager: fileManager)
+        return try install(kinds, home: home, fileManager: fileManager, executableResolver: &executableResolver)
     }
 
     public static func defaultHome() -> URL { URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true) }
 
-    /// Legacy helper for callers that still want the user helper link. Generated hooks invoke
-    /// `spaces` from PATH.
-    public static func defaultCLIPath(home: URL) -> String {
-        SpacesBinaryLayout.userHelperLinkURL(for: .spaces, homeDirectoryURL: home)?.path ?? home.appendingPathComponent(".spaces/bin/spaces").path
+    // MARK: - Test seams
+    //
+    // Availability depends on the daemon user's environment and login shell. These overloads let tests
+    // supply both, so no test spawns the developer's real login shell or reads the real `PATH`.
+
+    static func status(
+        home: URL, fileManager: FileManager, environment: [String: String], shellPathDirectoryResolver: @escaping ShellPathDirectoryResolver
+    ) -> [AgentHookStatus] {
+        var executableResolver = ExecutableResolver(
+            home: home, fileManager: fileManager, environment: environment, shellPathDirectoryResolver: shellPathDirectoryResolver)
+        return status(home: home, fileManager: fileManager, executableResolver: &executableResolver)
     }
 
-    // MARK: - Availability
-
-    /// An agent is "available" only when its executable resolves on PATH / a common install dir.
-    static func isAvailable(_ kind: SupportedCodingAgentHook, home: URL, fileManager: FileManager) -> Bool {
-        var executableResolver = ExecutableResolver(home: home, fileManager: fileManager)
-        return isAvailable(kind, executableResolver: &executableResolver)
+    @discardableResult
+    static func install(
+        _ kinds: [SupportedCodingAgentHook], home: URL, fileManager: FileManager, environment: [String: String],
+        shellPathDirectoryResolver: @escaping ShellPathDirectoryResolver
+    ) throws -> [AgentHookStatus] {
+        var executableResolver = ExecutableResolver(
+            home: home, fileManager: fileManager, environment: environment, shellPathDirectoryResolver: shellPathDirectoryResolver)
+        return try install(kinds, home: home, fileManager: fileManager, executableResolver: &executableResolver)
     }
 
     static func isAvailable(
@@ -101,30 +94,38 @@ public enum AgentHookInstaller {
         return isAvailable(kind, executableResolver: &executableResolver)
     }
 
-    private static func isAvailable(_ kind: SupportedCodingAgentHook, executableResolver: inout ExecutableResolver) -> Bool {
-        for name in kind.executableNames {
-            if executableResolver.resolve(named: name) != nil { return true }
+    // MARK: - Internals
+
+    /// `install` and the `status` it returns share one resolver, so a login-shell probe costs at most
+    /// one shell spawn per install rather than one per phase.
+    private static func install(
+        _ kinds: [SupportedCodingAgentHook], home: URL, fileManager: FileManager, executableResolver: inout ExecutableResolver
+    ) throws -> [AgentHookStatus] {
+        let unavailable = kinds.filter { !isAvailable($0, executableResolver: &executableResolver) }
+        guard unavailable.isEmpty else { throw AgentHookInstallerError.unavailableAgents(unavailable) }
+        for kind in kinds {
+            try kind.install(home: home, fileManager: fileManager)
         }
-        return false
+        return status(home: home, fileManager: fileManager, executableResolver: &executableResolver)
     }
 
-    /// Resolves an executable across `$PATH` plus common install locations, because a daemon started
-    /// by launchd/systemd often has a minimal PATH that omits user tool directories. When those
-    /// locations miss, it asks the user's login shell for the PATH it would use in a Spaces terminal.
-    static func resolveExecutable(named name: String, home: URL, fileManager: FileManager) -> String? {
-        var executableResolver = ExecutableResolver(home: home, fileManager: fileManager)
-        return executableResolver.resolve(named: name)
+    private static func status(home: URL, fileManager: FileManager, executableResolver: inout ExecutableResolver) -> [AgentHookStatus] {
+        SupportedCodingAgentHook.allCases.map { kind in
+            AgentHookStatus(
+                kind: kind, displayName: kind.displayName, available: isAvailable(kind, executableResolver: &executableResolver),
+                hooksInstalled: kind.hooksInstalled(home: home, fileManager: fileManager))
+        }
     }
 
-    static func resolveExecutable(
-        named name: String, home: URL, fileManager: FileManager, environment: [String: String],
-        shellPathDirectoryResolver: @escaping ShellPathDirectoryResolver
-    ) -> String? {
-        var executableResolver = ExecutableResolver(
-            home: home, fileManager: fileManager, environment: environment, shellPathDirectoryResolver: shellPathDirectoryResolver)
-        return executableResolver.resolve(named: name)
+    /// An agent is "available" only when its executable resolves on PATH / a common install dir.
+    private static func isAvailable(_ kind: SupportedCodingAgentHook, executableResolver: inout ExecutableResolver) -> Bool {
+        kind.executableNames.contains { executableResolver.resolve(named: $0) != nil }
     }
 
+    /// Resolves executables across `$PATH` plus common install locations, because a daemon started by
+    /// launchd/systemd often has a minimal PATH that omits user tool directories. When those locations
+    /// miss, it asks the user's login shell for the PATH it would use in a Spaces terminal. The
+    /// login-shell answer is resolved at most once per resolver instance.
     private struct ExecutableResolver {
         let home: URL
         let fileManager: FileManager
@@ -135,7 +136,7 @@ public enum AgentHookInstaller {
 
         init(
             home: URL, fileManager: FileManager, environment: [String: String] = ProcessInfo.processInfo.environment,
-            shellPathDirectoryResolver: @escaping ShellPathDirectoryResolver = AgentHookInstaller.loginShellPathDirectories
+            shellPathDirectoryResolver: @escaping ShellPathDirectoryResolver = AgentHookInstaller.cachedLoginShellPathDirectories
         ) {
             self.home = home
             self.fileManager = fileManager
@@ -187,6 +188,62 @@ public enum AgentHookInstaller {
     }
 
 #if os(macOS) || os(Linux)
+    /// Spawning an interactive login shell costs seconds — it sources the user's whole rc chain
+    /// (version managers, completions) — and the daemon probes availability on every app launch,
+    /// device connect, and Settings → Coding Agents open. Probes are user-action driven rather than a
+    /// hot loop, so a short TTL collapses the burst each action makes without holding a stale answer.
+    ///
+    /// The TTL is what keeps the "a newly installed agent is picked up on the next connect" contract
+    /// honest. `spacesd` outlives the app, so a cache held for the daemon's lifetime would survive an
+    /// app relaunch: an agent installed through a version manager whose shim directory is not yet on
+    /// the daemon's PATH would stay undetected until the daemon itself restarted.
+    ///
+    /// Failed probes are cached too. A shell that is missing, or an rc script that hangs past the
+    /// probe timeout, would otherwise pay the full timeout on *every* status call forever; caching the
+    /// failure bounds that to once per TTL and still recovers on its own.
+    static let shellDirectoryCacheTTLSeconds: TimeInterval = 60
+
+    private static let shellDirectoryCache = ShellDirectoryCache()
+
+    private static func cachedLoginShellPathDirectories(home: URL, environment: [String: String], fileManager: FileManager) -> [String] {
+        shellDirectoryCache.directories(home: home) { loginShellPathDirectories(home: home, environment: environment, fileManager: fileManager) }
+    }
+
+    final class ShellDirectoryCache: @unchecked Sendable {
+        private struct Entry {
+            let directories: [String]
+            let capturedAtNanoseconds: UInt64
+        }
+
+        private let lock = NSLock()
+        private var entriesByHome: [String: Entry] = [:]
+        private let ttlNanoseconds: UInt64
+        /// Monotonic, so a system clock change can neither freeze nor expire the cache.
+        private let now: @Sendable () -> UInt64
+
+        init(
+            ttlSeconds: TimeInterval = AgentHookInstaller.shellDirectoryCacheTTLSeconds,
+            now: @escaping @Sendable () -> UInt64 = { DispatchTime.now().uptimeNanoseconds }
+        ) {
+            self.ttlNanoseconds = UInt64(ttlSeconds * 1_000_000_000)
+            self.now = now
+        }
+
+        /// Holds the lock across `compute` so concurrent probes for the same home spawn one shell,
+        /// not one each.
+        func directories(home: URL, compute: () -> [String]) -> [String] {
+            lock.lock()
+            defer { lock.unlock() }
+            let timestamp = now()
+            if let entry = entriesByHome[home.path], timestamp &- entry.capturedAtNanoseconds < ttlNanoseconds {
+                return entry.directories
+            }
+            let computed = compute()
+            entriesByHome[home.path] = Entry(directories: computed, capturedAtNanoseconds: timestamp)
+            return computed
+        }
+    }
+
     private static func loginShellPathDirectories(home: URL, environment: [String: String], fileManager: FileManager) -> [String] {
         guard let shellPath = userLoginShellPath(environment: environment, fileManager: fileManager),
             let shellPATH = resolvedLoginShellPATH(shellPath: shellPath, home: home, environment: environment)
@@ -213,10 +270,21 @@ public enum AgentHookInstaller {
         return path.isEmpty ? nil : path
     }
 
-    private static func resolvedLoginShellPATH(shellPath: String, home: URL, environment: [String: String]) -> String? {
+    /// Marks the PATH line in the login shell's output. The shell's rc files write arbitrary text to
+    /// both streams first, so the value is printed on its own line and read back by prefix.
+    static let pathMarkerPrefix = "__SPACES_AGENT_HOOK_PATH__="
+
+    /// Runs the user's login shell and reads back the PATH it would give a Spaces terminal.
+    ///
+    /// The pipe is drained by a readability handler *while* the shell runs, so an rc chain that writes
+    /// more than the 64KB pipe buffer cannot deadlock. Process termination does not imply the handler
+    /// has consumed the last chunk, so the output is read through to EOF before it is parsed —
+    /// otherwise the marker line, which is printed last, can be lost and the shell PATH silently
+    /// ignored.
+    static func resolvedLoginShellPATH(shellPath: String, home: URL, environment: [String: String]) -> String? {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: shellPath)
-        process.arguments = ["-l", "-i", "-c", "printf '\\n__SPACES_AGENT_HOOK_PATH__=%s\\n' \"$PATH\""]
+        process.arguments = ["-l", "-i", "-c", "printf '\\n\(pathMarkerPrefix)%s\\n' \"$PATH\""]
         var processEnvironment = environment
         processEnvironment["HOME"] = home.path
         if processEnvironment["PATH"]?.isEmpty ?? true {
@@ -226,9 +294,15 @@ public enum AgentHookInstaller {
 
         let outputPipe = Pipe()
         let outputBuffer = PipeOutputBuffer()
+        let endOfOutput = DispatchSemaphore(value: 0)
         outputPipe.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
-            if !data.isEmpty { outputBuffer.append(data) }
+            guard !data.isEmpty else {
+                handle.readabilityHandler = nil  // EOF: the shell exited and its write end closed
+                endOfOutput.signal()
+                return
+            }
+            outputBuffer.append(data)
         }
         process.standardOutput = outputPipe
         process.standardError = outputPipe
@@ -251,11 +325,13 @@ public enum AgentHookInstaller {
             }
         }
         process.waitUntilExit()
+        // The shell has exited, so EOF is imminent; bound the wait anyway rather than hang the daemon
+        // on a grandchild that inherited the write end and outlives its parent.
+        _ = endOfOutput.wait(timeout: .now() + 1)
         outputPipe.fileHandleForReading.readabilityHandler = nil
 
         guard process.terminationStatus == 0, let output = String(data: outputBuffer.snapshot(), encoding: .utf8) else { return nil }
-        let prefix = "__SPACES_AGENT_HOOK_PATH__="
-        return output.components(separatedBy: .newlines).last(where: { $0.hasPrefix(prefix) }).map { String($0.dropFirst(prefix.count)) }
+        return output.components(separatedBy: .newlines).last { $0.hasPrefix(pathMarkerPrefix) }.map { String($0.dropFirst(pathMarkerPrefix.count)) }
     }
 
     private final class PipeOutputBuffer: @unchecked Sendable {
@@ -275,6 +351,6 @@ public enum AgentHookInstaller {
         }
     }
 #else
-    private static func loginShellPathDirectories(home: URL, environment: [String: String], fileManager: FileManager) -> [String] { [] }
+    private static func cachedLoginShellPathDirectories(home: URL, environment: [String: String], fileManager: FileManager) -> [String] { [] }
 #endif
 }

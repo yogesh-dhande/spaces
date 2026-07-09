@@ -13,9 +13,8 @@ import Foundation
 enum AgentHookOpencodePluginWriter {
     static let pluginFileName = "spaces-agent-signal.js"
 
-    static func install(pluginURL: URL, cliPath: String, fileManager: FileManager = .default) throws {
-        try fileManager.createDirectory(at: pluginURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try pluginContents().write(to: pluginURL, atomically: true, encoding: .utf8)
+    static func install(pluginURL: URL, fileManager: FileManager = .default) throws {
+        try AgentHookConfigFile.write(pluginContents(), to: pluginURL, fileManager: fileManager)
     }
 
     static func isInstalled(pluginURL: URL) -> Bool {

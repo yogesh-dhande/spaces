@@ -28,7 +28,7 @@ enum AgentHookJSONWriter {
     }
 
     /// Writes the merged hooks to `fileURL`. Creates parent directories and the file as needed.
-    static func install(fileURL: URL, cliPath: String, bindings: [EventBinding], fileManager: FileManager = .default) throws {
+    static func install(fileURL: URL, bindings: [EventBinding], fileManager: FileManager = .default) throws {
         var root = try loadRootObject(fileURL: fileURL, fileManager: fileManager)
         var hooks = (root["hooks"] as? [String: Any]) ?? [:]
 
@@ -105,9 +105,8 @@ enum AgentHookJSONWriter {
     }
 
     private static func write(root: [String: Any], to fileURL: URL, fileManager: FileManager) throws {
-        try fileManager.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         var data = try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
         data.append(0x0A)  // trailing newline
-        try data.write(to: fileURL, options: .atomic)
+        try AgentHookConfigFile.write(data, to: fileURL, fileManager: fileManager)
     }
 }
