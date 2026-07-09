@@ -558,6 +558,7 @@ import workspacecore
                 self?.setRemoteDevicePairingStatus("Connected \(result.name).", isError: false)
                 self?.refreshVisibleDeviceSettingsAfterClientDeviceChange()
                 self?.host.requestSidebarReload()
+                self?.host.autoInstallAgentHooksForKnownDevices()
             } catch { self?.setRemoteDevicePairingStatus(error.localizedDescription, isError: true) }
         }
     }

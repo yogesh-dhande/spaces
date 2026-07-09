@@ -15,11 +15,11 @@ public struct SpacesCommand: ParsableCommand {
               - Repo-local development builds default to a per-worktree profile under ~/.spaces-dev/profiles/spaces.
               - Installed or non-dev builds default to ~/.spaces/spaces.db.
               - Runtime state defaults to <profile-root>/runtime unless `SPACES_RUNTIME_DIR` overrides it.
-              - Workspace and agent commands require explicit IDs.
+              - Workspace commands require explicit IDs; agent signal defaults workspace/session IDs from Spaces terminal environment.
               - `workspace create` targets this device's spacesd daemon.
               - `workspace start` waits for pending/running setup to complete and fails with the setup error if setup failed. It ensures a workspace and all its processes are running: launches when stopped; when already running, restarts any exited processes. Windows open without activating the app.
               - `workspace restart` forces a full stop and relaunch for a workspace.
-              - Agent events stay explicit. Workspace runtime commands do not imply agent lifecycle. `agent signal <event>` records those lifecycle transitions for an explicit workspace and terminal session.
+              - Agent events stay explicit. Workspace runtime commands do not imply agent lifecycle. `agent signal <event>` records those lifecycle transitions for the current Spaces terminal session, or no-ops outside one.
             """, version: AppVersion.current,
         subcommands: [ProjectCommand.self, WorkspaceCommand.self, AgentCommand.self, TerminalCommand.self, DeviceCommand.self, MCPCommand.self])
 
@@ -105,22 +105,57 @@ struct WorkspaceRestartCommand: ParsableCommand {
 
 struct AgentCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
-        commandName: "agent", abstract: "Manage coding-agent lifecycle state.", subcommands: [AgentSignalCommand.self])
+        commandName: "agent", abstract: "Manage coding-agent lifecycle state.",
+        subcommands: [AgentSignalCommand.self, AgentHooksCommand.self])
+}
+
+struct AgentHooksCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "hooks", abstract: "Inspect Spaces lifecycle hooks for local coding agents.", subcommands: [AgentHooksStatusCommand.self])
+}
+
+struct AgentHooksStatusCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "status", abstract: "Show which local coding-agent CLIs are detected and have Spaces hooks installed.")
+
+    func run() throws {
+        let context = CLIContext()
+        context.output.emitLines(
+            AgentHookInstaller.status().map { status in
+                "\(status.kind.rawValue)\tavailable=\(status.available)\thooks=\(status.hooksInstalled)"
+            })
+    }
 }
 
 struct AgentSignalCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "signal", abstract: "Record a lifecycle event for an explicit terminal session.")
+    static let configuration = CommandConfiguration(commandName: "signal", abstract: "Record a lifecycle event for a Spaces terminal session.")
 
-    @Option(name: .long, help: "Workspace ID.") var workspace: String
-    @Option(name: .long, help: "Spaces terminal session ID.") var session: String
+    @Option(name: .long, help: "Workspace ID. Defaults to SPACES_WORKSPACE_ID.") var workspace: String?
+    @Option(name: .long, help: "Spaces terminal session ID. Defaults to SPACES_TERMINAL_TRACKING_ID.") var session: String?
     @Argument(
         help: ArgumentHelp("Lifecycle event to record.", discussion: "Allowed values: \(AgentEventType.allValueStrings.joined(separator: ", "))."))
     var type: AgentEventType
 
     func run() throws {
-        let context = CLIContext()
-        _ = try TerminalService.sendProfileCommand(.agentSignal(.init(workspaceID: workspace, terminalSessionID: session, event: type.rawValue)))
-        context.output.emit("Agent \(type.rawValue): workspace=\(workspace)")
+        guard let context = Self.resolvedSignalContext(workspace: workspace, session: session, environment: ProcessInfo.processInfo.environment) else {
+            return
+        }
+        let cliContext = CLIContext()
+        _ = try TerminalService.sendProfileCommand(
+            .agentSignal(.init(workspaceID: context.workspaceID, terminalSessionID: context.sessionID, event: type.rawValue)))
+        cliContext.output.emit("Agent \(type.rawValue): workspace=\(context.workspaceID)")
+    }
+
+    static func resolvedSignalContext(workspace: String?, session: String?, environment: [String: String]) -> (workspaceID: String, sessionID: String)? {
+        let workspaceID = nonEmpty(workspace) ?? nonEmpty(environment["SPACES_WORKSPACE_ID"])
+        let sessionID = nonEmpty(session) ?? nonEmpty(environment[WorkspaceOrchestrator.terminalTrackingIDEnvVar])
+        guard let workspaceID, let sessionID else { return nil }
+        return (workspaceID, sessionID)
+    }
+
+    private static func nonEmpty(_ value: String?) -> String? {
+        guard let value, !value.isEmpty else { return nil }
+        return value
     }
 }
 

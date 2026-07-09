@@ -3,9 +3,9 @@ import Testing
 import spacesclientcore
 import spacesdeviceapi
 import spacesdevicecore
-import spacesterminalcore
 import workspacecore
 
+@testable import spacesterminalcore
 @testable import spacesui
 
 @Suite struct AppKitControllerDeviceParityTests {
@@ -78,6 +78,14 @@ import workspacecore
         #expect(
             !DevicePairingController.localDaemonRestartActionIsAvailable(
                 responseMessage: SpacesDeviceAPIControlClient.deviceAPINotRunningMessage, isRelaunching: true))
+    }
+
+    @Test func localDaemonCompatibilityBlockShowsUpdateGuidanceWhenClientIsTooOld() {
+        let incompatibility = TerminalServiceDaemonWireIncompatibility(
+            verdict: .clientTooOld, status: nil, message: "The running spacesd daemon is newer than this Spaces build.")
+        let error = TerminalServiceError.daemonWireIncompatible(incompatibility)
+
+        #expect(AppKitController.shouldShowLocalDaemonCompatibilityBlock(for: error))
     }
 
     @Test func remoteWorkspacePathActionsKeepControlsButUseSSHDependentErrorText() {

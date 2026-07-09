@@ -35,7 +35,7 @@ spaces workspace create --project <id> --branch feature/demo
 spaces workspace start --workspace <id>
 spaces workspace restart --workspace <id>
 spaces device pair                          # open a short-lived same-device pairing window
-spaces agent signal --workspace <id> --session <terminal-session-id> blocked
+spaces agent signal blocked                 # inside a Spaces-managed terminal
 spaces terminal command --command "cat"   # start a terminal session in the current directory's workspace
 spaces terminal list                      # inspect live session IDs and working directories
 spaces terminal send text <session> "hello" --newline
@@ -44,7 +44,7 @@ spaces terminal tail <session> --lines 20 # read recent output
 spaces terminal show <session>            # open an owner-seeking window for a session
 ```
 
-Coding agents emit explicit `spaces agent signal` events from their terminals so the GUI knows which agents are working, waiting on a human, or done. See [coding-agent integration](https://usespaces.dev/docs/coding-agents).
+Coding agents emit explicit `spaces agent signal` events from their terminals so the GUI knows which agents are working, waiting on a human, or done. Spaces-managed terminals provide the workspace and session environment used by this command; outside one, the command exits successfully without reporting an event. Spaces installs hooks for detected Claude Code, Codex, and opencode CLIs automatically on install and on connect, assuming `spaces` is available on the hook process's `PATH`, and Settings → Coding Agents manages them per device. See [coding-agent integration](https://usespaces.dev/docs/coding-agents).
 
 ## Features
 

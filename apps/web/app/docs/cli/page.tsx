@@ -33,7 +33,7 @@ export default function CliReferencePage() {
 spaces project list
 spaces workspace list
 spaces workspace start --workspace <id>
-spaces agent signal --workspace <id> --session <terminal-session-id> blocked`}</CodeBlock>
+spaces agent signal blocked`}</CodeBlock>
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
@@ -97,24 +97,35 @@ spaces terminal show <session-id>`}</CodeBlock>
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Agent Signal</h2>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Coding agents report their lifecycle explicitly for a workspace and terminal session. Spaces uses these events to surface blocked and done states in the app and Alerts. This command records state only; it does not launch or stop an agent.
+          Coding agents report their lifecycle explicitly for a workspace and terminal session. Inside a Spaces-managed terminal, the command reads the workspace and terminal-session IDs from environment. Spaces uses these events to surface blocked and done states in the app and Alerts. This command records state only; it does not launch or stop an agent.
         </p>
-        <CodeBlock>{`spaces agent signal --workspace <workspace-id> --session <terminal-session-id> init
-spaces agent signal --workspace <workspace-id> --session <terminal-session-id> working
-spaces agent signal --workspace <workspace-id> --session <terminal-session-id> blocked
-spaces agent signal --workspace <workspace-id> --session <terminal-session-id> done
-spaces agent signal --workspace <workspace-id> --session <terminal-session-id> exit`}</CodeBlock>
+        <CodeBlock>{`spaces agent signal init
+spaces agent signal working
+spaces agent signal blocked
+spaces agent signal done
+spaces agent signal exit`}</CodeBlock>
         <ul className="mt-3 space-y-1">
-          <Flag name="--workspace <id>" description="Workspace ID to associate with the event." />
-          <Flag name="--session <id>" description="Spaces terminal session ID that owns the agent." />
+          <Flag name="--workspace <id>" description="Workspace ID to associate with the event. Defaults to SPACES_WORKSPACE_ID." />
+          <Flag name="--session <id>" description="Spaces terminal session ID that owns the agent. Defaults to SPACES_TERMINAL_TRACKING_ID." />
           <Flag name="<event>" description="Required event type: init, working, blocked, done, or exit." />
         </ul>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Spaces records agent lifecycle events only for Spaces-managed terminal sessions. Use <code>init</code> to establish the agent row; later events update that row, or establish one when the terminal runtime identifies the session as a coding agent.
+          Spaces records agent lifecycle events only for Spaces-managed terminal sessions. Outside one, <code>spaces agent signal</code> exits successfully without reporting an event unless explicit IDs are supplied. Use <code>init</code> to establish the agent row; later events update that row, or establish one when the terminal runtime identifies the session as a coding agent.
         </p>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           Agent labels come from configured launcher names or the terminal runtime when it identifies known Codex, Claude Code, and opencode foreground commands.
         </p>
+      </article>
+
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Agent Hooks</h2>
+        <p className="mt-3 text-sm leading-7 text-foreground-soft">
+          Spaces installs the lifecycle hooks for detected supported agent CLIs automatically on install and on connect, and Settings &rarr; Coding Agents manages them per device. This command reports local hook status for this machine.
+        </p>
+        <CodeBlock>{`spaces agent hooks status`}</CodeBlock>
+        <ul className="mt-3 space-y-1">
+          <Flag name="status" description="Lists supported agents on this machine with CLI detection and whether Spaces hooks are installed." />
+        </ul>
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
@@ -137,10 +148,10 @@ spaces device remove <name-or-id>`}</CodeBlock>
         <CodeBlock>{`spaces project list
 spaces workspace create --project <project-id> --branch bugfix/login-timeout
 spaces workspace start --workspace <workspace-id>
-spaces agent signal --workspace <workspace-id> --session <terminal-session-id> init
-spaces agent signal --workspace <workspace-id> --session <terminal-session-id> working
+spaces agent signal init
+spaces agent signal working
 # ... later ...
-spaces agent signal --workspace <workspace-id> --session <terminal-session-id> blocked`}</CodeBlock>
+spaces agent signal blocked`}</CodeBlock>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
           The GUI remains the primary place to configure templates and edit workspace details. The CLI stays focused on explicit profile, workspace, terminal, and agent automation.
         </p>

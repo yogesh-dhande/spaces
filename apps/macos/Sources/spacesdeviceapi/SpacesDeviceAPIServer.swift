@@ -1122,7 +1122,22 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         case .readTerminalLinkChunk(let payload): return try handleReadTerminalLinkChunkRequest(payload)
         case .subscribe, .subscribeDeviceOverview:
             return SpacesDeviceAPIResponse(ok: false, message: "Subscription requests must use the stream path.", errorCode: .misroutedRequest)
+        case .agentHooksStatus:
+            return SpacesDeviceAPIResponse(
+                ok: true, message: "Loaded agent hook status.",
+                result: .agentHooksStatus(.init(agents: AgentHookInstaller.status())))
+        case .installAgentHooks(let payload): return try handleInstallAgentHooksRequest(payload)
         }
+    }
+
+    /// Idempotently installs Spaces lifecycle hooks for the requested agents into this daemon's home
+    /// directory, then returns fresh status for every supported agent. Rejects an empty request.
+    private func handleInstallAgentHooksRequest(_ payload: SpacesDeviceInstallAgentHooksRequest) throws -> SpacesDeviceAPIResponse {
+        guard !payload.kinds.isEmpty else {
+            return SpacesDeviceAPIResponse(ok: false, message: "No coding agents specified.", errorCode: .invalidArgument)
+        }
+        let status = try AgentHookInstaller.install(payload.kinds)
+        return SpacesDeviceAPIResponse(ok: true, message: "Installed agent hooks.", result: .agentHooksStatus(.init(agents: status)))
     }
 
     private func authorize(_ request: SpacesDeviceAPIRequest) throws {
@@ -1155,6 +1170,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             case .gitCommandFailed, .dependencyMissing, .configError, .databaseMigrationFailed: return .internalError
             }
         }
+        if error is AgentHookInstallerError { return .invalidArgument }
         if error is DecodingError { return .invalidArgument }
         return .internalError
     }

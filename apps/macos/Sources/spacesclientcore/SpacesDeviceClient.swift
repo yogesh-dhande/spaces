@@ -147,7 +147,7 @@ public enum SpacesDeviceClient {
             if let terminalError = error as? TerminalServiceError {
                 switch terminalError {
                 case .serviceStartupTimedOut, .executableNotFound: return true
-                case .requestFailed: return false
+                case .daemonWireIncompatible, .requestFailed: return false
                 }
             }
         #endif
@@ -236,6 +236,28 @@ public enum SpacesDeviceClient {
             throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode)
         }
         return status
+    }
+
+    /// Reports availability + Spaces hook-install status for supported coding agents on `device`
+    /// (local or remote). Read-only.
+    public static func agentHooksStatus(
+        device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
+    ) throws -> [AgentHookStatus] {
+        let response = try request(.init(command: .agentHooksStatus), device: device, clientApp: clientApp, profile: profile)
+        guard let payload = response.agentHooksStatus else { throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode) }
+        return payload.agents
+    }
+
+    /// Idempotently installs Spaces lifecycle hooks for `kinds` on `device` (local or remote) and
+    /// returns fresh status for every supported agent.
+    @discardableResult public static func installAgentHooks(
+        _ kinds: [SupportedCodingAgentHook], device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
+        profile: SpacesProfile? = nil
+    ) throws -> [AgentHookStatus] {
+        let response = try request(
+            .init(command: .installAgentHooks(.init(kinds: kinds))), device: device, clientApp: clientApp, profile: profile)
+        guard let payload = response.agentHooksStatus else { throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode) }
+        return payload.agents
     }
 
     /// Refreshes a device, reading its compatibility verdict from the overview's inline frozen-core
@@ -640,12 +662,12 @@ public enum SpacesDeviceClient {
         switch command {
         case .createProject, .previewGitProject, .deleteProject, .importProject, .exportProject, .createWorkspace, .launchWorkspace, .stopWorkspace,
             .restartWorkspace, .archiveWorkspace, .runWorkspaceSetup, .openWorkspaceTerminal, .stopWorkspaceTerminal, .runWorkspaceProcess,
-            .stopWorkspaceProcess, .restartWorkspaceProcess, .runCodingAgent, .stopCodingAgent, .restartCodingAgent:
+            .stopWorkspaceProcess, .restartWorkspaceProcess, .runCodingAgent, .stopCodingAgent, .restartCodingAgent, .installAgentHooks:
             longRunningMutationTimeoutSeconds
         case .pair, .ping, .daemonStatus, .requestDaemonRestart, .overview, .previewProject, .listDirectories, .workspaceCreateOptions,
             .updateProjectConfig, .updateWorkspaceConfig, .updateWorkspaceMetadata, .renameTerminalSession, .state, .terminalControl,
             .terminalPasteImage, .sendTerminalInput, .tailTerminalOutput, .resolveTerminalLink, .readTerminalLinkChunk, .subscribe,
-            .subscribeDeviceOverview:
+            .subscribeDeviceOverview, .agentHooksStatus:
             defaultRequestTimeoutSeconds
         }
     }

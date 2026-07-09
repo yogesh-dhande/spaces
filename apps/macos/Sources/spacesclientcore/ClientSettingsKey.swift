@@ -40,4 +40,8 @@ public enum ClientSettingsKey {
     /// App-wide UI appearance (an `AppAppearanceMode` raw value: `system`/`light`/`dark`).
     /// An unset value resolves to the dark default.
     public static let appAppearanceMode = "app_appearance_mode"
+    /// Records which coding agents Spaces has already auto-installed hooks for, per device, so
+    /// auto-install runs once per (device, agent) and never fights a user who removes a hook. Stored
+    /// as a JSON object `{ "<deviceID>": ["claudeCode", …] }`. Manual installs from settings bypass it.
+    public static let agentHooksAutoInstalled = "agent_hooks_auto_installed"
 }

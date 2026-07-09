@@ -39,6 +39,18 @@ import workspacecore
     private weak var mcpConfigTextView: NSTextView?
     private weak var mcpConfigHintLabel: NSTextField?
 
+    /// Coding Agents section state. The selected device (This Mac or a paired remote) whose agents
+    /// are shown, the container the per-agent rows render into, and the last fetched status.
+    var codingAgentsDeviceID: String = SpacesPairedDeviceRecord.localDeviceID
+    weak var codingAgentsRowsContainer: NSStackView?
+    var codingAgentsStatus: [AgentHookStatus] = []
+    /// Increments per reload so a stale in-flight fetch's result is discarded when the user switches devices.
+    var codingAgentsReloadToken: Int = 0
+    /// Increments per install so a stale completion cannot update rows for a different selected device.
+    var codingAgentsInstallToken: Int = 0
+    /// Non-nil while a manual Install/Reinstall request is in flight.
+    var codingAgentsInstallingKind: SupportedCodingAgentHook?
+
     /// Opens user settings as a floating dialog on the given section. The dialog floats over the
     /// main window, so the current sidebar selection and detail pane are left untouched.
     func openSettings(section: SettingsSection) {
@@ -204,6 +216,7 @@ import workspacecore
         let label = NSTextField(labelWithString: section.title)
         label.font = .systemFont(ofSize: 13, weight: .medium)
         label.textColor = .labelColor
+        row.setAccessibilityLabel(section.title)
 
         let hstack = NSStackView(views: [iconView, label])
         hstack.orientation = .horizontal
@@ -218,15 +231,13 @@ import workspacecore
             hstack.topAnchor.constraint(equalTo: row.topAnchor, constant: 7), hstack.bottomAnchor.constraint(equalTo: row.bottomAnchor, constant: -7),
         ])
 
-        let click = NSClickGestureRecognizer(target: self, action: #selector(settingsSectionRowClicked(_:)))
-        row.addGestureRecognizer(click)
+        row.onClick = { [weak self] in self?.selectSettingsSection(section) }
 
         settingsSectionRowViews[section] = row
         return row
     }
 
-    @objc private func settingsSectionRowClicked(_ sender: NSClickGestureRecognizer) {
-        guard let id = sender.view?.identifier?.rawValue, let section = SettingsSection(rawValue: id) else { return }
+    private func selectSettingsSection(_ section: SettingsSection) {
         guard section != selectedSettingsSection else { return }
         selectedSettingsSection = section
         for (candidate, row) in settingsSectionRowViews { row.isSelected = candidate == section }
@@ -240,6 +251,7 @@ import workspacecore
         case .general: renderSettingsCards(generalSettingsCards())
         case .shortcuts: renderSettingsCards(shortcutsSettingsCards())
         case .devices: host.renderDeviceSettings(response: host.currentDeviceControlResponse())
+        case .codingAgents: renderCodingAgentsSection()
         case .mcp: renderSettingsCards(mcpSettingsCards())
         }
     }

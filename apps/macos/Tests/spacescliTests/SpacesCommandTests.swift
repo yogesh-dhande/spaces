@@ -49,6 +49,42 @@ final class SpacesCommandTests: XCTestCase {
         XCTAssertEqual(command.type, .blocked)
     }
 
+    func testAgentSignalParsesEventWithoutExplicitContext() throws {
+        let command = try AgentSignalCommand.parse(["done"])
+
+        XCTAssertNil(command.workspace)
+        XCTAssertNil(command.session)
+        XCTAssertEqual(command.type, .done)
+    }
+
+    func testAgentSignalResolvesContextFromEnvironment() {
+        let context = AgentSignalCommand.resolvedSignalContext(
+            workspace: nil, session: nil,
+            environment: ["SPACES_WORKSPACE_ID": "workspace-env", "SPACES_TERMINAL_TRACKING_ID": "session-env"])
+
+        XCTAssertEqual(context?.workspaceID, "workspace-env")
+        XCTAssertEqual(context?.sessionID, "session-env")
+    }
+
+    func testAgentSignalExplicitContextOverridesEnvironment() {
+        let context = AgentSignalCommand.resolvedSignalContext(
+            workspace: "workspace-explicit", session: "session-explicit",
+            environment: ["SPACES_WORKSPACE_ID": "workspace-env", "SPACES_TERMINAL_TRACKING_ID": "session-env"])
+
+        XCTAssertEqual(context?.workspaceID, "workspace-explicit")
+        XCTAssertEqual(context?.sessionID, "session-explicit")
+    }
+
+    func testAgentSignalMissingContextIsNoOp() {
+        XCTAssertNil(AgentSignalCommand.resolvedSignalContext(workspace: nil, session: nil, environment: [:]))
+    }
+
+    func testAgentHooksCommandExposesStatusOnly() {
+        let subcommands = AgentHooksCommand.configuration.subcommands.map { String(describing: $0) }
+        XCTAssertEqual(subcommands, ["AgentHooksStatusCommand"])
+        XCTAssertThrowsError(try AgentHooksCommand.parse(["install"]))
+    }
+
     func testTerminalListParses() throws { XCTAssertNoThrow(try TerminalListCommand.parse([])) }
 
     func testTerminalCommandsParseDeviceSelector() throws {

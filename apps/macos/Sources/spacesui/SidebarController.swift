@@ -228,6 +228,10 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             host.startBackgroundServicesIfNeeded()
         case .failure(let error):
             if host.handleDeferredSetupRequirementIfNeeded(error) { return }
+            if host.showLocalDaemonCompatibilityBlockIfNeeded(error) {
+                host.startBackgroundServicesIfNeeded()
+                return
+            }
             host.showError(error)
             host.showPlaceholder(message: "Spaces couldn't load workspace data.")
             host.startBackgroundServicesIfNeeded()
@@ -488,6 +492,8 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
                 return
             }
             self.remoteOverviewSubscriptions[deviceID] = client
+            // The remote is reachable now; ensure its agent hooks are installed (guarded, once per session).
+            self.host.autoInstallAgentHooksForKnownDevices()
         }
     }
 

@@ -117,7 +117,14 @@ import XCTest
             XCTAssertTrue(message.contains("Restart the daemon"))
             // Impact suffix appears when a restart would interrupt running work.
             XCTAssertTrue(message.contains("Restarting stops"))
-            XCTAssertThrowsError(try TerminalService.assertDaemonWireCompatible(response))
+            XCTAssertThrowsError(try TerminalService.assertDaemonWireCompatible(response)) { error in
+                guard case TerminalServiceError.daemonWireIncompatible(let incompatibility) = error else {
+                    return XCTFail("Expected daemonWireIncompatible, got \(error)")
+                }
+                XCTAssertEqual(incompatibility.verdict, .daemonTooOld)
+                XCTAssertTrue(incompatibility.canRestartDaemon)
+                XCTAssertEqual(incompatibility.status?.activeSessionCount, 2)
+            }
         }
 
         func testDaemonWireIncompatibleWhenClientIsOlder() throws {
@@ -125,6 +132,13 @@ import XCTest
                 ok: true, message: "pong", daemonStatus: makeDaemonStatus(protocolVersion: SpacesWireProtocol.version + 1))
             let message = try XCTUnwrap(TerminalService.daemonWireIncompatibility(response))
             XCTAssertTrue(message.contains("Update Spaces"))
+            XCTAssertThrowsError(try TerminalService.assertDaemonWireCompatible(response)) { error in
+                guard case TerminalServiceError.daemonWireIncompatible(let incompatibility) = error else {
+                    return XCTFail("Expected daemonWireIncompatible, got \(error)")
+                }
+                XCTAssertEqual(incompatibility.verdict, .clientTooOld)
+                XCTAssertFalse(incompatibility.canRestartDaemon)
+            }
         }
 
         func testDaemonWireIncompatibleWhenStatusIsMissing() throws {

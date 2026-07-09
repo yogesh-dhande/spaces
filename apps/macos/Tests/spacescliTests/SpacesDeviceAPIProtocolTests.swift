@@ -5,12 +5,41 @@ import spacesterminalcore
 @testable import spacesdevicecore
 
 final class SpacesDeviceAPIProtocolTests: XCTestCase {
+    func testWireProtocolVersionCoversAgentHooksCommands() {
+        XCTAssertGreaterThanOrEqual(SpacesWireProtocol.version, 2)
+    }
+
     func testSubscribeDeviceOverviewRoundTripsThroughCodecAndIsASubscription() throws {
         let request = SpacesDeviceAPIRequest(command: .subscribeDeviceOverview, authToken: "SECRET")
         XCTAssertTrue(request.command.isSubscriptionCommand)
         XCTAssertTrue(request.command.isDeviceOverviewSubscription)
         XCTAssertFalse(SpacesDeviceAPIRequest(command: .overview).command.isDeviceOverviewSubscription)
         XCTAssertEqual(try SpacesDeviceAPICodec.decodeRequest(SpacesDeviceAPICodec.encodeRequest(request)), request)
+    }
+
+    func testAgentHooksStatusCommandIsReplaySafeAndRoundTrips() throws {
+        let request = SpacesDeviceAPIRequest(command: .agentHooksStatus, authToken: "SECRET")
+        XCTAssertTrue(request.isSafeToReplayAfterConnectionFailure)
+        XCTAssertEqual(try SpacesDeviceAPICodec.decodeRequest(SpacesDeviceAPICodec.encodeRequest(request)), request)
+    }
+
+    func testInstallAgentHooksCommandRoundTripsAndIsNotReplaySafe() throws {
+        let request = SpacesDeviceAPIRequest(
+            command: .installAgentHooks(.init(kinds: [.claudeCode, .opencode])), authToken: "SECRET")
+        XCTAssertFalse(request.isSafeToReplayAfterConnectionFailure)
+        XCTAssertEqual(try SpacesDeviceAPICodec.decodeRequest(SpacesDeviceAPICodec.encodeRequest(request)), request)
+    }
+
+    func testAgentHooksStatusResultRoundTripsThroughResponse() throws {
+        let payload = SpacesAgentHooksStatusPayload(agents: [
+            AgentHookStatus(kind: .claudeCode, displayName: "Claude Code", available: true, hooksInstalled: true),
+            AgentHookStatus(kind: .codex, displayName: "Codex", available: true, hooksInstalled: false),
+            AgentHookStatus(kind: .opencode, displayName: "opencode", available: false, hooksInstalled: false),
+        ])
+        let response = SpacesDeviceAPIResponse(ok: true, message: "Loaded agent hook status.", result: .agentHooksStatus(payload))
+        let decoded = try SpacesDeviceAPICodec.decodeResponse(SpacesDeviceAPICodec.encodeResponse(response))
+        XCTAssertEqual(decoded, response)
+        XCTAssertEqual(decoded.agentHooksStatus, payload)
     }
 
     func testResponseErrorCodeEncodesWhenSetAndDecodesNilWhenAbsent() throws {

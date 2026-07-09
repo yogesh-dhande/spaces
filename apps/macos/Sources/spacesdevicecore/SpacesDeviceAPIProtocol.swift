@@ -1308,6 +1308,10 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
     /// remote daemon's database changes, so paired clients stay live without
     /// polling. No payload: one overview stream per connection.
     case subscribeDeviceOverview
+    /// Reports availability + Spaces hook-install status for supported coding agents on the daemon host.
+    case agentHooksStatus
+    /// Idempotently installs Spaces lifecycle hooks for the requested coding agents on the daemon host.
+    case installAgentHooks(SpacesDeviceInstallAgentHooksRequest)
 
     public var name: String {
         switch self {
@@ -1351,6 +1355,8 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
         case .resolveTerminalLink: "resolveTerminalLink"
         case .readTerminalLinkChunk: "readTerminalLinkChunk"
         case .subscribeDeviceOverview: "subscribeDeviceOverview"
+        case .agentHooksStatus: "agentHooksStatus"
+        case .installAgentHooks: "installAgentHooks"
         }
     }
 
@@ -1401,7 +1407,7 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
     var isSafeToReplayAfterConnectionFailure: Bool {
         switch self {
         case .ping, .daemonStatus, .overview, .previewProject, .previewGitProject, .listDirectories, .workspaceCreateOptions, .state,
-            .resolveTerminalLink, .readTerminalLinkChunk, .tailTerminalOutput:
+            .resolveTerminalLink, .readTerminalLinkChunk, .tailTerminalOutput, .agentHooksStatus:
             true
         default: false
         }
@@ -1450,6 +1456,8 @@ extension SpacesDeviceAPICommand: Codable {
         case resolveTerminalLink
         case readTerminalLinkChunk
         case subscribeDeviceOverview
+        case agentHooksStatus
+        case installAgentHooks
     }
 
     public init(from decoder: any Decoder) throws {
@@ -1512,6 +1520,10 @@ extension SpacesDeviceAPICommand: Codable {
         case .subscribeDeviceOverview:
             _ = try container.decode(SpacesDeviceAPIEmptyPayload.self, forKey: key)
             self = .subscribeDeviceOverview
+        case .agentHooksStatus:
+            _ = try container.decode(SpacesDeviceAPIEmptyPayload.self, forKey: key)
+            self = .agentHooksStatus
+        case .installAgentHooks: self = .installAgentHooks(try container.decode(SpacesDeviceInstallAgentHooksRequest.self, forKey: key))
         }
     }
 
@@ -1558,6 +1570,8 @@ extension SpacesDeviceAPICommand: Codable {
         case .resolveTerminalLink(let payload): try container.encode(payload, forKey: .resolveTerminalLink)
         case .readTerminalLinkChunk(let payload): try container.encode(payload, forKey: .readTerminalLinkChunk)
         case .subscribeDeviceOverview: try container.encode(SpacesDeviceAPIEmptyPayload(), forKey: .subscribeDeviceOverview)
+        case .agentHooksStatus: try container.encode(SpacesDeviceAPIEmptyPayload(), forKey: .agentHooksStatus)
+        case .installAgentHooks(let payload): try container.encode(payload, forKey: .installAgentHooks)
         }
     }
 }
@@ -1612,6 +1626,7 @@ public enum SpacesDeviceAPIResult: Sendable, Equatable {
     case terminalLinkMetadata(SpacesDeviceTerminalLinkMetadata)
     case terminalLinkChunk(SpacesDeviceTerminalLinkChunk)
     case terminalOutput(SpacesDeviceTerminalOutputResult)
+    case agentHooksStatus(SpacesAgentHooksStatusPayload)
 }
 
 extension SpacesDeviceAPIResult: Codable {
@@ -1628,6 +1643,7 @@ extension SpacesDeviceAPIResult: Codable {
         case terminalLinkMetadata
         case terminalLinkChunk
         case terminalOutput
+        case agentHooksStatus
     }
 
     public init(from decoder: any Decoder) throws {
@@ -1649,6 +1665,7 @@ extension SpacesDeviceAPIResult: Codable {
         case .terminalLinkMetadata: self = .terminalLinkMetadata(try container.decode(SpacesDeviceTerminalLinkMetadata.self, forKey: key))
         case .terminalLinkChunk: self = .terminalLinkChunk(try container.decode(SpacesDeviceTerminalLinkChunk.self, forKey: key))
         case .terminalOutput: self = .terminalOutput(try container.decode(SpacesDeviceTerminalOutputResult.self, forKey: key))
+        case .agentHooksStatus: self = .agentHooksStatus(try container.decode(SpacesAgentHooksStatusPayload.self, forKey: key))
         }
     }
 
@@ -1667,6 +1684,7 @@ extension SpacesDeviceAPIResult: Codable {
         case .terminalLinkMetadata(let payload): try container.encode(payload, forKey: .terminalLinkMetadata)
         case .terminalLinkChunk(let payload): try container.encode(payload, forKey: .terminalLinkChunk)
         case .terminalOutput(let payload): try container.encode(payload, forKey: .terminalOutput)
+        case .agentHooksStatus(let payload): try container.encode(payload, forKey: .agentHooksStatus)
         }
     }
 }
@@ -1724,6 +1742,8 @@ public struct SpacesDeviceAPIResponse: Codable, Sendable, Equatable {
     public var terminalLinkChunk: SpacesDeviceTerminalLinkChunk? { if case .terminalLinkChunk(let payload) = result { payload } else { nil } }
 
     public var terminalOutput: String? { if case .terminalOutput(let payload) = result { payload.text } else { nil } }
+
+    public var agentHooksStatus: SpacesAgentHooksStatusPayload? { if case .agentHooksStatus(let payload) = result { payload } else { nil } }
 }
 
 public enum SpacesDeviceAPICodec {

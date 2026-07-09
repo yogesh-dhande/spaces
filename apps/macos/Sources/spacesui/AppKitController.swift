@@ -3684,6 +3684,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         guard !didStartBackgroundServices else { return }
         didStartBackgroundServices = true
         sidebar.startRemoteOverviewSubscriptions()
+        autoInstallAgentHooksForKnownDevices()
     }
 
     private func stopBackgroundServices() {
@@ -4230,6 +4231,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         case general
         case shortcuts
         case devices
+        case codingAgents
         case mcp
 
         var title: String {
@@ -4237,6 +4239,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             case .general: "General"
             case .shortcuts: "Shortcuts"
             case .devices: "Devices"
+            case .codingAgents: "Coding Agents"
             case .mcp: "MCP"
             }
         }
@@ -4246,6 +4249,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             case .general: "gearshape"
             case .shortcuts: "keyboard"
             case .devices: "desktopcomputer.and.macbook"
+            case .codingAgents: "chevron.left.forwardslash.chevron.right"
             case .mcp: "puzzlepiece.extension"
             }
         }
@@ -6794,6 +6798,49 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return ((try? database.pairedDevices()) ?? []).filter { $0.id != SpacesPairedDeviceRecord.localDeviceID }
     }
 
+    /// Devices whose agent-hook auto-install is currently running. This de-dupes overlapping launch
+    /// and connect signals, while completed probes are removed so later reconnects can discover
+    /// coding agents installed after app launch. Per-agent "already handled" markers live in the
+    /// client DB and prevent repeated installs.
+    private var agentHooksAutoInstallInFlightDeviceIDs: Set<String> = []
+
+    /// Auto-installs Spaces coding-agent hooks on every known device (This Mac + paired remotes) that
+    /// is not already being probed. Safe to call repeatedly — on app launch, after pairing a remote,
+    /// and whenever a remote reconnects. The actual once-per-(device, agent) decision and the
+    /// idempotent install live in `AgentHooksAutoInstaller`.
+    func autoInstallAgentHooksForKnownDevices() {
+        guard let database = try? clientDatabase() else { return }
+        var candidates: [SpacesPairedDeviceRecord] = []
+        if let local = try? database.pairedDevice(id: SpacesPairedDeviceRecord.localDeviceID) { candidates.append(local) }
+        candidates.append(contentsOf: macPairedDevices())
+        let toProbe = candidates.filter { agentHooksAutoInstallInFlightDeviceIDs.insert($0.id).inserted }
+        guard !toProbe.isEmpty else { return }
+        let profile = try? SpacesProfile.current()
+        // Process this trigger's candidates in order; the installer serializes marker persistence across overlapping triggers.
+        Task.detached(priority: .utility) { [weak self] in
+            guard let database = try? SpacesClientDatabase.defaultDatabase() else {
+                for device in toProbe { await self?.markAgentHooksDeviceProbeFinished(device.id) }
+                return
+            }
+            for device in toProbe {
+                do {
+                    let installed = try AgentHooksAutoInstaller.run(device: device, database: database, profile: profile)
+                    if !installed.isEmpty {
+                        NSLog("Spaces: auto-installed agent hooks on \(device.id): \(installed.map { $0.rawValue }.joined(separator: ", "))")
+                    }
+                } catch {
+                    NSLog("Spaces: agent hook auto-install deferred for \(device.id): \(error.localizedDescription)")
+                }
+                await self?.markAgentHooksDeviceProbeFinished(device.id)
+            }
+        }
+    }
+
+    /// Clears a device's in-flight probe mark so a later reconnect re-checks newly available agents.
+    private func markAgentHooksDeviceProbeFinished(_ deviceID: String) {
+        agentHooksAutoInstallInFlightDeviceIDs.remove(deviceID)
+    }
+
     @objc func showSettings() { settings.openSettings(section: .general) }
 
     private func copyToPasteboard(_ value: String) {
@@ -7853,8 +7900,61 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     func showError(_ error: Error) {
+        if showLocalDaemonCompatibilityBlockIfNeeded(error) { return }
         let alert = NSAlert(error: error)
         alert.runModal()
+    }
+
+    nonisolated static func shouldShowLocalDaemonCompatibilityBlock(for error: Error) -> Bool {
+        if let terminalError = error as? TerminalServiceError,
+            case .daemonWireIncompatible = terminalError
+        {
+            return true
+        }
+        return false
+    }
+
+    @discardableResult func showLocalDaemonCompatibilityBlockIfNeeded(_ error: Error) -> Bool {
+        if Self.shouldShowLocalDaemonCompatibilityBlock(for: error),
+            let terminalError = error as? TerminalServiceError,
+            case .daemonWireIncompatible(let incompatibility) = terminalError
+        {
+            showLocalDaemonCompatibilityBlock(incompatibility)
+            return true
+        }
+        return false
+    }
+
+    private func showLocalDaemonCompatibilityBlock(_ incompatibility: TerminalServiceDaemonWireIncompatibility) {
+        let storedLocalDevice = localPairedDevice ?? (try? clientDatabase().pairedDevice(id: SpacesPairedDeviceRecord.localDeviceID))
+        if let storedLocalDevice {
+            localPairedDevice = storedLocalDevice
+            localDeviceID = storedLocalDevice.id
+            localDeviceName = storedLocalDevice.name
+        }
+        if let index = deviceSections.firstIndex(where: { $0.deviceID == localDeviceID }) {
+            deviceSections[index].device = storedLocalDevice ?? deviceSections[index].device
+            deviceSections[index].daemonStatus = incompatibility.status
+            deviceSections[index].compatibility = incompatibility.verdict
+            deviceSections[index].projects = []
+            deviceSections[index].workspacesByProject = [:]
+            deviceSections[index].workspaceRuntimeStatusByID = [:]
+            deviceSections[index].alertsGroups = []
+            deviceSections[index].overview = nil
+            deviceSections[index].loadState = .loaded
+        } else {
+            deviceSections.insert(
+                DeviceSection(
+                    deviceID: localDeviceID, deviceName: localDeviceName, isLocal: true, loadState: .loaded, device: storedLocalDevice,
+                    overview: nil, daemonStatus: incompatibility.status, compatibility: incompatibility.verdict),
+                at: 0)
+        }
+        rebuildFlatSidebarData()
+        outlineView.reloadData()
+        showCompatibilityBlock(deviceID: localDeviceID, verdict: incompatibility.verdict)
+        if let window {
+            revealTargetedHotkeyWindow(window)
+        }
     }
 
     private func showInfoMessage(title: String, message: String) {
