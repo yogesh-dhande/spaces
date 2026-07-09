@@ -71,6 +71,23 @@ import workspacecore
         #expect(section.row(at: 0)?.collapsedDetailTextForTesting == "SPACES_PORT_PORT, SPACES_PORT_URL")
     }
 
+    @Test func cancelDoesNotCommitValidDraftWhenEndingFieldEditingFirst() {
+        let section = PortsSection(ports: [ServiceDefinition(name: "web")])
+        var committedPorts: [ServiceDefinition] = []
+        section.onCommit = { committedPorts = $0 }
+
+        let row = section.row(at: 0)
+        row?.onBeginEdit?()
+        row?.setEditingNameForTesting("api")
+        row?.suppressNextEditingEndedCommit()
+        row?.endEditingForTesting()
+        row?.onCancel?()
+
+        #expect(!section.isEditing(at: 0))
+        #expect(section.currentPorts.map(\.name) == ["web"])
+        #expect(committedPorts.isEmpty)
+    }
+
     @Test func sectionKeepsInvalidServiceNameEditingOnBlur() {
         let section = PortsSection()
         var committedPorts: [ServiceDefinition] = []
@@ -87,13 +104,34 @@ import workspacecore
 
     @Test func reloadSwapsPortTextsWithoutDroppingOpenEditorDraft() {
         let section = PortsSection(ports: [ServiceDefinition(name: "web")], collapsedDisplayPortTexts: ["3000"])
+        var committedPorts: [ServiceDefinition] = []
+        section.onCommit = { committedPorts = $0 }
         section.row(at: 0)?.onBeginEdit?()
+        section.row(at: 0)?.setEditingNameForTesting("api")
         #expect(section.isEditing(at: 0))
 
         section.reload(ports: section.currentPorts, collapsedDisplayPortTexts: ["3000:52341"])
 
         #expect(section.isEditing(at: 0))
+        #expect(section.currentPorts.map(\.name) == ["web"])
+        #expect(committedPorts.isEmpty)
         #expect(section.row(at: 0)?.collapsedPortTextForTesting == "3000:52341")
+    }
+
+    @Test func programmaticEditorTeardownDoesNotCommitValidDraft() {
+        let section = PortsSection(ports: [ServiceDefinition(name: "web")])
+        var committedPorts: [ServiceDefinition] = []
+        section.onCommit = { committedPorts = $0 }
+
+        let row = section.row(at: 0)
+        row?.onBeginEdit?()
+        row?.setEditingNameForTesting("api")
+        row?.suppressNextEditingEndedCommit()
+        row?.endEditingForTesting()
+
+        #expect(section.isEditing(at: 0))
+        #expect(section.currentPorts.map(\.name) == ["web"])
+        #expect(committedPorts.isEmpty)
     }
 
     @Test func replaceClearsDraftStateBeforeLoadingImportedPorts() {

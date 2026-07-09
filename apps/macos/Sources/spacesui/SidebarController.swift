@@ -127,6 +127,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     /// they read as nested under the project header. A non-git project has no workspace level, so its
     /// runtime-target rows are not given this extra indent.
     private static let workspaceIndent: CGFloat = 16
+    private static let runtimeTargetShortcutSlotWidth: CGFloat = 20
 
     func invalidateVisibleWorkspacesCache() {
         visibleWorkspacesCache.removeAll(keepingCapacity: true)
@@ -1188,6 +1189,15 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         }
     }
 
+    private func runtimeTargetTextColor(item: SidebarRuntimeTargetItem, isSelected: Bool) -> NSColor {
+        switch item.runState {
+        case .running: return sidebarRunningIndicatorColor()
+        case .exited: return sidebarFailedIndicatorColor()
+        case .notStarted: return sidebarMetadataTextColor(isSelected: isSelected)
+        case nil: return sidebarPrimaryTextColor(isSelected: isSelected, isArchived: false)
+        }
+    }
+
     private func runtimeTargetRowCell(workspace: WorkspaceSummary, item: SidebarRuntimeTargetItem, nestedUnderWorkspace: Bool) -> NSTableCellView {
         let cell = NSTableCellView()
         cell.setAccessibilityIdentifier("sidebar-target-\(workspace.id)-\(item.key)")
@@ -1200,21 +1210,19 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         row.spacing = 6
         row.translatesAutoresizingMaskIntoConstraints = false
 
-        // The ⌘-number chip leads the row (left of the kind icon), matching the
-        // command palette's chip-icon-title ordering. Every row carries the fixed-width
-        // slot — chips render only on the selected workspace's rows, and reserving the
+        // The ⌘-number hint leads the row (left of the kind icon), matching the
+        // command palette's shortcut-icon-title ordering. Every row carries the fixed-width
+        // slot — hints render only on the selected workspace's rows, and reserving the
         // space keeps target rows vertically aligned across workspaces either way.
         let chipSlot = NSView()
         chipSlot.translatesAutoresizingMaskIntoConstraints = false
-        chipSlot.widthAnchor.constraint(equalToConstant: 32).isActive = true
+        chipSlot.widthAnchor.constraint(equalToConstant: Self.runtimeTargetShortcutSlotWidth).isActive = true
         chipSlot.setContentHuggingPriority(.required, for: .horizontal)
         if host.selectedWorkspaceID == workspace.id, let index = item.shortcutIndex {
-            let chip = RowPrimitives.shortcutChip(host.windowShortcutBadgeText(index: index))
+            let chip = RowPrimitives.sidebarShortcutHint(host.windowShortcutBadgeText(index: index))
             chipSlot.addSubview(chip)
             NSLayoutConstraint.activate([
-                chip.leadingAnchor.constraint(equalTo: chipSlot.leadingAnchor),
-                chip.trailingAnchor.constraint(lessThanOrEqualTo: chipSlot.trailingAnchor), chip.topAnchor.constraint(equalTo: chipSlot.topAnchor),
-                chip.bottomAnchor.constraint(equalTo: chipSlot.bottomAnchor),
+                chip.trailingAnchor.constraint(equalTo: chipSlot.trailingAnchor), chip.centerYAnchor.constraint(equalTo: chipSlot.centerYAnchor),
             ])
         }
         row.addArrangedSubview(chipSlot)
@@ -1245,7 +1253,6 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             }
             row.addArrangedSubview(editor)
         } else {
-            let isPendingLaunchAction = item.kind == .missingConfiguredProcess || item.kind == .agentLauncher
             let titleLabel = PressableLabel(labelWithString: item.title)
             // Mirror the row identifier onto the title label. AppKit does not expose an
             // NSTableCellView's own accessibility identifier as a queryable element (only its
@@ -1260,10 +1267,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
                 self.host.focusSidebarRuntimeTarget(workspaceID: workspace.id, key: item.key)
             }
             titleLabel.font = .systemFont(ofSize: 11, weight: .regular)
-            titleLabel.textColor =
-                isPendingLaunchAction
-                ? sidebarMetadataTextColor(isSelected: isWorkspaceSelected)
-                : sidebarPrimaryTextColor(isSelected: isWorkspaceSelected, isArchived: false)
+            titleLabel.textColor = runtimeTargetTextColor(item: item, isSelected: isWorkspaceSelected)
             titleLabel.lineBreakMode = .byTruncatingTail
             titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
             titleLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
@@ -1933,21 +1937,15 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
 
         let badge = NSTextField(labelWithString: "")
         badge.font = .monospacedSystemFont(ofSize: 10, weight: .bold)
-        badge.textColor = .white
-        badge.alignment = .center
-        badge.wantsLayer = true
-        bindAppearanceReactiveLayer(badge) { [weak self] view in
-            view.layer?.backgroundColor = self?.sidebarFailedIndicatorColor().cgColor
-        }
-        badge.layer?.cornerRadius = UIRadius.pill(forHeight: 14)
+        badge.textColor = sidebarFailedIndicatorColor()
+        badge.alignment = .right
         badge.isBordered = false
         badge.isEditable = false
         badge.drawsBackground = false
         badge.isHidden = true
         badge.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            badge.widthAnchor.constraint(greaterThanOrEqualToConstant: 18), badge.heightAnchor.constraint(equalToConstant: 14),
-        ])
+        badge.setContentHuggingPriority(.required, for: .horizontal)
+        badge.setContentCompressionResistancePriority(.required, for: .horizontal)
         alertsRowBadge = badge
 
         let stack = NSStackView()

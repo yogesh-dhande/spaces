@@ -95,6 +95,8 @@ import workspacecore
                     guard row.isEditing else { return nil }
                     return (row.identity(from: ports[safe: index]), row.formSnapshot())
                 }) : [:]
+        // Row rebuilds can end AppKit field editing; preserve/cancel that draft instead of committing it.
+        for row in rows where row.isEditing { row.suppressNextEditingEndedCommit() }
         rowsStack.removeAllArrangedSubviews()
         rows.removeAll()
         for (index, port) in ports.enumerated() {
@@ -191,6 +193,7 @@ import workspacecore
     private let detailLabel = NSTextField(labelWithString: "")
     private var currentPort: ServiceDefinition
     private var nameField: NSTextField?
+    private var formTarget: PortFormTarget?
 
     init(port: ServiceDefinition, portText: String? = nil, displayURL: String? = nil) {
         self.currentPort = port
@@ -238,9 +241,10 @@ import workspacecore
         guard !isEditing else { return }
         isEditing = true
         let seed = prefill ?? currentPort
-        let (form, field) = Self.makeEditingForm(
+        let (form, field, target) = Self.makeEditingForm(
             port: seed, onCancel: { [weak self] in self?.onCancel?() }, onSave: { [weak self] edited in self?.onSave?(edited) })
         nameField = field
+        formTarget = target
         editingContainer = form
         let run = { [self] in
             body.removeArrangedSubview(collapsedContainer)
@@ -279,6 +283,7 @@ import workspacecore
         }
         editingContainer = nil
         nameField = nil
+        formTarget = nil
     }
 
     func identity(from port: ServiceDefinition?) -> String {
@@ -288,6 +293,7 @@ import workspacecore
     }
 
     func formSnapshot() -> ServiceDefinition { ServiceDefinition(id: currentPort.id, name: nameField?.stringValue ?? "") }
+    func suppressNextEditingEndedCommit() { formTarget?.suppressNextEditingEndedCommit() }
 
     var collapsedPrimaryTextForTesting: String { nameLabel.stringValue }
     var collapsedPrimaryTextIsSelectableForTesting: Bool { nameLabel.isSelectable }
@@ -327,7 +333,7 @@ import workspacecore
     }
 
     private static func makeEditingForm(port: ServiceDefinition, onCancel: @escaping () -> Void, onSave: @escaping (ServiceDefinition) -> Void) -> (
-        NSStackView, NSTextField
+        NSStackView, NSTextField, PortFormTarget
     ) {
         let nameField = NSTextField(string: port.name)
         nameField.placeholderString = "Service name (e.g. web)"
@@ -337,11 +343,14 @@ import workspacecore
 
         let target = PortFormTarget()
 
-        let cancel = {
-            target.isCancelling = true
+        let cancel = { [weak target] in
+            target?.beginCancelling()
             onCancel()
         }
         let cancelButton = buildActionButton(symbol: "xmark", tooltip: "Cancel") { _ in cancel() }
+        // NSButton can end field editing before its action fires, so mark cancel on mouse down.
+        cancelButton.onMouseDown = { [weak target] in target?.suppressNextEditingEndedCommit() }
+        cancelButton.onMouseTrackingEnded = { [weak target] in target?.clearUnusedEditingEndedSuppression() }
         cancelButton.setAccessibilityIdentifier("service-row-edit-cancel")
 
         // A service name is a DNS label (it becomes a hostname), so only commit valid labels.
@@ -375,11 +384,11 @@ import workspacecore
         form.edgeInsets = NSEdgeInsets(top: 9, left: 14, bottom: 9, right: 14)
         form.translatesAutoresizingMaskIntoConstraints = false
         retainAssociatedObject(target, on: form)
-        return (form, nameField)
+        return (form, nameField, target)
     }
 
-    private static func buildActionButton(symbol: String, tooltip: String, onClick: @escaping (NSButton) -> Void) -> NSButton {
-        let button = NSButton()
+    private static func buildActionButton(symbol: String, tooltip: String, onClick: @escaping (NSButton) -> Void) -> PortActionButton {
+        let button = PortActionButton()
         button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: tooltip)
         button.bezelStyle = .inline
         button.isBordered = false
@@ -395,6 +404,17 @@ import workspacecore
 
 }
 
+@MainActor private final class PortActionButton: NSButton {
+    var onMouseDown: (() -> Void)?
+    var onMouseTrackingEnded: (() -> Void)?
+
+    override func mouseDown(with event: NSEvent) {
+        onMouseDown?()
+        super.mouseDown(with: event)
+        onMouseTrackingEnded?()
+    }
+}
+
 @MainActor private final class PortFormTarget: NSObject, NSTextFieldDelegate {
     var onCancel: (() -> Void)?
     var onSave: (() -> Void)?
@@ -402,10 +422,21 @@ import workspacecore
     var onTextChange: (() -> Void)?
     var didFinish = false
     var isCancelling = false
+    private var suppressesNextEditingEndedCommit = false
+    func beginCancelling() { isCancelling = true }
+    func suppressNextEditingEndedCommit() { suppressesNextEditingEndedCommit = true }
+    func clearUnusedEditingEndedSuppression() { suppressesNextEditingEndedCommit = false }
     @objc func triggerCancel() { onCancel?() }
     @objc func triggerSave() { onSave?() }
     func controlTextDidChange(_ obj: Notification) { onTextChange?() }
-    func controlTextDidEndEditing(_ obj: Notification) { onEditingEnded?() }
+    func controlTextDidEndEditing(_ obj: Notification) {
+        guard !suppressesNextEditingEndedCommit else {
+            suppressesNextEditingEndedCommit = false
+            return
+        }
+        guard !isCancelling else { return }
+        onEditingEnded?()
+    }
     func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
         if commandSelector == #selector(NSResponder.insertNewline(_:)) {
             onSave?()
