@@ -43,8 +43,7 @@ export default function BrowserSessionsDocsPage() {
         <pre className="mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-lg border border-line/70 bg-background-soft/60 p-3 text-xs leading-6 text-foreground">
           <code>{`web        $SPACES_WEB_URL
 admin      $SPACES_WEB_URL/admin
-pr-review  https://github.com/org/repo/pull/912
-           https://docs.example.com/runbook/checkout`}</code>
+prs  https://github.com/org/repo/pull`}</code>
         </pre>
       </article>
     </DocsShell>
