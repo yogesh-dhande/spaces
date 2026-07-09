@@ -5,8 +5,9 @@ import workspacecore
 
 /// One compact sidebar row for a focusable runtime target of a workspace. Items are
 /// derived from the same ordered target list the numbered shortcuts use
-/// (`workspaceShortcutTargets`). Window cycling uses the already-open subset of that
-/// order, so sidebar order, ⌘-number hints, and cycle identities stay aligned.
+/// (`workspaceShortcutTargets`). Window cycling uses the already-open subset of those
+/// targets with MRU ordering, so sidebar rows, ⌘-number hints, and cycle identities stay
+/// aligned without requiring the same visible order.
 struct SidebarRuntimeTargetItem: Hashable, Sendable {
     /// Stable per-target identity, using the cycle-cursor key scheme
     /// (e.g. `process:<id>`, `terminal:<sessionID>`, `browser:<url>`).
@@ -119,7 +120,10 @@ extension AppKitController {
                 let target = context.targets.first(where: { Self.cycleCursorKey(for: $0, detail: context.detail) == key })
             else { return }
             let resolution = Self.windowShortcutTargetResolution(target, workspaceID: workspaceID, detail: context.detail, overview: context.overview)
-            guard let action = await self.executeWindowFocusResolution(resolution) else { return }
+            guard
+                let action = await self.executeWindowFocusResolution(
+                    resolution, preferredTarget: target, preferredDetail: context.detail)
+            else { return }
             self.hideAfterSuccessfulExternalWindowAction(action)
         }
     }

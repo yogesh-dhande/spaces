@@ -85,6 +85,18 @@ import AppKit
         applyToActiveTabBar()
     }
 
+    /// Returns the panel to its built-in content tab strip. The main window uses this
+    /// while fullscreen because AppKit hides titlebar accessories there.
+    func useBuiltInTabBar() {
+        if let externalTabBar, externalTabBar.hostingOwner === self {
+            externalTabBar.hostingOwner = nil
+        }
+        externalTabBar = nil
+        paneTreeTopToView.isActive = false
+        paneTreeTopToTabBar.isActive = true
+        applyToActiveTabBar()
+    }
+
     private var drivesExternalTabBar: Bool {
         guard let externalTabBar else { return false }
         return externalTabBar.hostingOwner === self

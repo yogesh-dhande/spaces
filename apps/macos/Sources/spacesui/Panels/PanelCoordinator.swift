@@ -24,7 +24,8 @@ import spacesterminalcore
 
     private var panels: [PanelScope: PanelState] = [:]
     /// Live content controllers keyed by terminal session id.
-    private var contentControllers: [String: TerminalPaneContentController] = [:]
+    private var contentControllers: [String: any TerminalPaneContentHosting] = [:]
+    private var contentPreparationTasks: [String: Task<Void, Never>] = [:]
     /// Window shells for materialized global panels, keyed by panel window id.
     private var panelWindows: [String: PanelWindowController] = [:]
     /// Persistence hook, wired to the client database; called after every layout change.
@@ -87,6 +88,12 @@ import spacesterminalcore
         return ordered
     }
 
+    func closeTerminalPanes(workspaceID: String, sessionIsTerminating: Bool = false) {
+        for sessionID in openTerminalSessionIDs(workspaceID: workspaceID) {
+            closePane(forSessionID: sessionID, sessionIsTerminating: sessionIsTerminating)
+        }
+    }
+
     private func scopeSortKey(_ scope: PanelScope) -> String {
         switch scope {
         case .workspace(let deviceID, let workspaceID): return "0:\(deviceID):\(workspaceID)"
@@ -95,10 +102,10 @@ import spacesterminalcore
     }
 
     /// The live content controller for a session, if its pane is open anywhere.
-    func content(forSessionID sessionID: String) -> TerminalPaneContentController? { contentControllers[sessionID] }
+    func content(forSessionID sessionID: String) -> (any TerminalPaneContentHosting)? { contentControllers[sessionID] }
 
     /// The content controller owning `responder` (keyboard-routing and focus lookups).
-    func contentOwning(responder: NSResponder?) -> TerminalPaneContentController? {
+    func contentOwning(responder: NSResponder?) -> (any TerminalPaneContentHosting)? {
         guard let responder else { return nil }
         for controller in contentControllers.values where controller.owns(responder: responder) { return controller }
         return nil
@@ -110,7 +117,7 @@ import spacesterminalcore
     /// Syncs the layout's focused pane to the content that actually has keyboard focus
     /// (clicks inside terminal content bypass the pane chrome's mouse handling, so the
     /// shortcut monitor calls this as typing reveals where focus really is).
-    func noteContentFocused(_ content: TerminalPaneContentController) {
+    func noteContentFocused(_ content: any TerminalPaneContentHosting) {
         guard let placement = placement(forSessionID: content.sessionID) else { return }
         guard layout(for: placement.scope).focusedPaneID != placement.paneID else { return }
         focusPane(scope: placement.scope, paneID: placement.paneID, moveKeyboardFocus: false)
@@ -304,6 +311,7 @@ import spacesterminalcore
         guard let focusedPaneID = layout.focusedPaneID, let pane = PanelLayoutEngine.pane(withID: focusedPaneID, in: layout),
             let sessionID = pane.content.terminalSessionID, let content = contentControllers[sessionID]
         else { return }
+        host.noteWindowNavigationTerminalFocus(sessionID: sessionID)
         content.activate(focus: true)
     }
 
@@ -351,14 +359,21 @@ import spacesterminalcore
     /// and with it the attachment-driven unattached ad hoc cleanup — is skipped.
     func closePane(forSessionID sessionID: String, sessionIsTerminating: Bool = false) {
         guard let placement = placement(forSessionID: sessionID) else { return }
-        if sessionIsTerminating, let content = contentControllers.removeValue(forKey: sessionID) { content.closeForSessionTermination() }
+        if sessionIsTerminating, let content = contentControllers.removeValue(forKey: sessionID) {
+            contentPreparationTasks.removeValue(forKey: sessionID)?.cancel()
+            content.closeForSessionTermination()
+        }
         closePane(scope: placement.scope, paneID: placement.paneID)
     }
 
     /// Detaches every open pane's terminal client at app termination without stopping
     /// sessions (daemon-owned sessions keep running across quit; panes are rebuilt on
     /// relaunch from the persisted layout).
-    func closeAllContentForTermination() { for content in contentControllers.values { content.close() } }
+    func closeAllContentForTermination() {
+        for task in contentPreparationTasks.values { task.cancel() }
+        contentPreparationTasks.removeAll()
+        for content in contentControllers.values { content.close() }
+    }
 
     /// Re-themes every open pane's live session to the app's current light/dark appearance. Called when the
     /// app appearance changes (`AppKitController.applyAppAppearance`) so open terminals — local and remote —
@@ -368,12 +383,14 @@ import spacesterminalcore
 
     private func closeContent(for pane: Pane) {
         guard let sessionID = pane.content.terminalSessionID, let content = contentControllers.removeValue(forKey: sessionID) else { return }
-        // Closing detaches the pane's client and, once the daemon has processed that detach, runs the
-        // unattached ad hoc cleanup against the authoritative snapshot (via the pane's close-detach
-        // hook). The cleanup is driven directly from the close because this controller's own state
-        // stream is torn down here, so the detach would no longer surface as an attachment-state
-        // change to observe. An ad hoc shell stops only when no other client is still attached.
+        contentPreparationTasks.removeValue(forKey: sessionID)?.cancel()
+        // Live terminal content runs unattached ad hoc cleanup through its close-detach hook.
+        // A preparing placeholder has no embedded client to detach, but the daemon shell already
+        // exists, so a removed placeholder runs the same snapshot-checked cleanup directly.
         content.close()
+        if content is TerminalPanePlaceholderContentController {
+            host.terminateUnattachedAdHocBuiltInTerminalSessionIfNeeded(sessionID: sessionID)
+        }
     }
 
     private func beginSplit(scope: PanelScope, paneID: String, direction: PaneSplitDirection) {
@@ -439,17 +456,66 @@ import spacesterminalcore
 
     // MARK: - Content lifecycle
 
-    private func ensureContentController(request: AppKitController.DeviceTerminalOpenRequest) -> TerminalPaneContentController? {
+    private func ensureContentController(request: AppKitController.DeviceTerminalOpenRequest) -> (any TerminalPaneContentHosting)? {
         if let existing = contentControllers[request.sessionID] { return existing }
+        if request.preparedCredentials == nil {
+            let content = TerminalPanePlaceholderContentController(
+                request: request, deviceID: request.deviceID ?? host.deviceID(forWorkspaceID: request.workspaceID))
+            installContentController(content, sessionID: request.sessionID)
+            scheduleTerminalPaneContentPreparation(request: request)
+            return content
+        }
         guard let content = host.makeTerminalPaneContent(request: request) else { return nil }
+        installContentController(content, sessionID: request.sessionID)
+        return content
+    }
+
+    private func installContentController(_ content: any TerminalPaneContentHosting, sessionID: String) {
         content.onTitleChanged = { [weak self, weak content] title in
             guard let self, let content, let sessionID = content.descriptor.terminalSessionID, self.placement(forSessionID: sessionID) != nil else {
                 return
             }
             self.refreshTabTitles(forSessionID: sessionID)
         }
-        contentControllers[request.sessionID] = content
-        return content
+        contentControllers[sessionID] = content
+    }
+
+    private func scheduleTerminalPaneContentPreparation(request: AppKitController.DeviceTerminalOpenRequest) {
+        let sessionID = request.sessionID
+        guard contentPreparationTasks[sessionID] == nil else { return }
+        contentPreparationTasks[sessionID] = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.contentPreparationTasks[sessionID] = nil }
+            let result = await self.host.prepareTerminalPaneOpenRequest(request)
+            guard !Task.isCancelled else { return }
+            guard self.placement(forSessionID: sessionID) != nil else { return }
+            guard self.contentControllers[sessionID] is TerminalPanePlaceholderContentController else { return }
+            switch result {
+            case .success(let preparedRequest):
+                guard let content = self.host.makeTerminalPaneContent(request: preparedRequest) else {
+                    (self.contentControllers[sessionID] as? TerminalPanePlaceholderContentController)?.fail(message: "Terminal pane failed to open.")
+                    return
+                }
+                self.replacePreparingContent(content, sessionID: sessionID)
+            case .failure(let error):
+                (self.contentControllers[sessionID] as? TerminalPanePlaceholderContentController)?.fail(error: error)
+                self.host.showError(error)
+            }
+        }
+    }
+
+    private func replacePreparingContent(_ content: TerminalPaneContentController, sessionID: String) {
+        guard let previous = contentControllers[sessionID] as? TerminalPanePlaceholderContentController else { return }
+        let requestsOwnership = previous.requestsOwnershipWhenReady
+        installContentController(content, sessionID: sessionID)
+        if requestsOwnership { content.requestOwnershipIfNeeded() }
+        previous.close()
+        guard let placement = placement(forSessionID: sessionID) else { return }
+        render(scope: placement.scope)
+        if let pane = PanelLayoutEngine.pane(withID: placement.paneID, in: layout(for: placement.scope)) {
+            activateContentIfVisible(scope: placement.scope, pane: pane)
+        }
+        activateFocusedPane(scope: placement.scope)
     }
 
     /// Recomputes every tab's title for a visible panel in place (the lightweight

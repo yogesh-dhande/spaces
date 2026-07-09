@@ -5,9 +5,10 @@ import Foundation
 /// A "window" is a client concept (see docs/implementation.md): cycling rotates over the
 /// same ordered focusable targets the numbered shortcuts use (rebuilt from the overview),
 /// tracked here by an opaque per-target cursor key. The cursor remembers the last-focused
-/// target per workspace and a short-lived cycle session preserves rotation order across a
-/// burst of rapid presses, both held in memory only. This type is intentionally agnostic
-/// to the target type — the caller maps each target to a stable cursor key.
+/// target per workspace, the recent cursor list supplies MRU ordering at the start of a
+/// cycle burst, and a short-lived cycle session preserves that rotation across rapid
+/// presses. All state is held in memory only. This type is intentionally agnostic to the
+/// target type — the caller maps each target to a stable cursor key.
 enum WorkspaceWindowCycle {
     typealias Cursor = String
 
@@ -28,8 +29,12 @@ enum WorkspaceWindowCycle {
     }
 
     /// Reorders targets for cycling. When a recent cycle session still matches the current
-    /// cursors it preserves that rotation; otherwise the natural order is used.
-    static func cycleOrdering(cursors: [Cursor], currentIndex: Int?, session: CycleSession?) -> (indices: [Int], currentIndex: Int?) {
+    /// cursors it preserves that rotation; otherwise it builds a fresh MRU order with the
+    /// resolved current target first, then recent targets, then remaining targets in natural
+    /// order.
+    static func cycleOrdering(cursors: [Cursor], currentIndex: Int?, session: CycleSession?, recentCursors: [Cursor] = [])
+        -> (indices: [Int], currentIndex: Int?)
+    {
         if let session, let sessionIndices = sessionTargetIndices(session: session, cursors: cursors) {
             let resolvedCurrentIndex: Int?
             if let currentIndex {
@@ -40,8 +45,26 @@ enum WorkspaceWindowCycle {
             }
             return (sessionIndices, resolvedCurrentIndex)
         }
-        let orderedIndices = Array(cursors.indices)
+        let orderedIndices = mruTargetIndices(cursors: cursors, currentIndex: currentIndex, recentCursors: recentCursors)
         return (orderedIndices, currentIndex.flatMap { orderedIndices.firstIndex(of: $0) })
+    }
+
+    private static func mruTargetIndices(cursors: [Cursor], currentIndex: Int?, recentCursors: [Cursor]) -> [Int] {
+        var remainingIndicesByCursor: [Cursor: [Int]] = [:]
+        for (index, cursor) in cursors.enumerated() { remainingIndicesByCursor[cursor, default: []].append(index) }
+
+        var orderedIndices: [Int] = []
+        func append(cursor: Cursor) {
+            guard var indices = remainingIndicesByCursor[cursor], let nextIndex = indices.first else { return }
+            orderedIndices.append(nextIndex)
+            indices.removeFirst()
+            remainingIndicesByCursor[cursor] = indices.isEmpty ? nil : indices
+        }
+
+        if let currentIndex, cursors.indices.contains(currentIndex) { append(cursor: cursors[currentIndex]) }
+        for cursor in recentCursors { append(cursor: cursor) }
+        for (_, indices) in remainingIndicesByCursor.sorted(by: { $0.value[0] < $1.value[0] }) { orderedIndices.append(contentsOf: indices) }
+        return orderedIndices
     }
 
     private static func sessionTargetIndices(session: CycleSession, cursors: [Cursor]) -> [Int]? {

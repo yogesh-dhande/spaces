@@ -7,6 +7,8 @@ import systembridge
 /// header of their own until a tab actually holds more than one. Custom chrome instead
 /// of NSTabView so tabs stay compact and the strip can later host drag-out.
 @MainActor final class PanelTabBarView: NSView {
+    static let preferredHeight: CGFloat = 28
+
     /// When this strip is shared chrome (the main window's titlebar accessory), the
     /// workspace panel currently driving it; background panels leave it alone.
     weak var hostingOwner: AnyObject?
@@ -72,7 +74,7 @@ import systembridge
         NSLayoutConstraint.activate([
             row.topAnchor.constraint(equalTo: topAnchor), row.leadingAnchor.constraint(equalTo: leadingAnchor),
             row.trailingAnchor.constraint(equalTo: trailingAnchor), row.bottomAnchor.constraint(equalTo: bottomAnchor),
-            heightAnchor.constraint(equalToConstant: 28), scrollView.heightAnchor.constraint(equalTo: row.heightAnchor, constant: -6),
+            heightAnchor.constraint(equalToConstant: Self.preferredHeight), scrollView.heightAnchor.constraint(equalTo: row.heightAnchor, constant: -6),
             tabsStack.heightAnchor.constraint(equalTo: scrollView.heightAnchor),
         ])
     }
@@ -139,6 +141,18 @@ import systembridge
         guard titlesByTabID[tabID] != title else { return }
         titlesByTabID[tabID] = title
         requestRebuild()
+    }
+
+    /// Clears the strip immediately, bypassing rename-time rebuild deferral used for
+    /// ordinary layout refreshes.
+    func clear() {
+        guard !tabIDs.isEmpty || !titlesByTabID.isEmpty || selectedTabID != nil || renamingTabID != nil || rebuildDeferredForRename else { return }
+        renamingTabID = nil
+        rebuildDeferredForRename = false
+        tabIDs = []
+        titlesByTabID = [:]
+        selectedTabID = nil
+        rebuildTabs()
     }
 
     /// Rebuilding while the rename editor is up would tear the editor out mid-edit;

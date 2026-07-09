@@ -33,8 +33,9 @@ import AppKit
 
     /// Installs (or re-installs after re-parenting) the pane's content view.
     func attachContent(_ controller: any PaneContentHosting) {
-        contentController = controller
         let view = controller.contentView
+        for subview in contentContainer.subviews where subview !== view { subview.removeFromSuperview() }
+        contentController = controller
         guard view.superview !== contentContainer else { return }
         view.removeFromSuperview()
         view.translatesAutoresizingMaskIntoConstraints = false

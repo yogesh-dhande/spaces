@@ -246,7 +246,8 @@ private final class NotificationObserverBag: @unchecked Sendable {
         preferredAttachmentMode = .owner
         if let launchConfiguration { updateGhosttySessionHostReference(for: launchConfiguration) }
         lastObservedRuntimeState = (stateProvider.currentRuntimeState) ?? lastObservedRuntimeState
-        let currentOwnerClient = activeOwnerClient(snapshot: stateProvider.currentAttachmentSnapshot)
+        let attachmentSnapshot = stateProvider.currentAttachmentSnapshot
+        let currentOwnerClient = activeOwnerClient(snapshot: attachmentSnapshot)
         lastObservedOwnerClientID = currentOwnerClient?.id
         let hasDifferentActiveOwner = currentOwnerClient != nil && currentOwnerClient?.id != client.id
         if hasDifferentActiveOwner && isInteractiveRuntimeState(lastObservedRuntimeState) {
@@ -255,6 +256,14 @@ private final class NotificationObserverBag: @unchecked Sendable {
         }
         guard canAttachToGhosttyRuntime(lastObservedRuntimeState) else {
             refreshNow(allowGhosttyOwnerAttach: false)
+            return
+        }
+        if currentOwnerClient?.id == client.id, activeAttachment(snapshot: attachmentSnapshot)?.mode == .owner {
+            isClientAttached = true
+            lastRequestedAttachmentMode = .owner
+            lastObservedAttachmentMode = .owner
+            ensureGhosttyHostAttached(reason: "request_owner_mode")
+            refreshNow()
             return
         }
         attachLocalClientIfNeeded(mode: .owner, force: true)
@@ -295,7 +304,7 @@ private final class NotificationObserverBag: @unchecked Sendable {
                         TerminalPerformance.logMetric(
                             "terminal_viewer_takeover", target: "session=\(self.sessionID) client=\(clientID)",
                             elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false, detail: "stage=control_response")
-                        self.updateInputStatus(message: response.message, isError: true)
+                        self.finishFailedTakeoverAttempt(id: attemptID, message: response.message)
                         return
                     }
                     self.ownerAttachmentRequested = true
@@ -316,14 +325,26 @@ private final class NotificationObserverBag: @unchecked Sendable {
             } catch {
                 await MainActor.run {
                     guard self.takeoverAttemptID == attemptID else { return }
-                    self.clearTakeoverAttempt(id: attemptID)
                     TerminalPerformance.logMetric(
                         "terminal_viewer_takeover", target: "session=\(self.sessionID) client=\(clientID)",
                         elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false, detail: "stage=exception")
-                    self.updateInputStatus(message: String(describing: error), isError: true)
+                    self.finishFailedTakeoverAttempt(id: attemptID, message: String(describing: error))
                 }
             }
         }
+        refreshNow(allowGhosttyOwnerAttach: false)
+    }
+
+    private func finishFailedTakeoverAttempt(id: UUID, message: String) {
+        guard takeoverAttemptID == id else { return }
+        clearTakeoverAttempt(id: id)
+        let attachmentSnapshot = stateProvider.currentAttachmentSnapshot
+        if activeOwnerClient(snapshot: attachmentSnapshot)?.id != client.id {
+            ownerAttachmentRequested = false
+            preferredAttachmentMode = activeAttachment(snapshot: attachmentSnapshot)?.mode ?? .viewer
+        }
+        refreshNow(allowGhosttyOwnerAttach: false)
+        updateInputStatus(message: message, isError: true)
     }
 
     private func clearTakeoverAttempt(id: UUID) {
@@ -500,7 +521,7 @@ private final class NotificationObserverBag: @unchecked Sendable {
                     if !shouldPreserveOwnerRequest {
                         if currentOwnerClient != nil, currentOwnerClient?.id != client.id { ownerAttachmentRequested = false }
                         preferredAttachmentMode = activeAttachment.mode
-                    } else if !canKeepOwnerRequest {
+                    } else if !canKeepOwnerRequest && takeoverTask == nil {
                         preferredAttachmentMode = activeAttachment.mode
                     }
                     if lastObservedAttachmentMode != activeAttachment.mode {
@@ -755,6 +776,10 @@ private final class NotificationObserverBag: @unchecked Sendable {
         let activeAttachments = snapshot.attachments
         guard let ownerAttachment = activeAttachments.last(where: { $0.mode == .owner && $0.detachedAt == nil }) else { return nil }
         return snapshot.clients.first(where: { $0.id == ownerAttachment.clientID })
+    }
+
+    private func activeAttachment(snapshot: TerminalSessionAttachmentSnapshot?) -> TerminalAttachment? {
+        snapshot?.attachments.last { $0.clientID == client.id && $0.detachedAt == nil }
     }
 
     /// Refreshes `lastObservedRuntimeState` from the provider, keeping the previous
