@@ -74,7 +74,7 @@ export default function InstallationDocsPage() {
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
           Confirm the CLI and GUI are working:
         </p>
-        <pre className="mt-3 rounded-lg bg-background-soft p-3 text-xs leading-6">
+        <pre className="mt-3 rounded-sm bg-background-soft p-3 text-xs leading-6">
 {`spaces --version
 open -a Spaces`}
         </pre>
@@ -95,7 +95,7 @@ open -a Spaces`}
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
           To remove Spaces completely:
         </p>
-        <pre className="mt-3 rounded-lg bg-background-soft p-3 text-xs leading-6">
+        <pre className="mt-3 rounded-sm bg-background-soft p-3 text-xs leading-6">
 {`launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/dev.usespaces.spacesd.plist
 rm -f ~/Library/LaunchAgents/dev.usespaces.spacesd.plist
 rm -rf /Applications/Spaces.app

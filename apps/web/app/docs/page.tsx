@@ -138,7 +138,7 @@ export default function DocsPage() {
             <Link
               key={page.href}
               href={page.href}
-              className="group flex flex-col gap-3 rounded-2xl border border-line/80 bg-surface/80 p-5 transition-colors hover:border-accent/60"
+              className="group flex flex-col gap-3 rounded-sm border border-line/80 bg-surface/80 p-5 transition-colors hover:border-accent/60"
             >
               <span className="font-mono text-[0.6rem] uppercase tracking-[0.18em] text-foreground-soft">
                 {String(i + 1).padStart(2, "0")}

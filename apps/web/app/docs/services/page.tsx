@@ -29,7 +29,7 @@ export default function ServicesDocsPage() {
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
           A bundled Caddy reverse proxy runs on your Mac and routes each service to a predictable URL:
         </p>
-        <pre className="mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-lg border border-line/70 bg-background-soft/60 p-3 text-xs leading-6 text-foreground">
+        <pre className="mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-sm border border-line/70 bg-background-soft/60 p-3 text-xs leading-6 text-foreground">
           <code>{`http://<service>.<workspace-slug>.localhost:7391`}</code>
         </pre>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
@@ -48,7 +48,7 @@ export default function ServicesDocsPage() {
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
           Every process, setup script, and stop script in the workspace runs with these variables for each service — <code><ServiceToken>web</ServiceToken></code> becomes <code><ServiceToken>WEB</ServiceToken></code>, <code>admin-ui</code> becomes <code>ADMIN_UI</code>:
         </p>
-        <pre className="mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-lg border border-line/70 bg-background-soft/60 p-3 text-xs leading-6 text-foreground">
+        <pre className="mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-sm border border-line/70 bg-background-soft/60 p-3 text-xs leading-6 text-foreground">
           <code>
             {"SPACES_"}<ServiceToken>WEB</ServiceToken>{"_PORT   # assigned local port, e.g. 51234\n"}
             {"SPACES_"}<ServiceToken>WEB</ServiceToken>{"_HOST   # routed hostname, no scheme or port\n"}

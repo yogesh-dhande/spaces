@@ -63,7 +63,7 @@ export default function WorkspacesDocsPage() {
           <li>• Spaces keeps each port assignment pinned to the workspace until archive.</li>
           <li>• Stopped workspaces hold placeholder reservations for assigned ports; running workspaces release those placeholders so processes can bind normally.</li>
         </ul>
-        <pre className="mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-lg border border-line/70 bg-background-soft/60 p-3 text-xs leading-6 text-foreground">
+        <pre className="mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-sm border border-line/70 bg-background-soft/60 p-3 text-xs leading-6 text-foreground">
           <code>{`Workspace: bugfix/login-timeout
 SPACES_WEB_PORT=20001
 SPACES_WEB_URL=http://web.login-fix-a3f9c2d1847b.localhost:7391

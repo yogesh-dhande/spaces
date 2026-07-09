@@ -40,7 +40,7 @@ export default function BrowserSessionsDocsPage() {
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Example</h2>
-        <pre className="mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-lg border border-line/70 bg-background-soft/60 p-3 text-xs leading-6 text-foreground">
+        <pre className="mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-sm border border-line/70 bg-background-soft/60 p-3 text-xs leading-6 text-foreground">
           <code>{`web        $SPACES_WEB_URL
 admin      $SPACES_WEB_URL/admin
 prs  https://github.com/org/repo/pull`}</code>

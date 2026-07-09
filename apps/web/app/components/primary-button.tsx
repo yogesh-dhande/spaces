@@ -26,7 +26,7 @@ export function PrimaryButton({
   return (
     <Link
       {...props}
-      className={`inline-flex items-center rounded-full text-sm font-semibold text-background-soft bg-accent-strong ring-1 ring-inset ring-white/[0.16] transition-colors hover:bg-accent ${sizeClasses[size]} ${className}`}
+      className={`inline-flex items-center rounded-sm text-sm font-semibold text-background-soft bg-accent-strong ring-1 ring-inset ring-white/[0.16] transition-colors hover:bg-accent ${sizeClasses[size]} ${className}`}
     >
       {children}
     </Link>

@@ -21,13 +21,13 @@ export function CopyablePrompt({ label = "Prompt", text }: CopyablePromptProps) 
   };
 
   return (
-    <div className="relative mt-3 overflow-hidden rounded-xl border border-line/70 bg-code-surface shadow-sm">
+    <div className="relative mt-3 overflow-hidden rounded-sm border border-line/70 bg-code-surface shadow-sm">
       <button
         type="button"
         onClick={handleCopy}
         aria-label={copied ? "Copied prompt" : `Copy ${label.toLowerCase()}`}
         aria-live="polite"
-        className="absolute right-2 top-2 inline-flex items-center rounded-md border border-white/10 bg-white/[0.04] px-2.5 py-1 font-mono text-[0.65rem] uppercase tracking-[0.14em] text-white/70 transition-colors hover:border-white/25 hover:text-white"
+        className="absolute right-2 top-2 inline-flex items-center rounded-sm border border-white/10 bg-white/[0.04] px-2.5 py-1 font-mono text-[0.65rem] uppercase tracking-[0.14em] text-white/70 transition-colors hover:border-white/25 hover:text-white"
       >
         {copied ? "Copied" : "Copy"}
       </button>

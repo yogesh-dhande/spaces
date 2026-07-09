@@ -31,7 +31,7 @@ export default function TroubleshootingDocsPage() {
           <li>• <strong>Browser sessions never open or focus Chrome</strong> &mdash; Spaces needs permission to control Google Chrome. Enable Spaces for Google Chrome under System Settings ▸ Privacy &amp; Security ▸ Automation.</li>
           <li>• <strong>Something is left running after stop</strong> &mdash; add the teardown command to the project or workspace stop script to clean up state not managed by Spaces.</li>
         </ul>
-        <pre className="mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-lg border border-line/70 bg-background-soft/60 p-3 text-xs leading-6 text-foreground">
+        <pre className="mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-sm border border-line/70 bg-background-soft/60 p-3 text-xs leading-6 text-foreground">
           <code>{`spaces workspace start --workspace <workspace-id>
 spaces workspace restart --workspace <workspace-id>`}</code>
         </pre>

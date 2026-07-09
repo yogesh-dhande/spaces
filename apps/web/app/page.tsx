@@ -8,8 +8,9 @@ const githubReleasesURL = "https://github.com/yogesh-dhande/spaces/releases/late
 
 // Scope strip under the hero headline — the surfaces Spaces puts under one roof.
 const heroScope = [
-  "agents",
+  "projects",
   "worktrees",
+  "agents",
   "ports",
   "processes",
   "windows",
@@ -358,13 +359,12 @@ const workflow: WorkflowStepData[] = [
 
 type RemoteNode = {
   name: string;
-  detail: string;
 };
 
 const remoteNodes: RemoteNode[] = [
-  { name: "Local Mac", detail: "this machine" },
-  { name: "Remote Mac", detail: "SSH · pinned TLS" },
-  { name: "Cloud Linux", detail: "spacesd on Ubuntu" },
+  { name: "Local Mac" },
+  { name: "Remote Mac" },
+  { name: "Cloud Linux" },
 ];
 
 // A row in the Alerts panel mock. Only blocked and done states raise Alerts,
@@ -438,10 +438,6 @@ export default function HomePage() {
         <div className="mx-auto grid w-full max-w-7xl items-center gap-12 px-6 pt-14 md:pt-20 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)] lg:gap-10">
           {/* Left: copy */}
           <div className="min-w-0">
-            <p className="inline-flex items-center gap-2 font-mono text-[0.7rem] uppercase tracking-[0.18em] text-foreground-soft">
-              <span className="h-1.5 w-1.5 rounded-full bg-accent" />
-              macOS + iOS · open source
-            </p>
             <h1 className="mt-5 text-[clamp(2rem,4vw,3.5rem)] font-semibold leading-[1.04] tracking-[-0.01em]">
               Manage <span className="text-accent">parallel coding sessions</span>
             </h1>
@@ -483,7 +479,7 @@ export default function HomePage() {
               </PrimaryButton>
               <Link
                 href="/docs"
-                className="inline-flex items-center gap-1.5 rounded-full border border-line px-5 py-3 text-sm font-semibold transition-colors hover:border-accent hover:text-accent"
+                className="inline-flex items-center gap-1.5 rounded-sm border border-line px-5 py-3 text-sm font-semibold transition-colors hover:border-accent hover:text-accent"
               >
                 Read Docs
                 <span aria-hidden>→</span>
@@ -498,7 +494,7 @@ export default function HomePage() {
           </div>
 
           {/* Right: screenshot */}
-          <figure className="relative overflow-hidden rounded-xl border border-line/80 bg-surface/70 shadow-[0_40px_100px_-60px_color-mix(in_oklab,var(--ink)_55%,transparent)]">
+          <figure className="relative overflow-hidden rounded-sm border border-line/80 bg-surface/70 shadow-[0_40px_100px_-60px_color-mix(in_oklab,var(--ink)_55%,transparent)]">
             <img
               src="/media/hero.png"
               alt="The Spaces app showing workspaces, terminals, editors, and live agent status side by side"
@@ -584,10 +580,6 @@ export default function HomePage() {
       <section id="agents" className="border-t border-line/70">
         <div className="mx-auto w-full max-w-7xl px-6 py-20 md:py-24">
           <div className="max-w-3xl">
-            <p className="inline-flex items-center gap-2 font-mono text-[0.7rem] uppercase tracking-[0.18em] text-foreground-soft">
-              <span className="h-1.5 w-1.5 rounded-full bg-accent" />
-              Agent alerts
-            </p>
             <h2 className="mt-5 text-[clamp(1.5rem,3.5vw,2.3rem)] font-semibold leading-[1.15] tracking-[-0.01em]">
               Know which agent needs you,{" "}
               <span className="text-accent whitespace-nowrap">
@@ -607,7 +599,7 @@ export default function HomePage() {
           <div className="mt-14 grid gap-10 lg:grid-cols-[1.1fr_0.9fr] lg:items-center">
             <AlertsPanel />
 
-            <div className="rounded-xl border border-accent-2/45 bg-[color:color-mix(in_oklab,var(--accent-2)_8%,var(--surface))] p-6 md:p-8">
+            <div className="rounded-sm border border-accent-2/45 bg-[color:color-mix(in_oklab,var(--accent-2)_8%,var(--surface))] p-6 md:p-8">
               <p className="inline-flex items-center gap-2 font-mono text-[0.7rem] uppercase tracking-[0.18em] text-accent-2">
                 <span className="h-1.5 w-1.5 rounded-full bg-accent-2" />
                 One list, every agent
@@ -644,10 +636,6 @@ export default function HomePage() {
       <section id="proxy" className="border-t border-line/70">
         <div className="mx-auto w-full max-w-7xl px-6 py-20 md:py-24">
           <div className="max-w-3xl">
-            <p className="inline-flex items-center gap-2 font-mono text-[0.7rem] uppercase tracking-[0.18em] text-foreground-soft">
-              <span className="h-1.5 w-1.5 rounded-full bg-accent" />
-              Bundled reverse proxy
-            </p>
             <h2 className="mt-5 text-[clamp(1.5rem,3.5vw,2.3rem)] font-semibold leading-[1.15] tracking-[-0.01em]">
               One localhost, one cookie jar, <span className="text-accent">endless conflicts. Solved.</span>
             </h2>
@@ -660,7 +648,7 @@ export default function HomePage() {
 
           <div className="mt-14 grid gap-6 lg:grid-cols-2">
             <ComparisonColumn tone="negative" label="Plain localhost" items={localhostPains} />
-            <ComparisonColumn tone="accent" label="Spaces" items={spacesFixes} />
+            <ComparisonColumn tone="accent" label="Spaces with Caddy Reverse Proxy" items={spacesFixes} />
           </div>
         </div>
       </section>
@@ -691,14 +679,14 @@ export default function HomePage() {
             </p>
           </div>
 
-          <figure className="mt-12 overflow-hidden rounded-xl border border-line/80 bg-surface/70 p-2 md:p-3">
+          <figure className="mt-12 overflow-hidden rounded-sm border border-line/80 bg-surface/70 p-2 md:p-3">
             <video
               src="/media/demo_nav_palette.mp4"
               autoPlay
               loop
               muted
               playsInline
-              className="h-auto w-full rounded-lg"
+              className="h-auto w-full rounded-sm"
             />
           </figure>
         </div>
@@ -708,10 +696,6 @@ export default function HomePage() {
       <section id="remote" className="border-t border-line/70">
         <div className="mx-auto w-full max-w-7xl px-6 py-20 md:py-24">
           <div className="max-w-3xl">
-            <p className="inline-flex items-center gap-2 font-mono text-[0.7rem] uppercase tracking-[0.18em] text-foreground-soft">
-              <span className="h-1.5 w-1.5 rounded-full bg-accent" />
-              Remote machines
-            </p>
             <h2 className="mt-5 text-[clamp(1.5rem,3.5vw,2.3rem)] font-semibold leading-[1.15] tracking-[-0.01em]">
               Connect to all machines <span className="text-accent whitespace-nowrap">from one Mac</span>
             </h2>
@@ -726,7 +710,7 @@ export default function HomePage() {
           <div className="mt-14 grid gap-10 lg:grid-cols-[1.1fr_0.9fr] lg:items-center">
             <RemoteDiagram />
 
-            <div className="rounded-xl border border-accent-2/45 bg-[color:color-mix(in_oklab,var(--accent-2)_8%,var(--surface))] p-6 md:p-8">
+            <div className="rounded-sm border border-accent-2/45 bg-[color:color-mix(in_oklab,var(--accent-2)_8%,var(--surface))] p-6 md:p-8">
               <p className="inline-flex items-center gap-2 font-mono text-[0.7rem] uppercase tracking-[0.18em] text-accent-2">
                 <span className="h-1.5 w-1.5 rounded-full bg-accent-2" />
                 Sessions outlive your laptop
@@ -751,8 +735,6 @@ export default function HomePage() {
           <div className="grid gap-10 lg:grid-cols-2 lg:items-center">
             <div className="max-w-xl">
               <p className="inline-flex items-center gap-2 font-mono text-[0.7rem] uppercase tracking-[0.18em] text-foreground-soft">
-                <span className="h-1.5 w-1.5 rounded-full bg-accent" />
-                <span>iOS companion</span>
                 <span className="rounded-full border border-accent-2/50 px-2 py-0.5 text-[0.62rem] text-accent-2">
                   Coming soon
                 </span>
@@ -794,12 +776,8 @@ export default function HomePage() {
         <div className="mx-auto w-full max-w-7xl px-6 py-20 md:py-24">
           <div className="flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
             <h2 className="text-[clamp(1.5rem,3.5vw,2.3rem)] font-semibold leading-[1.15] tracking-[-0.01em]">
-              Capabilities
+              Features
             </h2>
-            <p className="font-mono text-xs tracking-[0.16em] tabular-nums">
-              <span className="text-accent">{String(keyFeatures.length).padStart(2, "0")}</span>
-              <span className="text-foreground-soft"> features</span>
-            </p>
           </div>
 
           <ol className="mt-12 grid border-t border-line/70 md:grid-cols-2">
@@ -871,7 +849,7 @@ export default function HomePage() {
             </PrimaryButton>
             <Link
               href="/docs"
-              className="inline-flex items-center gap-1.5 rounded-full border border-line px-5 py-3 text-sm font-semibold transition-colors hover:border-accent hover:text-accent"
+              className="inline-flex items-center gap-1.5 rounded-sm border border-line px-5 py-3 text-sm font-semibold transition-colors hover:border-accent hover:text-accent"
             >
               Read Docs
               <span aria-hidden>→</span>
@@ -887,7 +865,7 @@ export default function HomePage() {
 
 function Key({ children }: { children: React.ReactNode }) {
   return (
-    <kbd className="inline-flex items-center rounded-md border border-accent-2/55 bg-accent-2/20 px-2 py-1 font-mono text-xs font-semibold leading-none text-accent-2">
+    <kbd className="inline-flex items-center rounded-sm border border-accent-2/55 bg-accent-2/20 px-2 py-1 font-mono text-xs font-semibold leading-none text-accent-2">
       {children}
     </kbd>
   );
@@ -895,8 +873,8 @@ function Key({ children }: { children: React.ReactNode }) {
 
 function PillarCard({ pillar }: { pillar: Pillar }) {
   return (
-    <li className="flex h-full flex-col gap-4 rounded-xl border border-line/80 bg-surface/50 p-6 transition-colors hover:border-accent/50">
-      <span className="inline-flex h-10 w-10 items-center justify-center rounded-lg border border-accent/30 bg-accent/10 text-accent">
+    <li className="flex h-full flex-col gap-4 rounded-sm border border-line/80 bg-surface/50 p-6 transition-colors hover:border-accent/50">
+      <span className="inline-flex h-10 w-10 items-center justify-center rounded-sm border border-accent/30 bg-accent/10 text-accent">
         {pillar.icon}
       </span>
       <div className="min-w-0">
@@ -920,15 +898,12 @@ function PillarCard({ pillar }: { pillar: Pillar }) {
 
 function RemoteDiagram() {
   return (
-    <figure className="rounded-xl border border-line/80 bg-surface/50 p-6 md:p-10">
+    <figure className="rounded-sm border border-line/80 bg-surface/50 p-6 md:p-10">
       <div className="mx-auto flex max-w-md flex-col items-center">
         {/* Hub: your Mac */}
-        <div className="w-full max-w-[15rem] rounded-lg border border-accent/45 bg-accent/10 px-5 py-4 text-center">
+        <div className="w-full max-w-[15rem] rounded-sm border border-accent/45 bg-accent/10 px-5 py-4 text-center">
           <p className="font-mono text-[0.62rem] uppercase tracking-[0.16em] text-accent">
-            Your Mac
-          </p>
-          <p className="mt-1 text-sm font-semibold tracking-tight text-foreground">
-            One command surface
+            Spaces Client (Mac)
           </p>
         </div>
 
@@ -948,12 +923,9 @@ function RemoteDiagram() {
                   aria-hidden
                   className="hidden h-6 w-px bg-line/80 sm:block"
                 />
-                <div className="w-full rounded-lg border border-line/80 bg-background/60 px-4 py-3 text-center">
+                <div className="w-full rounded-sm border border-line/80 bg-background/60 px-4 py-3 text-center">
                   <p className="text-sm font-semibold tracking-tight text-foreground">
                     {node.name}
-                  </p>
-                  <p className="mt-1 font-mono text-[0.62rem] uppercase tracking-[0.14em] text-foreground-soft">
-                    {node.detail}
                   </p>
                 </div>
               </div>
@@ -1053,7 +1025,7 @@ function SparkleIcon({ className = "h-4 w-4" }: { className?: string }) {
 // numbered targets (browser, process, agent), with sibling workspaces below.
 function WorkspaceSidebarMock() {
   return (
-    <figure className="overflow-hidden rounded-xl border border-line/80 bg-surface/70 shadow-[0_40px_100px_-60px_color-mix(in_oklab,var(--ink)_55%,transparent)]">
+    <figure className="overflow-hidden rounded-sm border border-line/80 bg-surface/70 shadow-[0_40px_100px_-60px_color-mix(in_oklab,var(--ink)_55%,transparent)]">
       <WindowChrome />
       <div className="p-2.5">
         <p className="px-2.5 pb-1 pt-3 font-mono text-[0.62rem] uppercase tracking-[0.16em] text-foreground-soft">
@@ -1066,7 +1038,7 @@ function WorkspaceSidebarMock() {
         </div>
 
         {/* Selected, active workspace — expanded into its targets. */}
-        <div className="mt-0.5 rounded-lg border border-accent/40 bg-accent/[0.06]">
+        <div className="mt-0.5 rounded-sm border border-accent/40 bg-accent/[0.06]">
           <div className="flex items-center gap-2 px-2.5 py-2 text-sm font-semibold text-foreground">
             <span className="h-2 w-2 rounded-full bg-accent" />
             <span>main</span>
@@ -1095,7 +1067,7 @@ function TargetRow({
   label: string;
 }) {
   return (
-    <li className="flex items-center gap-2.5 rounded-md px-2 py-1.5">
+    <li className="flex items-center gap-2.5 rounded-sm px-2 py-1.5">
       <NumKey>{shortcut}</NumKey>
       <span className="text-foreground-soft">{icon}</span>
       <span className="text-sm text-foreground">{label}</span>
@@ -1123,7 +1095,7 @@ function WorkspaceRow({ name, active }: { name: string; active?: boolean }) {
 // and a jump affordance.
 function AlertsPanel() {
   return (
-    <figure className="overflow-hidden rounded-xl border border-line/80 bg-surface/70 shadow-[0_40px_100px_-60px_color-mix(in_oklab,var(--ink)_55%,transparent)]">
+    <figure className="overflow-hidden rounded-sm border border-line/80 bg-surface/70 shadow-[0_40px_100px_-60px_color-mix(in_oklab,var(--ink)_55%,transparent)]">
       <div className="flex items-center border-b border-line/70 px-4 py-3.5">
         <span className="inline-flex items-center gap-2 text-sm font-semibold tracking-tight text-foreground">
           <BellIcon />
@@ -1191,7 +1163,7 @@ function ComparisonColumn({
         };
 
   return (
-    <div className={`rounded-xl border ${toneClasses.border} ${toneClasses.bg} p-6 md:p-8`}>
+    <div className={`rounded-sm border ${toneClasses.border} ${toneClasses.bg} p-6 md:p-8`}>
       <p
         className={`inline-flex items-center gap-2 font-mono text-[0.7rem] uppercase tracking-[0.18em] ${toneClasses.text}`}
       >
@@ -1223,7 +1195,7 @@ function MediaPlaceholder({
 }) {
   return (
     <figure
-      className={`relative flex ${aspect} w-full items-center justify-center overflow-hidden rounded-xl border border-dashed border-line bg-surface/40`}
+      className={`relative flex ${aspect} w-full items-center justify-center overflow-hidden rounded-sm border border-dashed border-line bg-surface/40`}
     >
       <div className="flex flex-col items-center gap-4 px-6 text-center text-foreground-soft">
         {children}
