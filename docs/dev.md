@@ -183,6 +183,8 @@ Each `apps/macos/Tests/e2e.sh` invocation writes an ignored Markdown report unde
 
 `apps/macos/Tests/e2e.sh all` is the shared-setup smoke lane for app, terminal, mobile, and paired-device coverage. `apps/macos/Tests/e2e.sh exhaustive` is the full manual lane: app full coverage, every terminal scenario, every mobile scenario, local and constrained iOS latency profiles, local and remote Device API parity, and Device API profiling.
 
+`apps/macos/.build/debug/spacese2e e2e app --scenario window-cycle-small` runs the compact app-side window-cycle profile. The scenario includes the local primary workspace and, with the repo `.env` remote host configuration, a paired remote workspace. The remote portion opens a configured process pane and an ad hoc terminal pane on the Mac client, records sidebar direct-focus latency for the already-open process pane, and records cycle latency between the two already-open remote terminal panes.
+
 Mobile terminal latency sweeps target the local paired daemon over the Device API; remote terminal latency runs through the paired-device parity harness instead of a separate direct-daemon channel.
 
 The daemon-hosted Device API is a paired Spaces-only transport rather than a third-party external API surface. `spacese2e mobile-serve` is available when a harness needs a standalone Device API process with explicit host, port, or one-time pairing-window output; harness JSON calls go through `spacese2e mobile-request` so local scripts use the same pinned-TLS transport as the iOS app.

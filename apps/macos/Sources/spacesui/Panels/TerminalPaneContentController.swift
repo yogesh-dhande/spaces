@@ -2,12 +2,29 @@ import AppKit
 import spacesterminalcore
 import spacesterminalui
 
+@MainActor protocol TerminalPaneContentHosting: PaneContentHosting {
+    var workspaceID: String { get }
+    var sessionID: String { get }
+    func applyAppearance(_ appearance: ThemeAppearance)
+    func setAccessibilityRuntimeTargetName(_ name: String)
+    func requestOwnershipIfNeeded()
+    func closeForSessionTermination()
+    var canPerformFindActions: Bool { get }
+    func find(_ sender: Any?)
+    func findNext(_ sender: Any?)
+    func findPrevious(_ sender: Any?)
+    func useSelectionForFind(_ sender: Any?)
+    func performShortcutForTesting(action: String, text: String?)
+    func debugRefreshStateForTesting(skipOwnerAttach: Bool)
+    func debugStateDump() -> TerminalSessionWindowDebugState
+}
+
 /// Terminal implementation of `PaneContentHosting`: wraps the session's Device API
 /// state model (owned indirectly through the pane view controller's injected closures)
 /// and the window-independent `TerminalSessionPaneViewController`. One instance per
 /// open session, owned by `PanelCoordinator`; the pane view re-parents `contentView`
 /// across layout rebuilds without recreating it.
-@MainActor final class TerminalPaneContentController: PaneContentHosting {
+@MainActor final class TerminalPaneContentController: TerminalPaneContentHosting {
     let descriptor: PaneContentDescriptor
     let workspaceID: String
     let sessionID: String

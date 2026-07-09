@@ -29,6 +29,36 @@ public struct TerminalSessionWindowDebugState: Sendable, Codable, Equatable {
     public let takeoverButtonVisible: Bool
     public let takeoverButtonEnabled: Bool
     public let takeoverMessage: String
+
+    public init(
+        renderedOutput: String, visibleSurfaceOutput: String?, showsTerminalSurface: Bool, showsTextRenderer: Bool, rendererSummary: String,
+        summary: String, state: String, windowTitle: String, didCloseWindow: Bool, surfaceColumns: Int?, surfaceRows: Int?, windowIsKey: Bool,
+        firstResponderTypeName: String?, searchVisible: Bool, searchQuery: String, searchTotal: Int?, searchSelected: Int?, attachmentMode: String,
+        takeoverPending: Bool, takeoverButtonVisible: Bool, takeoverButtonEnabled: Bool, takeoverMessage: String
+    ) {
+        self.renderedOutput = renderedOutput
+        self.visibleSurfaceOutput = visibleSurfaceOutput
+        self.showsTerminalSurface = showsTerminalSurface
+        self.showsTextRenderer = showsTextRenderer
+        self.rendererSummary = rendererSummary
+        self.summary = summary
+        self.state = state
+        self.windowTitle = windowTitle
+        self.didCloseWindow = didCloseWindow
+        self.surfaceColumns = surfaceColumns
+        self.surfaceRows = surfaceRows
+        self.windowIsKey = windowIsKey
+        self.firstResponderTypeName = firstResponderTypeName
+        self.searchVisible = searchVisible
+        self.searchQuery = searchQuery
+        self.searchTotal = searchTotal
+        self.searchSelected = searchSelected
+        self.attachmentMode = attachmentMode
+        self.takeoverPending = takeoverPending
+        self.takeoverButtonVisible = takeoverButtonVisible
+        self.takeoverButtonEnabled = takeoverButtonEnabled
+        self.takeoverMessage = takeoverMessage
+    }
 }
 
 extension TerminalSessionPaneViewController {
@@ -95,15 +125,9 @@ extension TerminalSessionPaneViewController {
     var debugInputFieldValue: String { inputField.stringValue }
     func debugSimulateApplicationDidBecomeActive() { NotificationCenter.default.post(name: NSApplication.didBecomeActiveNotification, object: NSApp) }
     func debugSimulateApplicationDidResignActive() { NotificationCenter.default.post(name: NSApplication.didResignActiveNotification, object: NSApp) }
-    func debugSimulateAttachmentStateDidChange() {
-        TerminalSessionNotification.post(.spacesTerminalAttachmentStateDidChange, sessionID: sessionID)
-    }
-    func debugSimulateSessionMetadataDidChange() {
-        TerminalSessionNotification.post(.spacesTerminalSessionMetadataDidChange, sessionID: sessionID)
-    }
-    func debugSimulateRuntimeStateDidChange() {
-        TerminalSessionNotification.post(.spacesTerminalRuntimeStateDidChange, sessionID: sessionID)
-    }
+    func debugSimulateAttachmentStateDidChange() { TerminalSessionNotification.post(.spacesTerminalAttachmentStateDidChange, sessionID: sessionID) }
+    func debugSimulateSessionMetadataDidChange() { TerminalSessionNotification.post(.spacesTerminalSessionMetadataDidChange, sessionID: sessionID) }
+    func debugSimulateRuntimeStateDidChange() { TerminalSessionNotification.post(.spacesTerminalRuntimeStateDidChange, sessionID: sessionID) }
     func debugSimulateOutputDidChange() {
         TerminalSessionNotification.post(.spacesTerminalOutputDidChange, sessionID: sessionID)
         refreshNow()

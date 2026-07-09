@@ -26,6 +26,11 @@
     /// `makeHostStateStreamSubscriber()` and issues control/state requests through
     /// `terminalServiceRequestSender`. Nothing here writes to local `spaces.db`.
     @MainActor final class DeviceTerminalSessionStateModel: TerminalSessionStateProviding {
+        struct PreparedCredentials: Sendable, Equatable {
+            let certificateFingerprint: String
+            let authToken: String?
+        }
+
         private let device: SpacesPairedDeviceRecord
         private let sessionID: String
         private let clientApp: SpacesDeviceClientApp
@@ -66,29 +71,28 @@
         init(
             device: SpacesPairedDeviceRecord, sessionID: String, launchConfiguration: TerminalSessionLaunchConfiguration,
             initialRuntimeState: TerminalSessionRuntimeState? = nil, initialAttachmentSnapshot: TerminalSessionAttachmentSnapshot? = nil,
-            clientApp: SpacesDeviceClientApp, profile: SpacesProfile? = nil
+            clientApp: SpacesDeviceClientApp, preparedCredentials: PreparedCredentials
         ) throws {
-            // This model opens its own pinned-TLS Device API connections directly instead of going
-            // through SpacesDeviceClient.request, so it must apply the same local-credential recovery
-            // that request does: a local device whose stored auth token went missing (e.g. an earlier
-            // bootstrap failed while the daemon was down) is re-bootstrapped here — refreshing its
-            // pinned certificate fingerprint — rather than dead-ending the pane. A remote device cannot
-            // self-heal, so a missing remote fingerprint still surfaces as missingCertificateFingerprint.
-            let (certificateFingerprint, resolvedAuthToken) = try SpacesDeviceClient.credentialsEnsuringLocalRecovery(
-                device: device, clientApp: clientApp, profile: profile)
             self.device = device
             self.sessionID = sessionID
             self.clientApp = clientApp
-            self.certificateFingerprint = certificateFingerprint
-            authToken = resolvedAuthToken
+            certificateFingerprint = preparedCredentials.certificateFingerprint
+            authToken = preparedCredentials.authToken
             requestClient = try SpacesDeviceAPIRequestSessionClient(
-                host: device.host, port: device.port, certificateFingerprint: certificateFingerprint)
+                host: device.host, port: device.port, certificateFingerprint: preparedCredentials.certificateFingerprint)
             currentLaunchConfiguration = launchConfiguration
             currentRuntimeState = initialRuntimeState
             // Seed the owner from the overview so an owner-seeking open sees the existing
             // owner immediately and takes the takeover path, rather than attaching as owner
             // before the live subscription catches up.
             currentAttachmentSnapshot = initialAttachmentSnapshot
+        }
+
+        nonisolated static func resolveCredentials(device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp, profile: SpacesProfile? = nil)
+            throws -> PreparedCredentials
+        {
+            let credentials = try SpacesDeviceClient.credentialsEnsuringLocalRecovery(device: device, clientApp: clientApp, profile: profile)
+            return PreparedCredentials(certificateFingerprint: credentials.certificateFingerprint, authToken: credentials.authToken)
         }
 
         deinit {
