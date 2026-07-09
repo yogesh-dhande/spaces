@@ -43,7 +43,8 @@ struct WorkspaceWindowCycleTests {
     @Test func cycleOrderingPreservesActiveSessionRotation() {
         // A live session remembers a rotation that differs from natural order; cycling keeps it.
         let cursors = ["a", "b", "c"]
-        let session = WorkspaceWindowCycle.CycleSession(orderedCursors: ["c", "a", "b"], currentIndex: 0, lastUsedAt: Date(timeIntervalSinceReferenceDate: 0))
+        let session = WorkspaceWindowCycle.CycleSession(
+            orderedCursors: ["c", "a", "b"], currentIndex: 0, lastUsedAt: Date(timeIntervalSinceReferenceDate: 0))
         let ordering = WorkspaceWindowCycle.cycleOrdering(cursors: cursors, currentIndex: 2, session: session, recentCursors: ["b", "a", "c"])
         // Session order ["c","a","b"] maps to indices [2,0,1]; current (cursor "c", index 2) is first.
         #expect(ordering.indices == [2, 0, 1])
@@ -53,7 +54,8 @@ struct WorkspaceWindowCycleTests {
     @Test func cycleOrderingFallsBackWhenSessionCursorsNoLongerMatch() {
         // The remembered session references a cursor that is gone, so the natural order is used.
         let cursors = ["a", "b"]
-        let session = WorkspaceWindowCycle.CycleSession(orderedCursors: ["a", "gone"], currentIndex: 0, lastUsedAt: Date(timeIntervalSinceReferenceDate: 0))
+        let session = WorkspaceWindowCycle.CycleSession(
+            orderedCursors: ["a", "gone"], currentIndex: 0, lastUsedAt: Date(timeIntervalSinceReferenceDate: 0))
         let ordering = WorkspaceWindowCycle.cycleOrdering(cursors: cursors, currentIndex: nil, session: session)
         #expect(ordering.indices == [0, 1])
     }

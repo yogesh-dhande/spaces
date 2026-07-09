@@ -120,10 +120,9 @@ extension AppKitController {
                 let target = context.targets.first(where: { Self.cycleCursorKey(for: $0, detail: context.detail) == key })
             else { return }
             let resolution = Self.windowShortcutTargetResolution(target, workspaceID: workspaceID, detail: context.detail, overview: context.overview)
-            guard
-                let action = await self.executeWindowFocusResolution(
-                    resolution, preferredTarget: target, preferredDetail: context.detail)
-            else { return }
+            guard let action = await self.executeWindowFocusResolution(resolution, preferredTarget: target, preferredDetail: context.detail) else {
+                return
+            }
             self.hideAfterSuccessfulExternalWindowAction(action)
         }
     }

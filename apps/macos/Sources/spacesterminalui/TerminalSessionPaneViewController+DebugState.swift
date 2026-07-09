@@ -125,15 +125,9 @@ extension TerminalSessionPaneViewController {
     var debugInputFieldValue: String { inputField.stringValue }
     func debugSimulateApplicationDidBecomeActive() { NotificationCenter.default.post(name: NSApplication.didBecomeActiveNotification, object: NSApp) }
     func debugSimulateApplicationDidResignActive() { NotificationCenter.default.post(name: NSApplication.didResignActiveNotification, object: NSApp) }
-    func debugSimulateAttachmentStateDidChange() {
-        TerminalSessionNotification.post(.spacesTerminalAttachmentStateDidChange, sessionID: sessionID)
-    }
-    func debugSimulateSessionMetadataDidChange() {
-        TerminalSessionNotification.post(.spacesTerminalSessionMetadataDidChange, sessionID: sessionID)
-    }
-    func debugSimulateRuntimeStateDidChange() {
-        TerminalSessionNotification.post(.spacesTerminalRuntimeStateDidChange, sessionID: sessionID)
-    }
+    func debugSimulateAttachmentStateDidChange() { TerminalSessionNotification.post(.spacesTerminalAttachmentStateDidChange, sessionID: sessionID) }
+    func debugSimulateSessionMetadataDidChange() { TerminalSessionNotification.post(.spacesTerminalSessionMetadataDidChange, sessionID: sessionID) }
+    func debugSimulateRuntimeStateDidChange() { TerminalSessionNotification.post(.spacesTerminalRuntimeStateDidChange, sessionID: sessionID) }
     func debugSimulateOutputDidChange() {
         TerminalSessionNotification.post(.spacesTerminalOutputDidChange, sessionID: sessionID)
         refreshNow()

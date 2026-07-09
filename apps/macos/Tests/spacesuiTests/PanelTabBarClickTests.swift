@@ -32,6 +32,14 @@ import Testing
         return nil
     }
 
+    private func view(withAccessibilityIdentifier identifier: String, in root: NSView) -> NSView? {
+        if root.accessibilityIdentifier() == identifier { return root }
+        for sub in root.subviews {
+            if let found = view(withAccessibilityIdentifier: identifier, in: sub) { return found }
+        }
+        return nil
+    }
+
     private func mouseEvent(_ type: NSEvent.EventType, at pointInWindow: NSPoint, in window: NSWindow) -> NSEvent {
         NSEvent.mouseEvent(
             with: type, location: pointInWindow, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
@@ -60,14 +68,43 @@ import Testing
         var closed: String?
         bar.onCloseTab = { closed = $0 }
         let item = try #require(tabItemView(withID: "t2", in: bar))
-        let close = try #require(
-            item.subviews.compactMap { $0 as? NSStackView }.first?.arrangedSubviews.compactMap { $0 as? NSButton }.first)
+        let close = try #require(view(withAccessibilityIdentifier: "panel-tab-close-t2", in: item) as? NSButton)
+        item.mouseEntered(with: mouseEvent(.mouseMoved, at: item.convert(NSPoint(x: item.bounds.midX, y: item.bounds.midY), to: nil), in: window))
         let inWindow = close.convert(NSPoint(x: close.bounds.midX, y: close.bounds.midY), to: nil)
         let content = try #require(window.contentView)
         let hit = try #require(content.hitTest(content.convert(inWindow, from: nil)))
         #expect(hit === close, "hit view was \(type(of: hit))")
         close.performClick(nil)
         #expect(closed == "t2")
+    }
+
+    /// Close glyphs occupy a stable slot but stay visually hidden and inactive until hover.
+    @Test func closeGlyphOnlyShowsOnHover() throws {
+        let (bar, window) = makeBarInWindow()
+        let item = try #require(tabItemView(withID: "t2", in: bar))
+        let close = try #require(view(withAccessibilityIdentifier: "panel-tab-close-t2", in: item) as? NSButton)
+        let content = try #require(window.contentView)
+        let inWindow = close.convert(NSPoint(x: close.bounds.midX, y: close.bounds.midY), to: nil)
+
+        #expect(close.alphaValue == 0)
+        #expect(!close.isEnabled)
+        let hitBeforeHover = try #require(content.hitTest(content.convert(inWindow, from: nil)))
+        #expect(hitBeforeHover === item, "hit view was \(type(of: hitBeforeHover))")
+
+        item.mouseEntered(with: mouseEvent(.mouseMoved, at: inWindow, in: window))
+        #expect(close.alphaValue == 1)
+        #expect(close.isEnabled)
+
+        item.mouseExited(with: mouseEvent(.mouseMoved, at: inWindow, in: window))
+        #expect(close.alphaValue == 0)
+        #expect(!close.isEnabled)
+    }
+
+    /// Tab separators are drawn between neighboring tabs, not after the final tab.
+    @Test func tabSeparatorsRenderBetweenTabs() {
+        let (bar, _) = makeBarInWindow()
+        #expect(view(withAccessibilityIdentifier: "tab-separator-t1", in: bar) != nil)
+        #expect(view(withAccessibilityIdentifier: "tab-separator-t2", in: bar) == nil)
     }
 
     /// In the main window the tab strip sits inside the hidden titlebar region, where

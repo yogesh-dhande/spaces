@@ -49,11 +49,8 @@ import AppKit
         paneTreeTopToView = paneTree.topAnchor.constraint(equalTo: topAnchor)
         NSLayoutConstraint.activate([
             tabBar.topAnchor.constraint(equalTo: topAnchor), tabBar.leadingAnchor.constraint(equalTo: leadingAnchor),
-            tabBar.trailingAnchor.constraint(equalTo: trailingAnchor),
-            paneTreeTopToTabBar,
-            paneTree.leadingAnchor.constraint(equalTo: leadingAnchor),
-            paneTree.trailingAnchor.constraint(equalTo: trailingAnchor),
-            paneTree.bottomAnchor.constraint(equalTo: bottomAnchor),
+            tabBar.trailingAnchor.constraint(equalTo: trailingAnchor), paneTreeTopToTabBar, paneTree.leadingAnchor.constraint(equalTo: leadingAnchor),
+            paneTree.trailingAnchor.constraint(equalTo: trailingAnchor), paneTree.bottomAnchor.constraint(equalTo: bottomAnchor),
             emptyStateLabel.centerXAnchor.constraint(equalTo: centerXAnchor), emptyStateLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
     }
@@ -88,9 +85,7 @@ import AppKit
     /// Returns the panel to its built-in content tab strip. The main window uses this
     /// while fullscreen because AppKit hides titlebar accessories there.
     func useBuiltInTabBar() {
-        if let externalTabBar, externalTabBar.hostingOwner === self {
-            externalTabBar.hostingOwner = nil
-        }
+        if let externalTabBar, externalTabBar.hostingOwner === self { externalTabBar.hostingOwner = nil }
         externalTabBar = nil
         paneTreeTopToView.isActive = false
         paneTreeTopToTabBar.isActive = true
@@ -112,9 +107,7 @@ import AppKit
         let selectedTab = layout.tabs.first { $0.id == layout.selectedTabID }
         paneTree.render(root: selectedTab?.root)
         emptyStateLabel.isHidden = !layout.isEmpty
-        if layout.isEmpty {
-            emptyStateLabel.stringValue = newTabShortcutHint.map { "No open terminals — \($0) opens one" } ?? "No open terminals"
-        }
+        if layout.isEmpty { emptyStateLabel.stringValue = newTabShortcutHint.map { "No open terminals — \($0) opens one" } ?? "No open terminals" }
     }
 
     private func applyToActiveTabBar() {

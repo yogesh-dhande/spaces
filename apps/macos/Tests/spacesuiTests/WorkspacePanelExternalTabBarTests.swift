@@ -9,8 +9,7 @@ import Testing
 @MainActor @Suite struct WorkspacePanelExternalTabBarTests {
     private func layout(tabID: String, sessionID: String) -> PanelLayout {
         PanelLayoutEngine.appendTab(
-            tabID: tabID, pane: Pane(id: "pane-\(tabID)", content: .terminalSession(deviceID: "device", sessionID: sessionID)),
-            to: PanelLayout())
+            tabID: tabID, pane: Pane(id: "pane-\(tabID)", content: .terminalSession(deviceID: "device", sessionID: sessionID)), to: PanelLayout())
     }
 
     private func tabIDs(in root: NSView) -> [String] {
@@ -28,9 +27,7 @@ import Testing
 
     private func view(identifier: String, in root: NSView) -> NSView? {
         if root.accessibilityIdentifier() == identifier { return root }
-        for subview in root.subviews {
-            if let match = view(identifier: identifier, in: subview) { return match }
-        }
+        for subview in root.subviews { if let match = view(identifier: identifier, in: subview) { return match } }
         return nil
     }
 
@@ -41,9 +38,7 @@ import Testing
             pressure: 0)
         let renameItem = event.flatMap { tabView?.menu(for: $0)?.items.first { $0.title == "Rename Tab" } }
         #expect(renameItem != nil)
-        if let renameItem, let action = renameItem.action {
-            NSApp.sendAction(action, to: renameItem.target, from: renameItem)
-        }
+        if let renameItem, let action = renameItem.action { NSApp.sendAction(action, to: renameItem.target, from: renameItem) }
     }
 
     @Test func adoptingPanelDrivesSharedBarAndBackgroundPanelsDoNot() {

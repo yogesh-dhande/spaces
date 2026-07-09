@@ -24,17 +24,15 @@ enum WorkspaceWindowCycle {
     /// orchestrator's 2-second window).
     static let cycleSessionTimeout: TimeInterval = 2
 
-    static func index(of cursor: Cursor, in cursors: [Cursor]) -> Int? {
-        cursors.firstIndex(of: cursor)
-    }
+    static func index(of cursor: Cursor, in cursors: [Cursor]) -> Int? { cursors.firstIndex(of: cursor) }
 
     /// Reorders targets for cycling. When a recent cycle session still matches the current
     /// cursors it preserves that rotation; otherwise it builds a fresh MRU order with the
     /// resolved current target first, then recent targets, then remaining targets in natural
     /// order.
-    static func cycleOrdering(cursors: [Cursor], currentIndex: Int?, session: CycleSession?, recentCursors: [Cursor] = [])
-        -> (indices: [Int], currentIndex: Int?)
-    {
+    static func cycleOrdering(cursors: [Cursor], currentIndex: Int?, session: CycleSession?, recentCursors: [Cursor] = []) -> (
+        indices: [Int], currentIndex: Int?
+    ) {
         if let session, let sessionIndices = sessionTargetIndices(session: session, cursors: cursors) {
             let resolvedCurrentIndex: Int?
             if let currentIndex {

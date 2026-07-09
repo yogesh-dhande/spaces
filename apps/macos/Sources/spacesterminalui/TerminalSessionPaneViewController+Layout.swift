@@ -243,8 +243,7 @@ extension TerminalSessionPaneViewController {
         let usesInlineControls = visibleRenderer == .textView && isOwner
         inputRowStackView.isHidden = !usesInlineControls
         let isWaitingForRequestedOwnership = !isOwner && preferredAttachmentMode == .owner
-        let showsTakeoverShell =
-            visibleRenderer == .ghosttyTakeoverStatus && backend == .ghosttyEmbedded && !isWaitingForRequestedOwnership
+        let showsTakeoverShell = visibleRenderer == .ghosttyTakeoverStatus && backend == .ghosttyEmbedded && !isWaitingForRequestedOwnership
         takeoverContainerView.isHidden = !(showsTakeoverShell && !isOwner)
         takeoverRowStackView.isHidden = takeoverContainerView.isHidden
         isViewerTakeoverShellActive = !takeoverContainerView.isHidden

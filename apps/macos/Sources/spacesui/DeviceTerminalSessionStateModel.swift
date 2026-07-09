@@ -88,9 +88,9 @@
             currentAttachmentSnapshot = initialAttachmentSnapshot
         }
 
-        nonisolated static func resolveCredentials(
-            device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp, profile: SpacesProfile? = nil
-        ) throws -> PreparedCredentials {
+        nonisolated static func resolveCredentials(device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp, profile: SpacesProfile? = nil)
+            throws -> PreparedCredentials
+        {
             let credentials = try SpacesDeviceClient.credentialsEnsuringLocalRecovery(device: device, clientApp: clientApp, profile: profile)
             return PreparedCredentials(certificateFingerprint: credentials.certificateFingerprint, authToken: credentials.authToken)
         }

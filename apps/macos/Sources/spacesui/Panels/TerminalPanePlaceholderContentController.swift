@@ -3,9 +3,7 @@ import spacesterminalcore
 import spacesterminalghostty
 import spacesterminalui
 
-@MainActor private final class TerminalPanePlaceholderView: NSView {
-    override var acceptsFirstResponder: Bool { true }
-}
+@MainActor private final class TerminalPanePlaceholderView: NSView { override var acceptsFirstResponder: Bool { true } }
 
 /// Temporary pane content shown while Device API credentials are prepared off the
 /// main actor. The panel owns it exactly like live terminal content, then replaces it
@@ -33,9 +31,7 @@ import spacesterminalui
     var displayTitle: String { titleLabel.stringValue }
     var canPerformFindActions: Bool { false }
 
-    func activate(focus: Bool) {
-        if focus { _ = makeContentFirstResponder() }
-    }
+    func activate(focus: Bool) { if focus { _ = makeContentFirstResponder() } }
     func deactivate() {}
     func close() { spinner.stopAnimation(nil) }
     func closeForSessionTermination() { close() }
@@ -60,13 +56,9 @@ import spacesterminalui
         return false
     }
 
-    func setAccessibilityRuntimeTargetName(_ name: String) {
-        rootView.setAccessibilityLabel(name)
-    }
+    func setAccessibilityRuntimeTargetName(_ name: String) { rootView.setAccessibilityLabel(name) }
 
-    func fail(error: Error) {
-        fail(message: String(describing: error))
-    }
+    func fail(error: Error) { fail(message: String(describing: error)) }
 
     func fail(message: String) {
         spinner.stopAnimation(nil)
@@ -83,17 +75,14 @@ import spacesterminalui
             windowTitle: rootView.window?.title ?? "", didCloseWindow: false, surfaceColumns: nil, surfaceRows: nil,
             windowIsKey: rootView.window?.isKeyWindow == true, firstResponderTypeName: debugFirstResponderTypeName, searchVisible: false,
             searchQuery: "", searchTotal: nil, searchSelected: nil, attachmentMode: TerminalAttachmentMode.owner.rawValue,
-            takeoverPending: requestsOwnershipWhenReady,
-            takeoverButtonVisible: false, takeoverButtonEnabled: false, takeoverMessage: "")
+            takeoverPending: requestsOwnershipWhenReady, takeoverButtonVisible: false, takeoverButtonEnabled: false, takeoverMessage: "")
     }
 
     private func buildView(title: String) {
         rootView.setAccessibilityIdentifier("terminal-pane-\(sessionID)")
         rootView.setAccessibilityLabel(title)
         rootView.wantsLayer = true
-        bindAppearanceReactiveLayer(rootView) { view in
-            view.layer?.backgroundColor = NSColor.activeTheme(\.terminal.background).cgColor
-        }
+        bindAppearanceReactiveLayer(rootView) { view in view.layer?.backgroundColor = NSColor.activeTheme(\.terminal.background).cgColor }
 
         spinner.style = .spinning
         spinner.controlSize = .regular
@@ -123,8 +112,7 @@ import spacesterminalui
 
         rootView.addSubview(stack)
         NSLayoutConstraint.activate([
-            stack.centerXAnchor.constraint(equalTo: rootView.centerXAnchor),
-            stack.centerYAnchor.constraint(equalTo: rootView.centerYAnchor),
+            stack.centerXAnchor.constraint(equalTo: rootView.centerXAnchor), stack.centerYAnchor.constraint(equalTo: rootView.centerYAnchor),
             stack.leadingAnchor.constraint(greaterThanOrEqualTo: rootView.leadingAnchor, constant: 24),
             stack.trailingAnchor.constraint(lessThanOrEqualTo: rootView.trailingAnchor, constant: -24),
             labelStack.widthAnchor.constraint(lessThanOrEqualToConstant: 420),

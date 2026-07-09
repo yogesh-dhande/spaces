@@ -9,9 +9,7 @@ import AppKit
     let tabBar = PanelTabBarView()
 
     /// The sidebar's current width; the strip starts just right of the divider.
-    var sidebarWidth: CGFloat = 360 {
-        didSet { needsLayout = true }
-    }
+    var sidebarWidth: CGFloat = 360 { didSet { needsLayout = true } }
 
     private var stripLeadingConstraint: NSLayoutConstraint!
     /// The clip/self spanning constraints currently installed, and the titlebar they
@@ -25,9 +23,7 @@ import AppKit
         addSubview(tabBar)
         stripLeadingConstraint = tabBar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 280)
         NSLayoutConstraint.activate([
-            stripLeadingConstraint,
-            tabBar.trailingAnchor.constraint(equalTo: trailingAnchor),
-            tabBar.topAnchor.constraint(equalTo: topAnchor),
+            stripLeadingConstraint, tabBar.trailingAnchor.constraint(equalTo: trailingAnchor), tabBar.topAnchor.constraint(equalTo: topAnchor),
             tabBar.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
     }
@@ -68,8 +64,8 @@ import AppKit
     /// constraint went inactive) re-establishes the span so the strip self-heals on
     /// the next layout pass.
     private func installClipSpanningConstraintsIfNeeded() {
-        guard let clip = superview, let titlebar = clip.superview,
-            NSStringFromClass(type(of: clip)).contains("NSTitlebarAccessoryClipView"), clip.frame.origin.x > 0
+        guard let clip = superview, let titlebar = clip.superview, NSStringFromClass(type(of: clip)).contains("NSTitlebarAccessoryClipView"),
+            clip.frame.origin.x > 0
         else { return }
         guard constrainedTitlebar !== titlebar || !spanningConstraints.allSatisfy(\.isActive) else { return }
         NSLayoutConstraint.deactivate(spanningConstraints)
@@ -78,12 +74,9 @@ import AppKit
         translatesAutoresizingMaskIntoConstraints = false
         spanningConstraints = [
             clip.leadingAnchor.constraint(equalTo: titlebar.leadingAnchor, constant: leadingConstant),
-            clip.trailingAnchor.constraint(equalTo: titlebar.trailingAnchor),
-            clip.topAnchor.constraint(equalTo: titlebar.topAnchor),
-            clip.heightAnchor.constraint(equalTo: titlebar.heightAnchor),
-            leadingAnchor.constraint(equalTo: clip.leadingAnchor),
-            trailingAnchor.constraint(equalTo: clip.trailingAnchor),
-            topAnchor.constraint(equalTo: clip.topAnchor),
+            clip.trailingAnchor.constraint(equalTo: titlebar.trailingAnchor), clip.topAnchor.constraint(equalTo: titlebar.topAnchor),
+            clip.heightAnchor.constraint(equalTo: titlebar.heightAnchor), leadingAnchor.constraint(equalTo: clip.leadingAnchor),
+            trailingAnchor.constraint(equalTo: clip.trailingAnchor), topAnchor.constraint(equalTo: clip.topAnchor),
             bottomAnchor.constraint(equalTo: clip.bottomAnchor),
         ]
         NSLayoutConstraint.activate(spanningConstraints)

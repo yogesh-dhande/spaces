@@ -388,9 +388,7 @@ import spacesterminalcore
         // A preparing placeholder has no embedded client to detach, but the daemon shell already
         // exists, so a removed placeholder runs the same snapshot-checked cleanup directly.
         content.close()
-        if content is TerminalPanePlaceholderContentController {
-            host.terminateUnattachedAdHocBuiltInTerminalSessionIfNeeded(sessionID: sessionID)
-        }
+        if content is TerminalPanePlaceholderContentController { host.terminateUnattachedAdHocBuiltInTerminalSessionIfNeeded(sessionID: sessionID) }
     }
 
     private func beginSplit(scope: PanelScope, paneID: String, direction: PaneSplitDirection) {

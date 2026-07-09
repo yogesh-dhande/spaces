@@ -177,8 +177,7 @@ import workspacecore
         let processes = [
             RunningProcessRecord(
                 id: "process-web", workspaceID: "workspace", templateName: "web", command: "run web", terminalApp: "Spaces",
-                terminalTrackingID: "spaces-web", pid: 1, status: .running, logPath: nil, lastOutputAt: nil,
-                startedAt: nil, exitedAt: nil)
+                terminalTrackingID: "spaces-web", pid: 1, status: .running, logPath: nil, lastOutputAt: nil, startedAt: nil, exitedAt: nil)
         ]
         let agentWindows = [
             AgentWindowRecord(
@@ -198,13 +197,12 @@ import workspacecore
         let windows = [
             WindowRecord(
                 id: "win-shell", workspaceID: "workspace", app: TerminalHost.spaces.appName, name: "shell-1", detail: "codex --model gpt-5",
-                targetURL: nil, terminalTrackingID: "spaces-session", role: "terminal", orderIndex: 200,
-                lastSeenAt: "now")
+                targetURL: nil, terminalTrackingID: "spaces-session", role: "terminal", orderIndex: 200, lastSeenAt: "now")
         ]
         let agentWindows = [
             AgentWindowRecord(
-                id: "agent", workspaceID: "workspace", provider: .spaces, label: "Codex", terminalTrackingID: "spaces-session",
-                sessionKey: nil, status: .idle, createdAt: "now", updatedAt: "now")
+                id: "agent", workspaceID: "workspace", provider: .spaces, label: "Codex", terminalTrackingID: "spaces-session", sessionKey: nil,
+                status: .idle, createdAt: "now", updatedAt: "now")
         ]
 
         let titleByAgentID = AppKitController.codingAgentWindowTitleByAgentID(agentWindows: agentWindows, trackedWindows: windows)
@@ -220,8 +218,8 @@ import workspacecore
         ]
         let agentWindows = [
             AgentWindowRecord(
-                id: "agent", workspaceID: "workspace", provider: .spaces, label: "Codex", terminalTrackingID: "spaces-session",
-                sessionKey: nil, status: .idle, createdAt: "now", updatedAt: "now")
+                id: "agent", workspaceID: "workspace", provider: .spaces, label: "Codex", terminalTrackingID: "spaces-session", sessionKey: nil,
+                status: .idle, createdAt: "now", updatedAt: "now")
         ]
 
         let titleByAgentID = AppKitController.codingAgentWindowTitleByAgentID(agentWindows: agentWindows, trackedWindows: windows)
@@ -305,11 +303,11 @@ import workspacecore
         let configuredAgentLaunchers = [AgentLauncher(name: "claude", command: "claude")]
         let agentWindows = [
             AgentWindowRecord(
-                id: "configured", workspaceID: "workspace", provider: .spaces, label: "claude", terminalTrackingID: "session-claude",
-                sessionKey: nil, status: .idle, createdAt: "now", updatedAt: "now"),
+                id: "configured", workspaceID: "workspace", provider: .spaces, label: "claude", terminalTrackingID: "session-claude", sessionKey: nil,
+                status: .idle, createdAt: "now", updatedAt: "now"),
             AgentWindowRecord(
-                id: "adhoc", workspaceID: "workspace", provider: .spaces, label: "reviewer", terminalTrackingID: "session-reviewer",
-                sessionKey: nil, status: .spinning, createdAt: "now", updatedAt: "now"),
+                id: "adhoc", workspaceID: "workspace", provider: .spaces, label: "reviewer", terminalTrackingID: "session-reviewer", sessionKey: nil,
+                status: .spinning, createdAt: "now", updatedAt: "now"),
         ]
 
         let shortcutTargets = AppKitController.orderedWorkspaceRunShortcutTargets(
@@ -353,8 +351,8 @@ import workspacecore
     @Test func unlabeledAgentRowsStillReceiveShortcutIdentity() {
         let agentWindows = [
             AgentWindowRecord(
-                id: "agent-unlabeled", workspaceID: "workspace", provider: .spaces, label: nil, terminalTrackingID: "spaces-hook-1",
-                sessionKey: nil, status: .waiting, createdAt: "now", updatedAt: "now")
+                id: "agent-unlabeled", workspaceID: "workspace", provider: .spaces, label: nil, terminalTrackingID: "spaces-hook-1", sessionKey: nil,
+                status: .waiting, createdAt: "now", updatedAt: "now")
         ]
 
         let shortcutIndices = AppKitController.workspaceDetailShortcutIndices(
@@ -370,8 +368,8 @@ import workspacecore
                 id: "matched", workspaceID: "workspace", provider: .spaces, label: "Claude", terminalTrackingID: "session-claude", sessionKey: nil,
                 status: .idle, createdAt: "now", updatedAt: "now"),
             AgentWindowRecord(
-                id: "adhoc", workspaceID: "workspace", provider: .spaces, label: "reviewer", terminalTrackingID: "session-reviewer",
-                sessionKey: nil, status: .spinning, createdAt: "now", updatedAt: "now"),
+                id: "adhoc", workspaceID: "workspace", provider: .spaces, label: "reviewer", terminalTrackingID: "session-reviewer", sessionKey: nil,
+                status: .spinning, createdAt: "now", updatedAt: "now"),
         ]
 
         let entries = AppKitController.resolvedCodingAgentRunEntries(configuredAgentLaunchers: configuredAgentLaunchers, agentWindows: agentWindows)
@@ -483,14 +481,16 @@ import workspacecore
     @Test func browserSessionPrefixMatchingSkipsLongerSiblingTargets() {
         let targetURL = "http://localhost:3000"
         let siblingTargetURLs = AppKitController.browserSessionSiblingTargetURLs(
-            targetURL: targetURL,
-            targetURLs: ["http://localhost:3000", "http://localhost:3000/admin", "http://localhost:3000/admin"])
+            targetURL: targetURL, targetURLs: ["http://localhost:3000", "http://localhost:3000/admin", "http://localhost:3000/admin"])
 
         #expect(siblingTargetURLs == ["http://localhost:3000/admin"])
         #expect(AppKitController.browserTabURL("http://localhost:3000/", matchesBrowserSessionTargetURL: targetURL, excluding: siblingTargetURLs))
         #expect(AppKitController.browserTabURL("http://localhost:3000/docs", matchesBrowserSessionTargetURL: targetURL, excluding: siblingTargetURLs))
-        #expect(!AppKitController.browserTabURL("http://localhost:3000/admin", matchesBrowserSessionTargetURL: targetURL, excluding: siblingTargetURLs))
-        #expect(!AppKitController.browserTabURL("http://localhost:3000/admin/users", matchesBrowserSessionTargetURL: targetURL, excluding: siblingTargetURLs))
+        #expect(
+            !AppKitController.browserTabURL("http://localhost:3000/admin", matchesBrowserSessionTargetURL: targetURL, excluding: siblingTargetURLs))
+        #expect(
+            !AppKitController.browserTabURL(
+                "http://localhost:3000/admin/users", matchesBrowserSessionTargetURL: targetURL, excluding: siblingTargetURLs))
         #expect(AppKitController.browserTabURL("http://localhost:3000/admin", matchesBrowserSessionTargetURL: siblingTargetURLs[0], excluding: []))
     }
 
@@ -566,8 +566,8 @@ import workspacecore
     @Test func doneAndWaitingAgentsRemainAlertsAttentionItems() {
         let agents = [
             AgentWindowRecord(
-                id: "agent-waiting", workspaceID: "workspace", provider: .spaces, label: "Waiting", terminalTrackingID: "session-1",
-                sessionKey: nil, status: .waiting, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:01:00Z"),
+                id: "agent-waiting", workspaceID: "workspace", provider: .spaces, label: "Waiting", terminalTrackingID: "session-1", sessionKey: nil,
+                status: .waiting, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:01:00Z"),
             AgentWindowRecord(
                 id: "agent-done", workspaceID: "workspace", provider: .spaces, label: "Done", terminalTrackingID: "session-2", sessionKey: nil,
                 status: .done, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:02:00Z"),
