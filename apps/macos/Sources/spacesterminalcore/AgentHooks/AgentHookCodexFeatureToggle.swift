@@ -1,13 +1,13 @@
 import Foundation
 
-/// Ensures Codex's `[features].hooks = true` flag is set in `~/.codex/config.toml`, which Codex
+/// Ensures Codex's `features.hooks = true` flag is set in `~/.codex/config.toml`, which Codex
 /// requires before it runs any `~/.codex/hooks.json` hooks.
 ///
 /// This is a narrow, table-aware line edit rather than a full TOML rewrite (Swift has no TOML
 /// serializer, and rewriting would drop comments and reorder the user's config): it only touches the
-/// `hooks` key inside the `[features]` table or a top-level `features = { ... }` inline table,
-/// appending the table when absent. Idempotent — once `hooks = true` is present the file is left
-/// byte-identical.
+/// `hooks` key inside the `[features]` table, a top-level `features = { ... }` inline table, or
+/// top-level `features.*` dotted keys, appending the table when absent. Idempotent — once
+/// `hooks = true` is present the file is left byte-identical.
 enum AgentHookCodexFeatureToggle {
     private static let sectionHeader = "[features]"
 
@@ -59,6 +59,17 @@ enum AgentHookCodexFeatureToggle {
             lines[inlineIndex] = updatedLine
             return lines.joined(separator: "\n")
         }
+        if let dottedHooksIndex = lines[..<topLevelEnd].firstIndex(where: { dottedFeaturesHooksUpdate(for: $0) != nil }),
+            let update = dottedFeaturesHooksUpdate(for: lines[dottedHooksIndex])
+        {
+            guard let updatedLine = update.updatedLine else { return nil }
+            lines[dottedHooksIndex] = updatedLine
+            return lines.joined(separator: "\n")
+        }
+        if let dottedFeaturesIndex = lines[..<topLevelEnd].lastIndex(where: isDottedFeaturesAssignment) {
+            lines.insert("features.hooks = true", at: dottedFeaturesIndex + 1)
+            return lines.joined(separator: "\n")
+        }
 
         // No [features] table: append one. Keep exactly one blank separator line before it.
         var prefix = original
@@ -74,7 +85,9 @@ enum AgentHookCodexFeatureToggle {
             if lines[(sectionIndex + 1)..<sectionEnd].contains(where: isHooksTrueAssignment) { return true }
         }
         let topLevelEnd = lines.firstIndex(where: { isAnySectionHeader($0) }) ?? lines.count
-        return lines[..<topLevelEnd].contains { inlineFeaturesTableUpdate(for: $0)?.hasHooksTrue == true }
+        return lines[..<topLevelEnd].contains {
+            inlineFeaturesTableUpdate(for: $0)?.hasHooksTrue == true || dottedFeaturesHooksUpdate(for: $0)?.hasHooksTrue == true
+        }
     }
 
     private static func commentStripped(_ line: String) -> String { splitTrailingComment(line).code }
@@ -163,6 +176,33 @@ enum AgentHookCodexFeatureToggle {
         let trailingSeparator = afterBody.first.map { $0.isWhitespace ? "" : " " } ?? ""
         let updatedLine = beforeBody + leadingSeparator + updatedBody + trailingSeparator + afterBody + split.comment
         return (false, updatedLine)
+    }
+
+    private static func dottedFeaturesHooksUpdate(for line: String) -> (hasHooksTrue: Bool, updatedLine: String?)? {
+        let split = splitTrailingComment(line)
+        let code = split.code
+        guard let equalsIndex = code.firstIndex(of: "="), dottedKeyParts(in: code[..<equalsIndex]) == ["features", "hooks"] else {
+            return nil
+        }
+
+        let rawValue = code[code.index(after: equalsIndex)...].trimmingCharacters(in: .whitespaces)
+        if rawValue == "true" { return (true, nil) }
+
+        let prefix = String(code[...equalsIndex])
+        let comment = split.comment.isEmpty ? "" : " " + split.comment
+        return (false, prefix + " true" + comment)
+    }
+
+    private static func isDottedFeaturesAssignment(_ line: String) -> Bool {
+        let code = commentStripped(line)
+        guard let equalsIndex = code.firstIndex(of: "="), let firstPart = dottedKeyParts(in: code[..<equalsIndex])?.first else { return false }
+        return firstPart == "features"
+    }
+
+    private static func dottedKeyParts(in key: Substring) -> [String]? {
+        let parts = key.split(separator: ".", omittingEmptySubsequences: false).map { trimmed(String($0)) }
+        guard parts.count >= 2, parts.allSatisfy({ !$0.isEmpty }) else { return nil }
+        return parts
     }
 
     private static func matchingInlineTableCloseIndex(in value: String, openBraceIndex: String.Index) -> String.Index? {

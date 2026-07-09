@@ -207,6 +207,32 @@ import Testing
         #expect(AgentHookCodexFeatureToggle.isEnabled(fileURL: config))
     }
 
+    @Test func codexFeatureToggleLeavesEnabledDottedFeaturesHookUntouched() throws {
+        let contents = "model = \"gpt-5\"\nfeatures.hooks = true\n"
+
+        #expect(AgentHookCodexFeatureToggle.updatedContents(contents) == nil)
+        let home = try makeHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let config = home.appendingPathComponent(".codex/config.toml")
+        try FileManager.default.createDirectory(at: config.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try contents.write(to: config, atomically: true, encoding: .utf8)
+        #expect(AgentHookCodexFeatureToggle.isEnabled(fileURL: config))
+    }
+
+    @Test func codexFeatureToggleUpdatesDottedFeaturesHookInPlace() {
+        let updated = AgentHookCodexFeatureToggle.updatedContents("model = \"gpt-5\"\nfeatures.hooks = false # disabled\n")
+
+        #expect(updated?.contains("features.hooks = true # disabled") == true)
+        #expect(updated?.contains("[features]") == false)
+    }
+
+    @Test func codexFeatureToggleAddsDottedHookWhenOtherDottedFeaturesExist() {
+        let updated = AgentHookCodexFeatureToggle.updatedContents("model = \"gpt-5\"\nfeatures.experimental = true\n")
+
+        #expect(updated?.contains("features.experimental = true\nfeatures.hooks = true") == true)
+        #expect(updated?.contains("[features]") == false)
+    }
+
     @Test func codexFeatureToggleUpdatesInlineFeaturesTableInPlace() {
         let updated = AgentHookCodexFeatureToggle.updatedContents("model = \"gpt-5\"\nfeatures = { js_repl = false }\n")
 
@@ -290,6 +316,23 @@ import Testing
 
         let status = AgentHookInstaller.status(home: home)
         #expect(status.first { $0.kind == .codex }?.available == true)
+    }
+
+    @Test func executableFromLoginShellPathCountsAsAvailable() throws {
+        let home = try makeHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let shimDirectory = home.appendingPathComponent(".asdf/shims", isDirectory: true)
+        let executablePath = shimDirectory.appendingPathComponent("codex").path
+        let fileManager = StubFileManager(executablePaths: [executablePath])
+
+        let available = AgentHookInstaller.isAvailable(
+            .codex, home: home, fileManager: fileManager, environment: ["PATH": "/usr/bin:/bin"],
+            shellPathDirectoryResolver: { resolverHome, _, _ in
+                #expect(resolverHome == home)
+                return [shimDirectory.path]
+            })
+
+        #expect(available)
     }
 
     @Test func installRejectsUnavailableAgentsBeforeWritingConfig() throws {
