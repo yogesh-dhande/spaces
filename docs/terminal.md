@@ -39,7 +39,7 @@ Each live session also participates in a service-level control path:
 ## Local and Remote Daemons
 - Every Mac or Linux daemon owns PTYs, headless Ghostty sessions, render-frame export, terminal input, resize, scroll, file-link preview chunks, process execution, and clone or worktree preparation for its own workspaces.
 - macOS and iOS terminal detail attach directly to the paired daemon through the Device API after TLS identity pinning and token authorization.
-- macOS remote-device terminal windows require SSH to the same device for local window attach and owner control. Browser sessions that target daemon-local services use SSH local forwarding, while unrelated URLs open unchanged.
+- Remote-device terminal attach and owner control use that same Device API path and require no SSH to the device. Browser sessions that target daemon-local services do use SSH local forwarding, while unrelated URLs open unchanged.
 - Agent lifecycle signals are written to the owning daemon database with the terminal session identity and workspace context.
 - Terminal link preview resolution runs in the owning daemon. File previews stream as authorized chunks from that daemon; direct HTTPS media downloads remain client-side.
 
