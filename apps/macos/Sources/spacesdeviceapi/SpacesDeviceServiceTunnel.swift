@@ -179,6 +179,17 @@ enum SpacesDeviceServiceTunnelSSLPendingOperation: Equatable {
     func isReady(clientReadable: Bool, clientWritable: Bool) -> Bool { waitsForRead ? clientReadable : clientWritable }
 }
 
+struct SpacesDeviceServiceTunnelClientSocketReadiness: Equatable {
+    let readable: Bool
+    let writable: Bool
+}
+
+func spacesDeviceServiceTunnelClientSocketReadiness(revents: Int16) -> SpacesDeviceServiceTunnelClientSocketReadiness {
+    let terminalEvent = (revents & Int16(POLLHUP | POLLERR)) != 0
+    return SpacesDeviceServiceTunnelClientSocketReadiness(
+        readable: terminalEvent || (revents & Int16(POLLIN)) != 0, writable: terminalEvent || (revents & Int16(POLLOUT)) != 0)
+}
+
 #if canImport(Network) && canImport(Security)
     /// One live service tunnel on the Darwin (Network.framework) transport. The service→phone direction
     /// reads the loopback socket through `relaySource` and forwards each chunk over `connection`; the
@@ -565,8 +576,9 @@ enum SpacesDeviceServiceTunnelSSLPendingOperation: Equatable {
                     throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
                 }
 
-                let clientReadable = (descriptors[0].revents & Int16(POLLIN | POLLHUP | POLLERR)) != 0
-                let clientWritable = (descriptors[0].revents & Int16(POLLOUT)) != 0
+                let clientReadiness = spacesDeviceServiceTunnelClientSocketReadiness(revents: descriptors[0].revents)
+                let clientReadable = clientReadiness.readable
+                let clientWritable = clientReadiness.writable
                 let loopbackReadable = (descriptors[1].revents & Int16(POLLIN | POLLHUP | POLLERR)) != 0
                 let loopbackWritable = (descriptors[1].revents & Int16(POLLOUT)) != 0
 

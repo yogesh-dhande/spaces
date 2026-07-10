@@ -2,6 +2,12 @@ import XCTest
 
 @testable import spacesdeviceapi
 
+#if canImport(Darwin)
+    import Darwin
+#elseif canImport(Glibc)
+    import Glibc
+#endif
+
 final class ServiceTunnelSSLRetryStateTests: XCTestCase {
     func testReadWantWriteKeepsThePendingOperationAsRead() {
         let pending = SpacesDeviceServiceTunnelSSLPendingOperation.read(waitingFor: .write)
@@ -21,5 +27,16 @@ final class ServiceTunnelSSLRetryStateTests: XCTestCase {
         XCTAssertFalse(pending.waitsForWrite)
         XCTAssertTrue(pending.isReady(clientReadable: true, clientWritable: false))
         XCTAssertFalse(pending.isReady(clientReadable: false, clientWritable: true))
+    }
+
+    func testClientHangupOrErrorCountsAsWriteReadyForPendingSSLRetry() {
+        let pending = SpacesDeviceServiceTunnelSSLPendingOperation.read(waitingFor: .write)
+
+        for event in [POLLHUP, POLLERR] {
+            let readiness = spacesDeviceServiceTunnelClientSocketReadiness(revents: Int16(event))
+            XCTAssertTrue(readiness.readable)
+            XCTAssertTrue(readiness.writable)
+            XCTAssertTrue(pending.isReady(clientReadable: readiness.readable, clientWritable: readiness.writable))
+        }
     }
 }
