@@ -22,10 +22,8 @@ import AppKit
         contentContainer.translatesAutoresizingMaskIntoConstraints = false
         addSubview(contentContainer)
         NSLayoutConstraint.activate([
-            contentContainer.topAnchor.constraint(equalTo: topAnchor),
-            contentContainer.leadingAnchor.constraint(equalTo: leadingAnchor),
-            contentContainer.trailingAnchor.constraint(equalTo: trailingAnchor),
-            contentContainer.bottomAnchor.constraint(equalTo: bottomAnchor),
+            contentContainer.topAnchor.constraint(equalTo: topAnchor), contentContainer.leadingAnchor.constraint(equalTo: leadingAnchor),
+            contentContainer.trailingAnchor.constraint(equalTo: trailingAnchor), contentContainer.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
     }
 
@@ -33,15 +31,15 @@ import AppKit
 
     /// Installs (or re-installs after re-parenting) the pane's content view.
     func attachContent(_ controller: any PaneContentHosting) {
-        contentController = controller
         let view = controller.contentView
+        for subview in contentContainer.subviews where subview !== view { subview.removeFromSuperview() }
+        contentController = controller
         guard view.superview !== contentContainer else { return }
         view.removeFromSuperview()
         view.translatesAutoresizingMaskIntoConstraints = false
         contentContainer.addSubview(view)
         NSLayoutConstraint.activate([
-            view.topAnchor.constraint(equalTo: contentContainer.topAnchor),
-            view.leadingAnchor.constraint(equalTo: contentContainer.leadingAnchor),
+            view.topAnchor.constraint(equalTo: contentContainer.topAnchor), view.leadingAnchor.constraint(equalTo: contentContainer.leadingAnchor),
             view.trailingAnchor.constraint(equalTo: contentContainer.trailingAnchor),
             view.bottomAnchor.constraint(equalTo: contentContainer.bottomAnchor),
         ])

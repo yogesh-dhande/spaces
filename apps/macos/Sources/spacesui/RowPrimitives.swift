@@ -128,6 +128,20 @@ enum RowPrimitives {
         makeChip(text: text, font: .monospacedSystemFont(ofSize: 10.5, weight: .medium), foreground: Theme.muted, minWidth: 26)
     }
 
+    /// Plain monospace shortcut hint for dense sidebar target rows, where the
+    /// indentation slot already separates the hint from the target identity.
+    @MainActor static func sidebarShortcutHint(_ text: String) -> NSTextField {
+        let label = NSTextField(labelWithString: text)
+        label.font = .monospacedSystemFont(ofSize: 10.5, weight: .medium)
+        label.textColor = Theme.muted
+        label.alignment = .right
+        label.lineBreakMode = .byClipping
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.setContentHuggingPriority(.required, for: .horizontal)
+        label.setContentCompressionResistancePriority(.required, for: .horizontal)
+        return label
+    }
+
     /// Project name chip (e.g. "Spaces") that sits next to the workspace title.
     @MainActor static func projectChip(_ text: String) -> NSView {
         makeChip(text: text, font: .systemFont(ofSize: 11, weight: .regular), foreground: Theme.muted, minWidth: 0)

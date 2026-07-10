@@ -282,7 +282,7 @@ Options:
   --pause-transitions            Add a 1 second pause after visible transitions.
   --setup-fixtures-only          Create projects/workspaces and leave the manual test environment running.
   --only-window-cycle-profile    Run only the single-workspace focus/cycle profiling path.
-  --only-window-cycle-small      Run only the small primary workspace app-side window-cycle profiling loop.
+  --only-window-cycle-small      Run only the small local+remote app-side window-cycle profiling loop.
   --transition-pause-seconds N   Override the transition pause duration.
   --help                         Show this help text.
 EOF
@@ -1079,6 +1079,74 @@ print(json.dumps({"runWorkspaceProcess": {"workspaceID": workspace_id, "processK
 PY
   )"
   remote_device_request_ok "$command_json"
+}
+
+remote_device_overview_response() {
+  remote_device_request '{"overview":{}}'
+}
+
+remote_device_process_session_id_optional() {
+  local process_name="$1"
+  local response
+  response="$(remote_device_overview_response)" || return 1
+  python3 - "$response" "$REMOTE_DEVICE_WORKSPACE_ID" "$process_name" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+workspace_id, process_name = sys.argv[2:4]
+overview = (payload.get("result") or {}).get("overview") or {}
+for workspace in overview.get("workspaces") or []:
+    if workspace.get("id") != workspace_id:
+        continue
+    for row in workspace.get("processRows") or []:
+        if row.get("name") == process_name and row.get("runState") == "running":
+            print(row.get("sessionID") or "")
+            raise SystemExit(0)
+print("")
+PY
+}
+
+remote_device_wait_process_session_id() {
+  local process_name="$1"
+  local deadline=$((SECONDS + ACTION_TIMEOUT_SECONDS))
+  local session_id=""
+  while (( SECONDS < deadline )); do
+    session_id="$(remote_device_process_session_id_optional "$process_name" || true)"
+    if [[ -n "$session_id" ]]; then
+      printf '%s' "$session_id"
+      return 0
+    fi
+    sleep 0.2
+  done
+  fail "timed out waiting for remote process session: $process_name"
+}
+
+remote_device_open_workspace_terminal() {
+  local command_json response
+  command_json="$(
+    python3 - "$REMOTE_DEVICE_WORKSPACE_ID" <<'PY'
+import json
+import sys
+
+workspace_id = sys.argv[1]
+print(json.dumps({"openWorkspaceTerminal": {"workspaceID": workspace_id}}, separators=(",", ":")))
+PY
+  )"
+  response="$(remote_device_request "$command_json")" || fail "Remote Device API openWorkspaceTerminal failed."
+  python3 - "$response" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+if payload.get("ok") is not True:
+    raise SystemExit(payload.get("message") or json.dumps(payload))
+mutation = ((payload.get("result") or {}).get("mutation") or {})
+session_id = mutation.get("sessionID") or ""
+if not session_id:
+    raise SystemExit(f"openWorkspaceTerminal did not return sessionID: {json.dumps(payload)}")
+print(session_id)
+PY
 }
 
 remote_device_ssh() {
@@ -4954,6 +5022,186 @@ run_window_cycle_profile_loop() {
   PROFILE_RECORD_METRICS="$cycle_profile_recording_before"
 }
 
+wait_for_remote_terminal_focus_target() {
+  local target_session_id="$1"
+  local request_id="${2:-}"
+  LAST_CYCLE_TARGET_FOCUS_VIA_APP_OBSERVATION=0
+  if ! wait_for_spaces_terminal_frontmost_session_optional "$target_session_id"; then
+    if [[ -z "$request_id" ]] || ! wait_for_terminal_focus_observed_request "$target_session_id" "$request_id"; then
+      fail "timed out waiting for remote Spaces terminal focus: session=$target_session_id request_id=${request_id:-<none>}"
+    fi
+    LAST_CYCLE_TARGET_FOCUS_VIA_APP_OBSERVATION=1
+    log_debug "accepted remote terminal focus from app observation after AX snapshot timeout: session=$target_session_id request_id=$request_id"
+  fi
+  assert_no_spaces_modal_dialog
+}
+
+measure_remote_terminal_focus_click() {
+  local host="$1"
+  local target_identifier="$2"
+  local target_session_id="$3"
+  local metric_name="$4"
+  local transition_label="$5"
+  local log_start_line focus_line focus_elapsed_ms
+  wait_for_spaces_main_window_shortcut_focus "$SPACES_PID" || fail "main Spaces window did not become key before remote direct focus click"
+  log_start_line=$(( $(app_log_line_count) + 1 ))
+  ui_click_identifier "$target_identifier"
+  transition_pause "$transition_label"
+  wait_for_app_log_pattern_from_line "spaces: perf metric=terminal_pane_focus target=session=${target_session_id} success=1 .*" "$log_start_line" >/dev/null
+  focus_line="$APP_LOG_LAST_MATCH"
+  focus_elapsed_ms="$(extract_metric_field "$focus_line" "elapsed_ms")"
+  assert_metric_not_above "$focus_elapsed_ms" "$SPACES_CYCLE_LATENCY_BUDGET_MS" "${transition_label} focus latency"
+  record_metric_sample "$metric_name" "$focus_elapsed_ms" "$host" "remote"
+  wait_for_remote_terminal_focus_target "$target_session_id"
+  wait_for_condition "spaces_built_in_terminal_focus_state" "owner"
+}
+
+measure_remote_spaces_cycle_transition() {
+  local host="$1"
+  local workspace_id="$2"
+  local source_component="$3"
+  local direction="$4"
+  local transition_label="$5"
+  local expected_session_id="$6"
+  shift 6
+  local expected_patterns=("$@")
+  local started_at route_observed_at focus_observed_at surface_observed_at log_start_line
+  local cycle_line cycle_target cycle_elapsed_ms cycle_request_id cycle_focus_route_line cycle_focus_route_elapsed_ms=""
+  local cycle_focus_observed_line cycle_focus_observed_elapsed_ms=""
+  log_start_line=$(( $(app_log_line_count) + 1 ))
+  started_at="$(timestamp_ms)"
+  send_cycle_hotkey_with_ack "$direction"
+  transition_pause "$transition_label"
+  wait_for_app_log_pattern_from_line "spaces: perf metric=window_cycle workspace=${workspace_id} target=.* success=1 .* direction=${direction}" "$log_start_line" >/dev/null
+  cycle_line="$APP_LOG_LAST_MATCH"
+  cycle_target="$(extract_perf_target "$cycle_line")"
+  if ((${#expected_patterns[@]} > 0)); then
+    matches_cycle_target_pattern "$cycle_target" "${expected_patterns[@]}" \
+      || fail "${transition_label}: unexpected cycle target '$cycle_target'"
+  fi
+  route_observed_at="$(timestamp_ms)"
+  cycle_elapsed_ms="$(extract_metric_field "$cycle_line" "elapsed_ms")"
+  assert_metric_not_above "$cycle_elapsed_ms" "$SPACES_CYCLE_LATENCY_BUDGET_MS" "${transition_label} app route latency"
+  cycle_request_id="$(extract_request_id "$cycle_line")"
+  if [[ -n "$cycle_request_id" ]]; then
+    cycle_focus_route_line="$(
+      find_app_log_pattern_anywhere_once \
+        "spaces: perf metric=built_in_terminal_focus_route .*success=1 .*elapsed_ms=[0-9]+ .*request_id=${cycle_request_id}( |$)" || true
+    )"
+    if [[ -n "$cycle_focus_route_line" ]]; then
+      cycle_focus_route_elapsed_ms="$(extract_metric_field "$cycle_focus_route_line" "elapsed_ms")"
+    fi
+    cycle_focus_observed_line="$(
+      find_app_log_pattern_anywhere_once \
+        "spaces: perf metric=terminal_window_focus_observed .*success=1 .*elapsed_ms=[0-9]+ .*request_id=${cycle_request_id}( |$)" || true
+    )"
+    if [[ -n "$cycle_focus_observed_line" ]]; then
+      cycle_focus_observed_elapsed_ms="$(extract_metric_field "$cycle_focus_observed_line" "elapsed_ms")"
+    fi
+  fi
+  wait_for_remote_terminal_focus_target "$expected_session_id" "$cycle_request_id"
+  focus_observed_at="$(timestamp_ms)"
+  assert_cycle_focus_surface_state
+  surface_observed_at="$(timestamp_ms)"
+  record_cycle_transition_metrics \
+    "$source_component" \
+    "$direction" \
+    "$cycle_target" \
+    "$((surface_observed_at - started_at))" \
+    "$((route_observed_at - started_at))" \
+    "$((focus_observed_at - route_observed_at))" \
+    "$((surface_observed_at - focus_observed_at))" \
+    "$cycle_elapsed_ms" \
+    "$host" \
+    "remote" \
+    "${cycle_focus_observed_elapsed_ms:-$cycle_focus_route_elapsed_ms}"
+  MEASURED_CYCLE_TARGET="$cycle_target"
+}
+
+run_remote_window_cycle_small_assertions() {
+  [[ -n "$REMOTE_DEVICE_RESULT_JSON" && -f "$REMOTE_DEVICE_RESULT_JSON" ]] || fail "remote window-cycle-small requires a remote Device API result JSON"
+  local host="remote-primary"
+  local process_name="remote-web-server"
+  local remote_workspace_id="$REMOTE_DEVICE_WORKSPACE_ID"
+  local process_target_id terminal_target_id process_session_id terminal_session_id
+  local cycle_profile_iterations="$REAL_SYSTEM_PROFILE_REPETITIONS"
+  local cycle_profile_warmups="$REAL_SYSTEM_PROFILE_WARMUPS"
+  local cycle_profile_iteration cycle_profile_recording_before="$PROFILE_RECORD_METRICS"
+
+  begin_case "$host: small remote window cycle profile setup"
+  wait_for_spaces_frontmost_ready
+  wait_for_ui_identifier "sidebar-workspace-title-$remote_workspace_id" "remote workspace row"
+  ui_select_outline_row_containing_identifier "sidebar-workspace-title-$remote_workspace_id"
+  wait_for_ui_identifier "workspace-detail-title-label" "remote workspace detail title"
+  process_session_id="$(remote_device_process_session_id_optional "$process_name" || true)"
+  if [[ -z "$process_session_id" ]]; then
+    remote_device_run_workspace_process "$process_name"
+    process_session_id="$(remote_device_wait_process_session_id "$process_name")"
+  fi
+  process_target_id="$(wait_for_ui_identifier_with_prefix "sidebar-target-${remote_workspace_id}-process:" "remote process session row")"
+  ui_click_identifier "$process_target_id"
+  wait_for_remote_terminal_focus_target "$process_session_id"
+
+  terminal_session_id="$(remote_device_open_workspace_terminal)"
+  terminal_target_id="$(wait_for_ui_identifier_with_prefix "sidebar-target-${remote_workspace_id}-terminal:${terminal_session_id}" "remote ad hoc terminal row")"
+  ui_click_identifier "$terminal_target_id"
+  wait_for_remote_terminal_focus_target "$terminal_session_id"
+  pass_case
+
+  begin_case "$host: small remote direct focus and window cycling profile"
+  ensure_single_spaces_instance "$SPACES_PID"
+  for (( cycle_profile_iteration = 1; cycle_profile_iteration <= cycle_profile_warmups + cycle_profile_iterations; cycle_profile_iteration++ )); do
+    if (( cycle_profile_iteration <= cycle_profile_warmups )); then
+      PROFILE_RECORD_METRICS=0
+    else
+      PROFILE_RECORD_METRICS="$cycle_profile_recording_before"
+    fi
+
+    wait_for_spaces_main_window_shortcut_focus "$SPACES_PID" || fail "main Spaces window did not become key before remote terminal seed"
+    ui_click_identifier "$terminal_target_id"
+    wait_for_remote_terminal_focus_target "$terminal_session_id"
+    measure_remote_terminal_focus_click \
+      "$host" \
+      "$process_target_id" \
+      "$process_session_id" \
+      "spaces_detail_ui.sidebar_direct_focus.process_tracked_tab" \
+      "$host sidebar direct focus remote process"
+
+    wait_for_spaces_main_window_shortcut_focus "$SPACES_PID" || fail "main Spaces window did not become key before remote cycle seed"
+    ui_click_identifier "$process_target_id"
+    wait_for_remote_terminal_focus_target "$process_session_id"
+    measure_remote_spaces_cycle_transition \
+      "$host" \
+      "$remote_workspace_id" \
+      "process_tracked_tab" \
+      "next" \
+      "$host cycle next remote process to terminal" \
+      "$terminal_session_id" \
+      "terminal:*"
+    cycle_target="$MEASURED_CYCLE_TARGET"
+    case "$cycle_target" in
+      terminal:*) ;;
+      *) fail "remote process to terminal cycle target: expected terminal, got '$cycle_target'" ;;
+    esac
+
+    measure_remote_spaces_cycle_transition \
+      "$host" \
+      "$remote_workspace_id" \
+      "terminal_tracked_tab" \
+      "previous" \
+      "$host cycle previous remote terminal to process" \
+      "$process_session_id" \
+      "process:${process_name}"
+    cycle_target="$MEASURED_CYCLE_TARGET"
+    case "$cycle_target" in
+      process:${process_name}) ;;
+      *) fail "remote terminal to process cycle target: expected ${process_name}, got '$cycle_target'" ;;
+    esac
+  done
+  PROFILE_RECORD_METRICS="$cycle_profile_recording_before"
+  pass_case
+}
+
 open_ad_hoc_spaces_terminal_for_cycle_profile() {
   local host="$1"
   local workspace_dir="$2"
@@ -6138,6 +6386,9 @@ EOF
 
   if (( ONLY_WINDOW_CYCLE_SMALL == 1 )); then
     run_window_cycle_small_assertions "local-primary" "$workspace_dir" "Beacon docs sentinel" '"workspace": "beacon-status"'
+    if [[ "${SPACES_E2E_RUN_REMOTE:-0}" == "1" ]]; then
+      run_remote_window_cycle_small_assertions
+    fi
     return 0
   fi
 

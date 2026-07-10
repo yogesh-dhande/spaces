@@ -393,6 +393,18 @@ import workspacecore
                     createdAt: "2026-06-22T12:00:00Z", updatedAt: "2026-06-22T12:00:01Z"))
     }
 
+    @Test func terminalOpenRequestColdResolutionIsSkippedForExistingPane() {
+        let fallbackRequest = AppKitController.DeviceTerminalOpenRequest(
+            workspaceID: "workspace-1", sessionID: "session-1", title: "shell-1", workingDirectory: "/device/project-feature", kind: .shell)
+        let resolvedRequest = AppKitController.DeviceTerminalOpenRequest(
+            workspaceID: "workspace-1", sessionID: "session-1", title: "shell-1", workingDirectory: "/device/project-feature", kind: .shell,
+            shell: "/bin/zsh")
+
+        #expect(AppKitController.terminalOpenRequestNeedsColdResolution(fallbackRequest, hasExistingPane: false))
+        #expect(!AppKitController.terminalOpenRequestNeedsColdResolution(fallbackRequest, hasExistingPane: true))
+        #expect(!AppKitController.terminalOpenRequestNeedsColdResolution(resolvedRequest, hasExistingPane: false))
+    }
+
     @Test func deviceShortcutResolvesStartingTerminalRowWithSessionMetadata() {
         let session = startingSessionSummary(id: "session-starting-shell", title: "shell-1", rowKind: .liveSession)
         let overview = SpacesDeviceOverviewPayload(
@@ -504,8 +516,7 @@ import workspacecore
     @Test func deviceTerminalControlRequestMapsSetAppearanceToTheDaemon() throws {
         // A live theme switch flows through the same device-API conversion as attach; the action and
         // the requested appearance must both survive so the remote daemon re-themes its live session.
-        let control = TerminalControlRequest(
-            command: .setAppearance(TerminalControlSetAppearancePayload(clientID: "mac-client", appearance: .dark)))
+        let control = TerminalControlRequest(command: .setAppearance(TerminalControlSetAppearancePayload(clientID: "mac-client", appearance: .dark)))
 
         let request = try AppKitController.deviceTerminalControlRequest(sessionID: "session-web", controlRequest: control)
 
@@ -560,8 +571,7 @@ import workspacecore
         // The attach then carries dark and the client is present; a follow-up broadcast of dark dedupes
         // against the recorded value, so it does not double-send what the attach already applied.
         let afterAttach = AppKitController.applyAppearanceToLiveSession(
-            .dark, sessionID: "session-a", clientID: "client-a", lastAppliedAppearance: recorded, requestSender: recorder.send,
-            applyState: { _ in })
+            .dark, sessionID: "session-a", clientID: "client-a", lastAppliedAppearance: recorded, requestSender: recorder.send, applyState: { _ in })
         #expect(afterAttach == .dark)
         #expect(recorder.sends.isEmpty)
     }
