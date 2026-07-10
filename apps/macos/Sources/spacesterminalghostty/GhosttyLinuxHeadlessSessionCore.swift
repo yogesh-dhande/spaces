@@ -271,6 +271,18 @@
             guard ownerRequestIsCurrent(request) else {
                 return TerminalControlResponse(ok: false, message: "Only the active owner can send input.", errorCode: .ownershipRejected)
             }
+            if request.asPaste {
+                guard var text = request.text, request.bytes == nil else {
+                    return TerminalControlResponse(ok: false, message: "Paste input requires text payload.", errorCode: .invalidArgument)
+                }
+                if request.appendNewline { text.append("\n") }
+                guard let payload = encodePastePayload(text) else {
+                    return TerminalControlResponse(ok: false, message: "Unable to encode paste input.", errorCode: .internalError)
+                }
+                markLocalOwnerCommandInputOutputResyncPending()
+                ptyDriver.sendRawBytes(payload)
+                return TerminalControlResponse(ok: true, message: "Sent input.")
+            }
             guard var payload = request.inputPayload else {
                 return TerminalControlResponse(ok: false, message: "Missing input payload.", errorCode: .invalidArgument)
             }
@@ -278,6 +290,26 @@
             markLocalOwnerCommandInputOutputResyncPending()
             ptyDriver.sendRawBytes(payload)
             return TerminalControlResponse(ok: true, message: "Sent input.")
+        }
+
+        private func encodePastePayload(_ text: String) -> Data? {
+            guard let vtSession else { return nil }
+            let data = Data(text.utf8)
+            var encodedPointer: UnsafeMutablePointer<CChar>?
+            var encodedLength: size_t = 0
+            let encoded = data.withUnsafeBytes { rawBuffer -> Bool in
+                if data.isEmpty {
+                    return spaces_ghostty_vt_session_encode_paste(vtSession, nil, 0, &encodedPointer, &encodedLength)
+                }
+                guard let baseAddress = rawBuffer.bindMemory(to: UInt8.self).baseAddress else { return false }
+                return spaces_ghostty_vt_session_encode_paste(vtSession, baseAddress, data.count, &encodedPointer, &encodedLength)
+            }
+            guard encoded else { return nil }
+            defer {
+                if let encodedPointer { spaces_ghostty_vt_free_buffer(encodedPointer) }
+            }
+            guard let encodedPointer, encodedLength > 0 else { return Data() }
+            return Data(bytes: encodedPointer, count: encodedLength)
         }
 
         private func key(_ request: TerminalControlRequest) -> TerminalControlResponse {

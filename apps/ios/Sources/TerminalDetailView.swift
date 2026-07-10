@@ -89,8 +89,8 @@ struct TerminalDetailView: View {
                             onViewportSizeChanged: { columns, rows in
                                 model.updateViewportSize(columns: columns, rows: rows)
                             },
-                            onSendText: { text in
-                                sendTerminalText(text)
+                            onSendText: { text, asPaste in
+                                sendTerminalText(text, asPaste: asPaste)
                             },
                             onSendKey: { key in
                                 sendTerminalKey(key)
@@ -172,10 +172,10 @@ struct TerminalDetailView: View {
         .allowsHitTesting(false)
     }
 
-    private func sendTerminalText(_ text: String) {
+    private func sendTerminalText(_ text: String, asPaste: Bool = false) {
         guard !text.isEmpty else { return }
         writeE2EEventIfNeeded(kind: "send_text", detail: text)
-        Task { await model.sendText(text) }
+        Task { await model.sendText(text, asPaste: asPaste) }
     }
 
     private func sendTerminalKey(_ key: String) {

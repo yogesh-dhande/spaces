@@ -23,6 +23,8 @@ struct TerminalComposerSheet: View {
             TextField("Message", text: $model.composerDraftText, axis: .vertical)
                 .lineLimit(3...6)
                 .textFieldStyle(.plain)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
                 .foregroundStyle(Theme.text)
                 .tint(Theme.accent)
                 .accessibilityIdentifier("composer.message-field")

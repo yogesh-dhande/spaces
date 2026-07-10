@@ -479,7 +479,7 @@ struct TerminalLinkPreview: Identifiable, Equatable {
         }
     }
 
-    func sendText(_ text: String, appendNewline: Bool = false) async {
+    func sendText(_ text: String, appendNewline: Bool = false, asPaste: Bool = false) async {
         guard isOwner else { return }
         guard acceptsInput, hasConfirmedOwnerInputReadiness else { return }
         guard !text.isEmpty else { return }
@@ -488,7 +488,15 @@ struct TerminalLinkPreview: Identifiable, Equatable {
             flushBufferedInputText()
             enqueueInputSend(kind: "send_text", detail: "\(text)\\n") { [weak self, text] in
                 guard let self else { return }
-                try await self.performSendTextRequest(text, appendNewline: true)
+                try await self.performSendTextRequest(text, appendNewline: true, asPaste: asPaste)
+            }
+            return
+        }
+        if asPaste {
+            flushBufferedInputText()
+            enqueueInputSend(kind: "send_text", detail: text) { [weak self, text] in
+                guard let self else { return }
+                try await self.performSendTextRequest(text, asPaste: true)
             }
             return
         }
@@ -556,7 +564,7 @@ struct TerminalLinkPreview: Identifiable, Equatable {
             // send. A separator space follows the text (when images follow) and separates images.
             if hasText {
                 do {
-                    try await self.performSendTextRequest(text + (payloads.isEmpty ? "" : " "))
+                    try await self.performSendTextRequest(text + (payloads.isEmpty ? "" : " "), asPaste: true)
                 } catch {
                     await MainActor.run { self.finishComposedSend(with: error, failedStep: .text) }
                     return
@@ -565,7 +573,7 @@ struct TerminalLinkPreview: Identifiable, Equatable {
             for (index, payload) in payloads.enumerated() {
                 if index > 0 {
                     do {
-                        try await self.performSendTextRequest(" ")
+                        try await self.performSendTextRequest(" ", asPaste: true)
                     } catch {
                         await MainActor.run { self.finishComposedSend(with: error, failedStep: .image) }
                         return
@@ -748,16 +756,17 @@ struct TerminalLinkPreview: Identifiable, Equatable {
         }
     }
 
-    private func performSendTextRequest(_ text: String, appendNewline: Bool = false) async throws {
+    private func performSendTextRequest(_ text: String, appendNewline: Bool = false, asPaste: Bool = false) async throws {
         let ownerEpoch = currentOwnerEpoch
         try await performRequestUsingInputChannel {
-            [bridgeClient, sessionID = session.id, clientID = remoteClient.id, ownerEpoch, appendNewline] commandChannel in
+            [bridgeClient, sessionID = session.id, clientID = remoteClient.id, ownerEpoch, appendNewline, asPaste] commandChannel in
             try await bridgeClient.sendText(
                 sessionID: sessionID,
                 clientID: clientID,
                 text: text,
                 ownerEpoch: ownerEpoch,
                 appendNewline: appendNewline,
+                asPaste: asPaste,
                 timeout: Self.inputRequestTimeout,
                 commandChannel: commandChannel
             )

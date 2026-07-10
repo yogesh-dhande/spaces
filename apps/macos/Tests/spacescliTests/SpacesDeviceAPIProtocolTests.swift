@@ -41,6 +41,26 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
         XCTAssertFalse(request.isSafeToReplayAfterConnectionFailure)
     }
 
+    func testTerminalControlSendPasteIntentRoundTripsThroughCodec() throws {
+        let request = SpacesDeviceAPIRequest(
+            command: .terminalControl(
+                .init(
+                    action: .send, sessionID: "session-1", clientID: "client-1", text: "line one\nline two", ownerEpoch: 4,
+                    asPaste: true)),
+            authToken: "SECRET")
+
+        let decoded = try SpacesDeviceAPICodec.decodeRequest(SpacesDeviceAPICodec.encodeRequest(request))
+
+        guard case .terminalControl(let payload) = decoded.command else {
+            return XCTFail("Expected terminalControl request.")
+        }
+        XCTAssertEqual(payload.action, .send)
+        XCTAssertEqual(payload.text, "line one\nline two")
+        XCTAssertEqual(payload.ownerEpoch, 4)
+        XCTAssertTrue(payload.asPaste)
+        XCTAssertFalse(decoded.isSafeToReplayAfterConnectionFailure)
+    }
+
     func testReadOnlyRequestsAreReplaySafeAfterAmbiguousConnectionFailure() throws {
         let requests = [
             SpacesDeviceAPIRequest(command: .ping, authToken: "SECRET"), SpacesDeviceAPIRequest(command: .overview, authToken: "SECRET"),

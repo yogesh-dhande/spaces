@@ -37,6 +37,7 @@
         func sessionSnapshotText() -> String?
         func copySelectionToPasteboard() -> Bool
         func pasteClipboardContents() -> Bool
+        @discardableResult func sendTextAsPaste(_ text: String) -> Bool
         @discardableResult func performBindingAction(_ action: String) -> Bool
         @discardableResult func sendScroll(horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32) -> Bool
         @discardableResult func clearScreenAndScrollback() -> Bool
@@ -78,6 +79,13 @@
         func sendRawBytes(_ data: Data) {
             sessionDriver.sendRawBytes(data)
             inputActivityHandler?(data.count)
+        }
+
+        @discardableResult public func sendTextAsPaste(_ text: String) -> Bool {
+            guard !text.isEmpty else { return false }
+            sessionDriver.sendTextAsPaste(text)
+            inputActivityHandler?(text.utf8.count)
+            return true
         }
 
         func foregroundPID() -> Int32? { sessionDriver.foregroundPID() }
@@ -143,8 +151,7 @@
 
         public func pasteClipboardContents() -> Bool {
             guard let text = NSPasteboard.general.string(forType: .string), !text.isEmpty else { return false }
-            sendRawBytes(Data(text.utf8))
-            return true
+            return sendTextAsPaste(text)
         }
 
         @discardableResult public func performBindingAction(_ action: String) -> Bool { sessionDriver.performBindingAction(action) }
@@ -679,16 +686,31 @@
             guard isRuntimeInteractiveForControl() else { return TerminalControlResponse(ok: false, message: "Terminal session is not running.", errorCode: .sessionNotRunning) }
             if let clientID = request.clientID { try? TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: nowISO8601()) }
             if let rejection = ownerRequestRejection(for: request, commandName: "send", startedAt: startedAt) { return rejection }
-            guard var payload = request.inputPayload else {
-                return TerminalControlResponse(ok: false, message: "Missing input payload.", errorCode: .invalidArgument)
+            if request.asPaste {
+                guard var text = request.text, request.bytes == nil else {
+                    return TerminalControlResponse(ok: false, message: "Paste input requires text payload.", errorCode: .invalidArgument)
+                }
+                if request.appendNewline { text.append("\n") }
+                markLocalOwnerCommandInputOutputResyncPending()
+                guard rendererHostStorage.sendTextAsPaste(text) else {
+                    return TerminalControlResponse(ok: false, message: "Missing input payload.", errorCode: .invalidArgument)
+                }
+                TerminalPerformance.logMetric(
+                    "terminal_control_send", target: "session=\(launchConfiguration.sessionID)",
+                    elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true, detail: "bytes=\(text.utf8.count)")
+                return TerminalControlResponse(ok: true, message: "Sent input.")
+            } else {
+                guard var payload = request.inputPayload else {
+                    return TerminalControlResponse(ok: false, message: "Missing input payload.", errorCode: .invalidArgument)
+                }
+                if request.appendNewline { payload.append(0x0A) }
+                markLocalOwnerCommandInputOutputResyncPending()
+                rendererHostStorage.sendRawBytes(payload)
+                TerminalPerformance.logMetric(
+                    "terminal_control_send", target: "session=\(launchConfiguration.sessionID)",
+                    elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true, detail: "bytes=\(payload.count)")
+                return TerminalControlResponse(ok: true, message: "Sent input.")
             }
-            if request.appendNewline { payload.append(0x0A) }
-            markLocalOwnerCommandInputOutputResyncPending()
-            rendererHostStorage.sendRawBytes(payload)
-            TerminalPerformance.logMetric(
-                "terminal_control_send", target: "session=\(launchConfiguration.sessionID)",
-                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true, detail: "bytes=\(payload.count)")
-            return TerminalControlResponse(ok: true, message: "Sent input.")
         }
 
         private func controlResponseForKeyRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
@@ -1511,6 +1533,8 @@
         public func copySelectionToPasteboard() -> Bool { core.rendererHost.copySelectionToPasteboard() }
 
         public func pasteClipboardContents() -> Bool { core.rendererHost.pasteClipboardContents() }
+
+        @discardableResult public func sendTextAsPaste(_ text: String) -> Bool { core.rendererHost.sendTextAsPaste(text) }
 
         @discardableResult public func performBindingAction(_ action: String) -> Bool { core.rendererHost.performBindingAction(action) }
 

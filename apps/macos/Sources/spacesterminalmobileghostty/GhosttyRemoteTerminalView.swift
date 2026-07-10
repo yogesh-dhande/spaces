@@ -88,7 +88,7 @@ import Foundation
         public let onScrollGestureApplied: (@MainActor () -> Void)?
         public let onRenderedTextChanged: (@MainActor (String) -> Void)?
         public let onViewportSizeChanged: @MainActor (Int, Int) -> Void
-        public let onSendText: @MainActor (String) -> Void
+        public let onSendText: @MainActor (String, Bool) -> Void
         public let onSendKey: @MainActor (String) -> Void
         public let onSendScroll: @MainActor (Double, Double, Int32) -> Void
         public let onOpenLink: @MainActor (String) -> Void
@@ -98,7 +98,7 @@ import Foundation
             ownerEpoch: GhosttyRemoteTerminalOwnerEpoch? = nil, endedRender: GhosttyRemoteTerminalEndedRender? = nil, fallbackText: String,
             isVisible: Bool, acceptsInput: Bool, isBusy: Bool, onInputReadinessChanged: @escaping @MainActor (Bool) -> Void = { _ in },
             onScrollGestureApplied: (@MainActor () -> Void)? = nil, onRenderedTextChanged: (@MainActor (String) -> Void)? = nil,
-            onViewportSizeChanged: @escaping @MainActor (Int, Int) -> Void, onSendText: @escaping @MainActor (String) -> Void,
+            onViewportSizeChanged: @escaping @MainActor (Int, Int) -> Void, onSendText: @escaping @MainActor (String, Bool) -> Void,
             onSendKey: @escaping @MainActor (String) -> Void, onSendScroll: @escaping @MainActor (Double, Double, Int32) -> Void = { _, _, _ in },
             onOpenLink: @escaping @MainActor (String) -> Void = { _ in }, onOpenComposer: (@MainActor () -> Void)? = nil
         ) {
@@ -125,7 +125,7 @@ import Foundation
             hostView.onInputReadinessChanged = { ready in _ = Task { @MainActor in onInputReadinessChanged(ready) } }
             hostView.onScrollGestureApplied = onScrollGestureApplied.map { callback in { _ = Task { @MainActor in callback() } } }
             hostView.onViewportSizeChanged = { columns, rows in _ = Task { @MainActor in onViewportSizeChanged(columns, rows) } }
-            hostView.onSendText = { text in _ = Task { @MainActor in onSendText(text) } }
+            hostView.onSendText = { text, asPaste in _ = Task { @MainActor in onSendText(text, asPaste) } }
             hostView.onSendKey = { key in _ = Task { @MainActor in onSendKey(key) } }
             hostView.onSendScroll = { horizontal, vertical, scrollMods in _ = Task { @MainActor in onSendScroll(horizontal, vertical, scrollMods) } }
             hostView.onOpenLink = { link in _ = Task { @MainActor in onOpenLink(link) } }
@@ -245,7 +245,7 @@ import Foundation
         public var onInputReadinessChanged: ((Bool) -> Void)?
         public var onScrollGestureApplied: (() -> Void)?
         public var onViewportSizeChanged: ((Int, Int) -> Void)?
-        public var onSendText: ((String) -> Void)?
+        public var onSendText: ((String, Bool) -> Void)?
         public var onSendKey: ((String) -> Void)?
         public var onSendScroll: ((Double, Double, Int32) -> Void)?
         public var onOpenLink: ((String) -> Void)?
@@ -454,7 +454,23 @@ import Foundation
         public func insertText(_ text: String) {
             guard acceptsTerminalInput, !text.isEmpty else { return }
             if sendPendingAccessoryModifiersIfNeeded(for: text) { return }
-            if text == "\n" || text == "\r" { onSendKey?("enter") } else { onSendText?(text) }
+            if text == "\n" || text == "\r" { onSendKey?("enter") } else { onSendText?(text, false) }
+        }
+
+        public override func paste(_ sender: Any?) {
+            guard acceptsTerminalInput, let text = UIPasteboard.general.string else { return }
+            pasteText(text)
+        }
+
+        func pasteTextForTesting(_ text: String) {
+            guard acceptsTerminalInput else { return }
+            pasteText(text)
+        }
+
+        private func pasteText(_ text: String) {
+            guard !text.isEmpty else { return }
+            clearAccessoryModifiers()
+            onSendText?(text, true)
         }
 
         public func deleteBackward() { sendAccessoryKey("backspace") }
@@ -939,7 +955,7 @@ import Foundation
             guard acceptsTerminalInput, !text.isEmpty else { return }
             if sendPendingAccessoryModifiersIfNeeded(for: text) { return }
             clearAccessoryModifiers()
-            onSendText?(text)
+            onSendText?(text, false)
         }
 
         private func sendAccessoryKey(_ key: String) {

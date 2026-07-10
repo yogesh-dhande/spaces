@@ -146,6 +146,10 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
             pastedClipboard = true
             return true
         }
+        @discardableResult func sendTextAsPaste(_ text: String) -> Bool {
+            pastedClipboard = !text.isEmpty
+            return !text.isEmpty
+        }
         @discardableResult func performBindingAction(_ action: String) -> Bool {
             recordedBindingActions.append(action)
             switch action {

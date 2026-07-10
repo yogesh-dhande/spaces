@@ -1746,7 +1746,7 @@
             var sentKeys: [String] = []
             var sentText: [String] = []
             hostView.onSendKey = { sentKeys.append($0) }
-            hostView.onSendText = { sentText.append($0) }
+            hostView.onSendText = { text, _ in sentText.append(text) }
             hostView.setAcceptsTerminalInput(true)
 
             let accessoryView = try XCTUnwrap(hostView.inputAccessoryView)
@@ -1775,6 +1775,19 @@
 
             XCTAssertEqual(sentKeys, ["ctrl+c", "cmd+left", "cmd+backspace", "opt+backspace", "cmd+k"])
             XCTAssertEqual(sentText, [])
+        }
+
+        func testRemoteTerminalPasteMarksTextAsPaste() {
+            let hostView = GhosttyRemoteTerminalHostView(frame: .zero)
+            var sentText: [(String, Bool)] = []
+            hostView.onSendText = { text, asPaste in sentText.append((text, asPaste)) }
+            hostView.setAcceptsTerminalInput(true)
+
+            hostView.pasteTextForTesting("line one\nline two")
+
+            XCTAssertEqual(sentText.count, 1)
+            XCTAssertEqual(sentText.first?.0, "line one\nline two")
+            XCTAssertEqual(sentText.first?.1, true)
         }
 
         func testRemoteTerminalAccessoryJoystickRequiresDirectionalRelease() {

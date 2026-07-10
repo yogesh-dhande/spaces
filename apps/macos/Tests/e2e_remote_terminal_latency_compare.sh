@@ -675,6 +675,7 @@ class RemoteFactory:
             action = payload.pop("command")
             payload.setdefault("clientID", client_id)
             payload.setdefault("appendNewline", False)
+            payload.setdefault("asPaste", False)
             payload["action"] = action
             payload["sessionID"] = session_id
             request_json_line = json.dumps(
@@ -734,7 +735,7 @@ class RemoteFactory:
         trimmed_command = remote_command.strip()
         if trimmed_command:
             output_before, revision_before = base_counts(session)
-            response, _, _ = session.send_control({"command": "send", "text": trimmed_command, "appendNewline": True})
+            response, _, _ = session.send_control({"command": "send", "text": trimmed_command, "appendNewline": True, "asPaste": False})
             if not response.get("ok", True):
                 raise RuntimeError(response)
             session.stream_reader.wait_progress(output_before, revision_before, timeout=20)
@@ -919,7 +920,7 @@ def measure_input(factory, target: str, surface: str) -> dict:
         for index in range(sample_count):
             input_char = alphabet[index % len(alphabet)]
             expected_text = f"ACK:{input_char.encode('utf-8')[0]:02x}"
-            measurement = run_probe(session, {"command": "send", "text": input_char}, timeout=10, expected_text=expected_text)
+            measurement = run_probe(session, {"command": "send", "text": input_char, "asPaste": False}, timeout=10, expected_text=expected_text)
             measurement["sample_index"] = index + 1
             measurements.append(measurement)
             time.sleep(0.05)
@@ -938,14 +939,14 @@ def measure_command(factory, target: str, surface: str) -> dict:
         ready_token = f"__spaces_command_ready_{surface}_{target}_{uuid.uuid4().hex[:6]}__"
         run_probe(
             session,
-            {"command": "send", "text": decoded_print_command(ready_token), "appendNewline": True},
+            {"command": "send", "text": decoded_print_command(ready_token), "appendNewline": True, "asPaste": False},
             timeout=20,
             expected_text=ready_token,
         )
         for index in range(sample_count):
             token = f"__spaces_compare_{surface}_{target}_{index + 1:03d}_{uuid.uuid4().hex[:6]}__"
             command = decoded_print_command(token)
-            measurement = run_probe(session, {"command": "send", "text": command, "appendNewline": True}, timeout=10, expected_text=token)
+            measurement = run_probe(session, {"command": "send", "text": command, "appendNewline": True, "asPaste": False}, timeout=10, expected_text=token)
             measurement["sample_index"] = index + 1
             measurements.append(measurement)
             time.sleep(0.05)
@@ -976,7 +977,7 @@ def run_scroll_attempt(session: TargetSession, direction: int, timeout: float = 
     before_text = visible_text(session)
     output_before, revision_before = base_counts(session)
     begin_ns = now_ns()
-    response, control_ms, control_profile = session.send_control({"command": "scroll", "scrollVertical": direction})
+    response, control_ms, control_profile = session.send_control({"command": "scroll", "scrollVertical": direction, "asPaste": False})
     rpc_end_ns = now_ns()
     if not response.get("ok", True):
         raise RuntimeError(response)
@@ -1111,7 +1112,7 @@ def measure_scroll(factory, target: str, surface: str) -> dict:
         measurements = []
         for index in range(sample_count):
             direction = 900 if index % 2 == 0 else -900
-            measurement = run_probe(session, {"command": "scroll", "scrollVertical": direction}, timeout=10, expected_reason="scroll")
+            measurement = run_probe(session, {"command": "scroll", "scrollVertical": direction, "asPaste": False}, timeout=10, expected_reason="scroll")
             measurement["sample_index"] = index + 1
             measurements.append(measurement)
             time.sleep(0.05)

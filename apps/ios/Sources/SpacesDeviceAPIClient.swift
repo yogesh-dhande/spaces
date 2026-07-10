@@ -354,12 +354,15 @@ struct SpacesDeviceAPIClient: Sendable {
         text: String,
         ownerEpoch: UInt64?,
         appendNewline: Bool = false,
+        asPaste: Bool = false,
         timeout: Duration = .seconds(3),
         commandChannel: SpacesDeviceAPICommandChannel? = nil
     ) async throws {
         let request = SpacesDeviceAPIRequest(
             command: .terminalControl(
-                .init(action: .send, sessionID: sessionID, clientID: clientID, text: text, ownerEpoch: ownerEpoch, appendNewline: appendNewline)),
+                .init(
+                    action: .send, sessionID: sessionID, clientID: clientID, text: text, ownerEpoch: ownerEpoch, appendNewline: appendNewline,
+                    asPaste: asPaste)),
             authToken: settings.trimmedAuthToken,
             clientApp: clientAppIdentity
         )

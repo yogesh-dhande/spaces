@@ -764,6 +764,7 @@ def typed_device_request(request):
     if command in {"attach", "detach", "heartbeat", "takeover", "send", "key", "clear", "clearScreen", "resize", "scroll"}:
         payload["action"] = "clearScreen" if command == "clear" else command
         payload.setdefault("appendNewline", False)
+        payload.setdefault("asPaste", False)
         return {"command": {"terminalControl": payload}}
     return {"command": {command: payload}}
 
@@ -3226,6 +3227,7 @@ def typed_device_request(request: dict) -> dict:
     if command in {"attach", "detach", "heartbeat", "takeover", "send", "key", "clear", "clearScreen", "resize", "scroll"}:
         payload["action"] = "clearScreen" if command == "clear" else command
         payload.setdefault("appendNewline", False)
+        payload.setdefault("asPaste", False)
         return {"command": {"terminalControl": payload}}
     return {"command": {command: payload}}
 
@@ -3517,6 +3519,7 @@ def typed_device_request(request: dict) -> dict:
     if command in {"attach", "detach", "heartbeat", "takeover", "send", "key", "clear", "clearScreen", "resize", "scroll"}:
         payload["action"] = "clearScreen" if command == "clear" else command
         payload.setdefault("appendNewline", False)
+        payload.setdefault("asPaste", False)
         return {"command": {"terminalControl": payload}}
     return {"command": {command: payload}}
 

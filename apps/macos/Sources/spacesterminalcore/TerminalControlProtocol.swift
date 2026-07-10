@@ -18,6 +18,7 @@ public struct TerminalControlRequest: Codable, Sendable, Equatable {
     public let scrollVertical: Double?
     public let scrollMods: Int32?
     public let appendNewline: Bool
+    public let asPaste: Bool
     /// The attaching client's OS appearance (light/dark). Carried on `attach` so a remote daemon can
     /// render its headless terminal session with the matching Spaces theme variant.
     public let appearance: ThemeAppearance?
@@ -26,7 +27,7 @@ public struct TerminalControlRequest: Codable, Sendable, Equatable {
         command: String, authToken: String? = nil, text: String? = nil, bytes: Data? = nil, key: String? = nil, clientID: String? = nil,
         client: TerminalClient? = nil, attachmentMode: TerminalAttachmentMode? = nil, lineCount: Int? = nil, columns: Int? = nil, rows: Int? = nil,
         ownerEpoch: UInt64? = nil, resizeSerial: UInt64? = nil, scrollHorizontal: Double? = nil, scrollVertical: Double? = nil,
-        scrollMods: Int32? = nil, appendNewline: Bool = false, appearance: ThemeAppearance? = nil
+        scrollMods: Int32? = nil, appendNewline: Bool = false, asPaste: Bool = false, appearance: ThemeAppearance? = nil
     ) {
         self.command = command
         self.authToken = authToken
@@ -45,6 +46,7 @@ public struct TerminalControlRequest: Codable, Sendable, Equatable {
         self.scrollVertical = scrollVertical
         self.scrollMods = scrollMods
         self.appendNewline = appendNewline
+        self.asPaste = asPaste
         self.appearance = appearance
     }
 
@@ -59,7 +61,7 @@ public struct TerminalControlRequest: Codable, Sendable, Equatable {
         case .send(let payload):
             self.init(
                 command: command.name, authToken: authToken, text: payload.text, bytes: payload.bytes, clientID: payload.clientID,
-                ownerEpoch: payload.ownerEpoch, appendNewline: payload.appendNewline)
+                ownerEpoch: payload.ownerEpoch, appendNewline: payload.appendNewline, asPaste: payload.asPaste)
         case .key(let payload):
             self.init(command: command.name, authToken: authToken, key: payload.key, clientID: payload.clientID, ownerEpoch: payload.ownerEpoch)
         case .clearScreen(let payload):
@@ -96,6 +98,7 @@ public struct TerminalControlRequest: Codable, Sendable, Equatable {
         case scrollVertical
         case scrollMods
         case appendNewline
+        case asPaste
         case appearance
     }
 
@@ -118,6 +121,7 @@ public struct TerminalControlRequest: Codable, Sendable, Equatable {
         scrollVertical = try container.decodeIfPresent(Double.self, forKey: .scrollVertical)
         scrollMods = try container.decodeIfPresent(Int32.self, forKey: .scrollMods)
         appendNewline = try container.decodeIfPresent(Bool.self, forKey: .appendNewline) ?? false
+        asPaste = try container.decode(Bool.self, forKey: .asPaste)
         appearance = try container.decodeIfPresent(ThemeAppearance.self, forKey: .appearance)
     }
 
@@ -140,6 +144,7 @@ public struct TerminalControlRequest: Codable, Sendable, Equatable {
         try container.encodeIfPresent(scrollVertical, forKey: .scrollVertical)
         try container.encodeIfPresent(scrollMods, forKey: .scrollMods)
         try container.encode(appendNewline, forKey: .appendNewline)
+        try container.encode(asPaste, forKey: .asPaste)
         try container.encodeIfPresent(appearance, forKey: .appearance)
     }
 }
@@ -168,13 +173,15 @@ public struct TerminalControlSendPayload: Sendable, Equatable {
     public let clientID: String?
     public let ownerEpoch: UInt64?
     public let appendNewline: Bool
+    public let asPaste: Bool
 
-    public init(text: String?, bytes: Data?, clientID: String?, ownerEpoch: UInt64?, appendNewline: Bool) {
+    public init(text: String?, bytes: Data?, clientID: String?, ownerEpoch: UInt64?, appendNewline: Bool, asPaste: Bool = false) {
         self.text = text
         self.bytes = bytes
         self.clientID = clientID
         self.ownerEpoch = ownerEpoch
         self.appendNewline = appendNewline
+        self.asPaste = asPaste
     }
 
     public var inputPayload: Data? {
@@ -275,7 +282,7 @@ public enum TerminalControlCommand: Sendable, Equatable {
             self = .send(
                 TerminalControlSendPayload(
                     text: request.text, bytes: request.bytes, clientID: request.clientID, ownerEpoch: request.ownerEpoch,
-                    appendNewline: request.appendNewline))
+                    appendNewline: request.appendNewline, asPaste: request.asPaste))
         case "key": self = .key(TerminalControlKeyPayload(key: request.key, clientID: request.clientID, ownerEpoch: request.ownerEpoch))
         case "clearScreen": self = .clearScreen(TerminalControlOwnerPayload(clientID: request.clientID, ownerEpoch: request.ownerEpoch))
         case "resize":

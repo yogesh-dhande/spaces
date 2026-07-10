@@ -65,6 +65,14 @@ bool spaces_ghostty_vt_session_write(
     size_t input_len
 );
 
+bool spaces_ghostty_vt_session_encode_paste(
+    SpacesGhosttyVtSession *session,
+    const uint8_t *input,
+    size_t input_len,
+    char **out_ptr,
+    size_t *out_len
+);
+
 bool spaces_ghostty_vt_session_copy_snapshot(
     SpacesGhosttyVtSession *session,
     SpacesGhosttyVtSnapshot *out_snapshot

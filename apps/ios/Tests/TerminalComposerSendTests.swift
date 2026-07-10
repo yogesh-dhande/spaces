@@ -1,4 +1,5 @@
 #if canImport(UIKit)
+    import SwiftUI
     import UIKit
     import XCTest
     import spacesdevicecore
@@ -34,6 +35,13 @@
             }
 
             func tokens() -> [String] { requests.map(Self.token) }
+
+            func sendPasteFlags() -> [Bool] {
+                requests.compactMap { request in
+                    guard case .terminalControl(let payload) = request.command, payload.action == .send else { return nil }
+                    return payload.asPaste
+                }
+            }
 
             private static func token(_ request: SpacesDeviceAPIRequest) -> String {
                 switch request.command {
@@ -116,6 +124,38 @@
             return nil
         }
 
+        private func firstComposerTextInput(in view: UIView) -> (
+            autocapitalization: UITextAutocapitalizationType, autocorrection: UITextAutocorrectionType
+        )? {
+            if let textField = view as? UITextField {
+                return (textField.autocapitalizationType, textField.autocorrectionType)
+            }
+            if let textView = view as? UITextView {
+                return (textView.autocapitalizationType, textView.autocorrectionType)
+            }
+            for subview in view.subviews {
+                if let input = firstComposerTextInput(in: subview) { return input }
+            }
+            return nil
+        }
+
+        func testComposerMessageFieldDisablesTextMutationTraits() throws {
+            let model = TerminalViewerModel(session: session(), settings: settings(), onAuthenticationRequired: { _ in })
+            let sheet = TerminalComposerSheet(model: model, stagedScreenshots: StagedScreenshotStore())
+            let controller = UIHostingController(rootView: sheet)
+            let window = UIWindow(frame: UIScreen.main.bounds)
+            window.rootViewController = controller
+            window.isHidden = false
+            controller.view.frame = window.bounds
+            controller.view.layoutIfNeeded()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+            defer { window.isHidden = true }
+
+            let input = try XCTUnwrap(firstComposerTextInput(in: controller.view))
+            XCTAssertEqual(input.autocapitalization, .none)
+            XCTAssertEqual(input.autocorrection, .no)
+        }
+
         func testComposedSendTextThenImagesThenEnterInOrder() async throws {
             let recorder = ComposerAPIRecorder()
             let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
@@ -134,6 +174,8 @@
 
             let tokens = await recorder.tokens()
             XCTAssertEqual(tokens, ["send:hello ", "paste", "send: ", "paste", "key:enter"])
+            let sendPasteFlags = await recorder.sendPasteFlags()
+            XCTAssertEqual(sendPasteFlags, [true, true])
             XCTAssertEqual(model.composerDraftText, "")
             XCTAssertTrue(model.composerAttachments.isEmpty)
             XCTAssertNil(model.composerErrorMessage)
@@ -179,6 +221,8 @@
 
             let tokens = await recorder.tokens()
             XCTAssertEqual(tokens, ["send:just text", "key:enter"])
+            let sendPasteFlags = await recorder.sendPasteFlags()
+            XCTAssertEqual(sendPasteFlags, [true])
             XCTAssertEqual(model.composerDraftText, "")
             XCTAssertTrue(model.composerAttachments.isEmpty)
             XCTAssertNil(model.composerErrorMessage)

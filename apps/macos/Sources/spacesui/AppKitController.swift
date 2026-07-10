@@ -1780,7 +1780,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                     sessionID: sessionID,
                     request: TerminalControlRequest(
                         command: .send(
-                            TerminalControlSendPayload(text: text, bytes: nil, clientID: clientID, ownerEpoch: nil, appendNewline: appendNewline))),
+                            TerminalControlSendPayload(
+                                text: text, bytes: nil, clientID: clientID, ownerEpoch: nil, appendNewline: appendNewline))),
                     requestSender: requestSender, applyState: applyControlState)
             }
             let sendKeyAction: @Sendable (String) throws -> TerminalControlResponse = { key in
@@ -1885,7 +1886,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             action: action, sessionID: sessionID, clientID: request.clientID, client: request.client, attachmentMode: request.attachmentMode,
             text: request.text, key: request.key, columns: request.columns, rows: request.rows, ownerEpoch: request.ownerEpoch,
             resizeSerial: request.resizeSerial, scrollHorizontal: request.scrollHorizontal, scrollVertical: request.scrollVertical,
-            scrollMods: request.scrollMods, appendNewline: request.appendNewline, appearance: request.appearance)
+            scrollMods: request.scrollMods, appendNewline: request.appendNewline, asPaste: request.asPaste, appearance: request.appearance)
     }
 
     /// Issues a terminal control request to the session's owning device and returns

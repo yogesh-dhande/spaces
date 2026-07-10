@@ -12,7 +12,7 @@ final class TerminalControlProtocolTests: XCTestCase {
         let request = TerminalControlRequest(
             command: "attach", authToken: "SECRET", text: "hello", bytes: Data([0, 10, 255]), clientID: "client-1", client: client,
             attachmentMode: .viewer, lineCount: 20, columns: 80, rows: 24, ownerEpoch: 7, resizeSerial: 3, scrollHorizontal: 1.5,
-            scrollVertical: -2.5, scrollMods: 7, appendNewline: true, appearance: .light)
+            scrollVertical: -2.5, scrollMods: 7, appendNewline: true, asPaste: true, appearance: .light)
         let response = TerminalControlResponse(ok: true, message: "ok")
 
         let decoded = try TerminalControlCodec.decodeRequest(TerminalControlCodec.encodeRequest(request))
@@ -23,13 +23,29 @@ final class TerminalControlProtocolTests: XCTestCase {
         XCTAssertEqual(try TerminalControlCodec.decodeResponse(TerminalControlCodec.encodeResponse(response)), response)
     }
 
+    func testSendPasteIntentRoundTripsThroughTypedWrapper() throws {
+        let request = TerminalControlRequest(
+            command: .send(
+                TerminalControlSendPayload(
+                    text: "line one\nline two", bytes: nil, clientID: "client-1", ownerEpoch: 7, appendNewline: false, asPaste: true)))
+
+        let decoded = try TerminalControlCodec.decodeRequest(TerminalControlCodec.encodeRequest(request))
+
+        XCTAssertTrue(decoded.asPaste)
+        guard case .send(let payload) = decoded.commandValue else {
+            return XCTFail("Expected send command, got '\(decoded.commandValue.name)'.")
+        }
+        XCTAssertTrue(payload.asPaste)
+        XCTAssertEqual(payload.text, "line one\nline two")
+    }
+
     func testAttachRequestWithoutAppearanceDecodesToNil() throws {
-        let payload = #"{"command":"attach","clientID":"remote-client"}"#.data(using: .utf8)!
+        let payload = #"{"command":"attach","clientID":"remote-client","asPaste":false}"#.data(using: .utf8)!
         XCTAssertNil(try TerminalControlCodec.decodeRequest(payload).appearance)
     }
 
     func testRequestDecodeDefaultsMissingOptionalFields() throws {
-        let payload = #"{"command":"takeover","clientID":"remote-client"}"#.data(using: .utf8)!
+        let payload = #"{"command":"takeover","clientID":"remote-client","asPaste":false}"#.data(using: .utf8)!
 
         XCTAssertEqual(
             try TerminalControlCodec.decodeRequest(payload),
@@ -37,7 +53,7 @@ final class TerminalControlProtocolTests: XCTestCase {
     }
 
     func testLegacyScrollRequestDecodesWithoutScrollMods() throws {
-        let payload = #"{"command":"scroll","clientID":"remote-client","scrollHorizontal":1.5,"scrollVertical":-2.5}"#.data(using: .utf8)!
+        let payload = #"{"command":"scroll","clientID":"remote-client","scrollHorizontal":1.5,"scrollVertical":-2.5,"asPaste":false}"#.data(using: .utf8)!
         let request = try TerminalControlCodec.decodeRequest(payload)
 
         XCTAssertEqual(request.scrollHorizontal, 1.5)
@@ -79,14 +95,14 @@ final class TerminalControlProtocolTests: XCTestCase {
     }
 
     func testSetAppearanceWithoutAppearanceReportsMissingPayload() throws {
-        let request = try TerminalControlCodec.decodeRequest(#"{"command":"setAppearance","clientID":"viewer-1"}"#.data(using: .utf8)!)
+        let request = try TerminalControlCodec.decodeRequest(#"{"command":"setAppearance","clientID":"viewer-1","asPaste":false}"#.data(using: .utf8)!)
         XCTAssertEqual(request.commandValue.requiredPayloadFailureMessage, "Missing appearance.")
     }
 
     func testTypedCommandWrapperReportsMissingPayloadFields() throws {
-        let send = try TerminalControlCodec.decodeRequest(#"{"command":"send","clientID":"client-1"}"#.data(using: .utf8)!)
-        let attach = try TerminalControlCodec.decodeRequest(#"{"command":"attach","clientID":"legacy-extra"}"#.data(using: .utf8)!)
-        let resize = try TerminalControlCodec.decodeRequest(#"{"command":"resize","clientID":"client-1","columns":100}"#.data(using: .utf8)!)
+        let send = try TerminalControlCodec.decodeRequest(#"{"command":"send","clientID":"client-1","asPaste":false}"#.data(using: .utf8)!)
+        let attach = try TerminalControlCodec.decodeRequest(#"{"command":"attach","clientID":"legacy-extra","asPaste":false}"#.data(using: .utf8)!)
+        let resize = try TerminalControlCodec.decodeRequest(#"{"command":"resize","clientID":"client-1","columns":100,"asPaste":false}"#.data(using: .utf8)!)
 
         XCTAssertEqual(send.commandValue.requiredPayloadFailureMessage, "Missing input payload.")
         XCTAssertEqual(attach.commandValue.requiredPayloadFailureMessage, "Missing client payload.")
