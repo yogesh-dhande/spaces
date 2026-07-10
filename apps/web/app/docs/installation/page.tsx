@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { CodeBlock } from "../components/code-block";
 import { DocsShell } from "../components/docs-shell";
 import Link from "next/link";
 
@@ -80,6 +81,17 @@ open -a Spaces`}
         </pre>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
           The first command prints the installed version. The second launches the app.
+        </p>
+      </article>
+
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Linux Remote Devices</h2>
+        <p className="mt-2 text-sm leading-7 text-foreground-soft">
+          Pair an Ubuntu 24.04 device (x86_64 or arm64) as a remote device by running the installer on it:
+        </p>
+        <CodeBlock>{`curl -fsSL https://usespaces.dev/install.sh | bash`}</CodeBlock>
+        <p className="mt-2 text-sm leading-7 text-foreground-soft">
+          When pairing needs an exact version match, the Mac app prints a version-pinned variant of this command to run instead.
         </p>
       </article>
 

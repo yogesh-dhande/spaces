@@ -1,14 +1,21 @@
 #!/usr/bin/env bash
-# Installs the Spaces Linux daemon (spacesd) for a specific released version.
+# Installs the Spaces Linux daemon (spacesd), for the latest released version
+# or a specific requested version.
 #
 # This is the single, user-runnable install/upgrade path for Linux devices. It
-# downloads the signed remote-artifact manifest for the requested version,
-# verifies its Ed25519 signature against the embedded public key, downloads and
-# checksums the matching Ubuntu 24.04 archive, then runs the bundled install.sh
-# (which lays out ~/.spaces, ~/.local/bin/spaces, and the systemd user service).
+# downloads the signed remote-artifact manifest for the requested (or latest)
+# version, verifies its Ed25519 signature against the embedded public key,
+# downloads and checksums the matching Ubuntu 24.04 archive, then runs the
+# bundled install.sh (which lays out ~/.spaces, ~/.local/bin/spaces, and the
+# systemd user service).
 #
-# Run over the version-pinned one-liner rendered by the Spaces app/CLI, e.g.:
-#   curl -fsSL https://github.com/yogesh-dhande/spaces/releases/download/v0.1.0/spaces-install-linux.sh | bash -s -- 0.1.0
+# Served at https://usespaces.dev/install.sh via the web app's prebuild copy
+# (apps/web/package.json). Two invocations:
+#   curl -fsSL https://usespaces.dev/install.sh | bash
+#     Installs the latest published release.
+#   curl -fsSL https://usespaces.dev/install.sh | bash -s -- 0.1.0
+#     Installs a specific version. This is the form printed by the Spaces app
+#     when pairing requires a wire-compatible daemon version.
 #
 # The embedded REMOTE_ARTIFACT_PUBLIC_KEY must stay in sync with
 # AppVersion.remoteArtifactPublicKey; workspacecoreTests' installer drift test
@@ -25,10 +32,13 @@ die() {
 }
 
 version="${1:-}"
-[[ -n "$version" ]] || die "usage: spaces-install-linux.sh <version>"
 version="${version#v}"
-release_tag="v${version}"
-base_url="${RELEASE_BASE_URL}/${release_tag}"
+if [[ -n "$version" ]]; then
+    base_url="${RELEASE_BASE_URL}/v${version}"
+else
+    # No version requested: GitHub's stable redirect to the newest release's assets.
+    base_url="https://github.com/${REPOSITORY}/releases/latest/download"
+fi
 
 for tool in curl tar sha256sum openssl python3; do
     command -v "$tool" >/dev/null 2>&1 || die "required tool not found: $tool"
@@ -53,9 +63,9 @@ trap 'rm -rf "$workdir"' EXIT
 manifest_path="$workdir/spaces-remote-artifacts.json"
 signature_path="$workdir/spaces-remote-artifacts.json.sig"
 curl -fsSL "$base_url/spaces-remote-artifacts.json" -o "$manifest_path" \
-    || die "could not download the installer manifest for $release_tag. Confirm that Spaces $version is published."
+    || die "could not download the installer manifest from $base_url. Confirm that the requested Spaces release is published."
 curl -fsSL "$base_url/spaces-remote-artifacts.json.sig" -o "$signature_path" \
-    || die "could not download the installer signature for $release_tag."
+    || die "could not download the installer signature from $base_url."
 
 # Verify the manifest signature. The 44-byte Ed25519 SubjectPublicKeyInfo is the
 # fixed 12-byte DER prefix (base64 "MCowBQYDK2VwAyEA") followed by the raw key,
@@ -67,6 +77,13 @@ printf '%s\n%s\n%s\n' \
     "-----END PUBLIC KEY-----" >"$public_key_pem"
 openssl pkeyutl -verify -pubin -inkey "$public_key_pem" -rawin -in "$manifest_path" -sigfile "$signature_path" >/dev/null 2>&1 \
     || die "the installer manifest signature did not verify. Do not proceed; the download may be tampered with."
+
+# Only derive the version from the manifest after its signature verifies above;
+# never trust unverified content for the version that gates artifact selection.
+if [[ -z "$version" ]]; then
+    version="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8")).get("app_version",""))' "$manifest_path")"
+    [[ -n "$version" ]] || die "the latest release manifest does not declare an app_version."
+fi
 
 selection="$(python3 - "$manifest_path" "$version" "$platform" "$arch" <<'PY'
 import json

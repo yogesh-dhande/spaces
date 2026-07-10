@@ -281,7 +281,6 @@ jobs:
           release_title="Spaces ${{ steps.version.outputs.version }}"
           release_assets=(
             "$DMG_PATH"
-            "scripts/spaces-install-linux.sh"
             "dist/remote/spacesd-ubuntu-24.04-x86_64.tar.gz"
             "dist/remote/spacesd-ubuntu-24.04-x86_64.tar.gz.sha256"
             "dist/remote/spacesd-ubuntu-24.04-arm64.tar.gz"
@@ -289,12 +288,15 @@ jobs:
             "dist/remote/spaces-remote-artifacts.json"
             "dist/remote/spaces-remote-artifacts.json.sig"
           )
+          # --latest keeps releases/latest/download (the install.sh no-version path) pointed at
+          # the newest Spaces release even if another non-prerelease release is created later.
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release edit "$GITHUB_REF_NAME" --title "$release_title"
+            gh release edit "$GITHUB_REF_NAME" --title "$release_title" --latest
             gh release upload "$GITHUB_REF_NAME" "${release_assets[@]}" --clobber
           else
             gh release create "$GITHUB_REF_NAME" "${release_assets[@]}" \
               --title "$release_title" \
+              --latest \
               --generate-notes
           fi
 
