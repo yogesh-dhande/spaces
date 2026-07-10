@@ -40,14 +40,8 @@ public enum ClientSettingsKey {
     /// App-wide UI appearance (an `AppAppearanceMode` raw value: `system`/`light`/`dark`).
     /// An unset value resolves to the dark default.
     public static let appAppearanceMode = "app_appearance_mode"
-    /// Records which coding agents Spaces has already auto-installed hooks for, per device, so
-    /// auto-install runs once per (device, agent) and never fights a user who removes a hook. Stored
-    /// as a JSON object `{ "<deviceID>": ["claudeCode", …] }`. Manual installs from settings bypass it.
-    /// An agent is recorded only once its hooks are observed installed, so a failed attempt retries.
-    public static let agentHooksAutoInstalled = "agent_hooks_auto_installed"
-    /// The reason each coding agent's last hook install failed, per device, so Settings → Coding Agents
-    /// can explain a "hooks not installed" row that auto-install already tried and could not fix (most
-    /// often a `config.toml` that only the user can untangle). Stored as a JSON object
-    /// `{ "<deviceID>": { "codex": "<message>" } }`. An agent's entry is cleared when it next installs.
-    public static let agentHooksInstallFailures = "agent_hooks_install_failures"
+    /// The `AgentHookCommand.hookVersion` the user last dismissed the launch coding-agents setup step
+    /// for, as a decimal string. The step reappears only when a Spaces release bumps the hook version,
+    /// so skipping it is respected until the hooks Spaces wants to write actually change.
+    public static let agentHooksSetupDismissedVersion = "agent_hooks_setup_dismissed_version"
 }

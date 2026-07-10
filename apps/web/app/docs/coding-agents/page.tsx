@@ -2,9 +2,13 @@ import type { Metadata } from "next";
 import { DocsShell } from "../components/docs-shell";
 import { CopyablePrompt } from "../components/copyable-prompt";
 
+// Keep in step with `AgentHookCommand.hookVersion`: hooks written without the current version read
+// back in the app as out of date.
+const HOOK_MARKER = "# spaces-agent-hook v1";
+
 // Spaces embeds the absolute path it resolved for the CLI; `/usr/local/bin/spaces` stands in here.
 const spacesAgentSignalCommand = (event: string) =>
-  `'/usr/local/bin/spaces' agent signal ${event} >/dev/null 2>&1 || true # spaces-agent-hook`;
+  `'/usr/local/bin/spaces' agent signal ${event} >/dev/null 2>&1 || true ${HOOK_MARKER}`;
 
 const CLAUDE_PROMPT = `Add global Spaces lifecycle hooks to ~/.claude/settings.json so this agent
 reports its state to Spaces.
@@ -16,8 +20,9 @@ reports its state to Spaces.
   SessionEnd        ->  ${spacesAgentSignalCommand("exit")}
 
 Use an empty matcher ("") for every entry. Do not add or remove any
-other keys. These hooks assume spaces is available on PATH, run quietly,
-ignore transient Spaces failures, and keep the # spaces-agent-hook marker.
+other keys. Replace '/usr/local/bin/spaces' with the absolute path to my
+spaces CLI. These hooks run quietly, ignore transient Spaces failures,
+and keep the ${HOOK_MARKER} marker.
 After writing the file, show me the diff.`;
 
 const CODEX_PROMPT = `Enable Codex hooks with [features].hooks in ~/.codex/config.toml and add global Spaces lifecycle hooks so this agent
@@ -29,8 +34,9 @@ reports its state to Spaces.
   PermissionRequest ->  ${spacesAgentSignalCommand("blocked")}
 
 Use an empty matcher ("") for every entry. Do not add or remove any
-other keys. These hooks assume spaces is available on PATH, run quietly,
-ignore transient Spaces failures, and keep the # spaces-agent-hook marker.
+other keys. Replace '/usr/local/bin/spaces' with the absolute path to my
+spaces CLI. These hooks run quietly, ignore transient Spaces failures,
+and keep the ${HOOK_MARKER} marker.
 After writing the file, show me the diff.
 `;
 
@@ -76,22 +82,22 @@ export default function CodingAgentsDocsPage() {
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Hooks Install Themselves</h2>
+        <h2 className="text-2xl font-semibold tracking-tight">Setting Up Hooks</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Spaces wires these lifecycle hooks up for you. When you install Spaces, and whenever you connect a device, Spaces installs <code>spaces agent signal</code> hooks for every supported agent CLI it detects — Claude Code in <code>~/.claude/settings.json</code>, Codex in <code>~/.codex/hooks.json</code>, and opencode as a plugin in <code>~/.config/opencode/plugin/</code>. Each hook calls the Spaces CLI by the absolute path found when the hooks were installed, so it runs no matter what <code>PATH</code> your agent hands it; if you move or reinstall the CLI, reinstall the hooks from Settings &rarr; Coding Agents. The command only reports from Spaces-managed terminals and does nothing anywhere else, so nothing else in your setup changes.
+          Spaces sets these lifecycle hooks up for you, but never behind your back: it asks first. On first launch it offers to install <code>spaces agent signal</code> hooks for every supported agent CLI it detects — Claude Code in <code>~/.claude/settings.json</code>, Codex in <code>~/.codex/hooks.json</code>, and opencode as a plugin in <code>~/.config/opencode/plugin/</code>. You can skip that step and install later, or never. Each hook calls the Spaces CLI by the absolute path found when the hooks were installed, so it runs no matter what <code>PATH</code> your agent hands it; if you move or reinstall the CLI, reinstall the hooks from Settings &rarr; Coding Agents. The command only reports from Spaces-managed terminals and does nothing anywhere else, so nothing else in your setup changes.
         </p>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Installation preserves your existing hooks and settings and never duplicates an entry, so it is safe to run again. It happens once per device and agent: if you remove a Spaces hook it stays removed, and a detected agent without Spaces hooks is picked up the next time that device connects.
+          Installation preserves your existing hooks and settings and never duplicates an entry, so it is safe to run again. If a later Spaces release changes the hooks it installs, your agents show as out of date and Spaces offers to update them once — updating replaces the old hooks rather than adding to them.
         </p>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Agents install independently, so one that Spaces will not touch — a Codex <code>config.toml</code> that already defines <code>features</code> in a shape Spaces refuses to rewrite, say — does not stop the others. That agent&apos;s row in Settings explains what stopped it, and Spaces tries again the next time the device connects.
+          Agents install independently, so one that Spaces will not touch — a Codex <code>config.toml</code> that already defines <code>features</code> in a shape Spaces refuses to rewrite, say — does not stop the others. That agent&apos;s row explains what stopped it.
         </p>
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Managing Hooks in Settings</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Open <strong>Settings &rarr; Coding Agents</strong> to see, for This Mac or any paired remote, which supported agent CLIs are detected and whether their Spaces hooks are installed. Detected agents have an Install or Reinstall button; unsupported or missing CLIs remain visible without an install action.
+          Open <strong>Settings &rarr; Coding Agents</strong> to see, for This Mac or any paired remote, which supported agent CLIs are detected and whether their Spaces hooks are installed, out of date, or missing. Detected agents have an Install, Update, or Reinstall button; unsupported or missing CLIs remain visible without an install action.
         </p>
       </article>
 

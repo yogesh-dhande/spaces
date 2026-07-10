@@ -558,9 +558,6 @@ import workspacecore
                 self?.setRemoteDevicePairingStatus("Connected \(result.name).", isError: false)
                 self?.refreshVisibleDeviceSettingsAfterClientDeviceChange()
                 self?.host.requestSidebarReload()
-                if let device = self?.host.macPairedDevices().first(where: { $0.id == result.deviceID }) {
-                    self?.host.autoInstallAgentHooks(for: device)
-                }
             } catch { self?.setRemoteDevicePairingStatus(error.localizedDescription, isError: true) }
         }
     }

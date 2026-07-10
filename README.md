@@ -44,7 +44,7 @@ spaces terminal tail <session> --lines 20 # read recent output
 spaces terminal show <session>            # open an owner-seeking window for a session
 ```
 
-Coding agents emit explicit `spaces agent signal` events from their terminals so the GUI knows which agents are working, waiting on a human, or done. Spaces-managed terminals provide the workspace and session environment used by this command; outside one, the command exits successfully without reporting an event. Spaces installs hooks for detected Claude Code, Codex, and opencode CLIs automatically on install and on connect, invoking the Spaces CLI by the absolute path resolved at install time, and Settings → Coding Agents manages them per device. See [coding-agent integration](https://usespaces.dev/docs/coding-agents).
+Coding agents emit explicit `spaces agent signal` events from their terminals so the GUI knows which agents are working, waiting on a human, or done. Spaces-managed terminals provide the workspace and session environment used by this command; outside one, the command exits successfully without reporting an event. Spaces sets up these hooks for you: it offers to install them for every detected Claude Code, Codex, and opencode CLI on first launch, and Settings → Coding Agents installs or updates them per device at any time. See [coding-agent integration](https://usespaces.dev/docs/coding-agents).
 
 ## Features
 

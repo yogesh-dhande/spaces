@@ -32,9 +32,9 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
 
     func testAgentHooksStatusResultRoundTripsThroughResponse() throws {
         let payload = SpacesAgentHooksStatusPayload(agents: [
-            AgentHookStatus(kind: .claudeCode, displayName: "Claude Code", available: true, hooksInstalled: true),
-            AgentHookStatus(kind: .codex, displayName: "Codex", available: true, hooksInstalled: false),
-            AgentHookStatus(kind: .opencode, displayName: "opencode", available: false, hooksInstalled: false),
+            AgentHookStatus(kind: .claudeCode, displayName: "Claude Code", available: true, installState: .current),
+            AgentHookStatus(kind: .codex, displayName: "Codex", available: true, installState: .notInstalled),
+            AgentHookStatus(kind: .opencode, displayName: "opencode", available: false, installState: .notInstalled),
         ])
         let response = SpacesDeviceAPIResponse(ok: true, message: "Loaded agent hook status.", result: .agentHooksStatus(payload))
         let decoded = try SpacesDeviceAPICodec.decodeResponse(SpacesDeviceAPICodec.encodeResponse(response))
@@ -47,8 +47,8 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
     func testAgentHooksInstallResultCarriesPerAgentFailuresThroughResponse() throws {
         let outcome = AgentHookInstallOutcome(
             agents: [
-                AgentHookStatus(kind: .claudeCode, displayName: "Claude Code", available: true, hooksInstalled: true),
-                AgentHookStatus(kind: .codex, displayName: "Codex", available: true, hooksInstalled: false),
+                AgentHookStatus(kind: .claudeCode, displayName: "Claude Code", available: true, installState: .current),
+                AgentHookStatus(kind: .codex, displayName: "Codex", available: true, installState: .notInstalled),
             ],
             failures: [AgentHookInstallFailure(kind: .codex, message: "config.toml already defines `features`.")])
         let response = SpacesDeviceAPIResponse(ok: true, message: "Installed agent hooks.", result: .agentHooksInstall(outcome))

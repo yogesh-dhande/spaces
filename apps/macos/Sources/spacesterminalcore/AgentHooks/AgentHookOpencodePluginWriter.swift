@@ -17,9 +17,13 @@ enum AgentHookOpencodePluginWriter {
         try AgentHookConfigFile.write(pluginContents(spacesExecutablePath: spacesExecutablePath), to: pluginURL, fileManager: fileManager)
     }
 
-    static func isInstalled(pluginURL: URL) -> Bool {
-        guard let contents = try? String(contentsOf: pluginURL, encoding: .utf8) else { return false }
-        return contents.contains(AgentHookCommand.marker)
+    /// A whole-file write means the plugin is either absent, or exactly what some Spaces build wrote.
+    /// The header's version marker is what distinguishes this build's plugin from an older one's.
+    static func installState(pluginURL: URL) -> AgentHookInstallState {
+        guard let contents = try? String(contentsOf: pluginURL, encoding: .utf8), contents.contains(AgentHookCommand.marker) else {
+            return .notInstalled
+        }
+        return AgentHookCommand.isCurrent(contents) ? .current : .outdated
     }
 
     /// The plugin source. Uses Bun's `$` shell helper (passed into every opencode plugin) to run the
@@ -29,7 +33,7 @@ enum AgentHookOpencodePluginWriter {
     /// disrupts the agent.
     static func pluginContents(spacesExecutablePath: String) -> String {
         return """
-            // spaces-agent-signal — managed by Spaces (\(AgentHookCommand.marker)). Do not edit; reinstall from Spaces settings.
+            // spaces-agent-signal — managed by Spaces (\(AgentHookCommand.versionedMarker())). Do not edit; reinstall from Spaces settings.
 
             const SPACES_CLI = \(javaScriptStringLiteral(spacesExecutablePath))
 

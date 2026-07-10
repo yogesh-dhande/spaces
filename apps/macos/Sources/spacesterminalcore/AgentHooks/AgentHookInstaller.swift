@@ -12,20 +12,20 @@ public struct AgentHookStatus: Sendable, Equatable, Codable {
     public let displayName: String
     /// The agent executable resolves on this machine.
     public let available: Bool
-    /// Spaces lifecycle hooks are currently present in the agent's config.
-    public let hooksInstalled: Bool
+    /// How completely the agent's config carries the hooks this Spaces build writes.
+    public let installState: AgentHookInstallState
 
-    public init(kind: SupportedCodingAgentHook, displayName: String, available: Bool, hooksInstalled: Bool) {
+    public init(kind: SupportedCodingAgentHook, displayName: String, available: Bool, installState: AgentHookInstallState) {
         self.kind = kind
         self.displayName = displayName
         self.available = available
-        self.hooksInstalled = hooksInstalled
+        self.installState = installState
     }
 }
 
 /// Why hooks could not be installed for one agent. Per-agent rather than per-request: one agent whose
-/// config Spaces refuses to edit must not prevent the others from being installed, and must not make a
-/// successful sibling look unattempted to the caller that records what it has already auto-installed.
+/// config Spaces refuses to edit must not prevent the others from being installed, and the caller must
+/// be able to tell the user which agent failed and why.
 public struct AgentHookInstallFailure: Sendable, Equatable, Codable {
     public let kind: SupportedCodingAgentHook
     public let message: String
@@ -67,8 +67,9 @@ public enum AgentHookInstallerError: Error, LocalizedError, Sendable, Equatable 
 /// the machine it runs on. The daemon (`spacesd`) owns this: the local Mac daemon installs local
 /// hooks, a remote Linux daemon installs remote hooks, using identical code.
 ///
-/// Every install is "ensure desired state," so it is safe to replay on every app launch and remote
-/// (re)connect without duplicating hooks.
+/// Every install is "ensure desired state," so replaying it never duplicates a hook; a reinstall is
+/// also how an agent whose hooks an older Spaces build wrote is brought back to `.current`.
+/// Installs are always user-initiated — from the launch setup step or Settings → Coding Agents.
 public enum AgentHookInstaller {
     typealias ShellPathDirectoryResolver = (URL, [String: String], FileManager) -> [String]
 
@@ -157,7 +158,7 @@ public enum AgentHookInstaller {
         SupportedCodingAgentHook.allCases.map { kind in
             AgentHookStatus(
                 kind: kind, displayName: kind.displayName, available: isAvailable(kind, executableResolver: &executableResolver),
-                hooksInstalled: kind.hooksInstalled(home: home, fileManager: fileManager))
+                installState: kind.installState(home: home, fileManager: fileManager))
         }
     }
 

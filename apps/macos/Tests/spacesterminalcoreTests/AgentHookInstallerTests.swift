@@ -318,7 +318,7 @@ import Testing
         let outcome = try install([.claudeCode], home: home)
 
         #expect(outcome.failures.map(\.kind) == [.claudeCode])
-        #expect(outcome.agents.first { $0.kind == .claudeCode }?.hooksInstalled == false)
+        #expect(outcome.agents.first { $0.kind == .claudeCode }?.installState == .notInstalled)
         #expect(read(settings) == garbage)
     }
 
@@ -509,8 +509,10 @@ import Testing
 
         // Codex's config is untouchable, but that must not cost Claude Code its hooks.
         #expect(outcome.failures.map(\.kind) == [.codex])
-        #expect(outcome.agents.first { $0.kind == .codex }?.hooksInstalled == false)
-        #expect(outcome.agents.first { $0.kind == .claudeCode }?.hooksInstalled == true)
+        // hooks.json was written before the config.toml toggle failed, so the hook entries themselves
+        // are current — only `features.hooks` is still off, which is `.outdated`, not `.notInstalled`.
+        #expect(outcome.agents.first { $0.kind == .codex }?.installState == .outdated)
+        #expect(outcome.agents.first { $0.kind == .claudeCode }?.installState == .current)
         #expect(read(config) == original)
     }
 
@@ -536,13 +538,13 @@ import Testing
         try makeAgentsAvailable([.claudeCode, .opencode], home: home)
 
         let before = status(home: home)
-        #expect(before.allSatisfy { !$0.hooksInstalled })
+        #expect(before.allSatisfy { $0.installState == .notInstalled })
 
         try install([.claudeCode, .opencode], home: home)
         let after = status(home: home)
-        #expect(after.first { $0.kind == .claudeCode }?.hooksInstalled == true)
-        #expect(after.first { $0.kind == .opencode }?.hooksInstalled == true)
-        #expect(after.first { $0.kind == .codex }?.hooksInstalled == false)
+        #expect(after.first { $0.kind == .claudeCode }?.installState == .current)
+        #expect(after.first { $0.kind == .opencode }?.installState == .current)
+        #expect(after.first { $0.kind == .codex }?.installState == .notInstalled)
     }
 
     @Test func configDirectoryPresenceDoesNotCountAsAvailable() throws {
@@ -597,7 +599,7 @@ import Testing
         #expect(shell.invocationCount == 1)
         #expect(outcome.failures.isEmpty)
         #expect(outcome.agents.first { $0.kind == .codex }?.available == true)
-        #expect(outcome.agents.first { $0.kind == .codex }?.hooksInstalled == true)
+        #expect(outcome.agents.first { $0.kind == .codex }?.installState == .current)
     }
 
     /// An undetected agent is reported as a failure and writes nothing, while its detected siblings
@@ -610,7 +612,7 @@ import Testing
         let outcome = try install([.claudeCode, .codex], home: home)
 
         #expect(outcome.failures.map(\.kind) == [.codex])
-        #expect(outcome.agents.first { $0.kind == .claudeCode }?.hooksInstalled == true)
+        #expect(outcome.agents.first { $0.kind == .claudeCode }?.installState == .current)
         #expect(!FileManager.default.fileExists(atPath: home.appendingPathComponent(".codex").path))
     }
 
@@ -634,13 +636,13 @@ import Testing
         try install([.claudeCode], home: home)
 
         let contents = read(home.appendingPathComponent(".claude/settings.json"))
-        #expect(contents.contains("'\(spacesCLIPath(home: home))' agent signal done >/dev/null 2>&1 || true # \(AgentHookCommand.marker)"))
+        #expect(contents.contains("'\(spacesCLIPath(home: home))' agent signal done >/dev/null 2>&1 || true # \(AgentHookCommand.versionedMarker())"))
         #expect(!contents.contains("\"command\" : \"spaces agent signal"))
     }
 
     @Test func hookCommandShellQuotesAPathContainingSpaces() {
         let command = AgentHookCommand.signalCommand(event: .done, spacesExecutablePath: "/Users/a b/bin/spaces")
-        #expect(command == "'/Users/a b/bin/spaces' agent signal done >/dev/null 2>&1 || true # \(AgentHookCommand.marker)")
+        #expect(command == "'/Users/a b/bin/spaces' agent signal done >/dev/null 2>&1 || true # \(AgentHookCommand.versionedMarker())")
         #expect(AgentHookCommand.isSpacesOwned(command))
     }
 

@@ -55,16 +55,26 @@ enum AgentHookJSONWriter {
         try write(root: root, to: fileURL, fileManager: fileManager)
     }
 
-    /// True when every mapped event already has its Spaces-owned entry present.
-    static func isInstalled(fileURL: URL, bindings: [EventBinding], fileManager: FileManager = .default) -> Bool {
-        guard let root = try? loadRootObject(fileURL: fileURL, fileManager: fileManager),
+    /// How completely `fileURL` carries the hooks `bindings` describe.
+    ///
+    /// A file with no Spaces-owned entry at all is `.notInstalled`. Anything partial — a bound event
+    /// with no entry (this build added an event an older one did not write), or an entry carrying an
+    /// older `AgentHookCommand.hookVersion` — is `.outdated`, because reinstalling is what fixes it.
+    static func installState(fileURL: URL, bindings: [EventBinding], fileManager: FileManager = .default) -> AgentHookInstallState {
+        guard !bindings.isEmpty, let root = try? loadRootObject(fileURL: fileURL, fileManager: fileManager),
             let hooks = root["hooks"] as? [String: Any]
-        else { return false }
-        for binding in bindings {
-            let groups = (hooks[binding.eventName] as? [[String: Any]]) ?? []
-            guard groups.contains(where: groupIsSpacesOwned) else { return false }
+        else { return .notInstalled }
+
+        let ownedCommandsPerBinding = bindings.map { binding in
+            ((hooks[binding.eventName] as? [[String: Any]]) ?? [])
+                .flatMap { ($0["hooks"] as? [[String: Any]]) ?? [] }
+                .compactMap { $0["command"] as? String }
+                .filter(AgentHookCommand.isSpacesOwned)
         }
-        return !bindings.isEmpty
+        guard ownedCommandsPerBinding.contains(where: { !$0.isEmpty }) else { return .notInstalled }
+        let everyEventBound = ownedCommandsPerBinding.allSatisfy { !$0.isEmpty }
+        let everyCommandCurrent = ownedCommandsPerBinding.allSatisfy { $0.allSatisfy(AgentHookCommand.isCurrent) }
+        return everyEventBound && everyCommandCurrent ? .current : .outdated
     }
 
     // MARK: - Internals
@@ -86,11 +96,9 @@ enum AgentHookJSONWriter {
         ]
     }
 
-    private static func groupIsSpacesOwned(_ group: [String: Any]) -> Bool {
-        guard let entries = group["hooks"] as? [[String: Any]] else { return false }
-        return entries.contains { ($0["command"] as? String).map(AgentHookCommand.isSpacesOwned) ?? false }
-    }
-
+    /// Drops Spaces-owned entries from `group`, whatever version wrote them. Matching on
+    /// `isSpacesOwned` rather than the current version is what lets a reinstall replace an older
+    /// build's entry instead of appending a second one beside it.
     private static func strippingSpacesOwnedEntries(from group: [String: Any]) -> [String: Any]? {
         guard let entries = group["hooks"] as? [[String: Any]] else { return group }
         let keptEntries = entries.filter { entry in

@@ -88,46 +88,6 @@ import workspacecore
         #expect(AppKitController.shouldShowLocalDaemonCompatibilityBlock(for: error))
     }
 
-    /// Agent-hook auto-install rides this edge. A launch with the daemon offline or wire-incompatible
-    /// must not consume the device's attempt: the retry has to fire when the daemon becomes usable.
-    @Test func daemonBecameUsableFiresOnTheEdgeIntoAHealthyDaemon() {
-        // First snapshot of a healthy daemon is itself an edge.
-        #expect(
-            AppKitController.daemonBecameUsable(
-                previousLoadState: nil, previousCompatibility: nil, loadState: .loaded, compatibility: .compatible))
-
-        // Offline at launch, reachable later.
-        #expect(
-            AppKitController.daemonBecameUsable(
-                previousLoadState: .offline("unreachable"), previousCompatibility: nil, loadState: .loaded, compatibility: .compatible))
-
-        // A daemon restart resolving a compatibility block.
-        #expect(
-            AppKitController.daemonBecameUsable(
-                previousLoadState: .loaded, previousCompatibility: .daemonTooOld, loadState: .loaded, compatibility: .compatible))
-
-        // No handshake read yet is not "unusable"; the daemon answered the overview.
-        #expect(
-            AppKitController.daemonBecameUsable(previousLoadState: nil, previousCompatibility: nil, loadState: .loaded, compatibility: nil))
-    }
-
-    @Test func daemonBecameUsableStaysQuietWithoutAnEdge() {
-        // Steady healthy state: background refreshes must not re-probe on every sidebar reload.
-        #expect(
-            !AppKitController.daemonBecameUsable(
-                previousLoadState: .loaded, previousCompatibility: .compatible, loadState: .loaded, compatibility: .compatible))
-
-        // Still unusable: offline, loading, or wire-incompatible cannot serve `agentHooksStatus`.
-        #expect(
-            !AppKitController.daemonBecameUsable(
-                previousLoadState: .loaded, previousCompatibility: .compatible, loadState: .offline("gone"), compatibility: nil))
-        #expect(
-            !AppKitController.daemonBecameUsable(previousLoadState: nil, previousCompatibility: nil, loadState: .loading, compatibility: nil))
-        #expect(
-            !AppKitController.daemonBecameUsable(
-                previousLoadState: .offline("gone"), previousCompatibility: nil, loadState: .loaded, compatibility: .daemonTooOld))
-    }
-
     @Test func remoteWorkspacePathActionsKeepControlsButUseSSHDependentErrorText() {
         let editorMessage = AppKitController.remoteWorkspacePathActionErrorMessage(action: .openEditor, deviceName: "Build Host")
         let revealMessage = AppKitController.remoteWorkspacePathActionErrorMessage(action: .revealInFinder, deviceName: "Build Host")

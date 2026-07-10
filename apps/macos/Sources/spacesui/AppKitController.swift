@@ -313,7 +313,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     // module-internal rather than private.
     weak var visibleWorkspacePortsSection: PortsSection?
     var visiblePortsWorkspaceID: String?
-    var chromeAutomationSetupController: ChromeAutomationSetupController?
+    var setupFlowController: SetupFlowController?
     private var activeWindowShortcutProfile: WindowShortcutProfile?
     private let startupProfileStartTime = startupProfileBaselineUptime
     private var didLogFirstStartupInteraction = false
@@ -498,7 +498,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 guard let self else { return }
                 self.buildShellWindow()
                 self.logStartupProfile("shell_window_ready")
-                self.startWorkspaceUIAfterPermissionCheck()
+                self.enterSetupFlow()
                 self.ensureMainWindowVisibleOnLaunch()
             }
         }
@@ -2038,25 +2038,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// device that fails to load; otherwise the device is loaded. Keeping this pure makes the
     /// parity-with-remote contract directly testable.
     nonisolated static func localDeviceLoadState(offlineMessage: String?) -> SidebarDeviceLoadState { offlineMessage.map { .offline($0) } ?? .loaded }
-
-    /// Whether a device that could not serve daemon requests can now, so one-shot connect work
-    /// (agent-hook auto-install) runs on the edge into a usable daemon rather than only at app launch.
-    /// A daemon that is offline, still loading, or wire-incompatible cannot answer `agentHooksStatus`;
-    /// the first snapshot (`previous == nil`) that finds it usable is itself an edge.
-    nonisolated static func daemonBecameUsable(
-        previousLoadState: SidebarDeviceLoadState?, previousCompatibility: SpacesWireCompatibility?, loadState: SidebarDeviceLoadState,
-        compatibility: SpacesWireCompatibility?
-    ) -> Bool {
-        guard daemonIsUsable(loadState: loadState, compatibility: compatibility) else { return false }
-        guard let previousLoadState else { return true }
-        return !daemonIsUsable(loadState: previousLoadState, compatibility: previousCompatibility)
-    }
-
-    /// A nil verdict means no handshake has been read yet, which does not by itself make the daemon
-    /// unusable; only an explicit incompatible verdict does.
-    private nonisolated static func daemonIsUsable(loadState: SidebarDeviceLoadState, compatibility: SpacesWireCompatibility?) -> Bool {
-        loadState == .loaded && (compatibility?.isCompatible ?? true)
-    }
 
     /// One paired device's slice of the sidebar. The sidebar shows every paired
     /// device at once; each section loads independently so a slow or unreachable
@@ -3699,10 +3680,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         sidebar.sidebarThemeColor(light: light, dark: dark, alpha: alpha)
     }
 
-    /// Agent-hook auto-install is not started here: a launch-time attempt would run before the local
-    /// daemon is known reachable and would consume its only pass. Each device triggers it when its own
-    /// daemon becomes usable — the local device on its first healthy sidebar load, a remote when its
-    /// overview stream connects.
     func startBackgroundServicesIfNeeded() {
         guard !didStartBackgroundServices else { return }
         didStartBackgroundServices = true
@@ -3755,21 +3732,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
-    /// Decides at launch whether to show the blocking Chrome Automation permission screen or open
-    /// straight to the workspace UI.
-    private func startWorkspaceUIAfterPermissionCheck() {
-        if Self.requiresChromeAutomationSetup(ChromeAutomationPermission.status()) {
-            enterChromeAutomationSetupFlow()
-        } else {
-            presentMainWorkspaceUI()
-        }
-    }
-
     /// Builds the main split-view content and kicks off the initial sidebar load. Shared by the
-    /// normal launch path and the Chrome Automation setup screen's completion handler.
+    /// normal launch path and the setup flow's completion handler.
     private func presentMainWorkspaceUI() {
-        chromeAutomationSetupController?.stop()
-        chromeAutomationSetupController = nil
+        setupFlowController?.stop()
+        setupFlowController = nil
         buildMainWindowContent()
         logStartupProfile("main_content_ready")
         showLoadingPlaceholder(message: "Loading projects and workspaces...", detail: "Spaces is preparing your workspace data.")
@@ -3777,28 +3744,29 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         Task { @MainActor [weak self] in await self?.sidebar.loadInitialSidebarData() }
     }
 
-    /// Presents the blocking permission screen and advances to the workspace UI once the user
-    /// grants Chrome Automation. The controller polls so granting via System Settings (where macOS
-    /// no longer offers an in-app prompt after a denial) advances the app without a restart.
-    private func enterChromeAutomationSetupFlow() {
-        logStartupProfile("chrome_automation_setup_started")
-        chromeAutomationSetupController?.stop()
-        let controller = ChromeAutomationSetupController()
-        chromeAutomationSetupController = controller
-        // Capture `controller` weakly: it owns `onGranted`, so a strong capture would retain the
+    /// Presents the launch setup flow and advances to the workspace UI once its pending steps are
+    /// done. The flow decides internally which steps are pending; when none are, it completes
+    /// immediately and the user never sees it.
+    private func enterSetupFlow() {
+        logStartupProfile("setup_flow_started")
+        setupFlowController?.stop()
+        let controller = SetupFlowController(host: self, database: try? clientDatabase())
+        setupFlowController = controller
+        // Capture `controller` weakly: it owns `onComplete`, so a strong capture would retain the
         // controller (and its view hierarchy) past the point where `presentMainWorkspaceUI` clears
-        // `chromeAutomationSetupController`, leaking a setup controller each time the flow is shown.
-        controller.onGranted = { [weak self, weak controller] in
-            guard let self, let controller, self.chromeAutomationSetupController === controller else { return }
-            self.logStartupProfile("chrome_automation_setup_complete")
+        // `setupFlowController`, leaking a setup controller each time the flow is shown.
+        controller.onComplete = { [weak self, weak controller] in
+            guard let self, let controller, self.setupFlowController === controller else { return }
+            self.logStartupProfile("setup_flow_complete")
             self.presentMainWorkspaceUI()
         }
         window.contentView = controller.begin()
     }
 
-    /// The app has no prerequisite/onboarding flow: background-refresh failures are always
-    /// logged rather than routed to a setup screen. Retained so call sites that previously
-    /// short-circuited on a deferred-setup requirement keep a single, explicit no-op.
+    /// Background-refresh failures are always logged rather than routed to the launch setup flow,
+    /// which runs once before the workspace UI opens and never reopens over it. Retained so call
+    /// sites that previously short-circuited on a deferred-setup requirement keep a single,
+    /// explicit no-op.
     func handleDeferredSetupRequirementIfNeeded(_ error: Error) -> Bool {
         _ = error
         return false
@@ -6818,54 +6786,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     func macPairedDevices() -> [SpacesPairedDeviceRecord] {
         guard let database = try? clientDatabase() else { return [] }
         return ((try? database.pairedDevices()) ?? []).filter { $0.id != SpacesPairedDeviceRecord.localDeviceID }
-    }
-
-    /// Devices whose agent-hook auto-install is currently running. This de-dupes overlapping triggers
-    /// for the same device, while completed probes are removed so later reconnects can discover coding
-    /// agents installed after app launch. Per-agent "already handled" markers live in the client DB and
-    /// prevent repeated installs.
-    private var agentHooksAutoInstallInFlightDeviceIDs: Set<String> = []
-
-    /// Auto-installs Spaces coding-agent hooks on the local device.
-    func autoInstallLocalAgentHooks() {
-        guard let database = try? clientDatabase(), let local = try? database.pairedDevice(id: SpacesPairedDeviceRecord.localDeviceID) else { return }
-        autoInstallAgentHooks(for: local)
-    }
-
-    /// Auto-installs Spaces coding-agent hooks on `device`, unless a probe for it is already running.
-    ///
-    /// Called on the edge into a usable daemon — the local one on its first healthy sidebar load, a
-    /// remote when it is paired or its overview stream connects. Only that device is probed: a trigger
-    /// for one device says nothing about whether the others are reachable, and probing them anyway
-    /// would spend a request timeout apiece on every offline remote, on every edge. Safe to call
-    /// repeatedly; the once-per-(device, agent) decision and the idempotent install live in
-    /// `AgentHooksAutoInstaller`.
-    func autoInstallAgentHooks(for device: SpacesPairedDeviceRecord) {
-        guard agentHooksAutoInstallInFlightDeviceIDs.insert(device.id).inserted else { return }
-        let profile = try? SpacesProfile.current()
-        Task.detached(priority: .utility) { [weak self] in
-            if let database = try? SpacesClientDatabase.defaultDatabase() {
-                do {
-                    let result = try AgentHooksAutoInstaller.run(device: device, database: database, profile: profile)
-                    if !result.installed.isEmpty {
-                        NSLog("Spaces: auto-installed agent hooks on \(device.id): \(result.installed.map(\.rawValue).joined(separator: ", "))")
-                    }
-                    // Also recorded per (device, agent) so Settings → Coding Agents can explain the row.
-                    // The agent stays unrecorded, so the next connect retries it.
-                    for failure in result.failures {
-                        NSLog("Spaces: agent hook install failed on \(device.id) for \(failure.kind.rawValue): \(failure.message)")
-                    }
-                } catch {
-                    NSLog("Spaces: agent hook auto-install deferred for \(device.id): \(error.localizedDescription)")
-                }
-            }
-            await self?.markAgentHooksDeviceProbeFinished(device.id)
-        }
-    }
-
-    /// Clears a device's in-flight probe mark so a later reconnect re-checks newly available agents.
-    private func markAgentHooksDeviceProbeFinished(_ deviceID: String) {
-        agentHooksAutoInstallInFlightDeviceIDs.remove(deviceID)
     }
 
     @objc func showSettings() { settings.openSettings(section: .general) }

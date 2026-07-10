@@ -39,20 +39,9 @@ import workspacecore
     private weak var mcpConfigTextView: NSTextView?
     private weak var mcpConfigHintLabel: NSTextField?
 
-    /// Coding Agents section state. The selected device (This Mac or a paired remote) whose agents
-    /// are shown, the container the per-agent rows render into, and the last fetched status.
-    var codingAgentsDeviceID: String = SpacesPairedDeviceRecord.localDeviceID
-    weak var codingAgentsRowsContainer: NSStackView?
-    var codingAgentsStatus: [AgentHookStatus] = []
-    /// The last recorded install failure per agent on the selected device, so a row that Spaces tried
-    /// and failed to fix explains itself instead of only reporting "hooks not installed".
-    var codingAgentsFailures: [SupportedCodingAgentHook: String] = [:]
-    /// Increments per reload so a stale in-flight fetch's result is discarded when the user switches devices.
-    var codingAgentsReloadToken: Int = 0
-    /// Increments per install so a stale completion cannot update rows for a different selected device.
-    var codingAgentsInstallToken: Int = 0
-    /// Non-nil while a manual Install/Reinstall request is in flight.
-    var codingAgentsInstallingKind: SupportedCodingAgentHook?
+    /// The Coding Agents section, shared with the launch setup flow's coding-agents step. Lazy so its
+    /// first status fetch happens when the user opens the section, not when Settings is constructed.
+    lazy var codingAgents = CodingAgentsView(host: host)
 
     /// Opens user settings as a floating dialog on the given section. The dialog floats over the
     /// main window, so the current sidebar selection and detail pane are left untouched.
