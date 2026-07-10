@@ -396,7 +396,8 @@ Every terminal runs in the built-in terminal, never an external terminal app. A 
 #### Coding-Agents Setup Step
 - When a coding agent is detected on This Mac whose hooks are missing or out of date, launch offers a skippable coding-agents setup step after the Chrome Automation step. It shows the same agent rows as Settings, so hooks can be installed for This Mac or any paired device from the step itself.
 - The step offers Skip and Continue. Both dismiss it, and Continue reads Done once every detected agent on This Mac carries current hooks.
-- Dismissing the step is remembered against the hook version it was dismissed for. A user who skips is not asked again until a Spaces release changes the hooks it wants to write, at which point the step is offered once more.
+- Dismissing the step is remembered against the hook version it was dismissed for. A user who skips is not asked again until a Spaces release changes the hooks it wants to write, at which point the step is offered once more. A dismissal covers that hook version, not the agents installed when it was made: installing another agent afterwards does not re-offer the step, and its hooks stay available from Settings.
+- Only Skip and Continue dismiss the step. A launch that finds nothing to install — no coding agent detected on This Mac, or every detected agent already carrying current hooks — records nothing, so a user who installs a coding agent later is still offered the step on the next launch.
 - The decision to show the step reads This Mac only, so launch never waits on a paired remote that is asleep or unreachable.
 - When the local daemon cannot report agent status, the step is skipped for that launch and is not recorded as dismissed, so it is offered again once the daemon answers. Launch never blocks waiting for it.
 

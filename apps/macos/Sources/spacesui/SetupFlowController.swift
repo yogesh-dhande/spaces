@@ -52,9 +52,12 @@ import systembridge
 
     // MARK: - Pure decisions
 
-    /// Whether launch should even ask the daemon for agent status. Once the user has dismissed the step
-    /// for the hook version this build writes, there is nothing a probe could change — so the steady
-    /// state costs no daemon round trip at all.
+    /// Whether launch should even ask the daemon for agent status. A dismissal is the only thing that
+    /// can suppress the probe, because it is the only thing a probe could not overturn: the user has
+    /// said no for this hook version. Every other launch must ask, since the answer is exactly what
+    /// this cannot know locally — whether the user has since installed a coding agent whose hooks are
+    /// missing. Suppressing the probe on "nothing to install right now" would freeze that answer
+    /// forever and silently retire the step for a user who installs Claude or Codex tomorrow.
     static func shouldProbeLocalAgents(dismissedHookVersion: Int?, currentHookVersion: Int) -> Bool {
         dismissedHookVersion != currentHookVersion
     }
@@ -62,8 +65,7 @@ import systembridge
     /// Whether the coding-agents step should be shown.
     ///
     /// `localAgents == nil` means the local daemon did not answer. Omit the step rather than nag about
-    /// agents Spaces could not see — and, crucially, the caller must not record a dismissal in that
-    /// case, or an unreachable daemon at first launch would suppress the step forever.
+    /// agents Spaces could not see.
     ///
     /// The decision reads This Mac only. A paired remote may be asleep or unreachable, and blocking
     /// launch on its round trip would hang the app; the step's device picker still installs on remotes.
@@ -142,10 +144,10 @@ import systembridge
             let localAgents = await localAgentStatusWithinTimeout()
             guard Self.requiresCodingAgentsSetup(localAgents: localAgents, dismissedHookVersion: dismissedHookVersion(), currentHookVersion: currentVersion)
             else {
-                // Every detected agent is already current: nothing to ask, and nothing will change until
-                // the hook version moves, so record the dismissal. When the daemon never answered
-                // (`localAgents == nil`) leave it unrecorded so the next launch asks again.
-                if localAgents != nil { recordDismissedHookVersion() }
+                // Nothing to install right now — either no detected agent needs hooks, or the daemon
+                // never answered. Do not record a dismissal: the user has not seen the step, and
+                // "nothing to do today" is not "never ask again". Recording one here would retire the
+                // step for good the moment it first ran on a machine with no coding agent installed.
                 finish()
                 return
             }
@@ -280,6 +282,10 @@ import systembridge
         return Int(stored)
     }
 
+    /// Records that the user saw the step and decided. Called only from `dismissCodingAgentsStep`, the
+    /// Skip/Continue action: the marker means "the user said no to this hook version", never "Spaces
+    /// found nothing to install", and writing it from anywhere else would suppress a step the user was
+    /// never offered.
     private func recordDismissedHookVersion() {
         try? database?.setSetting(key: ClientSettingsKey.agentHooksSetupDismissedVersion, value: String(AgentHookCommand.hookVersion))
     }

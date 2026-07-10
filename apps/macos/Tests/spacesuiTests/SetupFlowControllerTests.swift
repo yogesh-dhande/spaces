@@ -53,12 +53,33 @@ import Testing
         #expect(!requires(nil, dismissed: currentVersion - 1))
     }
 
-    /// The steady state — already dismissed for this hook version — must cost no daemon round trip at
-    /// all, because no answer it returned could change the outcome.
+    /// Only a dismissal skips the probe, because it is the only answer a probe could not overturn.
     @Test func theProbeIsSkippedOnceDismissedForThisHookVersion() {
         #expect(!SetupFlowController.shouldProbeLocalAgents(dismissedHookVersion: currentVersion, currentHookVersion: currentVersion))
         #expect(SetupFlowController.shouldProbeLocalAgents(dismissedHookVersion: currentVersion - 1, currentHookVersion: currentVersion))
         #expect(SetupFlowController.shouldProbeLocalAgents(dismissedHookVersion: nil, currentHookVersion: currentVersion))
+    }
+
+    /// "Nothing to install today" must never harden into "never ask again". A launch that finds no
+    /// actionable agent leaves the gate open — it records no dismissal — so a user who installs a
+    /// coding agent afterwards is still offered the step. Whether the machine had no agent at all or
+    /// only agents already carrying current hooks, the next launch must still probe and still offer.
+    @Test func aLaunchWithNothingToInstallStillOffersTheStepAfterAnAgentArrives() {
+        for quietLaunch in [[], [agent(.claudeCode, available: true, installState: .current)]] {
+            #expect(SetupFlowController.shouldProbeLocalAgents(dismissedHookVersion: nil, currentHookVersion: currentVersion))
+            #expect(!requires(quietLaunch, dismissed: nil))
+        }
+
+        // The user has since installed Codex. Nothing was ever dismissed, so the step is offered.
+        #expect(SetupFlowController.shouldProbeLocalAgents(dismissedHookVersion: nil, currentHookVersion: currentVersion))
+        #expect(requires([agent(.codex, available: true, installState: .notInstalled)], dismissed: nil))
+    }
+
+    /// Skip means skip. A dismissal covers the hook version, not the set of agents installed when it
+    /// was made, so an agent installed afterwards does not reopen the step — Settings still offers it.
+    @Test func aDismissalIsNotReopenedByANewlyInstalledAgent() {
+        #expect(!SetupFlowController.shouldProbeLocalAgents(dismissedHookVersion: currentVersion, currentHookVersion: currentVersion))
+        #expect(!requires([agent(.codex, available: true, installState: .notInstalled)], dismissed: currentVersion))
     }
 
     // MARK: - Local summary
