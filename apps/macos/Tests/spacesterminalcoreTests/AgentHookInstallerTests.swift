@@ -397,6 +397,55 @@ import Testing
         #expect(updated?.contains("[features]\nhooks = true") == true)
     }
 
+    // MARK: - CRLF configs
+    //
+    // TOML accepts `\r\n` as a newline, so a config synced from a Windows checkout parses fine for
+    // Codex and must parse the same way here. Reading these line-by-line on `\n` alone would leave a
+    // trailing `\r` that hides `[features]` from the header match and turns `true` into a value that
+    // is neither `true` nor `false` — appending a second `[features]` table and handing Codex a
+    // config it can no longer read.
+
+    @Test func codexFeatureToggleLeavesEnabledCRLFSectionUntouched() throws {
+        #expect(try AgentHookCodexFeatureToggle.updatedContents("[features]\r\nhooks = true\r\n") == nil)
+        #expect(try AgentHookCodexFeatureToggle.updatedContents("model = \"gpt-5\"\r\nfeatures = { hooks = true }\r\n") == nil)
+        #expect(try AgentHookCodexFeatureToggle.updatedContents("model = \"gpt-5\"\r\nfeatures.hooks = true\r\n") == nil)
+    }
+
+    @Test func codexFeatureToggleEnablesHooksInExistingCRLFSection() throws {
+        let updated = try #require(try AgentHookCodexFeatureToggle.updatedContents("[features]\r\njs_repl = true\r\n"))
+
+        #expect(updated == "[features]\r\nhooks = true\r\njs_repl = true\r\n")
+        // The existing table is extended, never duplicated.
+        #expect(updated.components(separatedBy: "[features]").count == 2)
+    }
+
+    @Test func codexFeatureToggleFlipsFalseToTrueInCRLFConfig() throws {
+        #expect(try AgentHookCodexFeatureToggle.updatedContents("[features]\r\nhooks = false\r\n") == "[features]\r\nhooks = true\r\n")
+        #expect(
+            try AgentHookCodexFeatureToggle.updatedContents("model = \"gpt-5\"\r\nfeatures.hooks = false\r\n")
+                == "model = \"gpt-5\"\r\nfeatures.hooks = true\r\n")
+        #expect(
+            try AgentHookCodexFeatureToggle.updatedContents("model = \"gpt-5\"\r\nfeatures = { js_repl = false }\r\n")
+                == "model = \"gpt-5\"\r\nfeatures = { hooks = true, js_repl = false }\r\n")
+    }
+
+    /// An appended table keeps the newline the config already uses, so the file does not end up with
+    /// one LF-terminated stanza among CRLF lines.
+    @Test func codexFeatureToggleAppendsCRLFSectionToCRLFConfig() throws {
+        let updated = try #require(try AgentHookCodexFeatureToggle.updatedContents("model = \"gpt-5\"\r\n"))
+
+        #expect(updated == "model = \"gpt-5\"\r\n\r\n[features]\r\nhooks = true\r\n")
+        // Swift reads "\r\n" as a single Character, so a CRLF-only string contains no "\n" at all.
+        // A bare LF appended among CRLF lines would show up here.
+        #expect(!updated.contains("\n"))
+    }
+
+    @Test func codexFeatureToggleReportsNonBooleanHooksInCRLFConfig() throws {
+        #expect(throws: AgentHookCodexFeatureToggle.ConflictingFeaturesDefinitionError.self) {
+            try AgentHookCodexFeatureToggle.updatedContents("[features]\r\nhooks = \"yes\"\r\n")
+        }
+    }
+
     @Test func codexFeatureToggleFlipsFalseToTrueWithoutTouchingOtherSections() throws {
         let updated = try AgentHookCodexFeatureToggle.updatedContents("[features]\nhooks = false\njs_repl = true\n\n[agents]\nmax_depth = 2\n")
         #expect(updated?.contains("hooks = true") == true)

@@ -76,7 +76,8 @@ enum AgentHookCodexFeatureToggle {
     static func updatedContents(_ original: String) throws -> String? {
         if featuresSectionHasHooksTrue(original) { return nil }
 
-        var lines = original.components(separatedBy: "\n")
+        var lines = splitLines(original)
+        let newline = lineTerminator(of: original)
         if let sectionIndex = lines.firstIndex(where: isFeaturesSectionHeader) {
             // Find the extent of the [features] table (up to the next table header or EOF).
             let sectionEnd = lines[(sectionIndex + 1)...].firstIndex(where: isAnySectionHeader) ?? lines.count
@@ -85,7 +86,7 @@ enum AgentHookCodexFeatureToggle {
             } else {
                 lines.insert("\(hooksKey) = true", at: sectionIndex + 1)
             }
-            return lines.joined(separator: "\n")
+            return lines.joined(separator: newline)
         }
 
         let topLevelEnd = lines.firstIndex(where: isAnySectionHeader) ?? lines.count
@@ -93,7 +94,7 @@ enum AgentHookCodexFeatureToggle {
             switch inlineFeaturesTable(for: lines[inlineIndex]) {
             case .updated(let line):
                 lines[inlineIndex] = line
-                return lines.joined(separator: "\n")
+                return lines.joined(separator: newline)
             case .nonBooleanHooks:
                 throw ConflictingFeaturesDefinitionError(existingDefinition: nonBooleanHooksDefinition)
             case .hooksAlreadyTrue, .none:
@@ -102,11 +103,11 @@ enum AgentHookCodexFeatureToggle {
         }
         if let dottedHooksIndex = lines[..<topLevelEnd].firstIndex(where: { dottedFeaturesHooksAssignment(for: $0) != nil }) {
             lines[dottedHooksIndex] = try flippedDottedHooksLine(lines[dottedHooksIndex])
-            return lines.joined(separator: "\n")
+            return lines.joined(separator: newline)
         }
         if let dottedFeaturesIndex = lines[..<topLevelEnd].lastIndex(where: isDottedFeaturesAssignment) {
             lines.insert("\(sectionName).\(hooksKey) = true", at: dottedFeaturesIndex + 1)
-            return lines.joined(separator: "\n")
+            return lines.joined(separator: newline)
         }
 
         if let existingDefinition = conflictingFeaturesDefinition(lines) {
@@ -114,10 +115,11 @@ enum AgentHookCodexFeatureToggle {
         }
 
         // No [features] table in any spelling: append one. Keep exactly one blank separator line before it.
+        // `removeLast()` drops a whole terminator: Swift reads "\r\n" as one Character.
         var prefix = original
-        while prefix.hasSuffix("\n") { prefix.removeLast() }
-        let separator = prefix.isEmpty ? "" : "\n\n"
-        return prefix + separator + "[\(sectionName)]\n\(hooksKey) = true\n"
+        while prefix.hasSuffix(newline) { prefix.removeLast() }
+        let separator = prefix.isEmpty ? "" : newline + newline
+        return prefix + separator + "[\(sectionName)]" + newline + "\(hooksKey) = true" + newline
     }
 
     /// Text for the "`features.hooks` is not a boolean" conflict, shared by the section, inline-table,
@@ -142,7 +144,7 @@ enum AgentHookCodexFeatureToggle {
     }
 
     private static func featuresSectionHasHooksTrue(_ contents: String) -> Bool {
-        let lines = contents.components(separatedBy: "\n")
+        let lines = splitLines(contents)
         if let sectionIndex = lines.firstIndex(where: isFeaturesSectionHeader) {
             let sectionEnd = lines[(sectionIndex + 1)...].firstIndex(where: isAnySectionHeader) ?? lines.count
             if lines[(sectionIndex + 1)..<sectionEnd].contains(where: { isAlreadyTrue(hooksAssignment(for: $0)) }) { return true }
@@ -189,6 +191,23 @@ enum AgentHookCodexFeatureToggle {
         }
         return (result, "")
     }
+
+    /// Splits TOML into lines on either newline TOML allows, `\n` or `\r\n`, leaving no terminator
+    /// behind.
+    ///
+    /// Every parsing helper below reads a line as bare code, so a stray `\r` would defeat all of them
+    /// at once: `[features]` would not end in `]` and so would not match a table header, and `true`
+    /// would read as neither `true` nor `false`. A CRLF config — one synced from a Windows checkout,
+    /// which Codex itself parses fine — would then have a second `[features]` table appended beside the
+    /// one already there, producing a duplicate-table error the next time Codex read its own config.
+    /// Normalizing here keeps that concern in one place instead of in every helper.
+    private static func splitLines(_ contents: String) -> [String] {
+        contents.components(separatedBy: "\r\n").flatMap { $0.components(separatedBy: "\n") }
+    }
+
+    /// The newline an edit rejoins with: the one the config already uses, so writing back does not
+    /// convert the user's line endings or leave an LF-terminated stanza among CRLF lines.
+    private static func lineTerminator(of contents: String) -> String { contents.contains("\r\n") ? "\r\n" : "\n" }
 
     private static func trimmed(_ line: String) -> String { line.trimmingCharacters(in: .whitespaces) }
 
