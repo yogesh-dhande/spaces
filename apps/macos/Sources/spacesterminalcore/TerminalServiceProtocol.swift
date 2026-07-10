@@ -456,12 +456,12 @@ public struct TerminalServiceTerminalLinkMetadata: Codable, Sendable, Equatable,
     public let originalLink: String
     public let displayName: String
     public let contentType: String?
-    public let mediaKind: String?
+    public let artifactKind: String?
     public let byteCount: Int64?
     public let externalURL: String?
 
     public init(
-        id: String, source: String, originalLink: String, displayName: String, contentType: String?, mediaKind: String?, byteCount: Int64?,
+        id: String, source: String, originalLink: String, displayName: String, contentType: String?, artifactKind: String?, byteCount: Int64?,
         externalURL: String?
     ) {
         self.id = id
@@ -469,7 +469,7 @@ public struct TerminalServiceTerminalLinkMetadata: Codable, Sendable, Equatable,
         self.originalLink = originalLink
         self.displayName = displayName
         self.contentType = contentType
-        self.mediaKind = mediaKind
+        self.artifactKind = artifactKind
         self.byteCount = byteCount
         self.externalURL = externalURL
     }

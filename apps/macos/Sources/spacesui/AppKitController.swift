@@ -1815,6 +1815,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                         appearance, sessionID: sessionID, clientID: remoteClientStore.current(), lastAppliedAppearance: appearanceStore.current(),
                         requestSender: requestSender, applyState: applyControlState))
             }
+            // The mirror view's link handler is captured when the pane is built, but the coordinator that
+            // routes clicks needs the pane's view for its banner and so can only be built afterward. The
+            // handler box bridges that ordering: the session-host provider reads it lazily on the first
+            // link click, long after the coordinator has been attached below.
+            let linkOpenBox = TerminalLinkOpenHandlerBox()
             let pane = TerminalSessionPaneViewController(
                 sessionID: sessionID, paths: paths, stateProvider: stateModel, preferredAttachmentMode: .owner, performInitialRefresh: false,
                 sendInputAction: sendInputAction, sendKeyAction: sendKeyAction, pasteImageAction: pasteImageAction, takeoverAction: takeoverAction,
@@ -1823,11 +1828,21 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 sessionHostProvider: { launchConfiguration, paths in
                     Self.terminalSessionHost(
                         launchConfiguration: launchConfiguration, paths: paths, terminalServiceRequestSender: requestSender,
-                        stateStreamSubscriber: stateModel.makeHostStateStreamSubscriber(), agentSignalHandler: agentSignalHandler)
+                        stateStreamSubscriber: stateModel.makeHostStateStreamSubscriber(), agentSignalHandler: agentSignalHandler,
+                        linkOpenHandler: { [linkOpenBox] rawLink in linkOpenBox.open(rawLink) })
                 })
+            let linkOpenCoordinator = TerminalLinkOpenCoordinator(
+                sessionID: sessionID, deviceID: resolvedDeviceID, isLocalDevice: resolvedDeviceID == SpacesPairedDeviceRecord.localDeviceID,
+                workingDirectoryProvider: { [weak stateModel] in
+                    let payload = stateModel?.latestRemoteStatePayload
+                    if let workingDirectory = payload?.workingDirectory, !workingDirectory.isEmpty { return workingDirectory }
+                    return stateModel?.currentLaunchConfiguration?.workingDirectory ?? request.workingDirectory
+                },
+                requestSender: requestSender, banner: TerminalLinkActivityBanner(hostView: pane.view))
+            linkOpenBox.coordinator = linkOpenCoordinator
             return TerminalPaneContentController(
                 descriptor: .terminalSession(deviceID: resolvedDeviceID, sessionID: sessionID), workspaceID: request.workspaceID,
-                sessionID: sessionID, pane: pane, setAppearanceAction: setAppearanceAction)
+                sessionID: sessionID, pane: pane, setAppearanceAction: setAppearanceAction, linkOpenCoordinator: linkOpenCoordinator)
         } catch {
             showError(error)
             return nil
@@ -2303,11 +2318,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     @MainActor static func terminalSessionHost(
         launchConfiguration: TerminalSessionLaunchConfiguration, paths: TerminalSessionPaths,
         terminalServiceRequestSender: RemoteGhosttyTerminalServiceRequestSender? = nil,
-        stateStreamSubscriber: RemoteGhosttyStateStreamSubscriber? = nil, agentSignalHandler: RemoteGhosttyAgentSignalHandler? = nil
+        stateStreamSubscriber: RemoteGhosttyStateStreamSubscriber? = nil, agentSignalHandler: RemoteGhosttyAgentSignalHandler? = nil,
+        linkOpenHandler: (@MainActor (String) -> Void)? = nil
     ) -> any TerminalGhosttySessionHosting {
         RemoteGhosttySessionHost(
             launchConfiguration: launchConfiguration, paths: paths, terminalServiceRequestSender: terminalServiceRequestSender,
-            stateStreamSubscriber: stateStreamSubscriber, agentSignalHandler: agentSignalHandler)
+            stateStreamSubscriber: stateStreamSubscriber, agentSignalHandler: agentSignalHandler, linkOpenHandler: linkOpenHandler)
     }
 
     nonisolated static func launchServiceBuiltInTerminalSession(_ launchConfiguration: TerminalSessionLaunchConfiguration) throws

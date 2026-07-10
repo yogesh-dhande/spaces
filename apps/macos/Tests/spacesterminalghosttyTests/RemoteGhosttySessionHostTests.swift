@@ -517,6 +517,29 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         XCTAssertNil(mirrorView.debugHoveredLink)
     }
 
+    @MainActor func testMirrorTerminalViewOnOpenLinkTakesPrecedenceOverLegacyOpener() {
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "remote-on-open-link", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: nil,
+            createdAt: "2026-06-08T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+        let mirrorView = GhosttyMirrorTerminalView(launchConfiguration: launchConfiguration)
+        var routedLinks: [String] = []
+        var legacyOpens = 0
+        // When `onOpenLink` is set it fully replaces the legacy local-only opener path, so the
+        // per-pane coordinator can route web/loopback/remote-file clicks. The legacy
+        // `debugOpenURLHandler` seam must not fire.
+        mirrorView.onOpenLink = { routedLinks.append($0) }
+        mirrorView.debugOpenURLHandler = { _ in
+            legacyOpens += 1
+            return true
+        }
+
+        mirrorView.applyActionEvent(.openURL(kind: .unknown, value: "https://example.com/report"))
+        mirrorView.applyActionEvent(.openURL(kind: .unknown, value: "/tmp/screenshot.png"))
+
+        XCTAssertEqual(routedLinks, ["https://example.com/report", "/tmp/screenshot.png"])
+        XCTAssertEqual(legacyOpens, 0)
+    }
+
     @MainActor func testRemoteMirrorWindowKeyHandoffRestoresFirstResponderAndSendsEnter() throws {
         let launchConfiguration = TerminalSessionLaunchConfiguration(
             sessionID: "remote-key-handoff", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: nil,

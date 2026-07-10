@@ -1,0 +1,125 @@
+/* Compact, native-feeling styling for rendered terminal Markdown artifacts.
+   Backgrounds stay transparent so the WKWebView shows through to the system
+   background, and colors follow prefers-color-scheme so light and dark both
+   read like the rest of the app. */
+
+:root {
+  color-scheme: light dark;
+  --md-fg: #1a1c1e;
+  --md-muted: #5b6469;
+  --md-border: rgba(0, 0, 0, 0.14);
+  --md-code-bg: rgba(0, 0, 0, 0.06);
+  --md-quote-border: rgba(0, 0, 0, 0.18);
+  --md-link: #0f7a76;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --md-fg: #eaefee;
+    --md-muted: #9aa7ab;
+    --md-border: rgba(255, 255, 255, 0.16);
+    --md-code-bg: rgba(255, 255, 255, 0.08);
+    --md-quote-border: rgba(255, 255, 255, 0.22);
+    --md-link: #59dbcd;
+  }
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: transparent;
+}
+
+body {
+  -webkit-text-size-adjust: 100%;
+  font: -apple-system-body;
+  font-family: -apple-system, "SF Pro Text", system-ui, sans-serif;
+  color: var(--md-fg);
+  line-height: 1.5;
+  word-wrap: break-word;
+}
+
+.markdown-body {
+  max-width: 44rem;
+  margin: 0 auto;
+  padding: 16px 18px calc(16px + env(safe-area-inset-bottom));
+}
+
+.markdown-body > :first-child { margin-top: 0; }
+.markdown-body > :last-child { margin-bottom: 0; }
+
+h1, h2, h3, h4, h5, h6 {
+  line-height: 1.25;
+  margin: 1.4em 0 0.5em;
+  font-weight: 600;
+}
+h1 { font-size: 1.6em; }
+h2 { font-size: 1.35em; padding-bottom: 0.2em; border-bottom: 1px solid var(--md-border); }
+h3 { font-size: 1.15em; }
+h4 { font-size: 1em; }
+h5, h6 { font-size: 0.9em; color: var(--md-muted); }
+
+p, ul, ol, blockquote, table, pre { margin: 0 0 0.9em; }
+
+ul, ol { padding-left: 1.5em; }
+li + li { margin-top: 0.2em; }
+
+a { color: var(--md-link); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+code, pre {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 0.88em;
+}
+
+code {
+  background: var(--md-code-bg);
+  padding: 0.15em 0.35em;
+  border-radius: 4px;
+}
+
+pre {
+  background: var(--md-code-bg);
+  padding: 12px 14px;
+  border-radius: 8px;
+  overflow-x: auto;
+}
+pre code {
+  background: transparent;
+  padding: 0;
+  border-radius: 0;
+}
+
+blockquote {
+  margin-left: 0;
+  padding: 0.1em 1em;
+  color: var(--md-muted);
+  border-left: 3px solid var(--md-quote-border);
+}
+
+hr {
+  height: 1px;
+  border: 0;
+  background: var(--md-border);
+  margin: 1.5em 0;
+}
+
+table {
+  border-collapse: collapse;
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  overflow-x: auto;
+}
+th, td {
+  border: 1px solid var(--md-border);
+  padding: 6px 10px;
+  text-align: left;
+}
+th { font-weight: 600; }
+
+img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 6px;
+}

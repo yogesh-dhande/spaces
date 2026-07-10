@@ -2185,9 +2185,13 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 sessionID: sessionID, link: request.terminalLink, workingDirectory: nil, workspaceRoots: [])
         } else {
             let workspaceRoots = try loadWorkspaceRoots(store: context.store())
+            // Absolute, tilde, and file:// links never anchor against a working directory, so only look
+            // one up (which requires reading the session's launch/runtime state) when the resolver could
+            // actually need it. Otherwise those links keep resolving even if that state is unavailable.
+            let workingDirectory = try SpacesDeviceTerminalLinkResolver.requiresWorkingDirectory(link: request.terminalLink)
+                ? terminalWorkingDirectory(sessionID: sessionID) : nil
             metadata = try SpacesDeviceTerminalLinkResolver.resolve(
-                sessionID: sessionID, link: request.terminalLink, workingDirectory: terminalWorkingDirectory(sessionID: sessionID),
-                workspaceRoots: workspaceRoots)
+                sessionID: sessionID, link: request.terminalLink, workingDirectory: workingDirectory, workspaceRoots: workspaceRoots)
         }
         if metadata.source == .localFile {
             let resolvedPath = try SpacesDeviceTerminalLinkResolver.resolvedLocalFilePath(linkID: metadata.id)

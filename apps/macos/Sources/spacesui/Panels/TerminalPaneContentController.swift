@@ -33,18 +33,23 @@ import spacesterminalui
     /// `AppKitController.applyAppearanceToLiveSession`). Dedupe and pending-attach state live in the
     /// session's shared appearance store, captured by the closure, so this controller holds no copy.
     private let setAppearanceAction: (ThemeAppearance) -> Void
+    /// Routes terminal link clicks for this pane (fetches remote artifacts, shows the loopback notice).
+    /// Owned here so its in-flight fetch is cancelled when the pane closes. Nil for panes built without
+    /// a coordinator (e.g. tests).
+    private let linkOpenCoordinator: TerminalLinkOpenCoordinator?
 
     var onTitleChanged: ((String) -> Void)?
 
     init(
         descriptor: PaneContentDescriptor, workspaceID: String, sessionID: String, pane: TerminalSessionPaneViewController,
-        setAppearanceAction: @escaping (ThemeAppearance) -> Void
+        setAppearanceAction: @escaping (ThemeAppearance) -> Void, linkOpenCoordinator: TerminalLinkOpenCoordinator? = nil
     ) {
         self.descriptor = descriptor
         self.workspaceID = workspaceID
         self.sessionID = sessionID
         self.pane = pane
         self.setAppearanceAction = setAppearanceAction
+        self.linkOpenCoordinator = linkOpenCoordinator
         pane.onDisplayTitleChanged = { [weak self] title, _ in self?.onTitleChanged?(title) }
     }
 
@@ -70,11 +75,17 @@ import spacesterminalui
 
     func deactivate() { pane.hideEmbedded() }
 
-    func close() { pane.closeEmbedded() }
+    func close() {
+        linkOpenCoordinator?.cancelActiveOpen()
+        pane.closeEmbedded()
+    }
 
     /// Tears the pane down for a daemon-driven session termination: the session is
     /// already stopping, so the client detach and ad hoc stop are skipped.
-    func closeForSessionTermination() { pane.closeEmbedded(sessionIsTerminating: true) }
+    func closeForSessionTermination() {
+        linkOpenCoordinator?.cancelActiveOpen()
+        pane.closeEmbedded(sessionIsTerminating: true)
+    }
 
     @discardableResult func makeContentFirstResponder() -> Bool {
         pane.focusEmbeddedTerminalInput()

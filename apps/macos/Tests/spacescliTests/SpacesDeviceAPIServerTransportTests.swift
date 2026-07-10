@@ -902,8 +902,39 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
             let metadata = try XCTUnwrap(response.terminalLinkMetadata)
             XCTAssertEqual(metadata.source, .externalURL)
             XCTAssertEqual(metadata.externalURL, "https://example.com/screenshot.png")
-            XCTAssertEqual(metadata.mediaKind, .image)
+            XCTAssertEqual(metadata.artifactKind, .image)
             XCTAssertFalse(response.message.localizedStandardContains("sqlite"), response.message)
+        }
+    }
+
+    func testTerminalLinkAbsolutePathResolvesWithoutSessionState() throws {
+        try withTemporaryProfile { root in
+            let identity = try testTLSIdentity()
+            let pairingStore = AlwaysAuthorizedDevicePairingStore()
+            let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore)
+            try server.start()
+            defer { server.stop() }
+            let clientApp = SpacesDeviceClientApp(
+                installationID: "INSTALLATION-LINK-ABSOLUTE", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "ios",
+                deviceName: "iPhone", appVersion: "1.0")
+
+            // No launch configuration is ever written for this session, so `terminalWorkingDirectory`
+            // would throw `unknownSession` if it were looked up. An absolute-path link doesn't need a
+            // working directory to anchor it, so resolution must still succeed.
+            let image = URL(fileURLWithPath: "/tmp", isDirectory: true).appendingPathComponent("\(UUID().uuidString).png")
+            defer { try? FileManager.default.removeItem(at: image) }
+            try Data([0x89, 0x50, 0x4E, 0x47, 0x01]).write(to: image)
+
+            let response = try sendTLSRequest(
+                SpacesDeviceAPIRequest(
+                    command: .resolveTerminalLink(.init(sessionID: "session-without-launch-config", terminalLink: image.path)),
+                    authToken: pairingStore.authToken, clientApp: clientApp), port: server.listeningPort,
+                certificateFingerprint: identity.certificateFingerprint)
+
+            XCTAssertTrue(response.ok, response.message)
+            let metadata = try XCTUnwrap(response.terminalLinkMetadata)
+            XCTAssertEqual(metadata.source, .localFile)
+            XCTAssertEqual(metadata.displayName, image.lastPathComponent)
         }
     }
 

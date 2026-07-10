@@ -41,7 +41,7 @@ Each live session also participates in a service-level control path:
 - macOS and iOS terminal detail attach directly to the paired daemon through the Device API after TLS identity pinning and token authorization.
 - macOS remote-device terminal windows require SSH to the same device for local window attach and owner control. Browser sessions that target daemon-local services use SSH local forwarding, while unrelated URLs open unchanged.
 - Agent lifecycle signals are written to the owning daemon database with the terminal session identity and workspace context.
-- Terminal link preview resolution runs in the owning daemon. File previews stream as authorized chunks from that daemon; direct HTTPS media downloads remain client-side.
+- Terminal file-link resolution for cross-device transfer runs in the owning daemon: iOS previews and macOS remote-session fetches stream files as authorized chunks from that daemon. A macOS local-session file link opens directly on the Mac with no daemon round trip, and direct HTTPS media downloads remain client-side.
 
 ## Service Runtime
 - `GhosttyEmbeddedSessionHost` is the service-owned runtime for `ghostty-embedded`.

@@ -92,6 +92,12 @@
         private(set) var debugRenderFrameApplyCount = 0
         var debugOpenURLHandler: (@MainActor (URL) -> Bool)?
 
+        /// Per-pane link router installed by `RemoteGhosttySessionHost`. When set it fully replaces the
+        /// legacy local-only `GhosttyTerminalLinkOpener.open` path for `.openURL` action events, so the
+        /// coordinator can route web/loopback/remote-file links (fetch-over-Device-API, loopback notice).
+        /// Left nil in contexts with no coordinator (tests, non-device hosts), where the legacy opener
+        /// and its `debugOpenURLHandler` test seam still apply.
+        var onOpenLink: (@MainActor (String) -> Void)?
         var acceptsTerminalInput = false { didSet { restoreFirstResponderIfWindowReady() } }
         var onSendText: SendTextHandler?
         var onSendKey: SendKeyHandler?
@@ -320,7 +326,12 @@
 
         func applyActionEvent(_ event: GhosttyActionEvent) {
             switch event {
-            case .openURL(_, let value): _ = GhosttyTerminalLinkOpener.open(value, openURL: debugOpenURLHandler)
+            case .openURL(_, let value):
+                if let onOpenLink {
+                    onOpenLink(value)
+                } else {
+                    _ = GhosttyTerminalLinkOpener.open(value, openURL: debugOpenURLHandler)
+                }
             case .mouseOverLink(let value): hoveredLink = value
             case .startSearch(let needle): showSearchOverlay(query: needle, submitSeededQuery: needle != nil)
             case .endSearch: hideSearchOverlay()

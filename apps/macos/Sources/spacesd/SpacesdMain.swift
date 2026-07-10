@@ -770,9 +770,20 @@ import workspacecore
             if canResolveTerminalLinkWithoutLocalState(link) {
                 metadata = try SpacesDeviceTerminalLinkResolver.resolve(sessionID: sessionID, link: link, workingDirectory: nil, workspaceRoots: [])
             } else {
-                let workingDirectory = try terminalWorkingDirectory(sessionID: sessionID)
+                // Unlike SpacesDeviceAPIServer's workspaceRoots (loaded from every project/workspace in the
+                // DB), this daemon only ever authorizes a single extra root: the session's own working
+                // directory. So the lookup is still attempted for absolute/tilde/file:// links too (best
+                // effort, via `try?`) to keep authorizing paths under that root exactly as before; only a
+                // relative link's *requirement* for a working directory still hard-fails resolution (with
+                // the informative unknownSession error) when session launch/runtime state is unavailable.
+                let workingDirectory: String?
+                do { workingDirectory = try terminalWorkingDirectory(sessionID: sessionID) } catch {
+                    guard !SpacesDeviceTerminalLinkResolver.requiresWorkingDirectory(link: link) else { throw error }
+                    workingDirectory = nil
+                }
                 metadata = try SpacesDeviceTerminalLinkResolver.resolve(
-                    sessionID: sessionID, link: link, workingDirectory: workingDirectory, workspaceRoots: [workingDirectory])
+                    sessionID: sessionID, link: link, workingDirectory: workingDirectory,
+                    workspaceRoots: workingDirectory.map { [$0] } ?? [])
             }
             if metadata.source == .localFile {
                 let resolvedPath = try SpacesDeviceTerminalLinkResolver.resolvedLocalFilePath(linkID: metadata.id)
@@ -1055,7 +1066,7 @@ import workspacecore
     private func terminalServiceLinkMetadata(_ metadata: SpacesDeviceTerminalLinkMetadata) -> TerminalServiceTerminalLinkMetadata {
         TerminalServiceTerminalLinkMetadata(
             id: metadata.id, source: metadata.source.rawValue, originalLink: metadata.originalLink, displayName: metadata.displayName,
-            contentType: metadata.contentType, mediaKind: metadata.mediaKind?.rawValue, byteCount: metadata.byteCount,
+            contentType: metadata.contentType, artifactKind: metadata.artifactKind?.rawValue, byteCount: metadata.byteCount,
             externalURL: metadata.externalURL)
     }
 

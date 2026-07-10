@@ -7,7 +7,7 @@ public enum SpacesDeviceTerminalLinkResolverError: LocalizedError, Equatable {
     case invalidPath
     case blockedPath(String)
     case fileUnavailable
-    case unsupportedMedia
+    case unsupportedArtifact
     case invalidLinkID
     case sessionMismatch
     case invalidChunkRange
@@ -21,7 +21,7 @@ public enum SpacesDeviceTerminalLinkResolverError: LocalizedError, Equatable {
         case .invalidPath: return "Terminal link path is invalid."
         case .blockedPath: return "This file path is not available to device preview."
         case .fileUnavailable: return "Terminal link file is not a readable regular file."
-        case .unsupportedMedia: return "Only image and video files can be previewed on iOS."
+        case .unsupportedArtifact: return "Only image, video, PDF, Markdown, text, and HTML files can be previewed."
         case .invalidLinkID: return "Terminal link transfer ID is invalid."
         case .sessionMismatch: return "Terminal link transfer does not match this session."
         case .invalidChunkRange: return "Terminal link chunk range is invalid."
@@ -40,7 +40,7 @@ public struct SpacesDeviceTerminalLinkResolver {
         let originalLink: String
         let displayName: String
         let contentType: String?
-        let mediaKind: SpacesDeviceTerminalLinkMediaKind
+        let artifactKind: SpacesDeviceTerminalLinkArtifactKind
         let byteCount: Int64
     }
 
@@ -48,7 +48,7 @@ public struct SpacesDeviceTerminalLinkResolver {
         let url: URL
         let displayName: String
         let contentType: String?
-        let mediaKind: SpacesDeviceTerminalLinkMediaKind
+        let artifactKind: SpacesDeviceTerminalLinkArtifactKind
         let byteCount: Int64
     }
 
@@ -71,12 +71,12 @@ public struct SpacesDeviceTerminalLinkResolver {
                 let isDownloadablePreviewURL = scheme == "https"
                 let contentType =
                     isDownloadablePreviewURL ? SpacesDeviceTerminalLinkClassifier.preferredContentType(pathExtension: url.pathExtension) : nil
-                let mediaKind =
+                let artifactKind =
                     isDownloadablePreviewURL
-                    ? SpacesDeviceTerminalLinkClassifier.mediaKind(contentType: contentType, pathExtension: url.pathExtension) : nil
+                    ? SpacesDeviceTerminalLinkClassifier.artifactKind(contentType: contentType, pathExtension: url.pathExtension) : nil
                 return SpacesDeviceTerminalLinkMetadata(
                     id: "external|\(url.absoluteString)", source: .externalURL, originalLink: link, displayName: externalDisplayName(for: url),
-                    contentType: contentType, mediaKind: mediaKind, byteCount: nil, externalURL: url.absoluteString)
+                    contentType: contentType, artifactKind: artifactKind, byteCount: nil, externalURL: url.absoluteString)
             case "file":
                 guard isLocalFileURLHost(url.host) else { throw SpacesDeviceTerminalLinkResolverError.unsupportedFileURLHost(url.host ?? "") }
                 return try resolveLocal(
@@ -99,7 +99,7 @@ public struct SpacesDeviceTerminalLinkResolver {
         guard payload.sessionID == sessionID else { throw SpacesDeviceTerminalLinkResolverError.sessionMismatch }
         let file = try validateLocalFile(
             url: URL(fileURLWithPath: payload.path), workspaceRoots: workspaceRoots, homeDirectory: homeDirectory, fileManager: fileManager)
-        guard file.mediaKind == payload.mediaKind else { throw SpacesDeviceTerminalLinkResolverError.unsupportedMedia }
+        guard file.artifactKind == payload.artifactKind else { throw SpacesDeviceTerminalLinkResolverError.unsupportedArtifact }
 
         let offset = offset ?? 0
         let limit = min(max(limit ?? defaultChunkLimit, 1), maximumChunkLimit)
@@ -118,6 +118,20 @@ public struct SpacesDeviceTerminalLinkResolver {
     public static func resolvedLocalFilePath(linkID: String?) throws -> String {
         guard let payload = try decodePayload(linkID) else { throw SpacesDeviceTerminalLinkResolverError.invalidLinkID }
         return payload.path
+    }
+
+    /// Whether resolving `link` could need a working directory to anchor a relative local-file path.
+    /// Mirrors `resolve`'s own scheme and prefix handling exactly: `http`/`https`/`file` (and any other
+    /// scheme, which `resolve` rejects outright) never reach relative-path resolution, and absolute
+    /// (`/…`) or tilde (`~`, `~/…`) links resolve directly without one. Only a bare relative local-file
+    /// path needs it. Callers use this to skip looking up a session's working directory (which can
+    /// require reading session launch/runtime state that may be unavailable) when the link can't
+    /// possibly need it, so absolute-path links still resolve when that state is missing.
+    public static func requiresWorkingDirectory(link: String?) -> Bool {
+        guard let link = normalizedString(link) else { return false }
+        if URL(string: link)?.scheme != nil { return false }
+        if link == "~" || link.hasPrefix("~/") { return false }
+        return !link.hasPrefix("/")
     }
 
     private static func resolveLocal(
@@ -145,11 +159,11 @@ public struct SpacesDeviceTerminalLinkResolver {
         let file = try validateLocalFile(url: resolvedURL, workspaceRoots: workspaceRoots, homeDirectory: homeDirectory, fileManager: fileManager)
         let payload = LocalLinkPayload(
             sessionID: sessionID, path: file.url.path, originalLink: originalLink, displayName: file.displayName, contentType: file.contentType,
-            mediaKind: file.mediaKind, byteCount: file.byteCount)
+            artifactKind: file.artifactKind, byteCount: file.byteCount)
         let linkID = try encodePayload(payload)
         return SpacesDeviceTerminalLinkMetadata(
             id: linkID, source: .localFile, originalLink: originalLink, displayName: file.displayName, contentType: file.contentType,
-            mediaKind: file.mediaKind, byteCount: file.byteCount, externalURL: nil)
+            artifactKind: file.artifactKind, byteCount: file.byteCount, externalURL: nil)
     }
 
     private static func validateLocalFile(url: URL, workspaceRoots: [String], homeDirectory: String, fileManager: FileManager) throws -> LocalFile {
@@ -169,12 +183,14 @@ public struct SpacesDeviceTerminalLinkResolver {
         guard attributes[.type] as? FileAttributeType == .typeRegular else { throw SpacesDeviceTerminalLinkResolverError.fileUnavailable }
         let byteCount = (attributes[.size] as? NSNumber)?.int64Value ?? 0
         let contentType = SpacesDeviceTerminalLinkClassifier.preferredContentType(pathExtension: resolvedURL.pathExtension)
-        guard let mediaKind = SpacesDeviceTerminalLinkClassifier.mediaKind(contentType: contentType, pathExtension: resolvedURL.pathExtension) else {
-            throw SpacesDeviceTerminalLinkResolverError.unsupportedMedia
+        guard let artifactKind = SpacesDeviceTerminalLinkClassifier.artifactKind(contentType: contentType, pathExtension: resolvedURL.pathExtension)
+        else {
+            throw SpacesDeviceTerminalLinkResolverError.unsupportedArtifact
         }
 
         return LocalFile(
-            url: resolvedURL, displayName: resolvedURL.lastPathComponent, contentType: contentType, mediaKind: mediaKind, byteCount: byteCount)
+            url: resolvedURL, displayName: resolvedURL.lastPathComponent, contentType: contentType, artifactKind: artifactKind,
+            byteCount: byteCount)
     }
 
     private static func pathIsAllowed(_ path: String, workspaceRoots: [String], homeDirectory: String) -> Bool {

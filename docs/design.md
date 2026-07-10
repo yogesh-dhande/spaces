@@ -70,6 +70,7 @@ Use it when adding or updating UI anywhere in the app. The goal is consistency: 
 - Use color to reinforce meaning, not to carry meaning alone.
 - Surface actionable state near the affected item.
 - Daemon-compatibility uses two distinct surfaces scoped to a single device. A blocking surface replaces that device's detail content with an orange-accented card: warning icon, title, one-line explanation, the restart-impact counts, and a single Restart action (omit the action when the fix is updating the app instead). A quiet variant is a muted "update pending" caption that never blocks. Badge an incompatible or update-pending device inline in the device list/selector so it reads before the user navigates into it. Keep other paired devices fully interactive.
+- A compact single-line banner may overlay the top edge of a content pane, rather than blocking it, for transient state tied to that pane's current action: an indeterminate progress state with a Cancel affordance, a transient error, or an informational notice. Progress stays until the triggering action clears it or is cancelled; error and notice variants auto-dismiss after a few seconds or on click.
 
 ## Icons And Chips
 - Use icons for obvious actions and state.
@@ -86,6 +87,7 @@ Use it when adding or updating UI anywhere in the app. The goal is consistency: 
 - Use icon-only buttons for obvious actions such as edit, remove, copy, reveal, launch, stop, and overflow.
 - Use text buttons where clarity matters more than compactness.
 - Put infrequent or contextual actions behind an overflow menu instead of overcrowding the main UI.
+- Use a segmented control in a sheet's or view's toolbar/navigation-bar principal position to switch between a small, fixed set of content-rendering modes (e.g. Rendered/Raw) instead of separate screens, buttons, or menu items.
 
 ## Forms
 - Keep forms compact and aligned.
