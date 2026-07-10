@@ -158,10 +158,13 @@ struct TerminalLinkPreview: Identifiable, Equatable {
     private static let dismissalDetachTimeout: Duration = .seconds(3)
     private static let linkPreviewChunkLimit = 256 * 1024
 
-    private enum ComposedInputFailureStage {
+    /// Which step of the composed-send burst (see `enqueueComposedInputSend`) a failure occurred in, so
+    /// `finishComposedSend` can surface a message that matches what actually happened rather than always
+    /// describing an image failure.
+    private enum ComposedSendStep {
         case text
         case image
-        case submit
+        case enter
     }
 
     init(
@@ -555,7 +558,7 @@ struct TerminalLinkPreview: Identifiable, Equatable {
                 do {
                     try await self.performSendTextRequest(text + (payloads.isEmpty ? "" : " "))
                 } catch {
-                    await MainActor.run { self.finishComposedSend(with: error, failedStage: .text) }
+                    await MainActor.run { self.finishComposedSend(with: error, failedStep: .text) }
                     return
                 }
             }
@@ -564,28 +567,28 @@ struct TerminalLinkPreview: Identifiable, Equatable {
                     do {
                         try await self.performSendTextRequest(" ")
                     } catch {
-                        await MainActor.run { self.finishComposedSend(with: error, failedStage: .text) }
+                        await MainActor.run { self.finishComposedSend(with: error, failedStep: .image) }
                         return
                     }
                 }
                 do {
                     try await self.performPasteImageRequest(payload)
                 } catch {
-                    await MainActor.run { self.finishComposedSend(with: error, failedStage: .image) }
+                    await MainActor.run { self.finishComposedSend(with: error, failedStep: .image) }
                     return
                 }
             }
             do {
                 try await self.performSendKeyRequest("enter")
             } catch {
-                await MainActor.run { self.finishComposedSend(with: error, failedStage: .submit) }
+                await MainActor.run { self.finishComposedSend(with: error, failedStep: .enter) }
                 return
             }
             await MainActor.run { self.finishComposedSend(with: nil) }
         }
     }
 
-    private func finishComposedSend(with error: Error?, failedStage: ComposedInputFailureStage? = nil) {
+    private func finishComposedSend(with error: Error?, failedStep: ComposedSendStep? = nil) {
         isSendingComposedMessage = false
         guard let error else {
             writeE2EEventIfNeeded(kind: "composer_send_success", detail: nil)
@@ -600,17 +603,17 @@ struct TerminalLinkPreview: Identifiable, Equatable {
         }
         writeE2EEventIfNeeded(kind: "composer_send_failure", detail: error.localizedDescription)
         // Keep the entire draft (text + all attachments) so the user can retry without recomposing.
-        if failedStage != .image, routeInputSendRecovery(error) {
+        if failedStep != .image, routeInputSendRecovery(error) {
             composerErrorMessage = nil
             return
         }
-        switch failedStage {
+        switch failedStep {
         case .text:
-            composerErrorMessage = "Couldn't send the message text. The draft was kept so you can retry."
-        case .submit:
-            composerErrorMessage = "Couldn't submit the message. The draft was kept so you can retry; the terminal line may contain partial text."
+            composerErrorMessage = "Couldn't send the message. Nothing was submitted."
+        case .enter:
+            composerErrorMessage = "The message was sent but couldn't be submitted. Retrying will send the whole message again."
         case .image, nil:
-            composerErrorMessage = "Couldn't send an image. The draft was kept so you can retry; the terminal line may contain partial text."
+            composerErrorMessage = "Couldn't send an image. Nothing was submitted — the terminal line may contain partial text."
         }
     }
 

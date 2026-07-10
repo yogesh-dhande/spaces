@@ -316,7 +316,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                         if request.command.isTunnelCommand {
                             // Whatever remains buffered after the request line is pipelined tunnel data;
                             // hand it to the tunnel so those bytes reach the service.
-                            try server.handleTunnelRequest(request, connection: connection, residual: buffer)
+                            server.handleTunnelRequest(request, connection: connection, residual: buffer)
                         } else {
                             try server.handleSubscribeRequest(request, connection: connection)
                         }
@@ -775,6 +775,10 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         /// Active service tunnels keyed by request connection. Mutated only on `queue`; the relay methods
         /// live in `SpacesDeviceServiceTunnel.swift` (same module) which is why this is internal.
         var tunnelRelays: [ObjectIdentifier: SpacesDeviceServiceTunnelRelay] = [:]
+        /// Tunnel dials currently running on their relay queues. Each pending dial holds a
+        /// `maxConcurrentServiceTunnels` cap slot so a burst of opens cannot overshoot the cap while
+        /// dials are off-queue. Mutated only on `queue`.
+        var pendingTunnelDialCount = 0
     #elseif os(Linux) && canImport(OpenSSL)
         private var linuxServer: LinuxServer?
         /// Count of in-flight service tunnels for the concurrent-tunnel cap. Each Linux tunnel owns a
@@ -2332,37 +2336,51 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             case ready(loopbackFD: Int32)
         }
 
-        /// Authorizes, caps, resolves, and dials a service tunnel on the server queue (mirroring the
-        /// subscription prepare path) so all database and registry access stays serialized. On success it
-        /// reserves a slot in the concurrent-tunnel count; the caller must pair `.ready` with
-        /// `finishServiceTunnel()` once the splice returns.
+        /// Authorizes and reserves a concurrent-tunnel cap slot on the server queue (mirroring the
+        /// subscription prepare path), then resolves and dials on the calling per-client thread so the
+        /// dial's connect timeout (up to 2 seconds for a configured-but-dead service) never stalls the
+        /// shared server queue. A rejection after the reservation releases the slot internally; the
+        /// caller must pair `.ready` with `finishServiceTunnel()` once the splice returns.
         func prepareServiceTunnel(_ request: SpacesDeviceAPIRequest, tunnelRequest: SpacesDeviceServiceTunnelRequest) throws
             -> LinuxServiceTunnelOutcome
         {
-            try syncOnQueue {
+            // nil means the cap slot was reserved; non-nil is an early rejection issued before reserving.
+            let earlyRejection: LinuxServiceTunnelOutcome? = try syncOnQueue { () -> LinuxServiceTunnelOutcome? in
                 try self.authorize(request)
                 guard let installationID = request.clientApp?.installationID.trimmingCharacters(in: .whitespacesAndNewlines), !installationID.isEmpty
-                else { return .reject(SpacesDeviceAPIResponse(ok: false, message: "Missing client installation ID.", errorCode: .invalidArgument)) }
-                guard self.activeServiceTunnelCount < Self.maxConcurrentServiceTunnels else {
-                    return .reject(SpacesDeviceAPIResponse(ok: false, message: "Too many concurrent service tunnels.", errorCode: .busy))
+                else {
+                    return LinuxServiceTunnelOutcome.reject(
+                        SpacesDeviceAPIResponse(ok: false, message: "Missing client installation ID.", errorCode: .invalidArgument))
                 }
+                guard self.activeServiceTunnelCount < Self.maxConcurrentServiceTunnels else {
+                    return LinuxServiceTunnelOutcome.reject(
+                        SpacesDeviceAPIResponse(ok: false, message: "Too many concurrent service tunnels.", errorCode: .busy))
+                }
+                self.activeServiceTunnelCount += 1
+                return nil
+            }
+            if let earlyRejection { return earlyRejection }
+
+            do {
                 switch try SpacesDeviceServiceTunnelResolver.resolve(tunnelRequest) {
                 case .failure(let message, let errorCode):
+                    finishServiceTunnel()
                     return .reject(SpacesDeviceAPIResponse(ok: false, message: message, errorCode: errorCode))
                 case .port(let port):
-                    let loopbackFD: Int32
                     do {
-                        loopbackFD = try SpacesDeviceServiceTunnelDialer.dialLoopback(port: port, blocking: false)
+                        return .ready(loopbackFD: try SpacesDeviceServiceTunnelDialer.dialLoopback(port: port, blocking: false))
                     } catch {
-                        self.trace("tunnel_dial_failed service=\(tunnelRequest.serviceName) port=\(port) error=\(error)")
+                        trace("tunnel_dial_failed service=\(tunnelRequest.serviceName) port=\(port) error=\(error)")
+                        finishServiceTunnel()
                         return .reject(
                             SpacesDeviceAPIResponse(
                                 ok: false, message: "Service '\(tunnelRequest.serviceName)' is not accepting connections.",
                                 errorCode: .serviceNotRunning))
                     }
-                    self.activeServiceTunnelCount += 1
-                    return .ready(loopbackFD: loopbackFD)
                 }
+            } catch {
+                finishServiceTunnel()
+                throw error
             }
         }
 

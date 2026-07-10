@@ -285,11 +285,15 @@ func spacesDeviceServiceTunnelClientSocketReadiness(revents: Int16) -> SpacesDev
     }
 
     extension SpacesDeviceAPIServer {
-        /// Handles an `openServiceTunnel` request on the request connection's server queue: resolves and
-        /// dials the service before replying, then converts the connection into a raw bidirectional byte
-        /// pipe. Any residual bytes already buffered after the request line are written to the service
-        /// first so a client that (incorrectly) pipelines does not lose data.
-        func handleTunnelRequest(_ request: SpacesDeviceAPIRequest, connection: NWConnection, residual: Data) throws {
+        /// Handles an `openServiceTunnel` request. The cheap gates (command shape, installation ID,
+        /// the concurrent-tunnel cap) run on the request connection's server queue, but the database
+        /// resolve and the loopback dial — up to 2 seconds for a configured-but-dead service — run on
+        /// the tunnel's own relay queue so a slow dial never stalls other Device API requests. The
+        /// pending dial holds a cap slot (`pendingTunnelDialCount`) so a burst of concurrent opens
+        /// cannot overshoot `maxConcurrentServiceTunnels` while dials are in flight. Any residual
+        /// bytes already buffered after the request line are written to the service first so a client
+        /// that (incorrectly) pipelines does not lose data.
+        func handleTunnelRequest(_ request: SpacesDeviceAPIRequest, connection: NWConnection, residual: Data) {
             guard case .openServiceTunnel(let tunnelRequest) = request.command else {
                 sendTunnelResponseAndCancel(
                     SpacesDeviceAPIResponse(ok: false, message: "Tunnel requests must use the tunnel path.", errorCode: .misroutedRequest),
@@ -302,35 +306,62 @@ func spacesDeviceServiceTunnelClientSocketReadiness(revents: Int16) -> SpacesDev
                     SpacesDeviceAPIResponse(ok: false, message: "Missing client installation ID.", errorCode: .invalidArgument), to: connection)
                 return
             }
-            guard tunnelRelays.count < Self.maxConcurrentServiceTunnels else {
+            guard tunnelRelays.count + pendingTunnelDialCount < Self.maxConcurrentServiceTunnels else {
                 sendTunnelResponseAndCancel(
                     SpacesDeviceAPIResponse(ok: false, message: "Too many concurrent service tunnels.", errorCode: .busy), to: connection)
                 return
             }
 
-            switch try SpacesDeviceServiceTunnelResolver.resolve(tunnelRequest) {
-            case .failure(let message, let errorCode):
-                sendTunnelResponseAndCancel(SpacesDeviceAPIResponse(ok: false, message: message, errorCode: errorCode), to: connection)
-                return
-            case .port(let port):
-                let loopbackFD: Int32
-                do { loopbackFD = try SpacesDeviceServiceTunnelDialer.dialLoopback(port: port) } catch {
-                    trace("tunnel_dial_failed service=\(tunnelRequest.serviceName) port=\(port) error=\(error)")
-                    sendTunnelResponseAndCancel(
-                        SpacesDeviceAPIResponse(
-                            ok: false, message: "Service '\(tunnelRequest.serviceName)' is not accepting connections.", errorCode: .serviceNotRunning),
-                        to: connection)
-                    return
+            pendingTunnelDialCount += 1
+            let relayQueue = DispatchQueue(label: "spaces.device.api.tunnel.\(installationID).\(ObjectIdentifier(connection))")
+            relayQueue.async { [weak self] in
+                guard let self else { return }
+                let outcome = Self.resolveAndDialTunnel(tunnelRequest)
+                self.performOnQueue {
+                    self.pendingTunnelDialCount -= 1
+                    switch outcome {
+                    case .reject(let response):
+                        self.trace("tunnel_open_rejected service=\(tunnelRequest.serviceName) code=\(response.errorCode?.rawValue ?? "-")")
+                        self.sendTunnelResponseAndCancel(response, to: connection)
+                    case .ready(let loopbackFD):
+                        self.openTunnelRelay(
+                            tunnelRequest: tunnelRequest, installationID: installationID, loopbackFD: loopbackFD, relayQueue: relayQueue,
+                            connection: connection, residual: residual)
+                    }
                 }
-                openTunnelRelay(
-                    tunnelRequest: tunnelRequest, installationID: installationID, loopbackFD: loopbackFD, connection: connection, residual: residual)
+            }
+        }
+
+        private enum TunnelDialOutcome {
+            case reject(SpacesDeviceAPIResponse)
+            case ready(loopbackFD: Int32)
+        }
+
+        /// Resolves the service's loopback port and dials it. Runs on the tunnel's relay queue — never
+        /// the server queue — because the dial blocks for up to its connect timeout.
+        private static func resolveAndDialTunnel(_ tunnelRequest: SpacesDeviceServiceTunnelRequest) -> TunnelDialOutcome {
+            let resolution: SpacesDeviceServiceTunnelResolution
+            do { resolution = try SpacesDeviceServiceTunnelResolver.resolve(tunnelRequest) } catch {
+                let message = (error as? LocalizedError)?.errorDescription ?? String(describing: error)
+                return .reject(SpacesDeviceAPIResponse(ok: false, message: message, errorCode: errorCode(for: error)))
+            }
+            switch resolution {
+            case .failure(let message, let errorCode):
+                return .reject(SpacesDeviceAPIResponse(ok: false, message: message, errorCode: errorCode))
+            case .port(let port):
+                do { return .ready(loopbackFD: try SpacesDeviceServiceTunnelDialer.dialLoopback(port: port)) } catch {
+                    return .reject(
+                        SpacesDeviceAPIResponse(
+                            ok: false, message: "Service '\(tunnelRequest.serviceName)' is not accepting connections.",
+                            errorCode: .serviceNotRunning))
+                }
             }
         }
 
         private func openTunnelRelay(
-            tunnelRequest: SpacesDeviceServiceTunnelRequest, installationID: String, loopbackFD: Int32, connection: NWConnection, residual: Data
+            tunnelRequest: SpacesDeviceServiceTunnelRequest, installationID: String, loopbackFD: Int32, relayQueue: DispatchQueue,
+            connection: NWConnection, residual: Data
         ) {
-            let relayQueue = DispatchQueue(label: "spaces.device.api.tunnel.\(installationID).\(ObjectIdentifier(connection))")
             let relaySource = DispatchSource.makeReadSource(fileDescriptor: loopbackFD, queue: relayQueue)
             let relay = SpacesDeviceServiceTunnelRelay(
                 workspaceID: tunnelRequest.workspaceID, serviceName: tunnelRequest.serviceName, installationID: installationID,
@@ -484,15 +515,17 @@ func spacesDeviceServiceTunnelClientSocketReadiness(revents: Int16) -> SpacesDev
             relay.relayQueue.async { shutdown(loopbackFD, SHUT_WR) }
         }
 
-        /// Tears a tunnel down exactly once: cancels the loopback source (its cancel handler closes the
-        /// fd), unblocks any in-flight blocking write via `shutdown`, and cancels the phone connection.
+        /// Tears a tunnel down exactly once: unblocks any in-flight blocking write via `shutdown`, then
+        /// cancels the loopback source (its cancel handler closes the fd), and cancels the phone
+        /// connection. The `shutdown` must precede `cancel()` — the cancel handler's `close` runs
+        /// asynchronously on the relay queue, and a `shutdown` issued after it could hit a recycled fd.
         /// Idempotent and safe to call from any teardown hook, all of which run on the server queue.
         func teardownTunnel(connection: NWConnection, cancelConnection: Bool = true) {
             guard let relay = tunnelRelays.removeValue(forKey: ObjectIdentifier(connection)) else { return }
             trace("tunnel_close peer=\(String(describing: connection.endpoint))")
             relay.prepareForCancel()
-            relay.relaySource.cancel()
             shutdown(relay.loopbackFD, SHUT_RDWR)
+            relay.relaySource.cancel()
             if cancelConnection { connection.cancel() }
         }
 

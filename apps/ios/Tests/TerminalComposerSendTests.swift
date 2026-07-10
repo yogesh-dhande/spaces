@@ -159,7 +159,9 @@
             XCTAssertFalse(tokens.contains("key:enter"), "Enter must not be sent after a failed image.")
             XCTAssertEqual(model.composerDraftText, "hello")
             XCTAssertEqual(model.composerAttachments.count, 2)
-            XCTAssertNotNil(model.composerErrorMessage)
+            XCTAssertEqual(
+                model.composerErrorMessage,
+                "Couldn't send an image. Nothing was submitted — the terminal line may contain partial text.")
         }
 
         func testComposedSendClearsDraftOnSuccess() async throws {
@@ -202,10 +204,10 @@
             XCTAssertEqual(tokens, ["send:just text"])
             XCTAssertEqual(model.composerDraftText, "just text")
             XCTAssertTrue(model.composerAttachments.isEmpty)
-            XCTAssertEqual(model.composerErrorMessage, "Couldn't send the message text. The draft was kept so you can retry.")
+            XCTAssertEqual(model.composerErrorMessage, "Couldn't send the message. Nothing was submitted.")
         }
 
-        func testEnterFailureUsesSubmitErrorInsteadOfImageError() async throws {
+        func testComposedSendEnterFailureKeepsDraftWithSubmitMessage() async throws {
             let recorder = ComposerAPIRecorder(
                 failuresByToken: [
                     "key:enter": SpacesDeviceAPIResponse(ok: false, message: "Input was rejected.", errorCode: .internalError)
@@ -216,15 +218,20 @@
             let model = TerminalViewerModel(
                 session: session(), settings: settings(), onAuthenticationRequired: { _ in }, bridgeClient: bridgeClient)
             model.configureOwnerInteractiveForTesting(ownerEpoch: 5)
-            model.composerDraftText = "just text"
+            model.composerDraftText = "hello"
+            model.attachComposerImage(attachment("Screenshot"))
+            model.attachComposerImage(attachment("Clipboard"))
 
             await model.sendComposedMessage()
             try await waitUntilSendCompletes(model)
 
             let tokens = await recorder.tokens()
-            XCTAssertEqual(tokens, ["send:just text", "key:enter"])
-            XCTAssertEqual(model.composerDraftText, "just text")
-            XCTAssertEqual(model.composerErrorMessage, "Couldn't submit the message. The draft was kept so you can retry; the terminal line may contain partial text.")
+            XCTAssertEqual(tokens, ["send:hello ", "paste", "send: ", "paste", "key:enter"])
+            XCTAssertEqual(model.composerDraftText, "hello")
+            XCTAssertEqual(model.composerAttachments.count, 2)
+            XCTAssertEqual(
+                model.composerErrorMessage,
+                "The message was sent but couldn't be submitted. Retrying will send the whole message again.")
         }
 
         func testTextSendAuthenticationFailurePromptsRepairInsteadOfImageError() async throws {

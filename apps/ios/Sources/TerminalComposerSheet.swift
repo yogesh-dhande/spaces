@@ -49,7 +49,7 @@ struct TerminalComposerSheet: View {
         .onReceive(NotificationCenter.default.publisher(for: UIPasteboard.changedNotification)) { _ in
             refreshPasteState()
         }
-        .onChange(of: model.isSendingComposedMessage) { isSending in
+        .onChange(of: model.isSendingComposedMessage) { _, isSending in
             if isSending {
                 didStartSending = true
             } else if didStartSending {
