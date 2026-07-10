@@ -148,7 +148,9 @@ struct ContentView: View {
             case .active:
                 model.browserProxyStart()
             case .background:
-                model.browserProxyStop()
+                // Opening a browser session in Safari backgrounds Spaces before Safari consumes the
+                // localhost proxy URL, so keep the listener alive until iOS suspends the app.
+                break
             case .inactive:
                 break
             @unknown default:

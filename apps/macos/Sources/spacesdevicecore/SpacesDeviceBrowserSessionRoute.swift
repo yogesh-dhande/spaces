@@ -30,10 +30,9 @@ public struct SpacesDeviceBrowserSessionRoute: Sendable, Equatable {
     /// Builds one route per `resolvedBrowserSessions` entry that has a parseable `http` URL matching a
     /// service in `assignedPorts`. Sessions with a `nil`/unparseable URL, a non-`http` scheme, or no
     /// matching service are dropped. Result order follows `resolvedBrowserSessions` order.
-    public static func routes(
-        resolvedBrowserSessions: [SpacesDeviceBrowserSession],
-        assignedPorts: [SpacesDeviceAssignedPort]
-    ) -> [SpacesDeviceBrowserSessionRoute] {
+    public static func routes(resolvedBrowserSessions: [SpacesDeviceBrowserSession], assignedPorts: [SpacesDeviceAssignedPort])
+        -> [SpacesDeviceBrowserSessionRoute]
+    {
         resolvedBrowserSessions.compactMap { session in
             guard let urlString = session.url, let target = URLComponents(string: urlString), target.scheme?.lowercased() == "http" else {
                 return nil
@@ -60,9 +59,7 @@ public struct SpacesDeviceBrowserSessionRoute: Sendable, Equatable {
 
     /// Rebuilds the browser-session URL against a proxy listening on `proxyPort` at `identityHost`,
     /// preserving `pathQueryFragment`. Returns `nil` only if the resulting string is not a valid URL.
-    public func proxyURL(proxyPort: Int) -> URL? {
-        URLComponents(string: "http://\(identityHost):\(proxyPort)\(pathQueryFragment)")?.url
-    }
+    public func proxyURL(proxyPort: Int) -> URL? { URLComponents(string: "http://\(identityHost):\(proxyPort)\(pathQueryFragment)")?.url }
 
     /// Loopback hosts that route to the assigned port's raw `port` rather than the identity URL's
     /// host/port. `URLComponents.host` already strips the brackets `URL(string:)` uses to delimit an
@@ -72,16 +69,13 @@ public struct SpacesDeviceBrowserSessionRoute: Sendable, Equatable {
         return host == "localhost" || host == "127.0.0.1" || host == "::1"
     }
 
-    /// Concatenates `components`' path, query, and fragment into one percent-encoded relative string,
-    /// using `URLComponents`'s decoded convenience setters so re-encoding matches `URL(string:)`
-    /// semantics on every platform. Building this via a *relative* `URLComponents` (no scheme/host)
-    /// keeps an all-empty path/query/fragment as `""` instead of `URLComponents.string` growing a
-    /// leading `"/"` the original URL never had.
+    /// Concatenates `components`' path, query, and fragment into one percent-encoded relative string.
+    /// Use the percent-encoded fields directly so bytes such as `%2F` and `%2B` keep addressing the
+    /// same resource after the URL is rewritten through the local proxy.
     private static func pathQueryFragment(of components: URLComponents) -> String {
-        var relative = URLComponents()
-        relative.path = components.path
-        relative.query = components.query
-        relative.fragment = components.fragment
-        return relative.string ?? components.path
+        var pathQueryFragment = components.percentEncodedPath
+        if let query = components.percentEncodedQuery { pathQueryFragment += "?\(query)" }
+        if let fragment = components.percentEncodedFragment { pathQueryFragment += "#\(fragment)" }
+        return pathQueryFragment
     }
 }
