@@ -1258,6 +1258,21 @@ public struct SpacesDeviceTerminalLinkChunkRequest: Codable, Sendable, Equatable
     }
 }
 
+/// Request to open a raw byte tunnel to a running workspace service. The daemon replies with a single
+/// `ok` response line as usual, then the connection stops speaking newline-delimited JSON and becomes a
+/// transparent byte pipe to the service (relayed for as long as the underlying connection stays open).
+/// The client must finish reading that one response line before writing or reading tunnel bytes; nothing
+/// after the line's trailing newline belongs to the Device API framing.
+public struct SpacesDeviceServiceTunnelRequest: Codable, Sendable, Equatable {
+    public let workspaceID: String
+    public let serviceName: String
+
+    public init(workspaceID: String, serviceName: String) {
+        self.workspaceID = workspaceID
+        self.serviceName = serviceName
+    }
+}
+
 public enum SpacesDeviceAPICommand: Sendable, Equatable {
     case pair(SpacesDevicePairRequest)
     case ping
@@ -1308,6 +1323,8 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
     /// remote daemon's database changes, so paired clients stay live without
     /// polling. No payload: one overview stream per connection.
     case subscribeDeviceOverview
+    /// Hijacks the connection into a raw byte tunnel to a workspace service after one `ok` response line.
+    case openServiceTunnel(SpacesDeviceServiceTunnelRequest)
 
     public var name: String {
         switch self {
@@ -1351,6 +1368,7 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
         case .resolveTerminalLink: "resolveTerminalLink"
         case .readTerminalLinkChunk: "readTerminalLinkChunk"
         case .subscribeDeviceOverview: "subscribeDeviceOverview"
+        case .openServiceTunnel: "openServiceTunnel"
         }
     }
 
@@ -1397,6 +1415,17 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
         if case .subscribeDeviceOverview = self { return true }
         return false
     }
+
+    /// True for commands that hand the connection over to a raw byte tunnel after one `ok` response line.
+    public var isTunnelCommand: Bool {
+        if case .openServiceTunnel = self { return true }
+        return false
+    }
+
+    /// True for any command that stops speaking newline-delimited JSON after its response — either a
+    /// long-lived subscription stream or a one-shot pipe handover — so the connection handler must not
+    /// treat the connection as request/response after issuing the response.
+    public var hijacksConnection: Bool { isSubscriptionCommand || isTunnelCommand }
 
     var isSafeToReplayAfterConnectionFailure: Bool {
         switch self {
@@ -1450,6 +1479,7 @@ extension SpacesDeviceAPICommand: Codable {
         case resolveTerminalLink
         case readTerminalLinkChunk
         case subscribeDeviceOverview
+        case openServiceTunnel
     }
 
     public init(from decoder: any Decoder) throws {
@@ -1512,6 +1542,7 @@ extension SpacesDeviceAPICommand: Codable {
         case .subscribeDeviceOverview:
             _ = try container.decode(SpacesDeviceAPIEmptyPayload.self, forKey: key)
             self = .subscribeDeviceOverview
+        case .openServiceTunnel: self = .openServiceTunnel(try container.decode(SpacesDeviceServiceTunnelRequest.self, forKey: key))
         }
     }
 
@@ -1558,6 +1589,7 @@ extension SpacesDeviceAPICommand: Codable {
         case .resolveTerminalLink(let payload): try container.encode(payload, forKey: .resolveTerminalLink)
         case .readTerminalLinkChunk(let payload): try container.encode(payload, forKey: .readTerminalLinkChunk)
         case .subscribeDeviceOverview: try container.encode(SpacesDeviceAPIEmptyPayload(), forKey: .subscribeDeviceOverview)
+        case .openServiceTunnel(let payload): try container.encode(payload, forKey: .openServiceTunnel)
         }
     }
 }

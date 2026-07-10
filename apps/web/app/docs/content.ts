@@ -50,7 +50,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/browser-sessions",
     title: "Browser Sessions",
     summary:
-      "Attach Chrome URLs to a workspace so the pages you need are one direct shortcut away while unopened sessions stay out of window cycling.",
+      "Attach Chrome URLs to a workspace so the pages you need are one direct shortcut away while unopened sessions stay out of window cycling, and open the same sessions in an in-app web view from your iPhone.",
   },
   {
     href: "/docs/coding-agents",
@@ -92,7 +92,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/ios",
     title: "iOS Companion",
     summary:
-      "Pair the Spaces iOS app with a Mac or Linux device to browse live terminal sessions, watch coding agents, run workspace processes, and create workspaces from your phone.",
+      "Pair the Spaces iOS app with a Mac or Linux device to browse live terminal sessions, watch coding agents, run workspace processes, open browser sessions in an in-app web view, and create workspaces from your phone.",
   },
 ];
 

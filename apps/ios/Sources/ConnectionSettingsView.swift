@@ -98,6 +98,14 @@ struct ConnectionSettingsView: View {
                         }
                     }
                 }
+
+                #if DEBUG
+                    Section("Debug") {
+                        NavigationLink("Browser Proxy Smoke Test") {
+                            BrowserProxySmokeTestView()
+                        }
+                    }
+                #endif
             }
             .navigationTitle("Devices")
             .tint(Theme.accent)

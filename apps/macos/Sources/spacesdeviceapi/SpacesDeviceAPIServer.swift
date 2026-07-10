@@ -233,7 +233,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             private let server: SpacesDeviceAPIServer
             private let peerID: String
             private var buffer = Data()
-            private var didSubscribe = false
+            /// Set once a subscription or service tunnel takes the connection over, stopping the
+            /// newline-delimited JSON read loop so the hijacking path owns all further bytes.
+            private var didHijackConnection = false
             private var didReceiveEOF = false
 
             init(connection: NWConnection, server: SpacesDeviceAPIServer) {
@@ -262,7 +264,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             }
 
             private func receiveNext() {
-                guard !didSubscribe else { return }
+                guard !didHijackConnection else { return }
                 connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { [weak self] content, _, isComplete, error in
                     guard let self else { return }
                     if let content, !content.isEmpty { self.buffer.append(content) }
@@ -281,7 +283,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             }
 
             private func processBufferedLines() {
-                guard !didSubscribe else { return }
+                guard !didHijackConnection else { return }
                 guard server.acceptingRequests else {
                     connection.cancel()
                     return
@@ -309,9 +311,15 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                         "request_received peer=\(peerID) command=\(request.commandName) session=\(request.sessionID ?? "-") client=\(request.clientID ?? request.clientApp?.installationID ?? "-")"
                     )
                     try server.authorize(request)
-                    guard !request.command.isSubscriptionCommand else {
-                        didSubscribe = true
-                        try server.handleSubscribeRequest(request, connection: connection)
+                    guard !request.command.hijacksConnection else {
+                        didHijackConnection = true
+                        if request.command.isTunnelCommand {
+                            // Whatever remains buffered after the request line is pipelined tunnel data;
+                            // hand it to the tunnel so those bytes reach the service.
+                            try server.handleTunnelRequest(request, connection: connection, residual: buffer)
+                        } else {
+                            try server.handleSubscribeRequest(request, connection: connection)
+                        }
                         return
                     }
                     let response = try server.handleRequest(request, peerID: peerID)
@@ -484,6 +492,31 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                         case .relay(let subscription):
                             registerActiveConnection(fileDescriptor, installationID: subscription.installationID)
                             try server.relayLinuxSubscription(subscription, ssl: ssl)
+                        }
+                        return
+                    }
+
+                    if request.command.isTunnelCommand {
+                        guard case .openServiceTunnel(let tunnelRequest) = request.command else { return }
+                        let outcome = try server.prepareServiceTunnel(request, tunnelRequest: tunnelRequest)
+                        switch outcome {
+                        case .reject(let response):
+                            try Self.writeTLSResponse(try SpacesDeviceAPICodec.encodeResponseLine(response), ssl: ssl)
+                        case .ready(let loopbackFD):
+                            defer {
+                                close(loopbackFD)
+                                server.finishServiceTunnel()
+                            }
+                            try Self.writeTLSResponse(
+                                try SpacesDeviceAPICodec.encodeResponseLine(SpacesDeviceAPIResponse(ok: true, message: "Tunnel open.")), ssl: ssl)
+                            // Register the client fd so pairing revoke / server stop shut the tunnel down.
+                            registerActiveConnection(fileDescriptor, installationID: request.clientApp?.installationID ?? "")
+                            // Bytes already buffered past the request line are the pipelining client's
+                            // first tunnel bytes; hand them to the splice so they reach the service.
+                            let residual = requestBuffer
+                            requestBuffer.removeAll(keepingCapacity: false)
+                            try SpacesDeviceServiceTunnelSplicer.splice(
+                                ssl: ssl, clientFD: fileDescriptor, loopbackFD: loopbackFD, residual: residual)
                         }
                         return
                     }
@@ -715,7 +748,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// is respawned by launchd `KeepAlive` / systemd `Restart=always` from the updated binary.
     private let onRestartRequested: (@Sendable () -> Void)?
     private let overviewLoaderForTesting: (@Sendable (SpacesDeviceClientApp?) throws -> SpacesDeviceOverviewPayload)?
-    private let queue: DispatchQueue
+    /// Serial queue that confines all request dispatch and relay-registry mutation. Internal so the
+    /// service-tunnel relay methods (in `SpacesDeviceServiceTunnel.swift`) run on the same queue.
+    let queue: DispatchQueue
     private let queueKey = DispatchSpecificKey<Void>()
     private let stateLock = NSLock()
     private let terminalLinkTransferAuthorizationTTL: TimeInterval
@@ -737,8 +772,15 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         private var requestConnections: [ObjectIdentifier: RequestConnection] = [:]
         private var streamRelays: [ObjectIdentifier: StreamRelay] = [:]
         private var streamRelaysClosingAfterFinalSend: Set<ObjectIdentifier> = []
+        /// Active service tunnels keyed by request connection. Mutated only on `queue`; the relay methods
+        /// live in `SpacesDeviceServiceTunnel.swift` (same module) which is why this is internal.
+        var tunnelRelays: [ObjectIdentifier: SpacesDeviceServiceTunnelRelay] = [:]
     #elseif os(Linux) && canImport(OpenSSL)
         private var linuxServer: LinuxServer?
+        /// Count of in-flight service tunnels for the concurrent-tunnel cap. Each Linux tunnel owns a
+        /// blocking `handleClient` thread rather than a registry entry, so the cap is a counter mutated on
+        /// `queue`.
+        private var activeServiceTunnelCount = 0
     #endif
     private var terminalLinkTransferAuthorizations: [String: TerminalLinkTransferAuthorization] = [:]
     private var running = false
@@ -1122,6 +1164,10 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         case .readTerminalLinkChunk(let payload): return try handleReadTerminalLinkChunkRequest(payload)
         case .subscribe, .subscribeDeviceOverview:
             return SpacesDeviceAPIResponse(ok: false, message: "Subscription requests must use the stream path.", errorCode: .misroutedRequest)
+        case .openServiceTunnel:
+            // Hijacks the connection into a raw byte pipe after this response, like a subscription;
+            // it cannot be answered on the request/response path handled here.
+            return SpacesDeviceAPIResponse(ok: false, message: "Tunnel requests must use the tunnel path.", errorCode: .misroutedRequest)
         }
     }
 
@@ -2281,6 +2327,49 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 success: true)
         }
 
+        enum LinuxServiceTunnelOutcome {
+            case reject(SpacesDeviceAPIResponse)
+            case ready(loopbackFD: Int32)
+        }
+
+        /// Authorizes, caps, resolves, and dials a service tunnel on the server queue (mirroring the
+        /// subscription prepare path) so all database and registry access stays serialized. On success it
+        /// reserves a slot in the concurrent-tunnel count; the caller must pair `.ready` with
+        /// `finishServiceTunnel()` once the splice returns.
+        func prepareServiceTunnel(_ request: SpacesDeviceAPIRequest, tunnelRequest: SpacesDeviceServiceTunnelRequest) throws
+            -> LinuxServiceTunnelOutcome
+        {
+            try syncOnQueue {
+                try self.authorize(request)
+                guard let installationID = request.clientApp?.installationID.trimmingCharacters(in: .whitespacesAndNewlines), !installationID.isEmpty
+                else { return .reject(SpacesDeviceAPIResponse(ok: false, message: "Missing client installation ID.", errorCode: .invalidArgument)) }
+                guard self.activeServiceTunnelCount < Self.maxConcurrentServiceTunnels else {
+                    return .reject(SpacesDeviceAPIResponse(ok: false, message: "Too many concurrent service tunnels.", errorCode: .busy))
+                }
+                switch try SpacesDeviceServiceTunnelResolver.resolve(tunnelRequest) {
+                case .failure(let message, let errorCode):
+                    return .reject(SpacesDeviceAPIResponse(ok: false, message: message, errorCode: errorCode))
+                case .port(let port):
+                    let loopbackFD: Int32
+                    do {
+                        loopbackFD = try SpacesDeviceServiceTunnelDialer.dialLoopback(port: port, blocking: false)
+                    } catch {
+                        self.trace("tunnel_dial_failed service=\(tunnelRequest.serviceName) port=\(port) error=\(error)")
+                        return .reject(
+                            SpacesDeviceAPIResponse(
+                                ok: false, message: "Service '\(tunnelRequest.serviceName)' is not accepting connections.",
+                                errorCode: .serviceNotRunning))
+                    }
+                    self.activeServiceTunnelCount += 1
+                    return .ready(loopbackFD: loopbackFD)
+                }
+            }
+        }
+
+        func finishServiceTunnel() {
+            performOnQueue { self.activeServiceTunnelCount = max(0, self.activeServiceTunnelCount - 1) }
+        }
+
     #endif
 
     #if canImport(Network) && canImport(Security)
@@ -2544,6 +2633,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         private func closeRequestConnectionAfterNetworkUpdate(connection: NWConnection, cancelNetworkConnection: Bool) {
             performOnQueue {
                 self.closeStreamRelay(connection: connection, cancelNetworkConnection: cancelNetworkConnection)
+                self.teardownTunnel(connection: connection, cancelConnection: cancelNetworkConnection)
                 self.closeRequestConnection(connection: connection)
             }
         }
@@ -2553,6 +2643,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             guard !normalizedID.isEmpty else { return }
             let connections = streamRelays.values.filter { $0.installationID == normalizedID }.map(\.connection)
             for connection in connections { closeStreamRelay(connection: connection) }
+            // A revoked installation loses its service tunnels along with its subscriptions.
+            teardownTunnels(forInstallationID: normalizedID)
         }
     #elseif os(Linux) && canImport(OpenSSL)
         private func closeStreamRelaysOnQueue(forInstallationID installationID: String) {
@@ -2566,6 +2658,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         acceptingRequests = false
         stopOverviewStreamServer()
         #if canImport(Network) && canImport(Security)
+            teardownAllTunnels()
             for relay in Array(streamRelays.values) { closeStreamRelay(connection: relay.connection) }
             for connection in Array(requestConnections.values.map(\.connection)) { connection.cancel() }
             requestConnections.removeAll()
@@ -2586,7 +2679,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         return try queue.sync(execute: work)
     }
 
-    private func performOnQueue(_ work: @escaping @Sendable () -> Void) {
+    func performOnQueue(_ work: @escaping @Sendable () -> Void) {
         if DispatchQueue.getSpecific(key: queueKey) != nil { work() } else { queue.async(execute: work) }
     }
 
@@ -2732,7 +2825,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         #endif
     }
 
-    private func trace(_ message: String) {
+    func trace(_ message: String) {
         guard traceEnabled else { return }
         FileHandle.standardOutput.write(Data("spaces-device-api-trace \(message)\n".utf8))
     }

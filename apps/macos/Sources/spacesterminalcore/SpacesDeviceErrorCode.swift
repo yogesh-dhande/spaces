@@ -8,6 +8,7 @@ public enum SpacesDeviceErrorCode: String, Codable, Sendable, Equatable {
     case invalidArgument
     case sessionNotRunning
     case sessionNotAvailable
+    case serviceNotRunning
     case ownershipRejected
     case busy
     case payloadTooLarge

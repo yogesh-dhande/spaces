@@ -49,6 +49,71 @@
             XCTAssertEqual(terminal?.runState, .exited)
         }
 
+        func testBrowserSessionRowsBuiltFromResolvedRoutes() {
+            let model = makeModel()
+            model.overview = makeOverview(
+                featureAssignedPorts: [SpacesDeviceAssignedPort(name: "web", port: 3_000, url: "http://web.feature.localhost:3000")],
+                featureConfig: SpacesDeviceWorkspaceConfig(
+                    resolvedBrowserSessions: [SpacesDeviceBrowserSession(name: "Dashboard", url: "http://localhost:3000/dashboard")]))
+
+            let rows = model.workspaceGroups.first { $0.workspace.id == "workspace-feature" }?.rows ?? []
+            let browserRow = rows.first { row in
+                if case .browserSession = row.source { return true }
+                return false
+            }
+
+            XCTAssertEqual(browserRow?.id, "browser:workspace-feature:web:0")
+            XCTAssertEqual(browserRow?.title, "Dashboard")
+            XCTAssertEqual(browserRow?.detail, "localhost:3000/dashboard")
+            XCTAssertEqual(browserRow?.type, .browserSessions)
+            XCTAssertNil(browserRow?.sessionID)
+            XCTAssertEqual(browserRow?.canRun, false)
+            XCTAssertEqual(browserRow?.canStop, false)
+            XCTAssertEqual(browserRow?.canRestart, false)
+        }
+
+        func testBrowserSessionRowsSurviveRunStateFilter() {
+            let model = makeModel()
+            model.overview = makeOverview(
+                featureAssignedPorts: [SpacesDeviceAssignedPort(name: "web", port: 3_000, url: "http://web.feature.localhost:3000")],
+                featureConfig: SpacesDeviceWorkspaceConfig(
+                    resolvedBrowserSessions: [SpacesDeviceBrowserSession(name: "Dashboard", url: "http://localhost:3000/dashboard")]))
+            // A run-state filter that excludes every "real" run state must still leave browser rows visible.
+            model.visibleRunStates = [.running]
+
+            let rows = model.workspaceGroups.first { $0.workspace.id == "workspace-feature" }?.rows ?? []
+            XCTAssertTrue(rows.contains { $0.title == "Dashboard" })
+        }
+
+        func testRowTypeFilterExcludesAndIncludesBrowserSessions() {
+            let model = makeModel()
+            model.overview = makeOverview(
+                featureAssignedPorts: [SpacesDeviceAssignedPort(name: "web", port: 3_000, url: "http://web.feature.localhost:3000")],
+                featureConfig: SpacesDeviceWorkspaceConfig(
+                    resolvedBrowserSessions: [SpacesDeviceBrowserSession(name: "Dashboard", url: "http://localhost:3000/dashboard")]))
+
+            model.visibleRowTypes = Set(SpacesMobileWorkspaceRowType.allCases.filter { $0 != .browserSessions })
+            let rowsWithFilterOff = model.workspaceGroups.first { $0.workspace.id == "workspace-feature" }?.rows ?? []
+            XCTAssertFalse(rowsWithFilterOff.contains { $0.title == "Dashboard" })
+
+            model.visibleRowTypes = Set(SpacesMobileWorkspaceRowType.allCases)
+            let rowsWithFilterOn = model.workspaceGroups.first { $0.workspace.id == "workspace-feature" }?.rows ?? []
+            XCTAssertTrue(rowsWithFilterOn.contains { $0.title == "Dashboard" })
+        }
+
+        func testBrowserSessionProxyURLUsesFixedPortAndIdentityHost() {
+            let model = makeModel()
+            let route = SpacesDeviceBrowserSessionRoute.routes(
+                resolvedBrowserSessions: [SpacesDeviceBrowserSession(name: "Dashboard", url: "http://localhost:3000/dashboard")],
+                assignedPorts: [SpacesDeviceAssignedPort(name: "web", port: 3_000, url: "http://web.feature.localhost:3000")]
+            ).first!
+            let row = SpacesMobileBrowserSessionRow(workspaceID: "workspace-feature", index: 0, route: route)
+
+            let url = model.browserSessionProxyURL(for: row)
+
+            XCTAssertEqual(url?.absoluteString, "http://web.feature.localhost:47898/dashboard")
+        }
+
         func testStopTerminalRowSendsWorkspaceTerminalStopMutation() async {
             let recorder = SpacesMobileRequestRecorder()
             let settings = SpacesMobileConnectionSettings()
@@ -327,6 +392,8 @@
             sessions: [SpacesDeviceTerminalSessionSummary] = [],
             featureProcessRows: [SpacesDeviceWorkspaceProcessRow]? = nil,
             featureCodingAgentRows: [SpacesDeviceWorkspaceCodingAgentRow]? = nil,
+            featureAssignedPorts: [SpacesDeviceAssignedPort] = [],
+            featureConfig: SpacesDeviceWorkspaceConfig = SpacesDeviceWorkspaceConfig(),
             daemonStatus: TerminalServiceDaemonStatus = TerminalServiceDaemonStatus(
                 version: "1.0.0", artifactVersion: nil, certificateFingerprint: nil, activeSessionCount: 0, protocolVersion: SpacesWireProtocol.version)
         ) -> SpacesDeviceOverviewPayload {
@@ -350,6 +417,8 @@
                 id: "workspace-feature", projectID: project.id, projectName: project.name, branch: "feature",
                 baseBranch: "main", dir: "/repo/feature", isRunning: true, isArchived: false, isHidden: false, isDefault: false,
                 sessionCount: 1,
+                assignedPorts: featureAssignedPorts,
+                config: featureConfig,
                 processRows: processRows,
                 codingAgentRows: codingAgentRows,
                 terminalRows: [])

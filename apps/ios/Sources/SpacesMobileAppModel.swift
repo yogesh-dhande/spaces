@@ -202,6 +202,7 @@ enum SpacesMobileWorkspaceRowType: String, CaseIterable, Identifiable, Hashable 
     case processes
     case codingAgents
     case workspaceTerminals
+    case browserSessions
 
     var id: String { rawValue }
 
@@ -210,6 +211,7 @@ enum SpacesMobileWorkspaceRowType: String, CaseIterable, Identifiable, Hashable 
         case .processes: "Processes"
         case .codingAgents: "Coding Agents"
         case .workspaceTerminals: "Workspace Terminals"
+        case .browserSessions: "Browser Sessions"
         }
     }
 
@@ -218,6 +220,7 @@ enum SpacesMobileWorkspaceRowType: String, CaseIterable, Identifiable, Hashable 
         case .processes: "terminal"
         case .codingAgents: "cpu"
         case .workspaceTerminals: "terminal.fill"
+        case .browserSessions: "globe"
         }
     }
 }
@@ -232,11 +235,41 @@ extension SpacesDeviceRunState {
     }
 }
 
+/// A workspace's browser-session URL resolved to a live runtime route (see
+/// `SpacesDeviceBrowserSessionRoute`). Unlike processes/agents/terminals this row has no run state or
+/// mutation actions of its own — it is a navigable link into the on-device browser proxy — so it is
+/// modeled as its own row payload rather than another `SpacesDeviceWorkspace*Row` case.
+struct SpacesMobileBrowserSessionRow: Identifiable, Sendable, Equatable {
+    let id: String
+    let workspaceID: String
+    let title: String
+    /// Short host(+port)+path summary of the resolved session URL, e.g. `"localhost:3000/dashboard"`.
+    let detail: String
+    let route: SpacesDeviceBrowserSessionRoute
+
+    /// `index` disambiguates two resolved sessions that match the same service (same `id` would
+    /// otherwise collide) while keeping ids stable across a refresh that reorders nothing else.
+    init(workspaceID: String, index: Int, route: SpacesDeviceBrowserSessionRoute) {
+        self.workspaceID = workspaceID
+        self.id = "browser:\(workspaceID):\(route.serviceName):\(index)"
+        self.title = route.sessionName ?? route.serviceName
+        self.detail = Self.detail(originalURL: route.originalURL)
+        self.route = route
+    }
+
+    private static func detail(originalURL: String) -> String {
+        guard let components = URLComponents(string: originalURL), let host = components.host else { return originalURL }
+        let portSuffix = components.port.map { ":\($0)" } ?? ""
+        return "\(host)\(portSuffix)\(components.path)"
+    }
+}
+
 struct SpacesMobileWorkspaceRuntimeRow: Identifiable, Sendable {
     enum Source: Sendable {
         case process(SpacesDeviceWorkspaceProcessRow)
         case codingAgent(SpacesDeviceWorkspaceCodingAgentRow)
         case terminal(SpacesDeviceWorkspaceTerminalRow)
+        case browserSession(SpacesMobileBrowserSessionRow)
     }
 
     let source: Source
@@ -246,6 +279,7 @@ struct SpacesMobileWorkspaceRuntimeRow: Identifiable, Sendable {
         case .process(let row): "process:\(row.id)"
         case .codingAgent(let row): "agent:\(row.id)"
         case .terminal(let row): "terminal:\(row.id)"
+        case .browserSession(let row): row.id
         }
     }
 
@@ -254,6 +288,7 @@ struct SpacesMobileWorkspaceRuntimeRow: Identifiable, Sendable {
         case .process(let row): row.workspaceID
         case .codingAgent(let row): row.workspaceID
         case .terminal(let row): row.workspaceID
+        case .browserSession(let row): row.workspaceID
         }
     }
 
@@ -262,6 +297,7 @@ struct SpacesMobileWorkspaceRuntimeRow: Identifiable, Sendable {
         case .process: .processes
         case .codingAgent: .codingAgents
         case .terminal: .workspaceTerminals
+        case .browserSession: .browserSessions
         }
     }
 
@@ -270,6 +306,7 @@ struct SpacesMobileWorkspaceRuntimeRow: Identifiable, Sendable {
         case .process(let row): row.name
         case .codingAgent(let row): row.name
         case .terminal(let row): row.title
+        case .browserSession(let row): row.title
         }
     }
 
@@ -278,6 +315,7 @@ struct SpacesMobileWorkspaceRuntimeRow: Identifiable, Sendable {
         case .process(let row): row.command
         case .codingAgent(let row): row.command
         case .terminal(let row): row.workingDirectory
+        case .browserSession(let row): row.detail
         }
     }
 
@@ -286,14 +324,18 @@ struct SpacesMobileWorkspaceRuntimeRow: Identifiable, Sendable {
         case .process(let row): row.sessionID
         case .codingAgent(let row): row.sessionID
         case .terminal(let row): row.sessionID
+        case .browserSession: nil
         }
     }
 
+    /// Browser session rows carry no run state of their own; `.notStarted` is an unused filler
+    /// (the UI never renders it — `rowMatchesFilters` also bypasses the run-state filter for these rows).
     var runState: SpacesDeviceRunState {
         switch source {
         case .process(let row): row.runState
         case .codingAgent(let row): row.runState
         case .terminal(let row): row.runState
+        case .browserSession: .notStarted
         }
     }
 
@@ -302,6 +344,7 @@ struct SpacesMobileWorkspaceRuntimeRow: Identifiable, Sendable {
         case .process(let row): row.canRun
         case .codingAgent(let row): row.canRun
         case .terminal: false
+        case .browserSession: false
         }
     }
 
@@ -310,6 +353,7 @@ struct SpacesMobileWorkspaceRuntimeRow: Identifiable, Sendable {
         case .process(let row): row.canStop
         case .codingAgent(let row): row.canStop
         case .terminal(let row): row.canStop
+        case .browserSession: false
         }
     }
 
@@ -318,6 +362,7 @@ struct SpacesMobileWorkspaceRuntimeRow: Identifiable, Sendable {
         case .process(let row): row.canRestart
         case .codingAgent(let row): row.canRestart
         case .terminal: false
+        case .browserSession: false
         }
     }
 
@@ -329,6 +374,8 @@ struct SpacesMobileWorkspaceRuntimeRow: Identifiable, Sendable {
             row.agentID != nil && row.sessionID != nil
         case .terminal(let row):
             row.canStop
+        case .browserSession:
+            false
         }
     }
 
@@ -339,6 +386,8 @@ struct SpacesMobileWorkspaceRuntimeRow: Identifiable, Sendable {
         case .codingAgent(let row):
             row.agentID != nil && (row.isConfigured || row.launcherID != nil) && row.sessionID != nil
         case .terminal:
+            false
+        case .browserSession:
             false
         }
     }
@@ -397,6 +446,14 @@ private enum SpacesMobileMutationTimeoutRecovery {
     var workspaceCreateOptions: SpacesDeviceWorkspaceCreateOptions?
     @ObservationIgnored private var bridgeClient: SpacesDeviceAPIClient
     @ObservationIgnored private var commandChannel: SpacesDeviceAPICommandChannel
+    /// On-device loopback reverse proxy WKWebView browser sessions load through. Owned for the app's
+    /// lifetime (its installation identity is stable across device switches), started/stopped by
+    /// `ContentView`'s scene-phase observation.
+    @ObservationIgnored private let browserProxy: SpacesMobileBrowserProxy
+    /// Routing table merged from the active device's overview after each successful `refresh()`, and
+    /// pruned when a device is unpaired. Kept on the model (rather than rebuilt from scratch each time)
+    /// so `removeDevice` can drop just that device's routes via `BrowserProxyRoutingTable.removeDevice`.
+    @ObservationIgnored private var browserRoutingTable = BrowserProxyRoutingTable()
 
     init() {
         #if DEBUG
@@ -410,6 +467,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         activeDeviceID = deviceState.activeDeviceID
         self.bridgeClient = bridgeClient
         commandChannel = bridgeClient.makeCommandChannel()
+        browserProxy = SpacesMobileBrowserProxy(installationID: deviceState.settings.installationID)
         SpacesMobileSettingsStore.save(deviceState.settings)
     }
 
@@ -419,6 +477,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         activeDeviceID = nil
         self.bridgeClient = bridgeClient
         commandChannel = bridgeClient.makeCommandChannel()
+        browserProxy = SpacesMobileBrowserProxy(installationID: settings.installationID)
     }
 
     var workspaceGroups: [SpacesMobileWorkspaceGroup] {
@@ -511,6 +570,44 @@ private enum SpacesMobileMutationTimeoutRecovery {
         }
     }
 
+    /// Current bind status of the on-device browser proxy, so the UI can surface a bind failure.
+    var browserProxyStatus: BrowserProxyStatus { browserProxy.runtimeState.status }
+
+    /// Starts the loopback browser proxy. Idempotent; call when the app becomes active.
+    func browserProxyStart() {
+        Task { await browserProxy.start() }
+    }
+
+    /// Stops the loopback browser proxy and tears down any live tunnels. Call when the app backgrounds.
+    func browserProxyStop() {
+        Task { await browserProxy.stop() }
+    }
+
+    /// The URL a `WKWebView` should load for a browser session row, rebuilt against the proxy's fixed
+    /// loopback port. `nil` only if the route's identity host somehow fails to form a valid URL.
+    func browserSessionProxyURL(for row: SpacesMobileBrowserSessionRow) -> URL? {
+        row.route.proxyURL(proxyPort: Int(SpacesMobileBrowserProxy.fixedPort))
+    }
+
+    /// Merges the active device's freshly fetched overview into the browser proxy's routing table and
+    /// pushes the updated table to the proxy actor. Called after every successful `refresh()`; a
+    /// workspace's browser-session rows are read straight back out of `overview` by
+    /// `workspaceRuntimeRows(for:)`, but the proxy needs its own copy of the host->target mapping to
+    /// route requests it receives independently of the SwiftUI refresh cycle.
+    private func updateBrowserRoutes(overview: SpacesDeviceOverviewPayload) {
+        guard let activeDeviceID else { return }
+        browserRoutingTable.merge(
+            deviceID: activeDeviceID,
+            deviceName: activeDeviceName ?? settings.trimmedHost,
+            host: settings.trimmedHost,
+            port: settings.port,
+            certificateFingerprint: settings.certificateFingerprint,
+            overview: overview
+        )
+        let table = browserRoutingTable
+        Task { await browserProxy.updateRoutes(table) }
+    }
+
     func refresh() async {
         guard !isLoading else { return }
         isLoading = true
@@ -524,6 +621,9 @@ private enum SpacesMobileMutationTimeoutRecovery {
             // A decodable overview whose daemon nonetheless reports an incompatible protocol is blocked;
             // show the restart/update block, not its stale workspace data.
             self.overview = isActiveDeviceBlocked ? nil : overview
+            if let overview = self.overview {
+                updateBrowserRoutes(overview: overview)
+            }
             connectionNotice = nil
             errorMessage = nil
         } catch is CancellationError {
@@ -636,6 +736,9 @@ private enum SpacesMobileMutationTimeoutRecovery {
         compatibility = nil
         workspaceCreateOptions = nil
         connectionNotice = nil
+        browserRoutingTable.removeDevice(deviceID: id)
+        let table = browserRoutingTable
+        Task { await browserProxy.updateRoutes(table) }
         Task { await previousCommandChannel.close() }
     }
 
@@ -725,7 +828,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
                 try await bridgeClient.runCodingAgent(
                     workspaceID: agent.workspaceID, agentName: agent.name, agentLauncherID: agent.launcherID, commandChannel: commandChannel)
             }
-        case .terminal:
+        case .terminal, .browserSession:
             return nil
         }
     }
@@ -754,6 +857,8 @@ private enum SpacesMobileMutationTimeoutRecovery {
                 guard let sessionID = terminal.sessionID else { return }
                 response = try await bridgeClient.stopWorkspaceTerminal(
                     workspaceID: terminal.workspaceID, sessionID: sessionID, commandChannel: commandChannel)
+            case .browserSession:
+                return
             }
             applyMutationResponse(response)
         } catch {
@@ -776,7 +881,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
                 try await bridgeClient.restartCodingAgent(
                     workspaceID: agent.workspaceID, agentID: agentID, agentName: agent.name, commandChannel: commandChannel)
             }
-        case .terminal:
+        case .terminal, .browserSession:
             return nil
         }
     }
@@ -799,13 +904,23 @@ private enum SpacesMobileMutationTimeoutRecovery {
     }
 
     private func workspaceRuntimeRows(for workspace: SpacesDeviceWorkspaceSummary) -> [SpacesMobileWorkspaceRuntimeRow] {
-        workspace.processRows.map { .init(source: .process($0)) }
+        let browserRoutes = SpacesDeviceBrowserSessionRoute.routes(
+            resolvedBrowserSessions: workspace.config.resolvedBrowserSessions, assignedPorts: workspace.assignedPorts)
+        return workspace.processRows.map { .init(source: .process($0)) }
             + workspace.codingAgentRows.map { .init(source: .codingAgent($0)) }
             + workspace.terminalRows.map { .init(source: .terminal($0)) }
+            + browserRoutes.enumerated().map { index, route in
+                .init(source: .browserSession(SpacesMobileBrowserSessionRow(workspaceID: workspace.id, index: index, route: route)))
+            }
     }
 
     private func rowMatchesFilters(_ row: SpacesMobileWorkspaceRuntimeRow, workspace: SpacesDeviceWorkspaceSummary, query: String) -> Bool {
-        guard visibleRowTypes.contains(row.type), visibleRunStates.contains(row.runState) else { return false }
+        guard visibleRowTypes.contains(row.type) else { return false }
+        // Browser session rows carry no run state (see `SpacesMobileWorkspaceRuntimeRow.runState`), so
+        // the run-state filter only applies to rows that actually have one.
+        if case .browserSession = row.source {} else {
+            guard visibleRunStates.contains(row.runState) else { return false }
+        }
         guard !query.isEmpty else { return true }
         return [workspace.projectName, workspace.displayName, workspace.dir, row.title, row.detail].contains { value in
             value.localizedStandardContains(query)
