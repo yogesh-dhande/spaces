@@ -11,11 +11,19 @@
             private var requests: [SpacesDeviceAPIRequest] = []
             private var pasteImageCount = 0
             private let failPasteImageAtIndex: Int?
+            private let failuresByToken: [String: SpacesDeviceAPIResponse]
 
-            init(failPasteImageAtIndex: Int? = nil) { self.failPasteImageAtIndex = failPasteImageAtIndex }
+            init(failPasteImageAtIndex: Int? = nil, failuresByToken: [String: SpacesDeviceAPIResponse] = [:]) {
+                self.failPasteImageAtIndex = failPasteImageAtIndex
+                self.failuresByToken = failuresByToken
+            }
 
             func handle(_ request: SpacesDeviceAPIRequest) -> SpacesDeviceAPIResponse {
                 requests.append(request)
+                let token = Self.token(request)
+                if let failure = failuresByToken[token] {
+                    return failure
+                }
                 if case .terminalPasteImage = request.command {
                     pasteImageCount += 1
                     if let failPasteImageAtIndex, pasteImageCount == failPasteImageAtIndex {
@@ -39,6 +47,14 @@
                 default: return "other"
                 }
             }
+        }
+
+        private actor AuthenticationPromptRecorder {
+            private var messages: [String] = []
+
+            func append(_ message: String) { messages.append(message) }
+
+            func firstMessage() -> String? { messages.first }
         }
 
         private func settings() -> SpacesMobileConnectionSettings {
@@ -90,6 +106,14 @@
                 try await Task.sleep(for: .milliseconds(10))
             }
             XCTFail("Composed send did not complete in time.")
+        }
+
+        private func waitForAuthenticationMessage(recorder: AuthenticationPromptRecorder) async throws -> String? {
+            for _ in 0..<100 {
+                if let message = await recorder.firstMessage() { return message }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            return nil
         }
 
         func testComposedSendTextThenImagesThenEnterInOrder() async throws {
@@ -155,6 +179,80 @@
             XCTAssertEqual(tokens, ["send:just text", "key:enter"])
             XCTAssertEqual(model.composerDraftText, "")
             XCTAssertTrue(model.composerAttachments.isEmpty)
+            XCTAssertNil(model.composerErrorMessage)
+        }
+
+        func testTextOnlyFailureUsesMessageErrorInsteadOfImageError() async throws {
+            let recorder = ComposerAPIRecorder(
+                failuresByToken: [
+                    "send:just text": SpacesDeviceAPIResponse(ok: false, message: "Input was rejected.", errorCode: .internalError)
+                ])
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.handle(request)
+            }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, bridgeClient: bridgeClient)
+            model.configureOwnerInteractiveForTesting(ownerEpoch: 5)
+            model.composerDraftText = "just text"
+
+            await model.sendComposedMessage()
+            try await waitUntilSendCompletes(model)
+
+            let tokens = await recorder.tokens()
+            XCTAssertEqual(tokens, ["send:just text"])
+            XCTAssertEqual(model.composerDraftText, "just text")
+            XCTAssertTrue(model.composerAttachments.isEmpty)
+            XCTAssertEqual(model.composerErrorMessage, "Couldn't send the message text. The draft was kept so you can retry.")
+        }
+
+        func testEnterFailureUsesSubmitErrorInsteadOfImageError() async throws {
+            let recorder = ComposerAPIRecorder(
+                failuresByToken: [
+                    "key:enter": SpacesDeviceAPIResponse(ok: false, message: "Input was rejected.", errorCode: .internalError)
+                ])
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.handle(request)
+            }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, bridgeClient: bridgeClient)
+            model.configureOwnerInteractiveForTesting(ownerEpoch: 5)
+            model.composerDraftText = "just text"
+
+            await model.sendComposedMessage()
+            try await waitUntilSendCompletes(model)
+
+            let tokens = await recorder.tokens()
+            XCTAssertEqual(tokens, ["send:just text", "key:enter"])
+            XCTAssertEqual(model.composerDraftText, "just text")
+            XCTAssertEqual(model.composerErrorMessage, "Couldn't submit the message. The draft was kept so you can retry; the terminal line may contain partial text.")
+        }
+
+        func testTextSendAuthenticationFailurePromptsRepairInsteadOfImageError() async throws {
+            let authenticationRecorder = AuthenticationPromptRecorder()
+            let recorder = ComposerAPIRecorder(
+                failuresByToken: [
+                    "send:just text": SpacesDeviceAPIResponse(ok: false, message: "Invalid device auth token.", errorCode: .unauthorized)
+                ])
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.handle(request)
+            }
+            let model = TerminalViewerModel(
+                session: session(),
+                settings: settings(),
+                onAuthenticationRequired: { message in
+                    Task { await authenticationRecorder.append(message) }
+                },
+                bridgeClient: bridgeClient)
+            model.configureOwnerInteractiveForTesting(ownerEpoch: 5)
+            model.composerDraftText = "just text"
+
+            await model.sendComposedMessage()
+            try await waitUntilSendCompletes(model)
+
+            let authenticationMessage = try await waitForAuthenticationMessage(recorder: authenticationRecorder)
+            XCTAssertEqual(
+                authenticationMessage,
+                "This Mac no longer recognizes this device. Open Devices and pair this device again.")
             XCTAssertNil(model.composerErrorMessage)
         }
     }

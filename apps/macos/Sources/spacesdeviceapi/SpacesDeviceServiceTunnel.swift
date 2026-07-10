@@ -83,9 +83,7 @@ enum SpacesDeviceServiceTunnelDialer {
                 guard errno == EINPROGRESS else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .ECONNREFUSED) }
                 var pollDescriptor = pollfd(fd: fileDescriptor, events: Int16(POLLOUT), revents: 0)
                 let pollResult = poll(&pollDescriptor, 1, Int32(timeoutSeconds * 1000))
-                guard pollResult > 0 else {
-                    throw pollResult == 0 ? POSIXError(.ETIMEDOUT) : POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
-                }
+                guard pollResult > 0 else { throw pollResult == 0 ? POSIXError(.ETIMEDOUT) : POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
                 var socketError: Int32 = 0
                 var length = socklen_t(MemoryLayout<Int32>.size)
                 guard getsockopt(fileDescriptor, SOL_SOCKET, SO_ERROR, &socketError, &length) == 0, socketError == 0 else {
@@ -143,6 +141,44 @@ func spacesDeviceServiceTunnelWriteAll(fileDescriptor: Int32, data: Data) -> Boo
     }
 }
 
+enum SpacesDeviceServiceTunnelSSLReadiness {
+    case read
+    case write
+}
+
+enum SpacesDeviceServiceTunnelSSLPendingOperation: Equatable {
+    enum Operation: Equatable {
+        case read
+        case write
+    }
+
+    case read(waitingFor: SpacesDeviceServiceTunnelSSLReadiness)
+    case write(waitingFor: SpacesDeviceServiceTunnelSSLReadiness)
+
+    var operation: Operation {
+        switch self {
+        case .read: return .read
+        case .write: return .write
+        }
+    }
+
+    var waitsForRead: Bool {
+        switch self {
+        case .read(waitingFor: .read), .write(waitingFor: .read): return true
+        case .read(waitingFor: .write), .write(waitingFor: .write): return false
+        }
+    }
+
+    var waitsForWrite: Bool {
+        switch self {
+        case .read(waitingFor: .write), .write(waitingFor: .write): return true
+        case .read(waitingFor: .read), .write(waitingFor: .read): return false
+        }
+    }
+
+    func isReady(clientReadable: Bool, clientWritable: Bool) -> Bool { waitsForRead ? clientReadable : clientWritable }
+}
+
 #if canImport(Network) && canImport(Security)
     /// One live service tunnel on the Darwin (Network.framework) transport. The service→phone direction
     /// reads the loopback socket through `relaySource` and forwards each chunk over `connection`; the
@@ -159,6 +195,7 @@ func spacesDeviceServiceTunnelWriteAll(fileDescriptor: Int32, data: Data) -> Boo
         let connection: NWConnection
 
         private let lock = NSLock()
+        private var relaySourceActivated = false
         private var backpressureSuspended = false
         private var tornDown = false
 
@@ -206,7 +243,19 @@ func spacesDeviceServiceTunnelWriteAll(fileDescriptor: Int32, data: Data) -> Boo
             relaySource.resume()
         }
 
-        /// Balances any outstanding backpressure suspend and marks the relay torn down so its event
+        /// Performs the source's base activation once the tunnel open response has been delivered.
+        /// Returns false if teardown won the setup race before activation.
+        @discardableResult func activateRelaySource() -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            guard !tornDown, !relaySourceActivated else { return false }
+            relaySourceActivated = true
+            relaySource.resume()
+            return true
+        }
+
+        /// Balances the source's base activation plus any outstanding backpressure suspend and marks
+        /// the relay torn down so its event
         /// handler no-ops, letting `relaySource.cancel()` reach its cancel handler (which closes the fd).
         func prepareForCancel() {
             lock.lock()
@@ -215,6 +264,10 @@ func spacesDeviceServiceTunnelWriteAll(fileDescriptor: Int32, data: Data) -> Boo
             tornDown = true
             if backpressureSuspended {
                 backpressureSuspended = false
+                relaySource.resume()
+            }
+            if !relaySourceActivated {
+                relaySourceActivated = true
                 relaySource.resume()
             }
         }
@@ -250,19 +303,16 @@ func spacesDeviceServiceTunnelWriteAll(fileDescriptor: Int32, data: Data) -> Boo
                 return
             case .port(let port):
                 let loopbackFD: Int32
-                do {
-                    loopbackFD = try SpacesDeviceServiceTunnelDialer.dialLoopback(port: port)
-                } catch {
+                do { loopbackFD = try SpacesDeviceServiceTunnelDialer.dialLoopback(port: port) } catch {
                     trace("tunnel_dial_failed service=\(tunnelRequest.serviceName) port=\(port) error=\(error)")
                     sendTunnelResponseAndCancel(
                         SpacesDeviceAPIResponse(
-                            ok: false, message: "Service '\(tunnelRequest.serviceName)' is not accepting connections.",
-                            errorCode: .serviceNotRunning), to: connection)
+                            ok: false, message: "Service '\(tunnelRequest.serviceName)' is not accepting connections.", errorCode: .serviceNotRunning),
+                        to: connection)
                     return
                 }
                 openTunnelRelay(
-                    tunnelRequest: tunnelRequest, installationID: installationID, loopbackFD: loopbackFD, connection: connection,
-                    residual: residual)
+                    tunnelRequest: tunnelRequest, installationID: installationID, loopbackFD: loopbackFD, connection: connection, residual: residual)
             }
         }
 
@@ -283,8 +333,7 @@ func spacesDeviceServiceTunnelWriteAll(fileDescriptor: Int32, data: Data) -> Boo
 
             // The single ok line is sent directly, bypassing networkShaper: once it is delivered the
             // connection is an opaque byte pipe, so shaping (chunking/pacing) must not touch it.
-            sendTunnelResponseLine(SpacesDeviceAPIResponse(ok: true, message: "Tunnel open."), to: connection) {
-                [weak self, weak relay] error in
+            sendTunnelResponseLine(SpacesDeviceAPIResponse(ok: true, message: "Tunnel open."), to: connection) { [weak self, weak relay] error in
                 guard let self, let relay else { return }
                 if let error {
                     self.trace("tunnel_open_send_error error=\(error)")
@@ -292,7 +341,7 @@ func spacesDeviceServiceTunnelWriteAll(fileDescriptor: Int32, data: Data) -> Boo
                     return
                 }
                 // Base activation of the service→phone source; backpressure suspend/resume rides on top.
-                relay.relaySource.resume()
+                guard relay.activateRelaySource() else { return }
                 self.startPhoneToServiceRelay(relay, residual: residual)
             }
         }
@@ -442,9 +491,7 @@ func spacesDeviceServiceTunnelWriteAll(fileDescriptor: Int32, data: Data) -> Boo
             do {
                 let data = try SpacesDeviceAPICodec.encodeResponseLine(response)
                 connection.send(content: data, contentContext: .defaultMessage, isComplete: false, completion: .contentProcessed(completion))
-            } catch {
-                completion(error)
-            }
+            } catch { completion(error) }
         }
 
         private func sendTunnelResponseAndCancel(_ response: SpacesDeviceAPIResponse, to connection: NWConnection) {
@@ -456,9 +503,7 @@ func spacesDeviceServiceTunnelWriteAll(fileDescriptor: Int32, data: Data) -> Boo
             for connection in connections { teardownTunnel(connection: connection) }
         }
 
-        func teardownAllTunnels() {
-            for relay in Array(tunnelRelays.values) { teardownTunnel(connection: relay.connection) }
-        }
+        func teardownAllTunnels() { for relay in Array(tunnelRelays.values) { teardownTunnel(connection: relay.connection) } }
     }
 #endif
 
@@ -485,10 +530,9 @@ func spacesDeviceServiceTunnelWriteAll(fileDescriptor: Int32, data: Data) -> Boo
             var loopbackWriteShutdown = false
             var sslShutdownSent = false
 
-            // WANT_READ/WANT_WRITE from the last SSL op steer the poll flags, since either TLS operation
-            // may need progress on the opposite readiness before it can complete.
-            var sslReadWantsWrite = false
-            var sslWriteWantsRead = false
+            // OpenSSL requires retrying the same SSL_read/SSL_write operation after WANT_READ/WANT_WRITE,
+            // even when the operation wants the opposite socket readiness.
+            var pendingSSLRetry: SpacesDeviceServiceTunnelSSLPendingOperation?
 
             var readBuffer = [UInt8](repeating: 0, count: 64 * 1024)
 
@@ -496,11 +540,16 @@ func spacesDeviceServiceTunnelWriteAll(fileDescriptor: Int32, data: Data) -> Boo
                 if clientReadClosed, loopbackReadClosed, toService.isEmpty, toClient.isEmpty { break }
 
                 let canReadFromClient = !clientReadClosed && toService.count < bufferCapacity
-                let canReadFromLoopback = !loopbackReadClosed && toClient.count < bufferCapacity
+                let canReadFromLoopback = !loopbackReadClosed && toClient.count < bufferCapacity && pendingSSLRetry?.operation != .write
 
                 var clientEvents: Int16 = 0
-                if canReadFromClient || sslWriteWantsRead { clientEvents |= Int16(POLLIN) }
-                if !toClient.isEmpty || sslReadWantsWrite { clientEvents |= Int16(POLLOUT) }
+                if let pendingSSLRetry {
+                    if pendingSSLRetry.waitsForRead { clientEvents |= Int16(POLLIN) }
+                    if pendingSSLRetry.waitsForWrite { clientEvents |= Int16(POLLOUT) }
+                } else {
+                    if canReadFromClient { clientEvents |= Int16(POLLIN) }
+                    if !toClient.isEmpty { clientEvents |= Int16(POLLOUT) }
+                }
                 var loopbackEvents: Int16 = 0
                 if canReadFromLoopback { loopbackEvents |= Int16(POLLIN) }
                 if !toService.isEmpty { loopbackEvents |= Int16(POLLOUT) }
@@ -508,8 +557,7 @@ func spacesDeviceServiceTunnelWriteAll(fileDescriptor: Int32, data: Data) -> Boo
                 if clientEvents == 0, loopbackEvents == 0 { break }
 
                 var descriptors = [
-                    pollfd(fd: clientFD, events: clientEvents, revents: 0),
-                    pollfd(fd: loopbackFD, events: loopbackEvents, revents: 0),
+                    pollfd(fd: clientFD, events: clientEvents, revents: 0), pollfd(fd: loopbackFD, events: loopbackEvents, revents: 0),
                 ]
                 let pollResult = poll(&descriptors, 2, -1)
                 if pollResult < 0 {
@@ -523,16 +571,26 @@ func spacesDeviceServiceTunnelWriteAll(fileDescriptor: Int32, data: Data) -> Boo
                 let loopbackWritable = (descriptors[1].revents & Int16(POLLOUT)) != 0
 
                 // 1. Client (TLS) → toService.
-                if !clientReadClosed, toService.count < bufferCapacity, clientReadable || (sslWriteWantsRead && clientWritable) {
-                    sslWriteWantsRead = false
+                let shouldReadClient: Bool
+                if let pendingSSLRetry {
+                    shouldReadClient =
+                        pendingSSLRetry.operation == .read && pendingSSLRetry.isReady(clientReadable: clientReadable, clientWritable: clientWritable)
+                } else {
+                    shouldReadClient = clientReadable
+                }
+                if canReadFromClient, shouldReadClient {
                     let want = min(bufferCapacity - toService.count, readBuffer.count)
                     let readCount = SSL_read(ssl, &readBuffer, Int32(want))
                     if readCount > 0 {
+                        pendingSSLRetry = nil
                         toService.append(contentsOf: readBuffer[0..<Int(readCount)])
                     } else {
                         switch SSL_get_error(ssl, readCount) {
-                        case SSL_ERROR_ZERO_RETURN: clientReadClosed = true
-                        case SSL_ERROR_WANT_READ, SSL_ERROR_WANT_WRITE: break
+                        case SSL_ERROR_ZERO_RETURN:
+                            pendingSSLRetry = nil
+                            clientReadClosed = true
+                        case SSL_ERROR_WANT_READ: pendingSSLRetry = .read(waitingFor: .read)
+                        case SSL_ERROR_WANT_WRITE: pendingSSLRetry = .read(waitingFor: .write)
                         default: throw POSIXError(.EIO)
                         }
                     }
@@ -568,17 +626,24 @@ func spacesDeviceServiceTunnelWriteAll(fileDescriptor: Int32, data: Data) -> Boo
                 }
 
                 // 4. toClient → client (TLS).
-                if !toClient.isEmpty, clientWritable || (sslReadWantsWrite && clientReadable) {
-                    sslReadWantsWrite = false
+                let shouldWriteClient: Bool
+                if let pendingSSLRetry {
+                    shouldWriteClient =
+                        pendingSSLRetry.operation == .write && pendingSSLRetry.isReady(clientReadable: clientReadable, clientWritable: clientWritable)
+                } else {
+                    shouldWriteClient = clientWritable
+                }
+                if !toClient.isEmpty, shouldWriteClient {
                     let writeCount = toClient.withUnsafeBytes { rawBuffer in
                         SSL_write(ssl, rawBuffer.baseAddress, Int32(min(toClient.count, Int(Int32.max))))
                     }
                     if writeCount > 0 {
+                        pendingSSLRetry = nil
                         toClient.removeFirst(Int(writeCount))
                     } else {
                         switch SSL_get_error(ssl, writeCount) {
-                        case SSL_ERROR_WANT_READ: sslWriteWantsRead = true
-                        case SSL_ERROR_WANT_WRITE: break
+                        case SSL_ERROR_WANT_READ: pendingSSLRetry = .write(waitingFor: .read)
+                        case SSL_ERROR_WANT_WRITE: pendingSSLRetry = .write(waitingFor: .write)
                         default: throw POSIXError(.EIO)
                         }
                     }

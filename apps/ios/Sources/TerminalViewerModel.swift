@@ -158,6 +158,12 @@ struct TerminalLinkPreview: Identifiable, Equatable {
     private static let dismissalDetachTimeout: Duration = .seconds(3)
     private static let linkPreviewChunkLimit = 256 * 1024
 
+    private enum ComposedInputFailureStage {
+        case text
+        case image
+        case submit
+    }
+
     init(
         session: SpacesDeviceTerminalSessionSummary,
         settings: SpacesMobileConnectionSettings,
@@ -542,27 +548,44 @@ struct TerminalLinkPreview: Identifiable, Equatable {
             guard let self, !Task.isCancelled else { return }
             await MainActor.run { self.writeE2EEventIfNeeded(kind: "composer_send_begin", detail: detail) }
             let hasText = !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            do {
-                // Ordering rationale: text first, then image paths, then Enter. Trailing paths read as
-                // arguments to the typed text, and the risky large upload happens after the cheap text
-                // send. A separator space follows the text (when images follow) and separates images.
-                if hasText {
+            // Ordering rationale: text first, then image paths, then Enter. Trailing paths read as
+            // arguments to the typed text, and the risky large upload happens after the cheap text
+            // send. A separator space follows the text (when images follow) and separates images.
+            if hasText {
+                do {
                     try await self.performSendTextRequest(text + (payloads.isEmpty ? "" : " "))
+                } catch {
+                    await MainActor.run { self.finishComposedSend(with: error, failedStage: .text) }
+                    return
                 }
-                for (index, payload) in payloads.enumerated() {
-                    if index > 0 { try await self.performSendTextRequest(" ") }
+            }
+            for (index, payload) in payloads.enumerated() {
+                if index > 0 {
+                    do {
+                        try await self.performSendTextRequest(" ")
+                    } catch {
+                        await MainActor.run { self.finishComposedSend(with: error, failedStage: .text) }
+                        return
+                    }
+                }
+                do {
                     try await self.performPasteImageRequest(payload)
+                } catch {
+                    await MainActor.run { self.finishComposedSend(with: error, failedStage: .image) }
+                    return
                 }
+            }
+            do {
                 try await self.performSendKeyRequest("enter")
             } catch {
-                await MainActor.run { self.finishComposedSend(with: error) }
+                await MainActor.run { self.finishComposedSend(with: error, failedStage: .submit) }
                 return
             }
             await MainActor.run { self.finishComposedSend(with: nil) }
         }
     }
 
-    private func finishComposedSend(with error: Error?) {
+    private func finishComposedSend(with error: Error?, failedStage: ComposedInputFailureStage? = nil) {
         isSendingComposedMessage = false
         guard let error else {
             writeE2EEventIfNeeded(kind: "composer_send_success", detail: nil)
@@ -577,7 +600,18 @@ struct TerminalLinkPreview: Identifiable, Equatable {
         }
         writeE2EEventIfNeeded(kind: "composer_send_failure", detail: error.localizedDescription)
         // Keep the entire draft (text + all attachments) so the user can retry without recomposing.
-        composerErrorMessage = "Couldn't send an image. Nothing was submitted — the terminal line may contain partial text."
+        if failedStage != .image, routeInputSendRecovery(error) {
+            composerErrorMessage = nil
+            return
+        }
+        switch failedStage {
+        case .text:
+            composerErrorMessage = "Couldn't send the message text. The draft was kept so you can retry."
+        case .submit:
+            composerErrorMessage = "Couldn't submit the message. The draft was kept so you can retry; the terminal line may contain partial text."
+        case .image, nil:
+            composerErrorMessage = "Couldn't send an image. The draft was kept so you can retry; the terminal line may contain partial text."
+        }
     }
 
     private func performPasteImageRequest(_ payload: TerminalImageAttachmentPayload) async throws {
@@ -849,14 +883,19 @@ struct TerminalLinkPreview: Identifiable, Equatable {
 
     private func handleInputSendError(_ error: Error) {
         guard !Self.isTransientInputTransportError(error) else { return }
-        if handleAuthenticationFailure(error) { return }
+        if routeInputSendRecovery(error) { return }
+        errorMessage = error.localizedDescription
+    }
+
+    private func routeInputSendRecovery(_ error: Error) -> Bool {
+        if handleAuthenticationFailure(error) { return true }
         if Self.isTerminalNoLongerLiveError(error) {
             Task { [weak self] in
                 await self?.recoverEndedStateAfterTerminalStopped(error, reason: "input_terminal_stopped")
             }
-            return
+            return true
         }
-        errorMessage = error.localizedDescription
+        return false
     }
 
     private func handleResolvedTerminalLink(

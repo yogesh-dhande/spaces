@@ -1,4 +1,5 @@
 #if canImport(Network) && canImport(Security)
+    import Darwin
     import Foundation
     import Network
     import XCTest
@@ -79,9 +80,7 @@
                 try client.send(payload)
                 let echoed = try client.readExactly(payload.count)
                 XCTAssertEqual(echoed, payload)
-                XCTAssertThrowsError(try client.readExactly(1, timeout: 3)) { error in
-                    XCTAssertEqual(error as? RawTunnelClientError, .closed)
-                }
+                XCTAssertThrowsError(try client.readExactly(1, timeout: 3)) { error in XCTAssertEqual(error as? RawTunnelClientError, .closed) }
                 client.cancel()
             }
         }
@@ -123,10 +122,44 @@
 
                 harness.stop()
 
-                XCTAssertThrowsError(try client.readExactly(1, timeout: 5)) { error in
-                    XCTAssertEqual(error as? RawTunnelClientError, .closed)
-                }
+                XCTAssertThrowsError(try client.readExactly(1, timeout: 5)) { error in XCTAssertEqual(error as? RawTunnelClientError, .closed) }
                 client.cancel()
+            }
+        }
+
+        func testRelayCancelBalancesNeverActivatedReadSource() throws {
+            var fileDescriptors = [Int32](repeating: -1, count: 2)
+            let pipeResult = fileDescriptors.withUnsafeMutableBufferPointer { buffer -> Int32 in
+                guard let baseAddress = buffer.baseAddress else { return -1 }
+                return Darwin.pipe(baseAddress)
+            }
+            XCTAssertEqual(pipeResult, 0)
+            try XCTSkipIf(pipeResult != 0, "Could not create relay test pipe.")
+            let readFD = fileDescriptors[0]
+            let writeFD = fileDescriptors[1]
+            defer { close(writeFD) }
+
+            let cancelHandlerRan = DispatchSemaphore(value: 0)
+            let relayQueue = DispatchQueue(label: "spaces.device.api.tunnel.test.never-activated-source")
+            let relaySource = DispatchSource.makeReadSource(fileDescriptor: readFD, queue: relayQueue)
+            relaySource.setCancelHandler {
+                close(readFD)
+                cancelHandlerRan.signal()
+            }
+            let connection = NWConnection(host: "127.0.0.1", port: 9, using: .tcp)
+            let relay = SpacesDeviceServiceTunnelRelay(
+                workspaceID: "workspace-1", serviceName: "web", installationID: "install-1", loopbackFD: readFD, relayQueue: relayQueue,
+                relaySource: relaySource, connection: connection)
+
+            let result = withExtendedLifetime(relay) {
+                relay.prepareForCancel()
+                relaySource.cancel()
+                return cancelHandlerRan.wait(timeout: .now() + 0.5)
+            }
+            XCTAssertEqual(result, .success, "Teardown must balance the source's base activation before canceling it.")
+            if result != .success {
+                relaySource.resume()
+                _ = cancelHandlerRan.wait(timeout: .now() + 1)
             }
         }
 
@@ -134,8 +167,7 @@
 
         private func seedWorkspaceService(workspaceID: String, serviceName: String, port: Int) throws {
             let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
-            try store.upsert(
-                project: ProjectRecord(id: "project-1", name: "Project", dir: "/tmp/project", isGitRepo: false, defaultBranch: nil))
+            try store.upsert(project: ProjectRecord(id: "project-1", name: "Project", dir: "/tmp/project", isGitRepo: false, defaultBranch: nil))
             try store.upsert(
                 workspace: WorkspaceRecord(
                     id: workspaceID, projectID: "project-1", dir: "/tmp/project/\(workspaceID)", dirname: workspaceID, branch: "main",
@@ -231,8 +263,8 @@
 
         private func requestLine(workspaceID: String, serviceName: String) throws -> Data {
             let clientApp = SpacesDeviceClientApp(
-                installationID: "service-tunnel-test", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "macos",
-                deviceName: "Mac", appVersion: "1.0")
+                installationID: "service-tunnel-test", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "macos", deviceName: "Mac",
+                appVersion: "1.0")
             let request = SpacesDeviceAPIRequest(
                 command: .openServiceTunnel(SpacesDeviceServiceTunnelRequest(workspaceID: workspaceID, serviceName: serviceName)),
                 authToken: authToken, clientApp: clientApp)
@@ -429,9 +461,7 @@
             let deadline = Date().addingTimeInterval(timeout)
             receivedCondition.lock()
             defer { receivedCondition.unlock() }
-            while receivedData().count < byteCount, Date() < deadline {
-                _ = receivedCondition.wait(until: Date(timeIntervalSinceNow: 0.05))
-            }
+            while receivedData().count < byteCount, Date() < deadline { _ = receivedCondition.wait(until: Date(timeIntervalSinceNow: 0.05)) }
             return receivedData().count >= byteCount
         }
 
