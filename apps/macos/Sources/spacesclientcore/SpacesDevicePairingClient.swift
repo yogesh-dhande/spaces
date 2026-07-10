@@ -181,7 +181,7 @@ public enum SpacesDevicePairingClient {
         openSSHControlMaster(destination: destination, port: request.sshPort)
         defer { closeSSHControlMaster(destination: destination, port: request.sshPort) }
 
-        let installCommand = SpacesLinuxInstaller.installCommand(version: normalized(request.clientAppVersion))
+        let installCommand = SpacesLinuxInstaller.sshInstallCommand(version: normalized(request.clientAppVersion))
         let result = try runSSH(
             destination: destination, port: request.sshPort, remoteCommand: installCommand, timeoutSeconds: remoteInstallTimeoutSeconds)
         if result.timedOut { throw SpacesRemoteDevicePairingError.remoteInstallTimedOut(destination) }

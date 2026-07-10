@@ -23,6 +23,22 @@ final class SpacesDevicePairingClientTests: XCTestCase {
         }
     }
 
+    func testSSHInstallCommandPropagatesDownloadFailures() {
+        // The SSH recovery form must download-then-execute, never pipe curl into bash: under the
+        // remote `sh -c` wrapper a pipeline exits with bash's status (0 on an empty stream), which
+        // would report a failed install.sh download as a successful install.
+        for version in ["0.1.0", "v0.1.0"] {
+            XCTAssertEqual(
+                SpacesLinuxInstaller.sshInstallCommand(version: version),
+                #"set -e; installer="$(mktemp)"; trap 'rm -f "$installer"' EXIT; curl -fsSL https://usespaces.dev/install.sh -o "$installer"; bash "$installer" 0.1.0"#)
+        }
+        for command in [SpacesLinuxInstaller.sshInstallCommand(version: nil), SpacesLinuxInstaller.sshInstallCommand(version: "")] {
+            XCTAssertEqual(
+                command,
+                #"set -e; installer="$(mktemp)"; trap 'rm -f "$installer"' EXIT; curl -fsSL https://usespaces.dev/install.sh -o "$installer"; bash "$installer""#)
+        }
+    }
+
     func testRemoteInstallProbeParsesLinuxPlatform() throws {
         let probe = try SpacesDevicePairingClient.parseRemoteInstallProbeOutput(
             """
