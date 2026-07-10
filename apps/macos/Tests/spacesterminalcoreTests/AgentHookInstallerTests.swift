@@ -397,6 +397,64 @@ import Testing
         #expect(updated?.contains("[features]\nhooks = true") == true)
     }
 
+    // MARK: - `features.hooks` already spelled as a table
+    //
+    // `hooks` is a boolean feature flag, but a config may already define `features.hooks` as a *table*
+    // — `[features.hooks]`, `hooks.enabled` inside `[features]`, or `features.hooks.enabled` at top
+    // level. Writing `hooks = true` beside any of those makes TOML see one key as both a table and a
+    // boolean, so Codex refuses the whole config. Every such shape must fail the install and leave the
+    // file untouched, exactly as a non-boolean `hooks` value does.
+
+    @Test func codexFeatureToggleRefusesDottedHooksSubTableInsideFeaturesSection() throws {
+        #expect(throws: AgentHookCodexFeatureToggle.ConflictingFeaturesDefinitionError.self) {
+            try AgentHookCodexFeatureToggle.updatedContents("[features]\nhooks.enabled = true\n")
+        }
+    }
+
+    @Test func codexFeatureToggleRefusesHooksSubTableHeaderBesideFeaturesSection() throws {
+        #expect(throws: AgentHookCodexFeatureToggle.ConflictingFeaturesDefinitionError.self) {
+            try AgentHookCodexFeatureToggle.updatedContents("[features]\njs_repl = true\n\n[features.hooks]\nenabled = true\n")
+        }
+    }
+
+    @Test func codexFeatureToggleRefusesHooksSubTableHeaderBesideDottedFeaturesKeys() throws {
+        #expect(throws: AgentHookCodexFeatureToggle.ConflictingFeaturesDefinitionError.self) {
+            try AgentHookCodexFeatureToggle.updatedContents("model = \"gpt-5\"\nfeatures.experimental = true\n\n[features.hooks]\nenabled = true\n")
+        }
+    }
+
+    @Test func codexFeatureToggleRefusesDottedHooksSubTableAtTopLevel() throws {
+        #expect(throws: AgentHookCodexFeatureToggle.ConflictingFeaturesDefinitionError.self) {
+            try AgentHookCodexFeatureToggle.updatedContents("features.hooks.enabled = true\n")
+        }
+    }
+
+    /// `[[features.hooks]]` names `features.hooks` just as `[features.hooks]` does; neither can coexist
+    /// with a boolean `hooks`. This one previously reached the append path, which is the worst outcome:
+    /// a config Codex parsed today stops parsing tomorrow.
+    @Test func codexFeatureToggleRefusesHooksArrayOfTables() throws {
+        #expect(throws: AgentHookCodexFeatureToggle.ConflictingFeaturesDefinitionError.self) {
+            try AgentHookCodexFeatureToggle.updatedContents("[[features.hooks]]\nenabled = true\n")
+        }
+    }
+
+    /// A deeper table under `hooks` implies `hooks` is a table just the same.
+    @Test func codexFeatureToggleRefusesNestedHooksSubTableHeader() throws {
+        #expect(throws: AgentHookCodexFeatureToggle.ConflictingFeaturesDefinitionError.self) {
+            try AgentHookCodexFeatureToggle.updatedContents("[features.hooks.matchers]\nfoo = 1\n")
+        }
+    }
+
+    /// The guard must not swallow the shapes it has no business rejecting: a sibling sub-table, a plain
+    /// boolean `hooks`, and the dotted `features.hooks` boolean are all still editable.
+    @Test func codexFeatureToggleStillEditsShapesThatOnlyLookLikeHooksTables() throws {
+        #expect(try AgentHookCodexFeatureToggle.updatedContents("[features.sub]\nfoo = 1\n")?.contains("[features]\nhooks = true") == true)
+        #expect(try AgentHookCodexFeatureToggle.updatedContents("[features]\nhooks = false\n") == "[features]\nhooks = true\n")
+        #expect(try AgentHookCodexFeatureToggle.updatedContents("features.hooks = false\n") == "features.hooks = true\n")
+        // `hooks.enabled` under some *other* table says nothing about `features.hooks`.
+        #expect(try AgentHookCodexFeatureToggle.updatedContents("[agents]\nhooks.enabled = true\n")?.contains("[features]\nhooks = true") == true)
+    }
+
     // MARK: - CRLF configs
     //
     // TOML accepts `\r\n` as a newline, so a config synced from a Windows checkout parses fine for

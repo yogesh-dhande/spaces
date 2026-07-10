@@ -17,6 +17,8 @@ import Foundation
 enum AgentHookCodexFeatureToggle {
     private static let sectionName = "features"
     private static let hooksKey = "hooks"
+    /// The single key every edit path below writes.
+    private static let hooksPath = "\(sectionName).\(hooksKey)"
 
     /// `features` (or `features.hooks`) is already defined in a shape this line editor cannot safely
     /// edit. Appending a `[features]` table beside it would produce a duplicate key or a table-type
@@ -78,6 +80,15 @@ enum AgentHookCodexFeatureToggle {
 
         var lines = splitLines(original)
         let newline = lineTerminator(of: original)
+
+        // Refuse before any edit path runs. Each of them writes the `features.hooks` key, so a config
+        // that already spells that key as a table rules all of them out at once. The append path's own
+        // `conflictingFeaturesDefinition` scan is too late: a `[features]` table or a dotted `features.*`
+        // anchor diverts the edit long before it, and the insert lands in a table it never checked.
+        if let existingDefinition = conflictingHooksTableDefinition(lines) {
+            throw ConflictingFeaturesDefinitionError(existingDefinition: existingDefinition)
+        }
+
         if let sectionIndex = lines.firstIndex(where: isFeaturesSectionHeader) {
             // Find the extent of the [features] table (up to the next table header or EOF).
             let sectionEnd = lines[(sectionIndex + 1)...].firstIndex(where: isAnySectionHeader) ?? lines.count
@@ -254,14 +265,60 @@ enum AgentHookCodexFeatureToggle {
         return dottedName(in: String(value.dropFirst(2).dropLast(2)))
     }
 
+    /// Describes a `features.hooks` definition that is a table rather than the boolean flag Spaces
+    /// sets, or nil when writing that key is safe.
+    ///
+    /// `hooks` is a boolean feature flag, but a config may already spell `features.hooks` as a table in
+    /// any of four ways: a `[features.hooks]` header, a deeper `[features.hooks.matchers]` header, a
+    /// `[[features.hooks]]` array of tables, or a dotted key below it — `hooks.enabled` inside
+    /// `[features]`, `features.hooks.enabled` at top level. Writing `hooks = true` beside any of them
+    /// defines one key as both a table and a boolean, and Codex then refuses to parse the whole file.
+    /// Refuse instead, and leave the config the user has untouched.
+    ///
+    /// `[features.sub]` does not collide: it says nothing about `hooks`, and TOML allows a super-table
+    /// to be declared after its sub-table. Nor does `hooks.enabled` under some other table.
+    private static func conflictingHooksTableDefinition(_ lines: [String]) -> String? {
+        for line in lines {
+            if namesHooksTable(sectionHeaderName(line)) { return "a `[\(hooksPath)]` table" }
+            if namesHooksTable(arrayOfTablesName(line)) { return "`\(hooksPath)` as an array of tables (`[[\(hooksPath)]]`)" }
+        }
+
+        let topLevelEnd = lines.firstIndex(where: isAnySectionHeader) ?? lines.count
+        if lines[..<topLevelEnd].contains(where: { definesSubKey(of: [sectionName, hooksKey], in: $0) }) {
+            return "`\(hooksPath)` as a table (`\(hooksPath).<key>`)"
+        }
+        if let sectionIndex = lines.firstIndex(where: isFeaturesSectionHeader) {
+            let sectionEnd = lines[(sectionIndex + 1)...].firstIndex(where: isAnySectionHeader) ?? lines.count
+            if lines[(sectionIndex + 1)..<sectionEnd].contains(where: { definesSubKey(of: [hooksKey], in: $0) }) {
+                return "`\(hooksPath)` as a table (`\(hooksKey).<key>` under `[\(sectionName)]`)"
+            }
+        }
+        return nil
+    }
+
+    /// Whether a table name is `features.hooks` itself or a table nested under it. The trailing dot
+    /// matters: `[features.hooksfoo]` names a different table entirely.
+    private static func namesHooksTable(_ name: String?) -> Bool {
+        guard let name else { return false }
+        return name == hooksPath || name.hasPrefix("\(hooksPath).")
+    }
+
+    /// Whether the line assigns a dotted key strictly below `prefix` — `hooks.enabled` for `["hooks"]` —
+    /// which is what makes the key at `prefix` a table rather than a value.
+    private static func definesSubKey(of prefix: [String], in line: String) -> Bool {
+        let code = commentStripped(line)
+        guard let equalsIndex = code.firstIndex(of: "="), let parts = dottedKeyParts(in: code[..<equalsIndex]) else { return false }
+        return parts.count > prefix.count && Array(parts.prefix(prefix.count)) == prefix
+    }
+
     /// Describes a `features` definition that cannot be extended with a `hooks` key, or nil when
     /// appending a `[features]` table is safe. Reached only after every editable shape has been ruled
-    /// out, so anything left that claims the `features` name — or the `features.hooks` name — collides.
+    /// out, so anything left that claims the `features` name collides. `features.hooks` spelled as a
+    /// table is rejected earlier, by `conflictingHooksTableDefinition`, for every edit path at once.
     /// `[features.sub]` does not collide: TOML allows a super-table to be declared after its sub-table.
     private static func conflictingFeaturesDefinition(_ lines: [String]) -> String? {
         for line in lines {
             if arrayOfTablesName(line) == sectionName { return "`\(sectionName)` as an array of tables (`[[\(sectionName)]]`)" }
-            if sectionHeaderName(line) == "\(sectionName).\(hooksKey)" { return "a `[\(sectionName).\(hooksKey)]` table" }
         }
         let topLevelEnd = lines.firstIndex(where: isAnySectionHeader) ?? lines.count
         for line in lines[..<topLevelEnd] {
