@@ -144,6 +144,24 @@
             XCTAssertEqual(dialer.targets().first?.workspaceID, "ws-1")
         }
 
+        func testProxyStartupIsSingleFlightAcrossConcurrentCalls() async throws {
+            let dialer = FakeTunnelDialer(behavior: .fail(BrowserTunnelError(code: nil, message: "unused")))
+            let proxyPort = UInt16.random(in: 49_152...65_500)
+            let proxy = SpacesMobileBrowserProxy(port: proxyPort, installationID: "install-1", dialer: dialer)
+
+            await withTaskGroup(of: Void.self) { group in
+                for _ in 0..<8 {
+                    group.addTask { await proxy.start() }
+                }
+            }
+            defer { Task { await proxy.stop() } }
+
+            let status = await proxyStatus(proxy)
+            XCTAssertEqual(status, .running(port: proxyPort))
+            let response = try await sendRequest(port: proxyPort, host: "unknown.service.localhost:\(proxyPort)", path: "/")
+            XCTAssertTrue(response.head.contains("502"))
+        }
+
         func testProxyUnknownHostReturns502NamingHost() async throws {
             let dialer = FakeTunnelDialer(behavior: .fail(BrowserTunnelError(code: nil, message: "unused")))
             let proxyPort = UInt16.random(in: 49_152...65_500)

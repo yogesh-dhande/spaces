@@ -348,6 +348,55 @@
             XCTAssertEqual(request?.commandName, "openWorkspaceTerminal")
         }
 
+        func testMutationOverviewUpdatesBrowserProxyRoutes() async {
+            let refreshedOverview = makeOverview(
+                featureAssignedPorts: [SpacesDeviceAssignedPort(name: "web", port: 3_000, url: "http://web.feature.localhost:3000")],
+                featureConfig: SpacesDeviceWorkspaceConfig(
+                    resolvedBrowserSessions: [SpacesDeviceBrowserSession(name: "Dashboard", url: "http://localhost:3000/dashboard")]))
+            let recorder = SpacesMobileRequestRecorder()
+            var settings = SpacesMobileConnectionSettings()
+            settings.host = "127.0.0.1"
+            settings.port = 47_847
+            settings.certificateFingerprint = "fp-1"
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                return SpacesDeviceAPIResponse(
+                    ok: true,
+                    message: "Created workspace.",
+                    result: .mutation(
+                        SpacesDeviceMutationResult(
+                            overview: refreshedOverview,
+                            workspaceID: "workspace-feature")))
+            }
+            let proxy = SpacesMobileBrowserProxy(port: UInt16.random(in: 49_152...65_500), installationID: settings.installationID)
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client, browserProxy: proxy)
+            model.activeDeviceID = "device-1"
+            model.pairedDevices = [
+                SpacesMobilePairedDeviceRecord(
+                    id: "device-1", name: "Studio", host: settings.host, port: settings.port, certificateFingerprint: settings.certificateFingerprint,
+                    createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z", lastSelectedAt: nil)
+            ]
+
+            await model.createWorkspace(
+                projectID: "project-1",
+                branch: "feature",
+                baseBranch: "main",
+                directoryName: nil,
+                allowExistingBranchReuse: false)
+
+            let commandNames = await recorder.snapshot().map(\.commandName)
+            XCTAssertEqual(commandNames, ["createWorkspace"])
+            XCTAssertTrue(model.workspaceGroups.flatMap(\.rows).contains { $0.id == "browser:workspace-feature:web:0" })
+            let target = await proxy.routeTarget(forHost: "web.feature.localhost")
+            XCTAssertEqual(target?.deviceID, "device-1")
+            XCTAssertEqual(target?.deviceName, "Studio")
+            XCTAssertEqual(target?.host, "127.0.0.1")
+            XCTAssertEqual(target?.port, 47_847)
+            XCTAssertEqual(target?.certificateFingerprint, "fp-1")
+            XCTAssertEqual(target?.workspaceID, "workspace-feature")
+            XCTAssertEqual(target?.serviceName, "web")
+        }
+
         func testRefreshUsesEmbeddedStatusWithoutSecondHandshake() async {
             let overview = makeOverview(daemonStatus: daemonStatus(protocolVersion: SpacesWireProtocol.version))
             let recorder = SpacesMobileRequestRecorder()

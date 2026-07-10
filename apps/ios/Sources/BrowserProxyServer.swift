@@ -45,6 +45,8 @@ actor SpacesMobileBrowserProxy {
     private let log = Logger(subsystem: "dev.usespaces.spacesmobile", category: "browser-proxy")
 
     private var listener: NWListener?
+    private var isStarting = false
+    private var startToken = 0
     private var routingTable = BrowserProxyRoutingTable()
     private var sessions: [UUID: BrowserProxySession] = [:]
 
@@ -69,26 +71,56 @@ actor SpacesMobileBrowserProxy {
         routingTable = table
     }
 
+    /// Looks up the route the proxy would use for a browser `Host`.
+    func routeTarget(forHost host: String) -> BrowserProxyRouteTarget? {
+        routingTable.target(forHost: host)
+    }
+
     /// Binds the loopback listener, retrying a bind failure a few times with backoff before exposing
     /// `.failed`. Idempotent: a second call while already running is a no-op.
     func start() async {
-        if listener != nil { return }
-        await setStatus(.starting)
+        if listener != nil || isStarting { return }
+        startToken += 1
+        let token = startToken
+        isStarting = true
+        defer {
+            if startToken == token {
+                isStarting = false
+            }
+        }
         var lastError: (any Error)?
         for attempt in 0..<Self.bindRetryLimit {
+            guard startToken == token else { return }
+            var pendingListener: NWListener?
             do {
-                try await bindListener()
+                let candidate = try makeListener()
+                pendingListener = candidate
+                listener = candidate
+                await setStatus(.starting)
+                guard listener === candidate else {
+                    candidate.cancel()
+                    return
+                }
+                try await waitUntilReady(candidate)
+                guard listener === candidate else {
+                    candidate.cancel()
+                    return
+                }
                 await setStatus(.running(port: port))
                 return
             } catch {
                 lastError = error
-                listener?.cancel()
-                listener = nil
+                if let pendingListener {
+                    pendingListener.cancel()
+                    guard listener === pendingListener else { return }
+                    listener = nil
+                }
                 if attempt < Self.bindRetryLimit - 1 {
                     try? await Task.sleep(for: Self.bindRetryBackoff)
                 }
             }
         }
+        guard startToken == token else { return }
         let message = lastError.map { "The on-device browser proxy could not bind to port \(port): \($0.localizedDescription)" }
             ?? "The on-device browser proxy could not bind to port \(port)."
         log.error("browser proxy bind failed: \(message, privacy: .public)")
@@ -97,20 +129,24 @@ actor SpacesMobileBrowserProxy {
 
     /// Cancels the listener and tears down every live tunnel pair.
     func stop() {
+        startToken += 1
         listener?.cancel()
         listener = nil
+        isStarting = false
         for session in sessions.values { session.cancelAll() }
         sessions.removeAll()
         Task { await setStatus(.idle) }
     }
 
-    private func bindListener() async throws {
+    private func makeListener() throws -> NWListener {
         let parameters = NWParameters.tcp
         parameters.allowLocalEndpointReuse = true
         guard let nwPort = NWEndpoint.Port(rawValue: port) else { throw BrowserProxyConnectionIO.IOError.cancelled }
-        parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: nwPort)
+        // Keep host and port separate: the endpoint constrains the listener to loopback, while
+        // NWListener(using:on:) owns the fixed-port bind.
+        parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: .any)
 
-        let listener = try NWListener(using: parameters)
+        let listener = try NWListener(using: parameters, on: nwPort)
         listener.newConnectionHandler = { [weak self] connection in
             guard let self else {
                 connection.cancel()
@@ -118,6 +154,10 @@ actor SpacesMobileBrowserProxy {
             }
             Task { await self.accept(connection) }
         }
+        return listener
+    }
+
+    private func waitUntilReady(_ listener: NWListener) async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
             let resume = BrowserProxyOneShot(continuation)
             listener.stateUpdateHandler = { state in
@@ -139,7 +179,6 @@ actor SpacesMobileBrowserProxy {
             }
             listener.start(queue: queue)
         }
-        self.listener = listener
     }
 
     private func accept(_ connection: NWConnection) {

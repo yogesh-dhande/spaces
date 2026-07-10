@@ -450,9 +450,9 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// lifetime (its installation identity is stable across device switches), started/stopped by
     /// `ContentView`'s scene-phase observation.
     @ObservationIgnored private let browserProxy: SpacesMobileBrowserProxy
-    /// Routing table merged from the active device's overview after each successful `refresh()`, and
-    /// pruned when a device is unpaired. Kept on the model (rather than rebuilt from scratch each time)
-    /// so `removeDevice` can drop just that device's routes via `BrowserProxyRoutingTable.removeDevice`.
+    /// Routing table merged from accepted active-device overviews, and pruned when a device is unpaired.
+    /// Kept on the model (rather than rebuilt from scratch each time) so `removeDevice` can drop just
+    /// that device's routes via `BrowserProxyRoutingTable.removeDevice`.
     @ObservationIgnored private var browserRoutingTable = BrowserProxyRoutingTable()
     /// In-memory holding spot for a screenshot staged for paste into a terminal session, shared across
     /// the app so the staging flow and the terminal viewer can both reach the same pending image.
@@ -474,13 +474,17 @@ private enum SpacesMobileMutationTimeoutRecovery {
         SpacesMobileSettingsStore.save(deviceState.settings)
     }
 
-    init(settings: SpacesMobileConnectionSettings, bridgeClient: SpacesDeviceAPIClient) {
+    init(
+        settings: SpacesMobileConnectionSettings,
+        bridgeClient: SpacesDeviceAPIClient,
+        browserProxy: SpacesMobileBrowserProxy? = nil
+    ) {
         self.settings = settings
         pairedDevices = []
         activeDeviceID = nil
         self.bridgeClient = bridgeClient
         commandChannel = bridgeClient.makeCommandChannel()
-        browserProxy = SpacesMobileBrowserProxy(installationID: settings.installationID)
+        self.browserProxy = browserProxy ?? SpacesMobileBrowserProxy(installationID: settings.installationID)
     }
 
     var workspaceGroups: [SpacesMobileWorkspaceGroup] {
@@ -592,12 +596,12 @@ private enum SpacesMobileMutationTimeoutRecovery {
         row.route.proxyURL(proxyPort: Int(SpacesMobileBrowserProxy.fixedPort))
     }
 
-    /// Merges the active device's freshly fetched overview into the browser proxy's routing table and
-    /// pushes the updated table to the proxy actor. Called after every successful `refresh()`; a
-    /// workspace's browser-session rows are read straight back out of `overview` by
-    /// `workspaceRuntimeRows(for:)`, but the proxy needs its own copy of the host->target mapping to
-    /// route requests it receives independently of the SwiftUI refresh cycle.
-    private func updateBrowserRoutes(overview: SpacesDeviceOverviewPayload) {
+    /// Merges an accepted active-device overview into the browser proxy's routing table and pushes the
+    /// updated table to the proxy actor before the overview is published to SwiftUI. Workspace
+    /// browser-session rows are read straight back out of `overview` by `workspaceRuntimeRows(for:)`,
+    /// but the proxy needs its own copy of the host->target mapping to route requests independently of
+    /// the SwiftUI refresh cycle.
+    private func updateBrowserRoutes(overview: SpacesDeviceOverviewPayload) async {
         guard let activeDeviceID else { return }
         browserRoutingTable.merge(
             deviceID: activeDeviceID,
@@ -608,7 +612,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
             overview: overview
         )
         let table = browserRoutingTable
-        Task { await browserProxy.updateRoutes(table) }
+        await browserProxy.updateRoutes(table)
     }
 
     func refresh() async {
@@ -623,10 +627,11 @@ private enum SpacesMobileMutationTimeoutRecovery {
             applyCompatibility(overview.daemonStatus)
             // A decodable overview whose daemon nonetheless reports an incompatible protocol is blocked;
             // show the restart/update block, not its stale workspace data.
-            self.overview = isActiveDeviceBlocked ? nil : overview
-            if let overview = self.overview {
-                updateBrowserRoutes(overview: overview)
+            let acceptedOverview = isActiveDeviceBlocked ? nil : overview
+            if let acceptedOverview {
+                await updateBrowserRoutes(overview: acceptedOverview)
             }
+            self.overview = acceptedOverview
             connectionNotice = nil
             errorMessage = nil
         } catch is CancellationError {
@@ -802,7 +807,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
             let response = try await bridgeClient.createWorkspace(
                 projectID: projectID, branch: branch, baseBranch: baseBranch, directoryName: directoryName,
                 allowExistingBranchReuse: allowExistingBranchReuse, commandChannel: commandChannel)
-            applyMutationResponse(response)
+            await applyMutationResponse(response)
             isShowingWorkspaceCreateSheet = false
         } catch {
             handleBridgeError(error)
@@ -863,7 +868,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
             case .browserSession:
                 return
             }
-            applyMutationResponse(response)
+            await applyMutationResponse(response)
         } catch {
             handleBridgeError(error)
         }
@@ -1014,7 +1019,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         defer { isMutating = false }
         do {
             let response = try await operation()
-            applyMutationResponse(response)
+            await applyMutationResponse(response)
             if let sessionID = response.sessionID {
                 return overview?.sessions.first(where: { $0.id == sessionID })
             }
@@ -1034,8 +1039,9 @@ private enum SpacesMobileMutationTimeoutRecovery {
         }
     }
 
-    private func applyMutationResponse(_ response: SpacesDeviceAPIResponse) {
+    private func applyMutationResponse(_ response: SpacesDeviceAPIResponse) async {
         if let overview = response.overview {
+            await updateBrowserRoutes(overview: overview)
             self.overview = overview
             connectionNotice = nil
             errorMessage = nil
@@ -1063,7 +1069,9 @@ private enum SpacesMobileMutationTimeoutRecovery {
             return session
         }
         do {
-            overview = try await bridgeClient.fetchOverview(commandChannel: commandChannel)
+            let refreshedOverview = try await bridgeClient.fetchOverview(commandChannel: commandChannel)
+            await updateBrowserRoutes(overview: refreshedOverview)
+            overview = refreshedOverview
             errorMessage = nil
             connectionNotice = nil
             return timeoutRecovery.acceptsFreshSession(refreshedSession(forRowID: rowID))

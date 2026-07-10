@@ -199,10 +199,10 @@
 
             let parameters = NWParameters.tcp
             parameters.allowLocalEndpointReuse = true
-            parameters.requiredLocalEndpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: Self.port)
+            parameters.requiredLocalEndpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: .any)
 
             do {
-                let listener = try NWListener(using: parameters)
+                let listener = try NWListener(using: parameters, on: Self.port)
                 listener.stateUpdateHandler = { [weak self] state in
                     guard let self else { return }
                     Task { @MainActor in self.handleListenerState(state) }
