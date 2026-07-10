@@ -7034,6 +7034,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     @objc func openDevicePairingWindow() { devicePairing.openDevicePairingWindow() }
     @objc func pairIOSWithConnectedDevice(_ sender: NSButton) { devicePairing.pairIOSWithConnectedDevice(sender) }
     @objc func connectRemoteDeviceFromPairingPanel() { devicePairing.connectRemoteDeviceFromPairingPanel() }
+    @objc func installSpacesOnRemoteDevice() { devicePairing.installSpacesOnRemoteDevice() }
+    @objc func copyRemoteDeviceInstallCommand() { devicePairing.copyRemoteDeviceInstallCommand() }
     @objc func toggleRemoteDeviceAdvancedFields(_ sender: NSButton) { devicePairing.toggleRemoteDeviceAdvancedFields(sender) }
     @objc func restartLocalDaemon() { devicePairing.restartLocalDaemon() }
     @objc func removeMacPairedDevice(_ sender: NSButton) { devicePairing.removeMacPairedDevice(sender) }

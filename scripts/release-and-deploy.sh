@@ -237,7 +237,6 @@ echo "🚀 Final step: Creating GitHub release..."
 cd "$REPO_ROOT"
 release_assets=(
   "$DMG_PATH"
-  "$SCRIPTS_DIR/spaces-install-linux.sh"
   "$REMOTE_ARTIFACT_DIR/spacesd-ubuntu-24.04-x86_64.tar.gz"
   "$REMOTE_ARTIFACT_DIR/spacesd-ubuntu-24.04-x86_64.tar.gz.sha256"
   "$REMOTE_ARTIFACT_DIR/spacesd-ubuntu-24.04-arm64.tar.gz"
@@ -245,8 +244,11 @@ release_assets=(
   "$REMOTE_ARTIFACT_DIR/spaces-remote-artifacts.json"
   "$REMOTE_ARTIFACT_DIR/spaces-remote-artifacts.json.sig"
 )
+# --latest keeps releases/latest/download (the install.sh no-version path) pointed at
+# the newest Spaces release even if another non-prerelease release is created later.
 gh release create "$TAG" "${release_assets[@]}" \
   --title "Spaces $VERSION" \
+  --latest \
   --generate-notes
 echo "✓ GitHub release created"
 echo ""
