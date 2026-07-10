@@ -83,6 +83,15 @@ struct TerminalLinkPreview: Identifiable, Equatable {
     var isPreparingLinkPreview = false
     var linkPreviewErrorMessage: String?
     var linkPreview: TerminalLinkPreview?
+
+    /// Rich-composer draft. The draft text is a two-way binding for the composer's text field; the
+    /// attachments and sending/error flags are mutated only through the composer API below. The draft
+    /// survives the composer sheet being dismissed and reopened because the model outlives the sheet
+    /// (it is `@State` on the detail view), so a partially composed message is not lost on dismiss.
+    var composerDraftText = ""
+    private(set) var composerAttachments: [TerminalComposerAttachment] = []
+    private(set) var isSendingComposedMessage = false
+    var composerErrorMessage: String?
     private var linkPreviewRequestGeneration: UInt64 = 0
     @ObservationIgnored private var externalLinkPreviewDownloadTask: Task<URL, Error>?
 
@@ -135,6 +144,9 @@ struct TerminalLinkPreview: Identifiable, Equatable {
     private static let inputBatchDelay: Duration = .milliseconds(35)
     private static let scrollCoalescingInterval: Duration = .milliseconds(16)
     private static let inputRequestTimeout: Duration = .seconds(6)
+    /// Pasting a multi-MiB image takes meaningfully longer to transmit than interactive text/key input,
+    /// so composer image steps use a larger timeout than `inputRequestTimeout`.
+    private static let pasteImageRequestTimeout: Duration = .seconds(30)
     private static let stateRequestTimeout: Duration = .seconds(12)
     private static let ownerRecoveryGraceInterval: TimeInterval = 2
     private static let silentReconnectDelay: Duration = .milliseconds(150)
@@ -482,6 +494,107 @@ struct TerminalLinkPreview: Identifiable, Equatable {
         enqueueInputSend(kind: "send_key", detail: key) { [weak self, key] in
             guard let self else { return }
             try await self.performSendKeyRequest(key)
+        }
+    }
+
+    func attachComposerImage(_ attachment: TerminalComposerAttachment) {
+        composerAttachments.append(attachment)
+        composerErrorMessage = nil
+    }
+
+    func removeComposerAttachment(id: UUID) {
+        composerAttachments.removeAll { $0.id == id }
+    }
+
+    /// The composer can send when the session accepts owner input (same gating as typing) and the draft
+    /// has content — either non-whitespace text or at least one attachment — and no send is in flight.
+    var canSendComposedMessage: Bool {
+        guard acceptsInput, hasConfirmedOwnerInputReadiness, !isSendingComposedMessage else { return false }
+        let hasText = !composerDraftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        return hasText || !composerAttachments.isEmpty
+    }
+
+    /// Sends the composed message as a single ordered burst: the typed text, then each image, then Enter.
+    /// The whole sequence runs inside one serial-queue closure so it stays ordered relative to any other
+    /// input and never interleaves. Enter is only sent after every prior step succeeds, so a partial
+    /// failure leaves the draft intact and nothing is submitted.
+    func sendComposedMessage() async {
+        guard canSendComposedMessage, isOwner else { return }
+        flushPendingScroll()
+        flushBufferedInputText()
+        let draftText = composerDraftText
+        // Capture only the Sendable payloads (not the attachments, whose UIImage thumbnails are not
+        // Sendable) for the detached serial-queue closure.
+        let payloads = composerAttachments.map(\.payload)
+        isSendingComposedMessage = true
+        composerErrorMessage = nil
+        enqueueComposedInputSend(text: draftText, payloads: payloads)
+    }
+
+    private func enqueueComposedInputSend(text: String, payloads: [TerminalImageAttachmentPayload]) {
+        let detail = "text_bytes=\(text.utf8.count) attachments=\(payloads.count)"
+        logPerformanceEvent(name: "input_command_enqueue", count: detail.utf8.count, attributes: inputCommandAttributes(kind: "composer_send", detail: detail))
+        // A dedicated enqueue (rather than the generic `enqueueInputSend`) because the composer owns its
+        // own completion: a partial failure must surface via `composerErrorMessage` and preserve the draft
+        // rather than the generic `errorMessage` path, and success must clear the draft — while still
+        // sharing `inputSendQueue` so it stays ordered with any buffered text/keys.
+        inputSendQueue.enqueue(priority: .userInitiated) { [weak self] in
+            guard let self, !Task.isCancelled else { return }
+            await MainActor.run { self.writeE2EEventIfNeeded(kind: "composer_send_begin", detail: detail) }
+            let hasText = !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            do {
+                // Ordering rationale: text first, then image paths, then Enter. Trailing paths read as
+                // arguments to the typed text, and the risky large upload happens after the cheap text
+                // send. A separator space follows the text (when images follow) and separates images.
+                if hasText {
+                    try await self.performSendTextRequest(text + (payloads.isEmpty ? "" : " "))
+                }
+                for (index, payload) in payloads.enumerated() {
+                    if index > 0 { try await self.performSendTextRequest(" ") }
+                    try await self.performPasteImageRequest(payload)
+                }
+                try await self.performSendKeyRequest("enter")
+            } catch {
+                await MainActor.run { self.finishComposedSend(with: error) }
+                return
+            }
+            await MainActor.run { self.finishComposedSend(with: nil) }
+        }
+    }
+
+    private func finishComposedSend(with error: Error?) {
+        isSendingComposedMessage = false
+        guard let error else {
+            writeE2EEventIfNeeded(kind: "composer_send_success", detail: nil)
+            composerDraftText = ""
+            composerAttachments = []
+            composerErrorMessage = nil
+            if isOwner {
+                hasConfirmedOwnerInputReadiness = true
+                isInputSurfaceReady = true
+            }
+            return
+        }
+        writeE2EEventIfNeeded(kind: "composer_send_failure", detail: error.localizedDescription)
+        // Keep the entire draft (text + all attachments) so the user can retry without recomposing.
+        composerErrorMessage = "Couldn't send an image. Nothing was submitted — the terminal line may contain partial text."
+    }
+
+    private func performPasteImageRequest(_ payload: TerminalImageAttachmentPayload) async throws {
+        guard let ownerEpoch = currentOwnerEpoch else {
+            throw SpacesDeviceAPIClientError.requestFailed("The terminal is not ready to receive an image.")
+        }
+        try await performRequestUsingInputChannel {
+            [bridgeClient, sessionID = session.id, clientID = remoteClient.id, ownerEpoch, payload] commandChannel in
+            try await bridgeClient.pasteImage(
+                sessionID: sessionID,
+                clientID: clientID,
+                ownerEpoch: ownerEpoch,
+                fileExtension: payload.fileExtension,
+                imageData: payload.imageData,
+                timeout: Self.pasteImageRequestTimeout,
+                commandChannel: commandChannel
+            )
         }
     }
 
@@ -1916,5 +2029,37 @@ struct TerminalLinkPreview: Identifiable, Equatable {
     private func endedRenderID(for snapshot: GhosttyTerminalSnapshot) -> String {
         let screenRevision = latestState?.screenStateRevision ?? 0
         return "ended|\(screenRevision)|\(snapshot.columns)x\(snapshot.rows)|\(latestState?.emittedAt ?? "unknown")"
+    }
+
+    /// Injects an owner-interactive state so composer/input send sequencing can be exercised without a
+    /// live subscribe stream (whose owner-bootstrap render update the unit tests cannot synthesize).
+    /// Sets the same preconditions the real owner-bootstrap path establishes: this client owns the
+    /// session, input readiness is confirmed, and an owner render epoch carries `ownerEpoch`.
+    func configureOwnerInteractiveForTesting(ownerEpoch: UInt64) {
+        let ownerAttachment = TerminalAttachment(
+            sessionID: session.id, clientID: remoteClient.id, mode: .owner, attachedAt: "2026-01-01T00:00:00Z")
+        let runtime = TerminalSessionRuntimeState(
+            sessionID: session.id, servicePID: 100, childPID: 200, state: .running, updatedAt: "2026-01-01T00:00:00Z")
+        latestState = GhosttyRemoteSessionStatePayload(
+            sessionID: session.id,
+            reason: TerminalRemoteSessionStateReason.initial,
+            emittedAt: "2026-01-01T00:00:00Z",
+            sessionStateRevision: nil,
+            sessionStateFlags: nil,
+            screenStateRevision: nil,
+            runtimeState: runtime,
+            attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [remoteClient], attachments: [ownerAttachment]),
+            title: session.title,
+            workingDirectory: session.workingDirectory,
+            outputByteCount: 0)
+        let bootstrapSnapshot = GhosttyTerminalSnapshot(
+            columns: 80, rows: 24, cursorColumn: 0, cursorRow: 0, cursorVisible: true,
+            defaultForegroundRGB: 0xFFFF_FFFF, defaultBackgroundRGB: 0, cells: [])
+        ownerRenderEpochState = GhosttyRemoteTerminalOwnerEpoch(
+            sessionID: session.id, id: "owner|test", ownerEpoch: ownerEpoch, bootstrapSnapshot: bootstrapSnapshot)
+        hasAttachedToSession = true
+        hasAttemptedAutomaticTakeover = true
+        hasConfirmedOwnerInputReadiness = true
+        isInputSurfaceReady = true
     }
 }

@@ -20,6 +20,7 @@ struct TerminalDetailView: View {
 
     @State private var hasMountedTerminalSurface = false
     @State private var isBackNavigationInProgress = false
+    @State private var isShowingComposer = false
     @State private var renderedText = ""
     @State private var model: TerminalViewerModel
     /// The app's effective light/dark scheme. `preferredColorScheme` at the app scene stamps the forced
@@ -99,6 +100,9 @@ struct TerminalDetailView: View {
                             },
                             onOpenLink: { link in
                                 openTerminalLink(link)
+                            },
+                            onOpenComposer: {
+                                isShowingComposer = true
                             }
                         )
                         .accessibilityIdentifier("terminal.surface")
@@ -149,6 +153,9 @@ struct TerminalDetailView: View {
                 })
         ) { preview in
             TerminalLinkPreviewSheet(preview: preview)
+        }
+        .sheet(isPresented: $isShowingComposer) {
+            TerminalComposerSheet(model: model, stagedScreenshots: appModel.stagedScreenshots)
         }
         .onDisappear { model.stop() }
     }

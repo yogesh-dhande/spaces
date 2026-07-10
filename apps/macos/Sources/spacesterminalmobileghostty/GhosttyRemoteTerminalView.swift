@@ -92,6 +92,7 @@ import Foundation
         public let onSendKey: @MainActor (String) -> Void
         public let onSendScroll: @MainActor (Double, Double, Int32) -> Void
         public let onOpenLink: @MainActor (String) -> Void
+        public let onOpenComposer: (@MainActor () -> Void)?
 
         public init(
             ownerEpoch: GhosttyRemoteTerminalOwnerEpoch? = nil, endedRender: GhosttyRemoteTerminalEndedRender? = nil, fallbackText: String,
@@ -99,7 +100,7 @@ import Foundation
             onScrollGestureApplied: (@MainActor () -> Void)? = nil, onRenderedTextChanged: (@MainActor (String) -> Void)? = nil,
             onViewportSizeChanged: @escaping @MainActor (Int, Int) -> Void, onSendText: @escaping @MainActor (String) -> Void,
             onSendKey: @escaping @MainActor (String) -> Void, onSendScroll: @escaping @MainActor (Double, Double, Int32) -> Void = { _, _, _ in },
-            onOpenLink: @escaping @MainActor (String) -> Void = { _ in }
+            onOpenLink: @escaping @MainActor (String) -> Void = { _ in }, onOpenComposer: (@MainActor () -> Void)? = nil
         ) {
             self.ownerEpoch = ownerEpoch
             self.endedRender = endedRender
@@ -115,6 +116,7 @@ import Foundation
             self.onSendKey = onSendKey
             self.onSendScroll = onSendScroll
             self.onOpenLink = onOpenLink
+            self.onOpenComposer = onOpenComposer
         }
 
         public func makeUIView(context: Context) -> GhosttyRemoteTerminalHostView { GhosttyRemoteTerminalHostView() }
@@ -127,6 +129,7 @@ import Foundation
             hostView.onSendKey = { key in _ = Task { @MainActor in onSendKey(key) } }
             hostView.onSendScroll = { horizontal, vertical, scrollMods in _ = Task { @MainActor in onSendScroll(horizontal, vertical, scrollMods) } }
             hostView.onOpenLink = { link in _ = Task { @MainActor in onOpenLink(link) } }
+            hostView.onOpenComposer = onOpenComposer.map { callback in { _ = Task { @MainActor in callback() } } }
             hostView.onRenderedTextChanged = onRenderedTextChanged.map { callback in { text in _ = Task { @MainActor in callback(text) } } }
             hostView.setTerminalVisible(isVisible)
             hostView.setAcceptsTerminalInput(acceptsInput && !isBusy)
@@ -232,6 +235,7 @@ import Foundation
         private lazy var activateInputRecognizer = UITapGestureRecognizer(target: self, action: #selector(handleTapToActivateInput(_:)))
         private lazy var scrollPanRecognizer = UIPanGestureRecognizer(target: self, action: #selector(handleScrollPan))
         private lazy var terminalAccessoryView = TerminalAccessoryToolbar(
+            onComposer: { [weak self] in self?.onOpenComposer?() },
             onText: { [weak self] text in self?.sendAccessoryText(text) }, onKey: { [weak self] key in self?.sendAccessoryKey(key) },
             onModifier: { [weak self] modifier in self?.toggleAccessoryModifier(modifier) },
             onKeyboardToggle: { [weak self] in self?.toggleAccessorySoftwareKeyboard() })
@@ -245,6 +249,7 @@ import Foundation
         public var onSendKey: ((String) -> Void)?
         public var onSendScroll: ((Double, Double, Int32) -> Void)?
         public var onOpenLink: ((String) -> Void)?
+        public var onOpenComposer: (() -> Void)?
         public var onRenderedTextChanged: ((String) -> Void)? {
             didSet {
                 guard onRenderedTextChanged == nil else {
@@ -1095,6 +1100,7 @@ import Foundation
             var pendingModifiers: Set<AccessoryModifier> = [] { didSet { updateModifierButtonAppearances() } }
             var isKeyboardVisible = true { didSet { updateKeyboardButtonImage() } }
 
+            private let onComposer: () -> Void
             private let onText: (String) -> Void
             private let onKey: (String) -> Void
             private let onModifier: (AccessoryModifier) -> Void
@@ -1104,6 +1110,7 @@ import Foundation
             private let contentStackView = UIStackView()
             private let pinnedStackView = UIStackView()
             private var modifierButtons: [AccessoryModifier: UIButton] = [:]
+            private let composerButton = UIButton(type: .system)
             private let joystickButton = DirectionalPadButton(type: .system)
             private let keyboardButton = UIButton(type: .system)
             private var metrics = TerminalAccessoryToolbar.metrics(for: UIDevice.current.userInterfaceIdiom)
@@ -1121,9 +1128,10 @@ import Foundation
             override func sizeThatFits(_ size: CGSize) -> CGSize { CGSize(width: size.width, height: Self.toolbarHeight) }
 
             init(
-                onText: @escaping (String) -> Void, onKey: @escaping (String) -> Void, onModifier: @escaping (AccessoryModifier) -> Void,
-                onKeyboardToggle: @escaping () -> Void
+                onComposer: @escaping () -> Void, onText: @escaping (String) -> Void, onKey: @escaping (String) -> Void,
+                onModifier: @escaping (AccessoryModifier) -> Void, onKeyboardToggle: @escaping () -> Void
             ) {
+                self.onComposer = onComposer
                 self.onText = onText
                 self.onKey = onKey
                 self.onModifier = onModifier
@@ -1198,6 +1206,12 @@ import Foundation
                 addModifierButton(.control)
                 addModifierButton(.command)
                 addModifierButton(.option)
+
+                configureButton(composerButton, imageName: "plus.bubble")
+                composerButton.accessibilityIdentifier = "terminal.accessory.composer"
+                composerButton.accessibilityLabel = "Compose message"
+                composerButton.addAction(UIAction { [weak self] _ in self?.onComposer() }, for: .touchUpInside)
+                pinnedStackView.addArrangedSubview(composerButton)
 
                 configureButton(joystickButton, imageName: "dpad")
                 joystickButton.accessibilityIdentifier = "terminal.accessory.arrow-joystick"

@@ -1,6 +1,7 @@
 import SwiftUI
 import UIKit
 import WebKit
+import spacesterminalcore
 
 /// Full-screen detail view for a workspace browser session, pushed from a browser-session row in the
 /// workspace list. Loads the session's on-device proxy URL
@@ -19,9 +20,17 @@ struct BrowserSessionDetailView: View {
     let title: String
     let subtitle: String
     let url: URL
+    let stagedScreenshots: StagedScreenshotStore
     let onBack: () -> Void
 
     @State private var model = BrowserSessionDetailViewModel()
+    /// A freshly captured screenshot awaiting markup. Non-nil drives the full-screen QuickLook Markup
+    /// presentation; the item carries the temp-file URL the editor annotates in place.
+    @State private var markupItem: ScreenshotMarkupItem?
+    /// True from the moment the screenshot button is tapped until the snapshot returns, so repeated taps
+    /// can't queue overlapping captures.
+    @State private var isCapturingScreenshot = false
+    @State private var toast: ScreenshotToast?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -38,12 +47,38 @@ struct BrowserSessionDetailView: View {
                     errorState(loadErrorMessage)
                 }
             }
+            .overlay(alignment: .bottom) {
+                if let toast {
+                    toastBanner(toast)
+                        .padding(.horizontal, 16)
+                        .padding(.bottom, 12)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+            }
 
             bottomToolbar
         }
         .background(Self.surfaceBackground.ignoresSafeArea())
         .accessibilityIdentifier("browserSession.detail")
         .toolbar(.hidden, for: .navigationBar)
+        .fullScreenCover(item: $markupItem) { item in
+            ScreenshotMarkupPresenter(item: item, stagedScreenshots: stagedScreenshots) { outcome in
+                markupItem = nil
+                switch outcome {
+                case .staged:
+                    showToast("Screenshot staged — insert it from a terminal", isError: false)
+                case .failed(let message):
+                    showToast(message, isError: true)
+                }
+            }
+            .ignoresSafeArea()
+        }
+        .task(id: toast?.id) {
+            guard toast != nil else { return }
+            try? await Task.sleep(for: .seconds(2.5))
+            guard !Task.isCancelled else { return }
+            withAnimation { toast = nil }
+        }
     }
 
     private var topOverlay: some View {
@@ -103,6 +138,12 @@ struct BrowserSessionDetailView: View {
             }
             Spacer(minLength: 0)
             toolbarButton(
+                systemName: "camera.viewfinder", accessibilityLabel: "Screenshot", identifier: "browserSession.screenshot",
+                isEnabled: model.loadErrorMessage == nil && !isCapturingScreenshot
+            ) {
+                captureScreenshot()
+            }
+            toolbarButton(
                 systemName: "safari", accessibilityLabel: "Open in Safari", identifier: "browserSession.openInSafari", isEnabled: true
             ) {
                 UIApplication.shared.open(url)
@@ -126,6 +167,73 @@ struct BrowserSessionDetailView: View {
         .disabled(!isEnabled)
         .accessibilityLabel(accessibilityLabel)
         .accessibilityIdentifier(identifier)
+    }
+
+    /// Captures the web view's visible viewport, then routes the result back through `handleCapturedSnapshot`
+    /// on the main actor. `model.captureSnapshot` is wired by the web view's coordinator; it should always
+    /// be present by the time the (page-loaded) button is enabled, so a missing hook just clears the
+    /// in-flight flag rather than surfacing an error.
+    private func captureScreenshot() {
+        guard let capture = model.captureSnapshot else { return }
+        isCapturingScreenshot = true
+        capture { image in
+            handleCapturedSnapshot(image)
+        }
+    }
+
+    @MainActor
+    private func handleCapturedSnapshot(_ image: UIImage?) {
+        isCapturingScreenshot = false
+        guard let image, let pngData = image.pngData() else {
+            showToast("Couldn't capture this page.", isError: true)
+            return
+        }
+        do {
+            // Validate up front so an oversized capture is rejected before we write a temp file or open
+            // the Markup editor. Markup can still grow the PNG past the cap, so the stage-on-dismiss
+            // step re-validates too.
+            _ = try TerminalImageAttachmentPayload.validated(fileExtension: "png", imageData: pngData)
+        } catch {
+            showToast(Self.screenshotErrorMessage(error), isError: true)
+            return
+        }
+        let fileURL = FileManager.default.temporaryDirectory.appending(path: "spaces-screenshot-\(UUID().uuidString).png")
+        do {
+            try pngData.write(to: fileURL)
+        } catch {
+            showToast("Couldn't prepare this screenshot.", isError: true)
+            return
+        }
+        markupItem = ScreenshotMarkupItem(fileURL: fileURL, sourceTitle: title)
+    }
+
+    static func screenshotErrorMessage(_ error: Error) -> String {
+        if case TerminalImageAttachmentValidationError.imageTooLarge = error {
+            return "Screenshot is too large to stage."
+        }
+        return "Couldn't stage this screenshot."
+    }
+
+    private func showToast(_ text: String, isError: Bool) {
+        withAnimation { toast = ScreenshotToast(text: text, isError: isError) }
+    }
+
+    private func toastBanner(_ toast: ScreenshotToast) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: toast.isError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(toast.isError ? Theme.orange : .white)
+            Text(toast.text)
+                .font(.footnote.weight(.medium))
+                .foregroundStyle(.white)
+                .lineLimit(2)
+                .multilineTextAlignment(.leading)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(Capsule().fill(Color.black.opacity(0.82)))
+        .overlay(Capsule().strokeBorder(.white.opacity(0.12), lineWidth: 1))
+        .accessibilityIdentifier("browserSession.screenshotToast")
     }
 
     /// Shown only for a transport-level failure (e.g. the on-device proxy listener never bound). A
@@ -197,10 +305,21 @@ final class BrowserSessionDetailViewModel {
     var goBack: (() -> Void)?
     var goForward: (() -> Void)?
     var reload: (() -> Void)?
+    /// Captures the web view's visible viewport and delivers the image (or `nil` on failure) back on the
+    /// main actor. Wired by the coordinator, which owns the live `WKWebView`.
+    var captureSnapshot: ((@escaping @MainActor (UIImage?) -> Void) -> Void)?
     /// Re-issues the original request. Used by the Retry button instead of a plain `reload()` since a
     /// page that never committed (the transport-level failure case this button exists for) has nothing
     /// for `reload()` to reload.
     var retry: (() -> Void)?
+}
+
+/// A transient capsule banner shown over the browser content: the staged-screenshot confirmation or a
+/// capture/validation failure. `id` changes on every post so `.task(id:)` restarts the auto-dismiss timer.
+private struct ScreenshotToast: Equatable {
+    let id = UUID()
+    let text: String
+    let isError: Bool
 }
 
 /// `WKWebView` wrapper for a browser session. Always uses `WKWebsiteDataStore.default()` so cookies and
@@ -244,6 +363,18 @@ private struct BrowserSessionWebView: UIViewRepresentable {
             model.goBack = { [weak webView] in webView?.goBack() }
             model.goForward = { [weak webView] in webView?.goForward() }
             model.reload = { [weak webView] in webView?.reload() }
+            model.captureSnapshot = { [weak webView] completion in
+                guard let webView else {
+                    completion(nil)
+                    return
+                }
+                // `takeSnapshot(with: nil)` captures the visible viewport. Its completion handler is
+                // already `@MainActor`, so the image is delivered to our (also main-actor) completion
+                // directly — no hop needed, unlike the KVO callbacks above.
+                webView.takeSnapshot(with: nil) { image, _ in
+                    completion(image)
+                }
+            }
             model.retry = { [weak self, weak webView] in
                 guard let webView, let url = self?.loadedURL else { return }
                 webView.load(URLRequest(url: url))

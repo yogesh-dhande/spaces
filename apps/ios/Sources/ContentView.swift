@@ -53,7 +53,8 @@ struct ContentView: View {
                     BrowserSessionDetailView(
                         title: selectedBrowserSession.row.title,
                         subtitle: selectedBrowserSession.row.route.identityHost,
-                        url: selectedBrowserSession.proxyURL
+                        url: selectedBrowserSession.proxyURL,
+                        stagedScreenshots: model.stagedScreenshots
                     ) {
                         self.selectedBrowserSession = nil
                     }

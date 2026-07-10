@@ -454,6 +454,9 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// pruned when a device is unpaired. Kept on the model (rather than rebuilt from scratch each time)
     /// so `removeDevice` can drop just that device's routes via `BrowserProxyRoutingTable.removeDevice`.
     @ObservationIgnored private var browserRoutingTable = BrowserProxyRoutingTable()
+    /// In-memory holding spot for a screenshot staged for paste into a terminal session, shared across
+    /// the app so the staging flow and the terminal viewer can both reach the same pending image.
+    let stagedScreenshots = StagedScreenshotStore()
 
     init() {
         #if DEBUG

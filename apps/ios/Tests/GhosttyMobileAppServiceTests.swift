@@ -1627,8 +1627,8 @@
             let scrollableButtons = buttons.filter { $0.isDescendant(of: scrollView) }
             let pinnedButtons = buttons.filter { !$0.isDescendant(of: scrollView) }
             XCTAssertEqual(scrollableButtons.compactMap(\.accessibilityLabel), ["tab", "/", "~", "|", "-", "_", "esc", "Control", "Command", "Option"])
-            XCTAssertEqual(pinnedButtons.compactMap(\.accessibilityLabel), ["Arrow key joystick", "Hide keyboard"])
-            let joystickButton = try XCTUnwrap(pinnedButtons.first)
+            XCTAssertEqual(pinnedButtons.compactMap(\.accessibilityLabel), ["Compose message", "Arrow key joystick", "Hide keyboard"])
+            let joystickButton = try XCTUnwrap(pinnedButtons.first { $0.accessibilityLabel == "Arrow key joystick" })
             XCTAssertEqual(joystickButton.accessibilityCustomActions?.map(\.name) ?? [], ["Up arrow", "Down arrow", "Left arrow", "Right arrow"])
 
             let phoneFrames = hostView.accessoryToolbarLayoutFramesForTesting(width: 320, userInterfaceIdiom: .phone)
@@ -1663,7 +1663,7 @@
             }
 
             hostView.setSoftwareKeyboardVisible(false)
-            XCTAssertEqual(hostView.accessoryToolbarButtonAccessibilityLabelsForTesting.pinned, ["Arrow key joystick", "Show keyboard"])
+            XCTAssertEqual(hostView.accessoryToolbarButtonAccessibilityLabelsForTesting.pinned, ["Compose message", "Arrow key joystick", "Show keyboard"])
 
             hostView.setAcceptsTerminalInput(false)
             XCTAssertNil(hostView.inputAccessoryView)
