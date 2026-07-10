@@ -3760,7 +3760,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             self.logStartupProfile("setup_flow_complete")
             self.presentMainWorkspaceUI()
         }
-        window.contentView = controller.begin()
+        // Install the setup content before starting the flow, never after: with no pending step the
+        // flow completes inside `begin()`, and its completion handler makes the workspace UI the
+        // window's content. Assigning here afterwards would cover it with an empty setup container.
+        window.contentView = controller.view
+        controller.begin()
     }
 
     /// Background-refresh failures are always logged rather than routed to the launch setup flow,

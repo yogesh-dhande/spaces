@@ -76,9 +76,14 @@ import systembridge
 
     // MARK: - Flow
 
-    /// Builds the setup container and enters the first pending step. The view is the window's content
-    /// until `onComplete` fires.
-    func begin() -> NSView {
+    /// The flow's content view. The caller installs this as the window's content *before* calling
+    /// `begin()`, because a launch with no pending step completes inside `begin()` and hands the window
+    /// to the workspace UI; installing it afterwards would cover that UI with this empty container.
+    var view: NSView { container }
+
+    /// Enters the first pending step. Completes immediately through `onComplete` — before returning —
+    /// when no step is pending.
+    func begin() {
         // Start the probe before the first step renders, so a cold `spacesd` warms up while the user
         // works through the Chrome Automation screen instead of after it.
         if Self.shouldProbeLocalAgents(dismissedHookVersion: dismissedHookVersion(), currentHookVersion: AgentHookCommand.hookVersion) {
@@ -90,7 +95,6 @@ import systembridge
         } else {
             enterCodingAgentsStepIfNeeded()
         }
-        return container
     }
 
     func stop() {
@@ -116,7 +120,11 @@ import systembridge
             self.chromeSetup = nil
             self.enterCodingAgentsStepIfNeeded()
         }
-        setContent(controller.begin())
+        // Show the step before starting it, never after: an already-granted permission fires
+        // `onGranted` inside `begin()`, and the content the next step installs must not be replaced
+        // by this step's now-inert view.
+        setContent(controller.view)
+        controller.begin()
     }
 
     /// Resolves the coding-agents step against the local daemon, then either shows it or hands off to

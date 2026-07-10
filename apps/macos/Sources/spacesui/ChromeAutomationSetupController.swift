@@ -18,13 +18,21 @@ import systembridge
     private var pollTimer: Timer?
     private var isRequestingAccess = false
 
-    /// Builds the setup view, applies the current permission state, and starts polling so a grant
-    /// made in System Settings advances the app without a relaunch.
-    func begin() -> NSView {
+    /// The step's content view. The caller installs this before calling `begin()`, because a
+    /// permission granted between the caller's check and `begin()` completes the step through
+    /// `onGranted` before `begin()` returns, and the next step's content must win.
+    var view: NSView { container }
+
+    /// Applies the current permission state and starts polling so a grant made in System Settings
+    /// advances the app without a relaunch. Completes immediately through `onGranted` — before
+    /// returning — when the permission is already granted.
+    func begin() {
         buildLayout()
-        applyStatus(ChromeAutomationPermission.status())
+        // Poll before applying the status, not after: an already-granted permission completes the step
+        // from inside `applyStatus`, and its `stop()` can only invalidate a timer that already exists.
+        // Starting the timer afterwards would leave it running against a step nobody can stop again.
         startPolling()
-        return container
+        applyStatus(ChromeAutomationPermission.status())
     }
 
     func stop() {
