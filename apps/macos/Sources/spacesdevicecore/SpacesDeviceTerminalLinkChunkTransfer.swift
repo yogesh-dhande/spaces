@@ -5,6 +5,7 @@ import Foundation
 /// transport-layer failures the caller's `readChunk` closure may throw on its own.
 public enum SpacesDeviceTerminalLinkChunkTransferError: LocalizedError, Equatable {
     case invalidChunkData(linkID: String)
+    case unexpectedChunkLinkID(requestedLinkID: String, receivedLinkID: String)
     case unexpectedChunkOffset(linkID: String, requestedOffset: Int64, receivedOffset: Int64)
     case chunkByteCountMismatch(linkID: String, reportedByteCount: Int, decodedByteCount: Int)
     case emptyNonFinalChunk(linkID: String, offset: Int64)
@@ -14,6 +15,8 @@ public enum SpacesDeviceTerminalLinkChunkTransferError: LocalizedError, Equatabl
     public var errorDescription: String? {
         switch self {
         case .invalidChunkData(let linkID): return "Terminal link '\(linkID)' transfer returned invalid data."
+        case .unexpectedChunkLinkID(let requestedLinkID, let receivedLinkID):
+            return "Terminal link '\(requestedLinkID)' transfer returned a chunk for '\(receivedLinkID)'."
         case .unexpectedChunkOffset(let linkID, let requestedOffset, let receivedOffset):
             return "Terminal link '\(linkID)' transfer returned chunk offset \(receivedOffset) instead of the requested offset \(requestedOffset)."
         case .chunkByteCountMismatch(let linkID, let reportedByteCount, let decodedByteCount):
@@ -68,6 +71,9 @@ public enum SpacesDeviceTerminalLinkChunkTransfer {
             let chunk = try await readChunk(offset, SpacesDeviceTerminalLinkResolver.defaultChunkLimit)
             try Task.checkCancellation()
 
+            guard chunk.linkID == linkID else {
+                throw SpacesDeviceTerminalLinkChunkTransferError.unexpectedChunkLinkID(requestedLinkID: linkID, receivedLinkID: chunk.linkID)
+            }
             guard chunk.offset == offset else {
                 throw SpacesDeviceTerminalLinkChunkTransferError.unexpectedChunkOffset(
                     linkID: linkID, requestedOffset: offset, receivedOffset: chunk.offset)

@@ -66,6 +66,24 @@ final class SpacesDeviceTerminalLinkChunkTransferTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: destinationURL.path))
     }
 
+    func testWrongLinkIDThrowsAndRemovesPartialFile() async throws {
+        let destinationURL = makeDestinationURL()
+        let payload = Data(repeating: 0x41, count: 10)
+
+        do {
+            _ = try await SpacesDeviceTerminalLinkChunkTransfer.download(linkID: "link-1", expectedByteCount: nil, to: destinationURL) { offset, _ in
+                SpacesDeviceTerminalLinkChunk(
+                    linkID: "stale-link", offset: offset, byteCount: payload.count, isFinal: true, base64Data: payload.base64EncodedString())
+            }
+            XCTFail("Expected a wrong link ID error")
+        } catch SpacesDeviceTerminalLinkChunkTransferError.unexpectedChunkLinkID(let requestedLinkID, let receivedLinkID) {
+            XCTAssertEqual(requestedLinkID, "link-1")
+            XCTAssertEqual(receivedLinkID, "stale-link")
+        }
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: destinationURL.path))
+    }
+
     func testByteCountMismatchThrowsAndRemovesPartialFile() async throws {
         let destinationURL = makeDestinationURL()
 
