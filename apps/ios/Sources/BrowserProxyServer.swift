@@ -25,9 +25,11 @@ final class BrowserProxyRuntimeState {
 /// It listens on `127.0.0.1:47898`, reads each connection's first HTTP request head to learn the
 /// `Host`, looks the host up in the routing table, verifies the embedded web view's unguessable proxy
 /// cookie, opens an authenticated raw-byte tunnel to the owning daemon (`openServiceTunnel` over
-/// pinned TLS), replays the bytes it consumed after stripping the proxy cookie, then splices the two
-/// connections transparently so WebSocket/SSE upgrades pass straight through. Requests it cannot route,
-/// authenticate, or dial are answered with a self-contained HTML error page.
+/// pinned TLS), replays exactly one non-upgrade request after stripping the proxy cookie, then
+/// half-closes the tunnel write side so the browser cannot reuse that connection with unsanitized
+/// cookies. Upgrade requests then splice the two connections transparently so WebSockets pass straight
+/// through. Requests it cannot route, authenticate, or dial are answered with a self-contained HTML
+/// error page.
 actor SpacesMobileBrowserProxy {
     /// The fixed loopback port WKWebView targets. It is stable so the `.localhost` URLs the daemon
     /// mints resolve to this proxy regardless of which daemon owns the service.
@@ -249,14 +251,24 @@ actor SpacesMobileBrowserProxy {
             if !opened.residual.isEmpty {
                 try await BrowserProxyConnectionIO.send(opened.residual, on: client)
             }
+            let bodyLimit = parser.isUpgradeRequest ? nil : (parser.contentLength ?? 0)
             try await BrowserProxyConnectionIO.send(
-                parser.consumedBytes(droppingCookieNamed: BrowserProxyRequest.cookieName), on: opened.connection)
+                parser.consumedBytes(
+                    droppingCookieNamed: BrowserProxyRequest.cookieName,
+                    forcingConnectionClose: !parser.isUpgradeRequest,
+                    bodyLimit: bodyLimit),
+                on: opened.connection)
         } catch {
             teardown(session.id)
             return
         }
 
-        splice(session)
+        if parser.isUpgradeRequest {
+            splice(session)
+        } else {
+            let initialBodyBytesForwarded = min(parser.bodyByteCount, parser.contentLength ?? 0)
+            relaySingleRequestResponse(session, remainingRequestBodyBytes: max(0, (parser.contentLength ?? 0) - initialBodyBytesForwarded))
+        }
     }
 
     /// Reads the HTTP head off a freshly accepted client connection.
@@ -304,6 +316,23 @@ actor SpacesMobileBrowserProxy {
         Self.pump(from: tunnel, to: client, coordinator: coordinator)
     }
 
+    /// Finishes the first request body, closes the service-facing write side, and relays the single
+    /// response back to the client. Normal HTTP browser connections use this instead of a raw
+    /// client->service splice so a keep-alive follow-up request cannot leak the proxy auth cookie.
+    private func relaySingleRequestResponse(_ session: BrowserProxySession, remainingRequestBodyBytes: Int) {
+        guard let tunnel = session.tunnel else {
+            teardown(session.id)
+            return
+        }
+        let client = session.client
+        let id = session.id
+        let coordinator = BrowserProxyRelayCoordinator {
+            Task { await self.teardown(id) }
+        }
+        Self.finishSingleRequestBody(from: client, to: tunnel, remainingBytes: remainingRequestBodyBytes, coordinator: coordinator)
+        Self.pump(from: tunnel, to: client, coordinator: coordinator)
+    }
+
     /// Pumps bytes from `source` to `dest`, applying backpressure by only issuing the next receive
     /// after the prior send is processed. Forwards stream end as a half-close (`.finalMessage` is
     /// what actually emits a TCP FIN; the default message context ignores `isComplete` for stream
@@ -336,6 +365,59 @@ actor SpacesMobileBrowserProxy {
             } else {
                 pump(from: source, to: dest, coordinator: coordinator)
             }
+        }
+    }
+
+    /// Sends the remaining bytes of a known-length request body, then half-closes the service-facing
+    /// write side. If the client stops before the declared body is complete, the tunnel is aborted
+    /// rather than forwarding a truncated request.
+    private static func finishSingleRequestBody(
+        from source: NWConnection,
+        to dest: NWConnection,
+        remainingBytes: Int,
+        coordinator: BrowserProxyRelayCoordinator
+    ) {
+        guard remainingBytes > 0 else {
+            dest.send(
+                content: nil,
+                contentContext: .finalMessage,
+                isComplete: true,
+                completion: .contentProcessed { _ in coordinator.directionComplete() })
+            return
+        }
+
+        source.receive(minimumIncompleteLength: 1, maximumLength: min(65_536, remainingBytes)) { content, _, isComplete, error in
+            if error != nil {
+                coordinator.abort()
+                return
+            }
+            guard let content, !content.isEmpty else {
+                if isComplete {
+                    coordinator.abort()
+                    return
+                }
+                finishSingleRequestBody(from: source, to: dest, remainingBytes: remainingBytes, coordinator: coordinator)
+                return
+            }
+
+            let nextRemainingBytes = remainingBytes - content.count
+            if isComplete, nextRemainingBytes > 0 {
+                coordinator.abort()
+                return
+            }
+            dest.send(
+                content: content,
+                contentContext: nextRemainingBytes == 0 ? .finalMessage : .defaultMessage,
+                isComplete: nextRemainingBytes == 0,
+                completion: .contentProcessed { sendError in
+                    if sendError != nil {
+                        coordinator.abort()
+                    } else if nextRemainingBytes == 0 {
+                        coordinator.directionComplete()
+                    } else {
+                        finishSingleRequestBody(from: source, to: dest, remainingBytes: nextRemainingBytes, coordinator: coordinator)
+                    }
+                })
         }
     }
 

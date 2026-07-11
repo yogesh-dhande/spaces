@@ -64,10 +64,39 @@ struct BrowserProxyHTTPHeadParser {
         return nil
     }
 
-    func consumedBytes(droppingCookieNamed cookieName: String) -> Data {
+    var isUpgradeRequest: Bool {
+        guard !headerValues(named: "Upgrade").isEmpty else { return false }
+        return headerValues(named: "Connection").contains { value in
+            value.split(separator: ",").contains { token in
+                token.trimmingCharacters(in: .whitespaces).caseInsensitiveCompare("upgrade") == .orderedSame
+            }
+        }
+    }
+
+    var contentLength: Int? {
+        for value in headerValues(named: "Content-Length") {
+            let trimmed = value.trimmingCharacters(in: .whitespaces)
+            guard let length = Int(trimmed), length >= 0 else { continue }
+            return length
+        }
+        return nil
+    }
+
+    var bodyByteCount: Int {
+        guard isComplete, let headEndIndex else { return 0 }
+        return consumedBytes.count - headEndIndex
+    }
+
+    func consumedBytes(droppingCookieNamed cookieName: String, forcingConnectionClose: Bool = false, bodyLimit: Int? = nil) -> Data {
         guard isComplete, let headEndIndex, let headText else { return consumedBytes }
-        let body = consumedBytes[headEndIndex...]
+        let fullBody = consumedBytes[headEndIndex...]
+        let body = if let bodyLimit {
+            fullBody.prefix(max(0, min(bodyLimit, fullBody.count)))
+        } else {
+            fullBody
+        }
         var sanitizedLines: [String] = []
+        var addedConnectionClose = false
         for line in headText.components(separatedBy: "\r\n") {
             guard !line.isEmpty else { continue }
             guard let colon = line.firstIndex(of: ":") else {
@@ -75,6 +104,17 @@ struct BrowserProxyHTTPHeadParser {
                 continue
             }
             let name = line[..<colon].trimmingCharacters(in: .whitespaces)
+            if forcingConnectionClose,
+               name.caseInsensitiveCompare("Connection") == .orderedSame
+                   || name.caseInsensitiveCompare("Proxy-Connection") == .orderedSame
+                   || name.caseInsensitiveCompare("Keep-Alive") == .orderedSame
+            {
+                if name.caseInsensitiveCompare("Connection") == .orderedSame, !addedConnectionClose {
+                    sanitizedLines.append("Connection: close")
+                    addedConnectionClose = true
+                }
+                continue
+            }
             guard name.caseInsensitiveCompare("Cookie") == .orderedSame else {
                 sanitizedLines.append(line)
                 continue
@@ -88,6 +128,9 @@ struct BrowserProxyHTTPHeadParser {
             if !remaining.isEmpty {
                 sanitizedLines.append("Cookie: \(remaining.joined(separator: "; "))")
             }
+        }
+        if forcingConnectionClose, !addedConnectionClose {
+            sanitizedLines.append("Connection: close")
         }
         var sanitized = sanitizedLines.joined(separator: "\r\n").data(using: .isoLatin1)!
         sanitized.append(Data("\r\n\r\n".utf8))

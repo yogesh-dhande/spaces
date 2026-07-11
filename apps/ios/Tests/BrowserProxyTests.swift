@@ -79,6 +79,56 @@
             XCTAssertTrue(sanitized.hasSuffix("\r\n\r\nhello"))
         }
 
+        func testHeadForcesConnectionCloseWhenSanitizingNormalRequest() throws {
+            var parser = BrowserProxyHTTPHeadParser()
+            let request =
+                "GET / HTTP/1.1\r\n"
+                + "Host: web.feature.localhost\r\n"
+                + "Connection: keep-alive\r\n"
+                + "Proxy-Connection: keep-alive\r\n"
+                + "Keep-Alive: timeout=60\r\n"
+                + "Cookie: \(BrowserProxyRequest.cookieName)=secret-token; app=keep\r\n"
+                + "\r\n"
+
+            try parser.append(Data(request.utf8))
+
+            XCTAssertFalse(parser.isUpgradeRequest)
+            let sanitized = String(
+                decoding: parser.consumedBytes(droppingCookieNamed: BrowserProxyRequest.cookieName, forcingConnectionClose: true),
+                as: UTF8.self)
+            XCTAssertTrue(sanitized.contains("Connection: close"))
+            XCTAssertTrue(sanitized.contains("Cookie: app=keep"))
+            XCTAssertFalse(sanitized.contains("Connection: keep-alive"))
+            XCTAssertFalse(sanitized.contains("Proxy-Connection"))
+            XCTAssertFalse(sanitized.contains("Keep-Alive"))
+            XCTAssertFalse(sanitized.contains(BrowserProxyRequest.cookieName))
+        }
+
+        func testHeadPreservesUpgradeHeadersWhenSanitizingUpgradeRequest() throws {
+            var parser = BrowserProxyHTTPHeadParser()
+            let request =
+                "GET /socket HTTP/1.1\r\n"
+                + "Host: web.feature.localhost\r\n"
+                + "Connection: keep-alive, Upgrade\r\n"
+                + "Upgrade: websocket\r\n"
+                + "Cookie: \(BrowserProxyRequest.cookieName)=secret-token; app=keep\r\n"
+                + "\r\n"
+
+            try parser.append(Data(request.utf8))
+
+            XCTAssertTrue(parser.isUpgradeRequest)
+            let sanitized = String(
+                decoding: parser.consumedBytes(
+                    droppingCookieNamed: BrowserProxyRequest.cookieName,
+                    forcingConnectionClose: !parser.isUpgradeRequest),
+                as: UTF8.self)
+            XCTAssertTrue(sanitized.contains("Connection: keep-alive, Upgrade"))
+            XCTAssertTrue(sanitized.contains("Upgrade: websocket"))
+            XCTAssertTrue(sanitized.contains("Cookie: app=keep"))
+            XCTAssertFalse(sanitized.contains("Connection: close"))
+            XCTAssertFalse(sanitized.contains(BrowserProxyRequest.cookieName))
+        }
+
         // MARK: - Routing table
 
         func testRoutingTableMergeExtractsServiceHosts() {
@@ -170,7 +220,8 @@
 
             let response = try await sendRequest(
                 port: proxyPort, host: "web.feature.localhost:\(proxyPort)", path: "/index.html",
-                cookieHeader: "app=keep; \(BrowserProxyRequest.cookieName)=\(authToken)")
+                cookieHeader: "app=keep; \(BrowserProxyRequest.cookieName)=\(authToken)",
+                connectionHeader: "keep-alive")
 
             XCTAssertTrue(response.head.contains("200"), "expected 200 status, got: \(response.head) body: \(response.body)")
             XCTAssertTrue(response.body.contains("hello-from-service"))
@@ -178,11 +229,53 @@
             let requestReachedService = String(decoding: service.received(), as: UTF8.self)
             XCTAssertTrue(requestReachedService.contains("GET /index.html"))
             XCTAssertTrue(requestReachedService.contains("Host: web.feature.localhost"))
+            XCTAssertTrue(requestReachedService.contains("Connection: close"))
             XCTAssertTrue(requestReachedService.contains("Cookie: app=keep"))
+            XCTAssertFalse(requestReachedService.contains("Connection: keep-alive"))
             XCTAssertFalse(requestReachedService.contains(BrowserProxyRequest.cookieName))
 
             XCTAssertEqual(dialer.targets().first?.serviceName, "web")
             XCTAssertEqual(dialer.targets().first?.workspaceID, "ws-1")
+        }
+
+        func testProxyDropsPipelinedKeepAliveRequestAfterSingleSanitizedRequest() async throws {
+            let service = try LocalHTTPTestService(responseBody: "hello-from-service")
+            defer { service.stop() }
+            let servicePort = try await service.start()
+            let dialer = FakeTunnelDialer(behavior: .connect(port: servicePort))
+
+            var table = BrowserProxyRoutingTable()
+            _ = table.merge(
+                deviceID: "device-1", deviceName: "Studio", host: "127.0.0.1", port: 47_847, certificateFingerprint: "fp-1",
+                overview: makeOverview(serviceName: "web", url: "http://web.feature.localhost:47847", branch: "feature", workspaceID: "ws-1"))
+            let authToken = try XCTUnwrap(table.target(forHost: "web.feature.localhost")?.proxyAuthToken)
+
+            let proxyPort = UInt16.random(in: 49_152...65_500)
+            let proxy = SpacesMobileBrowserProxy(port: proxyPort, installationID: "install-1", dialer: dialer)
+            await proxy.updateRoutes(table)
+            await proxy.start()
+            defer { Task { await proxy.stop() } }
+
+            let rawRequest =
+                "GET /first HTTP/1.1\r\n"
+                + "Host: web.feature.localhost:\(proxyPort)\r\n"
+                + "Cookie: app=keep; \(BrowserProxyRequest.cookieName)=\(authToken)\r\n"
+                + "Connection: keep-alive\r\n"
+                + "\r\n"
+                + "GET /second HTTP/1.1\r\n"
+                + "Host: web.feature.localhost:\(proxyPort)\r\n"
+                + "Cookie: \(BrowserProxyRequest.cookieName)=\(authToken)\r\n"
+                + "Connection: close\r\n"
+                + "\r\n"
+
+            let response = try await sendRawRequest(port: proxyPort, request: rawRequest)
+
+            XCTAssertTrue(response.head.contains("200"), "expected 200 status, got: \(response.head) body: \(response.body)")
+            let requestReachedService = String(decoding: service.received(), as: UTF8.self)
+            XCTAssertTrue(requestReachedService.contains("GET /first"))
+            XCTAssertTrue(requestReachedService.contains("Cookie: app=keep"))
+            XCTAssertFalse(requestReachedService.contains("GET /second"))
+            XCTAssertFalse(requestReachedService.contains(BrowserProxyRequest.cookieName))
         }
 
         func testProxyStartupIsSingleFlightAcrossConcurrentCalls() async throws {
@@ -278,7 +371,13 @@
             await MainActor.run { proxy.runtimeState.status }
         }
 
-        private func sendRequest(port: UInt16, host: String, path: String, cookieHeader: String? = nil) async throws -> (head: String, body: String) {
+        private func sendRequest(
+            port: UInt16,
+            host: String,
+            path: String,
+            cookieHeader: String? = nil,
+            connectionHeader: String = "close"
+        ) async throws -> (head: String, body: String) {
             guard let nwPort = NWEndpoint.Port(rawValue: port) else { throw XCTSkip("invalid port") }
             let connection = NWConnection(host: .ipv4(.loopback), port: nwPort, using: .tcp)
             let queue = DispatchQueue(label: "browser.proxy.test.client")
@@ -286,9 +385,29 @@
                 try await BrowserProxyConnectionIO.waitUntilReady(connection, queue: queue)
             }
             let cookieLine = cookieHeader.map { "Cookie: \($0)\r\n" } ?? ""
-            let request = "GET \(path) HTTP/1.1\r\nHost: \(host)\r\n\(cookieLine)Connection: close\r\n\r\n"
+            let request = "GET \(path) HTTP/1.1\r\nHost: \(host)\r\n\(cookieLine)Connection: \(connectionHeader)\r\n\r\n"
             try await BrowserProxyConnectionIO.send(Data(request.utf8), on: connection)
 
+            let data = try await readResponse(from: connection)
+            connection.cancel()
+            return splitResponse(data)
+        }
+
+        private func sendRawRequest(port: UInt16, request: String) async throws -> (head: String, body: String) {
+            guard let nwPort = NWEndpoint.Port(rawValue: port) else { throw XCTSkip("invalid port") }
+            let connection = NWConnection(host: .ipv4(.loopback), port: nwPort, using: .tcp)
+            let queue = DispatchQueue(label: "browser.proxy.test.raw.client")
+            try await BrowserProxyConnectionIO.withTimeout(.seconds(10)) {
+                try await BrowserProxyConnectionIO.waitUntilReady(connection, queue: queue)
+            }
+            try await BrowserProxyConnectionIO.send(Data(request.utf8), on: connection)
+
+            let data = try await readResponse(from: connection)
+            connection.cancel()
+            return splitResponse(data)
+        }
+
+        private func readResponse(from connection: NWConnection) async throws -> Data {
             let data = try await BrowserProxyConnectionIO.withTimeout(.seconds(10)) { () -> Data in
                 var buffer = Data()
                 while true {
@@ -298,7 +417,10 @@
                 }
                 return buffer
             }
-            connection.cancel()
+            return data
+        }
+
+        private func splitResponse(_ data: Data) -> (head: String, body: String) {
             let text = String(decoding: data, as: UTF8.self)
             if let range = text.range(of: "\r\n\r\n") {
                 return (String(text[..<range.lowerBound]), String(text[range.upperBound...]))

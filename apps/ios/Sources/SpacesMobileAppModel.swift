@@ -585,6 +585,11 @@ private enum SpacesMobileMutationTimeoutRecovery {
         Task { await browserProxy.start() }
     }
 
+    /// Stops the loopback browser proxy and all live tunnels. Call when the app enters the background.
+    func browserProxyStop() {
+        Task { await browserProxy.stop() }
+    }
+
     /// The URL a `WKWebView` should load for a browser session row, rebuilt against the proxy's fixed
     /// loopback port. `nil` only if the route's identity host somehow fails to form a valid URL.
     func browserSessionProxyURL(for row: SpacesMobileBrowserSessionRow) -> URL? {
