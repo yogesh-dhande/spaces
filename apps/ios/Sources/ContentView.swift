@@ -53,7 +53,7 @@ struct ContentView: View {
                     BrowserSessionDetailView(
                         title: selectedBrowserSession.row.title,
                         subtitle: selectedBrowserSession.row.route.identityHost,
-                        url: selectedBrowserSession.proxyURL,
+                        request: selectedBrowserSession.proxyRequest,
                         stagedScreenshots: model.stagedScreenshots
                     ) {
                         self.selectedBrowserSession = nil
@@ -148,8 +148,6 @@ struct ContentView: View {
             case .active:
                 model.browserProxyStart()
             case .background:
-                // Opening a browser session in Safari backgrounds Spaces before Safari consumes the
-                // localhost proxy URL, so keep the listener alive until iOS suspends the app.
                 break
             case .inactive:
                 break
@@ -693,8 +691,8 @@ struct ContentView: View {
 
     private func activateRuntimeRow(_ row: SpacesMobileWorkspaceRuntimeRow) {
         if case .browserSession(let browserRow) = row.source {
-            guard let proxyURL = model.browserSessionProxyURL(for: browserRow) else { return }
-            selectedBrowserSession = SelectedBrowserSessionRoute(row: browserRow, proxyURL: proxyURL)
+            guard let proxyRequest = model.browserSessionProxyRequest(for: browserRow) else { return }
+            selectedBrowserSession = SelectedBrowserSessionRoute(row: browserRow, proxyRequest: proxyRequest)
         } else if let session = model.terminalSession(for: row) {
             selectedSession = SelectedTerminalSessionRoute(session: session)
         } else if row.canRun {
@@ -740,7 +738,7 @@ private struct SelectedTerminalSessionRoute: Identifiable, Hashable {
 
 private struct SelectedBrowserSessionRoute: Identifiable, Hashable {
     let row: SpacesMobileBrowserSessionRow
-    let proxyURL: URL
+    let proxyRequest: BrowserProxyRequest
 
     var id: String { row.id }
 

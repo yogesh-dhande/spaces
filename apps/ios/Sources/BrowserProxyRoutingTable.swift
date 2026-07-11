@@ -1,5 +1,46 @@
 import Foundation
+import Security
 import spacesdevicecore
+
+/// The authenticated loopback URL the embedded browser should load for a workspace browser session.
+/// The cookie gates access to the in-process proxy; the proxy strips it before replaying the request
+/// to the workspace service.
+struct BrowserProxyRequest: Sendable, Equatable, Hashable {
+    static let cookieName = "SpacesBrowserProxyAuth"
+
+    let url: URL
+    let authToken: String
+
+    init?(url: URL, authToken: String) {
+        guard url.host != nil else { return nil }
+        self.url = url
+        self.authToken = authToken
+    }
+
+    var urlRequest: URLRequest {
+        var request = URLRequest(url: url)
+        request.setValue(cookieHeaderValue, forHTTPHeaderField: "Cookie")
+        return request
+    }
+
+    var httpCookie: HTTPCookie {
+        guard let host = url.host,
+              let cookie = HTTPCookie(properties: [
+                  .domain: host,
+                  .path: "/",
+                  .name: Self.cookieName,
+                  .value: authToken,
+                  .discard: "TRUE",
+                  HTTPCookiePropertyKey(rawValue: "HttpOnly"): "TRUE",
+              ])
+        else {
+            preconditionFailure("Browser proxy requests are created only for host-bearing URLs.")
+        }
+        return cookie
+    }
+
+    private var cookieHeaderValue: String { "\(Self.cookieName)=\(authToken)" }
+}
 
 /// The daemon and workspace service a browser `Host` resolves to. The display names are carried so
 /// the proxy's error pages can name the service, workspace, and device without a second lookup.
@@ -12,6 +53,7 @@ struct BrowserProxyRouteTarget: Sendable, Equatable {
     let serviceName: String
     let workspaceName: String
     let deviceName: String
+    let proxyAuthToken: String
 }
 
 /// Maps lowercased browser hosts (`<service>.<workspace-slug>.localhost`, without port) to the
@@ -41,9 +83,18 @@ struct BrowserProxyRoutingTable: Sendable, Equatable {
         for workspace in overview.workspaces {
             for assignedPort in workspace.assignedPorts {
                 guard let key = Self.routingKey(forURL: assignedPort.url) else { continue }
-                if let existing = targets[key], existing.deviceID != deviceID || existing.workspaceID != workspace.id {
+                let existing = targets[key]
+                if let existing, existing.deviceID != deviceID || existing.workspaceID != workspace.id {
                     replacedHosts.append(key)
                 }
+                let proxyAuthToken =
+                    if let existing, existing.deviceID == deviceID, existing.workspaceID == workspace.id,
+                       existing.serviceName == assignedPort.name
+                    {
+                        existing.proxyAuthToken
+                    } else {
+                        Self.makeProxyAuthToken()
+                    }
                 targets[key] = BrowserProxyRouteTarget(
                     deviceID: deviceID,
                     host: host,
@@ -52,7 +103,8 @@ struct BrowserProxyRoutingTable: Sendable, Equatable {
                     workspaceID: workspace.id,
                     serviceName: assignedPort.name,
                     workspaceName: workspace.displayName,
-                    deviceName: deviceName
+                    deviceName: deviceName,
+                    proxyAuthToken: proxyAuthToken
                 )
             }
         }
@@ -74,5 +126,15 @@ struct BrowserProxyRoutingTable: Sendable, Equatable {
         let trimmed = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, let components = URLComponents(string: trimmed), let host = components.host, !host.isEmpty else { return nil }
         return host.lowercased()
+    }
+
+    private static func makeProxyAuthToken() -> String {
+        var bytes = [UInt8](repeating: 0, count: 32)
+        let status = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        precondition(status == errSecSuccess, "Unable to generate browser proxy authentication token.")
+        return Data(bytes).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
     }
 }

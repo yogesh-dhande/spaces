@@ -591,6 +591,16 @@ private enum SpacesMobileMutationTimeoutRecovery {
         row.route.proxyURL(proxyPort: Int(SpacesMobileBrowserProxy.fixedPort))
     }
 
+    /// Authenticated request details for the embedded browser. The proxy rejects requests that do not
+    /// carry the route's in-memory cookie, so local loopback clients cannot dial daemon service tunnels
+    /// just by guessing a routed `.localhost` host.
+    func browserSessionProxyRequest(for row: SpacesMobileBrowserSessionRow) -> BrowserProxyRequest? {
+        guard let target = browserRoutingTable.target(forHost: row.route.identityHost),
+              let url = browserSessionProxyURL(for: row)
+        else { return nil }
+        return BrowserProxyRequest(url: url, authToken: target.proxyAuthToken)
+    }
+
     /// Merges an accepted active-device overview into the browser proxy's routing table and pushes the
     /// updated table to the proxy actor before the overview is published to SwiftUI. Workspace
     /// browser-session rows are read straight back out of `overview` by `workspaceRuntimeRows(for:)`,

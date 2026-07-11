@@ -44,21 +44,72 @@ struct BrowserProxyHTTPHeadParser {
     /// The routing host from the `Host` header: name matched case-insensitively, any `:port` suffix
     /// stripped, lowercased. Nil until the head is complete or if no `Host` header is present.
     var host: String? {
-        guard isComplete, let headEndIndex else { return nil }
-        let headData = consumedBytes.prefix(headEndIndex)
-        // HTTP header bytes are ASCII; ISO Latin-1 decodes any byte without failing.
-        guard let headText = String(data: headData, encoding: .isoLatin1) else { return nil }
-        // The first line is the request line; skip it and scan header lines for `Host:`.
-        for line in headText.components(separatedBy: "\r\n").dropFirst() {
-            if line.isEmpty { break }
-            guard let colon = line.firstIndex(of: ":") else { continue }
-            let name = line[..<colon].trimmingCharacters(in: .whitespaces)
-            guard name.caseInsensitiveCompare("Host") == .orderedSame else { continue }
-            let value = line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
+        for value in headerValues(named: "Host") {
             let stripped = Self.stripPort(value).lowercased()
             return stripped.isEmpty ? nil : stripped
         }
         return nil
+    }
+
+    func cookieValue(named cookieName: String) -> String? {
+        for header in headerValues(named: "Cookie") {
+            for part in header.split(separator: ";", omittingEmptySubsequences: false) {
+                let trimmed = part.trimmingCharacters(in: .whitespaces)
+                guard let equals = trimmed.firstIndex(of: "=") else { continue }
+                let name = trimmed[..<equals]
+                guard name == cookieName else { continue }
+                return String(trimmed[trimmed.index(after: equals)...])
+            }
+        }
+        return nil
+    }
+
+    func consumedBytes(droppingCookieNamed cookieName: String) -> Data {
+        guard isComplete, let headEndIndex, let headText else { return consumedBytes }
+        let body = consumedBytes[headEndIndex...]
+        var sanitizedLines: [String] = []
+        for line in headText.components(separatedBy: "\r\n") {
+            guard !line.isEmpty else { continue }
+            guard let colon = line.firstIndex(of: ":") else {
+                sanitizedLines.append(line)
+                continue
+            }
+            let name = line[..<colon].trimmingCharacters(in: .whitespaces)
+            guard name.caseInsensitiveCompare("Cookie") == .orderedSame else {
+                sanitizedLines.append(line)
+                continue
+            }
+            let value = line[line.index(after: colon)...]
+            let remaining = value.split(separator: ";", omittingEmptySubsequences: false).compactMap { part -> String? in
+                let trimmed = part.trimmingCharacters(in: .whitespaces)
+                guard let equals = trimmed.firstIndex(of: "=") else { return trimmed.isEmpty ? nil : trimmed }
+                return trimmed[..<equals] == cookieName ? nil : trimmed
+            }
+            if !remaining.isEmpty {
+                sanitizedLines.append("Cookie: \(remaining.joined(separator: "; "))")
+            }
+        }
+        var sanitized = sanitizedLines.joined(separator: "\r\n").data(using: .isoLatin1)!
+        sanitized.append(Data("\r\n\r\n".utf8))
+        sanitized.append(body)
+        return sanitized
+    }
+
+    private var headText: String? {
+        guard isComplete, let headEndIndex else { return nil }
+        // HTTP header bytes are ASCII; ISO Latin-1 decodes any byte without failing.
+        return String(data: consumedBytes.prefix(headEndIndex), encoding: .isoLatin1)
+    }
+
+    private func headerValues(named headerName: String) -> [String] {
+        guard let headText else { return [] }
+        return headText.components(separatedBy: "\r\n").dropFirst().compactMap { line in
+            if line.isEmpty { return nil }
+            guard let colon = line.firstIndex(of: ":") else { return nil }
+            let name = line[..<colon].trimmingCharacters(in: .whitespaces)
+            guard name.caseInsensitiveCompare(headerName) == .orderedSame else { return nil }
+            return line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
+        }
     }
 
     /// Drops the `:port` suffix from a `Host` header value, handling bracketed IPv6 literals.
@@ -94,6 +145,12 @@ enum BrowserProxyErrorResponse {
     static func serviceUnavailable(service: String?, workspace: String?, device: String?, reason: String) -> Data {
         response(
             status: "503 Service Unavailable", title: "Service isn’t running", service: service, workspace: workspace, device: device, reason: reason)
+    }
+
+    /// The request named a routable local proxy host but did not carry the unguessable cookie issued
+    /// for the embedded browser session, so the proxy refuses it before opening a daemon tunnel.
+    static func forbidden(service: String?, workspace: String?, device: String?, reason: String) -> Data {
+        response(status: "403 Forbidden", title: "Can’t open this service", service: service, workspace: workspace, device: device, reason: reason)
     }
 
     private static func response(status: String, title: String, service: String?, workspace: String?, device: String?, reason: String) -> Data {

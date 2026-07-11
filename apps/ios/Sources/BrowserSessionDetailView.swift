@@ -19,7 +19,7 @@ struct BrowserSessionDetailView: View {
 
     let title: String
     let subtitle: String
-    let url: URL
+    let request: BrowserProxyRequest
     let stagedScreenshots: StagedScreenshotStore
     let onBack: () -> Void
 
@@ -42,7 +42,7 @@ struct BrowserSessionDetailView: View {
             progressBar
 
             ZStack {
-                BrowserSessionWebView(url: url, model: model)
+                BrowserSessionWebView(request: request, model: model)
                 if let loadErrorMessage = model.loadErrorMessage {
                     errorState(loadErrorMessage)
                 }
@@ -142,11 +142,6 @@ struct BrowserSessionDetailView: View {
                 isEnabled: model.loadErrorMessage == nil && !isCapturingScreenshot
             ) {
                 captureScreenshot()
-            }
-            toolbarButton(
-                systemName: "safari", accessibilityLabel: "Open in Safari", identifier: "browserSession.openInSafari", isEnabled: true
-            ) {
-                UIApplication.shared.open(url)
             }
         }
         .padding(.horizontal, 18)
@@ -325,7 +320,7 @@ private struct ScreenshotToast: Equatable {
 /// `WKWebView` wrapper for a browser session. Always uses `WKWebsiteDataStore.default()` so cookies and
 /// local storage persist across visits the same way a real browser tab's would.
 private struct BrowserSessionWebView: UIViewRepresentable {
-    let url: URL
+    let request: BrowserProxyRequest
     let model: BrowserSessionDetailViewModel
 
     func makeCoordinator() -> Coordinator {
@@ -337,12 +332,12 @@ private struct BrowserSessionWebView: UIViewRepresentable {
         configuration.websiteDataStore = .default()
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = context.coordinator
-        context.coordinator.attach(to: webView, initialURL: url)
+        context.coordinator.attach(to: webView, initialRequest: request)
         return webView
     }
 
     func updateUIView(_ webView: WKWebView, context: Context) {
-        context.coordinator.load(url, on: webView)
+        context.coordinator.load(request, on: webView)
     }
 
     /// Owns the KVO observers and navigation delegate callbacks. Network/WebKit callbacks are not
@@ -352,14 +347,15 @@ private struct BrowserSessionWebView: UIViewRepresentable {
     /// than the (non-`Sendable`) `WKWebView`/`Error` the callback received.
     @MainActor final class Coordinator: NSObject, WKNavigationDelegate {
         private let model: BrowserSessionDetailViewModel
-        private var loadedURL: URL?
+        private var loadedRequest: BrowserProxyRequest?
+        private var loadGeneration = 0
         private var observations: [NSKeyValueObservation] = []
 
         init(model: BrowserSessionDetailViewModel) {
             self.model = model
         }
 
-        func attach(to webView: WKWebView, initialURL: URL) {
+        func attach(to webView: WKWebView, initialRequest: BrowserProxyRequest) {
             model.goBack = { [weak webView] in webView?.goBack() }
             model.goForward = { [weak webView] in webView?.goForward() }
             model.reload = { [weak webView] in webView?.reload() }
@@ -376,17 +372,24 @@ private struct BrowserSessionWebView: UIViewRepresentable {
                 }
             }
             model.retry = { [weak self, weak webView] in
-                guard let webView, let url = self?.loadedURL else { return }
-                webView.load(URLRequest(url: url))
+                guard let webView, let request = self?.loadedRequest else { return }
+                webView.load(request.urlRequest)
             }
             observe(webView)
-            load(initialURL, on: webView)
+            load(initialRequest, on: webView)
         }
 
-        func load(_ url: URL, on webView: WKWebView) {
-            guard loadedURL != url else { return }
-            loadedURL = url
-            webView.load(URLRequest(url: url))
+        func load(_ request: BrowserProxyRequest, on webView: WKWebView) {
+            guard loadedRequest != request else { return }
+            loadedRequest = request
+            loadGeneration += 1
+            let generation = loadGeneration
+            webView.configuration.websiteDataStore.httpCookieStore.setCookie(request.httpCookie) { [weak self, weak webView] in
+                Task { @MainActor [weak self, weak webView] in
+                    guard let self, self.loadGeneration == generation, let webView else { return }
+                    webView.load(request.urlRequest)
+                }
+            }
         }
 
         private func observe(_ webView: WKWebView) {

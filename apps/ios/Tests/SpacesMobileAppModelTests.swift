@@ -386,7 +386,11 @@
 
             let commandNames = await recorder.snapshot().map(\.commandName)
             XCTAssertEqual(commandNames, ["createWorkspace"])
-            XCTAssertTrue(model.workspaceGroups.flatMap(\.rows).contains { $0.id == "browser:workspace-feature:web:0" })
+            let browserRow = model.workspaceGroups.flatMap(\.rows).compactMap { row -> SpacesMobileBrowserSessionRow? in
+                guard case .browserSession(let browserRow) = row.source else { return nil }
+                return browserRow
+            }.first
+            XCTAssertEqual(browserRow?.id, "browser:workspace-feature:web:0")
             let target = await proxy.routeTarget(forHost: "web.feature.localhost")
             XCTAssertEqual(target?.deviceID, "device-1")
             XCTAssertEqual(target?.deviceName, "Studio")
@@ -395,6 +399,12 @@
             XCTAssertEqual(target?.certificateFingerprint, "fp-1")
             XCTAssertEqual(target?.workspaceID, "workspace-feature")
             XCTAssertEqual(target?.serviceName, "web")
+            XCTAssertFalse(target?.proxyAuthToken.isEmpty ?? true)
+            if let browserRow {
+                let request = model.browserSessionProxyRequest(for: browserRow)
+                XCTAssertEqual(request?.url.absoluteString, "http://web.feature.localhost:47898/dashboard")
+                XCTAssertEqual(request?.authToken, target?.proxyAuthToken)
+            }
         }
 
         func testRefreshUsesEmbeddedStatusWithoutSecondHandshake() async {

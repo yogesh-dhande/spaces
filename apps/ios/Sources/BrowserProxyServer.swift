@@ -23,10 +23,11 @@ final class BrowserProxyRuntimeState {
 /// On-phone reverse proxy that lets WKWebView load `http://<service>.<slug>.localhost:47898/...`.
 ///
 /// It listens on `127.0.0.1:47898`, reads each connection's first HTTP request head to learn the
-/// `Host`, looks the host up in the routing table, opens an authenticated raw-byte tunnel to the
-/// owning daemon (`openServiceTunnel` over pinned TLS), replays the bytes it consumed, then splices
-/// the two connections transparently so WebSocket/SSE upgrades pass straight through. Requests it
-/// cannot route or dial are answered with a self-contained HTML error page.
+/// `Host`, looks the host up in the routing table, verifies the embedded web view's unguessable proxy
+/// cookie, opens an authenticated raw-byte tunnel to the owning daemon (`openServiceTunnel` over
+/// pinned TLS), replays the bytes it consumed after stripping the proxy cookie, then splices the two
+/// connections transparently so WebSocket/SSE upgrades pass straight through. Requests it cannot route,
+/// authenticate, or dial are answered with a self-contained HTML error page.
 actor SpacesMobileBrowserProxy {
     /// The fixed loopback port WKWebView targets. It is stable so the `.localhost` URLs the daemon
     /// mints resolve to this proxy regardless of which daemon owns the service.
@@ -212,6 +213,12 @@ actor SpacesMobileBrowserProxy {
                 reason: "No running workspace service is mapped to \(host)."))
             return
         }
+        guard parser.cookieValue(named: BrowserProxyRequest.cookieName) == target.proxyAuthToken else {
+            await respondAndClose(session, BrowserProxyErrorResponse.forbidden(
+                service: target.serviceName, workspace: target.workspaceName, device: target.deviceName,
+                reason: "This request did not come from the active Spaces browser session."))
+            return
+        }
 
         let opened: OpenedTunnel
         do {
@@ -242,7 +249,8 @@ actor SpacesMobileBrowserProxy {
             if !opened.residual.isEmpty {
                 try await BrowserProxyConnectionIO.send(opened.residual, on: client)
             }
-            try await BrowserProxyConnectionIO.send(parser.consumedBytes, on: opened.connection)
+            try await BrowserProxyConnectionIO.send(
+                parser.consumedBytes(droppingCookieNamed: BrowserProxyRequest.cookieName), on: opened.connection)
         } catch {
             teardown(session.id)
             return
