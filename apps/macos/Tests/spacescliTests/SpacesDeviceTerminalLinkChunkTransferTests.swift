@@ -37,8 +37,7 @@ final class SpacesDeviceTerminalLinkChunkTransferTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: destinationURL) }
 
         let written = try await SpacesDeviceTerminalLinkChunkTransfer.download(
-            linkID: "link-1", expectedByteCount: Int64(data.count), to: destinationURL,
-            readChunk: makeChunkReader(data: data, serverChunkSize: 4096))
+            linkID: "link-1", expectedByteCount: Int64(data.count), to: destinationURL, readChunk: makeChunkReader(data: data, serverChunkSize: 4096))
 
         XCTAssertEqual(written, Int64(data.count))
         XCTAssertEqual(try Data(contentsOf: destinationURL), data)
@@ -49,8 +48,7 @@ final class SpacesDeviceTerminalLinkChunkTransferTests: XCTestCase {
         let callCounter = SequentialCallCounter()
 
         do {
-            _ = try await SpacesDeviceTerminalLinkChunkTransfer.download(linkID: "link-1", expectedByteCount: 20, to: destinationURL) {
-                offset, _ in
+            _ = try await SpacesDeviceTerminalLinkChunkTransfer.download(linkID: "link-1", expectedByteCount: 20, to: destinationURL) { offset, _ in
                 let call = callCounter.increment()
                 let payload = Data(repeating: 0x41, count: 10)
                 // The second chunk reports an offset one past where it was requested.
@@ -72,8 +70,7 @@ final class SpacesDeviceTerminalLinkChunkTransferTests: XCTestCase {
         let destinationURL = makeDestinationURL()
 
         do {
-            _ = try await SpacesDeviceTerminalLinkChunkTransfer.download(linkID: "link-1", expectedByteCount: nil, to: destinationURL) {
-                offset, _ in
+            _ = try await SpacesDeviceTerminalLinkChunkTransfer.download(linkID: "link-1", expectedByteCount: nil, to: destinationURL) { offset, _ in
                 let payload = Data(repeating: 0x42, count: 8)
                 return SpacesDeviceTerminalLinkChunk(
                     linkID: "link-1", offset: offset, byteCount: payload.count + 1, isFinal: true, base64Data: payload.base64EncodedString())
@@ -92,14 +89,11 @@ final class SpacesDeviceTerminalLinkChunkTransferTests: XCTestCase {
         let destinationURL = makeDestinationURL()
 
         do {
-            _ = try await SpacesDeviceTerminalLinkChunkTransfer.download(linkID: "link-1", expectedByteCount: nil, to: destinationURL) {
-                offset, _ in
+            _ = try await SpacesDeviceTerminalLinkChunkTransfer.download(linkID: "link-1", expectedByteCount: nil, to: destinationURL) { offset, _ in
                 SpacesDeviceTerminalLinkChunk(linkID: "link-1", offset: offset, byteCount: 4, isFinal: true, base64Data: "not valid base64!!")
             }
             XCTFail("Expected an invalid chunk data error")
-        } catch SpacesDeviceTerminalLinkChunkTransferError.invalidChunkData(let linkID) {
-            XCTAssertEqual(linkID, "link-1")
-        }
+        } catch SpacesDeviceTerminalLinkChunkTransferError.invalidChunkData(let linkID) { XCTAssertEqual(linkID, "link-1") }
 
         XCTAssertFalse(FileManager.default.fileExists(atPath: destinationURL.path))
     }
@@ -110,9 +104,8 @@ final class SpacesDeviceTerminalLinkChunkTransferTests: XCTestCase {
         let callCounter = SequentialCallCounter()
 
         do {
-            _ = try await SpacesDeviceTerminalLinkChunkTransfer.download(
-                linkID: "link-1", expectedByteCount: expectedByteCount, to: destinationURL
-            ) { offset, _ in
+            _ = try await SpacesDeviceTerminalLinkChunkTransfer.download(linkID: "link-1", expectedByteCount: expectedByteCount, to: destinationURL) {
+                offset, _ in
                 callCounter.increment()
                 let payload = Data(repeating: 0x43, count: 50)
                 // Never reports isFinal, so only the expected-byte-count guard can stop the loop.
@@ -129,12 +122,31 @@ final class SpacesDeviceTerminalLinkChunkTransferTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: destinationURL.path))
     }
 
+    func testNonFinalEmptyChunkThrowsWithoutLooping() async throws {
+        let destinationURL = makeDestinationURL()
+        let callCounter = SequentialCallCounter()
+
+        do {
+            _ = try await SpacesDeviceTerminalLinkChunkTransfer.download(linkID: "link-1", expectedByteCount: nil, to: destinationURL) { offset, _ in
+                callCounter.increment()
+                return SpacesDeviceTerminalLinkChunk(
+                    linkID: "link-1", offset: offset, byteCount: 0, isFinal: false, base64Data: Data().base64EncodedString())
+            }
+            XCTFail("Expected an empty non-final chunk error")
+        } catch SpacesDeviceTerminalLinkChunkTransferError.emptyNonFinalChunk(let linkID, let offset) {
+            XCTAssertEqual(linkID, "link-1")
+            XCTAssertEqual(offset, 0)
+        }
+
+        XCTAssertEqual(callCounter.value, 1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: destinationURL.path))
+    }
+
     func testCancellationMidDownloadThrowsCancellationErrorAndRemovesPartialFile() async throws {
         let destinationURL = makeDestinationURL()
 
         let task = Task {
-            try await SpacesDeviceTerminalLinkChunkTransfer.download(linkID: "link-1", expectedByteCount: nil, to: destinationURL) {
-                offset, _ in
+            try await SpacesDeviceTerminalLinkChunkTransfer.download(linkID: "link-1", expectedByteCount: nil, to: destinationURL) { offset, _ in
                 // Cancels the task currently running the download loop from inside its own chunk fetch, so
                 // the helper's post-fetch `Task.checkCancellation()` deterministically observes it on the
                 // very first iteration without racing an external `Task.cancel()` call against the loop.
@@ -148,10 +160,7 @@ final class SpacesDeviceTerminalLinkChunkTransferTests: XCTestCase {
         do {
             _ = try await task.value
             XCTFail("Expected a CancellationError")
-        } catch is CancellationError {
-        } catch {
-            XCTFail("Expected a CancellationError, got \(error)")
-        }
+        } catch is CancellationError {} catch { XCTFail("Expected a CancellationError, got \(error)") }
 
         XCTAssertFalse(FileManager.default.fileExists(atPath: destinationURL.path))
     }

@@ -12,6 +12,7 @@ public enum SpacesDeviceTerminalLinkResolverError: LocalizedError, Equatable {
     case sessionMismatch
     case invalidChunkRange
     case unsupportedFileURLHost(String)
+    case fileChanged
 
     public var errorDescription: String? {
         switch self {
@@ -26,6 +27,7 @@ public enum SpacesDeviceTerminalLinkResolverError: LocalizedError, Equatable {
         case .sessionMismatch: return "Terminal link transfer does not match this session."
         case .invalidChunkRange: return "Terminal link chunk range is invalid."
         case .unsupportedFileURLHost(let host): return "Terminal file URLs for '\(host)' are not local to this Mac."
+        case .fileChanged: return "Terminal link file changed before it could be transferred."
         }
     }
 }
@@ -42,6 +44,7 @@ public struct SpacesDeviceTerminalLinkResolver {
         let contentType: String?
         let artifactKind: SpacesDeviceTerminalLinkArtifactKind
         let byteCount: Int64
+        let contentModificationTimeMicros: Int64
     }
 
     private struct LocalFile {
@@ -50,6 +53,7 @@ public struct SpacesDeviceTerminalLinkResolver {
         let contentType: String?
         let artifactKind: SpacesDeviceTerminalLinkArtifactKind
         let byteCount: Int64
+        let contentModificationTimeMicros: Int64
     }
 
     private static let blockedPathPrefixes = [
@@ -100,6 +104,9 @@ public struct SpacesDeviceTerminalLinkResolver {
         let file = try validateLocalFile(
             url: URL(fileURLWithPath: payload.path), workspaceRoots: workspaceRoots, homeDirectory: homeDirectory, fileManager: fileManager)
         guard file.artifactKind == payload.artifactKind else { throw SpacesDeviceTerminalLinkResolverError.unsupportedArtifact }
+        guard file.byteCount == payload.byteCount, file.contentModificationTimeMicros == payload.contentModificationTimeMicros else {
+            throw SpacesDeviceTerminalLinkResolverError.fileChanged
+        }
 
         let offset = offset ?? 0
         let limit = min(max(limit ?? defaultChunkLimit, 1), maximumChunkLimit)
@@ -159,7 +166,7 @@ public struct SpacesDeviceTerminalLinkResolver {
         let file = try validateLocalFile(url: resolvedURL, workspaceRoots: workspaceRoots, homeDirectory: homeDirectory, fileManager: fileManager)
         let payload = LocalLinkPayload(
             sessionID: sessionID, path: file.url.path, originalLink: originalLink, displayName: file.displayName, contentType: file.contentType,
-            artifactKind: file.artifactKind, byteCount: file.byteCount)
+            artifactKind: file.artifactKind, byteCount: file.byteCount, contentModificationTimeMicros: file.contentModificationTimeMicros)
         let linkID = try encodePayload(payload)
         return SpacesDeviceTerminalLinkMetadata(
             id: linkID, source: .localFile, originalLink: originalLink, displayName: file.displayName, contentType: file.contentType,
@@ -182,15 +189,19 @@ public struct SpacesDeviceTerminalLinkResolver {
         let attributes = try fileManager.attributesOfItem(atPath: path)
         guard attributes[.type] as? FileAttributeType == .typeRegular else { throw SpacesDeviceTerminalLinkResolverError.fileUnavailable }
         let byteCount = (attributes[.size] as? NSNumber)?.int64Value ?? 0
+        let contentModificationTimeMicros = contentModificationTimeMicros(for: attributes[.modificationDate] as? Date)
         let contentType = SpacesDeviceTerminalLinkClassifier.preferredContentType(pathExtension: resolvedURL.pathExtension)
         guard let artifactKind = SpacesDeviceTerminalLinkClassifier.artifactKind(contentType: contentType, pathExtension: resolvedURL.pathExtension)
-        else {
-            throw SpacesDeviceTerminalLinkResolverError.unsupportedArtifact
-        }
+        else { throw SpacesDeviceTerminalLinkResolverError.unsupportedArtifact }
 
         return LocalFile(
-            url: resolvedURL, displayName: resolvedURL.lastPathComponent, contentType: contentType, artifactKind: artifactKind,
-            byteCount: byteCount)
+            url: resolvedURL, displayName: resolvedURL.lastPathComponent, contentType: contentType, artifactKind: artifactKind, byteCount: byteCount,
+            contentModificationTimeMicros: contentModificationTimeMicros)
+    }
+
+    private static func contentModificationTimeMicros(for date: Date?) -> Int64 {
+        guard let date else { return 0 }
+        return Int64((date.timeIntervalSince1970 * 1_000_000).rounded())
     }
 
     private static func pathIsAllowed(_ path: String, workspaceRoots: [String], homeDirectory: String) -> Bool {

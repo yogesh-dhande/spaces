@@ -1127,12 +1127,19 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     ) async throws -> URL {
         try ensureCurrentLinkPreviewRequest(requestGeneration)
         let localURL = try previewCacheURL(for: metadata)
+        let temporaryURL = temporaryPreviewDownloadURL(for: localURL)
+        var didMoveTemporaryFile = false
+        defer {
+            if !didMoveTemporaryFile {
+                try? FileManager.default.removeItem(at: temporaryURL)
+            }
+        }
 
         let downloadTask = Task { [bridgeClient, sessionID = session.id] in
             try await SpacesDeviceTerminalLinkChunkTransfer.download(
                 linkID: metadata.id,
                 expectedByteCount: metadata.byteCount,
-                to: localURL
+                to: temporaryURL
             ) { offset, limit in
                 try await bridgeClient.readTerminalLinkChunk(
                     sessionID: sessionID, linkID: metadata.id, offset: offset, limit: limit, commandChannel: commandChannel)
@@ -1153,6 +1160,9 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         }
 
         try ensureCurrentLinkPreviewRequest(requestGeneration)
+        try? FileManager.default.removeItem(at: localURL)
+        try FileManager.default.moveItem(at: temporaryURL, to: localURL)
+        didMoveTemporaryFile = true
         cleanupStalePreviewCache()
         return localURL
     }
@@ -1166,6 +1176,10 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         let identity = Data("\(session.id)\u{0}\(metadata.id)".utf8)
         let digest = SHA256.hash(data: identity).map { String(format: "%02x", $0) }.joined()
         return linkPreviewCacheDirectory.appendingPathComponent("\(digest).\(fileExtension)")
+    }
+
+    private func temporaryPreviewDownloadURL(for cacheURL: URL) -> URL {
+        cacheURL.deletingLastPathComponent().appendingPathComponent(".\(cacheURL.lastPathComponent).\(UUID().uuidString).download")
     }
 
     private func beginLinkPreviewRequest() -> UInt64 {

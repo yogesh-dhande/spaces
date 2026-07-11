@@ -11,8 +11,7 @@ import spacesterminalghostty
 /// three collaborators are faked — a recording banner (`TerminalLinkActivityBannerPresenting`), a recording
 /// artifact registry (real `TerminalArtifactHandlerRegistry` with capturing handlers), and a scripted
 /// request sender — so no AppKit view tree, browser, or Device API connection is involved.
-@MainActor
-struct TerminalLinkOpenCoordinatorTests {
+@MainActor struct TerminalLinkOpenCoordinatorTests {
     // MARK: - Fakes
 
     @MainActor private final class RecordingBanner: TerminalLinkActivityBannerPresenting {
@@ -32,7 +31,10 @@ struct TerminalLinkOpenCoordinatorTests {
     }
 
     @MainActor private final class OpenRecorder {
-        struct Open { let category: TerminalArtifactCategory?; let url: URL }
+        struct Open {
+            let category: TerminalArtifactCategory?
+            let url: URL
+        }
         var opens: [Open] = []
 
         func makeRegistry() -> TerminalArtifactHandlerRegistry {
@@ -58,20 +60,14 @@ struct TerminalLinkOpenCoordinatorTests {
         private var resolveByLink: [String: TerminalServiceResponse] = [:]
         private var throwingLinks: Set<String> = []
         private var chunkByLinkID: [String: TerminalServiceTerminalLinkChunk] = [:]
-        private var gateByLinkID: [String: DispatchSemaphore] = [:]
+        private var gatesByLinkID: [String: [DispatchSemaphore]] = [:]
         private var resolveCounts = 0
         private var chunkCounts: [String: Int] = [:]
 
-        func setResolve(_ response: TerminalServiceResponse, forLink link: String) {
-            lock.withLock { resolveByLink[link] = response }
-        }
+        func setResolve(_ response: TerminalServiceResponse, forLink link: String) { lock.withLock { resolveByLink[link] = response } }
         func setResolveThrows(forLink link: String) { lock.withLock { _ = throwingLinks.insert(link) } }
-        func setChunk(_ chunk: TerminalServiceTerminalLinkChunk, forLinkID linkID: String) {
-            lock.withLock { chunkByLinkID[linkID] = chunk }
-        }
-        func setChunkGate(_ gate: DispatchSemaphore, forLinkID linkID: String) {
-            lock.withLock { gateByLinkID[linkID] = gate }
-        }
+        func setChunk(_ chunk: TerminalServiceTerminalLinkChunk, forLinkID linkID: String) { lock.withLock { chunkByLinkID[linkID] = chunk } }
+        func setChunkGate(_ gate: DispatchSemaphore, forLinkID linkID: String) { lock.withLock { gatesByLinkID[linkID] = [gate] } }
         func chunkCount(forLinkID linkID: String) -> Int { lock.withLock { chunkCounts[linkID] ?? 0 } }
         func resetChunkCount(forLinkID linkID: String) { lock.withLock { chunkCounts[linkID] = 0 } }
 
@@ -89,15 +85,17 @@ struct TerminalLinkOpenCoordinatorTests {
                 let linkID = payload.terminalLinkID ?? ""
                 let gate: DispatchSemaphore? = lock.withLock {
                     chunkCounts[linkID, default: 0] += 1
-                    return gateByLinkID[linkID]
+                    guard var gates = gatesByLinkID[linkID], !gates.isEmpty else { return nil }
+                    let gate = gates.removeFirst()
+                    gatesByLinkID[linkID] = gates
+                    return gate
                 }
                 gate?.wait()
                 guard let chunk = lock.withLock({ chunkByLinkID[linkID] }) else {
                     return TerminalServiceResponse(ok: false, message: "no chunk scripted for \(linkID)")
                 }
                 return TerminalServiceResponse(ok: true, message: "", terminalLinkChunk: chunk)
-            default:
-                return TerminalServiceResponse(ok: false, message: "unexpected command \(request.command.name)")
+            default: return TerminalServiceResponse(ok: false, message: "unexpected command \(request.command.name)")
             }
         }
     }
@@ -235,8 +233,7 @@ struct TerminalLinkOpenCoordinatorTests {
             forLink: "report.txt")
         sender.setChunk(
             TerminalServiceTerminalLinkChunk(
-                linkID: linkID, offset: 0, byteCount: payload.count, isFinal: true, base64Data: payload.base64EncodedString()),
-            forLinkID: linkID)
+                linkID: linkID, offset: 0, byteCount: payload.count, isFinal: true, base64Data: payload.base64EncodedString()), forLinkID: linkID)
         let coordinator = makeCoordinator(
             isLocalDevice: false, sender: sender, banner: banner, recorder: recorder, sessionID: sessionID, deviceID: deviceID)
 
@@ -267,8 +264,7 @@ struct TerminalLinkOpenCoordinatorTests {
             forLink: "data.txt")
         sender.setChunk(
             TerminalServiceTerminalLinkChunk(
-                linkID: linkID, offset: 0, byteCount: payload.count, isFinal: true, base64Data: payload.base64EncodedString()),
-            forLinkID: linkID)
+                linkID: linkID, offset: 0, byteCount: payload.count, isFinal: true, base64Data: payload.base64EncodedString()), forLinkID: linkID)
         let coordinator = makeCoordinator(
             isLocalDevice: false, sender: sender, banner: banner, recorder: recorder, sessionID: sessionID, deviceID: deviceID)
 
@@ -281,6 +277,45 @@ struct TerminalLinkOpenCoordinatorTests {
         await waitUntil { recorder.opens.count == 2 }
 
         #expect(sender.chunkCount(forLinkID: linkID) == 0)
+        #expect(banner.errorMessages.isEmpty)
+    }
+
+    @Test func duplicateRemoteClickKeepsCurrentCacheWhenCancelledFetchFinishesLate() async throws {
+        let banner = RecordingBanner()
+        let recorder = OpenRecorder()
+        let sender = FakeLinkSender()
+        let sessionID = "session-\(UUID().uuidString)"
+        let deviceID = "remote-\(UUID().uuidString)"
+        let payload = Data("current cache body".utf8)
+        let linkID = "link-\(UUID().uuidString)"
+        sender.setResolve(
+            TerminalServiceResponse(
+                ok: true, message: "",
+                terminalLinkMetadata: metadata(
+                    id: linkID, displayName: "data.txt", contentType: "text/plain", artifactKind: "text", byteCount: Int64(payload.count))),
+            forLink: "data.txt")
+        sender.setChunk(
+            TerminalServiceTerminalLinkChunk(
+                linkID: linkID, offset: 0, byteCount: payload.count, isFinal: true, base64Data: payload.base64EncodedString()), forLinkID: linkID)
+        let gate = DispatchSemaphore(value: 0)
+        sender.setChunkGate(gate, forLinkID: linkID)
+        let coordinator = makeCoordinator(
+            isLocalDevice: false, sender: sender, banner: banner, recorder: recorder, sessionID: sessionID, deviceID: deviceID)
+
+        coordinator.openLink("data.txt")
+        await waitUntil { sender.chunkCount(forLinkID: linkID) == 1 }
+
+        coordinator.openLink("data.txt")
+        await waitUntil { recorder.opens.count == 1 }
+        let openedURL = try #require(recorder.opens.first?.url)
+        #expect(FileManager.default.fileExists(atPath: openedURL.path))
+        #expect(try Data(contentsOf: openedURL) == payload)
+
+        gate.signal()
+        try? await Task.sleep(for: .milliseconds(300))
+
+        #expect(FileManager.default.fileExists(atPath: openedURL.path))
+        #expect(try Data(contentsOf: openedURL) == payload)
         #expect(banner.errorMessages.isEmpty)
     }
 
@@ -298,8 +333,7 @@ struct TerminalLinkOpenCoordinatorTests {
             TerminalServiceResponse(
                 ok: true, message: "",
                 terminalLinkMetadata: metadata(
-                    id: firstLinkID, displayName: "first.txt", contentType: "text/plain", artifactKind: "text",
-                    byteCount: Int64(firstPayload.count))),
+                    id: firstLinkID, displayName: "first.txt", contentType: "text/plain", artifactKind: "text", byteCount: Int64(firstPayload.count))),
             forLink: "first.txt")
         sender.setChunk(
             TerminalServiceTerminalLinkChunk(
@@ -315,8 +349,7 @@ struct TerminalLinkOpenCoordinatorTests {
                 ok: true, message: "",
                 terminalLinkMetadata: metadata(
                     id: secondLinkID, displayName: "second.txt", contentType: "text/plain", artifactKind: "text",
-                    byteCount: Int64(secondPayload.count))),
-            forLink: "second.txt")
+                    byteCount: Int64(secondPayload.count))), forLink: "second.txt")
         sender.setChunk(
             TerminalServiceTerminalLinkChunk(
                 linkID: secondLinkID, offset: 0, byteCount: secondPayload.count, isFinal: true, base64Data: secondPayload.base64EncodedString()),

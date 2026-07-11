@@ -587,6 +587,32 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
         XCTAssertNil(payloadJSON["mediaKind"])
     }
 
+    func testTerminalLinkResolverLinkIDChangesWhenSameSizeFileChanges() throws {
+        let root = URL(fileURLWithPath: "/private/tmp", isDirectory: true).appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let text = root.appendingPathComponent("same-size.txt")
+        let firstModificationDate = Date(timeIntervalSince1970: 1_700_000_000)
+        let secondModificationDate = Date(timeIntervalSince1970: 1_700_000_010)
+
+        try Data("first".utf8).write(to: text)
+        try FileManager.default.setAttributes([.modificationDate: firstModificationDate], ofItemAtPath: text.path)
+        let firstMetadata = try SpacesDeviceTerminalLinkResolver.resolve(
+            sessionID: "session-1", link: text.path, workingDirectory: nil, workspaceRoots: [root.path], homeDirectory: root.path)
+
+        try Data("other".utf8).write(to: text)
+        try FileManager.default.setAttributes([.modificationDate: secondModificationDate], ofItemAtPath: text.path)
+        let secondMetadata = try SpacesDeviceTerminalLinkResolver.resolve(
+            sessionID: "session-1", link: text.path, workingDirectory: nil, workspaceRoots: [root.path], homeDirectory: root.path)
+
+        XCTAssertEqual(firstMetadata.byteCount, secondMetadata.byteCount)
+        XCTAssertNotEqual(firstMetadata.id, secondMetadata.id)
+        XCTAssertThrowsError(
+            try SpacesDeviceTerminalLinkResolver.readChunk(
+                sessionID: "session-1", linkID: firstMetadata.id, offset: 0, limit: 32, workspaceRoots: [root.path], homeDirectory: root.path)
+        ) { error in XCTAssertEqual(error as? SpacesDeviceTerminalLinkResolverError, .fileChanged) }
+    }
+
     func testTerminalLinkResolverReadsChunkOfTextFile() throws {
         let root = URL(fileURLWithPath: "/private/tmp", isDirectory: true).appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

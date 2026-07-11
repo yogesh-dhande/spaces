@@ -35,8 +35,7 @@
             var errorDescription: String? { message }
         }
 
-        static let loopbackRemoteNotice =
-            "This address runs on the session's host machine and isn't reachable from this device yet."
+        static let loopbackRemoteNotice = "This address runs on the session's host machine and isn't reachable from this device yet."
 
         private let sessionID: String
         private let deviceID: String
@@ -60,10 +59,8 @@
         }
 
         init(
-            sessionID: String, deviceID: String, isLocalDevice: Bool,
-            workingDirectoryProvider: @escaping @MainActor () -> String?,
-            requestSender: @escaping RemoteGhosttyTerminalServiceRequestSender,
-            registry: TerminalArtifactHandlerRegistry = .defaultRegistry(),
+            sessionID: String, deviceID: String, isLocalDevice: Bool, workingDirectoryProvider: @escaping @MainActor () -> String?,
+            requestSender: @escaping RemoteGhosttyTerminalServiceRequestSender, registry: TerminalArtifactHandlerRegistry = .defaultRegistry(),
             banner: any TerminalLinkActivityBannerPresenting
         ) {
             self.sessionID = sessionID
@@ -84,20 +81,9 @@
             cancelActiveOpen()
             guard let route = SpacesDeviceTerminalLinkClassifier.route(for: rawLink) else { return }
             switch route {
-            case .webURL(let url):
-                _ = registry.open(url, as: .webURL)
-            case .loopbackURL(let url):
-                if isLocalDevice {
-                    _ = registry.open(url, as: .webURL)
-                } else {
-                    banner.showNotice(Self.loopbackRemoteNotice)
-                }
-            case .fileLink(let raw):
-                if isLocalDevice {
-                    openLocalFileLink(raw)
-                } else {
-                    startRemoteFileOpen(raw)
-                }
+            case .webURL(let url): _ = registry.open(url, as: .webURL)
+            case .loopbackURL(let url): if isLocalDevice { _ = registry.open(url, as: .webURL) } else { banner.showNotice(Self.loopbackRemoteNotice) }
+            case .fileLink(let raw): if isLocalDevice { openLocalFileLink(raw) } else { startRemoteFileOpen(raw) }
             }
         }
 
@@ -133,9 +119,7 @@
             let generationAtStart = generation
             banner.showProgress(message: "Resolving link…", onCancel: { [weak self] in self?.cancelActiveOpen() })
             Self.runCacheGCIfNeeded()
-            activeTask = Task { @MainActor [weak self] in
-                await self?.performRemoteFileOpen(raw, generation: generationAtStart)
-            }
+            activeTask = Task { @MainActor [weak self] in await self?.performRemoteFileOpen(raw, generation: generationAtStart) }
         }
 
         private func performRemoteFileOpen(_ raw: String, generation generationAtStart: UInt64) async {
@@ -176,14 +160,12 @@
             }
 
             let cacheURL: URL
-            do {
-                cacheURL = try makeCacheURL(for: metadata)
-            } catch {
+            do { cacheURL = try makeCacheURL(for: metadata) } catch {
                 finishWithError(error.localizedDescription, generation: generationAtStart)
                 return
             }
 
-            if isCacheHit(cacheURL, byteCount: metadata.byteCount) {
+            if isCacheHit(cacheURL, metadata: metadata) {
                 openArtifact(at: cacheURL, metadata: metadata)
                 finishSuccess(generation: generationAtStart)
                 return
@@ -191,9 +173,12 @@
 
             banner.showProgress(message: "Fetching \(metadata.displayName)…", onCancel: { [weak self] in self?.cancelActiveOpen() })
 
+            let temporaryURL = temporaryCacheURL(for: cacheURL)
+            var didMoveTemporaryFile = false
+            defer { if !didMoveTemporaryFile { try? FileManager.default.removeItem(at: temporaryURL) } }
             do {
                 try await Self.downloadArtifact(
-                    sessionID: sessionID, linkID: metadata.id, expectedByteCount: metadata.byteCount, to: cacheURL, using: sender)
+                    sessionID: sessionID, linkID: metadata.id, expectedByteCount: metadata.byteCount, to: temporaryURL, using: sender)
             } catch {
                 guard isCurrent(generationAtStart) else { return }
                 // A cancelled transfer was already superseded by a newer click (which owns the banner now).
@@ -203,6 +188,14 @@
             }
 
             guard isCurrent(generationAtStart) else { return }
+            do {
+                try? FileManager.default.removeItem(at: cacheURL)
+                try FileManager.default.moveItem(at: temporaryURL, to: cacheURL)
+                didMoveTemporaryFile = true
+            } catch {
+                finishWithError(error.localizedDescription, generation: generationAtStart)
+                return
+            }
             openArtifact(at: cacheURL, metadata: metadata)
             finishSuccess(generation: generationAtStart)
         }
@@ -239,12 +232,21 @@
             let fallbackExtension = URL(fileURLWithPath: metadata.displayName).pathExtension
             let fileExtension = SpacesDeviceTerminalLinkClassifier.preferredFilenameExtension(
                 contentType: metadata.contentType, fallback: fallbackExtension)
+            // The daemon-generated link id carries the canonical path plus file freshness fields, so a
+            // same-size rewrite resolves to a different cache entry instead of hitting stale bytes.
             let identity = Data("\(deviceID)|\(sessionID)|\(metadata.id)".utf8)
             let digest = SHA256.hash(data: identity).map { String(format: "%02x", $0) }.joined()
             return Self.cacheDirectory.appendingPathComponent("\(digest).\(fileExtension)")
         }
 
-        private func isCacheHit(_ url: URL, byteCount: Int64?) -> Bool {
+        private func temporaryCacheURL(for cacheURL: URL) -> URL {
+            cacheURL.deletingLastPathComponent().appendingPathComponent(".\(cacheURL.lastPathComponent).\(UUID().uuidString).download")
+        }
+
+        private func isCacheHit(_ url: URL, metadata: TerminalServiceTerminalLinkMetadata) -> Bool {
+            // The cache path is keyed by `metadata.id`; the size check only confirms the cached file is
+            // complete for that freshness-keyed artifact.
+            let byteCount = metadata.byteCount
             guard let byteCount, byteCount >= 0 else { return false }
             guard let size = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? Int64 else { return false }
             return size == byteCount
@@ -258,8 +260,7 @@
             let directory = cacheDirectory
             Task.detached(priority: .utility) {
                 guard
-                    let files = try? FileManager.default.contentsOfDirectory(
-                        at: directory, includingPropertiesForKeys: [.contentModificationDateKey])
+                    let files = try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.contentModificationDateKey])
                 else { return }
                 let cutoff = Date().addingTimeInterval(-24 * 60 * 60)
                 for file in files {
@@ -275,11 +276,7 @@
         /// The request sender does blocking pinned-TLS I/O, so every call runs off the main actor.
         private static func send(_ request: TerminalServiceRequest, using sender: @escaping RemoteGhosttyTerminalServiceRequestSender) async
             -> Result<TerminalServiceResponse, Error>
-        {
-            await Task.detached(priority: .userInitiated) {
-                do { return .success(try sender(request)) } catch { return .failure(error) }
-            }.value
-        }
+        { await Task.detached(priority: .userInitiated) { do { return .success(try sender(request)) } catch { return .failure(error) } }.value }
 
         /// Runs off the main actor (nonisolated) so the chunk-reader closure handed to the shared
         /// transfer helper is not main-actor-isolated. Honors `Task` cancellation via the helper.
@@ -287,10 +284,8 @@
             sessionID: String, linkID: String, expectedByteCount: Int64?, to destination: URL,
             using sender: @escaping RemoteGhosttyTerminalServiceRequestSender
         ) async throws {
-            try await SpacesDeviceTerminalLinkChunkTransfer.download(
-                linkID: linkID, expectedByteCount: expectedByteCount, to: destination
-            ) { offset, limit in
-                try await readChunk(sessionID: sessionID, linkID: linkID, offset: offset, limit: limit, using: sender)
+            try await SpacesDeviceTerminalLinkChunkTransfer.download(linkID: linkID, expectedByteCount: expectedByteCount, to: destination) {
+                offset, limit in try await readChunk(sessionID: sessionID, linkID: linkID, offset: offset, limit: limit, using: sender)
             }
         }
 
@@ -303,9 +298,7 @@
                         command: .readTerminalLinkChunk(.init(sessionID: sessionID, terminalLinkID: linkID, offset: offset, limit: limit))))
             }.value
             guard response.ok else { throw LinkOpenError(message: response.message) }
-            guard let wire = response.terminalLinkChunk else {
-                throw LinkOpenError(message: "The session's host returned no data for the link.")
-            }
+            guard let wire = response.terminalLinkChunk else { throw LinkOpenError(message: "The session's host returned no data for the link.") }
             return SpacesDeviceTerminalLinkChunk(
                 linkID: wire.linkID, offset: wire.offset, byteCount: wire.byteCount, isFinal: wire.isFinal, base64Data: wire.base64Data)
         }

@@ -7,24 +7,23 @@ public enum SpacesDeviceTerminalLinkChunkTransferError: LocalizedError, Equatabl
     case invalidChunkData(linkID: String)
     case unexpectedChunkOffset(linkID: String, requestedOffset: Int64, receivedOffset: Int64)
     case chunkByteCountMismatch(linkID: String, reportedByteCount: Int, decodedByteCount: Int)
+    case emptyNonFinalChunk(linkID: String, offset: Int64)
     case transferExceededExpectedByteCount(linkID: String, expectedByteCount: Int64)
     case incompleteTransfer(linkID: String, expectedByteCount: Int64, writtenByteCount: Int64)
 
     public var errorDescription: String? {
         switch self {
-        case .invalidChunkData(let linkID):
-            return "Terminal link '\(linkID)' transfer returned invalid data."
+        case .invalidChunkData(let linkID): return "Terminal link '\(linkID)' transfer returned invalid data."
         case .unexpectedChunkOffset(let linkID, let requestedOffset, let receivedOffset):
-            return
-                "Terminal link '\(linkID)' transfer returned chunk offset \(receivedOffset) instead of the requested offset \(requestedOffset)."
+            return "Terminal link '\(linkID)' transfer returned chunk offset \(receivedOffset) instead of the requested offset \(requestedOffset)."
         case .chunkByteCountMismatch(let linkID, let reportedByteCount, let decodedByteCount):
-            return
-                "Terminal link '\(linkID)' transfer returned an invalid chunk size (reported \(reportedByteCount), decoded \(decodedByteCount))."
+            return "Terminal link '\(linkID)' transfer returned an invalid chunk size (reported \(reportedByteCount), decoded \(decodedByteCount))."
+        case .emptyNonFinalChunk(let linkID, let offset):
+            return "Terminal link '\(linkID)' transfer returned an empty non-final chunk at offset \(offset)."
         case .transferExceededExpectedByteCount(let linkID, let expectedByteCount):
             return "Terminal link '\(linkID)' transfer exceeded its expected size of \(expectedByteCount) bytes."
         case .incompleteTransfer(let linkID, let expectedByteCount, let writtenByteCount):
-            return
-                "Terminal link '\(linkID)' transfer ended after \(writtenByteCount) bytes instead of the expected \(expectedByteCount) bytes."
+            return "Terminal link '\(linkID)' transfer ended after \(writtenByteCount) bytes instead of the expected \(expectedByteCount) bytes."
         }
     }
 }
@@ -52,13 +51,9 @@ public enum SpacesDeviceTerminalLinkChunkTransfer {
     /// is rethrown, so callers never observe a truncated file at `destinationURL`.
     ///
     /// - Returns: The total number of bytes written.
-    @discardableResult
-    public static func download(
-        linkID: String,
-        expectedByteCount: Int64?,
-        to destinationURL: URL,
-        readChunk: ChunkReader
-    ) async throws -> Int64 {
+    @discardableResult public static func download(linkID: String, expectedByteCount: Int64?, to destinationURL: URL, readChunk: ChunkReader)
+        async throws -> Int64
+    {
         try Data().write(to: destinationURL, options: .atomic)
         let handle = try FileHandle(forWritingTo: destinationURL)
         var didSucceed = false
@@ -83,6 +78,9 @@ public enum SpacesDeviceTerminalLinkChunkTransfer {
             guard data.count == chunk.byteCount else {
                 throw SpacesDeviceTerminalLinkChunkTransferError.chunkByteCountMismatch(
                     linkID: linkID, reportedByteCount: chunk.byteCount, decodedByteCount: data.count)
+            }
+            guard !data.isEmpty || chunk.isFinal else {
+                throw SpacesDeviceTerminalLinkChunkTransferError.emptyNonFinalChunk(linkID: linkID, offset: offset)
             }
 
             let nextOffset = offset + Int64(data.count)
