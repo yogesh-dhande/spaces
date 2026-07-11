@@ -747,11 +747,13 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         // preview sheet. `.webURL` and `.fileLink` still go through `resolveTerminalLink` below because
         // the daemon may classify an https URL as a previewable artifact (image/pdf/markdown/etc.)
         // rather than a plain web page.
-        guard let route = SpacesDeviceTerminalLinkClassifier.route(for: normalizedLink) else { return }
+        guard let route = SpacesDeviceTerminalLinkClassifier.route(for: normalizedLink) else {
+            cancelAndClearLinkPreviewState()
+            linkNotice = nil
+            return
+        }
         if case .loopbackURL = route {
-            invalidateLinkPreviewRequests()
-            isPreparingLinkPreview = false
-            linkPreviewErrorMessage = nil
+            cancelAndClearLinkPreviewState()
             linkNotice = Self.loopbackLinkNoticeMessage
             return
         }
@@ -1191,6 +1193,13 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     private func invalidateLinkPreviewRequests() {
         linkPreviewRequestGeneration &+= 1
         cancelLinkPreviewDownloads()
+    }
+
+    private func cancelAndClearLinkPreviewState() {
+        invalidateLinkPreviewRequests()
+        isPreparingLinkPreview = false
+        linkPreviewErrorMessage = nil
+        linkPreview = nil
     }
 
     private func cancelLinkPreviewDownloads() {

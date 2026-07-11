@@ -427,7 +427,7 @@ struct TerminalDetailView: View {
     private func noticeBanner(_ message: String) -> some View {
         Text(message)
             .font(.footnote)
-            .foregroundStyle(.white.opacity(0.86))
+            .foregroundStyle(.primary)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 16)
             .padding(.vertical, 12)

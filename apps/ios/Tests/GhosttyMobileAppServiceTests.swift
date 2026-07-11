@@ -1020,6 +1020,55 @@
             XCTAssertFalse(model.isPreparingLinkPreview)
         }
 
+        func testOpenTerminalLinkUnknownSchemeCancelsStalePreviewRequest() async throws {
+            let settings = settings()
+            let cacheRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            defer { try? FileManager.default.removeItem(at: cacheRoot) }
+            let gate = LinkPreviewGate()
+            let payload = Data([0x89, 0x50, 0x4E, 0x47])
+            let linkID = "slow-link"
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings) { request in
+                switch request.commandName {
+                case "resolveTerminalLink":
+                    await gate.markSlowStarted()
+                    await gate.waitForRelease()
+                    return Self.previewMetadata(
+                        id: linkID,
+                        originalLink: "slow.png",
+                        displayName: "slow.png",
+                        byteCount: payload.count)
+                case "readTerminalLinkChunk":
+                    return Self.previewChunk(id: linkID, payload: payload, offset: request.chunkOffset ?? 0)
+                default:
+                    return SpacesDeviceAPIResponse(ok: false, message: "unexpected command")
+                }
+            }
+            let model = TerminalViewerModel(
+                session: session(),
+                settings: settings,
+                onAuthenticationRequired: { _ in },
+                bridgeClient: bridgeClient,
+                linkPreviewCacheDirectory: cacheRoot)
+
+            let slowTask = Task { await model.openTerminalLink("slow.png") }
+            await gate.waitForSlowStart()
+
+            await model.openTerminalLink("mailto:person@example.com")
+
+            XCTAssertNil(model.linkPreview)
+            XCTAssertNil(model.linkPreviewErrorMessage)
+            XCTAssertNil(model.linkNotice)
+            XCTAssertFalse(model.isPreparingLinkPreview)
+
+            await gate.releaseSlow()
+            await slowTask.value
+
+            XCTAssertNil(model.linkPreview)
+            XCTAssertNil(model.linkPreviewErrorMessage)
+            XCTAssertNil(model.linkNotice)
+            XCTAssertFalse(model.isPreparingLinkPreview)
+        }
+
         func testOpenTerminalLinkDownloadsLocalDocumentPreviewsByKind() async throws {
             let cases: [(artifactKind: SpacesDeviceTerminalLinkArtifactKind, contentType: String, expectedContent: (URL) -> TerminalLinkPreviewContent)] = [
                 (.text, "text/plain", { .text($0) }),
