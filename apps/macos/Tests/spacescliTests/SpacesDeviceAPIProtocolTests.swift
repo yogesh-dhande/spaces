@@ -44,16 +44,12 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
     func testTerminalControlSendPasteIntentRoundTripsThroughCodec() throws {
         let request = SpacesDeviceAPIRequest(
             command: .terminalControl(
-                .init(
-                    action: .send, sessionID: "session-1", clientID: "client-1", text: "line one\nline two", ownerEpoch: 4,
-                    asPaste: true)),
+                .init(action: .send, sessionID: "session-1", clientID: "client-1", text: "line one\nline two", ownerEpoch: 4, asPaste: true)),
             authToken: "SECRET")
 
         let decoded = try SpacesDeviceAPICodec.decodeRequest(SpacesDeviceAPICodec.encodeRequest(request))
 
-        guard case .terminalControl(let payload) = decoded.command else {
-            return XCTFail("Expected terminalControl request.")
-        }
+        guard case .terminalControl(let payload) = decoded.command else { return XCTFail("Expected terminalControl request.") }
         XCTAssertEqual(payload.action, .send)
         XCTAssertEqual(payload.text, "line one\nline two")
         XCTAssertEqual(payload.ownerEpoch, 4)
@@ -299,6 +295,8 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
         XCTAssertEqual(byContentType("text/html"), .html)
         XCTAssertEqual(byContentType("application/pdf"), .pdf)
         XCTAssertEqual(byContentType("application/json"), .text)
+        XCTAssertEqual(byContentType("application/toml"), .text)
+        XCTAssertEqual(byContentType("application/x-yaml"), .text)
         XCTAssertEqual(byContentType("text/csv"), .text)
         XCTAssertEqual(byContentType("text/plain"), .text)
         XCTAssertEqual(byContentType("image/png"), .image)
@@ -316,14 +314,11 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
 
     func testTerminalLinkRouteClassifiesWebLoopbackAndFileLinks() {
         XCTAssertEqual(SpacesDeviceTerminalLinkClassifier.route(for: "https://example.com/docs"), .webURL(URL(string: "https://example.com/docs")!))
-        XCTAssertEqual(
-            SpacesDeviceTerminalLinkClassifier.route(for: "http://localhost:3000"), .loopbackURL(URL(string: "http://localhost:3000")!))
+        XCTAssertEqual(SpacesDeviceTerminalLinkClassifier.route(for: "http://localhost:3000"), .loopbackURL(URL(string: "http://localhost:3000")!))
         XCTAssertEqual(
             SpacesDeviceTerminalLinkClassifier.route(for: "http://127.0.0.1:8080/path"), .loopbackURL(URL(string: "http://127.0.0.1:8080/path")!))
-        XCTAssertEqual(
-            SpacesDeviceTerminalLinkClassifier.route(for: "http://[::1]:9999"), .loopbackURL(URL(string: "http://[::1]:9999")!))
-        XCTAssertEqual(
-            SpacesDeviceTerminalLinkClassifier.route(for: "http://0.0.0.0:4000"), .loopbackURL(URL(string: "http://0.0.0.0:4000")!))
+        XCTAssertEqual(SpacesDeviceTerminalLinkClassifier.route(for: "http://[::1]:9999"), .loopbackURL(URL(string: "http://[::1]:9999")!))
+        XCTAssertEqual(SpacesDeviceTerminalLinkClassifier.route(for: "http://0.0.0.0:4000"), .loopbackURL(URL(string: "http://0.0.0.0:4000")!))
         XCTAssertEqual(SpacesDeviceTerminalLinkClassifier.route(for: "/abs/path.md"), .fileLink("/abs/path.md"))
         XCTAssertEqual(SpacesDeviceTerminalLinkClassifier.route(for: "~/x.md"), .fileLink("~/x.md"))
         XCTAssertEqual(SpacesDeviceTerminalLinkClassifier.route(for: "rel/path.md"), .fileLink("rel/path.md"))

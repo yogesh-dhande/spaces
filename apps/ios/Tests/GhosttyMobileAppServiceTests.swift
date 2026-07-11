@@ -759,6 +759,50 @@
             XCTAssertTrue(cachedFiles.isEmpty)
         }
 
+        func testOpenTerminalLinkRejectsOversizedExternalTextPreviewBeforeCaching() async throws {
+            let settings = settings()
+            let cacheRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            let downloadRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            defer {
+                try? FileManager.default.removeItem(at: cacheRoot)
+                try? FileManager.default.removeItem(at: downloadRoot)
+            }
+            let oversizedByteCount = 4 * 1024 * 1024 + 1
+            let downloadedURL = downloadRoot.appendingPathComponent("huge.log")
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings) { _ in
+                Self.metadataResponse(SpacesDeviceTerminalLinkMetadata(
+                        id: "external|https://example.com/huge.log",
+                        source: .externalURL,
+                        originalLink: "https://example.com/huge.log",
+                        displayName: "huge.log",
+                        contentType: "text/plain",
+                        artifactKind: .text,
+                        byteCount: nil,
+                        externalURL: "https://example.com/huge.log"))
+            }
+            let model = TerminalViewerModel(
+                session: session(),
+                settings: settings,
+                onAuthenticationRequired: { _ in },
+                bridgeClient: bridgeClient,
+                remoteMediaDownloader: { _, expectedArtifactKind in
+                    XCTAssertEqual(expectedArtifactKind, .text)
+                    try FileManager.default.createDirectory(at: downloadRoot, withIntermediateDirectories: true)
+                    try Data(repeating: 0x41, count: oversizedByteCount).write(to: downloadedURL)
+                    return downloadedURL
+                },
+                linkPreviewCacheDirectory: cacheRoot)
+
+            await model.openTerminalLink("https://example.com/huge.log")
+
+            XCTAssertNil(model.linkPreview)
+            XCTAssertEqual(model.linkPreviewErrorMessage, "huge.log is too large to preview on this device.")
+            XCTAssertFalse(FileManager.default.fileExists(atPath: downloadedURL.path))
+            let cachedFiles = (try? FileManager.default.contentsOfDirectory(at: cacheRoot, includingPropertiesForKeys: nil)) ?? []
+            XCTAssertTrue(cachedFiles.isEmpty)
+            XCTAssertFalse(model.isPreparingLinkPreview)
+        }
+
         func testValidatedRemoteMediaDownloadRejectsNonHTTPSFinalURL() throws {
             let downloadedURL = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString).png")
             defer { try? FileManager.default.removeItem(at: downloadedURL) }

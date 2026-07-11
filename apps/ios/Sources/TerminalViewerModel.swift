@@ -1049,14 +1049,17 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         }
     }
 
-    /// Text-family artifacts (text/markdown/html) download entirely before preview, so an oversized file
-    /// is rejected up front rather than after a slow transfer. Media/PDF stay uncapped (existing
-    /// behavior: QuickLook streams them and large images/videos are a normal terminal workflow).
-    /// `metadata.byteCount` is only populated for local files today (external URLs don't report a size
-    /// before download), so this is a no-op for external text-family links until the daemon reports one.
+    /// Metadata byte counts reject oversized text-family local files before transfer. External text
+    /// files are measured after download and before they move into the preview cache.
     private func exceedsTextPreviewSizeCap(artifactKind: SpacesDeviceTerminalLinkArtifactKind, metadata: SpacesDeviceTerminalLinkMetadata) -> Bool {
         guard Self.isTextFamilyArtifact(artifactKind), let byteCount = metadata.byteCount else { return false }
         return byteCount > Self.textPreviewByteCountLimit
+    }
+
+    private func exceedsTextPreviewSizeCap(artifactKind: SpacesDeviceTerminalLinkArtifactKind, fileURL: URL) throws -> Bool {
+        guard Self.isTextFamilyArtifact(artifactKind) else { return false }
+        guard let byteCount = try fileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize else { return false }
+        return Int64(byteCount) > Self.textPreviewByteCountLimit
     }
 
     private static func isTextFamilyArtifact(_ kind: SpacesDeviceTerminalLinkArtifactKind) -> Bool {
@@ -1093,6 +1096,10 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             if !didMoveDownloadedFile {
                 try? FileManager.default.removeItem(at: downloadedURL)
             }
+        }
+        try ensureCurrentLinkPreviewRequest(requestGeneration)
+        if try exceedsTextPreviewSizeCap(artifactKind: artifactKind, fileURL: downloadedURL) {
+            throw SpacesDeviceAPIClientError.requestFailed("\(metadata.displayName) is too large to preview on this device.")
         }
         try ensureCurrentLinkPreviewRequest(requestGeneration)
         let localURL = try previewCacheURL(for: metadata)

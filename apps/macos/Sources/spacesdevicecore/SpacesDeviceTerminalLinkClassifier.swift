@@ -33,18 +33,15 @@ public enum SpacesDeviceTerminalLinkClassifier {
     private static let markdownExtensions: Set<String> = ["md", "markdown"]
     private static let htmlExtensions: Set<String> = ["html", "htm"]
     private static let pdfExtensions: Set<String> = ["pdf"]
-    private static let textExtensions: Set<String> = [
-        "txt", "log", "json", "jsonl", "yaml", "yml", "csv", "tsv", "toml", "ini", "cfg", "conf",
-    ]
+    private static let textExtensions: Set<String> = ["txt", "log", "json", "jsonl", "yaml", "yml", "csv", "tsv", "toml", "ini", "cfg", "conf"]
+    private static let textContentTypes: Set<String> = ["application/json", "application/toml", "application/x-yaml"]
 
     public static func artifactKind(contentType: String?, pathExtension: String?) -> SpacesDeviceTerminalLinkArtifactKind? {
         let trimmedExtension = normalizedExtension(pathExtension)
         if let trimmedExtension, let kind = sharedArtifactKind(forExtension: trimmedExtension) { return kind }
 
         let trimmedContentType = contentType?.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let trimmedContentType, !trimmedContentType.isEmpty, let kind = sharedArtifactKind(forContentType: trimmedContentType) {
-            return kind
-        }
+        if let trimmedContentType, !trimmedContentType.isEmpty, let kind = sharedArtifactKind(forContentType: trimmedContentType) { return kind }
 
         #if canImport(UniformTypeIdentifiers)
             if let trimmedContentType, !trimmedContentType.isEmpty, let type = UTType(mimeType: trimmedContentType), let kind = mediaKind(for: type) {
@@ -106,7 +103,7 @@ public enum SpacesDeviceTerminalLinkClassifier {
         if lowercased == "application/pdf" { return .pdf }
         if lowercased.hasPrefix("image/") { return .image }
         if lowercased.hasPrefix("video/") { return .video }
-        if lowercased == "application/json" || lowercased == "application/x-yaml" || lowercased.hasPrefix("text/") { return .text }
+        if textContentTypes.contains(lowercased) || lowercased.hasPrefix("text/") { return .text }
         return nil
     }
 
@@ -127,16 +124,16 @@ public enum SpacesDeviceTerminalLinkClassifier {
             "heic": "image/heic", "heif": "image/heif", "htm": "text/html", "html": "text/html", "ini": "text/plain", "jpg": "image/jpeg",
             "jpeg": "image/jpeg", "json": "application/json", "jsonl": "application/json", "log": "text/plain", "m4v": "video/x-m4v",
             "markdown": "text/markdown", "md": "text/markdown", "mov": "video/quicktime", "mp4": "video/mp4", "mpeg": "video/mpeg",
-            "mpg": "video/mpeg", "pdf": "application/pdf", "png": "image/png", "tif": "image/tiff", "tiff": "image/tiff",
-            "toml": "application/toml", "tsv": "text/tab-separated-values", "txt": "text/plain", "webm": "video/webm", "webp": "image/webp",
-            "yaml": "application/x-yaml", "yml": "application/x-yaml",
+            "mpg": "video/mpeg", "pdf": "application/pdf", "png": "image/png", "tif": "image/tiff", "tiff": "image/tiff", "toml": "application/toml",
+            "tsv": "text/tab-separated-values", "txt": "text/plain", "webm": "video/webm", "webp": "image/webp", "yaml": "application/x-yaml",
+            "yml": "application/x-yaml",
         ]
         private static let preferredExtensionsByContentType: [String: String] = [
-            "application/json": "json", "application/pdf": "pdf", "application/toml": "toml", "application/x-yaml": "yaml",
-            "image/avif": "avif", "image/bmp": "bmp", "image/gif": "gif", "image/heic": "heic", "image/heif": "heif", "image/jpeg": "jpg",
-            "image/jpg": "jpg", "image/png": "png", "image/tiff": "tiff", "image/webp": "webp", "text/csv": "csv", "text/html": "html",
-            "text/markdown": "md", "text/plain": "txt", "text/tab-separated-values": "tsv", "video/mp4": "mp4", "video/mpeg": "mpeg",
-            "video/quicktime": "mov", "video/webm": "webm", "video/x-m4v": "m4v",
+            "application/json": "json", "application/pdf": "pdf", "application/toml": "toml", "application/x-yaml": "yaml", "image/avif": "avif",
+            "image/bmp": "bmp", "image/gif": "gif", "image/heic": "heic", "image/heif": "heif", "image/jpeg": "jpg", "image/jpg": "jpg",
+            "image/png": "png", "image/tiff": "tiff", "image/webp": "webp", "text/csv": "csv", "text/html": "html", "text/markdown": "md",
+            "text/plain": "txt", "text/tab-separated-values": "tsv", "video/mp4": "mp4", "video/mpeg": "mpeg", "video/quicktime": "mov",
+            "video/webm": "webm", "video/x-m4v": "m4v",
         ]
 
         private static func mediaKind(forPathExtension pathExtension: String) -> SpacesDeviceTerminalLinkArtifactKind? {
