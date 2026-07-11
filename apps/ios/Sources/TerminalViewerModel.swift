@@ -515,11 +515,13 @@ struct TerminalLinkPreview: Identifiable, Equatable {
     }
 
     func attachComposerImage(_ attachment: TerminalComposerAttachment) {
+        guard !isSendingComposedMessage else { return }
         composerAttachments.append(attachment)
         composerErrorMessage = nil
     }
 
     func removeComposerAttachment(id: UUID) {
+        guard !isSendingComposedMessage else { return }
         composerAttachments.removeAll { $0.id == id }
     }
 
@@ -542,13 +544,15 @@ struct TerminalLinkPreview: Identifiable, Equatable {
         let draftText = composerDraftText
         // Capture only the Sendable payloads (not the attachments, whose UIImage thumbnails are not
         // Sendable) for the detached serial-queue closure.
-        let payloads = composerAttachments.map(\.payload)
+        let attachments = composerAttachments
+        let payloads = attachments.map(\.payload)
+        let attachmentIDs = attachments.map(\.id)
         isSendingComposedMessage = true
         composerErrorMessage = nil
-        enqueueComposedInputSend(text: draftText, payloads: payloads)
+        enqueueComposedInputSend(text: draftText, payloads: payloads, attachmentIDs: attachmentIDs)
     }
 
-    private func enqueueComposedInputSend(text: String, payloads: [TerminalImageAttachmentPayload]) {
+    private func enqueueComposedInputSend(text: String, payloads: [TerminalImageAttachmentPayload], attachmentIDs: [UUID]) {
         let detail = "text_bytes=\(text.utf8.count) attachments=\(payloads.count)"
         logPerformanceEvent(name: "input_command_enqueue", count: detail.utf8.count, attributes: inputCommandAttributes(kind: "composer_send", detail: detail))
         // A dedicated enqueue (rather than the generic `enqueueInputSend`) because the composer owns its
@@ -592,16 +596,24 @@ struct TerminalLinkPreview: Identifiable, Equatable {
                 await MainActor.run { self.finishComposedSend(with: error, failedStep: .enter) }
                 return
             }
-            await MainActor.run { self.finishComposedSend(with: nil) }
+            await MainActor.run { self.finishComposedSend(with: nil, sentDraftText: text, sentAttachmentIDs: attachmentIDs) }
         }
     }
 
-    private func finishComposedSend(with error: Error?, failedStep: ComposedSendStep? = nil) {
+    private func finishComposedSend(
+        with error: Error?,
+        failedStep: ComposedSendStep? = nil,
+        sentDraftText: String? = nil,
+        sentAttachmentIDs: [UUID] = []
+    ) {
         isSendingComposedMessage = false
         guard let error else {
             writeE2EEventIfNeeded(kind: "composer_send_success", detail: nil)
-            composerDraftText = ""
-            composerAttachments = []
+            if composerDraftText == sentDraftText {
+                composerDraftText = ""
+            }
+            let sentAttachmentIDs = Set(sentAttachmentIDs)
+            composerAttachments.removeAll { sentAttachmentIDs.contains($0.id) }
             composerErrorMessage = nil
             if isOwner {
                 hasConfirmedOwnerInputReadiness = true
