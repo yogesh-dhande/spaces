@@ -133,6 +133,15 @@
             XCTFail("Composed send did not start in time.")
         }
 
+        private func waitUntilRecorderContains(_ token: String, recorder: ComposerAPIRecorder) async throws {
+            for _ in 0..<100 {
+                let tokens = await recorder.tokens()
+                if tokens.contains(token) { return }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            XCTFail("Expected recorder token \(token) did not appear.")
+        }
+
         private func waitForAuthenticationMessage(recorder: AuthenticationPromptRecorder) async throws -> String? {
             for _ in 0..<100 {
                 if let message = await recorder.firstMessage() { return message }
@@ -211,6 +220,34 @@
             XCTAssertFalse(hitView === input.view || hitView?.isDescendant(of: input.view) == true)
 
             try await waitUntilSendCompletes(model)
+        }
+
+        func testCancelingQueuedComposedSendClearsSendingState() async throws {
+            let recorder = ComposerAPIRecorder(delaysByToken: ["send:blocking": .milliseconds(500)])
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.handle(request)
+            }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, bridgeClient: bridgeClient)
+            model.configureOwnerInteractiveForTesting(ownerEpoch: 7)
+
+            await model.sendText("blocking", asPaste: true)
+            try await waitUntilRecorderContains("send:blocking", recorder: recorder)
+            model.composerDraftText = "queued"
+            model.attachComposerImage(attachment("Screenshot"))
+
+            await model.sendComposedMessage()
+            XCTAssertTrue(model.isSendingComposedMessage)
+
+            model.stop()
+            try await Task.sleep(for: .milliseconds(50))
+
+            XCTAssertFalse(model.isSendingComposedMessage)
+            XCTAssertEqual(model.composerDraftText, "queued")
+            XCTAssertEqual(model.composerAttachments.count, 1)
+            let tokens = await recorder.tokens()
+            XCTAssertFalse(tokens.contains("send:queued "))
+            XCTAssertFalse(tokens.contains("paste"))
         }
 
         func testComposedSendTextThenImagesThenEnterInOrder() async throws {

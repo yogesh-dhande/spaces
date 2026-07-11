@@ -30,7 +30,7 @@ export default function IOSDocsPage() {
           <li>• Check on a coding agent that&apos;s working or waiting on you while you&apos;re away from your desk.</li>
           <li>• Create a workspace in any existing project, and open or stop workspace terminals.</li>
           <li>• Run, stop, or restart configured processes and coding agents.</li>
-          <li>• Open a workspace&apos;s browser sessions right inside the app &mdash; tap a row to load the dev server in an in-app web view with back, forward, reload, and Open in Safari, isolated per service just like Chrome on the Mac. See <a className="text-accent hover:underline" href="/docs/browser-sessions">Browser Sessions</a> for details.</li>
+          <li>• Open a workspace&apos;s browser sessions right inside the app &mdash; tap a row to load the dev server in an in-app web view with back, forward, reload, and screenshot controls, isolated per service just like Chrome on the Mac. See <a className="text-accent hover:underline" href="/docs/browser-sessions">Browser Sessions</a> for details.</li>
           <li>• Keep working even if the Mac app quit or crashed &mdash; as long as the Spaces daemon is reachable, acting from your phone brings the Mac app back automatically.</li>
         </ul>
       </article>

@@ -360,7 +360,7 @@ struct TerminalLinkPreview: Identifiable, Equatable {
         bufferedInputFlushTask?.cancel()
         bufferedInputFlushTask = nil
         scrollCoalescer.cancel()
-        inputSendQueue.cancelAll()
+        cancelQueuedInputSends()
         ownershipSynchronizationTask?.cancel()
         ownershipSynchronizationTask = nil
         bufferedInputText = ""
@@ -514,6 +514,11 @@ struct TerminalLinkPreview: Identifiable, Equatable {
         }
     }
 
+    private func cancelQueuedInputSends() {
+        inputSendQueue.cancelAll()
+        finishCanceledComposedSend()
+    }
+
     func attachComposerImage(_ attachment: TerminalComposerAttachment) {
         guard !isSendingComposedMessage else { return }
         composerAttachments.append(attachment)
@@ -560,7 +565,11 @@ struct TerminalLinkPreview: Identifiable, Equatable {
         // rather than the generic `errorMessage` path, and success must clear the draft — while still
         // sharing `inputSendQueue` so it stays ordered with any buffered text/keys.
         inputSendQueue.enqueue(priority: .userInitiated) { [weak self] in
-            guard let self, !Task.isCancelled else { return }
+            guard let self else { return }
+            if Task.isCancelled {
+                await MainActor.run { self.finishCanceledComposedSend() }
+                return
+            }
             await MainActor.run { self.writeE2EEventIfNeeded(kind: "composer_send_begin", detail: detail) }
             let hasText = !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             // Ordering rationale: text first, then image paths, then Enter. Trailing paths read as
@@ -635,6 +644,12 @@ struct TerminalLinkPreview: Identifiable, Equatable {
         case .image, nil:
             composerErrorMessage = "Couldn't send an image. Nothing was submitted — the terminal line may contain partial text."
         }
+    }
+
+    private func finishCanceledComposedSend() {
+        guard isSendingComposedMessage else { return }
+        isSendingComposedMessage = false
+        composerErrorMessage = nil
     }
 
     private func performPasteImageRequest(_ payload: TerminalImageAttachmentPayload) async throws {
@@ -1676,7 +1691,7 @@ struct TerminalLinkPreview: Identifiable, Equatable {
         streamHandle = nil
         bufferedInputFlushTask?.cancel()
         bufferedInputFlushTask = nil
-        inputSendQueue.cancelAll()
+        cancelQueuedInputSends()
         ownershipSynchronizationTask?.cancel()
         ownershipSynchronizationTask = nil
         bufferedInputText = ""
@@ -1838,7 +1853,7 @@ struct TerminalLinkPreview: Identifiable, Equatable {
             bufferedInputFlushTask?.cancel()
             bufferedInputFlushTask = nil
             scrollCoalescer.cancel()
-            inputSendQueue.cancelAll()
+            cancelQueuedInputSends()
             ownershipSynchronizationTask?.cancel()
             ownershipSynchronizationTask = nil
             bufferedInputText = ""
