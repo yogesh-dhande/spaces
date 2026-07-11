@@ -225,6 +225,38 @@
             XCTAssertEqual(table.target(forHost: "web.feature.localhost")?.proxyAuthToken, firstToken)
         }
 
+        func testRoutingTableMergePrunesRoutesMissingFromSameDeviceRefresh() {
+            var table = BrowserProxyRoutingTable()
+            _ = table.merge(
+                deviceID: "device-1", deviceName: "Studio", host: "127.0.0.1", port: 47_847, certificateFingerprint: "fp-1",
+                overview: makeOverview(serviceName: "web", url: "http://web.feature.localhost:47847", branch: "feature", workspaceID: "ws-1"))
+
+            _ = table.merge(
+                deviceID: "device-1", deviceName: "Studio", host: "127.0.0.1", port: 47_847, certificateFingerprint: "fp-1",
+                overview: makeOverview(serviceName: "api", url: "http://api.feature.localhost:47847", branch: "feature", workspaceID: "ws-1"))
+
+            XCTAssertNil(table.target(forHost: "web.feature.localhost"))
+            XCTAssertEqual(table.target(forHost: "api.feature.localhost")?.deviceID, "device-1")
+            XCTAssertEqual(table.target(forHost: "api.feature.localhost")?.serviceName, "api")
+        }
+
+        func testRoutingTableMergeDoesNotPruneRouteReassignedToAnotherDevice() {
+            var table = BrowserProxyRoutingTable()
+            _ = table.merge(
+                deviceID: "device-1", deviceName: "Studio", host: "127.0.0.1", port: 47_847, certificateFingerprint: "fp-1",
+                overview: makeOverview(serviceName: "web", url: "http://web.feature.localhost:47847", branch: "feature", workspaceID: "ws-1"))
+            _ = table.merge(
+                deviceID: "device-2", deviceName: "Laptop", host: "10.0.0.2", port: 47_847, certificateFingerprint: "fp-2",
+                overview: makeOverview(serviceName: "web", url: "http://web.feature.localhost:47847", branch: "feature", workspaceID: "ws-2"))
+
+            _ = table.merge(
+                deviceID: "device-1", deviceName: "Studio", host: "127.0.0.1", port: 47_847, certificateFingerprint: "fp-1",
+                overview: makeOverview(serviceName: "api", url: "http://api.feature.localhost:47847", branch: "feature", workspaceID: "ws-1"))
+
+            XCTAssertEqual(table.target(forHost: "web.feature.localhost")?.deviceID, "device-2")
+            XCTAssertEqual(table.target(forHost: "api.feature.localhost")?.deviceID, "device-1")
+        }
+
         func testRoutingTableRemoveDeviceDropsItsRoutes() {
             var table = BrowserProxyRoutingTable()
             _ = table.merge(

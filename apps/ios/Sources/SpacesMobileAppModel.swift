@@ -450,7 +450,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// lifetime (its installation identity is stable across device switches), started/stopped by
     /// `ContentView`'s scene-phase observation.
     @ObservationIgnored private let browserProxy: SpacesMobileBrowserProxy
-    /// Routing table merged from accepted active-device overviews, and pruned when a device is unpaired.
+    /// Routing table refreshed from accepted active-device overviews, and pruned when a device is unpaired.
     /// Kept on the model (rather than rebuilt from scratch each time) so `removeDevice` can drop just
     /// that device's routes via `BrowserProxyRoutingTable.removeDevice`.
     @ObservationIgnored private var browserRoutingTable = BrowserProxyRoutingTable()
