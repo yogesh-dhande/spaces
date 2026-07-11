@@ -8,8 +8,15 @@ APP_VERSION_SWIFT="$APP_ROOT/Sources/workspacecore/AppVersion.swift"
 SUBMODULE_PATH="apps/macos/vendor/ghostty"
 GHOSTTY_SOURCE_ROOT="$REPO_ROOT/$SUBMODULE_PATH"
 GHOSTTYVT_ROOT="$APP_ROOT/.local/ghosttyvt"
+# The C API header is platform-independent (both macOS setup_ghostty.sh and this Linux
+# build emit it from the same pinned Ghostty submodule SHA), so headers stay in the shared
+# `include` dir. The compiled libraries are NOT interchangeable, so the Linux build stages
+# its ELF `.so`/GNU-ar `.a` into a Linux-scoped `lib-linux` dir instead of the shared `lib`
+# dir that setup_ghostty.sh fills with the macOS dylib/xcframework/BSD-ar `.a`. Writing the
+# Linux output into the shared `lib` dir previously clobbered the macOS artifacts and broke
+# macOS TerminalOutputTailTests until setup_ghostty.sh restored them.
 GHOSTTYVT_INCLUDE_ROOT="$GHOSTTYVT_ROOT/include"
-GHOSTTYVT_LIB_ROOT="$GHOSTTYVT_ROOT/lib"
+GHOSTTYVT_LINUX_LIB_ROOT="$GHOSTTYVT_ROOT/lib-linux"
 
 ZIG_VERSION="0.15.2"
 GHOSTTY_BUILD_OPTIMIZE="${SPACES_GHOSTTY_BUILD_OPTIMIZE:-ReleaseFast}"
@@ -227,10 +234,10 @@ stage_ghostty_vt_development_artifacts() {
     shopt -u nullglob
     [[ "${#libraries[@]}" -gt 0 ]] || die "libghostty-vt.so output missing under $source_lib"
 
-    rm -rf "$GHOSTTYVT_INCLUDE_ROOT" "$GHOSTTYVT_LIB_ROOT"
+    rm -rf "$GHOSTTYVT_INCLUDE_ROOT" "$GHOSTTYVT_LINUX_LIB_ROOT"
     mkdir -p "$GHOSTTYVT_ROOT"
     cp -a "$source_include" "$GHOSTTYVT_INCLUDE_ROOT"
-    cp -a "$source_lib" "$GHOSTTYVT_LIB_ROOT"
+    cp -a "$source_lib" "$GHOSTTYVT_LINUX_LIB_ROOT"
 }
 
 swift_build_flags() {
@@ -281,7 +288,7 @@ swift_product_dir() {
 
 copy_ghostty_vt_libraries() {
     local destination_bin="$1"
-    local source_lib_dir="$GHOSTTYVT_LIB_ROOT"
+    local source_lib_dir="$GHOSTTYVT_LINUX_LIB_ROOT"
     [[ -d "$source_lib_dir" ]] || die "Ghostty lib output missing at $source_lib_dir"
     shopt -s nullglob
     local libraries=("$source_lib_dir"/libghostty-vt.so*)
