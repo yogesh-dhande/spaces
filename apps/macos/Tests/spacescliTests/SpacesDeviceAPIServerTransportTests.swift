@@ -938,6 +938,63 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
         }
     }
 
+    func testRelativeTerminalLinkAnchorsInForegroundProcessLiveWorkingDirectory() throws {
+        try withTemporaryProfile { root in
+            let identity = try testTLSIdentity()
+            let pairingStore = AlwaysAuthorizedDevicePairingStore()
+            let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore)
+            try server.start()
+            defer { server.stop() }
+            let clientApp = SpacesDeviceClientApp(
+                installationID: "INSTALLATION-LINK-LIVE-CWD", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "ios",
+                deviceName: "iPhone", appVersion: "1.0")
+            let sessionID = "session-live-cwd-\(UUID().uuidString)"
+            // The launch configuration and the tracked runtime-state working directory both point at the
+            // stale launch directory (which never receives the fixture), so a passing resolution can only
+            // come from consulting the foreground process's real cwd.
+            let staleDir = try makeWorkspaceRootProfile(root: root, sessionID: sessionID)
+
+            // The live cwd lives under /private/tmp so the resolver authorizes it via its fixed prefix
+            // allowlist without registering it as a workspace root. Match the kernel-reported cwd path by
+            // creating the directory at the resolved (/private/tmp) location the sleep child will chdir to.
+            let liveDir = URL(fileURLWithPath: "/private/tmp", isDirectory: true).appendingPathComponent(
+                "spaces-live-cwd-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: liveDir, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: liveDir) }
+            let imageData = Data([0x89, 0x50, 0x4E, 0x47, 0x0A, 0x0B])
+            try imageData.write(to: liveDir.appendingPathComponent("statement.png"))
+
+            let foreground = Process()
+            foreground.executableURL = URL(fileURLWithPath: "/bin/sleep")
+            foreground.arguments = ["30"]
+            foreground.currentDirectoryURL = liveDir
+            try foreground.run()
+            defer {
+                foreground.terminate()
+                foreground.waitUntilExit()
+            }
+
+            let paths = try TerminalSessionPaths.forSession(id: sessionID)
+            try TerminalSessionPersistence.writeRuntimeState(
+                TerminalSessionRuntimeState(
+                    sessionID: sessionID, servicePID: Int32(ProcessInfo.processInfo.processIdentifier),
+                    childPID: foreground.processIdentifier, state: .running, updatedAt: "2026-06-09T12:00:00Z",
+                    workingDirectory: staleDir.path, foregroundPID: foreground.processIdentifier),
+                paths: paths)
+
+            let response = try sendTLSRequest(
+                SpacesDeviceAPIRequest(
+                    command: .resolveTerminalLink(.init(sessionID: sessionID, terminalLink: "./statement.png")),
+                    authToken: pairingStore.authToken, clientApp: clientApp), port: server.listeningPort,
+                certificateFingerprint: identity.certificateFingerprint)
+
+            XCTAssertTrue(response.ok, response.message)
+            let metadata = try XCTUnwrap(response.terminalLinkMetadata)
+            XCTAssertEqual(metadata.source, .localFile)
+            XCTAssertEqual(metadata.displayName, "statement.png")
+        }
+    }
+
     func testTerminalLinkChunkReadUsesResolvedTransferAuthorizationWhenDatabaseBecomesUnavailable() throws {
         try withTemporaryProfile { root in
             let identity = try testTLSIdentity()

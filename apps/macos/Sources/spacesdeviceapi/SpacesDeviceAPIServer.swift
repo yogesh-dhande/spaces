@@ -2235,10 +2235,30 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
 
     private func terminalWorkingDirectory(sessionID: String) throws -> String {
         let paths = try TerminalSessionPaths.forSession(id: sessionID)
-        if let workingDirectory = normalizedString((try? TerminalSessionPersistence.readRuntimeState(paths: paths))?.workingDirectory) {
+        let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths)
+        // Prefer the live cwd of the session's foreground process (falling back to its child shell).
+        // The tracked runtime-state working directory only advances when the shell reports a new PWD
+        // through Ghostty shell integration (OSC 7), which many shells never emit — so it is stale
+        // after a plain `cd`. The owning process's real cwd is always current, anchoring relative
+        // links (e.g. `./statement.pdf`) in the directory the shell is actually sitting in.
+        if let liveWorkingDirectory = normalizedString(Self.liveTerminalWorkingDirectory(runtimeState: runtimeState)) {
+            return liveWorkingDirectory
+        }
+        if let workingDirectory = normalizedString(runtimeState?.workingDirectory) {
             return workingDirectory
         }
         return try TerminalSessionPersistence.readLaunchConfiguration(paths: paths).workingDirectory
+    }
+
+    private static func liveTerminalWorkingDirectory(runtimeState: TerminalSessionRuntimeState?) -> String? {
+        guard let runtimeState else { return nil }
+        if let foregroundPID = runtimeState.foregroundPID, let cwd = TerminalForegroundProcessInspector.workingDirectory(pid: foregroundPID) {
+            return cwd
+        }
+        if let childPID = runtimeState.childPID, let cwd = TerminalForegroundProcessInspector.workingDirectory(pid: childPID) {
+            return cwd
+        }
+        return nil
     }
 
     private func loadWorkspaceRoots(store: SQLiteStore) throws -> [String] {
