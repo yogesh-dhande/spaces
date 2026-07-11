@@ -45,11 +45,13 @@ final class TerminalControlProtocolTests: XCTestCase {
     }
 
     func testRequestDecodeDefaultsMissingOptionalFields() throws {
-        let payload = #"{"command":"takeover","clientID":"remote-client","asPaste":false}"#.data(using: .utf8)!
+        let payload = #"{"command":"takeover","clientID":"remote-client"}"#.data(using: .utf8)!
 
-        XCTAssertEqual(
-            try TerminalControlCodec.decodeRequest(payload),
-            TerminalControlRequest(command: "takeover", clientID: "remote-client", appendNewline: false))
+        let request = try TerminalControlCodec.decodeRequest(payload)
+
+        XCTAssertEqual(request, TerminalControlRequest(command: "takeover", clientID: "remote-client", appendNewline: false))
+        XCTAssertFalse(request.appendNewline)
+        XCTAssertFalse(request.asPaste)
     }
 
     func testLegacyScrollRequestDecodesWithoutScrollMods() throws {

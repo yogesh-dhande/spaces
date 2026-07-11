@@ -29,6 +29,16 @@ final class ServiceTunnelSSLRetryStateTests: XCTestCase {
         XCTAssertFalse(pending.isReady(clientReadable: false, clientWritable: true))
     }
 
+    func testShutdownWantWriteKeepsThePendingOperationAsShutdown() {
+        let pending = SpacesDeviceServiceTunnelSSLPendingOperation.shutdown(waitingFor: .write)
+
+        XCTAssertEqual(pending.operation, .shutdown)
+        XCTAssertFalse(pending.waitsForRead)
+        XCTAssertTrue(pending.waitsForWrite)
+        XCTAssertTrue(pending.isReady(clientReadable: false, clientWritable: true))
+        XCTAssertFalse(pending.isReady(clientReadable: true, clientWritable: false))
+    }
+
     func testClientHangupOrErrorCountsAsWriteReadyForPendingSSLRetry() {
         let pending = SpacesDeviceServiceTunnelSSLPendingOperation.read(waitingFor: .write)
 

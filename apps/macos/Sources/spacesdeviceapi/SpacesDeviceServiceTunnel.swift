@@ -150,29 +150,32 @@ enum SpacesDeviceServiceTunnelSSLPendingOperation: Equatable {
     enum Operation: Equatable {
         case read
         case write
+        case shutdown
     }
 
     case read(waitingFor: SpacesDeviceServiceTunnelSSLReadiness)
     case write(waitingFor: SpacesDeviceServiceTunnelSSLReadiness)
+    case shutdown(waitingFor: SpacesDeviceServiceTunnelSSLReadiness)
 
     var operation: Operation {
         switch self {
         case .read: return .read
         case .write: return .write
+        case .shutdown: return .shutdown
         }
     }
 
     var waitsForRead: Bool {
         switch self {
-        case .read(waitingFor: .read), .write(waitingFor: .read): return true
-        case .read(waitingFor: .write), .write(waitingFor: .write): return false
+        case .read(waitingFor: .read), .write(waitingFor: .read), .shutdown(waitingFor: .read): return true
+        case .read(waitingFor: .write), .write(waitingFor: .write), .shutdown(waitingFor: .write): return false
         }
     }
 
     var waitsForWrite: Bool {
         switch self {
-        case .read(waitingFor: .write), .write(waitingFor: .write): return true
-        case .read(waitingFor: .read), .write(waitingFor: .read): return false
+        case .read(waitingFor: .write), .write(waitingFor: .write), .shutdown(waitingFor: .write): return true
+        case .read(waitingFor: .read), .write(waitingFor: .read), .shutdown(waitingFor: .read): return false
         }
     }
 
@@ -574,17 +577,37 @@ func spacesDeviceServiceTunnelClientSocketReadiness(revents: Int16) -> SpacesDev
             var loopbackWriteShutdown = false
             var sslShutdownSent = false
 
-            // OpenSSL requires retrying the same SSL_read/SSL_write operation after WANT_READ/WANT_WRITE,
-            // even when the operation wants the opposite socket readiness.
+            // OpenSSL requires retrying the same operation after WANT_READ/WANT_WRITE, even when the
+            // operation wants the opposite socket readiness.
             var pendingSSLRetry: SpacesDeviceServiceTunnelSSLPendingOperation?
 
             var readBuffer = [UInt8](repeating: 0, count: 64 * 1024)
 
+            func sendSSLShutdown() throws {
+                let shutdownResult = SSL_shutdown(ssl)
+                switch shutdownResult {
+                case 1:
+                    pendingSSLRetry = nil
+                    sslShutdownSent = true
+                    clientReadClosed = true
+                case 0:
+                    pendingSSLRetry = nil
+                    sslShutdownSent = true
+                default:
+                    switch SSL_get_error(ssl, shutdownResult) {
+                    case SSL_ERROR_WANT_READ: pendingSSLRetry = .shutdown(waitingFor: .read)
+                    case SSL_ERROR_WANT_WRITE: pendingSSLRetry = .shutdown(waitingFor: .write)
+                    default: throw POSIXError(.EIO)
+                    }
+                }
+            }
+
             while true {
-                if clientReadClosed, loopbackReadClosed, toService.isEmpty, toClient.isEmpty { break }
+                if clientReadClosed, loopbackReadClosed, toService.isEmpty, toClient.isEmpty, sslShutdownSent { break }
 
                 let canReadFromClient = !clientReadClosed && toService.count < bufferCapacity
                 let canReadFromLoopback = !loopbackReadClosed && toClient.count < bufferCapacity && pendingSSLRetry?.operation != .write
+                let canStartSSLShutdown = loopbackReadClosed && toClient.isEmpty && !sslShutdownSent && pendingSSLRetry == nil
 
                 var clientEvents: Int16 = 0
                 if let pendingSSLRetry {
@@ -592,7 +615,7 @@ func spacesDeviceServiceTunnelClientSocketReadiness(revents: Int16) -> SpacesDev
                     if pendingSSLRetry.waitsForWrite { clientEvents |= Int16(POLLOUT) }
                 } else {
                     if canReadFromClient { clientEvents |= Int16(POLLIN) }
-                    if !toClient.isEmpty { clientEvents |= Int16(POLLOUT) }
+                    if !toClient.isEmpty || canStartSSLShutdown { clientEvents |= Int16(POLLOUT) }
                 }
                 var loopbackEvents: Int16 = 0
                 if canReadFromLoopback { loopbackEvents |= Int16(POLLIN) }
@@ -696,9 +719,12 @@ func spacesDeviceServiceTunnelClientSocketReadiness(revents: Int16) -> SpacesDev
 
                 // 4b. Service done and its bytes flushed to the client: send our close_notify once.
                 // Continued SSL_read is still allowed so the client's own close_notify is observed.
-                if loopbackReadClosed, toClient.isEmpty, !sslShutdownSent {
-                    _ = SSL_shutdown(ssl)
-                    sslShutdownSent = true
+                if let pendingSSLRetry, pendingSSLRetry.operation == .shutdown,
+                   pendingSSLRetry.isReady(clientReadable: clientReadable, clientWritable: clientWritable)
+                {
+                    try sendSSLShutdown()
+                } else if loopbackReadClosed, toClient.isEmpty, !sslShutdownSent, pendingSSLRetry == nil {
+                    try sendSSLShutdown()
                 }
             }
         }

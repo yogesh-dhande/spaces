@@ -121,7 +121,7 @@ public struct TerminalControlRequest: Codable, Sendable, Equatable {
         scrollVertical = try container.decodeIfPresent(Double.self, forKey: .scrollVertical)
         scrollMods = try container.decodeIfPresent(Int32.self, forKey: .scrollMods)
         appendNewline = try container.decodeIfPresent(Bool.self, forKey: .appendNewline) ?? false
-        asPaste = try container.decode(Bool.self, forKey: .asPaste)
+        asPaste = try container.decodeIfPresent(Bool.self, forKey: .asPaste) ?? false
         appearance = try container.decodeIfPresent(ThemeAppearance.self, forKey: .appearance)
     }
 
