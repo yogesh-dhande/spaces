@@ -53,15 +53,53 @@ enum SpacesDeviceServiceTunnelResolver {
     }
 }
 
-/// Dials a workspace service on `127.0.0.1:<port>` with a bounded, non-blocking connect so a service
-/// that is configured but not listening fails fast (mapped to `.serviceNotRunning`) instead of hanging
-/// the request connection.
+/// Dials a workspace service on loopback with a bounded, non-blocking connect so a service that is
+/// configured but not listening fails fast (mapped to `.serviceNotRunning`) instead of hanging the
+/// request connection.
 enum SpacesDeviceServiceTunnelDialer {
     /// - Parameter blocking: whether to leave the returned socket in blocking mode. Darwin drives the
     ///   phone→service direction with blocking writes on a dedicated queue; the Linux splice loop needs
     ///   the socket non-blocking for its `poll(2)` loop.
     static func dialLoopback(port: Int, timeoutSeconds: TimeInterval = 2, blocking: Bool = true) throws -> Int32 {
-        let fileDescriptor = socket(AF_INET, streamSocketType, 0)
+        do { return try dialIPv4Loopback(port: port, timeoutSeconds: timeoutSeconds, blocking: blocking) } catch {
+            return try dialIPv6Loopback(port: port, timeoutSeconds: timeoutSeconds, blocking: blocking)
+        }
+    }
+
+    private static func dialIPv4Loopback(port: Int, timeoutSeconds: TimeInterval, blocking: Bool) throws -> Int32 {
+        try dialSocket(addressFamily: AF_INET, timeoutSeconds: timeoutSeconds, blocking: blocking) { fileDescriptor in
+            var address = sockaddr_in()
+            address.sin_family = sa_family_t(AF_INET)
+            address.sin_port = in_port_t(UInt16(truncatingIfNeeded: port).bigEndian)
+            guard inet_pton(AF_INET, "127.0.0.1", &address.sin_addr) == 1 else { throw POSIXError(.EADDRNOTAVAIL) }
+
+            return withUnsafePointer(to: &address) { pointer in
+                pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPointer in
+                    connect(fileDescriptor, sockaddrPointer, socklen_t(MemoryLayout<sockaddr_in>.size))
+                }
+            }
+        }
+    }
+
+    private static func dialIPv6Loopback(port: Int, timeoutSeconds: TimeInterval, blocking: Bool) throws -> Int32 {
+        try dialSocket(addressFamily: AF_INET6, timeoutSeconds: timeoutSeconds, blocking: blocking) { fileDescriptor in
+            var address = sockaddr_in6()
+            address.sin6_family = sa_family_t(AF_INET6)
+            address.sin6_port = in_port_t(UInt16(truncatingIfNeeded: port).bigEndian)
+            guard inet_pton(AF_INET6, "::1", &address.sin6_addr) == 1 else { throw POSIXError(.EADDRNOTAVAIL) }
+
+            return withUnsafePointer(to: &address) { pointer in
+                pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPointer in
+                    connect(fileDescriptor, sockaddrPointer, socklen_t(MemoryLayout<sockaddr_in6>.size))
+                }
+            }
+        }
+    }
+
+    private static func dialSocket(addressFamily: Int32, timeoutSeconds: TimeInterval, blocking: Bool, connectSocket: (Int32) throws -> Int32) throws
+        -> Int32
+    {
+        let fileDescriptor = socket(addressFamily, streamSocketType, 0)
         guard fileDescriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
         #if canImport(Darwin)
             var noSIGPIPE: Int32 = 1
@@ -69,16 +107,8 @@ enum SpacesDeviceServiceTunnelDialer {
         #endif
         do {
             try setNonBlocking(fileDescriptor)
-            var address = sockaddr_in()
-            address.sin_family = sa_family_t(AF_INET)
-            address.sin_port = in_port_t(UInt16(truncatingIfNeeded: port).bigEndian)
-            guard inet_pton(AF_INET, "127.0.0.1", &address.sin_addr) == 1 else { throw POSIXError(.EADDRNOTAVAIL) }
 
-            let connectResult = withUnsafePointer(to: &address) { pointer in
-                pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPointer in
-                    connect(fileDescriptor, sockaddrPointer, socklen_t(MemoryLayout<sockaddr_in>.size))
-                }
-            }
+            let connectResult = try connectSocket(fileDescriptor)
             if connectResult != 0 {
                 guard errno == EINPROGRESS else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .ECONNREFUSED) }
                 var pollDescriptor = pollfd(fd: fileDescriptor, events: Int16(POLLOUT), revents: 0)
@@ -349,14 +379,13 @@ func spacesDeviceServiceTunnelClientSocketReadiness(revents: Int16) -> SpacesDev
                 return .reject(SpacesDeviceAPIResponse(ok: false, message: message, errorCode: errorCode(for: error)))
             }
             switch resolution {
-            case .failure(let message, let errorCode):
-                return .reject(SpacesDeviceAPIResponse(ok: false, message: message, errorCode: errorCode))
+            case .failure(let message, let errorCode): return .reject(SpacesDeviceAPIResponse(ok: false, message: message, errorCode: errorCode))
             case .port(let port):
                 do { return .ready(loopbackFD: try SpacesDeviceServiceTunnelDialer.dialLoopback(port: port)) } catch {
                     return .reject(
                         SpacesDeviceAPIResponse(
-                            ok: false, message: "Service '\(tunnelRequest.serviceName)' is not accepting connections.",
-                            errorCode: .serviceNotRunning))
+                            ok: false, message: "Service '\(tunnelRequest.serviceName)' is not accepting connections.", errorCode: .serviceNotRunning)
+                    )
                 }
             }
         }
@@ -720,7 +749,7 @@ func spacesDeviceServiceTunnelClientSocketReadiness(revents: Int16) -> SpacesDev
                 // 4b. Service done and its bytes flushed to the client: send our close_notify once.
                 // Continued SSL_read is still allowed so the client's own close_notify is observed.
                 if let pendingSSLRetry, pendingSSLRetry.operation == .shutdown,
-                   pendingSSLRetry.isReady(clientReadable: clientReadable, clientWritable: clientWritable)
+                    pendingSSLRetry.isReady(clientReadable: clientReadable, clientWritable: clientWritable)
                 {
                     try sendSSLShutdown()
                 } else if loopbackReadClosed, toClient.isEmpty, !sslShutdownSent, pendingSSLRetry == nil {

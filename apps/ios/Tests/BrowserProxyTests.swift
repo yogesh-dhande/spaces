@@ -129,6 +129,40 @@
             XCTAssertFalse(sanitized.contains(BrowserProxyRequest.cookieName))
         }
 
+        func testHeadLimitsChunkedBodyToTerminatingChunkWhenSanitizing() throws {
+            var parser = BrowserProxyHTTPHeadParser()
+            let chunkedBody = "5\r\nhello\r\n0\r\n\r\n"
+            let request =
+                "POST /upload HTTP/1.1\r\n"
+                + "Host: web.feature.localhost\r\n"
+                + "Transfer-Encoding: chunked\r\n"
+                + "Cookie: \(BrowserProxyRequest.cookieName)=secret-token; app=keep\r\n"
+                + "\r\n"
+                + chunkedBody
+                + "GET /second HTTP/1.1\r\n"
+                + "Host: web.feature.localhost\r\n"
+                + "Cookie: \(BrowserProxyRequest.cookieName)=secret-token\r\n"
+                + "\r\n"
+
+            try parser.append(Data(request.utf8))
+
+            XCTAssertEqual(parser.bodyFraming, .chunked)
+            let progress = try XCTUnwrap(parser.chunkedBodyProgress)
+            XCTAssertTrue(progress.isComplete)
+            XCTAssertEqual(progress.forwardedByteCount, Data(chunkedBody.utf8).count)
+            let sanitized = String(
+                decoding: parser.consumedBytes(
+                    droppingCookieNamed: BrowserProxyRequest.cookieName,
+                    forcingConnectionClose: true,
+                    bodyLimit: progress.forwardedByteCount),
+                as: UTF8.self)
+            XCTAssertTrue(sanitized.contains("POST /upload"))
+            XCTAssertTrue(sanitized.contains(chunkedBody))
+            XCTAssertTrue(sanitized.contains("Cookie: app=keep"))
+            XCTAssertFalse(sanitized.contains("GET /second"))
+            XCTAssertFalse(sanitized.contains(BrowserProxyRequest.cookieName))
+        }
+
         // MARK: - Routing table
 
         func testRoutingTableMergeExtractsServiceHosts() {
@@ -273,6 +307,52 @@
             XCTAssertTrue(response.head.contains("200"), "expected 200 status, got: \(response.head) body: \(response.body)")
             let requestReachedService = String(decoding: service.received(), as: UTF8.self)
             XCTAssertTrue(requestReachedService.contains("GET /first"))
+            XCTAssertTrue(requestReachedService.contains("Cookie: app=keep"))
+            XCTAssertFalse(requestReachedService.contains("GET /second"))
+            XCTAssertFalse(requestReachedService.contains(BrowserProxyRequest.cookieName))
+        }
+
+        func testProxyRelaysChunkedRequestBodyAndDropsPipelinedRequest() async throws {
+            let service = try LocalHTTPTestService(responseBody: "uploaded", requestTerminator: Data("\r\n0\r\n\r\n".utf8))
+            defer { service.stop() }
+            let servicePort = try await service.start()
+            let dialer = FakeTunnelDialer(behavior: .connect(port: servicePort))
+
+            var table = BrowserProxyRoutingTable()
+            _ = table.merge(
+                deviceID: "device-1", deviceName: "Studio", host: "127.0.0.1", port: 47_847, certificateFingerprint: "fp-1",
+                overview: makeOverview(serviceName: "web", url: "http://web.feature.localhost:47847", branch: "feature", workspaceID: "ws-1"))
+            let authToken = try XCTUnwrap(table.target(forHost: "web.feature.localhost")?.proxyAuthToken)
+
+            let proxyPort = UInt16.random(in: 49_152...65_500)
+            let proxy = SpacesMobileBrowserProxy(port: proxyPort, installationID: "install-1", dialer: dialer)
+            await proxy.updateRoutes(table)
+            await proxy.start()
+            defer { Task { await proxy.stop() } }
+
+            let rawRequest =
+                "POST /upload HTTP/1.1\r\n"
+                + "Host: web.feature.localhost:\(proxyPort)\r\n"
+                + "Transfer-Encoding: chunked\r\n"
+                + "Cookie: app=keep; \(BrowserProxyRequest.cookieName)=\(authToken)\r\n"
+                + "Connection: keep-alive\r\n"
+                + "\r\n"
+                + "5\r\nhello\r\n0\r\n\r\n"
+                + "GET /second HTTP/1.1\r\n"
+                + "Host: web.feature.localhost:\(proxyPort)\r\n"
+                + "Cookie: \(BrowserProxyRequest.cookieName)=\(authToken)\r\n"
+                + "Connection: close\r\n"
+                + "\r\n"
+
+            let response = try await sendRawRequest(port: proxyPort, request: rawRequest)
+
+            XCTAssertTrue(response.head.contains("200"), "expected 200 status, got: \(response.head) body: \(response.body)")
+            XCTAssertTrue(response.body.contains("uploaded"))
+            let requestReachedService = String(decoding: service.received(), as: UTF8.self)
+            XCTAssertTrue(requestReachedService.contains("POST /upload"))
+            XCTAssertTrue(requestReachedService.contains("Transfer-Encoding: chunked"))
+            XCTAssertTrue(requestReachedService.contains("5\r\nhello\r\n0\r\n\r\n"))
+            XCTAssertTrue(requestReachedService.contains("Connection: close"))
             XCTAssertTrue(requestReachedService.contains("Cookie: app=keep"))
             XCTAssertFalse(requestReachedService.contains("GET /second"))
             XCTAssertFalse(requestReachedService.contains(BrowserProxyRequest.cookieName))
@@ -477,11 +557,13 @@
         private let listener: NWListener
         private let queue = DispatchQueue(label: "browser.proxy.test.service")
         private let responseBody: String
+        private let requestTerminator: Data
         private let lock = NSLock()
         private var receivedBytes = Data()
 
-        init(responseBody: String) throws {
+        init(responseBody: String, requestTerminator: Data = Data("\r\n\r\n".utf8)) throws {
             self.responseBody = responseBody
+            self.requestTerminator = requestTerminator
             listener = try NWListener(using: .tcp)
         }
 
@@ -524,7 +606,7 @@
                 guard let self else { return }
                 var next = accumulated
                 if let content, !content.isEmpty { next.append(content) }
-                if next.range(of: Data("\r\n\r\n".utf8)) != nil {
+                if next.range(of: requestTerminator) != nil {
                     lock.lock()
                     receivedBytes = next
                     lock.unlock()
