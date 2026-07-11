@@ -312,6 +312,14 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
         XCTAssertNil(byExtension(nil, nil))
     }
 
+    func testTerminalLinkClassifierRejectsSVGContentTypes() {
+        XCTAssertNil(SpacesDeviceTerminalLinkClassifier.artifactKind(contentType: "image/svg+xml", pathExtension: nil))
+        XCTAssertNil(SpacesDeviceTerminalLinkClassifier.artifactKind(contentType: "image/svg+xml; charset=utf-8", pathExtension: nil))
+        XCTAssertNil(
+            SpacesDeviceTerminalLinkClassifier.artifactKind(
+                contentType: SpacesDeviceTerminalLinkClassifier.preferredContentType(pathExtension: "svg"), pathExtension: "svg"))
+    }
+
     func testTerminalLinkRouteClassifiesWebLoopbackAndFileLinks() {
         XCTAssertEqual(SpacesDeviceTerminalLinkClassifier.route(for: "https://example.com/docs"), .webURL(URL(string: "https://example.com/docs")!))
         XCTAssertEqual(SpacesDeviceTerminalLinkClassifier.route(for: "http://localhost:3000"), .loopbackURL(URL(string: "http://localhost:3000")!))

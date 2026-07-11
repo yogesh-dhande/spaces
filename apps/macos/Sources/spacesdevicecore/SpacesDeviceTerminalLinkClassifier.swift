@@ -97,14 +97,21 @@ public enum SpacesDeviceTerminalLinkClassifier {
     }
 
     private static func sharedArtifactKind(forContentType contentType: String) -> SpacesDeviceTerminalLinkArtifactKind? {
-        let lowercased = contentType.lowercased()
+        let lowercased = normalizedContentType(contentType)
         if lowercased == "text/markdown" { return .markdown }
         if lowercased == "text/html" { return .html }
         if lowercased == "application/pdf" { return .pdf }
+        if lowercased == "image/svg+xml" { return nil }
         if lowercased.hasPrefix("image/") { return .image }
         if lowercased.hasPrefix("video/") { return .video }
         if textContentTypes.contains(lowercased) || lowercased.hasPrefix("text/") { return .text }
         return nil
+    }
+
+    private static func normalizedContentType(_ contentType: String) -> String {
+        let lowercased = contentType.lowercased()
+        let baseType = lowercased.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? lowercased
+        return baseType.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     #if canImport(UniformTypeIdentifiers)

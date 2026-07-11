@@ -1780,8 +1780,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                     sessionID: sessionID,
                     request: TerminalControlRequest(
                         command: .send(
-                            TerminalControlSendPayload(
-                                text: text, bytes: nil, clientID: clientID, ownerEpoch: nil, appendNewline: appendNewline))),
+                            TerminalControlSendPayload(text: text, bytes: nil, clientID: clientID, ownerEpoch: nil, appendNewline: appendNewline))),
                     requestSender: requestSender, applyState: applyControlState)
             }
             let sendKeyAction: @Sendable (String) throws -> TerminalControlResponse = { key in
@@ -1835,10 +1834,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 sessionID: sessionID, deviceID: resolvedDeviceID, isLocalDevice: resolvedDeviceID == SpacesPairedDeviceRecord.localDeviceID,
                 workingDirectoryProvider: { [weak stateModel] in
                     let payload = stateModel?.latestRemoteStatePayload
-                    if let workingDirectory = payload?.workingDirectory, !workingDirectory.isEmpty { return workingDirectory }
-                    return stateModel?.currentLaunchConfiguration?.workingDirectory ?? request.workingDirectory
-                },
-                requestSender: requestSender, banner: TerminalLinkActivityBanner(hostView: pane.view))
+                    return Self.terminalLinkWorkingDirectory(
+                        runtimeState: stateModel?.currentRuntimeState ?? payload?.runtimeState, streamedWorkingDirectory: payload?.workingDirectory,
+                        launchWorkingDirectory: stateModel?.currentLaunchConfiguration?.workingDirectory,
+                        requestWorkingDirectory: request.workingDirectory)
+                }, requestSender: requestSender, banner: TerminalLinkActivityBanner(hostView: pane.view))
             linkOpenBox.coordinator = linkOpenCoordinator
             return TerminalPaneContentController(
                 descriptor: .terminalSession(deviceID: resolvedDeviceID, sessionID: sessionID), workspaceID: request.workspaceID,
@@ -1847,6 +1847,31 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             showError(error)
             return nil
         }
+    }
+
+    nonisolated static func terminalLinkWorkingDirectory(
+        runtimeState: TerminalSessionRuntimeState?, streamedWorkingDirectory: String?, launchWorkingDirectory: String?,
+        requestWorkingDirectory: String
+    ) -> String {
+        if let liveWorkingDirectory = liveTerminalWorkingDirectory(runtimeState: runtimeState) { return liveWorkingDirectory }
+        if let workingDirectory = normalizedTerminalWorkingDirectory(runtimeState?.workingDirectory) { return workingDirectory }
+        if let workingDirectory = normalizedTerminalWorkingDirectory(streamedWorkingDirectory) { return workingDirectory }
+        if let workingDirectory = normalizedTerminalWorkingDirectory(launchWorkingDirectory) { return workingDirectory }
+        return requestWorkingDirectory
+    }
+
+    private nonisolated static func liveTerminalWorkingDirectory(runtimeState: TerminalSessionRuntimeState?) -> String? {
+        guard let runtimeState else { return nil }
+        if let foregroundPID = runtimeState.foregroundPID, let cwd = TerminalForegroundProcessInspector.workingDirectory(pid: foregroundPID) {
+            return cwd
+        }
+        if let childPID = runtimeState.childPID, let cwd = TerminalForegroundProcessInspector.workingDirectory(pid: childPID) { return cwd }
+        return nil
+    }
+
+    private nonisolated static func normalizedTerminalWorkingDirectory(_ value: String?) -> String? {
+        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else { return nil }
+        return trimmed
     }
 
     /// Starts a fresh ad hoc terminal session on the workspace's owning daemon and

@@ -90,6 +90,38 @@ import workspacecore
         #expect(revealMessage.contains("SSH-capable workflow"))
     }
 
+    @Test func terminalLinkWorkingDirectoryPrefersLiveForegroundProcessCWD() throws {
+        let staleDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("stale-\(UUID().uuidString)", isDirectory: true)
+        let liveDirectory = URL(fileURLWithPath: "/private/tmp", isDirectory: true).appendingPathComponent(
+            "spaces-ui-live-cwd-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: staleDirectory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: liveDirectory, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: staleDirectory)
+            try? FileManager.default.removeItem(at: liveDirectory)
+        }
+
+        let foreground = Process()
+        foreground.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        foreground.arguments = ["30"]
+        foreground.currentDirectoryURL = liveDirectory
+        try foreground.run()
+        defer {
+            if foreground.isRunning { foreground.terminate() }
+            foreground.waitUntilExit()
+        }
+
+        let runtimeState = TerminalSessionRuntimeState(
+            sessionID: "session-live-cwd", backend: .ghosttyEmbedded, servicePID: Int32(ProcessInfo.processInfo.processIdentifier),
+            childPID: foreground.processIdentifier, state: .running, updatedAt: "2026-06-09T12:00:00Z", title: "shell",
+            workingDirectory: staleDirectory.path, foregroundPID: foreground.processIdentifier)
+
+        #expect(
+            AppKitController.terminalLinkWorkingDirectory(
+                runtimeState: runtimeState, streamedWorkingDirectory: staleDirectory.path, launchWorkingDirectory: staleDirectory.path,
+                requestWorkingDirectory: staleDirectory.path) == liveDirectory.path)
+    }
+
     @Test func deviceOverviewMappingPreservesProjectWorkspaceAndRuntimeControls() {
         let overview = SpacesDeviceOverviewPayload(
             projects: [
