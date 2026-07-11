@@ -18,9 +18,7 @@ struct BrowserProxyRequest: Sendable, Equatable, Hashable {
     }
 
     var urlRequest: URLRequest {
-        var request = URLRequest(url: url)
-        request.setValue(cookieHeaderValue, forHTTPHeaderField: "Cookie")
-        return request
+        URLRequest(url: url)
     }
 
     var httpCookie: HTTPCookie {
@@ -39,7 +37,6 @@ struct BrowserProxyRequest: Sendable, Equatable, Hashable {
         return cookie
     }
 
-    private var cookieHeaderValue: String { "\(Self.cookieName)=\(authToken)" }
 }
 
 /// The daemon and workspace service a browser `Host` resolves to. The display names are carried so

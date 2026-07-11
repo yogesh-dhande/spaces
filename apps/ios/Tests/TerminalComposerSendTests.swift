@@ -391,5 +391,39 @@
                 "This Mac no longer recognizes this device. Open Devices and pair this device again.")
             XCTAssertNil(model.composerErrorMessage)
         }
+
+        func testImageUploadAuthenticationFailurePromptsRepairInsteadOfImageError() async throws {
+            let authenticationRecorder = AuthenticationPromptRecorder()
+            let recorder = ComposerAPIRecorder(
+                failuresByToken: [
+                    "paste": SpacesDeviceAPIResponse(ok: false, message: "Invalid device auth token.", errorCode: .unauthorized)
+                ])
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.handle(request)
+            }
+            let model = TerminalViewerModel(
+                session: session(),
+                settings: settings(),
+                onAuthenticationRequired: { message in
+                    Task { await authenticationRecorder.append(message) }
+                },
+                bridgeClient: bridgeClient)
+            model.configureOwnerInteractiveForTesting(ownerEpoch: 5)
+            model.composerDraftText = "hello"
+            model.attachComposerImage(attachment("Screenshot"))
+
+            await model.sendComposedMessage()
+            try await waitUntilSendCompletes(model)
+
+            let tokens = await recorder.tokens()
+            XCTAssertEqual(tokens, ["send:hello ", "paste"])
+            let authenticationMessage = try await waitForAuthenticationMessage(recorder: authenticationRecorder)
+            XCTAssertEqual(
+                authenticationMessage,
+                "This Mac no longer recognizes this device. Open Devices and pair this device again.")
+            XCTAssertNil(model.composerErrorMessage)
+            XCTAssertEqual(model.composerDraftText, "hello")
+            XCTAssertEqual(model.composerAttachments.count, 1)
+        }
     }
 #endif

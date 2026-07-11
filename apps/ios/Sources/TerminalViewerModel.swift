@@ -623,7 +623,7 @@ struct TerminalLinkPreview: Identifiable, Equatable {
         }
         writeE2EEventIfNeeded(kind: "composer_send_failure", detail: error.localizedDescription)
         // Keep the entire draft (text + all attachments) so the user can retry without recomposing.
-        if failedStep != .image, routeInputSendRecovery(error) {
+        if routeInputSendRecovery(error) {
             composerErrorMessage = nil
             return
         }

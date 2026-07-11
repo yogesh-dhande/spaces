@@ -45,6 +45,7 @@ struct BrowserProxyHTTPHeadParser {
         guard !isComplete else { return }
         let terminator = Data([0x0D, 0x0A, 0x0D, 0x0A])
         if let range = consumedBytes.range(of: terminator) {
+            guard range.upperBound <= Self.maxHeadBytes else { throw ParseError.headTooLarge }
             headEndIndex = range.upperBound
             isComplete = true
         } else if consumedBytes.count > Self.maxHeadBytes {

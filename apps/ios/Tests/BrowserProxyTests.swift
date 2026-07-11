@@ -51,6 +51,20 @@
             }
         }
 
+        func testHeadRejectsHeaderTerminatorThatCrossesSizeCap() {
+            var parser = BrowserProxyHTTPHeadParser()
+            let prefix = "GET / HTTP/1.1\r\nX-Big: "
+            let terminator = "\r\n\r\n"
+            let fillerLength = BrowserProxyHTTPHeadParser.maxHeadBytes + 1 - Data(prefix.utf8).count - Data(terminator.utf8).count
+            XCTAssertGreaterThan(fillerLength, 0)
+            let bytes = Data((prefix + String(repeating: "a", count: fillerLength) + terminator).utf8)
+
+            XCTAssertThrowsError(try parser.append(bytes)) { error in
+                XCTAssertEqual(error as? BrowserProxyHTTPHeadParser.ParseError, .headTooLarge)
+            }
+            XCTAssertFalse(parser.isComplete)
+        }
+
         func testHeadMissingHostReturnsNil() throws {
             var parser = BrowserProxyHTTPHeadParser()
             try parser.append(Data("GET / HTTP/1.1\r\nAccept: */*\r\n\r\n".utf8))
@@ -224,6 +238,16 @@
 
             XCTAssertNil(table.target(forHost: "web.feature.localhost"))
             XCTAssertEqual(table.target(forHost: "api.other.localhost")?.deviceID, "device-2")
+        }
+
+        func testProxyRequestUsesCookieStoreInsteadOfCookieHeader() throws {
+            let url = try XCTUnwrap(URL(string: "http://web.feature.localhost:47898/index.html"))
+            let request = try XCTUnwrap(BrowserProxyRequest(url: url, authToken: "secret-token"))
+
+            XCTAssertNil(request.urlRequest.value(forHTTPHeaderField: "Cookie"))
+            XCTAssertEqual(request.httpCookie.name, BrowserProxyRequest.cookieName)
+            XCTAssertEqual(request.httpCookie.value, "secret-token")
+            XCTAssertEqual(request.httpCookie.domain, "web.feature.localhost")
         }
 
         // MARK: - End-to-end proxy over loopback
