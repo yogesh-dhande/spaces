@@ -205,7 +205,7 @@ private struct TerminalWebArtifactRepresentable: UIViewRepresentable {
             model.retry = { [weak self, weak webView] in
                 guard let self, let webView else { return }
                 self.loadedDescription = nil
-                self.perform(load, on: webView)
+                self.load(load, on: webView)
             }
             observe(webView)
             self.load(load, on: webView)

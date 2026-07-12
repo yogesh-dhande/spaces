@@ -297,16 +297,31 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
         XCTAssertEqual(byContentType("application/json"), .text)
         XCTAssertEqual(byContentType("application/toml"), .text)
         XCTAssertEqual(byContentType("application/x-yaml"), .text)
+        XCTAssertEqual(byContentType("application/yaml"), .text)
+        XCTAssertEqual(byContentType("text/yaml"), .text)
+        XCTAssertEqual(byContentType("text/toml"), .text)
         XCTAssertEqual(byContentType("text/csv"), .text)
+        XCTAssertEqual(byContentType("text/tab-separated-values"), .text)
         XCTAssertEqual(byContentType("text/plain"), .text)
         XCTAssertEqual(byContentType("image/png"), .image)
         XCTAssertEqual(byContentType("video/mp4"), .video)
+    }
+
+    func testTerminalLinkClassifierRejectsSourceTextContentTypes() {
+        let byContentType = { (contentType: String) in SpacesDeviceTerminalLinkClassifier.artifactKind(contentType: contentType, pathExtension: nil) }
+        XCTAssertNil(byContentType("text/x-python-script"))
+        XCTAssertNil(byContentType("text/javascript"))
+        XCTAssertNil(byContentType("text/css"))
+        XCTAssertNil(byContentType("text/x-swift"))
     }
 
     func testTerminalLinkClassifierRejectsNonPreviewableExtensions() {
         let byExtension = SpacesDeviceTerminalLinkClassifier.artifactKind
         XCTAssertNil(byExtension(nil, "swift"))
         XCTAssertNil(byExtension(nil, "py"))
+        XCTAssertNil(byExtension(SpacesDeviceTerminalLinkClassifier.preferredContentType(pathExtension: "py"), "py"))
+        XCTAssertNil(byExtension(SpacesDeviceTerminalLinkClassifier.preferredContentType(pathExtension: "js"), "js"))
+        XCTAssertNil(byExtension(SpacesDeviceTerminalLinkClassifier.preferredContentType(pathExtension: "css"), "css"))
         XCTAssertNil(byExtension(nil, "svg"))
         XCTAssertNil(byExtension(nil, "mp3"))
         XCTAssertNil(byExtension(nil, nil))

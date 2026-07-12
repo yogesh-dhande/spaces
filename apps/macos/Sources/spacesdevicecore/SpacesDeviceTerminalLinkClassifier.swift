@@ -34,7 +34,10 @@ public enum SpacesDeviceTerminalLinkClassifier {
     private static let htmlExtensions: Set<String> = ["html", "htm"]
     private static let pdfExtensions: Set<String> = ["pdf"]
     private static let textExtensions: Set<String> = ["txt", "log", "json", "jsonl", "yaml", "yml", "csv", "tsv", "toml", "ini", "cfg", "conf"]
-    private static let textContentTypes: Set<String> = ["application/json", "application/toml", "application/x-yaml"]
+    private static let textContentTypes: Set<String> = [
+        "application/json", "application/jsonl", "application/ndjson", "application/toml", "application/x-ndjson", "application/x-yaml",
+        "application/yaml", "text/csv", "text/plain", "text/tab-separated-values", "text/toml", "text/x-yaml", "text/yaml",
+    ]
 
     public static func artifactKind(contentType: String?, pathExtension: String?) -> SpacesDeviceTerminalLinkArtifactKind? {
         let trimmedExtension = normalizedExtension(pathExtension)
@@ -104,7 +107,7 @@ public enum SpacesDeviceTerminalLinkClassifier {
         if lowercased == "image/svg+xml" { return nil }
         if lowercased.hasPrefix("image/") { return .image }
         if lowercased.hasPrefix("video/") { return .video }
-        if textContentTypes.contains(lowercased) || lowercased.hasPrefix("text/") { return .text }
+        if textContentTypes.contains(lowercased) { return .text }
         return nil
     }
 
