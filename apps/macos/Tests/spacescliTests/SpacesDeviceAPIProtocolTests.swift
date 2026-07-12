@@ -44,16 +44,12 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
     func testTerminalControlSendPasteIntentRoundTripsThroughCodec() throws {
         let request = SpacesDeviceAPIRequest(
             command: .terminalControl(
-                .init(
-                    action: .send, sessionID: "session-1", clientID: "client-1", text: "line one\nline two", ownerEpoch: 4,
-                    asPaste: true)),
+                .init(action: .send, sessionID: "session-1", clientID: "client-1", text: "line one\nline two", ownerEpoch: 4, asPaste: true)),
             authToken: "SECRET")
 
         let decoded = try SpacesDeviceAPICodec.decodeRequest(SpacesDeviceAPICodec.encodeRequest(request))
 
-        guard case .terminalControl(let payload) = decoded.command else {
-            return XCTFail("Expected terminalControl request.")
-        }
+        guard case .terminalControl(let payload) = decoded.command else { return XCTFail("Expected terminalControl request.") }
         XCTAssertEqual(payload.action, .send)
         XCTAssertEqual(payload.text, "line one\nline two")
         XCTAssertEqual(payload.ownerEpoch, 4)
@@ -254,7 +250,7 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
 
         let metadata = SpacesDeviceTerminalLinkMetadata(
             id: "link-1", source: .localFile, originalLink: "images/screenshot.png", displayName: "screenshot.png", contentType: "image/png",
-            mediaKind: .image, byteCount: 12, externalURL: nil)
+            artifactKind: .image, byteCount: 12, externalURL: nil)
         let chunk = SpacesDeviceTerminalLinkChunk(
             linkID: "link-1", offset: 0, byteCount: 4, isFinal: false, base64Data: Data([1, 2, 3, 4]).base64EncodedString())
         let metadataResponse = SpacesDeviceAPIResponse(ok: true, message: "ok", result: .terminalLinkMetadata(metadata))
@@ -265,11 +261,107 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
     }
 
     func testTerminalLinkClassifierRejectsAudioMediaTypes() {
-        XCTAssertEqual(SpacesDeviceTerminalLinkClassifier.mediaKind(contentType: nil, pathExtension: "mp4"), .video)
-        XCTAssertEqual(SpacesDeviceTerminalLinkClassifier.mediaKind(contentType: nil, pathExtension: "png"), .image)
-        XCTAssertNil(SpacesDeviceTerminalLinkClassifier.mediaKind(contentType: "audio/mpeg", pathExtension: nil))
-        XCTAssertNil(SpacesDeviceTerminalLinkClassifier.mediaKind(contentType: nil, pathExtension: "mp3"))
-        XCTAssertNil(SpacesDeviceTerminalLinkClassifier.mediaKind(contentType: "audio/wav", pathExtension: "wav"))
+        XCTAssertEqual(SpacesDeviceTerminalLinkClassifier.artifactKind(contentType: nil, pathExtension: "mp4"), .video)
+        XCTAssertEqual(SpacesDeviceTerminalLinkClassifier.artifactKind(contentType: nil, pathExtension: "png"), .image)
+        XCTAssertNil(SpacesDeviceTerminalLinkClassifier.artifactKind(contentType: "audio/mpeg", pathExtension: nil))
+        XCTAssertNil(SpacesDeviceTerminalLinkClassifier.artifactKind(contentType: nil, pathExtension: "mp3"))
+        XCTAssertNil(SpacesDeviceTerminalLinkClassifier.artifactKind(contentType: "audio/wav", pathExtension: "wav"))
+    }
+
+    func testTerminalLinkClassifierClassifiesDocumentExtensions() {
+        let byExtension = SpacesDeviceTerminalLinkClassifier.artifactKind
+        XCTAssertEqual(byExtension(nil, "md"), .markdown)
+        XCTAssertEqual(byExtension(nil, "markdown"), .markdown)
+        XCTAssertEqual(byExtension(nil, "html"), .html)
+        XCTAssertEqual(byExtension(nil, "htm"), .html)
+        XCTAssertEqual(byExtension(nil, "pdf"), .pdf)
+        XCTAssertEqual(byExtension(nil, "txt"), .text)
+        XCTAssertEqual(byExtension(nil, "log"), .text)
+        XCTAssertEqual(byExtension(nil, "json"), .text)
+        XCTAssertEqual(byExtension(nil, "jsonl"), .text)
+        XCTAssertEqual(byExtension(nil, "yaml"), .text)
+        XCTAssertEqual(byExtension(nil, "yml"), .text)
+        XCTAssertEqual(byExtension(nil, "csv"), .text)
+        XCTAssertEqual(byExtension(nil, "tsv"), .text)
+        XCTAssertEqual(byExtension(nil, "toml"), .text)
+        XCTAssertEqual(byExtension(nil, "ini"), .text)
+        XCTAssertEqual(byExtension(nil, "cfg"), .text)
+        XCTAssertEqual(byExtension(nil, "conf"), .text)
+    }
+
+    func testTerminalLinkClassifierClassifiesDocumentContentTypes() {
+        let byContentType = { (contentType: String) in SpacesDeviceTerminalLinkClassifier.artifactKind(contentType: contentType, pathExtension: nil) }
+        XCTAssertEqual(byContentType("text/markdown"), .markdown)
+        XCTAssertEqual(byContentType("text/html"), .html)
+        XCTAssertEqual(byContentType("application/pdf"), .pdf)
+        XCTAssertEqual(byContentType("application/json"), .text)
+        XCTAssertEqual(byContentType("application/toml"), .text)
+        XCTAssertEqual(byContentType("application/x-yaml"), .text)
+        XCTAssertEqual(byContentType("application/yaml"), .text)
+        XCTAssertEqual(byContentType("text/yaml"), .text)
+        XCTAssertEqual(byContentType("text/toml"), .text)
+        XCTAssertEqual(byContentType("text/csv"), .text)
+        XCTAssertEqual(byContentType("text/tab-separated-values"), .text)
+        XCTAssertEqual(byContentType("text/plain"), .text)
+        XCTAssertEqual(byContentType("image/png"), .image)
+        XCTAssertEqual(byContentType("video/mp4"), .video)
+    }
+
+    func testTerminalLinkClassifierRejectsSourceTextContentTypes() {
+        let byContentType = { (contentType: String) in SpacesDeviceTerminalLinkClassifier.artifactKind(contentType: contentType, pathExtension: nil) }
+        XCTAssertNil(byContentType("text/x-python-script"))
+        XCTAssertNil(byContentType("text/javascript"))
+        XCTAssertNil(byContentType("text/css"))
+        XCTAssertNil(byContentType("text/x-swift"))
+    }
+
+    func testTerminalLinkClassifierRejectsNonPreviewableExtensions() {
+        let byExtension = SpacesDeviceTerminalLinkClassifier.artifactKind
+        XCTAssertNil(byExtension(nil, "swift"))
+        XCTAssertNil(byExtension(nil, "py"))
+        XCTAssertNil(byExtension(SpacesDeviceTerminalLinkClassifier.preferredContentType(pathExtension: "py"), "py"))
+        XCTAssertNil(byExtension(SpacesDeviceTerminalLinkClassifier.preferredContentType(pathExtension: "js"), "js"))
+        XCTAssertNil(byExtension(SpacesDeviceTerminalLinkClassifier.preferredContentType(pathExtension: "css"), "css"))
+        XCTAssertNil(byExtension(nil, "svg"))
+        XCTAssertNil(byExtension(nil, "mp3"))
+        XCTAssertNil(byExtension(nil, nil))
+    }
+
+    func testTerminalLinkClassifierRejectsSVGContentTypes() {
+        XCTAssertNil(SpacesDeviceTerminalLinkClassifier.artifactKind(contentType: "image/svg+xml", pathExtension: nil))
+        XCTAssertNil(SpacesDeviceTerminalLinkClassifier.artifactKind(contentType: "image/svg+xml; charset=utf-8", pathExtension: nil))
+        XCTAssertNil(
+            SpacesDeviceTerminalLinkClassifier.artifactKind(
+                contentType: SpacesDeviceTerminalLinkClassifier.preferredContentType(pathExtension: "svg"), pathExtension: "svg"))
+    }
+
+    func testTerminalLinkRouteClassifiesWebLoopbackAndFileLinks() {
+        XCTAssertEqual(SpacesDeviceTerminalLinkClassifier.route(for: "https://example.com/docs"), .webURL(URL(string: "https://example.com/docs")!))
+        XCTAssertEqual(SpacesDeviceTerminalLinkClassifier.route(for: "http://localhost:3000"), .loopbackURL(URL(string: "http://localhost:3000")!))
+        XCTAssertEqual(
+            SpacesDeviceTerminalLinkClassifier.route(for: "http://127.0.0.1:8080/path"), .loopbackURL(URL(string: "http://127.0.0.1:8080/path")!))
+        XCTAssertEqual(SpacesDeviceTerminalLinkClassifier.route(for: "http://[::1]:9999"), .loopbackURL(URL(string: "http://[::1]:9999")!))
+        XCTAssertEqual(SpacesDeviceTerminalLinkClassifier.route(for: "http://0.0.0.0:4000"), .loopbackURL(URL(string: "http://0.0.0.0:4000")!))
+        XCTAssertEqual(SpacesDeviceTerminalLinkClassifier.route(for: "/abs/path.md"), .fileLink("/abs/path.md"))
+        XCTAssertEqual(SpacesDeviceTerminalLinkClassifier.route(for: "~/x.md"), .fileLink("~/x.md"))
+        XCTAssertEqual(SpacesDeviceTerminalLinkClassifier.route(for: "rel/path.md"), .fileLink("rel/path.md"))
+        XCTAssertEqual(SpacesDeviceTerminalLinkClassifier.route(for: "file:///tmp/a.md"), .fileLink("file:///tmp/a.md"))
+        XCTAssertNil(SpacesDeviceTerminalLinkClassifier.route(for: "mailto:x@y.z"))
+        XCTAssertNil(SpacesDeviceTerminalLinkClassifier.route(for: ""))
+        XCTAssertNil(SpacesDeviceTerminalLinkClassifier.route(for: "   "))
+    }
+
+    func testTerminalLinkClassifierIsLoopbackHost() {
+        XCTAssertTrue(SpacesDeviceTerminalLinkClassifier.isLoopbackHost("localhost"))
+        XCTAssertTrue(SpacesDeviceTerminalLinkClassifier.isLoopbackHost("LOCALHOST"))
+        XCTAssertTrue(SpacesDeviceTerminalLinkClassifier.isLoopbackHost("127.0.0.1"))
+        XCTAssertTrue(SpacesDeviceTerminalLinkClassifier.isLoopbackHost("127.5.10.20"))
+        XCTAssertTrue(SpacesDeviceTerminalLinkClassifier.isLoopbackHost("::1"))
+        XCTAssertTrue(SpacesDeviceTerminalLinkClassifier.isLoopbackHost("0.0.0.0"))
+        XCTAssertFalse(SpacesDeviceTerminalLinkClassifier.isLoopbackHost("dev.localhost.example.com"))
+        XCTAssertFalse(SpacesDeviceTerminalLinkClassifier.isLoopbackHost("sub.localhost"))
+        XCTAssertFalse(SpacesDeviceTerminalLinkClassifier.isLoopbackHost("example.com"))
+        XCTAssertFalse(SpacesDeviceTerminalLinkClassifier.isLoopbackHost(nil))
     }
 
     func testWorkspaceTerminalRowRoundTripsStopAvailability() throws {
@@ -306,7 +398,7 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
         XCTAssertEqual(relativeMetadata.source, .localFile)
         XCTAssertEqual(relativeMetadata.displayName, "image.png")
         XCTAssertEqual(relativeMetadata.contentType, "image/png")
-        XCTAssertEqual(relativeMetadata.mediaKind, .image)
+        XCTAssertEqual(relativeMetadata.artifactKind, .image)
         XCTAssertEqual(relativeMetadata.byteCount, 4)
         XCTAssertEqual(homeMetadata.displayName, "home-image.png")
         XCTAssertEqual(homeMetadata.byteCount, 5)
@@ -323,7 +415,7 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
 
         XCTAssertEqual(metadata.source, .localFile)
         XCTAssertEqual(metadata.displayName, tmpImage.lastPathComponent)
-        XCTAssertEqual(metadata.mediaKind, .image)
+        XCTAssertEqual(metadata.artifactKind, .image)
         XCTAssertEqual(Data(base64Encoded: chunk.base64Data), payload)
         XCTAssertTrue(chunk.isFinal)
     }
@@ -345,7 +437,7 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
         XCTAssertEqual(metadata.originalLink, movie.path)
         XCTAssertEqual(metadata.displayName, "Screen Recording 2026-03-20 at 11.17.57 AM.mov")
         XCTAssertEqual(metadata.contentType, "video/quicktime")
-        XCTAssertEqual(metadata.mediaKind, .video)
+        XCTAssertEqual(metadata.artifactKind, .video)
         XCTAssertEqual(metadata.byteCount, Int64(payload.count))
         XCTAssertEqual(Data(base64Encoded: chunk.base64Data), payload)
         XCTAssertTrue(chunk.isFinal)
@@ -369,7 +461,7 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
         XCTAssertEqual(metadata.originalLink, movie.path)
         XCTAssertEqual(metadata.displayName, movieName)
         XCTAssertEqual(metadata.contentType, "video/quicktime")
-        XCTAssertEqual(metadata.mediaKind, .video)
+        XCTAssertEqual(metadata.artifactKind, .video)
         XCTAssertEqual(metadata.byteCount, Int64(payload.count))
         XCTAssertEqual(Data(base64Encoded: chunk.base64Data), payload)
         XCTAssertTrue(chunk.isFinal)
@@ -399,21 +491,21 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
         let page = try SpacesDeviceTerminalLinkResolver.resolve(sessionID: "session-1", link: "https://example.com/docs", workingDirectory: nil)
 
         XCTAssertEqual(image.source, .externalURL)
-        XCTAssertEqual(image.mediaKind, .image)
+        XCTAssertEqual(image.artifactKind, .image)
         XCTAssertEqual(image.contentType, "image/png")
         XCTAssertEqual(image.externalURL, "https://example.com/screenshot.png")
         XCTAssertEqual(cleartextImage.source, .externalURL)
         XCTAssertNil(cleartextImage.contentType)
-        XCTAssertNil(cleartextImage.mediaKind)
+        XCTAssertNil(cleartextImage.artifactKind)
         XCTAssertEqual(cleartextImage.externalURL, "http://example.com/screenshot.png")
         XCTAssertEqual(audio.source, .externalURL)
         XCTAssertEqual(audio.contentType, "audio/mpeg")
-        XCTAssertNil(audio.mediaKind)
+        XCTAssertNil(audio.artifactKind)
         XCTAssertEqual(page.source, .externalURL)
-        XCTAssertNil(page.mediaKind)
+        XCTAssertNil(page.artifactKind)
     }
 
-    func testTerminalLinkResolverRejectsBlockedAndNonMediaPaths() throws {
+    func testTerminalLinkResolverRejectsBlockedAndUnsupportedArtifactPaths() throws {
         XCTAssertThrowsError(
             try SpacesDeviceTerminalLinkResolver.resolve(sessionID: "session-1", link: "/System/Library/CoreServices", workingDirectory: nil)
         ) { error in XCTAssertEqual(error as? SpacesDeviceTerminalLinkResolverError, .blockedPath("/System/Library/CoreServices")) }
@@ -423,9 +515,11 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let blockedSymlink = root.appendingPathComponent("system-link.png")
         try FileManager.default.createSymbolicLink(at: blockedSymlink, withDestinationURL: URL(fileURLWithPath: "/System"))
-        let textFile = root.appendingPathComponent("notes.txt")
+        // .swift is source code, not one of the previewable artifact kinds, so it stays unsupported
+        // even though .txt (a sibling plain-text extension) now classifies as `.text`.
+        let sourceFile = root.appendingPathComponent("notes.swift")
         let audioFile = root.appendingPathComponent("sound.mp3")
-        try Data("not media".utf8).write(to: textFile)
+        try Data("not previewable".utf8).write(to: sourceFile)
         try Data([0x49, 0x44, 0x33]).write(to: audioFile)
 
         XCTAssertThrowsError(
@@ -435,13 +529,13 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
 
         XCTAssertThrowsError(
             try SpacesDeviceTerminalLinkResolver.resolve(
-                sessionID: "session-1", link: textFile.path, workingDirectory: nil, workspaceRoots: [root.path], homeDirectory: root.path)
-        ) { error in XCTAssertEqual(error as? SpacesDeviceTerminalLinkResolverError, .unsupportedMedia) }
+                sessionID: "session-1", link: sourceFile.path, workingDirectory: nil, workspaceRoots: [root.path], homeDirectory: root.path)
+        ) { error in XCTAssertEqual(error as? SpacesDeviceTerminalLinkResolverError, .unsupportedArtifact) }
 
         XCTAssertThrowsError(
             try SpacesDeviceTerminalLinkResolver.resolve(
                 sessionID: "session-1", link: audioFile.path, workingDirectory: nil, workspaceRoots: [root.path], homeDirectory: root.path)
-        ) { error in XCTAssertEqual(error as? SpacesDeviceTerminalLinkResolverError, .unsupportedMedia) }
+        ) { error in XCTAssertEqual(error as? SpacesDeviceTerminalLinkResolverError, .unsupportedArtifact) }
     }
 
     func testTerminalLinkResolverReadsLocalMediaInChunksAndChecksSession() throws {
@@ -467,6 +561,110 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
             try SpacesDeviceTerminalLinkResolver.readChunk(
                 sessionID: "other-session", linkID: metadata.id, offset: 0, limit: 4, workspaceRoots: [root.path], homeDirectory: root.path)
         ) { error in XCTAssertEqual(error as? SpacesDeviceTerminalLinkResolverError, .sessionMismatch) }
+    }
+
+    func testTerminalLinkResolverResolvesDocumentFixtureFiles() throws {
+        let root = URL(fileURLWithPath: "/private/tmp", isDirectory: true).appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let markdown = root.appendingPathComponent("README.md")
+        let json = root.appendingPathComponent("data.json")
+        let html = root.appendingPathComponent("page.html")
+        let pdf = root.appendingPathComponent("doc.pdf")
+        try Data("# Title".utf8).write(to: markdown)
+        try Data("{}".utf8).write(to: json)
+        try Data("<html></html>".utf8).write(to: html)
+        try Data("%PDF-1.4".utf8).write(to: pdf)
+
+        let markdownMetadata = try SpacesDeviceTerminalLinkResolver.resolve(
+            sessionID: "session-1", link: markdown.path, workingDirectory: nil, workspaceRoots: [root.path], homeDirectory: root.path)
+        let jsonMetadata = try SpacesDeviceTerminalLinkResolver.resolve(
+            sessionID: "session-1", link: json.path, workingDirectory: nil, workspaceRoots: [root.path], homeDirectory: root.path)
+        let htmlMetadata = try SpacesDeviceTerminalLinkResolver.resolve(
+            sessionID: "session-1", link: html.path, workingDirectory: nil, workspaceRoots: [root.path], homeDirectory: root.path)
+        let pdfMetadata = try SpacesDeviceTerminalLinkResolver.resolve(
+            sessionID: "session-1", link: pdf.path, workingDirectory: nil, workspaceRoots: [root.path], homeDirectory: root.path)
+
+        XCTAssertEqual(markdownMetadata.artifactKind, .markdown)
+        XCTAssertEqual(jsonMetadata.artifactKind, .text)
+        XCTAssertEqual(htmlMetadata.artifactKind, .html)
+        XCTAssertEqual(pdfMetadata.artifactKind, .pdf)
+    }
+
+    func testTerminalLinkResolverLinkIDPayloadUsesRenamedArtifactKindField() throws {
+        let root = URL(fileURLWithPath: "/private/tmp", isDirectory: true).appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let markdown = root.appendingPathComponent("notes.md")
+        try Data("notes".utf8).write(to: markdown)
+
+        let metadata = try SpacesDeviceTerminalLinkResolver.resolve(
+            sessionID: "session-1", link: markdown.path, workingDirectory: nil, workspaceRoots: [root.path], homeDirectory: root.path)
+
+        var base64 = metadata.id.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+        base64 += String(repeating: "=", count: (4 - base64.count % 4) % 4)
+        let payloadData = try XCTUnwrap(Data(base64Encoded: base64))
+        let payloadJSON = try XCTUnwrap(JSONSerialization.jsonObject(with: payloadData) as? [String: Any])
+
+        XCTAssertEqual(payloadJSON["artifactKind"] as? String, "markdown")
+        XCTAssertNil(payloadJSON["mediaKind"])
+    }
+
+    func testTerminalLinkResolverLinkIDChangesWhenSameSizeFileChanges() throws {
+        let root = URL(fileURLWithPath: "/private/tmp", isDirectory: true).appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let text = root.appendingPathComponent("same-size.txt")
+        let firstModificationDate = Date(timeIntervalSince1970: 1_700_000_000)
+        let secondModificationDate = Date(timeIntervalSince1970: 1_700_000_010)
+
+        try Data("first".utf8).write(to: text)
+        try FileManager.default.setAttributes([.modificationDate: firstModificationDate], ofItemAtPath: text.path)
+        let firstMetadata = try SpacesDeviceTerminalLinkResolver.resolve(
+            sessionID: "session-1", link: text.path, workingDirectory: nil, workspaceRoots: [root.path], homeDirectory: root.path)
+
+        try Data("other".utf8).write(to: text)
+        try FileManager.default.setAttributes([.modificationDate: secondModificationDate], ofItemAtPath: text.path)
+        let secondMetadata = try SpacesDeviceTerminalLinkResolver.resolve(
+            sessionID: "session-1", link: text.path, workingDirectory: nil, workspaceRoots: [root.path], homeDirectory: root.path)
+
+        XCTAssertEqual(firstMetadata.byteCount, secondMetadata.byteCount)
+        XCTAssertNotEqual(firstMetadata.id, secondMetadata.id)
+        XCTAssertThrowsError(
+            try SpacesDeviceTerminalLinkResolver.readChunk(
+                sessionID: "session-1", linkID: firstMetadata.id, offset: 0, limit: 32, workspaceRoots: [root.path], homeDirectory: root.path)
+        ) { error in XCTAssertEqual(error as? SpacesDeviceTerminalLinkResolverError, .fileChanged) }
+    }
+
+    func testTerminalLinkResolverReadsChunkOfTextFile() throws {
+        let root = URL(fileURLWithPath: "/private/tmp", isDirectory: true).appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let text = root.appendingPathComponent("log.txt")
+        let payload = Data("line one\nline two\n".utf8)
+        try payload.write(to: text)
+
+        let metadata = try SpacesDeviceTerminalLinkResolver.resolve(
+            sessionID: "session-1", link: text.path, workingDirectory: nil, workspaceRoots: [root.path], homeDirectory: root.path)
+        let chunk = try SpacesDeviceTerminalLinkResolver.readChunk(
+            sessionID: "session-1", linkID: metadata.id, offset: 0, limit: 32, workspaceRoots: [root.path], homeDirectory: root.path)
+
+        XCTAssertEqual(metadata.artifactKind, .text)
+        XCTAssertEqual(Data(base64Encoded: chunk.base64Data), payload)
+        XCTAssertTrue(chunk.isFinal)
+    }
+
+    func testTerminalLinkResolverRequiresWorkingDirectoryOnlyForRelativeLocalFileLinks() throws {
+        XCTAssertFalse(SpacesDeviceTerminalLinkResolver.requiresWorkingDirectory(link: "/tmp/screenshot.png"))
+        XCTAssertFalse(SpacesDeviceTerminalLinkResolver.requiresWorkingDirectory(link: "~"))
+        XCTAssertFalse(SpacesDeviceTerminalLinkResolver.requiresWorkingDirectory(link: "~/screenshot.png"))
+        XCTAssertFalse(SpacesDeviceTerminalLinkResolver.requiresWorkingDirectory(link: "file:///tmp/screenshot.png"))
+        XCTAssertFalse(SpacesDeviceTerminalLinkResolver.requiresWorkingDirectory(link: "https://example.com/screenshot.png"))
+        XCTAssertFalse(SpacesDeviceTerminalLinkResolver.requiresWorkingDirectory(link: nil))
+        XCTAssertFalse(SpacesDeviceTerminalLinkResolver.requiresWorkingDirectory(link: "   "))
+
+        XCTAssertTrue(SpacesDeviceTerminalLinkResolver.requiresWorkingDirectory(link: "screenshot.png"))
+        XCTAssertTrue(SpacesDeviceTerminalLinkResolver.requiresWorkingDirectory(link: "src/screenshot.png"))
     }
 
 }

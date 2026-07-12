@@ -44,7 +44,8 @@
         public init(
             launchConfiguration: TerminalSessionLaunchConfiguration, paths: TerminalSessionPaths,
             terminalServiceRequestSender: RemoteGhosttyTerminalServiceRequestSender? = nil,
-            stateStreamSubscriber: RemoteGhosttyStateStreamSubscriber? = nil, agentSignalHandler: RemoteGhosttyAgentSignalHandler? = nil
+            stateStreamSubscriber: RemoteGhosttyStateStreamSubscriber? = nil, agentSignalHandler: RemoteGhosttyAgentSignalHandler? = nil,
+            linkOpenHandler: (@MainActor (String) -> Void)? = nil
         ) {
             self.launchConfiguration = launchConfiguration
             self.paths = paths
@@ -52,6 +53,7 @@
             self.stateStreamSubscriber = stateStreamSubscriber
             self.agentSignalHandler = agentSignalHandler
             terminalView = GhosttyMirrorTerminalView(launchConfiguration: launchConfiguration)
+            terminalView.onOpenLink = linkOpenHandler
             ensureStateStreamStartedIfNeeded()
         }
 

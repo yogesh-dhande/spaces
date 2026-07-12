@@ -264,6 +264,7 @@
         private var didTerminateCurrentRun = false
         private var currentTitle: String?
         private var currentWorkingDirectory: String?
+        private var lastObservedProcessWorkingDirectory: String?
         private var lastKnownChildPID: Int32?
         private var lastKnownSurfaceSize: (columns: Int, rows: Int)?
         private var lastSessionStateRevision: UInt64?
@@ -457,7 +458,15 @@
 
         public func childPID() -> Int32? { observedChildPID() }
         public var effectiveTitle: String { currentTitle ?? launchConfiguration.title }
-        public var effectiveWorkingDirectory: String { currentWorkingDirectory ?? launchConfiguration.workingDirectory }
+        // Prefer the live cwd observed from the foreground/child process (cached by refreshRuntimeState)
+        // so the working directory clients see converges on reality even when the shell never reports a
+        // new PWD through Ghostty shell integration (OSC 7). currentWorkingDirectory (the PWD-action
+        // value) remains the next fallback, then the launch directory. This property is read on the
+        // per-render broadcast path, so it only reads the cached value — the proc lookup that fills the
+        // cache runs on the slower runtime-state refresh path.
+        public var effectiveWorkingDirectory: String {
+            lastObservedProcessWorkingDirectory ?? currentWorkingDirectory ?? launchConfiguration.workingDirectory
+        }
 
         private func startControlServer() throws {
             let controlServer = TerminalControlServer(socketPath: paths.controlSocketPath, queue: controlQueue) { [weak self] request in
@@ -868,6 +877,11 @@
             }
             let foregroundProcess = foregroundPID.flatMap(foregroundProcessResolver)
             let foregroundAgent = foregroundProcess.flatMap(TerminalForegroundProcessInspector.classify)
+            // Refresh the cached live cwd here (off the per-render broadcast path) so effectiveWorkingDirectory
+            // publishes the process's real directory even when the shell never emits an OSC 7 PWD report.
+            if let liveWorkingDirectory = Self.liveProcessWorkingDirectory(foregroundPID: foregroundPID, childPID: childPID) {
+                lastObservedProcessWorkingDirectory = liveWorkingDirectory
+            }
             let state = TerminalSessionRuntimeState(
                 sessionID: launchConfiguration.sessionID, backend: launchConfiguration.backend, servicePID: getpid(),
                 childPID: childPID ?? lastKnownChildPID, state: .running, updatedAt: TerminalSessionTimestamp.string(from: now), title: effectiveTitle,
@@ -1017,6 +1031,12 @@
         }
 
         private func observedForegroundPID() -> Int32? { foregroundPIDOverrideForTesting ?? rendererHostStorage.foregroundPID() }
+
+        private static func liveProcessWorkingDirectory(foregroundPID: Int32?, childPID: Int32?) -> String? {
+            if let foregroundPID, let cwd = TerminalForegroundProcessInspector.workingDirectory(pid: foregroundPID) { return cwd }
+            if let childPID, let cwd = TerminalForegroundProcessInspector.workingDirectory(pid: childPID) { return cwd }
+            return nil
+        }
 
         private func observedSurfaceSize() -> (columns: Int, rows: Int)? {
             if let size = rendererHostStorage.surfaceCellSize() {

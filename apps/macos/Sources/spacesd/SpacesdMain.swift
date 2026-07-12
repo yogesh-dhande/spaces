@@ -770,9 +770,20 @@ import workspacecore
             if canResolveTerminalLinkWithoutLocalState(link) {
                 metadata = try SpacesDeviceTerminalLinkResolver.resolve(sessionID: sessionID, link: link, workingDirectory: nil, workspaceRoots: [])
             } else {
-                let workingDirectory = try terminalWorkingDirectory(sessionID: sessionID)
+                // Unlike SpacesDeviceAPIServer's workspaceRoots (loaded from every project/workspace in the
+                // DB), this daemon only ever authorizes a single extra root: the session's own working
+                // directory. So the lookup is still attempted for absolute/tilde/file:// links too (best
+                // effort, via `try?`) to keep authorizing paths under that root exactly as before; only a
+                // relative link's *requirement* for a working directory still hard-fails resolution (with
+                // the informative unknownSession error) when session launch/runtime state is unavailable.
+                let workingDirectory: String?
+                do { workingDirectory = try terminalWorkingDirectory(sessionID: sessionID) } catch {
+                    guard !SpacesDeviceTerminalLinkResolver.requiresWorkingDirectory(link: link) else { throw error }
+                    workingDirectory = nil
+                }
                 metadata = try SpacesDeviceTerminalLinkResolver.resolve(
-                    sessionID: sessionID, link: link, workingDirectory: workingDirectory, workspaceRoots: [workingDirectory])
+                    sessionID: sessionID, link: link, workingDirectory: workingDirectory,
+                    workspaceRoots: workingDirectory.map { [$0] } ?? [])
             }
             if metadata.source == .localFile {
                 let resolvedPath = try SpacesDeviceTerminalLinkResolver.resolvedLocalFilePath(linkID: metadata.id)
@@ -1041,10 +1052,30 @@ import workspacecore
 
     private func terminalWorkingDirectory(sessionID: String) throws -> String {
         let paths = try TerminalSessionPaths.forSession(id: sessionID)
-        if let workingDirectory = normalizedString((try? TerminalSessionPersistence.readRuntimeState(paths: paths))?.workingDirectory) {
+        let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths)
+        // Prefer the live cwd of the session's foreground process (falling back to its child shell).
+        // The tracked runtime-state working directory only advances when the shell reports a new PWD
+        // through Ghostty shell integration (OSC 7), which many shells never emit — so it is stale
+        // after a plain `cd`. The owning process's real cwd is always current, anchoring relative
+        // links (e.g. `./statement.pdf`) in the directory the shell is actually sitting in.
+        if let liveWorkingDirectory = normalizedString(Self.liveTerminalWorkingDirectory(runtimeState: runtimeState)) {
+            return liveWorkingDirectory
+        }
+        if let workingDirectory = normalizedString(runtimeState?.workingDirectory) {
             return workingDirectory
         }
         return try TerminalSessionPersistence.readLaunchConfiguration(paths: paths).workingDirectory
+    }
+
+    private static func liveTerminalWorkingDirectory(runtimeState: TerminalSessionRuntimeState?) -> String? {
+        guard let runtimeState else { return nil }
+        if let foregroundPID = runtimeState.foregroundPID, let cwd = TerminalForegroundProcessInspector.workingDirectory(pid: foregroundPID) {
+            return cwd
+        }
+        if let childPID = runtimeState.childPID, let cwd = TerminalForegroundProcessInspector.workingDirectory(pid: childPID) {
+            return cwd
+        }
+        return nil
     }
 
     private func normalizedString(_ value: String?) -> String? {
@@ -1055,7 +1086,7 @@ import workspacecore
     private func terminalServiceLinkMetadata(_ metadata: SpacesDeviceTerminalLinkMetadata) -> TerminalServiceTerminalLinkMetadata {
         TerminalServiceTerminalLinkMetadata(
             id: metadata.id, source: metadata.source.rawValue, originalLink: metadata.originalLink, displayName: metadata.displayName,
-            contentType: metadata.contentType, mediaKind: metadata.mediaKind?.rawValue, byteCount: metadata.byteCount,
+            contentType: metadata.contentType, artifactKind: metadata.artifactKind?.rawValue, byteCount: metadata.byteCount,
             externalURL: metadata.externalURL)
     }
 

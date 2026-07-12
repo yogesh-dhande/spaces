@@ -13,6 +13,8 @@ targets:
     deploymentTarget: "17.0"
     sources:
       - Sources
+      - path: Resources
+        buildPhase: resources
       - path: Assets.xcassets
         buildPhase: resources
       - path: ../macos/.local/ghosttykit/Resources/ghostty

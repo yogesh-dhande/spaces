@@ -23,10 +23,9 @@ public enum SpacesLinuxInstaller {
     /// curl's exit code and error text, and never executes a partially downloaded script.
     public static func sshInstallCommand(version: String?) -> String {
         let versionArgument = version.flatMap { $0.isEmpty ? nil : " \(normalized($0))" } ?? ""
-        return #"set -e; installer="$(mktemp)"; trap 'rm -f "$installer"' EXIT; curl -fsSL \#(installScriptURL) -o "$installer"; bash "$installer"\#(versionArgument)"#
+        return
+            #"set -e; installer="$(mktemp)"; trap 'rm -f "$installer"' EXIT; curl -fsSL \#(installScriptURL) -o "$installer"; bash "$installer"\#(versionArgument)"#
     }
 
-    private static func normalized(_ version: String) -> String {
-        version.hasPrefix("v") ? String(version.dropFirst()) : version
-    }
+    private static func normalized(_ version: String) -> String { version.hasPrefix("v") ? String(version.dropFirst()) : version }
 }

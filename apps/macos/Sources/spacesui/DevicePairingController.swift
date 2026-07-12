@@ -427,8 +427,7 @@ import workspacecore
         commandRow.spacing = 8
 
         let installButton = host.actionButton(
-            title: "Install Spaces over SSH", symbol: "arrow.down.circle",
-            tooltip: "Run the installer on the remote device over SSH, then pair",
+            title: "Install Spaces over SSH", symbol: "arrow.down.circle", tooltip: "Run the installer on the remote device over SSH, then pair",
             action: #selector(AppKitController.installSpacesOnRemoteDevice), primary: false)
         installButton.isEnabled = !isInstallingRemoteSpaces
         installButton.setAccessibilityIdentifier("remote-device-install-ssh")
@@ -534,9 +533,7 @@ import workspacecore
         let divider = NSView()
         divider.translatesAutoresizingMaskIntoConstraints = false
         divider.wantsLayer = true
-        bindAppearanceReactiveLayer(divider) { view in
-            view.layer?.backgroundColor = Theme.border.cgColor
-        }
+        bindAppearanceReactiveLayer(divider) { view in view.layer?.backgroundColor = Theme.border.cgColor }
         container.addSubview(divider)
         NSLayoutConstraint.activate([
             container.heightAnchor.constraint(equalToConstant: 1),

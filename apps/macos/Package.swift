@@ -91,6 +91,7 @@ let terminalTargets: [Target] = [
         name: "spacesterminalghostty",
         dependencies: [
             "spacesterminalcore",
+            "spacesdevicecore",
             "ghosttyvtshim",
         ] + ghosttyKitTargetDependencies,
         linkerSettings: [.linkedLibrary("c++", .when(platforms: [.macOS])), .linkedLibrary("util", .when(platforms: [.linux]))]

@@ -422,9 +422,7 @@ public enum SpacesDevicePairingClient {
 
     private static func loadRemotePairingMetadata(
         destination: String, port: Int?, probe: RemoteInstallProbe, appVersion: String?, profile: SpacesProfile?
-    ) throws
-        -> RemotePairingMetadata
-    {
+    ) throws -> RemotePairingMetadata {
         let result = try runSSH(destination: destination, port: port, remoteCommand: remotePairCommand(profile: profile), timeoutSeconds: 15)
         return try parseRemotePairingMetadataResult(result, destination: destination, probe: probe, appVersion: appVersion)
     }
@@ -483,8 +481,7 @@ public enum SpacesDevicePairingClient {
                     lead: "SSH connected to \(destination), but Spaces is not installed for that user.", probe: probe, appVersion: appVersion)
             }
             throw SpacesRemoteDevicePairingError.invalidRemotePairingOutput(
-                installGuidanceMessage(
-                    lead: "SSH connected to \(destination), but Spaces there did not return a pairing window.", probe: probe))
+                installGuidanceMessage(lead: "SSH connected to \(destination), but Spaces there did not return a pairing window.", probe: probe))
         }
         do { return try JSONDecoder().decode(RemotePairingMetadata.self, from: data).validated() } catch {
             throw SpacesRemoteDevicePairingError.invalidRemotePairingOutput(
@@ -501,9 +498,7 @@ public enum SpacesDevicePairingClient {
     /// `remoteSpacesNotInstalled` error). Spaces never auto-installs remote daemons: Linux users run the
     /// installer one-liner on the device, and Mac users install and open the Spaces app there.
     static func installGuidanceMessage(lead: String, probe: RemoteInstallProbe) -> String {
-        if probe.operatingSystem == "Linux" {
-            return "\(lead) Install or update Spaces on the Ubuntu 24.04 device, then pair again."
-        }
+        if probe.operatingSystem == "Linux" { return "\(lead) Install or update Spaces on the Ubuntu 24.04 device, then pair again." }
         return "\(lead) Install the Spaces app on the remote Mac, open it once, then pair again."
     }
 
@@ -747,10 +742,7 @@ public enum SpacesDevicePairingClient {
     }
 
     private static func shellDoubleQuotedContent(_ value: String) -> String {
-        value
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
-            .replacingOccurrences(of: "$", with: "\\$")
+        value.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"").replacingOccurrences(of: "$", with: "\\$")
             .replacingOccurrences(of: "`", with: "\\`")
     }
 

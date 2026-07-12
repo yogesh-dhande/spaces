@@ -134,8 +134,10 @@ struct SpacesMobileE2ERenderDump: Codable, Equatable {
     let errorMessage: String?
     let isPreparingLinkPreview: Bool
     let linkPreviewTitle: String?
-    let linkPreviewMediaKind: SpacesDeviceTerminalLinkMediaKind?
+    let linkPreviewArtifactKind: SpacesDeviceTerminalLinkArtifactKind?
+    let linkPreviewContentKind: String?
     let linkPreviewErrorMessage: String?
+    let linkNotice: String?
     let visibleText: String
     let renderedText: String
     let renderStateKey: String

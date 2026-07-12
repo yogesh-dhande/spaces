@@ -1,15 +1,13 @@
 import XCTest
+import spacesterminalcore
 
 @testable import spacesclientcore
-import spacesterminalcore
 
 final class SpacesDevicePairingClientTests: XCTestCase {
     func testLinuxInstallerRendersVersionPinnedOneLiner() {
-        XCTAssertEqual(
-            SpacesLinuxInstaller.installCommand(version: "0.1.0"), "curl -fsSL https://usespaces.dev/install.sh | bash -s -- 0.1.0")
+        XCTAssertEqual(SpacesLinuxInstaller.installCommand(version: "0.1.0"), "curl -fsSL https://usespaces.dev/install.sh | bash -s -- 0.1.0")
         // A leading `v` is stripped so the pinned argument matches the release's app_version.
-        XCTAssertEqual(
-            SpacesLinuxInstaller.installCommand(version: "v0.1.0"), "curl -fsSL https://usespaces.dev/install.sh | bash -s -- 0.1.0")
+        XCTAssertEqual(SpacesLinuxInstaller.installCommand(version: "v0.1.0"), "curl -fsSL https://usespaces.dev/install.sh | bash -s -- 0.1.0")
     }
 
     func testLinuxInstallerRendersEvergreenOneLinerWithoutVersion() {
@@ -30,12 +28,14 @@ final class SpacesDevicePairingClientTests: XCTestCase {
         for version in ["0.1.0", "v0.1.0"] {
             XCTAssertEqual(
                 SpacesLinuxInstaller.sshInstallCommand(version: version),
-                #"set -e; installer="$(mktemp)"; trap 'rm -f "$installer"' EXIT; curl -fsSL https://usespaces.dev/install.sh -o "$installer"; bash "$installer" 0.1.0"#)
+                #"set -e; installer="$(mktemp)"; trap 'rm -f "$installer"' EXIT; curl -fsSL https://usespaces.dev/install.sh -o "$installer"; bash "$installer" 0.1.0"#
+            )
         }
         for command in [SpacesLinuxInstaller.sshInstallCommand(version: nil), SpacesLinuxInstaller.sshInstallCommand(version: "")] {
             XCTAssertEqual(
                 command,
-                #"set -e; installer="$(mktemp)"; trap 'rm -f "$installer"' EXIT; curl -fsSL https://usespaces.dev/install.sh -o "$installer"; bash "$installer""#)
+                #"set -e; installer="$(mktemp)"; trap 'rm -f "$installer"' EXIT; curl -fsSL https://usespaces.dev/install.sh -o "$installer"; bash "$installer""#
+            )
         }
     }
 
@@ -150,7 +150,8 @@ final class SpacesDevicePairingClientTests: XCTestCase {
 
             XCTAssertEqual(
                 SpacesDevicePairingClient.remotePairCommand(profile: profile),
-                #"SPACES_DB_PATH="$HOME/.spaces-dev/profiles/spaces/schema-squash-v1-154418a8e022/spaces.db" SPACES_RUNTIME_DIR="$HOME/.spaces-dev/profiles/spaces/schema-squash-v1-154418a8e022/runtime" ~/.spaces/bin/spaces device pair --json"#)
+                #"SPACES_DB_PATH="$HOME/.spaces-dev/profiles/spaces/schema-squash-v1-154418a8e022/spaces.db" SPACES_RUNTIME_DIR="$HOME/.spaces-dev/profiles/spaces/schema-squash-v1-154418a8e022/runtime" ~/.spaces/bin/spaces device pair --json"#
+            )
         }
     }
 
@@ -246,8 +247,7 @@ final class SpacesDevicePairingClientTests: XCTestCase {
     func testRemoteInstallTimedOutErrorDescriptionMentionsTenMinutes() {
         let error = SpacesRemoteDevicePairingError.remoteInstallTimedOut("dev@builder.local")
         XCTAssertEqual(
-            error.errorDescription,
-            "Installing Spaces on dev@builder.local timed out after 10 minutes. Check the device's network and try again.")
+            error.errorDescription, "Installing Spaces on dev@builder.local timed out after 10 minutes. Check the device's network and try again.")
     }
 
     func testRemoteInstallFailedErrorSurfacesScriptDieVerbatim() {
@@ -363,7 +363,8 @@ final class SpacesDevicePairingClientTests: XCTestCase {
         XCTAssertTrue(script.contains(#"remote_profile_root="${SPACES_E2E_REMOTE_DEVICE_ROOT:-~/.spaces-dev/profiles/spaces/$remote_profile_name}""#))
         XCTAssertTrue(script.contains("SPACES_DB_PATH=$quoted_remote_db_path SPACES_RUNTIME_DIR=$quoted_remote_runtime_dir"))
         let databaseRange = try XCTUnwrap(script.range(of: "SPACES_DB_PATH=$quoted_remote_db_path"))
-        let installRange = try XCTUnwrap(script.range(of: "SPACES_DEVICE_API_HOST=0.0.0.0 SPACES_DEVICE_API_PORT=$remote_daemon_port $quoted_install/install.sh"))
+        let installRange = try XCTUnwrap(
+            script.range(of: "SPACES_DEVICE_API_HOST=0.0.0.0 SPACES_DEVICE_API_PORT=$remote_daemon_port $quoted_install/install.sh"))
         XCTAssertLessThan(databaseRange.lowerBound, installRange.lowerBound)
         XCTAssertFalse(script.contains("~/.local/bin/spaces mobile status"))
     }
@@ -389,18 +390,8 @@ final class SpacesDevicePairingClientTests: XCTestCase {
     private func withRemoteDeviceRootOverride(_ value: String?, run: () throws -> Void) throws {
         let name = "SPACES_E2E_REMOTE_DEVICE_ROOT"
         let original = getenv(name).map { String(cString: $0) }
-        if let value {
-            setenv(name, value, 1)
-        } else {
-            unsetenv(name)
-        }
-        defer {
-            if let original {
-                setenv(name, original, 1)
-            } else {
-                unsetenv(name)
-            }
-        }
+        if let value { setenv(name, value, 1) } else { unsetenv(name) }
+        defer { if let original { setenv(name, original, 1) } else { unsetenv(name) } }
         try run()
     }
 }

@@ -556,7 +556,7 @@
                 "Expected restarting after an authentication failure to open a fresh stream.")
         }
 
-        func testOpenTerminalLinkOpensNonMediaExternalURL() async {
+        func testOpenTerminalLinkShowsWebPagePreviewForNonMediaExternalURL() async throws {
             let settings = settings()
             let bridgeClient = SpacesDeviceAPIClient(settings: settings) { request in
                 XCTAssertEqual(request.commandName, "resolveTerminalLink")
@@ -567,25 +567,27 @@
                         originalLink: "https://example.com/docs",
                         displayName: "docs",
                         contentType: nil,
-                        mediaKind: nil,
+                        artifactKind: nil,
                         byteCount: nil,
                         externalURL: "https://example.com/docs"))
             }
-            var openedURLs: [URL] = []
             let model = TerminalViewerModel(
                 session: session(),
                 settings: settings,
                 onAuthenticationRequired: { _ in },
-                bridgeClient: bridgeClient,
-                openExternalURL: { openedURLs.append($0) })
+                bridgeClient: bridgeClient)
 
             await model.openTerminalLink("https://example.com/docs")
 
-            XCTAssertEqual(openedURLs, [URL(string: "https://example.com/docs")!])
-            XCTAssertNil(model.linkPreview)
+            let preview = try XCTUnwrap(model.linkPreview)
+            XCTAssertEqual(preview.content, .webPage(URL(string: "https://example.com/docs")!))
+            XCTAssertNil(preview.kind)
             XCTAssertNil(model.linkPreviewErrorMessage)
         }
 
+        /// The raw link text (a local path, so it routes as `.fileLink`) must reach `resolveTerminalLink`
+        /// unmodified, spaces included. The mocked resolver response's exact shape is incidental — this
+        /// asserts on the request, not the resulting preview.
         func testOpenTerminalLinkSendsSpacedPathUnchanged() async {
             let settings = settings()
             let spacedPath = "/Users/yogesh/Downloads/Screen Recording 2026-03-20 at 11.17.57 AM.mov"
@@ -599,22 +601,20 @@
                         originalLink: spacedPath,
                         displayName: "docs",
                         contentType: nil,
-                        mediaKind: nil,
+                        artifactKind: nil,
                         byteCount: nil,
                         externalURL: "https://example.com/docs"))
             }
-            var openedURLs: [URL] = []
             let model = TerminalViewerModel(
                 session: session(),
                 settings: settings,
                 onAuthenticationRequired: { _ in },
-                bridgeClient: bridgeClient,
-                openExternalURL: { openedURLs.append($0) })
+                bridgeClient: bridgeClient)
 
             await model.openTerminalLink(spacedPath)
 
             XCTAssertEqual(resolvedLinks, [spacedPath])
-            XCTAssertEqual(openedURLs, [URL(string: "https://example.com/docs")!])
+            XCTAssertEqual(model.linkPreview?.content, .webPage(URL(string: "https://example.com/docs")!))
         }
 
         func testOpenTerminalLinkDownloadsExternalMediaPreview() async throws {
@@ -628,7 +628,7 @@
                         originalLink: "https://example.com/image.png",
                         displayName: "image.png",
                         contentType: "image/png",
-                        mediaKind: .image,
+                        artifactKind: .image,
                         byteCount: nil,
                         externalURL: "https://example.com/image.png"))
             }
@@ -638,8 +638,9 @@
                 settings: settings,
                 onAuthenticationRequired: { _ in },
                 bridgeClient: bridgeClient,
-                remoteMediaDownloader: { url in
+                remoteMediaDownloader: { url, expectedArtifactKind in
                     XCTAssertEqual(url, URL(string: "https://example.com/image.png"))
+                    XCTAssertEqual(expectedArtifactKind, .image)
                     try FileManager.default.createDirectory(at: cacheRoot, withIntermediateDirectories: true)
                     let downloadedURL = cacheRoot.appendingPathComponent("downloaded-image.png")
                     try payload.write(to: downloadedURL)
@@ -650,8 +651,66 @@
             await model.openTerminalLink("https://example.com/image.png")
 
             let preview = try XCTUnwrap(model.linkPreview)
-            XCTAssertEqual(preview.mediaKind, .image)
-            XCTAssertEqual(try Data(contentsOf: preview.url), payload)
+            XCTAssertEqual(preview.kind, .image)
+            XCTAssertEqual(preview.content, .quickLook(preview.content.url))
+            XCTAssertEqual(try Data(contentsOf: preview.content.url), payload)
+            XCTAssertNil(model.linkPreviewErrorMessage)
+        }
+
+        func testOpenTerminalLinkDownloadsExtensionClassifiedMarkdownServedAsPlainText() async throws {
+            let settings = settings()
+            let cacheRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            let downloadRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            defer {
+                try? FileManager.default.removeItem(at: cacheRoot)
+                try? FileManager.default.removeItem(at: downloadRoot)
+            }
+            let url = URL(string: "https://raw.githubusercontent.com/example/project/main/README.md")!
+            let payload = Data("# Read Me\n".utf8)
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings) { _ in
+                Self.metadataResponse(SpacesDeviceTerminalLinkMetadata(
+                        id: "external|https://raw.githubusercontent.com/example/project/main/README.md",
+                        source: .externalURL,
+                        originalLink: url.absoluteString,
+                        displayName: "README.md",
+                        contentType: "text/markdown",
+                        artifactKind: .markdown,
+                        byteCount: nil,
+                        externalURL: url.absoluteString))
+            }
+            let model = TerminalViewerModel(
+                session: session(),
+                settings: settings,
+                onAuthenticationRequired: { _ in },
+                bridgeClient: bridgeClient,
+                remoteMediaDownloader: { requestedURL, expectedArtifactKind in
+                    XCTAssertEqual(requestedURL, url)
+                    XCTAssertEqual(expectedArtifactKind, .markdown)
+                    try FileManager.default.createDirectory(at: downloadRoot, withIntermediateDirectories: true)
+                    let downloadedURL = downloadRoot.appendingPathComponent("README.md")
+                    try payload.write(to: downloadedURL)
+                    guard let response = HTTPURLResponse(
+                        url: url,
+                        statusCode: 200,
+                        httpVersion: nil,
+                        headerFields: ["Content-Type": "text/plain"])
+                    else {
+                        throw SpacesDeviceAPIClientError.requestFailed("Missing HTTP response.")
+                    }
+                    return try TerminalViewerModel.validatedRemoteMediaDownloadURL(
+                        downloadedURL,
+                        response: response,
+                        expectedArtifactKind: expectedArtifactKind,
+                        sourceURL: requestedURL)
+                },
+                linkPreviewCacheDirectory: cacheRoot)
+
+            await model.openTerminalLink(url.absoluteString)
+
+            let preview = try XCTUnwrap(model.linkPreview)
+            XCTAssertEqual(preview.kind, .markdown)
+            XCTAssertEqual(preview.content, .markdown(preview.content.url))
+            XCTAssertEqual(try Data(contentsOf: preview.content.url), payload)
             XCTAssertNil(model.linkPreviewErrorMessage)
         }
 
@@ -671,7 +730,7 @@
                         originalLink: "https://example.com/missing.png",
                         displayName: "missing.png",
                         contentType: "image/png",
-                        mediaKind: .image,
+                        artifactKind: .image,
                         byteCount: nil,
                         externalURL: "https://example.com/missing.png"))
             }
@@ -680,7 +739,7 @@
                 settings: settings,
                 onAuthenticationRequired: { _ in },
                 bridgeClient: bridgeClient,
-                remoteMediaDownloader: { requestedURL in
+                remoteMediaDownloader: { requestedURL, expectedArtifactKind in
                     XCTAssertEqual(requestedURL, url)
                     try FileManager.default.createDirectory(at: downloadRoot, withIntermediateDirectories: true)
                     let downloadedURL = downloadRoot.appendingPathComponent("error-page.html")
@@ -693,7 +752,11 @@
                     else {
                         throw SpacesDeviceAPIClientError.requestFailed("Missing HTTP response.")
                     }
-                    return try TerminalViewerModel.validatedRemoteMediaDownloadURL(downloadedURL, response: response)
+                    return try TerminalViewerModel.validatedRemoteMediaDownloadURL(
+                        downloadedURL,
+                        response: response,
+                        expectedArtifactKind: expectedArtifactKind,
+                        sourceURL: requestedURL)
                 },
                 linkPreviewCacheDirectory: cacheRoot)
 
@@ -721,7 +784,7 @@
                         originalLink: "https://example.com/login.png",
                         displayName: "login.png",
                         contentType: "image/png",
-                        mediaKind: .image,
+                        artifactKind: .image,
                         byteCount: nil,
                         externalURL: "https://example.com/login.png"))
             }
@@ -730,7 +793,7 @@
                 settings: settings,
                 onAuthenticationRequired: { _ in },
                 bridgeClient: bridgeClient,
-                remoteMediaDownloader: { requestedURL in
+                remoteMediaDownloader: { requestedURL, expectedArtifactKind in
                     XCTAssertEqual(requestedURL, url)
                     try FileManager.default.createDirectory(at: downloadRoot, withIntermediateDirectories: true)
                     let downloadedURL = downloadRoot.appendingPathComponent("login.html")
@@ -743,16 +806,64 @@
                     else {
                         throw SpacesDeviceAPIClientError.requestFailed("Missing HTTP response.")
                     }
-                    return try TerminalViewerModel.validatedRemoteMediaDownloadURL(downloadedURL, response: response)
+                    return try TerminalViewerModel.validatedRemoteMediaDownloadURL(
+                        downloadedURL,
+                        response: response,
+                        expectedArtifactKind: expectedArtifactKind,
+                        sourceURL: requestedURL)
                 },
                 linkPreviewCacheDirectory: cacheRoot)
 
             await model.openTerminalLink("https://example.com/login.png")
 
             XCTAssertNil(model.linkPreview)
-            XCTAssertEqual(model.linkPreviewErrorMessage, "The media link did not return image or video content.")
+            XCTAssertEqual(model.linkPreviewErrorMessage, "The media link did not return image content.")
             let cachedFiles = (try? FileManager.default.contentsOfDirectory(at: cacheRoot, includingPropertiesForKeys: nil)) ?? []
             XCTAssertTrue(cachedFiles.isEmpty)
+        }
+
+        func testOpenTerminalLinkRejectsOversizedExternalTextPreviewBeforeCaching() async throws {
+            let settings = settings()
+            let cacheRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            let downloadRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            defer {
+                try? FileManager.default.removeItem(at: cacheRoot)
+                try? FileManager.default.removeItem(at: downloadRoot)
+            }
+            let oversizedByteCount = 4 * 1024 * 1024 + 1
+            let downloadedURL = downloadRoot.appendingPathComponent("huge.log")
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings) { _ in
+                Self.metadataResponse(SpacesDeviceTerminalLinkMetadata(
+                        id: "external|https://example.com/huge.log",
+                        source: .externalURL,
+                        originalLink: "https://example.com/huge.log",
+                        displayName: "huge.log",
+                        contentType: "text/plain",
+                        artifactKind: .text,
+                        byteCount: nil,
+                        externalURL: "https://example.com/huge.log"))
+            }
+            let model = TerminalViewerModel(
+                session: session(),
+                settings: settings,
+                onAuthenticationRequired: { _ in },
+                bridgeClient: bridgeClient,
+                remoteMediaDownloader: { _, expectedArtifactKind in
+                    XCTAssertEqual(expectedArtifactKind, .text)
+                    try FileManager.default.createDirectory(at: downloadRoot, withIntermediateDirectories: true)
+                    try Data(repeating: 0x41, count: oversizedByteCount).write(to: downloadedURL)
+                    return downloadedURL
+                },
+                linkPreviewCacheDirectory: cacheRoot)
+
+            await model.openTerminalLink("https://example.com/huge.log")
+
+            XCTAssertNil(model.linkPreview)
+            XCTAssertEqual(model.linkPreviewErrorMessage, "huge.log is too large to preview on this device.")
+            XCTAssertFalse(FileManager.default.fileExists(atPath: downloadedURL.path))
+            let cachedFiles = (try? FileManager.default.contentsOfDirectory(at: cacheRoot, includingPropertiesForKeys: nil)) ?? []
+            XCTAssertTrue(cachedFiles.isEmpty)
+            XCTAssertFalse(model.isPreparingLinkPreview)
         }
 
         func testValidatedRemoteMediaDownloadRejectsNonHTTPSFinalURL() throws {
@@ -768,9 +879,32 @@
                     headerFields: ["Content-Type": "image/png"]))
 
             XCTAssertThrowsError(
-                try TerminalViewerModel.validatedRemoteMediaDownloadURL(downloadedURL, response: response)
+                try TerminalViewerModel.validatedRemoteMediaDownloadURL(downloadedURL, response: response, expectedArtifactKind: .image)
             ) { error in
                 XCTAssertEqual(error.localizedDescription, "The media link redirected to a non-HTTPS URL.")
+            }
+        }
+
+        func testValidatedRemoteMediaDownloadRejectsUnsupportedSpecificTypeDespiteResolvedExtension() throws {
+            let downloadedURL = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString).png")
+            defer { try? FileManager.default.removeItem(at: downloadedURL) }
+            try Data("<svg></svg>".utf8).write(to: downloadedURL)
+            let url = try XCTUnwrap(URL(string: "https://example.com/image.png"))
+            let response = try XCTUnwrap(
+                HTTPURLResponse(
+                    url: url,
+                    statusCode: 200,
+                    httpVersion: nil,
+                    headerFields: ["Content-Type": "image/svg+xml"]))
+
+            XCTAssertThrowsError(
+                try TerminalViewerModel.validatedRemoteMediaDownloadURL(
+                    downloadedURL,
+                    response: response,
+                    expectedArtifactKind: .image,
+                    sourceURL: url)
+            ) { error in
+                XCTAssertEqual(error.localizedDescription, "The media link did not return image content.")
             }
         }
 
@@ -788,7 +922,7 @@
                         originalLink: link,
                         displayName: URL(string: link)?.lastPathComponent ?? link,
                         contentType: "image/png",
-                        mediaKind: .image,
+                        artifactKind: .image,
                         byteCount: nil,
                         externalURL: link))
             }
@@ -797,7 +931,7 @@
                 settings: settings,
                 onAuthenticationRequired: { _ in },
                 bridgeClient: bridgeClient,
-                remoteMediaDownloader: { url in
+                remoteMediaDownloader: { url, _ in
                     try FileManager.default.createDirectory(at: cacheRoot, withIntermediateDirectories: true)
                     if url.lastPathComponent == "slow.png" {
                         await probe.markSlowStarted()
@@ -822,7 +956,7 @@
 
             let preview = try XCTUnwrap(model.linkPreview)
             XCTAssertEqual(preview.title, "fast.png")
-            XCTAssertEqual(try Data(contentsOf: preview.url), fastPayload)
+            XCTAssertEqual(try Data(contentsOf: preview.content.url), fastPayload)
             XCTAssertNil(model.linkPreviewErrorMessage)
             XCTAssertFalse(model.isPreparingLinkPreview)
         }
@@ -847,7 +981,7 @@
                         originalLink: link,
                         displayName: URL(string: link)?.lastPathComponent ?? link,
                         contentType: "image/png",
-                        mediaKind: .image,
+                        artifactKind: .image,
                         byteCount: nil,
                         externalURL: link))
             }
@@ -856,7 +990,7 @@
                 settings: settings,
                 onAuthenticationRequired: { _ in },
                 bridgeClient: bridgeClient,
-                remoteMediaDownloader: { url in
+                remoteMediaDownloader: { url, _ in
                     try FileManager.default.createDirectory(at: downloadRoot, withIntermediateDirectories: true)
                     if url.lastPathComponent == "slow.png" {
                         await gate.markSlowStarted()
@@ -877,7 +1011,7 @@
 
             let preview = try XCTUnwrap(model.linkPreview)
             XCTAssertEqual(preview.title, "fast.png")
-            XCTAssertEqual(try Data(contentsOf: preview.url), fastPayload)
+            XCTAssertEqual(try Data(contentsOf: preview.content.url), fastPayload)
             XCTAssertFalse(FileManager.default.fileExists(atPath: slowDownloadedURL.path))
             XCTAssertNil(model.linkPreviewErrorMessage)
             XCTAssertFalse(model.isPreparingLinkPreview)
@@ -897,7 +1031,7 @@
                             originalLink: "image.png",
                             displayName: "image.png",
                             contentType: "image/png",
-                            mediaKind: .image,
+                            artifactKind: .image,
                             byteCount: Int64(payload.count),
                             externalURL: nil))
                 case "readTerminalLinkChunk":
@@ -924,9 +1058,185 @@
             await model.openTerminalLink("image.png")
 
             let preview = try XCTUnwrap(model.linkPreview)
-            XCTAssertEqual(preview.mediaKind, .image)
-            XCTAssertEqual(try Data(contentsOf: preview.url), payload)
+            XCTAssertEqual(preview.kind, .image)
+            XCTAssertEqual(preview.content, .quickLook(preview.content.url))
+            XCTAssertEqual(try Data(contentsOf: preview.content.url), payload)
             XCTAssertNil(model.linkPreviewErrorMessage)
+        }
+
+        func testOpenTerminalLinkNoticesLoopbackURLWithoutResolving() async {
+            let settings = settings()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings) { _ in
+                XCTFail("Loopback links must not trigger a resolveTerminalLink round trip.")
+                return SpacesDeviceAPIResponse(ok: false, message: "unexpected")
+            }
+            let model = TerminalViewerModel(
+                session: session(),
+                settings: settings,
+                onAuthenticationRequired: { _ in },
+                bridgeClient: bridgeClient)
+
+            await model.openTerminalLink("http://localhost:3000/dashboard")
+
+            XCTAssertEqual(
+                model.linkNotice,
+                "This address runs on the session's host machine and isn't reachable from this device yet.")
+            XCTAssertNil(model.linkPreview)
+            XCTAssertNil(model.linkPreviewErrorMessage)
+            XCTAssertFalse(model.isPreparingLinkPreview)
+        }
+
+        func testOpenTerminalLinkIgnoresUnknownScheme() async {
+            let settings = settings()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings) { _ in
+                XCTFail("An unrecognized scheme must not trigger a resolveTerminalLink round trip.")
+                return SpacesDeviceAPIResponse(ok: false, message: "unexpected")
+            }
+            let model = TerminalViewerModel(
+                session: session(),
+                settings: settings,
+                onAuthenticationRequired: { _ in },
+                bridgeClient: bridgeClient)
+
+            await model.openTerminalLink("mailto:person@example.com")
+
+            XCTAssertNil(model.linkPreview)
+            XCTAssertNil(model.linkPreviewErrorMessage)
+            XCTAssertNil(model.linkNotice)
+            XCTAssertFalse(model.isPreparingLinkPreview)
+        }
+
+        func testOpenTerminalLinkUnknownSchemeCancelsStalePreviewRequest() async throws {
+            let settings = settings()
+            let cacheRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            defer { try? FileManager.default.removeItem(at: cacheRoot) }
+            let gate = LinkPreviewGate()
+            let payload = Data([0x89, 0x50, 0x4E, 0x47])
+            let linkID = "slow-link"
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings) { request in
+                switch request.commandName {
+                case "resolveTerminalLink":
+                    await gate.markSlowStarted()
+                    await gate.waitForRelease()
+                    return Self.previewMetadata(
+                        id: linkID,
+                        originalLink: "slow.png",
+                        displayName: "slow.png",
+                        byteCount: payload.count)
+                case "readTerminalLinkChunk":
+                    return Self.previewChunk(id: linkID, payload: payload, offset: request.chunkOffset ?? 0)
+                default:
+                    return SpacesDeviceAPIResponse(ok: false, message: "unexpected command")
+                }
+            }
+            let model = TerminalViewerModel(
+                session: session(),
+                settings: settings,
+                onAuthenticationRequired: { _ in },
+                bridgeClient: bridgeClient,
+                linkPreviewCacheDirectory: cacheRoot)
+
+            let slowTask = Task { await model.openTerminalLink("slow.png") }
+            await gate.waitForSlowStart()
+
+            await model.openTerminalLink("mailto:person@example.com")
+
+            XCTAssertNil(model.linkPreview)
+            XCTAssertNil(model.linkPreviewErrorMessage)
+            XCTAssertNil(model.linkNotice)
+            XCTAssertFalse(model.isPreparingLinkPreview)
+
+            await gate.releaseSlow()
+            await slowTask.value
+
+            XCTAssertNil(model.linkPreview)
+            XCTAssertNil(model.linkPreviewErrorMessage)
+            XCTAssertNil(model.linkNotice)
+            XCTAssertFalse(model.isPreparingLinkPreview)
+        }
+
+        func testOpenTerminalLinkDownloadsLocalDocumentPreviewsByKind() async throws {
+            let cases: [(artifactKind: SpacesDeviceTerminalLinkArtifactKind, contentType: String, expectedContent: (URL) -> TerminalLinkPreviewContent)] = [
+                (.text, "text/plain", { .text($0) }),
+                (.markdown, "text/markdown", { .markdown($0) }),
+                (.html, "text/html", { .htmlFile($0) }),
+                (.pdf, "application/pdf", { .quickLook($0) }),
+            ]
+            for testCase in cases {
+                let settings = settings()
+                let cacheRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+                defer { try? FileManager.default.removeItem(at: cacheRoot) }
+                let payload = Data("preview contents".utf8)
+                let bridgeClient = SpacesDeviceAPIClient(settings: settings) { request in
+                    switch request.commandName {
+                    case "resolveTerminalLink":
+                        return Self.metadataResponse(SpacesDeviceTerminalLinkMetadata(
+                                id: "link-1",
+                                source: .localFile,
+                                originalLink: "file.\(testCase.artifactKind.rawValue)",
+                                displayName: "file.\(testCase.artifactKind.rawValue)",
+                                contentType: testCase.contentType,
+                                artifactKind: testCase.artifactKind,
+                                byteCount: Int64(payload.count),
+                                externalURL: nil))
+                    case "readTerminalLinkChunk":
+                        return Self.previewChunk(id: request.terminalLinkID ?? "", payload: payload, offset: request.chunkOffset ?? 0)
+                    default:
+                        return SpacesDeviceAPIResponse(ok: false, message: "unexpected command")
+                    }
+                }
+                let model = TerminalViewerModel(
+                    session: session(),
+                    settings: settings,
+                    onAuthenticationRequired: { _ in },
+                    bridgeClient: bridgeClient,
+                    linkPreviewCacheDirectory: cacheRoot)
+
+                await model.openTerminalLink("file.\(testCase.artifactKind.rawValue)")
+
+                let preview = try XCTUnwrap(model.linkPreview, "kind=\(testCase.artifactKind)")
+                XCTAssertEqual(preview.kind, testCase.artifactKind)
+                XCTAssertEqual(preview.content, testCase.expectedContent(preview.content.url), "kind=\(testCase.artifactKind)")
+                XCTAssertEqual(try Data(contentsOf: preview.content.url), payload, "kind=\(testCase.artifactKind)")
+                XCTAssertNil(model.linkPreviewErrorMessage, "kind=\(testCase.artifactKind)")
+            }
+        }
+
+        func testOpenTerminalLinkRejectsOversizedTextFamilyPreview() async {
+            let settings = settings()
+            let oversizedByteCount: Int64 = 4 * 1024 * 1024 + 1
+            var didRequestChunk = false
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings) { request in
+                switch request.commandName {
+                case "resolveTerminalLink":
+                    return Self.metadataResponse(SpacesDeviceTerminalLinkMetadata(
+                            id: "link-1",
+                            source: .localFile,
+                            originalLink: "huge.log",
+                            displayName: "huge.log",
+                            contentType: "text/plain",
+                            artifactKind: .text,
+                            byteCount: oversizedByteCount,
+                            externalURL: nil))
+                case "readTerminalLinkChunk":
+                    didRequestChunk = true
+                    return SpacesDeviceAPIResponse(ok: false, message: "unexpected chunk request")
+                default:
+                    return SpacesDeviceAPIResponse(ok: false, message: "unexpected command")
+                }
+            }
+            let model = TerminalViewerModel(
+                session: session(),
+                settings: settings,
+                onAuthenticationRequired: { _ in },
+                bridgeClient: bridgeClient)
+
+            await model.openTerminalLink("huge.log")
+
+            XCTAssertNil(model.linkPreview)
+            XCTAssertEqual(model.linkPreviewErrorMessage, "huge.log is too large to preview on this device.")
+            XCTAssertFalse(didRequestChunk)
+            XCTAssertFalse(model.isPreparingLinkPreview)
         }
 
         func testOpenTerminalLinkDeletesPartialLocalPreviewOnTransferFailure() async throws {
@@ -968,7 +1278,9 @@
             await model.openTerminalLink("image.png")
 
             XCTAssertNil(model.linkPreview)
-            XCTAssertEqual(model.linkPreviewErrorMessage, "The terminal link transfer returned an invalid chunk size.")
+            XCTAssertEqual(
+                model.linkPreviewErrorMessage,
+                "Terminal link 'link-1' transfer returned an invalid chunk size (reported 2, decoded 1).")
             let cachedFiles = (try? FileManager.default.contentsOfDirectory(at: cacheRoot, includingPropertiesForKeys: nil)) ?? []
             XCTAssertTrue(cachedFiles.isEmpty)
             XCTAssertFalse(model.isPreparingLinkPreview)
@@ -1067,14 +1379,14 @@
 
             let fastPreview = try XCTUnwrap(model.linkPreview)
             XCTAssertEqual(fastPreview.title, "fast.png")
-            XCTAssertEqual(try Data(contentsOf: fastPreview.url), fastPayload)
+            XCTAssertEqual(try Data(contentsOf: fastPreview.content.url), fastPayload)
 
             await gate.releaseSlow()
             await slowTask.value
 
             let finalPreview = try XCTUnwrap(model.linkPreview)
             XCTAssertEqual(finalPreview.title, "fast.png")
-            XCTAssertEqual(try Data(contentsOf: finalPreview.url), fastPayload)
+            XCTAssertEqual(try Data(contentsOf: finalPreview.content.url), fastPayload)
             XCTAssertNil(model.linkPreviewErrorMessage)
             XCTAssertFalse(model.isPreparingLinkPreview)
         }
@@ -1112,9 +1424,9 @@
                 linkPreviewCacheDirectory: cacheRoot)
 
             await model.openTerminalLink("first.png")
-            let firstURL = try XCTUnwrap(model.linkPreview?.url)
+            let firstURL = try XCTUnwrap(model.linkPreview?.content.url)
             await model.openTerminalLink("second.png")
-            let secondURL = try XCTUnwrap(model.linkPreview?.url)
+            let secondURL = try XCTUnwrap(model.linkPreview?.content.url)
 
             XCTAssertNotEqual(firstURL, secondURL)
             XCTAssertEqual(try Data(contentsOf: firstURL), firstPayload)
@@ -1133,7 +1445,7 @@
                     originalLink: originalLink,
                     displayName: displayName,
                     contentType: "image/png",
-                    mediaKind: .image,
+                    artifactKind: .image,
                     byteCount: Int64(byteCount),
                     externalURL: nil))
         }
