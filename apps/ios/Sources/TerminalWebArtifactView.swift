@@ -18,6 +18,76 @@ enum TerminalWebArtifactLoad: Equatable {
         if case .request = self { return true }
         return false
     }
+
+    var allowsNetworkLoads: Bool {
+        if case .request = self { return true }
+        return false
+    }
+}
+
+enum TerminalWebArtifactNetworkPolicy {
+    static let contentRuleListIdentifier = "TerminalWebArtifactNoNetwork"
+    static let networkBlockContentRuleListJSON = """
+        [
+          {
+            "trigger": {
+              "url-filter": "^http://.*"
+            },
+            "action": {
+              "type": "block"
+            }
+          },
+          {
+            "trigger": {
+              "url-filter": "^https://.*"
+            },
+            "action": {
+              "type": "block"
+            }
+          },
+          {
+            "trigger": {
+              "url-filter": "^ws://.*"
+            },
+            "action": {
+              "type": "block"
+            }
+          },
+          {
+            "trigger": {
+              "url-filter": "^wss://.*"
+            },
+            "action": {
+              "type": "block"
+            }
+          }
+        ]
+        """
+
+    static func shouldBlockNetworkLoad(for load: TerminalWebArtifactLoad, url: URL) -> Bool {
+        shouldBlockNetworkLoad(networkLoadsAllowed: load.allowsNetworkLoads, url: url)
+    }
+
+    static func shouldBlockNetworkLoad(networkLoadsAllowed: Bool, url: URL) -> Bool {
+        guard !networkLoadsAllowed else { return false }
+        guard let scheme = url.scheme?.lowercased() else { return false }
+        return scheme == "http" || scheme == "https" || scheme == "ws" || scheme == "wss"
+    }
+
+    @MainActor
+    static func makeNetworkBlockContentRuleList() async throws -> WKContentRuleList {
+        guard let ruleList = try await WKContentRuleListStore.default().compileContentRuleList(
+            forIdentifier: contentRuleListIdentifier,
+            encodedContentRuleList: networkBlockContentRuleListJSON
+        ) else {
+            throw NSError(
+                domain: "TerminalWebArtifactNetworkPolicy",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "Couldn't prepare the isolated preview."]
+            )
+        }
+        return ruleList
+    }
 }
 
 /// Isolated `WKWebView` host for HTML artifacts and external web pages. Unlike the browser-sessions
@@ -119,10 +189,16 @@ private struct TerminalWebArtifactRepresentable: UIViewRepresentable {
     @MainActor final class Coordinator: NSObject, WKNavigationDelegate {
         private let model: TerminalWebArtifactViewModel
         private var loadedDescription: String?
+        private var activeLoadAllowsNetwork = false
+        private var loadTask: Task<Void, Never>?
         private var observations: [NSKeyValueObservation] = []
 
         init(model: TerminalWebArtifactViewModel) {
             self.model = model
+        }
+
+        deinit {
+            loadTask?.cancel()
         }
 
         func attach(to webView: WKWebView, load: TerminalWebArtifactLoad) {
@@ -145,6 +221,37 @@ private struct TerminalWebArtifactRepresentable: UIViewRepresentable {
         }
 
         private func perform(_ load: TerminalWebArtifactLoad, on webView: WKWebView) {
+            let description = Self.identity(for: load)
+            activeLoadAllowsNetwork = load.allowsNetworkLoads
+            loadTask?.cancel()
+            loadTask = Task { @MainActor [weak self, weak webView] in
+                guard let self, let webView else { return }
+                do {
+                    try await self.configureNetworkPolicy(for: load, on: webView)
+                    try Task.checkCancellation()
+                    guard self.loadedDescription == description else { return }
+                    self.performConfiguredLoad(load, on: webView)
+                } catch is CancellationError {
+                    return
+                } catch {
+                    self.handleFailure(error)
+                }
+            }
+        }
+
+        private func configureNetworkPolicy(for load: TerminalWebArtifactLoad, on webView: WKWebView) async throws {
+            let userContentController = webView.configuration.userContentController
+            guard !load.allowsNetworkLoads else {
+                userContentController.removeAllContentRuleLists()
+                return
+            }
+            let ruleList = try await TerminalWebArtifactNetworkPolicy.makeNetworkBlockContentRuleList()
+            try Task.checkCancellation()
+            userContentController.removeAllContentRuleLists()
+            userContentController.add(ruleList)
+        }
+
+        private func performConfiguredLoad(_ load: TerminalWebArtifactLoad, on webView: WKWebView) {
             switch load {
             case .fileURL(let url):
                 // Read access is scoped to the single artifact file: a sibling `./style.css` reference in
@@ -181,6 +288,20 @@ private struct TerminalWebArtifactRepresentable: UIViewRepresentable {
 
         func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
             Task { @MainActor [weak self] in self?.model.loadErrorMessage = nil }
+        }
+
+        func webView(
+            _ webView: WKWebView,
+            decidePolicyFor navigationAction: WKNavigationAction,
+            decisionHandler: @escaping @MainActor @Sendable (WKNavigationActionPolicy) -> Void
+        ) {
+            if let url = navigationAction.request.url,
+                TerminalWebArtifactNetworkPolicy.shouldBlockNetworkLoad(networkLoadsAllowed: activeLoadAllowsNetwork, url: url)
+            {
+                decisionHandler(.cancel)
+                return
+            }
+            decisionHandler(.allow)
         }
 
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {

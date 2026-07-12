@@ -657,6 +657,63 @@
             XCTAssertNil(model.linkPreviewErrorMessage)
         }
 
+        func testOpenTerminalLinkDownloadsExtensionClassifiedMarkdownServedAsPlainText() async throws {
+            let settings = settings()
+            let cacheRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            let downloadRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            defer {
+                try? FileManager.default.removeItem(at: cacheRoot)
+                try? FileManager.default.removeItem(at: downloadRoot)
+            }
+            let url = URL(string: "https://raw.githubusercontent.com/example/project/main/README.md")!
+            let payload = Data("# Read Me\n".utf8)
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings) { _ in
+                Self.metadataResponse(SpacesDeviceTerminalLinkMetadata(
+                        id: "external|https://raw.githubusercontent.com/example/project/main/README.md",
+                        source: .externalURL,
+                        originalLink: url.absoluteString,
+                        displayName: "README.md",
+                        contentType: "text/markdown",
+                        artifactKind: .markdown,
+                        byteCount: nil,
+                        externalURL: url.absoluteString))
+            }
+            let model = TerminalViewerModel(
+                session: session(),
+                settings: settings,
+                onAuthenticationRequired: { _ in },
+                bridgeClient: bridgeClient,
+                remoteMediaDownloader: { requestedURL, expectedArtifactKind in
+                    XCTAssertEqual(requestedURL, url)
+                    XCTAssertEqual(expectedArtifactKind, .markdown)
+                    try FileManager.default.createDirectory(at: downloadRoot, withIntermediateDirectories: true)
+                    let downloadedURL = downloadRoot.appendingPathComponent("README.md")
+                    try payload.write(to: downloadedURL)
+                    guard let response = HTTPURLResponse(
+                        url: url,
+                        statusCode: 200,
+                        httpVersion: nil,
+                        headerFields: ["Content-Type": "text/plain"])
+                    else {
+                        throw SpacesDeviceAPIClientError.requestFailed("Missing HTTP response.")
+                    }
+                    return try TerminalViewerModel.validatedRemoteMediaDownloadURL(
+                        downloadedURL,
+                        response: response,
+                        expectedArtifactKind: expectedArtifactKind,
+                        sourceURL: requestedURL)
+                },
+                linkPreviewCacheDirectory: cacheRoot)
+
+            await model.openTerminalLink(url.absoluteString)
+
+            let preview = try XCTUnwrap(model.linkPreview)
+            XCTAssertEqual(preview.kind, .markdown)
+            XCTAssertEqual(preview.content, .markdown(preview.content.url))
+            XCTAssertEqual(try Data(contentsOf: preview.content.url), payload)
+            XCTAssertNil(model.linkPreviewErrorMessage)
+        }
+
         func testOpenTerminalLinkRejectsFailedExternalMediaHTTPStatusBeforeCaching() async throws {
             let settings = settings()
             let cacheRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -696,7 +753,10 @@
                         throw SpacesDeviceAPIClientError.requestFailed("Missing HTTP response.")
                     }
                     return try TerminalViewerModel.validatedRemoteMediaDownloadURL(
-                        downloadedURL, response: response, expectedArtifactKind: expectedArtifactKind)
+                        downloadedURL,
+                        response: response,
+                        expectedArtifactKind: expectedArtifactKind,
+                        sourceURL: requestedURL)
                 },
                 linkPreviewCacheDirectory: cacheRoot)
 
@@ -747,7 +807,10 @@
                         throw SpacesDeviceAPIClientError.requestFailed("Missing HTTP response.")
                     }
                     return try TerminalViewerModel.validatedRemoteMediaDownloadURL(
-                        downloadedURL, response: response, expectedArtifactKind: expectedArtifactKind)
+                        downloadedURL,
+                        response: response,
+                        expectedArtifactKind: expectedArtifactKind,
+                        sourceURL: requestedURL)
                 },
                 linkPreviewCacheDirectory: cacheRoot)
 
@@ -819,6 +882,29 @@
                 try TerminalViewerModel.validatedRemoteMediaDownloadURL(downloadedURL, response: response, expectedArtifactKind: .image)
             ) { error in
                 XCTAssertEqual(error.localizedDescription, "The media link redirected to a non-HTTPS URL.")
+            }
+        }
+
+        func testValidatedRemoteMediaDownloadRejectsUnsupportedSpecificTypeDespiteResolvedExtension() throws {
+            let downloadedURL = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString).png")
+            defer { try? FileManager.default.removeItem(at: downloadedURL) }
+            try Data("<svg></svg>".utf8).write(to: downloadedURL)
+            let url = try XCTUnwrap(URL(string: "https://example.com/image.png"))
+            let response = try XCTUnwrap(
+                HTTPURLResponse(
+                    url: url,
+                    statusCode: 200,
+                    httpVersion: nil,
+                    headerFields: ["Content-Type": "image/svg+xml"]))
+
+            XCTAssertThrowsError(
+                try TerminalViewerModel.validatedRemoteMediaDownloadURL(
+                    downloadedURL,
+                    response: response,
+                    expectedArtifactKind: .image,
+                    sourceURL: url)
+            ) { error in
+                XCTAssertEqual(error.localizedDescription, "The media link did not return image content.")
             }
         }
 

@@ -1,5 +1,6 @@
 #if canImport(UIKit)
     import Foundation
+    import WebKit
     import XCTest
     @testable import SpacesMobile
 
@@ -63,6 +64,25 @@
             XCTAssertTrue(literal.contains("\\n"))
             XCTAssertFalse(literal.contains("<"))
             XCTAssertFalse(literal.contains(">"))
+        }
+
+        // MARK: - Artifact web isolation
+
+        func testArtifactNetworkPolicyBlocksNetworkOnlyForArtifactLoads() {
+            let networkURL = URL(string: "https://example.com/beacon")!
+            let webSocketURL = URL(string: "wss://example.com/events")!
+            let fileURL = URL(fileURLWithPath: "/tmp/artifact.html")
+            let dataURL = URL(string: "data:text/plain,ok")!
+
+            XCTAssertTrue(TerminalWebArtifactNetworkPolicy.shouldBlockNetworkLoad(for: .fileURL(fileURL), url: networkURL))
+            XCTAssertTrue(TerminalWebArtifactNetworkPolicy.shouldBlockNetworkLoad(for: .htmlString("<html></html>"), url: webSocketURL))
+            XCTAssertFalse(TerminalWebArtifactNetworkPolicy.shouldBlockNetworkLoad(for: .htmlString("<html></html>"), url: dataURL))
+            XCTAssertFalse(TerminalWebArtifactNetworkPolicy.shouldBlockNetworkLoad(for: .request(networkURL), url: networkURL))
+        }
+
+        @MainActor
+        func testArtifactNetworkPolicyContentRuleCompiles() async throws {
+            _ = try await TerminalWebArtifactNetworkPolicy.makeNetworkBlockContentRuleList()
         }
 
         // MARK: - Text truncation

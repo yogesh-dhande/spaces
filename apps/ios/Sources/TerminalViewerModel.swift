@@ -255,7 +255,11 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     nonisolated static func defaultRemoteMediaDownloader(_ url: URL, expectedArtifactKind: SpacesDeviceTerminalLinkArtifactKind) async throws -> URL {
         let (downloadedURL, response) = try await URLSession.shared.download(from: url)
         do {
-            return try validatedRemoteMediaDownloadURL(downloadedURL, response: response, expectedArtifactKind: expectedArtifactKind)
+            return try validatedRemoteMediaDownloadURL(
+                downloadedURL,
+                response: response,
+                expectedArtifactKind: expectedArtifactKind,
+                sourceURL: url)
         } catch {
             try? FileManager.default.removeItem(at: downloadedURL)
             throw error
@@ -267,8 +271,14 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     /// resolved as (say) `.image` but that actually redirects to an HTML sign-in page would pass a looser
     /// "is this any previewable kind" check — text/HTML is itself a previewable kind now that the
     /// classifier covers documents, not just media — and get cached and shown as if it were the image.
+    /// If the server reports a generic or plain-text type, the resolved/final URL extension is allowed
+    /// to confirm the promised artifact kind; a conflicting specific type such as an HTML sign-in page
+    /// still fails before caching.
     nonisolated static func validatedRemoteMediaDownloadURL(
-        _ downloadedURL: URL, response: URLResponse, expectedArtifactKind: SpacesDeviceTerminalLinkArtifactKind
+        _ downloadedURL: URL,
+        response: URLResponse,
+        expectedArtifactKind: SpacesDeviceTerminalLinkArtifactKind,
+        sourceURL: URL? = nil
     ) throws -> URL {
         guard response.url?.scheme?.lowercased() == "https" else {
             throw SpacesDeviceAPIClientError.requestFailed("The media link redirected to a non-HTTPS URL.")
@@ -279,12 +289,61 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         guard (200..<300).contains(httpResponse.statusCode) else {
             throw SpacesDeviceAPIClientError.requestFailed("The media link returned HTTP status \(httpResponse.statusCode).")
         }
-        guard let mimeType = httpResponse.mimeType?.trimmingCharacters(in: .whitespacesAndNewlines), !mimeType.isEmpty,
-            SpacesDeviceTerminalLinkClassifier.artifactKind(contentType: mimeType, pathExtension: nil) == expectedArtifactKind
-        else {
+        let mimeType = httpResponse.mimeType?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard downloadedArtifactKindMatches(
+            contentType: mimeType?.isEmpty == false ? mimeType : nil,
+            responseURL: response.url,
+            sourceURL: sourceURL,
+            expectedArtifactKind: expectedArtifactKind
+        ) else {
             throw SpacesDeviceAPIClientError.requestFailed("The media link did not return \(expectedArtifactKind.previewNoun) content.")
         }
         return downloadedURL
+    }
+
+    private nonisolated static func downloadedArtifactKindMatches(
+        contentType: String?,
+        responseURL: URL?,
+        sourceURL: URL?,
+        expectedArtifactKind: SpacesDeviceTerminalLinkArtifactKind
+    ) -> Bool {
+        let responseKind = contentType.flatMap {
+            SpacesDeviceTerminalLinkClassifier.artifactKind(contentType: $0, pathExtension: nil)
+        }
+        if responseKind == expectedArtifactKind { return true }
+        guard resolvedExtensionMatchesExpectedArtifactKind(
+            responseURL: responseURL,
+            sourceURL: sourceURL,
+            expectedArtifactKind: expectedArtifactKind)
+        else {
+            return false
+        }
+        guard let responseKind else {
+            return contentType.map(isGenericDownloadContentType) ?? true
+        }
+        return responseKind == .text && Self.isTextFamilyArtifact(expectedArtifactKind)
+    }
+
+    private nonisolated static func isGenericDownloadContentType(_ contentType: String) -> Bool {
+        let lowercased = contentType.lowercased()
+        let baseType = lowercased.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? lowercased
+        switch baseType.trimmingCharacters(in: .whitespacesAndNewlines) {
+        case "application/octet-stream", "binary/octet-stream", "application/x-download", "application/force-download":
+            return true
+        default:
+            return false
+        }
+    }
+
+    private nonisolated static func resolvedExtensionMatchesExpectedArtifactKind(
+        responseURL: URL?,
+        sourceURL: URL?,
+        expectedArtifactKind: SpacesDeviceTerminalLinkArtifactKind
+    ) -> Bool {
+        [responseURL, sourceURL].contains { url in
+            guard let url else { return false }
+            return SpacesDeviceTerminalLinkClassifier.artifactKind(contentType: nil, pathExtension: url.pathExtension) == expectedArtifactKind
+        }
     }
 
     var title: String { latestState?.title ?? session.title }
@@ -1064,7 +1123,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         return Int64(byteCount) > Self.textPreviewByteCountLimit
     }
 
-    private static func isTextFamilyArtifact(_ kind: SpacesDeviceTerminalLinkArtifactKind) -> Bool {
+    private nonisolated static func isTextFamilyArtifact(_ kind: SpacesDeviceTerminalLinkArtifactKind) -> Bool {
         switch kind {
         case .text, .markdown, .html: return true
         case .image, .video, .pdf: return false
