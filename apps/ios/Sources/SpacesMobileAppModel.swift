@@ -192,6 +192,15 @@ enum SpacesMobileE2EDumpWriter {
     }
 }
 
+/// Bottom tab bar destinations. Selection lives on the app model so non-tab surfaces
+/// (the not-paired state, pairing links, auth recovery) can switch tabs programmatically.
+enum SpacesMobileTab: String, Hashable, Sendable {
+    case alerts
+    case spaces
+    case agents
+    case settings
+}
+
 struct SpacesMobileTerminalWorkspaceGroup: Identifiable {
     let id: String
     let projectName: String
@@ -303,6 +312,13 @@ struct SpacesMobileWorkspaceRuntimeRow: Identifiable, Sendable {
         }
     }
 
+    /// A browser session is a URL, not a process: it has no run state, no lifecycle actions, and its
+    /// row opens a web view instead of a terminal, so several UI rules key off this.
+    var isBrowserSession: Bool {
+        if case .browserSession = source { return true }
+        return false
+    }
+
     var title: String {
         switch source {
         case .process(let row): row.name
@@ -397,6 +413,14 @@ struct SpacesMobileWorkspaceRuntimeRow: Identifiable, Sendable {
     var hasTerminalDetailActions: Bool { canRun || canStopFromTerminalDetail || canRestartFromTerminalDetail }
 }
 
+extension SpacesDeviceWorkspaceSummary {
+    /// Git workspaces are branch-backed; non-git workspaces are the project directory itself.
+    var isGitWorkspace: Bool {
+        guard let branch else { return false }
+        return !branch.isEmpty
+    }
+}
+
 struct SpacesMobileWorkspaceGroup: Identifiable {
     let workspace: SpacesDeviceWorkspaceSummary
     let rows: [SpacesMobileWorkspaceRuntimeRow]
@@ -446,11 +470,18 @@ private enum SpacesMobileMutationTimeoutRecovery {
     var visibleRowTypes: Set<SpacesMobileWorkspaceRowType> = Set(SpacesMobileWorkspaceRowType.allCases)
     var visibleRunStates: Set<SpacesDeviceRunState> = Set([.notStarted, .running, .exited])
     var workspaceCreateOptions: SpacesDeviceWorkspaceCreateOptions?
+    var selectedTab: SpacesMobileTab = .spaces
+    /// Workspaces whose runtime rows are collapsed on the Spaces tab. In-memory only; a fresh
+    /// launch starts fully expanded.
+    var collapsedWorkspaceIDs: Set<String> = []
+    /// Attention events the user cleared. In-memory only; identities are stable per source+kind+date
+    /// so a cleared event stays cleared across refreshes until the source changes state again.
+    var dismissedAlertIDs: Set<String> = []
     @ObservationIgnored private var bridgeClient: SpacesDeviceAPIClient
     @ObservationIgnored private var commandChannel: SpacesDeviceAPICommandChannel
     /// On-device loopback reverse proxy WKWebView browser sessions load through. Owned for the app's
     /// lifetime (its installation identity is stable across device switches), started/stopped by
-    /// `ContentView`'s scene-phase observation.
+    /// `RootTabView`'s scene-phase observation.
     @ObservationIgnored private let browserProxy: SpacesMobileBrowserProxy
     /// Routing table refreshed from accepted active-device overviews, and pruned when a device is unpaired.
     /// Kept on the model (rather than rebuilt from scratch each time) so `removeDevice` can drop just
@@ -534,6 +565,59 @@ private enum SpacesMobileMutationTimeoutRecovery {
             )
         }
         .sorted(by: groupSort)
+    }
+
+    /// Attention-event groups for the Alerts tab, derived client-side from the overview payload
+    /// with the user's cleared events filtered out.
+    var attentionGroups: [SpacesMobileAttentionGroup] {
+        guard let overview else { return [] }
+        return SpacesMobileAttention.groups(in: overview, dismissedEventIDs: dismissedAlertIDs)
+    }
+
+    /// Undismissed attention-event count, shown as the Alerts tab badge.
+    var undismissedAlertCount: Int {
+        attentionGroups.reduce(0) { $0 + $1.events.count }
+    }
+
+    /// Marks every currently derived attention event dismissed.
+    func clearAlerts() {
+        guard let overview else { return }
+        dismissedAlertIDs.formUnion(SpacesMobileAttention.events(in: overview).map(\.id))
+    }
+
+    /// Coding-agent rows across all workspaces grouped by activity for the Agents tab.
+    var agentGroups: [SpacesMobileAgentGroup] {
+        guard let overview else { return [] }
+        return SpacesMobileAgentGrouping.groups(in: overview)
+    }
+
+    func toggleWorkspaceCollapsed(_ workspaceID: String) {
+        if collapsedWorkspaceIDs.contains(workspaceID) {
+            collapsedWorkspaceIDs.remove(workspaceID)
+        } else {
+            collapsedWorkspaceIDs.insert(workspaceID)
+        }
+    }
+
+    /// Resolves a session summary for navigation, including sessions synthesized from
+    /// workspace terminal rows that are not in the overview's session list.
+    func session(forSessionID sessionID: String) -> SpacesDeviceTerminalSessionSummary? {
+        if let session = overview?.sessions.first(where: { $0.id == sessionID }) { return session }
+        return runtimeRow(forSessionID: sessionID).flatMap(terminalSession(for:))
+    }
+
+    /// Impact summary shown before a daemon restart is confirmed.
+    var daemonRestartImpactMessage: String {
+        guard let status = daemonStatus else {
+            return "Running terminals, processes, and coding agents on this device will stop."
+        }
+        let agents = status.activeAgents + status.waitingAgents
+        var parts: [String] = []
+        if status.activeSessionCount > 0 { parts.append("\(status.activeSessionCount) terminal\(status.activeSessionCount == 1 ? "" : "s")") }
+        if status.runningProcesses > 0 { parts.append("\(status.runningProcesses) process\(status.runningProcesses == 1 ? "" : "es")") }
+        if agents > 0 { parts.append("\(agents) coding agent\(agents == 1 ? "" : "s")") }
+        guard !parts.isEmpty else { return "No running work will be interrupted." }
+        return "This will stop " + parts.joined(separator: ", ") + "."
     }
 
     /// The active device cannot be used until its daemon is restarted/updated or this app updates.
@@ -938,7 +1022,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         guard visibleRowTypes.contains(row.type) else { return false }
         // Browser session rows carry no run state (see `SpacesMobileWorkspaceRuntimeRow.runState`), so
         // the run-state filter only applies to rows that actually have one.
-        if case .browserSession = row.source {} else {
+        if !row.isBrowserSession {
             guard visibleRunStates.contains(row.runState) else { return false }
         }
         guard !query.isEmpty else { return true }

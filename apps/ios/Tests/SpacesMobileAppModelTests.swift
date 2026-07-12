@@ -72,6 +72,25 @@
             XCTAssertEqual(browserRow?.canRestart, false)
         }
 
+        /// A browser session has no run state, so its row draws no status dot — while the process and
+        /// terminal rows beside it still do.
+        func testBrowserSessionRowHasNoStatusDot() {
+            let model = makeModel()
+            model.overview = makeOverview(
+                featureAssignedPorts: [SpacesDeviceAssignedPort(name: "web", port: 3_000, url: "http://web.feature.localhost:3000")],
+                featureConfig: SpacesDeviceWorkspaceConfig(
+                    resolvedBrowserSessions: [SpacesDeviceBrowserSession(name: "Dashboard", url: "http://localhost:3000/dashboard")]))
+
+            let rows = model.workspaceGroups.first { $0.workspace.id == "workspace-feature" }?.rows ?? []
+            let browserRow = rows.first { $0.title == "Dashboard" }
+            let processRow = rows.first { $0.title == "api" }
+
+            XCTAssertEqual(browserRow?.isBrowserSession, true)
+            XCTAssertNil(browserRow?.statusDotKind)
+            XCTAssertEqual(processRow?.isBrowserSession, false)
+            XCTAssertNotNil(processRow?.statusDotKind)
+        }
+
         func testBrowserSessionRowsSurviveRunStateFilter() {
             let model = makeModel()
             model.overview = makeOverview(
