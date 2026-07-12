@@ -33,7 +33,8 @@ struct SpacesE2ECommand: ParsableCommand {
             OpenRemoteDevicePairingWindowCommand.self, RecordScreenCommand.self, ProfileShowCommand.self, ProfileAppOwnerCommand.self,
             MacClientInstallationIDCommand.self, ProfileSocketPathsCommand.self, ProfileDesktopControlOwnerCommand.self,
             ProfileWaitForDesktopControlCommand.self, MobileStatusCommand.self, MobileServeCommand.self, MobileRequestCommand.self,
-            RenderUpdateTextCommand.self, ScrollApplicationWindowCommand.self, TypeApplicationWindowCommand.self, DragApplicationWindowCommand.self,
+            ServiceTunnelCommand.self, RenderUpdateTextCommand.self, ScrollApplicationWindowCommand.self, TypeApplicationWindowCommand.self,
+            DragApplicationWindowCommand.self,
         ])
 }
 
@@ -609,6 +610,51 @@ private struct MobileRequestCommand: ParsableCommand {
             FileHandle.standardOutput.write(Data([0x0A]))
             fflush(stdout)
         }
+    }
+}
+
+private struct ServiceTunnelCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "service-tunnel", abstract: "Open a Device API service tunnel and perform one HTTP GET through it.")
+
+    @Option(help: "Device API host.") var host = "127.0.0.1"
+    @Option(help: "Device API port.") var port: Int
+    @Option(help: "Expected daemon certificate fingerprint.") var certificateFingerprint: String
+    @Option(help: "Paired-device auth token.") var authToken: String
+    @Option(help: "Installation ID the auth token was paired with; the daemon binds each token to its paired installation and bundle.") var
+        clientInstallationID: String
+    @Option(help: "Workspace whose running service the tunnel targets.") var workspaceID: String
+    @Option(help: "Configured service name to tunnel to.") var serviceName: String
+    @Option(help: "Absolute request path for the single HTTP GET performed through the tunnel, e.g. /README.txt.") var httpGet: String
+    @Option(help: "Host header value for the HTTP GET.") var httpHost = "127.0.0.1"
+    @Option(help: "Timeout in seconds for the tunneled HTTP exchange.") var timeoutSeconds: Double = 30
+
+    func run() throws {
+        guard (1...65_535).contains(port) else { throw ValidationError("Port must be between 1 and 65535.") }
+        guard httpGet.hasPrefix("/") else { throw ValidationError("--http-get must be an absolute path starting with /.") }
+        let request = SpacesDeviceAPIRequest(
+            command: .openServiceTunnel(SpacesDeviceServiceTunnelRequest(workspaceID: workspaceID, serviceName: serviceName)),
+            authToken: authToken,
+            clientApp: SpacesDeviceClientApp(
+                installationID: clientInstallationID, bundleID: SpacesDeviceFirstPartyPolicy.iosBundleID, platform: "ios",
+                deviceName: "Spaces E2E Service Tunnel", appVersion: "1.0"))
+
+        let client = DeviceAPIRequestClient(host: host, port: UInt16(port), certificateFingerprint: certificateFingerprint)
+        let tunnel = try client.openTunnel(requestData: SpacesDeviceAPICodec.encodeRequest(request))
+        let response = try SpacesDeviceAPICodec.decodeResponse(tunnel.responseLine)
+        guard response.ok else {
+            tunnel.connection.cancel()
+            FileHandle.standardOutput.write(tunnel.responseLine)
+            FileHandle.standardOutput.write(Data([0x0A]))
+            throw ExitCode.failure
+        }
+
+        let deadline = Date(timeIntervalSinceNow: timeoutSeconds)
+        if !tunnel.initialTunnelData.isEmpty { FileHandle.standardOutput.write(tunnel.initialTunnelData) }
+        let httpRequest = "GET \(httpGet) HTTP/1.1\r\nHost: \(httpHost)\r\nConnection: close\r\n\r\n"
+        try client.sendTunnelBytes(Data(httpRequest.utf8), over: tunnel.connection)
+        try client.relayTunnelToStandardOutput(from: tunnel.connection, deadline: deadline)
+        tunnel.connection.cancel()
     }
 }
 
@@ -1854,6 +1900,95 @@ private final class DeviceAPIRequestClient: @unchecked Sendable {
         dispatchMain()
     }
 
+    /// Sends one tunnel-opening request line and reads exactly one response line, returning the
+    /// still-open connection as a raw byte pipe. Any bytes received after the response line's
+    /// trailing newline already belong to the pipe and are surfaced as `initialTunnelData`.
+    func openTunnel(requestData: Data) throws -> OpenedTunnel {
+        let connection = makeConnection()
+        try waitUntilReady(connection)
+        try send(requestData: requestData, connection: connection)
+        let semaphore = DispatchSemaphore(value: 0)
+        let box = TunnelResponseLineBox()
+        receiveTunnelResponseLine(from: connection, buffered: LineFrameBuffer(), box: box, semaphore: semaphore)
+        guard semaphore.wait(timeout: .now() + 10) == .success else {
+            connection.cancel()
+            throw DeviceAPIRequestError.timeout("Timed out waiting for the Device API tunnel response.")
+        }
+        if let error = box.error() {
+            connection.cancel()
+            throw error
+        }
+        let (line, remainder) = box.value()
+        return OpenedTunnel(connection: connection, responseLine: line, initialTunnelData: remainder)
+    }
+
+    /// Writes raw bytes into an opened tunnel pipe. Unlike `send(requestData:connection:)`, no
+    /// newline is appended: the connection no longer speaks newline-delimited JSON.
+    func sendTunnelBytes(_ data: Data, over connection: NWConnection) throws {
+        let semaphore = DispatchSemaphore(value: 0)
+        let box = DeviceAPIRequestResultBox()
+        connection.send(
+            content: data,
+            completion: .contentProcessed { error in
+                if let error { box.setError(error) }
+                semaphore.signal()
+            })
+        guard semaphore.wait(timeout: .now() + 10) == .success else {
+            throw DeviceAPIRequestError.timeout("Timed out sending bytes through the service tunnel.")
+        }
+        if let error = box.error() { throw error }
+    }
+
+    /// Copies tunnel pipe bytes to stdout until the remote side closes the pipe, failing if the
+    /// deadline passes before EOF.
+    func relayTunnelToStandardOutput(from connection: NWConnection, deadline: Date) throws {
+        while true {
+            let semaphore = DispatchSemaphore(value: 0)
+            let box = TunnelChunkBox()
+            connection.receive(minimumIncompleteLength: 1, maximumLength: 1_048_576) { content, _, isComplete, error in
+                box.set(content: content, isComplete: isComplete, error: error)
+                semaphore.signal()
+            }
+            let remaining = deadline.timeIntervalSinceNow
+            guard remaining > 0, semaphore.wait(timeout: .now() + remaining) == .success else {
+                connection.cancel()
+                throw DeviceAPIRequestError.timeout("Timed out waiting for tunneled service bytes.")
+            }
+            let chunk = box.value()
+            if let error = chunk.error {
+                connection.cancel()
+                throw error
+            }
+            if let content = chunk.content, !content.isEmpty { FileHandle.standardOutput.write(content) }
+            if chunk.isComplete { return }
+        }
+    }
+
+    private func receiveTunnelResponseLine(
+        from connection: NWConnection, buffered buffer: LineFrameBuffer, box: TunnelResponseLineBox, semaphore: DispatchSemaphore
+    ) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { content, _, isComplete, error in
+            if let error {
+                box.setError(error)
+                semaphore.signal()
+                return
+            }
+            var nextBuffer = buffer
+            if let content { nextBuffer.append(content) }
+            if let line = nextBuffer.popLine() {
+                box.set(line: line, remainder: nextBuffer.drainRemainder())
+                semaphore.signal()
+                return
+            }
+            if isComplete {
+                box.setError(DeviceAPIRequestError.emptyResponse)
+                semaphore.signal()
+                return
+            }
+            self.receiveTunnelResponseLine(from: connection, buffered: nextBuffer, box: box, semaphore: semaphore)
+        }
+    }
+
     private func makeConnection() -> NWConnection {
         let endpointPort = NWEndpoint.Port(rawValue: port)!
         return NWConnection(
@@ -1997,6 +2132,70 @@ private final class DeviceAPIRequestResultBox: @unchecked Sendable {
         let data = storedResponseData
         lock.unlock()
         return data
+    }
+}
+
+/// A service tunnel opened over the Device API: the raw pipe connection, the single response
+/// line the daemon issued before the handover, and any pipe bytes that arrived with it.
+private struct OpenedTunnel {
+    let connection: NWConnection
+    let responseLine: Data
+    let initialTunnelData: Data
+}
+
+private final class TunnelResponseLineBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedError: Error?
+    private var storedLine = Data()
+    private var storedRemainder = Data()
+
+    func setError(_ error: Error) {
+        lock.lock()
+        storedError = error
+        lock.unlock()
+    }
+
+    func error() -> Error? {
+        lock.lock()
+        let error = storedError
+        lock.unlock()
+        return error
+    }
+
+    func set(line: Data, remainder: Data) {
+        lock.lock()
+        storedLine = line
+        storedRemainder = remainder
+        lock.unlock()
+    }
+
+    func value() -> (line: Data, remainder: Data) {
+        lock.lock()
+        let value = (storedLine, storedRemainder)
+        lock.unlock()
+        return value
+    }
+}
+
+private final class TunnelChunkBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedError: Error?
+    private var storedContent: Data?
+    private var storedIsComplete = false
+
+    func set(content: Data?, isComplete: Bool, error: Error?) {
+        lock.lock()
+        storedContent = content
+        storedIsComplete = isComplete
+        storedError = error
+        lock.unlock()
+    }
+
+    func value() -> (content: Data?, isComplete: Bool, error: Error?) {
+        lock.lock()
+        let value = (storedContent, storedIsComplete, storedError)
+        lock.unlock()
+        return value
     }
 }
 

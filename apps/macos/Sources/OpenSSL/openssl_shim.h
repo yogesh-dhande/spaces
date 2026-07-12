@@ -26,6 +26,13 @@ static inline long spaces_SSL_CTX_set_max_proto_version(SSL_CTX *ctx, int versio
     return SSL_CTX_set_max_proto_version(ctx, version);
 }
 
+// Enables partial writes and a moving write buffer so the service-tunnel splice loop can drive one
+// non-blocking SSL* with independently buffered read/write directions. SSL_set_mode is a macro, so it
+// is wrapped here for Swift to call.
+static inline long spaces_SSL_set_partial_write_mode(SSL *ssl) {
+    return SSL_set_mode(ssl, SSL_MODE_ENABLE_PARTIAL_WRITE | SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER);
+}
+
 static inline unsigned char *spaces_device_api_psk_storage(void) {
     static unsigned char value[128];
     return value;

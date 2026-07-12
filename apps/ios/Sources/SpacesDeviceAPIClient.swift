@@ -354,12 +354,15 @@ struct SpacesDeviceAPIClient: Sendable {
         text: String,
         ownerEpoch: UInt64?,
         appendNewline: Bool = false,
+        asPaste: Bool = false,
         timeout: Duration = .seconds(3),
         commandChannel: SpacesDeviceAPICommandChannel? = nil
     ) async throws {
         let request = SpacesDeviceAPIRequest(
             command: .terminalControl(
-                .init(action: .send, sessionID: sessionID, clientID: clientID, text: text, ownerEpoch: ownerEpoch, appendNewline: appendNewline)),
+                .init(
+                    action: .send, sessionID: sessionID, clientID: clientID, text: text, ownerEpoch: ownerEpoch, appendNewline: appendNewline,
+                    asPaste: asPaste)),
             authToken: settings.trimmedAuthToken,
             clientApp: clientAppIdentity
         )
@@ -377,6 +380,29 @@ struct SpacesDeviceAPIClient: Sendable {
     ) async throws {
         let request = SpacesDeviceAPIRequest(
             command: .terminalControl(.init(action: .key, sessionID: sessionID, clientID: clientID, key: key, ownerEpoch: ownerEpoch)),
+            authToken: settings.trimmedAuthToken,
+            clientApp: clientAppIdentity
+        )
+        let response = try await sendRequest(request, timeout: timeout, commandChannel: commandChannel)
+        guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message, code: response.errorCode) }
+    }
+
+    /// Pastes a staged image into the session. Multi-MiB base64-encoded payloads take meaningfully
+    /// longer to transmit than ordinary text/key input, so this uses a 30 s default timeout instead
+    /// of the 6 s timeout used elsewhere for interactive input.
+    func pasteImage(
+        sessionID: String,
+        clientID: String,
+        ownerEpoch: UInt64,
+        fileExtension: String,
+        imageData: Data,
+        timeout: Duration = .seconds(30),
+        commandChannel: SpacesDeviceAPICommandChannel? = nil
+    ) async throws {
+        let request = SpacesDeviceAPIRequest(
+            command: .terminalPasteImage(
+                SpacesDeviceTerminalPasteImageRequest(
+                    sessionID: sessionID, clientID: clientID, ownerEpoch: ownerEpoch, fileExtension: fileExtension, imageData: imageData)),
             authToken: settings.trimmedAuthToken,
             clientApp: clientAppIdentity
         )

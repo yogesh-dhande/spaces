@@ -5,6 +5,7 @@ import spacesterminalcore
 struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var selectedSession: SelectedTerminalSessionRoute?
+    @State private var selectedBrowserSession: SelectedBrowserSessionRoute?
     @State private var pendingTerminalLaunch: PendingTerminalLaunch?
     @State private var pendingAuthenticationMessage: String?
     @State private var terminalListRefreshGeneration = 0
@@ -47,6 +48,17 @@ struct ContentView: View {
                     } onBack: {
                         self.pendingTerminalLaunch = nil
                     }
+                }
+                .navigationDestination(item: $selectedBrowserSession) { selectedBrowserSession in
+                    BrowserSessionDetailView(
+                        title: selectedBrowserSession.row.title,
+                        subtitle: selectedBrowserSession.row.route.identityHost,
+                        request: selectedBrowserSession.proxyRequest,
+                        stagedScreenshots: model.stagedScreenshots
+                    ) {
+                        self.selectedBrowserSession = nil
+                    }
+                    .id(selectedBrowserSession.id)
                 }
         }
         .sheet(isPresented: connectionSettingsBinding, onDismiss: { model.clearPendingPairingLink() }) {
@@ -105,16 +117,16 @@ struct ContentView: View {
                     return
                 }
             }
-            guard !model.isShowingConnectionSettings, activeTerminalRouteID == nil else { return }
+            guard !model.isShowingConnectionSettings, activeDetailRouteID == nil else { return }
             await model.refresh()
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(2))
                 guard !Task.isCancelled else { return }
-                guard scenePhase == .active, !model.isShowingConnectionSettings, activeTerminalRouteID == nil else { return }
+                guard scenePhase == .active, !model.isShowingConnectionSettings, activeDetailRouteID == nil else { return }
                 await model.refresh()
             }
         }
-        .onChange(of: activeTerminalRouteID) { oldValue, newValue in
+        .onChange(of: activeDetailRouteID) { oldValue, newValue in
             if oldValue != nil, newValue == nil {
                 handleTerminalDismissal()
             }
@@ -127,6 +139,21 @@ struct ContentView: View {
         }
         .onOpenURL { url in
             model.preparePairingLink(url)
+        }
+        .task {
+            model.browserProxyStart()
+        }
+        .onChange(of: scenePhase) { _, newPhase in
+            switch newPhase {
+            case .active:
+                model.browserProxyStart()
+            case .background:
+                model.browserProxyStop()
+            case .inactive:
+                break
+            @unknown default:
+                break
+            }
         }
     }
 
@@ -151,15 +178,17 @@ struct ContentView: View {
         )
     }
 
-    private var activeTerminalRouteID: String? {
-        selectedSession?.id ?? pendingTerminalLaunch?.id
+    /// Any detail route (a terminal, a pending terminal launch, or a browser session) that should pause
+    /// the workspace list's 2s refresh loop while it's on screen.
+    private var activeDetailRouteID: String? {
+        selectedSession?.id ?? pendingTerminalLaunch?.id ?? selectedBrowserSession?.id
     }
 
     private var refreshLoopTaskID: String {
         [
             scenePhase == .active ? "active" : "inactive",
             model.isShowingConnectionSettings ? "settings" : "home",
-            activeTerminalRouteID ?? "list",
+            activeDetailRouteID ?? "list",
             model.activeDeviceID ?? "no-device",
             "\(terminalListRefreshGeneration)",
         ].joined(separator: "|")
@@ -484,7 +513,14 @@ struct ContentView: View {
                 activateRuntimeRow(row)
             } label: {
                 HStack(spacing: 10) {
-                    StatusDot(kind: statusKind(for: row.runState))
+                    if isBrowserSessionRow(row) {
+                        // Browser session rows carry no run state, so the status dot is left blank
+                        // rather than drawn — an empty slot the same size keeps the icon column aligned
+                        // with the process/agent/terminal rows above and below it.
+                        Color.clear.frame(width: 14, height: 14)
+                    } else {
+                        StatusDot(kind: statusKind(for: row.runState))
+                    }
                     TypeIconTile(systemName: row.type.iconName)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(row.title)
@@ -507,7 +543,7 @@ struct ContentView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .disabled(model.isMutating || (row.sessionID == nil && !row.canRun))
+            .disabled(isRuntimeRowDisabled(row))
             .accessibilityIdentifier(rowIdentifier)
             runtimeActionButtons(for: row)
         }
@@ -588,7 +624,7 @@ struct ContentView: View {
     }
 
     @ViewBuilder private func runtimePrimaryIndicator(for row: SpacesMobileWorkspaceRuntimeRow) -> some View {
-        if row.sessionID != nil {
+        if isBrowserSessionRow(row) || row.sessionID != nil {
             Image(systemName: "chevron.right")
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(Theme.mutedSecondary)
@@ -597,6 +633,18 @@ struct ContentView: View {
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(Theme.mutedSecondary)
         }
+    }
+
+    private func isBrowserSessionRow(_ row: SpacesMobileWorkspaceRuntimeRow) -> Bool {
+        if case .browserSession = row.source { return true }
+        return false
+    }
+
+    /// Browser session rows are always tappable — navigating into one never touches the bridge client,
+    /// so unlike every other row it is not gated on `model.isMutating` or on having a session/run action.
+    private func isRuntimeRowDisabled(_ row: SpacesMobileWorkspaceRuntimeRow) -> Bool {
+        guard !isBrowserSessionRow(row) else { return false }
+        return model.isMutating || (row.sessionID == nil && !row.canRun)
     }
 
     @ViewBuilder private func runtimeActionButtons(for row: SpacesMobileWorkspaceRuntimeRow) -> some View {
@@ -642,7 +690,10 @@ struct ContentView: View {
     }
 
     private func activateRuntimeRow(_ row: SpacesMobileWorkspaceRuntimeRow) {
-        if let session = model.terminalSession(for: row) {
+        if case .browserSession(let browserRow) = row.source {
+            guard let proxyRequest = model.browserSessionProxyRequest(for: browserRow) else { return }
+            selectedBrowserSession = SelectedBrowserSessionRoute(row: browserRow, proxyRequest: proxyRequest)
+        } else if let session = model.terminalSession(for: row) {
             selectedSession = SelectedTerminalSessionRoute(session: session)
         } else if row.canRun {
             pendingTerminalLaunch = PendingTerminalLaunch(row: row, action: .primary)
@@ -677,6 +728,21 @@ private struct SelectedTerminalSessionRoute: Identifiable, Hashable {
     var id: String { session.id }
 
     static func == (lhs: SelectedTerminalSessionRoute, rhs: SelectedTerminalSessionRoute) -> Bool {
+        lhs.id == rhs.id
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+    }
+}
+
+private struct SelectedBrowserSessionRoute: Identifiable, Hashable {
+    let row: SpacesMobileBrowserSessionRow
+    let proxyRequest: BrowserProxyRequest
+
+    var id: String { row.id }
+
+    static func == (lhs: SelectedBrowserSessionRoute, rhs: SelectedBrowserSessionRoute) -> Bool {
         lhs.id == rhs.id
     }
 

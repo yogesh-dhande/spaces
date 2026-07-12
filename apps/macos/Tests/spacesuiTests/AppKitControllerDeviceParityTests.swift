@@ -494,6 +494,19 @@ import workspacecore
         #expect(request.resizeSerial == 3)
     }
 
+    @Test func deviceTerminalControlRequestPreservesPasteIntent() throws {
+        let control = TerminalControlRequest(
+            command: .send(
+                TerminalControlSendPayload(
+                    text: "line one\nline two", bytes: nil, clientID: "mac-client", ownerEpoch: 7, appendNewline: false, asPaste: true)))
+
+        let request = try AppKitController.deviceTerminalControlRequest(sessionID: "session-web", controlRequest: control)
+
+        #expect(request.action == .send)
+        #expect(request.text == "line one\nline two")
+        #expect(request.asPaste)
+    }
+
     @Test func deviceTerminalControlRequestCarriesAttachAppearanceToTheDaemon() throws {
         // The attaching client's OS appearance must survive the device-API conversion; otherwise the remote
         // Linux daemon never learns the client's light/dark preference and keeps its default theme.

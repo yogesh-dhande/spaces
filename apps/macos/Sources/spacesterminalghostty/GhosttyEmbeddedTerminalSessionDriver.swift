@@ -184,6 +184,18 @@
             GhosttyEmbeddedAppService.shared.tick()
         }
 
+        func sendTextAsPaste(_ text: String) {
+            guard let surface = surface, !text.isEmpty else { return }
+            let data = Data(text.utf8)
+            data.withUnsafeBytes { rawBuffer in
+                guard let baseAddress = rawBuffer.bindMemory(to: UInt8.self).baseAddress else { return }
+                ghostty_surface_text(surface, baseAddress, UInt(data.count))
+            }
+            GhosttyEmbeddedAppService.shared.tick()
+            requestSurfaceRefresh()
+            GhosttyEmbeddedAppService.shared.tick()
+        }
+
         func foregroundPID() -> Int32? {
             if let pid = hostPTY?.foregroundPID() { return pid }
             guard let session else { return nil }

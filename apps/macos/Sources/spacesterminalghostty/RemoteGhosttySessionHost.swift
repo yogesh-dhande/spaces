@@ -81,7 +81,7 @@
                 lastRequestedViewportSize = nil
             }
             terminalView.acceptsTerminalInput = isInteractive && mode == .owner
-            terminalView.onSendText = { [weak self] text in self?.sendRemoteInput(text) }
+            terminalView.onSendText = { [weak self] text, asPaste in self?.sendRemoteInput(text, asPaste: asPaste) }
             terminalView.onSendKey = { [weak self] key in self?.sendRemoteKey(key) }
             terminalView.onSendScroll = { [weak self] horizontal, vertical, scrollMods in
                 self?.sendRemoteScroll(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods)
@@ -165,6 +165,12 @@
         public func copySelectionToPasteboard() -> Bool { terminalView.copySelectionToPasteboard() }
 
         public func pasteClipboardContents() -> Bool { terminalView.pasteClipboardContents() }
+
+        @discardableResult public func sendTextAsPaste(_ text: String) -> Bool {
+            guard !text.isEmpty, isInteractiveRuntimeStateForControl(), attachedClient != nil else { return false }
+            sendRemoteInput(text, asPaste: true)
+            return true
+        }
 
         @discardableResult public func performBindingAction(_ action: String) -> Bool {
             let permitsFinalRenderReadOnlyAction = !isInteractiveRuntimeStateForControl() && Self.isReadOnlyBindingAction(action)
@@ -445,7 +451,7 @@
             return "runtime=\(runtimeColumns)x\(runtimeRows)|frame=\(snapshotColumns)x\(snapshotRows)|ownerEpoch=\(ownerEpoch)"
         }
 
-        private func sendRemoteInput(_ text: String) {
+        private func sendRemoteInput(_ text: String, asPaste: Bool) {
             guard isInteractiveRuntimeStateForControl() else { return }
             guard let client = attachedClient else { return }
             scrollCoalescer.flush()
@@ -458,7 +464,10 @@
             inputQueue.enqueue(priority: .userInitiated) {
                 _ = try Self.sendControlRequest(
                     TerminalControlRequest(
-                        command: .send(.init(text: text, bytes: nil, clientID: clientID, ownerEpoch: ownerEpoch, appendNewline: false))),
+                        command: .send(
+                            .init(
+                                text: text, bytes: nil, clientID: clientID, ownerEpoch: ownerEpoch, appendNewline: false,
+                                asPaste: asPaste))),
                     sessionID: sessionID, socketPath: socketPath, requestSender: requestSender)
                 if shouldRefreshAfterControl { Task { @MainActor [weak self] in self?.requestDirectStateRefresh(reason: "input") } }
             }

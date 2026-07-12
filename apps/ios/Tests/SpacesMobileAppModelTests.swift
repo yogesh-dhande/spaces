@@ -49,6 +49,86 @@
             XCTAssertEqual(terminal?.runState, .exited)
         }
 
+        func testBrowserSessionRowsBuiltFromResolvedRoutes() {
+            let model = makeModel()
+            model.overview = makeOverview(
+                featureAssignedPorts: [SpacesDeviceAssignedPort(name: "web", port: 3_000, url: "http://web.feature.localhost:3000")],
+                featureConfig: SpacesDeviceWorkspaceConfig(
+                    resolvedBrowserSessions: [SpacesDeviceBrowserSession(name: "Dashboard", url: "http://localhost:3000/dashboard")]))
+
+            let rows = model.workspaceGroups.first { $0.workspace.id == "workspace-feature" }?.rows ?? []
+            let browserRow = rows.first { row in
+                if case .browserSession = row.source { return true }
+                return false
+            }
+
+            XCTAssertEqual(browserRow?.id, "browser:workspace-feature:web:0")
+            XCTAssertEqual(browserRow?.title, "Dashboard")
+            XCTAssertEqual(browserRow?.detail, "localhost:3000/dashboard")
+            XCTAssertEqual(browserRow?.type, .browserSessions)
+            XCTAssertNil(browserRow?.sessionID)
+            XCTAssertEqual(browserRow?.canRun, false)
+            XCTAssertEqual(browserRow?.canStop, false)
+            XCTAssertEqual(browserRow?.canRestart, false)
+        }
+
+        func testBrowserSessionRowsSurviveRunStateFilter() {
+            let model = makeModel()
+            model.overview = makeOverview(
+                featureAssignedPorts: [SpacesDeviceAssignedPort(name: "web", port: 3_000, url: "http://web.feature.localhost:3000")],
+                featureConfig: SpacesDeviceWorkspaceConfig(
+                    resolvedBrowserSessions: [SpacesDeviceBrowserSession(name: "Dashboard", url: "http://localhost:3000/dashboard")]))
+            // A run-state filter that excludes every "real" run state must still leave browser rows visible.
+            model.visibleRunStates = [.running]
+
+            let rows = model.workspaceGroups.first { $0.workspace.id == "workspace-feature" }?.rows ?? []
+            XCTAssertTrue(rows.contains { $0.title == "Dashboard" })
+        }
+
+        func testRowTypeFilterExcludesAndIncludesBrowserSessions() {
+            let model = makeModel()
+            model.overview = makeOverview(
+                featureAssignedPorts: [SpacesDeviceAssignedPort(name: "web", port: 3_000, url: "http://web.feature.localhost:3000")],
+                featureConfig: SpacesDeviceWorkspaceConfig(
+                    resolvedBrowserSessions: [SpacesDeviceBrowserSession(name: "Dashboard", url: "http://localhost:3000/dashboard")]))
+
+            model.visibleRowTypes = Set(SpacesMobileWorkspaceRowType.allCases.filter { $0 != .browserSessions })
+            let rowsWithFilterOff = model.workspaceGroups.first { $0.workspace.id == "workspace-feature" }?.rows ?? []
+            XCTAssertFalse(rowsWithFilterOff.contains { $0.title == "Dashboard" })
+
+            model.visibleRowTypes = Set(SpacesMobileWorkspaceRowType.allCases)
+            let rowsWithFilterOn = model.workspaceGroups.first { $0.workspace.id == "workspace-feature" }?.rows ?? []
+            XCTAssertTrue(rowsWithFilterOn.contains { $0.title == "Dashboard" })
+        }
+
+        func testBrowserSessionProxyURLUsesFixedPortAndIdentityHost() {
+            let model = makeModel()
+            let route = SpacesDeviceBrowserSessionRoute.routes(
+                resolvedBrowserSessions: [SpacesDeviceBrowserSession(name: "Dashboard", url: "http://localhost:3000/dashboard")],
+                assignedPorts: [SpacesDeviceAssignedPort(name: "web", port: 3_000, url: "http://web.feature.localhost:3000")]
+            ).first!
+            let row = SpacesMobileBrowserSessionRow(workspaceID: "workspace-feature", index: 0, route: route)
+
+            let url = model.browserSessionProxyURL(for: row)
+
+            XCTAssertEqual(url?.absoluteString, "http://web.feature.localhost:47898/dashboard")
+        }
+
+        func testBrowserProxyStopReturnsProxyToIdle() async throws {
+            let settings = SpacesMobileConnectionSettings()
+            let client = SpacesDeviceAPIClient(settings: settings) { _ in
+                SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            let proxyPort = UInt16.random(in: 49_152...65_500)
+            let proxy = SpacesMobileBrowserProxy(port: proxyPort, installationID: settings.installationID)
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client, browserProxy: proxy)
+
+            model.browserProxyStart()
+            try await waitForBrowserProxyStatus(model, .running(port: proxyPort))
+            model.browserProxyStop()
+            try await waitForBrowserProxyStatus(model, .idle)
+        }
+
         func testStopTerminalRowSendsWorkspaceTerminalStopMutation() async {
             let recorder = SpacesMobileRequestRecorder()
             let settings = SpacesMobileConnectionSettings()
@@ -283,6 +363,65 @@
             XCTAssertEqual(request?.commandName, "openWorkspaceTerminal")
         }
 
+        func testMutationOverviewUpdatesBrowserProxyRoutes() async {
+            let refreshedOverview = makeOverview(
+                featureAssignedPorts: [SpacesDeviceAssignedPort(name: "web", port: 3_000, url: "http://web.feature.localhost:3000")],
+                featureConfig: SpacesDeviceWorkspaceConfig(
+                    resolvedBrowserSessions: [SpacesDeviceBrowserSession(name: "Dashboard", url: "http://localhost:3000/dashboard")]))
+            let recorder = SpacesMobileRequestRecorder()
+            var settings = SpacesMobileConnectionSettings()
+            settings.host = "127.0.0.1"
+            settings.port = 47_847
+            settings.certificateFingerprint = "fp-1"
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                return SpacesDeviceAPIResponse(
+                    ok: true,
+                    message: "Created workspace.",
+                    result: .mutation(
+                        SpacesDeviceMutationResult(
+                            overview: refreshedOverview,
+                            workspaceID: "workspace-feature")))
+            }
+            let proxy = SpacesMobileBrowserProxy(port: UInt16.random(in: 49_152...65_500), installationID: settings.installationID)
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client, browserProxy: proxy)
+            model.activeDeviceID = "device-1"
+            model.pairedDevices = [
+                SpacesMobilePairedDeviceRecord(
+                    id: "device-1", name: "Studio", host: settings.host, port: settings.port, certificateFingerprint: settings.certificateFingerprint,
+                    createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z", lastSelectedAt: nil)
+            ]
+
+            await model.createWorkspace(
+                projectID: "project-1",
+                branch: "feature",
+                baseBranch: "main",
+                directoryName: nil,
+                allowExistingBranchReuse: false)
+
+            let commandNames = await recorder.snapshot().map(\.commandName)
+            XCTAssertEqual(commandNames, ["createWorkspace"])
+            let browserRow = model.workspaceGroups.flatMap(\.rows).compactMap { row -> SpacesMobileBrowserSessionRow? in
+                guard case .browserSession(let browserRow) = row.source else { return nil }
+                return browserRow
+            }.first
+            XCTAssertEqual(browserRow?.id, "browser:workspace-feature:web:0")
+            let target = await proxy.routeTarget(forHost: "web.feature.localhost")
+            XCTAssertEqual(target?.deviceID, "device-1")
+            XCTAssertEqual(target?.deviceName, "Studio")
+            XCTAssertEqual(target?.host, "127.0.0.1")
+            XCTAssertEqual(target?.port, 47_847)
+            XCTAssertEqual(target?.certificateFingerprint, "fp-1")
+            XCTAssertEqual(target?.workspaceID, "workspace-feature")
+            XCTAssertEqual(target?.serviceName, "web")
+            XCTAssertFalse(target?.proxyAuthToken.isEmpty ?? true)
+            if let browserRow {
+                let request = model.browserSessionProxyRequest(for: browserRow)
+                XCTAssertEqual(request?.url.absoluteString, "http://web.feature.localhost:47898/dashboard")
+                XCTAssertEqual(request?.authToken, target?.proxyAuthToken)
+            }
+        }
+
         func testRefreshUsesEmbeddedStatusWithoutSecondHandshake() async {
             let overview = makeOverview(daemonStatus: daemonStatus(protocolVersion: SpacesWireProtocol.version))
             let recorder = SpacesMobileRequestRecorder()
@@ -327,6 +466,8 @@
             sessions: [SpacesDeviceTerminalSessionSummary] = [],
             featureProcessRows: [SpacesDeviceWorkspaceProcessRow]? = nil,
             featureCodingAgentRows: [SpacesDeviceWorkspaceCodingAgentRow]? = nil,
+            featureAssignedPorts: [SpacesDeviceAssignedPort] = [],
+            featureConfig: SpacesDeviceWorkspaceConfig = SpacesDeviceWorkspaceConfig(),
             daemonStatus: TerminalServiceDaemonStatus = TerminalServiceDaemonStatus(
                 version: "1.0.0", artifactVersion: nil, certificateFingerprint: nil, activeSessionCount: 0, protocolVersion: SpacesWireProtocol.version)
         ) -> SpacesDeviceOverviewPayload {
@@ -350,6 +491,8 @@
                 id: "workspace-feature", projectID: project.id, projectName: project.name, branch: "feature",
                 baseBranch: "main", dir: "/repo/feature", isRunning: true, isArchived: false, isHidden: false, isDefault: false,
                 sessionCount: 1,
+                assignedPorts: featureAssignedPorts,
+                config: featureConfig,
                 processRows: processRows,
                 codingAgentRows: codingAgentRows,
                 terminalRows: [])
@@ -407,6 +550,14 @@
                 SpacesDeviceAPIResponse(ok: true, message: "ok")
             }
             return SpacesMobileAppModel(settings: settings, bridgeClient: client)
+        }
+
+        private func waitForBrowserProxyStatus(_ model: SpacesMobileAppModel, _ expected: BrowserProxyStatus) async throws {
+            for _ in 0..<80 {
+                if model.browserProxyStatus == expected { return }
+                try await Task.sleep(for: .milliseconds(25))
+            }
+            XCTFail("Expected browser proxy status \(expected), got \(model.browserProxyStatus).")
         }
     }
 #endif

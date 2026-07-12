@@ -21,7 +21,7 @@
     @MainActor private final class GhosttyMirrorSurfaceHostView: NSView { override func hitTest(_ point: NSPoint) -> NSView? { nil } }
 
     @MainActor final class GhosttyMirrorTerminalView: NSView, NSSearchFieldDelegate {
-        typealias SendTextHandler = @MainActor (String) -> Void
+        typealias SendTextHandler = @MainActor (String, Bool) -> Void
         typealias SendKeyHandler = @MainActor (String) -> Void
         typealias SendScrollHandler = @MainActor (CGFloat, CGFloat, Int32) -> Void
         typealias ViewportSizeHandler = @MainActor (Int, Int) -> Void
@@ -249,7 +249,7 @@
             let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
             if flags.contains(.command) { return false }
             if let characters = GhosttyTerminalInputTranslator.ghosttyText(for: event), !characters.isEmpty {
-                onSendText?(characters)
+                onSendText?(characters, false)
                 return true
             }
             return false
@@ -302,7 +302,7 @@
         func pasteClipboardContents() -> Bool {
             guard acceptsTerminalInput else { return false }
             guard let text = NSPasteboard.general.string(forType: .string), !text.isEmpty else { return false }
-            onSendText?(text)
+            onSendText?(text, true)
             return true
         }
 

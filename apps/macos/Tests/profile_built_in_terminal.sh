@@ -158,6 +158,7 @@ request = {
         "connectedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     },
     "attachmentMode": "viewer",
+    "asPaste": False,
 }
 
 client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -186,7 +187,7 @@ import sys
 
 socket_path = sys.argv[1]
 text = sys.argv[2]
-request = {"command": "send", "text": text, "appendNewline": True}
+request = {"command": "send", "text": text, "appendNewline": True, "asPaste": False}
 
 client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 client.settimeout(5)
@@ -213,7 +214,7 @@ import sys
 
 socket_path = sys.argv[1]
 client_id = sys.argv[2]
-request = {"command": "takeover", "clientID": client_id}
+request = {"command": "takeover", "clientID": client_id, "asPaste": False}
 
 client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 client.settimeout(5)

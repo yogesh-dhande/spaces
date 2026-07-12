@@ -645,7 +645,7 @@ public enum SpacesDeviceClient {
         case .pair, .ping, .daemonStatus, .requestDaemonRestart, .overview, .previewProject, .listDirectories, .workspaceCreateOptions,
             .updateProjectConfig, .updateWorkspaceConfig, .updateWorkspaceMetadata, .renameTerminalSession, .state, .terminalControl,
             .terminalPasteImage, .sendTerminalInput, .tailTerminalOutput, .resolveTerminalLink, .readTerminalLinkChunk, .subscribe,
-            .subscribeDeviceOverview:
+            .subscribeDeviceOverview, .openServiceTunnel:
             defaultRequestTimeoutSeconds
         }
     }

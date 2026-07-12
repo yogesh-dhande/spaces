@@ -103,6 +103,30 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         XCTAssertEqual(GhosttyMirrorTerminalView.remoteKeySpecifier(for: keyEvent(keyCode: UInt16(kVK_ANSI_K), modifierFlags: .command)), "cmd+k")
     }
 
+    @MainActor func testRemoteMirrorClipboardPasteMarksTextAsPaste() {
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "remote-paste", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: nil,
+            createdAt: "2026-06-05T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+        let mirrorView = GhosttyMirrorTerminalView(launchConfiguration: launchConfiguration)
+        var sentText: [(String, Bool)] = []
+        mirrorView.onSendText = { text, asPaste in sentText.append((text, asPaste)) }
+        mirrorView.acceptsTerminalInput = true
+        let pasteboard = NSPasteboard.general
+        let previousText = pasteboard.string(forType: .string)
+        pasteboard.clearContents()
+        pasteboard.setString("line one\nline two", forType: .string)
+        defer {
+            pasteboard.clearContents()
+            if let previousText { pasteboard.setString(previousText, forType: .string) }
+        }
+
+        XCTAssertTrue(mirrorView.pasteClipboardContents())
+
+        XCTAssertEqual(sentText.count, 1)
+        XCTAssertEqual(sentText.first?.0, "line one\nline two")
+        XCTAssertEqual(sentText.first?.1, true)
+    }
+
     @MainActor func testRemoteMirrorEncodesPreciseScrollMods() {
         XCTAssertEqual(GhosttyMirrorTerminalView.makeScrollMods(hasPreciseDeltas: true, phase: .changed), 0b0000_0111)
         XCTAssertEqual(GhosttyMirrorTerminalView.makeScrollMods(hasPreciseDeltas: true, phase: .ended), 0b0000_1001)

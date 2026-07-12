@@ -1627,8 +1627,8 @@
             let scrollableButtons = buttons.filter { $0.isDescendant(of: scrollView) }
             let pinnedButtons = buttons.filter { !$0.isDescendant(of: scrollView) }
             XCTAssertEqual(scrollableButtons.compactMap(\.accessibilityLabel), ["tab", "/", "~", "|", "-", "_", "esc", "Control", "Command", "Option"])
-            XCTAssertEqual(pinnedButtons.compactMap(\.accessibilityLabel), ["Arrow key joystick", "Hide keyboard"])
-            let joystickButton = try XCTUnwrap(pinnedButtons.first)
+            XCTAssertEqual(pinnedButtons.compactMap(\.accessibilityLabel), ["Compose message", "Arrow key joystick", "Hide keyboard"])
+            let joystickButton = try XCTUnwrap(pinnedButtons.first { $0.accessibilityLabel == "Arrow key joystick" })
             XCTAssertEqual(joystickButton.accessibilityCustomActions?.map(\.name) ?? [], ["Up arrow", "Down arrow", "Left arrow", "Right arrow"])
 
             let phoneFrames = hostView.accessoryToolbarLayoutFramesForTesting(width: 320, userInterfaceIdiom: .phone)
@@ -1663,7 +1663,7 @@
             }
 
             hostView.setSoftwareKeyboardVisible(false)
-            XCTAssertEqual(hostView.accessoryToolbarButtonAccessibilityLabelsForTesting.pinned, ["Arrow key joystick", "Show keyboard"])
+            XCTAssertEqual(hostView.accessoryToolbarButtonAccessibilityLabelsForTesting.pinned, ["Compose message", "Arrow key joystick", "Show keyboard"])
 
             hostView.setAcceptsTerminalInput(false)
             XCTAssertNil(hostView.inputAccessoryView)
@@ -1746,7 +1746,7 @@
             var sentKeys: [String] = []
             var sentText: [String] = []
             hostView.onSendKey = { sentKeys.append($0) }
-            hostView.onSendText = { sentText.append($0) }
+            hostView.onSendText = { text, _ in sentText.append(text) }
             hostView.setAcceptsTerminalInput(true)
 
             let accessoryView = try XCTUnwrap(hostView.inputAccessoryView)
@@ -1775,6 +1775,19 @@
 
             XCTAssertEqual(sentKeys, ["ctrl+c", "cmd+left", "cmd+backspace", "opt+backspace", "cmd+k"])
             XCTAssertEqual(sentText, [])
+        }
+
+        func testRemoteTerminalPasteMarksTextAsPaste() {
+            let hostView = GhosttyRemoteTerminalHostView(frame: .zero)
+            var sentText: [(String, Bool)] = []
+            hostView.onSendText = { text, asPaste in sentText.append((text, asPaste)) }
+            hostView.setAcceptsTerminalInput(true)
+
+            hostView.pasteTextForTesting("line one\nline two")
+
+            XCTAssertEqual(sentText.count, 1)
+            XCTAssertEqual(sentText.first?.0, "line one\nline two")
+            XCTAssertEqual(sentText.first?.1, true)
         }
 
         func testRemoteTerminalAccessoryJoystickRequiresDirectionalRelease() {
