@@ -114,6 +114,21 @@
             XCTAssertEqual(url?.absoluteString, "http://web.feature.localhost:47898/dashboard")
         }
 
+        func testBrowserProxyStopReturnsProxyToIdle() async throws {
+            let settings = SpacesMobileConnectionSettings()
+            let client = SpacesDeviceAPIClient(settings: settings) { _ in
+                SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            let proxyPort = UInt16.random(in: 49_152...65_500)
+            let proxy = SpacesMobileBrowserProxy(port: proxyPort, installationID: settings.installationID)
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client, browserProxy: proxy)
+
+            model.browserProxyStart()
+            try await waitForBrowserProxyStatus(model, .running(port: proxyPort))
+            model.browserProxyStop()
+            try await waitForBrowserProxyStatus(model, .idle)
+        }
+
         func testStopTerminalRowSendsWorkspaceTerminalStopMutation() async {
             let recorder = SpacesMobileRequestRecorder()
             let settings = SpacesMobileConnectionSettings()
@@ -535,6 +550,14 @@
                 SpacesDeviceAPIResponse(ok: true, message: "ok")
             }
             return SpacesMobileAppModel(settings: settings, bridgeClient: client)
+        }
+
+        private func waitForBrowserProxyStatus(_ model: SpacesMobileAppModel, _ expected: BrowserProxyStatus) async throws {
+            for _ in 0..<80 {
+                if model.browserProxyStatus == expected { return }
+                try await Task.sleep(for: .milliseconds(25))
+            }
+            XCTFail("Expected browser proxy status \(expected), got \(model.browserProxyStatus).")
         }
     }
 #endif

@@ -148,7 +148,7 @@ struct ContentView: View {
             case .active:
                 model.browserProxyStart()
             case .background:
-                break
+                model.browserProxyStop()
             case .inactive:
                 break
             @unknown default:

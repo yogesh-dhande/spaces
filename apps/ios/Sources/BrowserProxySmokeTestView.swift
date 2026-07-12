@@ -8,8 +8,8 @@
     /// resolution.
     ///
     /// This stands in for the on-device browser-session proxy: a loopback
-    /// `NWListener` answers on a fixed port, a bare `WKWebView` loads a
-    /// `*.localhost` URL pointed at that port, and PASS requires both a
+    /// `NWListener` answers on an ephemeral port, a bare `WKWebView` loads a
+    /// `*.localhost` URL after the listener is ready, and PASS requires both a
     /// committed navigation and the listener observing the expected `Host`
     /// header — proving the request actually reached loopback instead of
     /// failing DNS or resolving somewhere else.
@@ -21,12 +21,17 @@
             VStack(spacing: 0) {
                 statusHeader
                 RowDivider(inset: 0)
-                WebProbeView(
-                    url: BrowserProxySmokeTestModel.smokeURL,
-                    reloadToken: reloadToken,
-                    onCommit: { model.recordNavigationCommit() },
-                    onFail: { model.recordNavigationFailure($0) }
-                )
+                if let smokeURL = model.smokeURL {
+                    WebProbeView(
+                        url: smokeURL,
+                        reloadToken: reloadToken,
+                        onCommit: { model.recordNavigationCommit() },
+                        onFail: { model.recordNavigationFailure($0) }
+                    )
+                } else {
+                    Color.clear
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
             }
             .background(Theme.bg)
             .navigationTitle("Browser Proxy Smoke Test")
@@ -49,7 +54,7 @@
                         .foregroundStyle(Theme.text)
                     Spacer(minLength: 0)
                 }
-                Text("Loads \(BrowserProxySmokeTestModel.smokeURL.absoluteString) against a loopback listener on port \(BrowserProxySmokeTestModel.port.rawValue).")
+                Text(statusDetailText)
                     .font(.footnote)
                     .foregroundStyle(Theme.muted)
                 if let listenerErrorMessage = model.listenerErrorMessage {
@@ -102,6 +107,13 @@
             case .committed: "Navigation committed"
             case .failed: "Navigation failed"
             }
+        }
+
+        private var statusDetailText: String {
+            if let smokeURL = model.smokeURL, let listenerPort = model.listenerPort {
+                return "Loads \(smokeURL.absoluteString) against a loopback listener on port \(listenerPort.rawValue)."
+            }
+            return "Starts a loopback listener on an ephemeral port, then loads a *.localhost URL against it."
         }
 
         private func retry() {
@@ -170,10 +182,12 @@
     @MainActor
     @Observable
     final class BrowserProxySmokeTestModel {
-        static let port: NWEndpoint.Port = 47898
         static let hostname = "smoke.abc123.localhost"
         static let expectedHostHeader = "Host: \(hostname)"
-        static let smokeURL = URL(string: "http://\(hostname):\(port.rawValue)/")!
+
+        static func makeSmokeURL(port: NWEndpoint.Port) -> URL {
+            URL(string: "http://\(hostname):\(port.rawValue)/")!
+        }
 
         enum NavigationOutcome: Equatable {
             case pending
@@ -184,25 +198,29 @@
         private(set) var sawExpectedHost = false
         private(set) var listenerErrorMessage: String?
         private(set) var navigationOutcome: NavigationOutcome = .pending
+        private(set) var listenerPort: NWEndpoint.Port?
+        private(set) var smokeURL: URL?
 
         private var listener: NWListener?
         private var connectionsByID: [ObjectIdentifier: NWConnection] = [:]
 
         /// Tears down any prior listener/connections and starts a fresh
-        /// listener bound to loopback on `Self.port`. Safe to call repeatedly
+        /// listener bound to an ephemeral loopback port. Safe to call repeatedly
         /// (used by the initial `.task` and by Retry).
         func start() {
             stop()
             sawExpectedHost = false
             listenerErrorMessage = nil
             navigationOutcome = .pending
+            listenerPort = nil
+            smokeURL = nil
 
             let parameters = NWParameters.tcp
             parameters.allowLocalEndpointReuse = true
             parameters.requiredLocalEndpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: .any)
 
             do {
-                let listener = try NWListener(using: parameters, on: Self.port)
+                let listener = try NWListener(using: parameters)
                 listener.stateUpdateHandler = { [weak self] state in
                     guard let self else { return }
                     Task { @MainActor in self.handleListenerState(state) }
@@ -227,6 +245,8 @@
                 connection.cancel()
             }
             connectionsByID.removeAll()
+            listenerPort = nil
+            smokeURL = nil
         }
 
         func recordNavigationCommit() {
@@ -246,15 +266,26 @@
             switch state {
             case .failed(let error):
                 listenerErrorMessage = describeBindFailure(error)
+                listenerPort = nil
+                smokeURL = nil
                 listener?.cancel()
                 listener = nil
             case .waiting(let error):
-                // A bind conflict (e.g. another process holding the port) surfaces as
-                // `.waiting` since Network.framework treats it as retryable rather than
-                // immediately fatal; surface it the same way as `.failed`.
+                // Binding may surface as `.waiting` since Network.framework treats some
+                // listener errors as retryable rather than immediately fatal.
                 listenerErrorMessage = describeBindFailure(error)
+                listenerPort = nil
+                smokeURL = nil
             case .ready:
                 listenerErrorMessage = nil
+                guard let port = listener?.port else {
+                    listenerErrorMessage = "Listener became ready without a local port."
+                    listenerPort = nil
+                    smokeURL = nil
+                    return
+                }
+                listenerPort = port
+                smokeURL = Self.makeSmokeURL(port: port)
             case .setup, .cancelled:
                 break
             @unknown default:
@@ -264,7 +295,7 @@
 
         private func describeBindFailure(_ error: NWError) -> String {
             if case .posix(let code) = error, code == .EADDRINUSE {
-                return "Port \(Self.port.rawValue) is already in use. Stop the other process and retry."
+                return "The smoke-test loopback port is already in use. Retry to request another port."
             }
             return "Listener error: \(error.debugDescription)"
         }

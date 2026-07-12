@@ -25,9 +25,11 @@ final class BrowserProxyRuntimeState {
 /// It listens on `127.0.0.1:47898`, reads each connection's first HTTP request head to learn the
 /// `Host`, looks the host up in the routing table, verifies the embedded web view's unguessable proxy
 /// cookie, opens an authenticated raw-byte tunnel to the owning daemon (`openServiceTunnel` over
-/// pinned TLS), replays the bytes it consumed after stripping the proxy cookie, then splices the two
-/// connections transparently so WebSocket/SSE upgrades pass straight through. Requests it cannot route,
-/// authenticate, or dial are answered with a self-contained HTML error page.
+/// pinned TLS), replays exactly one non-upgrade request after stripping the proxy cookie, then
+/// half-closes the tunnel write side so the browser cannot reuse that connection with unsanitized
+/// cookies. Upgrade requests then splice the two connections transparently so WebSockets pass straight
+/// through. Requests it cannot route, authenticate, or dial are answered with a self-contained HTML
+/// error page.
 actor SpacesMobileBrowserProxy {
     /// The fixed loopback port WKWebView targets. It is stable so the `.localhost` URLs the daemon
     /// mints resolve to this proxy regardless of which daemon owns the service.
@@ -243,6 +245,30 @@ actor SpacesMobileBrowserProxy {
 
         session.tunnel = opened.connection
 
+        let requestBodyRelay: BrowserProxyRequestBodyRelay
+        let bodyLimit: Int?
+        if parser.isUpgradeRequest {
+            requestBodyRelay = .none
+            bodyLimit = nil
+        } else {
+            switch parser.bodyFraming {
+            case .none:
+                requestBodyRelay = .none
+                bodyLimit = 0
+            case .contentLength(let contentLength):
+                let initialBodyBytesForwarded = min(parser.bodyByteCount, contentLength)
+                requestBodyRelay = .contentLength(remainingBytes: max(0, contentLength - initialBodyBytesForwarded))
+                bodyLimit = contentLength
+            case .chunked:
+                guard let progress = parser.chunkedBodyProgress else {
+                    teardown(session.id)
+                    return
+                }
+                requestBodyRelay = .chunked(bufferedBody: parser.bodyBytes(limit: progress.forwardedByteCount))
+                bodyLimit = progress.forwardedByteCount
+            }
+        }
+
         do {
             // Forward any early service bytes the daemon already delivered, then replay the consumed
             // request head (and any body bytes read with it) to the service.
@@ -250,13 +276,21 @@ actor SpacesMobileBrowserProxy {
                 try await BrowserProxyConnectionIO.send(opened.residual, on: client)
             }
             try await BrowserProxyConnectionIO.send(
-                parser.consumedBytes(droppingCookieNamed: BrowserProxyRequest.cookieName), on: opened.connection)
+                parser.consumedBytes(
+                    droppingCookieNamed: BrowserProxyRequest.cookieName,
+                    forcingConnectionClose: !parser.isUpgradeRequest,
+                    bodyLimit: bodyLimit),
+                on: opened.connection)
         } catch {
             teardown(session.id)
             return
         }
 
-        splice(session)
+        if parser.isUpgradeRequest {
+            splice(session)
+        } else {
+            relaySingleRequestResponse(session, requestBodyRelay: requestBodyRelay)
+        }
     }
 
     /// Reads the HTTP head off a freshly accepted client connection.
@@ -304,6 +338,30 @@ actor SpacesMobileBrowserProxy {
         Self.pump(from: tunnel, to: client, coordinator: coordinator)
     }
 
+    /// Finishes the first request body, closes the service-facing write side, and relays the single
+    /// response back to the client. Normal HTTP browser connections use this instead of a raw
+    /// client->service splice so a keep-alive follow-up request cannot leak the proxy auth cookie.
+    private func relaySingleRequestResponse(_ session: BrowserProxySession, requestBodyRelay: BrowserProxyRequestBodyRelay) {
+        guard let tunnel = session.tunnel else {
+            teardown(session.id)
+            return
+        }
+        let client = session.client
+        let id = session.id
+        let coordinator = BrowserProxyRelayCoordinator {
+            Task { await self.teardown(id) }
+        }
+        switch requestBodyRelay {
+        case .none:
+            Self.finishSingleRequestBody(from: client, to: tunnel, remainingBytes: 0, coordinator: coordinator)
+        case .contentLength(let remainingBytes):
+            Self.finishSingleRequestBody(from: client, to: tunnel, remainingBytes: remainingBytes, coordinator: coordinator)
+        case .chunked(let bufferedBody):
+            Self.finishChunkedRequestBody(from: client, to: tunnel, bufferedBody: bufferedBody, coordinator: coordinator)
+        }
+        Self.pump(from: tunnel, to: client, coordinator: coordinator)
+    }
+
     /// Pumps bytes from `source` to `dest`, applying backpressure by only issuing the next receive
     /// after the prior send is processed. Forwards stream end as a half-close (`.finalMessage` is
     /// what actually emits a TCP FIN; the default message context ignores `isComplete` for stream
@@ -331,11 +389,158 @@ actor SpacesMobileBrowserProxy {
                         }
                     })
             } else if isComplete {
-                dest.send(content: nil, contentContext: .finalMessage, isComplete: true, completion: .contentProcessed { _ in })
-                coordinator.directionComplete()
+                dest.send(
+                    content: nil,
+                    contentContext: .finalMessage,
+                    isComplete: true,
+                    completion: .contentProcessed { sendError in
+                        if sendError != nil {
+                            coordinator.abort()
+                        } else {
+                            coordinator.directionComplete()
+                        }
+                    })
             } else {
                 pump(from: source, to: dest, coordinator: coordinator)
             }
+        }
+    }
+
+    /// Sends the remaining bytes of a known-length request body, then half-closes the service-facing
+    /// write side. If the client stops before the declared body is complete, the tunnel is aborted
+    /// rather than forwarding a truncated request.
+    private static func finishSingleRequestBody(
+        from source: NWConnection,
+        to dest: NWConnection,
+        remainingBytes: Int,
+        coordinator: BrowserProxyRelayCoordinator
+    ) {
+        guard remainingBytes > 0 else {
+            dest.send(
+                content: nil,
+                contentContext: .finalMessage,
+                isComplete: true,
+                completion: .contentProcessed { sendError in
+                    if sendError != nil {
+                        coordinator.abort()
+                    } else {
+                        coordinator.directionComplete()
+                    }
+                })
+            return
+        }
+
+        source.receive(minimumIncompleteLength: 1, maximumLength: min(65_536, remainingBytes)) { content, _, isComplete, error in
+            if error != nil {
+                coordinator.abort()
+                return
+            }
+            guard let content, !content.isEmpty else {
+                if isComplete {
+                    coordinator.abort()
+                    return
+                }
+                finishSingleRequestBody(from: source, to: dest, remainingBytes: remainingBytes, coordinator: coordinator)
+                return
+            }
+
+            let nextRemainingBytes = remainingBytes - content.count
+            if isComplete, nextRemainingBytes > 0 {
+                coordinator.abort()
+                return
+            }
+            dest.send(
+                content: content,
+                contentContext: nextRemainingBytes == 0 ? .finalMessage : .defaultMessage,
+                isComplete: nextRemainingBytes == 0,
+                completion: .contentProcessed { sendError in
+                    if sendError != nil {
+                        coordinator.abort()
+                    } else if nextRemainingBytes == 0 {
+                        coordinator.directionComplete()
+                    } else {
+                        finishSingleRequestBody(from: source, to: dest, remainingBytes: nextRemainingBytes, coordinator: coordinator)
+                    }
+                })
+        }
+    }
+
+    /// Continues a chunked request body until the terminating chunk and trailer terminator have been
+    /// forwarded, then half-closes the service-facing write side. Bytes after that terminator are a
+    /// pipelined request on the browser connection and are intentionally not forwarded because they
+    /// would still carry the proxy auth cookie.
+    private static func finishChunkedRequestBody(
+        from source: NWConnection,
+        to dest: NWConnection,
+        bufferedBody: Data,
+        coordinator: BrowserProxyRelayCoordinator
+    ) {
+        var tracker = BrowserProxyChunkedBodyTracker()
+        guard let progress = tracker.consume(bufferedBody) else {
+            coordinator.abort()
+            return
+        }
+        if progress.isComplete {
+            dest.send(
+                content: nil,
+                contentContext: .finalMessage,
+                isComplete: true,
+                completion: .contentProcessed { sendError in
+                    if sendError != nil {
+                        coordinator.abort()
+                    } else {
+                        coordinator.directionComplete()
+                    }
+                })
+            return
+        }
+        finishChunkedRequestBody(from: source, to: dest, tracker: tracker, coordinator: coordinator)
+    }
+
+    private static func finishChunkedRequestBody(
+        from source: NWConnection,
+        to dest: NWConnection,
+        tracker: BrowserProxyChunkedBodyTracker,
+        coordinator: BrowserProxyRelayCoordinator
+    ) {
+        source.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { content, _, isComplete, error in
+            if error != nil {
+                coordinator.abort()
+                return
+            }
+            guard let content, !content.isEmpty else {
+                if isComplete {
+                    coordinator.abort()
+                    return
+                }
+                finishChunkedRequestBody(from: source, to: dest, tracker: tracker, coordinator: coordinator)
+                return
+            }
+
+            var updatedTracker = tracker
+            guard let progress = updatedTracker.consume(content) else {
+                coordinator.abort()
+                return
+            }
+            if isComplete, !progress.isComplete {
+                coordinator.abort()
+                return
+            }
+            let nextTracker = updatedTracker
+            let bodyBytes = content.prefix(progress.forwardedByteCount)
+            dest.send(
+                content: bodyBytes.isEmpty ? nil : Data(bodyBytes),
+                contentContext: progress.isComplete ? .finalMessage : .defaultMessage,
+                isComplete: progress.isComplete,
+                completion: .contentProcessed { sendError in
+                    if sendError != nil {
+                        coordinator.abort()
+                    } else if progress.isComplete {
+                        coordinator.directionComplete()
+                    } else {
+                        finishChunkedRequestBody(from: source, to: dest, tracker: nextTracker, coordinator: coordinator)
+                    }
+                })
         }
     }
 
@@ -347,6 +552,12 @@ actor SpacesMobileBrowserProxy {
     private func setStatus(_ status: BrowserProxyStatus) async {
         await MainActor.run { runtimeState.status = status }
     }
+}
+
+private enum BrowserProxyRequestBodyRelay: Sendable {
+    case none
+    case contentLength(remainingBytes: Int)
+    case chunked(bufferedBody: Data)
 }
 
 /// One live proxy connection: the accepted browser connection and, once dialed, its daemon tunnel.

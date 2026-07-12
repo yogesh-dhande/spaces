@@ -18,9 +18,7 @@ struct BrowserProxyRequest: Sendable, Equatable, Hashable {
     }
 
     var urlRequest: URLRequest {
-        var request = URLRequest(url: url)
-        request.setValue(cookieHeaderValue, forHTTPHeaderField: "Cookie")
-        return request
+        URLRequest(url: url)
     }
 
     var httpCookie: HTTPCookie {
@@ -39,7 +37,6 @@ struct BrowserProxyRequest: Sendable, Equatable, Hashable {
         return cookie
     }
 
-    private var cookieHeaderValue: String { "\(Self.cookieName)=\(authToken)" }
 }
 
 /// The daemon and workspace service a browser `Host` resolves to. The display names are carried so
@@ -67,7 +64,8 @@ struct BrowserProxyRouteTarget: Sendable, Equatable {
 struct BrowserProxyRoutingTable: Sendable, Equatable {
     private(set) var targets: [String: BrowserProxyRouteTarget] = [:]
 
-    /// Merges one device's overview into the table, keying each workspace service on its URL host.
+    /// Replaces one device's routes from its latest overview, keying each workspace service on its URL host.
+    /// Routes owned by this device but absent from the refresh are removed.
     /// Returns the hosts whose owning `(deviceID, workspaceID)` changed as a result, so the caller
     /// can surface the reassignment.
     @discardableResult
@@ -79,6 +77,17 @@ struct BrowserProxyRoutingTable: Sendable, Equatable {
         certificateFingerprint: String,
         overview: SpacesDeviceOverviewPayload
     ) -> [String] {
+        var refreshedKeys = Set<String>()
+        for workspace in overview.workspaces {
+            for assignedPort in workspace.assignedPorts {
+                guard let key = Self.routingKey(forURL: assignedPort.url) else { continue }
+                refreshedKeys.insert(key)
+            }
+        }
+        targets = targets.filter { key, target in
+            target.deviceID != deviceID || refreshedKeys.contains(key)
+        }
+
         var replacedHosts: [String] = []
         for workspace in overview.workspaces {
             for assignedPort in workspace.assignedPorts {

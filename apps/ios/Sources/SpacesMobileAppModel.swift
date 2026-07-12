@@ -452,7 +452,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// lifetime (its installation identity is stable across device switches), started/stopped by
     /// `ContentView`'s scene-phase observation.
     @ObservationIgnored private let browserProxy: SpacesMobileBrowserProxy
-    /// Routing table merged from accepted active-device overviews, and pruned when a device is unpaired.
+    /// Routing table refreshed from accepted active-device overviews, and pruned when a device is unpaired.
     /// Kept on the model (rather than rebuilt from scratch each time) so `removeDevice` can drop just
     /// that device's routes via `BrowserProxyRoutingTable.removeDevice`.
     @ObservationIgnored private var browserRoutingTable = BrowserProxyRoutingTable()
@@ -585,6 +585,11 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// Starts the loopback browser proxy. Idempotent; call when the app becomes active.
     func browserProxyStart() {
         Task { await browserProxy.start() }
+    }
+
+    /// Stops the loopback browser proxy and all live tunnels. Call when the app enters the background.
+    func browserProxyStop() {
+        Task { await browserProxy.stop() }
     }
 
     /// The URL a `WKWebView` should load for a browser session row, rebuilt against the proxy's fixed

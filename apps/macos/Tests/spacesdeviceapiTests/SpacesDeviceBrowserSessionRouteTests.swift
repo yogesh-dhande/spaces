@@ -1,6 +1,5 @@
 import Foundation
 import Testing
-
 import spacesdevicecore
 
 @Suite struct SpacesDeviceBrowserSessionRouteTests {
@@ -33,6 +32,15 @@ import spacesdevicecore
         #expect(routes.count == 1)
         #expect(routes[0].serviceName == "api")
         #expect(routes[0].pathQueryFragment == "")
+    }
+
+    @Test func bracketedIPv6LoopbackSessionMatchesByAssignedPort() {
+        let sessions = [SpacesDeviceBrowserSession(name: nil, url: "http://[::1]:8081/v1")]
+        let routes = SpacesDeviceBrowserSessionRoute.routes(resolvedBrowserSessions: sessions, assignedPorts: assignedPorts)
+        #expect(routes.count == 1)
+        #expect(routes[0].serviceName == "api")
+        #expect(routes[0].identityHost == "api.myslug.localhost")
+        #expect(routes[0].pathQueryFragment == "/v1")
     }
 
     @Test func proxyURLPreservesPathQueryAndFragment() {

@@ -20,9 +20,11 @@ struct TerminalComposerSheet: View {
                 attachmentStrip
             }
 
-            TextField("Message", text: $model.composerDraftText, axis: .vertical)
+            TextField("Message", text: composerDraftText, axis: .vertical)
                 .lineLimit(3...6)
                 .textFieldStyle(.plain)
+                .disabled(model.isSendingComposedMessage)
+                .allowsHitTesting(!model.isSendingComposedMessage)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
                 .foregroundStyle(Theme.text)
@@ -94,6 +96,7 @@ struct TerminalComposerSheet: View {
                         .foregroundStyle(.white, .black.opacity(0.55))
                 }
                 .padding(2)
+                .disabled(model.isSendingComposedMessage)
                 .accessibilityLabel("Remove \(attachment.sourceLabel.lowercased())")
             }
             .accessibilityIdentifier("composer.attachment.\(index)")
@@ -117,6 +120,7 @@ struct TerminalComposerSheet: View {
                                 .strokeBorder(Theme.border, lineWidth: 1))
                 }
                 .accessibilityLabel("Attach screenshot")
+                .disabled(model.isSendingComposedMessage)
                 .accessibilityIdentifier("composer.attach-staged")
             }
 
@@ -125,9 +129,9 @@ struct TerminalComposerSheet: View {
             } label: {
                 Image(systemName: "doc.on.clipboard")
                     .font(.system(size: 18))
-                    .foregroundStyle(hasPasteableImage ? Theme.accent : Theme.muted)
+                    .foregroundStyle(hasPasteableImage && !model.isSendingComposedMessage ? Theme.accent : Theme.muted)
             }
-            .disabled(!hasPasteableImage)
+            .disabled(model.isSendingComposedMessage || !hasPasteableImage)
             .accessibilityLabel("Paste image")
             .accessibilityIdentifier("composer.paste")
 
@@ -146,9 +150,18 @@ struct TerminalComposerSheet: View {
                         .foregroundStyle(model.canSendComposedMessage ? Theme.accent : Theme.muted)
                 }
             }
-            .disabled(!model.canSendComposedMessage)
+            .disabled(model.isSendingComposedMessage || !model.canSendComposedMessage)
             .accessibilityLabel("Send message")
             .accessibilityIdentifier("composer.send")
+        }
+    }
+
+    private var composerDraftText: Binding<String> {
+        Binding {
+            model.composerDraftText
+        } set: { newValue in
+            guard !model.isSendingComposedMessage else { return }
+            model.composerDraftText = newValue
         }
     }
 
@@ -157,6 +170,7 @@ struct TerminalComposerSheet: View {
     }
 
     private func pasteClipboardImage() {
+        guard !model.isSendingComposedMessage else { return }
         switch TerminalUIPasteboardImageReader.readImage() {
         case .image(let attachment):
             model.attachComposerImage(attachment)

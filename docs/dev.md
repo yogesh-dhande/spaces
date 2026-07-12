@@ -229,11 +229,21 @@ The zig and SwiftPM cache/build paths must live in named Docker volumes, not on 
 
 Use `--platform linux/arm64` with `--arch arm64` for the Ubuntu arm64 artifact. The archive contains `bin/spacesd`, `bin/spaces`, `install.sh`, the `spacesd-bin` executable, `libghostty-vt`, and the Swift runtime libraries needed on stock Ubuntu 24.04. The install script places the release under `~/.spaces/daemon/releases/<version>/`, updates `~/.spaces/daemon/current`, updates `~/.spaces/bin/spacesd` and `~/.spaces/bin/spaces`, points `~/.local/bin/spaces` to the managed CLI helper, creates `~/.spaces/runtime`, `~/spaces/workspaces`, and `~/spaces/repos`, installs `~/.config/systemd/user/spacesd.service`, enables user lingering so the service survives SSH disconnects, enables the user service, and restarts it. If the Linux account cannot enable lingering itself, run `sudo loginctl enable-linger <user>` on the Linux device and retry.
 
-The single user-facing Linux install/upgrade path is the published `spaces-install-linux.sh` one-liner, run on the Ubuntu 24.04 device for a specific released version (the Mac app and CLI print this command when a remote daemon is missing or wire-incompatible):
+The single user-facing Linux install/upgrade path is `scripts/spaces-install-linux.sh`, served at `https://usespaces.dev/install.sh`. `apps/web`'s npm `prebuild` step copies the script into `apps/web/public/install.sh`, so every Firebase website deploy republishes the current installer; the script is not uploaded as a per-release GitHub asset. The script takes an optional version argument, run on the Ubuntu 24.04 device:
 
 ```bash
-curl -fsSL https://github.com/yogesh-dhande/spaces/releases/download/v<version>/spaces-install-linux.sh | bash -s -- <version>
+curl -fsSL https://usespaces.dev/install.sh | bash
 ```
+
+installs the latest release. A version-pinned form:
+
+```bash
+curl -fsSL https://usespaces.dev/install.sh | bash -s -- <version>
+```
+
+installs a specific released version; the Mac app and CLI print this form when pairing needs a daemon wire-compatible with that client.
+
+The no-version form resolves the latest release through GitHub's `releases/latest/download` redirect, which only works while Spaces releases hold the repo's "latest" marker: the release workflows create Spaces releases with `--latest`, and `ensure_ghostty_artifacts.sh` publishes `ghostty-artifacts-<sha>` releases as prereleases so internal artifact releases never capture `releases/latest`.
 
 For development or debugging against an unreleased build, install a locally built artifact on a reachable Linux device with scp plus the bundled `install.sh` (this is the offline alternative to the published one-liner):
 
@@ -612,14 +622,14 @@ Publish macOS releases to GitHub Releases with:
 scripts/release-and-deploy.sh <version> [build-number]
 ```
 
-Local release runs the Ubuntu remote daemon artifact builds inside Docker for `linux/amd64` and `linux/arm64`, so Docker must be available before running the script. These Linux artifacts are installed by the user-run `spaces-install-linux.sh` one-liner on the Ubuntu device; Spaces does not install them over SSH. Remote Macs use the signed DMG rather than a separate daemon artifact.
+Local release runs the Ubuntu remote daemon artifact builds inside Docker for `linux/amd64` and `linux/arm64`, so Docker must be available before running the script. These Linux artifacts are installed by the published `https://usespaces.dev/install.sh` script, run on the Ubuntu device manually or by the Mac app over SSH during pairing recovery. Remote Macs use the signed DMG rather than a separate daemon artifact.
 
 This workflow:
 - syncs the checked-in version metadata used by the CLI, app menu, and bundle plist
 - builds universal `arm64` + `x86_64` release binaries for the app, CLI, and `spacesd`
 - code-signs the app, CLI, and spacesd daemon
 - builds and smoke-tests Ubuntu 24.04 `x86_64` and `arm64` remote daemon artifacts
-- signs `spaces-remote-artifacts.json` with the remote artifact Ed25519 key that the `spaces-install-linux.sh` installer uses to verify the Linux artifact download
+- signs `spaces-remote-artifacts.json` with the remote artifact Ed25519 key that the Linux installer uses to verify the Linux artifact download
 - creates a signed manual-download DMG
 - creates a Sparkle-served `Spaces.app` zip archive
 - updates `dist/updates/stable/appcast.xml` plus any Sparkle delta files
@@ -648,7 +658,7 @@ Important environment variables:
 
 For GitHub Actions releases, `CODESIGN_CERTIFICATE_P12` must be the base64-encoded Developer ID Application `.p12` bundle that matches `CODESIGN_IDENTITY`, and `CODESIGN_CERTIFICATE_PASSWORD` must be the password used when exporting that `.p12`.
 
-Sparkle update hosting lives under `https://usespaces.dev/releases/` on the static Firebase site. The update feed and Sparkle archives are staged into `apps/web/public/releases`, which Next.js exports as real static files before Firebase deploy. The release pipeline keeps a single DMG, a single Sparkle zip, one stable `appcast.xml`, the `spaces-install-linux.sh` installer, and signed Linux remote artifacts the installer downloads. The app bundle carries `spaces`, `spacesd`, and Caddy in `Contents/Resources`; the DMG installer links `/usr/local/bin` and `~/.spaces/bin` helpers to those bundled binaries so installed CLI commands, launchd, and remote Mac pairing use the updated app bundle after Sparkle updates. Linux artifacts link `~/.local/bin/spaces` to the managed `~/.spaces/bin/spaces` helper so user shells can run `spaces` without a system-wide install.
+Sparkle update hosting lives under `https://usespaces.dev/releases/` on the static Firebase site. The update feed and Sparkle archives are staged into `apps/web/public/releases`, which Next.js exports as real static files before Firebase deploy. The release pipeline keeps a single DMG, a single Sparkle zip, one stable `appcast.xml`, and signed Linux remote artifacts the installer downloads; the Linux installer itself is published separately at `https://usespaces.dev/install.sh` through the `apps/web` `prebuild` copy rather than as a GitHub release asset. The app bundle carries `spaces`, `spacesd`, and Caddy in `Contents/Resources`; the DMG installer links `/usr/local/bin` and `~/.spaces/bin` helpers to those bundled binaries so installed CLI commands, launchd, and remote Mac pairing use the updated app bundle after Sparkle updates. Linux artifacts link `~/.local/bin/spaces` to the managed `~/.spaces/bin/spaces` helper so user shells can run `spaces` without a system-wide install.
 
 ## Website Deploy
 

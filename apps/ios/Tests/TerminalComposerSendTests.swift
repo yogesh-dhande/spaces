@@ -13,15 +13,24 @@
             private var pasteImageCount = 0
             private let failPasteImageAtIndex: Int?
             private let failuresByToken: [String: SpacesDeviceAPIResponse]
+            private let delaysByToken: [String: Duration]
 
-            init(failPasteImageAtIndex: Int? = nil, failuresByToken: [String: SpacesDeviceAPIResponse] = [:]) {
+            init(
+                failPasteImageAtIndex: Int? = nil,
+                failuresByToken: [String: SpacesDeviceAPIResponse] = [:],
+                delaysByToken: [String: Duration] = [:]
+            ) {
                 self.failPasteImageAtIndex = failPasteImageAtIndex
                 self.failuresByToken = failuresByToken
+                self.delaysByToken = delaysByToken
             }
 
-            func handle(_ request: SpacesDeviceAPIRequest) -> SpacesDeviceAPIResponse {
+            func handle(_ request: SpacesDeviceAPIRequest) async -> SpacesDeviceAPIResponse {
                 requests.append(request)
                 let token = Self.token(request)
+                if let delay = delaysByToken[token] {
+                    try? await Task.sleep(for: delay)
+                }
                 if let failure = failuresByToken[token] {
                     return failure
                 }
@@ -116,6 +125,23 @@
             XCTFail("Composed send did not complete in time.")
         }
 
+        private func waitUntilSendStarts(_ model: TerminalViewerModel) async throws {
+            for _ in 0..<100 {
+                if model.isSendingComposedMessage { return }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            XCTFail("Composed send did not start in time.")
+        }
+
+        private func waitUntilRecorderContains(_ token: String, recorder: ComposerAPIRecorder) async throws {
+            for _ in 0..<100 {
+                let tokens = await recorder.tokens()
+                if tokens.contains(token) { return }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            XCTFail("Expected recorder token \(token) did not appear.")
+        }
+
         private func waitForAuthenticationMessage(recorder: AuthenticationPromptRecorder) async throws -> String? {
             for _ in 0..<100 {
                 if let message = await recorder.firstMessage() { return message }
@@ -125,13 +151,15 @@
         }
 
         private func firstComposerTextInput(in view: UIView) -> (
-            autocapitalization: UITextAutocapitalizationType, autocorrection: UITextAutocorrectionType
+            view: UIView,
+            autocapitalization: UITextAutocapitalizationType,
+            autocorrection: UITextAutocorrectionType
         )? {
             if let textField = view as? UITextField {
-                return (textField.autocapitalizationType, textField.autocorrectionType)
+                return (textField, textField.autocapitalizationType, textField.autocorrectionType)
             }
             if let textView = view as? UITextView {
-                return (textView.autocapitalizationType, textView.autocorrectionType)
+                return (textView, textView.autocapitalizationType, textView.autocorrectionType)
             }
             for subview in view.subviews {
                 if let input = firstComposerTextInput(in: subview) { return input }
@@ -156,6 +184,72 @@
             XCTAssertEqual(input.autocorrection, .no)
         }
 
+        func testComposerMessageFieldDisablesEditingWhileSending() async throws {
+            let recorder = ComposerAPIRecorder(delaysByToken: ["paste": .milliseconds(500)])
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.handle(request)
+            }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, bridgeClient: bridgeClient)
+            model.configureOwnerInteractiveForTesting(ownerEpoch: 7)
+            model.composerDraftText = "hello"
+            model.attachComposerImage(attachment("Screenshot"))
+
+            let sheet = TerminalComposerSheet(model: model, stagedScreenshots: StagedScreenshotStore())
+            let controller = UIHostingController(rootView: sheet)
+            let window = UIWindow(frame: UIScreen.main.bounds)
+            window.rootViewController = controller
+            window.isHidden = false
+            controller.view.frame = window.bounds
+            controller.view.layoutIfNeeded()
+            try await Task.sleep(for: .milliseconds(100))
+            controller.view.layoutIfNeeded()
+            defer { window.isHidden = true }
+
+            await model.sendComposedMessage()
+            try await waitUntilSendStarts(model)
+            try await Task.sleep(for: .milliseconds(100))
+            controller.view.layoutIfNeeded()
+
+            let input = try XCTUnwrap(firstComposerTextInput(in: controller.view))
+            let inputCenter = input.view.convert(
+                CGPoint(x: input.view.bounds.midX, y: input.view.bounds.midY),
+                to: controller.view
+            )
+            let hitView = controller.view.hitTest(inputCenter, with: nil)
+            XCTAssertFalse(hitView === input.view || hitView?.isDescendant(of: input.view) == true)
+
+            try await waitUntilSendCompletes(model)
+        }
+
+        func testCancelingQueuedComposedSendClearsSendingState() async throws {
+            let recorder = ComposerAPIRecorder(delaysByToken: ["send:blocking": .milliseconds(500)])
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.handle(request)
+            }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, bridgeClient: bridgeClient)
+            model.configureOwnerInteractiveForTesting(ownerEpoch: 7)
+
+            await model.sendText("blocking", asPaste: true)
+            try await waitUntilRecorderContains("send:blocking", recorder: recorder)
+            model.composerDraftText = "queued"
+            model.attachComposerImage(attachment("Screenshot"))
+
+            await model.sendComposedMessage()
+            XCTAssertTrue(model.isSendingComposedMessage)
+
+            model.stop()
+            try await Task.sleep(for: .milliseconds(50))
+
+            XCTAssertFalse(model.isSendingComposedMessage)
+            XCTAssertEqual(model.composerDraftText, "queued")
+            XCTAssertEqual(model.composerAttachments.count, 1)
+            let tokens = await recorder.tokens()
+            XCTAssertFalse(tokens.contains("send:queued "))
+            XCTAssertFalse(tokens.contains("paste"))
+        }
+
         func testComposedSendTextThenImagesThenEnterInOrder() async throws {
             let recorder = ComposerAPIRecorder()
             let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
@@ -177,6 +271,34 @@
             let sendPasteFlags = await recorder.sendPasteFlags()
             XCTAssertEqual(sendPasteFlags, [true, true])
             XCTAssertEqual(model.composerDraftText, "")
+            XCTAssertTrue(model.composerAttachments.isEmpty)
+            XCTAssertNil(model.composerErrorMessage)
+        }
+
+        func testComposedSendPreservesDraftEditsMadeDuringInFlightSend() async throws {
+            let recorder = ComposerAPIRecorder(delaysByToken: ["paste": .milliseconds(200)])
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.handle(request)
+            }
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, bridgeClient: bridgeClient)
+            model.configureOwnerInteractiveForTesting(ownerEpoch: 7)
+            model.composerDraftText = "original"
+            model.attachComposerImage(attachment("Screenshot"))
+            let sentAttachmentID = try XCTUnwrap(model.composerAttachments.first?.id)
+
+            await model.sendComposedMessage()
+            try await waitUntilSendStarts(model)
+            model.composerDraftText = "edited while sending"
+            model.removeComposerAttachment(id: sentAttachmentID)
+            model.attachComposerImage(attachment("Late"))
+            XCTAssertEqual(model.composerAttachments.map(\.id), [sentAttachmentID])
+
+            try await waitUntilSendCompletes(model)
+
+            let tokens = await recorder.tokens()
+            XCTAssertEqual(tokens, ["send:original ", "paste", "key:enter"])
+            XCTAssertEqual(model.composerDraftText, "edited while sending")
             XCTAssertTrue(model.composerAttachments.isEmpty)
             XCTAssertNil(model.composerErrorMessage)
         }
@@ -305,6 +427,40 @@
                 authenticationMessage,
                 "This Mac no longer recognizes this device. Open Devices and pair this device again.")
             XCTAssertNil(model.composerErrorMessage)
+        }
+
+        func testImageUploadAuthenticationFailurePromptsRepairInsteadOfImageError() async throws {
+            let authenticationRecorder = AuthenticationPromptRecorder()
+            let recorder = ComposerAPIRecorder(
+                failuresByToken: [
+                    "paste": SpacesDeviceAPIResponse(ok: false, message: "Invalid device auth token.", errorCode: .unauthorized)
+                ])
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
+                await recorder.handle(request)
+            }
+            let model = TerminalViewerModel(
+                session: session(),
+                settings: settings(),
+                onAuthenticationRequired: { message in
+                    Task { await authenticationRecorder.append(message) }
+                },
+                bridgeClient: bridgeClient)
+            model.configureOwnerInteractiveForTesting(ownerEpoch: 5)
+            model.composerDraftText = "hello"
+            model.attachComposerImage(attachment("Screenshot"))
+
+            await model.sendComposedMessage()
+            try await waitUntilSendCompletes(model)
+
+            let tokens = await recorder.tokens()
+            XCTAssertEqual(tokens, ["send:hello ", "paste"])
+            let authenticationMessage = try await waitForAuthenticationMessage(recorder: authenticationRecorder)
+            XCTAssertEqual(
+                authenticationMessage,
+                "This Mac no longer recognizes this device. Open Devices and pair this device again.")
+            XCTAssertNil(model.composerErrorMessage)
+            XCTAssertEqual(model.composerDraftText, "hello")
+            XCTAssertEqual(model.composerAttachments.count, 1)
         }
     }
 #endif
