@@ -521,6 +521,147 @@
             XCTAssertNil(model.overview)
         }
 
+        // MARK: - Renaming runtime rows
+
+        func testRenameAdHocTerminalRowRenamesItsSession() async throws {
+            let (model, recorder) = makeRenamingModel(
+                overview: makeOverview(
+                    featureTerminalRows: [
+                        SpacesDeviceWorkspaceTerminalRow(
+                            id: "terminal-shell", workspaceID: "workspace-feature", title: "shell", workingDirectory: "/repo/feature",
+                            sessionID: "session-shell", runState: .running, canOpenTerminal: true, canStop: true)
+                    ]))
+            let row = try XCTUnwrap(model.workspaceGroups.flatMap(\.rows).first { $0.title == "shell" })
+
+            XCTAssertEqual(model.canRename(row: row), true)
+            await model.rename(row: row, to: "  build log  ")
+
+            guard case .renameTerminalSession(let request)? = await recorder.snapshot().first?.command else {
+                return XCTFail("Expected a renameTerminalSession command.")
+            }
+            XCTAssertEqual(request.workspaceID, "workspace-feature")
+            XCTAssertEqual(request.sessionID, "session-shell")
+            XCTAssertEqual(request.title, "build log")
+            XCTAssertNil(model.errorMessage)
+        }
+
+        /// A configured process is named by its workspace config, not by its session, so the rename edits the
+        /// config entry — echoing every other configured field back unchanged.
+        func testRenameConfiguredProcessRowEditsItsConfigEntry() async throws {
+            let (model, recorder) = makeRenamingModel(overview: makeOverview(featureProcessRows: [configuredProcessRow()], featureConfig: config()))
+            let row = try XCTUnwrap(model.workspaceGroups.flatMap(\.rows).first { $0.title == "api" })
+
+            await model.rename(row: row, to: "backend")
+
+            guard case .updateWorkspaceConfig(let request)? = await recorder.snapshot().first?.command else {
+                return XCTFail("Expected an updateWorkspaceConfig command.")
+            }
+            XCTAssertEqual(request.workspaceID, "workspace-feature")
+            XCTAssertEqual(request.config.processes.map(\.name), ["backend"])
+            XCTAssertEqual(request.config.processes.map(\.command), ["npm run dev"])
+            XCTAssertEqual(request.config.stopScript, "npm stop")
+            XCTAssertEqual(request.config.ports.map(\.name), ["web"])
+            XCTAssertEqual(request.config.agentLaunchers.map(\.name), ["Codex"])
+            XCTAssertEqual(request.config.browserSessions.map(\.name), ["Dashboard"])
+        }
+
+        func testRenameConfiguredCodingAgentRowEditsItsLauncherEntry() async throws {
+            let (model, recorder) = makeRenamingModel(
+                overview: makeOverview(featureCodingAgentRows: [configuredCodingAgentRow()], featureConfig: config()))
+            let row = try XCTUnwrap(model.workspaceGroups.flatMap(\.rows).first { $0.title == "Codex" })
+
+            await model.rename(row: row, to: "Reviewer")
+
+            guard case .updateWorkspaceConfig(let request)? = await recorder.snapshot().first?.command else {
+                return XCTFail("Expected an updateWorkspaceConfig command.")
+            }
+            XCTAssertEqual(request.config.agentLaunchers.map(\.name), ["Reviewer"])
+            XCTAssertEqual(request.config.agentLaunchers.map(\.command), ["codex"])
+            XCTAssertEqual(request.config.processes.map(\.name), ["api"])
+        }
+
+        /// The configured browser session is matched by name and its raw URL is preserved: resolution expands
+        /// environment variables in the URL, so sending the resolved URL back would bake the expansion into
+        /// the config.
+        func testRenameBrowserSessionRowKeepsItsUnresolvedURL() async throws {
+            let (model, recorder) = makeRenamingModel(
+                overview: makeOverview(
+                    featureAssignedPorts: [SpacesDeviceAssignedPort(name: "web", port: 3_000, url: "http://web.feature.localhost:3000")],
+                    featureConfig: config()))
+            let row = try XCTUnwrap(model.workspaceGroups.flatMap(\.rows).first { $0.title == "Dashboard" })
+
+            await model.rename(row: row, to: "App")
+
+            guard case .updateWorkspaceConfig(let request)? = await recorder.snapshot().first?.command else {
+                return XCTFail("Expected an updateWorkspaceConfig command.")
+            }
+            XCTAssertEqual(request.config.browserSessions.map(\.name), ["App"])
+            XCTAssertEqual(request.config.browserSessions.map(\.url), ["http://localhost:${PORT_web}/dashboard"])
+        }
+
+        /// A process running without a configured entry takes its name from the running process, so there is
+        /// nothing to rename and the row offers no Rename.
+        func testUnconfiguredProcessRowCannotBeRenamed() async throws {
+            let (model, recorder) = makeRenamingModel(overview: makeOverview(featureConfig: config()))
+            let row = try XCTUnwrap(model.workspaceGroups.flatMap(\.rows).first { $0.title == "api" })
+
+            XCTAssertEqual(model.canRename(row: row), false)
+            await model.rename(row: row, to: "backend")
+
+            let commandNames = await recorder.snapshot().map(\.commandName)
+            XCTAssertEqual(commandNames, [])
+        }
+
+        func testRenameIgnoresEmptyAndUnchangedTitles() async throws {
+            let (model, recorder) = makeRenamingModel(overview: makeOverview(featureProcessRows: [configuredProcessRow()], featureConfig: config()))
+            let row = try XCTUnwrap(model.workspaceGroups.flatMap(\.rows).first { $0.title == "api" })
+
+            await model.rename(row: row, to: "   ")
+            await model.rename(row: row, to: "api")
+
+            let commandNames = await recorder.snapshot().map(\.commandName)
+            XCTAssertEqual(commandNames, [])
+        }
+
+        private func makeRenamingModel(
+            overview: SpacesDeviceOverviewPayload
+        ) -> (model: SpacesMobileAppModel, recorder: SpacesMobileRequestRecorder) {
+            let recorder = SpacesMobileRequestRecorder()
+            let settings = SpacesMobileConnectionSettings()
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            model.overview = overview
+            return (model, recorder)
+        }
+
+        /// The feature workspace's configuration, matching the configured process, launcher, and browser
+        /// session the rename tests target.
+        private func config() -> SpacesDeviceWorkspaceConfig {
+            SpacesDeviceWorkspaceConfig(
+                stopScript: "npm stop",
+                ports: [SpacesDeviceServiceDefinition(id: "port-web", name: "web")],
+                processes: [SpacesDeviceProcessTemplate(id: "template-api", name: "api", command: "npm run dev")],
+                browserSessions: [SpacesDeviceBrowserSession(name: "Dashboard", url: "http://localhost:${PORT_web}/dashboard")],
+                resolvedBrowserSessions: [SpacesDeviceBrowserSession(name: "Dashboard", url: "http://localhost:3000/dashboard")],
+                agentLaunchers: [SpacesDeviceAgentLauncher(id: "launcher-codex", name: "Codex", command: "codex")])
+        }
+
+        private func configuredProcessRow() -> SpacesDeviceWorkspaceProcessRow {
+            SpacesDeviceWorkspaceProcessRow(
+                id: "template-api", workspaceID: "workspace-feature", name: "api", command: "npm run dev", templateID: "template-api",
+                processID: "runtime-api", sessionID: "session-api", runState: .running, canRun: false, canStop: true, canRestart: true)
+        }
+
+        private func configuredCodingAgentRow() -> SpacesDeviceWorkspaceCodingAgentRow {
+            SpacesDeviceWorkspaceCodingAgentRow(
+                id: "agent-codex", workspaceID: "workspace-feature", name: "Codex", command: "codex", launcherID: "launcher-codex",
+                agentID: "runtime-codex", sessionID: "session-codex", isConfigured: true, runState: .running, activityState: .spinning,
+                canRun: false, canStop: true, canRestart: true)
+        }
+
         private func makeOverview(
             sessions: [SpacesDeviceTerminalSessionSummary] = [],
             featureProcessRows: [SpacesDeviceWorkspaceProcessRow]? = nil,

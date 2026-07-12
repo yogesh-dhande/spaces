@@ -43,10 +43,13 @@ struct WorkspaceBandLabel: View {
 /// `dotKind` is optional because not every row family has a run state — a browser session is a URL,
 /// not a process. Those rows hold the dot's slot empty rather than draw a dot, so the icon column
 /// stays aligned with the rows above and below.
-struct BandRow<Trailing: View>: View {
+///
+/// The title is a view slot, not a string, so a row being renamed can swap a text field into the
+/// title's place and keep the rest of the row identical while it is edited.
+struct BandRow<Title: View, Trailing: View>: View {
     let dotKind: StatusDot.Kind?
     let tile: TypeIconTile
-    let title: String
+    @ViewBuilder var title: () -> Title
     let detail: String
     var detailIsMonospaced = true
     @ViewBuilder var trailing: () -> Trailing
@@ -60,7 +63,7 @@ struct BandRow<Trailing: View>: View {
             }
             tile
             VStack(alignment: .leading, spacing: 1) {
-                Text(title)
+                title()
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(Theme.text)
                     .lineLimit(1)
@@ -77,6 +80,20 @@ struct BandRow<Trailing: View>: View {
         .padding(.horizontal, 20)
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
+    }
+}
+
+extension BandRow where Title == Text {
+    init(
+        dotKind: StatusDot.Kind?,
+        tile: TypeIconTile,
+        title: String,
+        detail: String,
+        detailIsMonospaced: Bool = true,
+        @ViewBuilder trailing: @escaping () -> Trailing
+    ) {
+        self.init(
+            dotKind: dotKind, tile: tile, title: { Text(title) }, detail: detail, detailIsMonospaced: detailIsMonospaced, trailing: trailing)
     }
 }
 

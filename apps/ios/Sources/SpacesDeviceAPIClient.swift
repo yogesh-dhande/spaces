@@ -239,6 +239,39 @@ struct SpacesDeviceAPIClient: Sendable {
         )
     }
 
+    /// Renames an ad hoc workspace terminal session. The daemon rejects sessions owned by a configured
+    /// process or coding agent — those own their name through the workspace config, not the session.
+    func renameTerminalSession(
+        workspaceID: String,
+        sessionID: String,
+        title: String,
+        commandChannel: SpacesDeviceAPICommandChannel? = nil
+    ) async throws -> SpacesDeviceAPIResponse {
+        try await mutation(
+            .init(
+                command: .renameTerminalSession(.init(workspaceID: workspaceID, sessionID: sessionID, title: title)),
+                authToken: settings.trimmedAuthToken,
+                clientApp: clientAppIdentity),
+            commandChannel: commandChannel
+        )
+    }
+
+    /// Replaces the workspace's whole configuration. The daemon overwrites every configured field from the
+    /// request, so a caller sends the workspace's current config with only its own edit applied.
+    func updateWorkspaceConfig(
+        workspaceID: String,
+        config: SpacesDeviceWorkspaceConfig,
+        commandChannel: SpacesDeviceAPICommandChannel? = nil
+    ) async throws -> SpacesDeviceAPIResponse {
+        try await mutation(
+            .init(
+                command: .updateWorkspaceConfig(.init(workspaceID: workspaceID, config: config)),
+                authToken: settings.trimmedAuthToken,
+                clientApp: clientAppIdentity),
+            commandChannel: commandChannel
+        )
+    }
+
     func runWorkspaceProcess(
         workspaceID: String,
         processKey: String,

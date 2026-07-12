@@ -1045,6 +1045,102 @@ private enum SpacesMobileMutationTimeoutRecovery {
         }
     }
 
+    // MARK: - Renaming runtime rows
+
+    /// Where a runtime row's name lives, and so how a rename reaches the daemon: an ad hoc terminal owns its
+    /// session title, while a configured process, coding agent, or browser session owns an entry in the
+    /// workspace config. The config snapshot travels with the entry so the index stays valid for the config
+    /// the rename is applied to.
+    private enum RuntimeRowRename {
+        case terminalSession(sessionID: String)
+        case workspaceConfig(SpacesDeviceWorkspaceConfig, entry: ConfigEntry)
+
+        enum ConfigEntry {
+            case process(index: Int)
+            case agentLauncher(index: Int)
+            case browserSession(index: Int)
+        }
+    }
+
+    /// Whether the row has a name the daemon can rename. A process or coding agent running without a
+    /// configured entry has no name to edit — its name comes from the running process — and a terminal row
+    /// whose session has ended has no session to rename, so those rows offer no Rename.
+    func canRename(row: SpacesMobileWorkspaceRuntimeRow) -> Bool {
+        renameTarget(for: row) != nil
+    }
+
+    /// Renames a runtime row. Renaming a configured process, coding agent, or browser session edits its
+    /// workspace-config entry, so a running process keeps its current name until it is restarted — the same
+    /// rule the Mac sidebar's rename follows.
+    func rename(row: SpacesMobileWorkspaceRuntimeRow, to newTitle: String) async {
+        let title = newTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty, title != row.title, let target = renameTarget(for: row) else { return }
+        await performWorkspaceMutation {
+            switch target {
+            case .terminalSession(let sessionID):
+                return try await bridgeClient.renameTerminalSession(
+                    workspaceID: row.workspaceID, sessionID: sessionID, title: title, commandChannel: commandChannel)
+            case .workspaceConfig(let config, let entry):
+                return try await bridgeClient.updateWorkspaceConfig(
+                    workspaceID: row.workspaceID, config: renamedConfig(config, entry: entry, to: title), commandChannel: commandChannel)
+            }
+        }
+    }
+
+    private func renameTarget(for row: SpacesMobileWorkspaceRuntimeRow) -> RuntimeRowRename? {
+        switch row.source {
+        case .terminal(let terminal):
+            guard let sessionID = terminal.sessionID else { return nil }
+            return .terminalSession(sessionID: sessionID)
+        case .process(let process):
+            guard let config = workspaceConfig(for: row.workspaceID), let templateID = process.templateID,
+                let index = config.processes.firstIndex(where: { $0.id == templateID })
+            else { return nil }
+            return .workspaceConfig(config, entry: .process(index: index))
+        case .codingAgent(let agent):
+            guard let config = workspaceConfig(for: row.workspaceID), let launcherID = agent.launcherID,
+                let index = config.agentLaunchers.firstIndex(where: { $0.id == launcherID })
+            else { return nil }
+            return .workspaceConfig(config, entry: .agentLauncher(index: index))
+        case .browserSession(let browser):
+            // Configured browser sessions carry no id, but the daemon requires their names to be present and
+            // unique within the workspace, and resolution preserves the configured name, so the name is the
+            // entry's identity — the URL is not, since resolution expands environment variables in it.
+            guard let config = workspaceConfig(for: row.workspaceID), let name = browser.route.sessionName,
+                let index = config.browserSessions.firstIndex(where: { $0.name == name })
+            else { return nil }
+            return .workspaceConfig(config, entry: .browserSession(index: index))
+        }
+    }
+
+    /// A copy of `config` with one entry renamed. Config fields are immutable and the daemon replaces the
+    /// workspace's whole config, so a rename echoes every other field back unchanged.
+    private func renamedConfig(
+        _ config: SpacesDeviceWorkspaceConfig, entry: RuntimeRowRename.ConfigEntry, to name: String
+    ) -> SpacesDeviceWorkspaceConfig {
+        var processes = config.processes
+        var agentLaunchers = config.agentLaunchers
+        var browserSessions = config.browserSessions
+        switch entry {
+        case .process(let index):
+            let process = processes[index]
+            processes[index] = SpacesDeviceProcessTemplate(
+                id: process.id, name: name, command: process.command, kind: process.kind, onExit: process.onExit)
+        case .agentLauncher(let index):
+            let launcher = agentLaunchers[index]
+            agentLaunchers[index] = SpacesDeviceAgentLauncher(id: launcher.id, name: name, command: launcher.command)
+        case .browserSession(let index):
+            browserSessions[index] = SpacesDeviceBrowserSession(name: name, url: browserSessions[index].url)
+        }
+        return SpacesDeviceWorkspaceConfig(
+            stopScript: config.stopScript, ports: config.ports, processes: processes, browserSessions: browserSessions,
+            resolvedBrowserSessions: config.resolvedBrowserSessions, agentLaunchers: agentLaunchers)
+    }
+
+    private func workspaceConfig(for workspaceID: String) -> SpacesDeviceWorkspaceConfig? {
+        overview?.workspaces.first { $0.id == workspaceID }?.config
+    }
+
     private func groupSort(_ lhs: SpacesMobileTerminalWorkspaceGroup, _ rhs: SpacesMobileTerminalWorkspaceGroup) -> Bool {
         if lhs.projectName.localizedStandardCompare(rhs.projectName) != .orderedSame {
             return lhs.projectName.localizedStandardCompare(rhs.projectName) == .orderedAscending

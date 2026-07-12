@@ -12,6 +12,9 @@ struct SpacesTabView: View {
     @State private var isConfirmingRestart = false
     @State private var pendingHideWorkspace: SpacesDeviceWorkspaceSummary?
     @State private var terminalListRefreshGeneration = 0
+    @State private var renamingRowID: String?
+    @State private var renameText = ""
+    @FocusState private var isRenameFieldFocused: Bool
 
     var body: some View {
         NavigationStack {
@@ -378,26 +381,71 @@ struct SpacesTabView: View {
     }
 
     @ViewBuilder private func runtimeRow(_ row: SpacesMobileWorkspaceRuntimeRow) -> some View {
-        let rowIdentifier = row.sessionID.map { "terminal.row.\($0)" } ?? "workspace.row.\(row.id)"
-        let button = Button {
-            activateRuntimeRow(row)
-        } label: {
-            BandRow(dotKind: row.statusDotKind, tile: .tile(for: row.type), title: row.title, detail: row.detail) {
-                runtimeTrailingIndicator(for: row)
+        if renamingRowID == row.id {
+            renameRow(row)
+        } else {
+            let rowIdentifier = row.sessionID.map { "terminal.row.\($0)" } ?? "workspace.row.\(row.id)"
+            let button = Button {
+                activateRuntimeRow(row)
+            } label: {
+                BandRow(dotKind: row.statusDotKind, tile: .tile(for: row.type), title: row.title, detail: row.detail) {
+                    runtimeTrailingIndicator(for: row)
+                }
+            }
+            .buttonStyle(.plain)
+            .disabled(isRuntimeRowDisabled(row))
+            .accessibilityIdentifier(rowIdentifier)
+
+            // Long-press only offers a menu when the row has something to offer. A row with neither a
+            // lifecycle action nor a renamable name — an exited terminal whose session is gone, or a
+            // process running without a configured entry — would otherwise open an empty menu.
+            if hasContextMenu(row) {
+                button.contextMenu { runtimeContextMenu(for: row) }
+            } else {
+                button
             }
         }
-        .buttonStyle(.plain)
-        .disabled(isRuntimeRowDisabled(row))
-        .accessibilityIdentifier(rowIdentifier)
+    }
 
-        // Long-press only offers a menu when the row actually has a lifecycle action. A browser session
-        // never has one (it is a URL, not a process), and neither does an exited terminal — either way,
-        // attaching the menu would open an empty one.
-        if row.canRun || row.canStop || row.canRestart {
-            button.contextMenu { runtimeContextMenu(for: row) }
-        } else {
-            button
+    /// The row being renamed: the title becomes a text field seeded with the current name and the rest of
+    /// the row stays put. Return commits; leaving the field (tapping away, scrolling it off) reverts, so a
+    /// half-typed name never reaches the daemon.
+    private func renameRow(_ row: SpacesMobileWorkspaceRuntimeRow) -> some View {
+        BandRow(
+            dotKind: row.statusDotKind,
+            tile: .tile(for: row.type),
+            title: {
+                TextField("Name", text: $renameText)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .submitLabel(.done)
+                    .focused($isRenameFieldFocused)
+                    .onSubmit { commitRename(for: row) }
+            },
+            detail: row.detail
+        ) {
+            EmptyView()
         }
+        .accessibilityIdentifier("runtime.rename.\(row.id)")
+        .onAppear { isRenameFieldFocused = true }
+        .onChange(of: isRenameFieldFocused) { _, isFocused in
+            if !isFocused { renamingRowID = nil }
+        }
+    }
+
+    private func hasContextMenu(_ row: SpacesMobileWorkspaceRuntimeRow) -> Bool {
+        row.canRun || row.canStop || row.canRestart || model.canRename(row: row)
+    }
+
+    private func beginRename(for row: SpacesMobileWorkspaceRuntimeRow) {
+        renameText = row.title
+        renamingRowID = row.id
+    }
+
+    private func commitRename(for row: SpacesMobileWorkspaceRuntimeRow) {
+        let title = renameText
+        renamingRowID = nil
+        Task { await model.rename(row: row, to: title) }
     }
 
     /// Browser session rows are always tappable: opening one loads a URL through the on-device proxy
@@ -438,6 +486,14 @@ struct SpacesTabView: View {
                 pendingTerminalLaunch = PendingTerminalLaunch(row: row, action: .restart)
             } label: {
                 Label("Restart", systemImage: "arrow.clockwise")
+            }
+            .disabled(model.isMutating)
+        }
+        if model.canRename(row: row) {
+            Button {
+                beginRename(for: row)
+            } label: {
+                Label("Rename", systemImage: "pencil")
             }
             .disabled(model.isMutating)
         }
