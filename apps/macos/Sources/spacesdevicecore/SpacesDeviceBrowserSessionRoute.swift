@@ -62,11 +62,12 @@ public struct SpacesDeviceBrowserSessionRoute: Sendable, Equatable {
     public func proxyURL(proxyPort: Int) -> URL? { URLComponents(string: "http://\(identityHost):\(proxyPort)\(pathQueryFragment)")?.url }
 
     /// Loopback hosts that route to the assigned port's raw `port` rather than the identity URL's
-    /// host/port. `URLComponents.host` already strips the brackets `URL(string:)` uses to delimit an
-    /// IPv6 literal, so `"::1"` covers both `http://[::1]:1234` and `http://::1:1234` inputs.
+    /// host/port. Bracketed IPv6 literals are normalized because Foundation may preserve the brackets
+    /// from `http://[::1]:1234` in `URLComponents.host`.
     private static func isLoopbackHost(_ host: String?) -> Bool {
         guard let host else { return false }
-        return host == "localhost" || host == "127.0.0.1" || host == "::1"
+        let normalizedHost = if host.hasPrefix("[") && host.hasSuffix("]") { String(host.dropFirst().dropLast()) } else { host }
+        return normalizedHost == "localhost" || normalizedHost == "127.0.0.1" || normalizedHost == "::1"
     }
 
     /// Concatenates `components`' path, query, and fragment into one percent-encoded relative string.
