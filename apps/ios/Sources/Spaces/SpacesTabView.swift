@@ -10,6 +10,7 @@ struct SpacesTabView: View {
     @State private var pendingTerminalLaunch: PendingTerminalLaunch?
     @State private var isShowingFilters = false
     @State private var isConfirmingRestart = false
+    @State private var pendingHideWorkspace: SpacesDeviceWorkspaceSummary?
     @State private var terminalListRefreshGeneration = 0
 
     var body: some View {
@@ -55,6 +56,32 @@ struct SpacesTabView: View {
         } message: {
             Text(model.daemonRestartImpactMessage)
         }
+        .confirmationDialog(
+            "Hide this workspace?",
+            isPresented: hideWorkspaceDialogBinding,
+            titleVisibility: .visible,
+            presenting: pendingHideWorkspace
+        ) { workspace in
+            // Hiding stops the workspace first, so a running one loses its processes and agents — the
+            // confirm button says so rather than hiding that behind a bare "Hide".
+            Button(workspace.isRunning ? "Stop and Hide" : "Hide", role: .destructive) {
+                Task { await model.hideWorkspace(workspace) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { workspace in
+            Text(
+                workspace.isRunning
+                    ? "\"\(workspace.displayName)\" is running. Hiding it stops its processes and coding agents, and removes it from this list and the Mac sidebar. Unhide it from the Mac."
+                    : "\"\(workspace.displayName)\" will be removed from this list and the Mac sidebar. Unhide it from the Mac."
+            )
+        }
+    }
+
+    private var hideWorkspaceDialogBinding: Binding<Bool> {
+        Binding(
+            get: { pendingHideWorkspace != nil },
+            set: { if !$0 { pendingHideWorkspace = nil } }
+        )
     }
 
     /// Any detail route — a terminal, a pending terminal launch, or a browser session — that should
@@ -317,14 +344,22 @@ struct SpacesTabView: View {
             .accessibilityIdentifier("workspace.band.\(group.id)")
             .contextMenu {
                 Button {
-                    pendingTerminalLaunch = PendingTerminalLaunch(workspace: group.workspace)
+                    pendingHideWorkspace = group.workspace
                 } label: {
-                    Label("New Terminal", systemImage: "plus")
+                    Label("Hide", systemImage: "eye.slash")
                 }
                 .disabled(model.isMutating)
             }
             if !isCollapsed {
                 VStack(spacing: 0) {
+                    WorkspaceControlBar(
+                        workspace: group.workspace,
+                        isMutating: model.isMutating,
+                        onStart: { Task { await model.launchWorkspace(group.workspace) } },
+                        onRestart: { Task { await model.restartWorkspace(group.workspace) } },
+                        onStop: { Task { await model.stopWorkspace(group.workspace) } },
+                        onNewTerminal: { pendingTerminalLaunch = PendingTerminalLaunch(workspace: group.workspace) }
+                    )
                     if group.rows.isEmpty {
                         Text("No configured rows")
                             .font(.system(size: 12))

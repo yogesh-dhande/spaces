@@ -72,6 +72,46 @@
             XCTAssertEqual(browserRow?.canRestart, false)
         }
 
+        /// Runtime rows group by family in the Mac sidebar's order: browser sessions, configured processes,
+        /// coding agents, then ad hoc terminals.
+        func testRuntimeRowsGroupByFamilyInMacSidebarOrder() {
+            let model = makeModel()
+            model.overview = makeOverview(
+                featureTerminalRows: [
+                    SpacesDeviceWorkspaceTerminalRow(
+                        id: "terminal-shell", workspaceID: "workspace-feature", title: "shell", workingDirectory: "/repo/feature",
+                        sessionID: "session-shell", runState: .running, canOpenTerminal: true, canStop: true)
+                ],
+                featureAssignedPorts: [SpacesDeviceAssignedPort(name: "web", port: 3_000, url: "http://web.feature.localhost:3000")],
+                featureConfig: SpacesDeviceWorkspaceConfig(
+                    resolvedBrowserSessions: [SpacesDeviceBrowserSession(name: "Dashboard", url: "http://localhost:3000/dashboard")]))
+
+            let rows = model.workspaceGroups.first { $0.workspace.id == "workspace-feature" }?.rows ?? []
+
+            XCTAssertEqual(rows.map(\.type), [.browserSessions, .processes, .codingAgents, .workspaceTerminals])
+            XCTAssertEqual(rows.map(\.title), ["Dashboard", "api", "Codex", "shell"])
+        }
+
+        /// `isHidden` is daemon-owned state shared with the Mac sidebar, so a workspace hidden on the Mac
+        /// is absent from the phone's list too.
+        func testHiddenWorkspaceIsExcludedFromWorkspaceGroups() {
+            let model = makeModel()
+            model.overview = makeOverview(featureIsHidden: true)
+
+            let workspaceIDs = model.workspaceGroups.map(\.workspace.id)
+            XCTAssertFalse(workspaceIDs.contains("workspace-feature"))
+            XCTAssertTrue(workspaceIDs.contains("workspace-docs"))
+        }
+
+        /// Hiding a workspace must not leak its loose terminal sessions back into the list as their own
+        /// group — hiding removes the workspace's rows, not just its band.
+        func testHiddenWorkspaceLooseSessionsAreExcludedFromTerminalGroups() {
+            let model = makeModel()
+            model.overview = makeOverview(sessions: [makeSession(id: "session-loose")], featureIsHidden: true)
+
+            XCTAssertFalse(model.terminalGroups.contains { $0.id == "workspace-feature" })
+        }
+
         /// A browser session has no run state, so its row draws no status dot — while the process and
         /// terminal rows beside it still do.
         func testBrowserSessionRowHasNoStatusDot() {
@@ -485,6 +525,8 @@
             sessions: [SpacesDeviceTerminalSessionSummary] = [],
             featureProcessRows: [SpacesDeviceWorkspaceProcessRow]? = nil,
             featureCodingAgentRows: [SpacesDeviceWorkspaceCodingAgentRow]? = nil,
+            featureTerminalRows: [SpacesDeviceWorkspaceTerminalRow] = [],
+            featureIsHidden: Bool = false,
             featureAssignedPorts: [SpacesDeviceAssignedPort] = [],
             featureConfig: SpacesDeviceWorkspaceConfig = SpacesDeviceWorkspaceConfig(),
             daemonStatus: TerminalServiceDaemonStatus = TerminalServiceDaemonStatus(
@@ -508,13 +550,13 @@
                 ]
             let feature = SpacesDeviceWorkspaceSummary(
                 id: "workspace-feature", projectID: project.id, projectName: project.name, branch: "feature",
-                baseBranch: "main", dir: "/repo/feature", isRunning: true, isArchived: false, isHidden: false, isDefault: false,
+                baseBranch: "main", dir: "/repo/feature", isRunning: true, isArchived: false, isHidden: featureIsHidden, isDefault: false,
                 sessionCount: 1,
                 assignedPorts: featureAssignedPorts,
                 config: featureConfig,
                 processRows: processRows,
                 codingAgentRows: codingAgentRows,
-                terminalRows: [])
+                terminalRows: featureTerminalRows)
             let docs = SpacesDeviceWorkspaceSummary(
                 id: "workspace-docs", projectID: project.id, projectName: project.name, branch: "docs", baseBranch: "main",
                 dir: "/repo/docs", isRunning: false, isArchived: false, isHidden: false, isDefault: false, sessionCount: 0,

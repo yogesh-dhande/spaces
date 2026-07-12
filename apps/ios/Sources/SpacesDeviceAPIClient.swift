@@ -167,6 +167,54 @@ struct SpacesDeviceAPIClient: Sendable {
         )
     }
 
+    /// Starts every configured process and coding agent in the workspace. Browser sessions and ad hoc
+    /// terminals are not launched — the daemon opens neither, they are opened on demand.
+    func launchWorkspace(
+        workspaceID: String,
+        commandChannel: SpacesDeviceAPICommandChannel? = nil
+    ) async throws -> SpacesDeviceAPIResponse {
+        try await mutation(
+            .init(command: .launchWorkspace(.init(workspaceID: workspaceID)), authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity),
+            commandChannel: commandChannel
+        )
+    }
+
+    func stopWorkspace(
+        workspaceID: String,
+        commandChannel: SpacesDeviceAPICommandChannel? = nil
+    ) async throws -> SpacesDeviceAPIResponse {
+        try await mutation(
+            .init(command: .stopWorkspace(.init(workspaceID: workspaceID)), authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity),
+            commandChannel: commandChannel
+        )
+    }
+
+    func restartWorkspace(
+        workspaceID: String,
+        commandChannel: SpacesDeviceAPICommandChannel? = nil
+    ) async throws -> SpacesDeviceAPIResponse {
+        try await mutation(
+            .init(command: .restartWorkspace(.init(workspaceID: workspaceID)), authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity),
+            commandChannel: commandChannel
+        )
+    }
+
+    /// Hides or unhides a workspace. `isHidden` is daemon-owned workspace state, so this is the same flag
+    /// the Mac sidebar's Hide action and Workspace Visibility dialog toggle — hiding here hides it there.
+    func setWorkspaceHidden(
+        workspaceID: String,
+        isHidden: Bool,
+        commandChannel: SpacesDeviceAPICommandChannel? = nil
+    ) async throws -> SpacesDeviceAPIResponse {
+        try await mutation(
+            .init(
+                command: .updateWorkspaceMetadata(.init(workspaceID: workspaceID, isHidden: isHidden, updatesHidden: true)),
+                authToken: settings.trimmedAuthToken,
+                clientApp: clientAppIdentity),
+            commandChannel: commandChannel
+        )
+    }
+
     func openWorkspaceTerminal(
         workspaceID: String,
         commandChannel: SpacesDeviceAPICommandChannel? = nil

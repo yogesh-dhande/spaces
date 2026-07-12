@@ -520,13 +520,20 @@ private enum SpacesMobileMutationTimeoutRecovery {
         self.browserProxy = browserProxy ?? SpacesMobileBrowserProxy(installationID: settings.installationID)
     }
 
+    /// The workspaces this client lists: neither archived nor hidden, matching the Mac sidebar's
+    /// `isVisibleWorkspace` rule. `isHidden` is daemon-owned workspace state, so a workspace hidden
+    /// from the Mac's Workspace Visibility dialog is hidden here too.
+    private var visibleWorkspaces: [SpacesDeviceWorkspaceSummary] {
+        (overview?.workspaces ?? []).filter { !$0.isArchived && !$0.isHidden }
+    }
+
     var workspaceGroups: [SpacesMobileWorkspaceGroup] {
         let allFiltersSelected =
             visibleRowTypes.count == SpacesMobileWorkspaceRowType.allCases.count
             && visibleRunStates.count == 3
             && searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        return (overview?.workspaces ?? []).filter { !$0.isArchived }.compactMap { workspace in
+        return visibleWorkspaces.compactMap { workspace in
             let allRows = workspaceRuntimeRows(for: workspace)
             let filteredRows = allRows.filter { row in rowMatchesFilters(row, workspace: workspace, query: query) }
             if allFiltersSelected { return SpacesMobileWorkspaceGroup(workspace: workspace, rows: allRows) }
@@ -539,12 +546,16 @@ private enum SpacesMobileMutationTimeoutRecovery {
     }
 
     var terminalGroups: [SpacesMobileTerminalWorkspaceGroup] {
-        let workspaces = overview?.workspaces ?? []
+        let workspaces = visibleWorkspaces
         let workspaceByID = Dictionary(uniqueKeysWithValues: workspaces.map { ($0.id, $0) })
         let representedSessionIDs = Set(workspaces.flatMap { workspaceRuntimeRows(for: $0).compactMap(\.sessionID) })
+        // A hidden workspace's loose sessions are hidden with it; otherwise hiding a workspace would just
+        // move its terminals into a loose group instead of removing them from the list.
+        let hiddenWorkspaceIDs = Set((overview?.workspaces ?? []).filter(\.isHidden).map(\.id))
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         let sessions = (overview?.sessions ?? []).filter { session in
-            !representedSessionIDs.contains(session.id) && terminalSessionMatchesFilters(session, query: query)
+            !hiddenWorkspaceIDs.contains(session.workspaceID) && !representedSessionIDs.contains(session.id)
+                && terminalSessionMatchesFilters(session, query: query)
         }
         let grouped = Dictionary(grouping: sessions) { $0.workspaceID }
 
@@ -990,6 +1001,50 @@ private enum SpacesMobileMutationTimeoutRecovery {
         }
     }
 
+    // MARK: - Workspace-level actions
+
+    /// Starts the whole workspace: every configured process and coding agent. The daemon opens no browser
+    /// session or ad hoc terminal, so those rows are untouched.
+    func launchWorkspace(_ workspace: SpacesDeviceWorkspaceSummary) async {
+        await performWorkspaceMutation {
+            try await bridgeClient.launchWorkspace(workspaceID: workspace.id, commandChannel: commandChannel)
+        }
+    }
+
+    func stopWorkspace(_ workspace: SpacesDeviceWorkspaceSummary) async {
+        await performWorkspaceMutation {
+            try await bridgeClient.stopWorkspace(workspaceID: workspace.id, commandChannel: commandChannel)
+        }
+    }
+
+    func restartWorkspace(_ workspace: SpacesDeviceWorkspaceSummary) async {
+        await performWorkspaceMutation {
+            try await bridgeClient.restartWorkspace(workspaceID: workspace.id, commandChannel: commandChannel)
+        }
+    }
+
+    /// Hides the workspace, stopping it first when it is running — matching the Mac's Hide, which never
+    /// leaves a hidden workspace running with no row left to stop it from.
+    func hideWorkspace(_ workspace: SpacesDeviceWorkspaceSummary) async {
+        await performWorkspaceMutation {
+            if workspace.isRunning {
+                _ = try await bridgeClient.stopWorkspace(workspaceID: workspace.id, commandChannel: commandChannel)
+            }
+            return try await bridgeClient.setWorkspaceHidden(workspaceID: workspace.id, isHidden: true, commandChannel: commandChannel)
+        }
+    }
+
+    private func performWorkspaceMutation(_ operation: () async throws -> SpacesDeviceAPIResponse) async {
+        guard !isMutating else { return }
+        isMutating = true
+        defer { isMutating = false }
+        do {
+            await applyMutationResponse(try await operation())
+        } catch {
+            handleBridgeError(error)
+        }
+    }
+
     private func groupSort(_ lhs: SpacesMobileTerminalWorkspaceGroup, _ rhs: SpacesMobileTerminalWorkspaceGroup) -> Bool {
         if lhs.projectName.localizedStandardCompare(rhs.projectName) != .orderedSame {
             return lhs.projectName.localizedStandardCompare(rhs.projectName) == .orderedAscending
@@ -1007,15 +1062,17 @@ private enum SpacesMobileMutationTimeoutRecovery {
         return lhs.createdAt < rhs.createdAt
     }
 
+    /// Runtime rows group by family in the same order the Mac sidebar uses: browser sessions, configured
+    /// processes, coding agents, then ad hoc terminals.
     private func workspaceRuntimeRows(for workspace: SpacesDeviceWorkspaceSummary) -> [SpacesMobileWorkspaceRuntimeRow] {
         let browserRoutes = SpacesDeviceBrowserSessionRoute.routes(
             resolvedBrowserSessions: workspace.config.resolvedBrowserSessions, assignedPorts: workspace.assignedPorts)
-        return workspace.processRows.map { .init(source: .process($0)) }
+        return browserRoutes.enumerated().map { index, route in
+            .init(source: .browserSession(SpacesMobileBrowserSessionRow(workspaceID: workspace.id, index: index, route: route)))
+        }
+            + workspace.processRows.map { .init(source: .process($0)) }
             + workspace.codingAgentRows.map { .init(source: .codingAgent($0)) }
             + workspace.terminalRows.map { .init(source: .terminal($0)) }
-            + browserRoutes.enumerated().map { index, route in
-                .init(source: .browserSession(SpacesMobileBrowserSessionRow(workspaceID: workspace.id, index: index, route: route)))
-            }
     }
 
     private func rowMatchesFilters(_ row: SpacesMobileWorkspaceRuntimeRow, workspace: SpacesDeviceWorkspaceSummary, query: String) -> Bool {

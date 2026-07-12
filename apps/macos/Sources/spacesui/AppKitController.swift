@@ -3447,6 +3447,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                     kind: .browser, processID: nil, windowListIndex: nil, targetURL: targetURL, processKey: nil, launcherName: nil, agentWindow: nil))
         }
 
+        // Row families are grouped: browser sessions, then configured processes, then coding agents, then
+        // ad hoc terminals. `processEntries` interleaves configured processes with ad hoc terminal windows
+        // in one list, so it is walked twice — configured processes here, terminal windows after the agents
+        // — to keep each family contiguous. Order within a family is the order `processEntries` already
+        // established (config order for configured processes, window order for terminals).
         for entry in processEntries {
             switch entry.kind {
             case .process:
@@ -3455,18 +3460,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                     WorkspaceRunShortcutTarget(
                         kind: .process, processID: processID, windowListIndex: nil, targetURL: nil, processKey: nil, launcherName: nil,
                         agentWindow: nil))
-            case .window:
-                guard let windowListIndex = entry.windowListIndex else { continue }
-                targets.append(
-                    WorkspaceRunShortcutTarget(
-                        kind: .window, processID: nil, windowListIndex: windowListIndex, targetURL: nil, processKey: nil, launcherName: nil,
-                        agentWindow: nil))
             case .missingConfiguredProcess:
                 guard let processKey = entry.processKey else { continue }
                 targets.append(
                     WorkspaceRunShortcutTarget(
                         kind: .missingConfiguredProcess, processID: nil, windowListIndex: nil, targetURL: nil, processKey: processKey,
                         launcherName: nil, agentWindow: nil))
+            case .window:
+                continue
             }
         }
 
@@ -3475,6 +3476,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 WorkspaceRunShortcutTarget(
                     kind: entry.kind, processID: nil, windowListIndex: nil, targetURL: nil, processKey: nil,
                     launcherName: entry.agentWindow == nil ? entry.launcherName : nil, agentWindow: entry.agentWindow))
+        }
+
+        for entry in processEntries {
+            guard case .window = entry.kind, let windowListIndex = entry.windowListIndex else { continue }
+            targets.append(
+                WorkspaceRunShortcutTarget(
+                    kind: .window, processID: nil, windowListIndex: windowListIndex, targetURL: nil, processKey: nil, launcherName: nil,
+                    agentWindow: nil))
         }
 
         return targets
@@ -5763,6 +5772,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         notesButton.setAccessibilityIdentifier("workspace-detail-notes")
         footer.addArrangedSubview(notesButton)
 
+        // Lifecycle actions follow the workspace's state, matching the sidebar row's context menu: a stopped
+        // workspace can only be started, so it offers Launch alone; a running one offers Restart and Stop.
         let launchOrRestartButton = footerActionButton(
             symbol: workspace.isRunning ? "arrow.clockwise.circle" : "play.circle", tooltip: workspace.isRunning ? "Restart" : "Launch",
             action: workspace.isRunning ? #selector(restartWorkspace(_:)) : #selector(launchWorkspace(_:)))
@@ -5770,10 +5781,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         launchOrRestartButton.setAccessibilityIdentifier("workspace-detail-launch-restart")
         footer.addArrangedSubview(launchOrRestartButton)
 
-        let stopButton = footerActionButton(symbol: "stop.circle", tooltip: "Stop", action: #selector(stopWorkspace(_:)))
-        stopButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
-        stopButton.setAccessibilityIdentifier("workspace-detail-stop")
-        footer.addArrangedSubview(stopButton)
+        if workspace.isRunning {
+            let stopButton = footerActionButton(symbol: "stop.circle", tooltip: "Stop", action: #selector(stopWorkspace(_:)))
+            stopButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
+            stopButton.setAccessibilityIdentifier("workspace-detail-stop")
+            footer.addArrangedSubview(stopButton)
+        }
 
         let overflowButton = footerActionButton(symbol: "ellipsis.circle", tooltip: "More actions", action: #selector(showWorkspaceOverflowMenu(_:)))
         overflowButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
@@ -8024,6 +8037,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     @objc private func archiveWorkspace(_ sender: Any) {
         guard let id = Self.senderIdentifier(sender) else { return }
+        archiveWorkspace(id: id, sender: sender)
+    }
+
+    /// Archives a workspace by id, so the detail ⋯ overflow menu and the sidebar row's right-click menu
+    /// share one confirmation and teardown path. `sender` is only used to disable the originating button
+    /// while the mutation is in flight; a menu item passes none.
+    func archiveWorkspace(id: String, sender: Any? = nil) {
         guard let (project, workspace) = findWorkspace(id: id) else { return }
         if workspace.isDefault {
             showInfoMessage(

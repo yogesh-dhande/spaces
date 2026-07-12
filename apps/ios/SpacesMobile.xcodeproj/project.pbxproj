@@ -65,6 +65,7 @@
 		ECD7605414703F81C20D3C1F /* SpacesMobileAppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 35C5584696D86B15B55614E4 /* SpacesMobileAppModel.swift */; };
 		EF5A873F100F9A6B3757F99E /* spacesterminalcore in Frameworks */ = {isa = PBXBuildFile; productRef = 43EB21BA2206002F56560C15 /* spacesterminalcore */; };
 		F0B1976C2F5ED584C46E6C79 /* TerminalViewerModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = F40914D63AD1216CD699DAC4 /* TerminalViewerModel.swift */; };
+		F1340E71F8BFB1C3BE19D9E1 /* WorkspaceControlBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C920538A76B1EF14F680074 /* WorkspaceControlBar.swift */; };
 		F4DCDE7C8A94835047353CCE /* ScreenshotMarkupPresenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = B9115C75CD6E289D76B640B9 /* ScreenshotMarkupPresenter.swift */; };
 /* End PBXBuildFile section */
 
@@ -105,6 +106,7 @@
 		573064C6726817E7F264E9C5 /* RootTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootTabView.swift; sourceTree = "<group>"; };
 		5746D7B660E9B5038B0DDEAF /* SpacesMobileAlertsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacesMobileAlertsTests.swift; sourceTree = "<group>"; };
 		5B16B0331923D686A4D0AEE5 /* SpacesMobileUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = SpacesMobileUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		5C920538A76B1EF14F680074 /* WorkspaceControlBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceControlBar.swift; sourceTree = "<group>"; };
 		68ACEAFCA89C7E530880B3F0 /* StagedScreenshotStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StagedScreenshotStore.swift; sourceTree = "<group>"; };
 		6B6AD8F5E136746F49A212A1 /* SpacesTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacesTabView.swift; sourceTree = "<group>"; };
 		6C455E2647DB986BD34D403B /* DaemonSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonSettingsView.swift; sourceTree = "<group>"; };
@@ -274,6 +276,7 @@
 			isa = PBXGroup;
 			children = (
 				6B6AD8F5E136746F49A212A1 /* SpacesTabView.swift */,
+				5C920538A76B1EF14F680074 /* WorkspaceControlBar.swift */,
 			);
 			path = Spaces;
 			sourceTree = "<group>";
@@ -528,6 +531,7 @@
 				F0B1976C2F5ED584C46E6C79 /* TerminalViewerModel.swift in Sources */,
 				CAEFA68B6F87086897B9C88D /* TerminalWebArtifactView.swift in Sources */,
 				D26F853567EBC3D143DD54F2 /* Theme.swift in Sources */,
+				F1340E71F8BFB1C3BE19D9E1 /* WorkspaceControlBar.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

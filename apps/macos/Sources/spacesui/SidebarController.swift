@@ -1349,6 +1349,9 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         }
         menu.addItem(.separator())
         addItem("Hide", symbol: "eye.slash", target: self, action: #selector(hideWorkspaceMenuItem(_:)), identifier: workspace.id)
+        // Archive is destructive (it removes the git worktree), so it sits last, below the separator, and
+        // routes through the same confirmation the detail ⋯ overflow menu uses.
+        addItem("Archive…", symbol: "archivebox", target: self, action: #selector(archiveWorkspaceMenuItem(_:)), identifier: workspace.id)
         return menu
     }
 
@@ -1370,6 +1373,11 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     @objc private func hideWorkspaceMenuItem(_ sender: NSMenuItem) {
         guard let id = sender.identifier?.rawValue else { return }
         host.hideWorkspace(id: id)
+    }
+
+    @objc private func archiveWorkspaceMenuItem(_ sender: NSMenuItem) {
+        guard let id = sender.identifier?.rawValue else { return }
+        host.archiveWorkspace(id: id)
     }
 
     private func runtimeTargetMenu(workspace: WorkspaceSummary, item: SidebarRuntimeTargetItem) -> NSMenu {
