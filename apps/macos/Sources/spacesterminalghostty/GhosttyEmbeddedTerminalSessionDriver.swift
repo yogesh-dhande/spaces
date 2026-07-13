@@ -266,7 +266,9 @@
 
         /// Swap PTY output delivery to an in-memory buffer so the read loop keeps
         /// draining while the daemon quiesces and closes its durable output handle.
-        func beginHandoffOutputBuffering() { hostPTY?.beginHandoffOutputBuffering() }
+        func beginHandoffOutputBuffering() async {
+            if let hostPTY { await hostPTY.beginHandoffOutputBuffering() }
+        }
 
         /// Flush the buffered PTY bytes to `path` and install a direct-to-file writer
         /// that keeps appending until `execv`.

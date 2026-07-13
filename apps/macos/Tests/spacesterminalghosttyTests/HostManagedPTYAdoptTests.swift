@@ -59,6 +59,16 @@ final class HostManagedPTYAdoptTests: XCTestCase {
 
     private func fileByteCount(_ path: String) -> Int { (try? FileManager.default.attributesOfItem(atPath: path)[.size] as? Int) ?? 0 }
 
+    private func beginHandoffOutputBuffering(_ driver: HostManagedPTYTerminalSessionDriver?) {
+        guard let driver else { return XCTFail("missing PTY driver") }
+        let completed = DispatchSemaphore(value: 0)
+        Task {
+            await driver.beginHandoffOutputBuffering()
+            completed.signal()
+        }
+        XCTAssertEqual(completed.wait(timeout: .now() + 5), .success, "handoff buffering did not finish")
+    }
+
     // MARK: - Adopt round-trip
 
     func testAdoptRoundTripHandsOffLiveChild() throws {
@@ -74,7 +84,7 @@ final class HostManagedPTYAdoptTests: XCTestCase {
         XCTAssertTrue(waitUntil { collectorA.string.contains("ping") }, "driver A never observed its child echo")
 
         // Stage the handoff: buffer, flush to a file, then snapshot the descriptors.
-        driverA?.beginHandoffOutputBuffering()
+        beginHandoffOutputBuffering(driverA)
         let filePath = makeTemporaryFilePath()
         try driverA?.finishHandoffOutputBuffering(appendingTo: filePath)
         guard let snapshot = driverA?.handoffDescriptorSnapshot() else { return XCTFail("driver A produced no handoff descriptor snapshot") }
@@ -127,7 +137,7 @@ final class HostManagedPTYAdoptTests: XCTestCase {
         // Flip mid-stream: wait until the handler has captured some early lines, then
         // swap to buffering and immediately to the append-only file sink.
         XCTAssertTrue(waitUntil { handlerCollector.string.contains("L0010") }, "no early output captured before the swap")
-        driver.beginHandoffOutputBuffering()
+        beginHandoffOutputBuffering(driver)
         let filePath = makeTemporaryFilePath()
         try driver.finishHandoffOutputBuffering(appendingTo: filePath)
 
@@ -148,6 +158,34 @@ final class HostManagedPTYAdoptTests: XCTestCase {
         }
         let expected: [String] = (1...200).map { String(format: "L%04d", $0) }
         XCTAssertEqual(markers, expected, "output was lost, duplicated, or reordered across the handoff swap")
+    }
+
+    func testHandoffBufferingWaitsForInFlightHandlerDelivery() throws {
+        let configuration = makeConfiguration(sessionID: "handler-barrier", command: "printf barrier-ready")
+        let driver = HostManagedPTYTerminalSessionDriver(launchConfiguration: configuration, terminationEscalationIntervals: fastEscalation)
+        let handlerEntered = expectation(description: "output handler entered")
+        let sessionClosed = expectation(description: "short-lived child exited")
+        let releaseHandler = DispatchSemaphore(value: 0)
+        let bufferingReturned = DispatchSemaphore(value: 0)
+        driver.setOutputHandler { _ in
+            handlerEntered.fulfill()
+            releaseHandler.wait()
+        }
+        driver.setSessionClosedHandler { sessionClosed.fulfill() }
+        try driver.startIfNeeded()
+
+        wait(for: [handlerEntered], timeout: 5)
+        Task {
+            await driver.beginHandoffOutputBuffering()
+            bufferingReturned.signal()
+        }
+
+        XCTAssertEqual(
+            bufferingReturned.wait(timeout: .now() + 0.1), .timedOut,
+            "buffering must not return while a pre-swap handler delivery is still running")
+        releaseHandler.signal()
+        XCTAssertEqual(bufferingReturned.wait(timeout: .now() + 5), .success)
+        wait(for: [sessionClosed], timeout: 5)
     }
 
     // MARK: - Dead-child adopt
@@ -194,7 +232,7 @@ final class HostManagedPTYAdoptTests: XCTestCase {
         try driver.startIfNeeded()
 
         let filePath = makeTemporaryFilePath()
-        driver.beginHandoffOutputBuffering()
+        beginHandoffOutputBuffering(driver)
         try driver.finishHandoffOutputBuffering(appendingTo: filePath)
         driver.endHandoffOutputBuffering()
 
@@ -215,7 +253,7 @@ final class HostManagedPTYAdoptTests: XCTestCase {
         driver.setOutputHandler { collector.append($0) }
         try driver.startIfNeeded()
 
-        driver.beginHandoffOutputBuffering()
+        beginHandoffOutputBuffering(driver)
         driver.sendRawBytes(Data("buffered-before-failure\n".utf8))
         usleep(100_000)
         XCTAssertFalse(collector.string.contains("buffered-before-failure"), "buffered output must not reach the normal handler before fallback")

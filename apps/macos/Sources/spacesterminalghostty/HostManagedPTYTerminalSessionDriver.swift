@@ -34,6 +34,11 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
     private var masterFDGeneration: UInt64 = 0
     private var childPIDValue: Int32?
     private var outputHandler: (@Sendable (Data) -> Void)?
+    /// Handler calls selected before a handoff sink swap execute outside `lock` and
+    /// may block in Ghostty processing. Quiesce awaits these calls before closing the
+    /// transcript so their resulting output cannot arrive after the handoff boundary.
+    private var handlerDeliveriesInFlight = 0
+    private var handlerDeliveryWaiters: [CheckedContinuation<Void, Never>] = []
     private var onSessionClosed: (@MainActor () -> Void)?
     private var cellSize: (columns: Int, rows: Int) = (80, 24)
     private var closed = false
@@ -158,10 +163,18 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
     /// buffer so PTY bytes keep being drained (the read loop must never block) while
     /// the daemon quiesces and closes the durable output handle. Nothing is lost —
     /// buffered bytes are flushed by `finishHandoffOutputBuffering`.
-    func beginHandoffOutputBuffering() {
-        lock.lock()
-        outputSink = .buffer
-        lock.unlock()
+    func beginHandoffOutputBuffering() async {
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            outputSink = .buffer
+            guard handlerDeliveriesInFlight > 0 else {
+                lock.unlock()
+                continuation.resume()
+                return
+            }
+            handlerDeliveryWaiters.append(continuation)
+            lock.unlock()
+        }
     }
 
     /// Second handoff step: open `path` for append and take over delivery. Opens with
@@ -346,8 +359,22 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
         switch outputSink {
         case .handler:
             let handler = outputHandler
+            if handler != nil { handlerDeliveriesInFlight += 1 }
             lock.unlock()
-            handler?(data)
+            guard let handler else { return }
+            handler(data)
+
+            let waiters: [CheckedContinuation<Void, Never>]
+            lock.lock()
+            handlerDeliveriesInFlight -= 1
+            if handlerDeliveriesInFlight == 0 {
+                waiters = handlerDeliveryWaiters
+                handlerDeliveryWaiters.removeAll()
+            } else {
+                waiters = []
+            }
+            lock.unlock()
+            for waiter in waiters { waiter.resume() }
         case .buffer:
             handoffBuffer.append(data)
             lock.unlock()

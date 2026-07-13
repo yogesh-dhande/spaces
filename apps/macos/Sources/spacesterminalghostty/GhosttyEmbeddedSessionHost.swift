@@ -490,7 +490,7 @@
 
             // Route further PTY bytes into an in-memory buffer so the read loop never
             // blocks while we drain the main actor and close the durable output handle.
-            sessionDriver.beginHandoffOutputBuffering()
+            await sessionDriver.beginHandoffOutputBuffering()
 
             // Fence: let already-queued incoming-output Tasks run to completion (they hop
             // to the main actor and append to output.log), then synchronously flush any
