@@ -1,4 +1,5 @@
 #if os(Linux)
+    import Dispatch
     import Foundation
     import Glibc
     import XCTest
@@ -190,6 +191,21 @@
             XCTAssertEqual(replayed, expected)
         }
 
+        func testOutputDeliveryFenceWaitsForScheduledPersistence() {
+            let fence = GhosttyLinuxHandoffOutputDeliveryFence()
+            fence.beginDelivery()
+
+            let completed = DispatchSemaphore(value: 0)
+            Task {
+                await fence.waitUntilDrained()
+                completed.signal()
+            }
+            XCTAssertEqual(completed.wait(timeout: .now() + .milliseconds(50)), .timedOut)
+
+            fence.finishDelivery()
+            XCTAssertEqual(completed.wait(timeout: .now() + .seconds(1)), .success)
+        }
+
         /// Drives the trusted (client-less) resize command so the recorded grid is a known
         /// non-default size the resume path must restore before replay.
         @MainActor private func resize(_ core: GhosttyEmbeddedSessionCore, columns: Int, rows: Int) {
@@ -243,6 +259,34 @@
             let transcript = try String(contentsOfFile: paths.outputPath)
             XCTAssertEqual(occurrences(of: marker, in: transcript), 1, "replay must not re-append the original transcript to output.log")
             XCTAssertEqual(occurrences(of: secondMarker, in: transcript), 1, "post-handoff output must land in output.log exactly once")
+        }
+
+        @MainActor func testResumeDoesNotRestoreClearedScreenOrScrollback() async throws {
+            let paths = try makeTemporaryPaths()
+            defer { try? FileManager.default.removeItem(atPath: paths.rootDirectory) }
+
+            let clearedMarker = "HANDOFF_CLEARED_MARKER"
+            let configuration = makeConfiguration(
+                sessionID: "handoff-cleared-\(UUID().uuidString)", command: "stty -echo; printf '%s\\n' '\(clearedMarker)'; cat")
+            let sourceCore = GhosttyEmbeddedSessionCore(launchConfiguration: configuration, paths: paths)
+            try sourceCore.startIfNeeded()
+            try await waitAsync { (try? String(contentsOfFile: paths.outputPath))?.contains(clearedMarker) == true }
+            let clearResponse = sourceCore.handleControlRequest(TerminalControlRequest(command: "clearScreen"))
+            XCTAssertTrue(clearResponse.ok, "clear must succeed: \(clearResponse.message)")
+
+            guard let record = try await sourceCore.quiesceForHandoff() else { return XCTFail("quiesce produced no handoff record") }
+            sourceCore.terminate()
+
+            let pty = try makeAdoptablePTY()
+            let resumedCore = GhosttyEmbeddedSessionCore(launchConfiguration: configuration, paths: paths)
+            defer {
+                tearDown(pty)
+                resumedCore.terminate()
+            }
+            try await resumedCore.resumeFromHandoff(handoffRecord(from: record, adopting: pty))
+            try attachRemoteOwner(to: resumedCore, id: "remote-owner")
+            let screen = try XCTUnwrap(renderedScreenText(of: resumedCore))
+            XCTAssertFalse(screen.contains(clearedMarker), "handoff replay must preserve the cleared screen and scrollback")
         }
 
         @MainActor func testResumePreservesVTParserStateAcrossReplayChunkBoundary() async throws {

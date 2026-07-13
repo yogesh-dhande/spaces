@@ -192,6 +192,40 @@ final class GhosttyEmbeddedSessionHandoffTests: XCTestCase {
         XCTAssertEqual(occurrences(of: secondMarker, in: transcript), 1, "post-handoff output must land in output.log exactly once")
     }
 
+    @MainActor func testResumeDoesNotRestoreClearedScreenOrScrollback() async throws {
+        try requireGhosttyAvailable()
+        let paths = try makeTemporaryPaths()
+        defer { try? FileManager.default.removeItem(atPath: paths.rootDirectory) }
+
+        let clearedMarker = "HANDOFF_CLEARED_MARKER"
+        let configuration = makeConfiguration(
+            sessionID: "handoff-cleared-\(UUID().uuidString)", command: "stty -echo; printf '%s\\n' '\(clearedMarker)'; cat")
+        let sourceCore = GhosttyEmbeddedSessionCore(launchConfiguration: configuration, paths: paths)
+        try sourceCore.startIfNeeded()
+        try await waitAsync { self.snapshotText(of: sourceCore)?.contains(clearedMarker) == true }
+        XCTAssertTrue(sourceCore.rendererHost.clearScreenAndScrollback())
+        try await waitAsync {
+            guard let text = self.snapshotText(of: sourceCore) else { return false }
+            return !text.contains(clearedMarker)
+        }
+
+        guard let record = try await sourceCore.quiesceForHandoff() else { return XCTFail("quiesce produced no handoff record") }
+        sourceCore.terminate()
+
+        let pty = try makeAdoptablePTY()
+        let resumedCore = GhosttyEmbeddedSessionCore(launchConfiguration: configuration, paths: paths)
+        defer {
+            tearDown(pty)
+            resumedCore.terminate()
+        }
+        try await resumedCore.resumeFromHandoff(handoffRecord(from: record, adopting: pty))
+        let liveMarker = "HANDOFF_AFTER_CLEAR_MARKER"
+        XCTAssertGreaterThan(write(pty.slave, "\(liveMarker)\n", liveMarker.utf8.count + 1), 0)
+        try await waitAsync { self.snapshotText(of: resumedCore)?.contains(liveMarker) == true }
+        XCTAssertFalse(
+            snapshotText(of: resumedCore)?.contains(clearedMarker) == true, "handoff replay must preserve the cleared screen and scrollback")
+    }
+
     // MARK: - 2. Reflow invariant (persisted grid before new output)
 
     @MainActor func testResumeRestoresPersistedGridBeforeNewOutput() async throws {

@@ -19,6 +19,45 @@
         }
     }
 
+    /// Bridges the PTY driver's synchronous output callback to the main-actor task that
+    /// persists and renders that output. Once the PTY driver has switched to handoff
+    /// buffering, no delivery can register here, so draining this fence is a stable
+    /// boundary before output.log is closed.
+    final class GhosttyLinuxHandoffOutputDeliveryFence: @unchecked Sendable {
+        private let lock = NSLock()
+        private var deliveryCount = 0
+        private var drainWaiters: [CheckedContinuation<Void, Never>] = []
+
+        func beginDelivery() {
+            lock.lock()
+            deliveryCount += 1
+            lock.unlock()
+        }
+
+        func finishDelivery() {
+            lock.lock()
+            precondition(deliveryCount > 0, "finishing an output delivery that was never registered")
+            deliveryCount -= 1
+            let waiters = deliveryCount == 0 ? drainWaiters : []
+            if deliveryCount == 0 { drainWaiters.removeAll() }
+            lock.unlock()
+            for waiter in waiters { waiter.resume() }
+        }
+
+        func waitUntilDrained() async {
+            await withCheckedContinuation { continuation in
+                lock.lock()
+                guard deliveryCount > 0 else {
+                    lock.unlock()
+                    continuation.resume()
+                    return
+                }
+                drainWaiters.append(continuation)
+                lock.unlock()
+            }
+        }
+    }
+
     @MainActor public final class GhosttyEmbeddedSessionCore {
         private static let maxScrollbackBytes = TerminalScrollbackBudget.defaultMaxBytes
         nonisolated static let outputReplayChunkByteCount = 1024 * 1024
@@ -34,6 +73,7 @@
         private let controlQueue: DispatchQueue
         private let stateStreamQueue: DispatchQueue
         private let ptyDriver: HostManagedPTYTerminalSessionDriver
+        private let outputDeliveryFence = GhosttyLinuxHandoffOutputDeliveryFence()
         private var controlServer: TerminalControlServer?
         private var stateStreamServer: GhosttyRemoteSessionStateStreamServer?
         private var outputHandle: FileHandle?
@@ -88,7 +128,7 @@
             started = true
             terminating = false
             writeRuntimeState(state: .starting)
-            ptyDriver.setOutputHandler { [weak self] data in Task { @MainActor [weak self] in self?.handleOutput(data) } }
+            installOutputHandler()
             ptyDriver.setSessionClosedHandler { [weak self] in self?.handleSessionClosed() }
             do {
                 try ptyDriver.startIfNeeded()
@@ -174,14 +214,11 @@
             // blocks while we drain the main actor and close the durable output handle.
             await ptyDriver.beginHandoffOutputBuffering()
 
-            // Fence: let already-queued incoming-output Tasks run to completion (they hop
-            // to the main actor and append to output.log). After beginHandoffOutputBuffering
-            // the session ingests no new PTY bytes through the handler, so once these land
-            // the file is complete up to the buffering boundary. Unlike the macOS core this
-            // core has no coalescing buffer to flush synchronously — handleOutput appends
-            // each chunk straight to output.log — so a main-actor yield plus a short settle
-            // is the whole fence.
-            await drainQueuedOutputForHandoff()
+            // The PTY callback registers this second fence before returning and only
+            // completes it after its main-actor handleOutput task has appended output.log.
+            // The driver's fence above makes the registration set stable; this drain proves
+            // every registered persistence task completed without relying on timing.
+            await outputDeliveryFence.waitUntilDrained()
 
             try? outputHandle?.synchronize()
             try? outputHandle?.close()
@@ -194,14 +231,6 @@
             return DaemonHandoffSessionRecord(
                 sessionID: launchConfiguration.sessionID, masterFD: descriptor.masterFD, childPID: descriptor.childPID, columns: terminalSize.columns,
                 rows: terminalSize.rows, ownerEpoch: ownerEpoch, screenStateRevision: screenStateRevision, appearance: currentAppearance.rawValue)
-        }
-
-        /// Main-actor fence for the quiesce output flush. Yields the main actor so queued
-        /// `handleOutput` Tasks land in output.log, then adds a short settle for any
-        /// in-flight read-loop → Task hop still landing on the main actor.
-        private func drainQueuedOutputForHandoff() async {
-            await Task.yield()
-            try? await Task.sleep(for: .milliseconds(20))
         }
 
         /// Failed-`execv` fallback: `execv` returned, so this same image keeps running and
@@ -248,7 +277,7 @@
             started = true
             terminating = false
             suppressBroadcastsForHandoff = false
-            ptyDriver.setOutputHandler { [weak self] data in Task { @MainActor [weak self] in self?.handleOutput(data) } }
+            installOutputHandler()
             ptyDriver.setSessionClosedHandler { [weak self] in self?.handleSessionClosed() }
 
             // Rebuild + replay at the persisted grid. recreateVTRenderer writes output.log
@@ -276,19 +305,36 @@
         var debugOwnerEpoch: UInt64 { ownerEpoch }
         var isStarted: Bool { started }
 
+        private func installOutputHandler() {
+            let outputDeliveryFence = outputDeliveryFence
+            ptyDriver.setOutputHandler { [weak self, outputDeliveryFence] data in
+                outputDeliveryFence.beginDelivery()
+                Task { @MainActor [weak self, outputDeliveryFence] in
+                    defer { outputDeliveryFence.finishDelivery() }
+                    self?.handleOutput(data)
+                }
+            }
+        }
+
         private func handleOutput(_ data: Data) {
             guard started, !data.isEmpty else { return }
             logMobileTakeoverPerformance(
                 name: "terminal_output_observed", count: data.count,
                 attributes: ["output_bytes": String(data.count), "output_byte_count_before": String(outputByteCount)])
-            do {
-                try outputHandle?.write(contentsOf: data)
-                outputByteCount += data.count
-            } catch {}
+            _ = appendTranscript(data)
             writeVTRenderer(data)
             writeRuntimeState(state: .running)
             broadcastCurrentState(reason: TerminalRemoteSessionStateReason.output)
             scheduleInputOutputResyncIfNeeded()
+        }
+
+        @discardableResult private func appendTranscript(_ data: Data) -> Bool {
+            guard let outputHandle else { return false }
+            do {
+                try outputHandle.write(contentsOf: data)
+                outputByteCount += data.count
+                return true
+            } catch { return false }
         }
 
         private func ensureOutputHandle() throws {
@@ -483,7 +529,11 @@
             guard ownerRequestIsCurrent(request) else {
                 return TerminalControlResponse(ok: false, message: "Only the active owner can clear the terminal.", errorCode: .ownershipRejected)
             }
-            writeVTRenderer(Data("\u{001B}[H\u{001B}[2J\u{001B}[3J".utf8))
+            let mutation = GhosttyTerminalTranscriptMutation.clearScreenAndScrollback
+            guard appendTranscript(mutation) else {
+                return TerminalControlResponse(ok: false, message: "Unable to persist the terminal clear operation.")
+            }
+            writeVTRenderer(mutation)
             broadcastCurrentState(reason: TerminalRemoteSessionStateReason.clearScreen)
             return TerminalControlResponse(ok: true, message: "Cleared terminal screen and scrollback.")
         }

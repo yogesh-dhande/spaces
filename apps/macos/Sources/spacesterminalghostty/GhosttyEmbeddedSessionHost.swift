@@ -56,10 +56,14 @@
 
     @MainActor public final class GhosttyHeadlessRendererHost: TerminalGhosttyRendererHosting {
         private let sessionDriver: GhosttyEmbeddedTerminalSessionDriver
+        private let clearScreenAndScrollbackAction: @MainActor () -> Bool
         private var isOwnerClient: (@MainActor (String) -> Bool)?
         private var inputActivityHandler: (@MainActor (Int) -> Void)?
 
-        init(sessionDriver: GhosttyEmbeddedTerminalSessionDriver) { self.sessionDriver = sessionDriver }
+        init(sessionDriver: GhosttyEmbeddedTerminalSessionDriver, clearScreenAndScrollbackAction: @escaping @MainActor () -> Bool) {
+            self.sessionDriver = sessionDriver
+            self.clearScreenAndScrollbackAction = clearScreenAndScrollbackAction
+        }
 
         func setOwnerClientResolver(_ resolver: @escaping @MainActor (String) -> Bool) { isOwnerClient = resolver }
 
@@ -154,13 +158,16 @@
             return sendTextAsPaste(text)
         }
 
-        @discardableResult public func performBindingAction(_ action: String) -> Bool { sessionDriver.performBindingAction(action) }
+        @discardableResult public func performBindingAction(_ action: String) -> Bool {
+            if action == "clear_screen" { return clearScreenAndScrollback() }
+            return sessionDriver.performBindingAction(action)
+        }
 
         @discardableResult public func sendScroll(horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32) -> Bool {
             sessionDriver.sendScroll(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods)
         }
 
-        @discardableResult public func clearScreenAndScrollback() -> Bool { sessionDriver.clearScreenAndScrollback() }
+        @discardableResult public func clearScreenAndScrollback() -> Bool { clearScreenAndScrollbackAction() }
 
         public var debugSearchState: GhosttyTerminalSearchDebugState { .init(isVisible: false, query: "", total: nil, selected: nil) }
 
@@ -254,7 +261,8 @@
         private let controlQueue: DispatchQueue
         private let stateStreamQueue: DispatchQueue
         private let sessionDriver: GhosttyEmbeddedTerminalSessionDriver
-        private lazy var rendererHostStorage = GhosttyHeadlessRendererHost(sessionDriver: sessionDriver)
+        private lazy var rendererHostStorage = GhosttyHeadlessRendererHost(
+            sessionDriver: sessionDriver, clearScreenAndScrollbackAction: { [weak self] in self?.clearScreenAndScrollback() ?? false })
         private let requestSurfaceRefreshAction: @MainActor () -> Void
         private var runtimeStateTimer: Timer?
         private var controlServer: TerminalControlServer?
@@ -1089,8 +1097,8 @@
             return staleClientIDs
         }
 
-        private func appendOutput(_ data: Data, interactiveResync: Bool = false, shouldBroadcastState: Bool = true) {
-            guard !didTerminateCurrentRun else { return }
+        @discardableResult private func appendOutput(_ data: Data, interactiveResync: Bool = false, shouldBroadcastState: Bool = true) -> Bool {
+            guard !didTerminateCurrentRun else { return false }
             let startedAt = Date()
             do {
                 let outputHandle = try ensureOutputHandle()
@@ -1112,12 +1120,24 @@
                             elapsedMS: TerminalPerformance.elapsedMS(since: sessionStartedAt), success: true, detail: "bytes=\(data.count)")
                     }
                 }
+                return true
             } catch {
                 TerminalPerformance.logMetric(
                     "terminal_output_write", target: "session=\(launchConfiguration.sessionID)",
                     elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false, detail: "bytes=\(data.count)")
                 fputs("spaces: ghostty output write failed: \(error)\n", stderr)
+                return false
             }
+        }
+
+        /// Keeps the renderer mutation replayable. The marker enters the same locked
+        /// coalescing buffer as PTY callbacks, preserving its byte order with concurrent
+        /// output before the buffer is drained synchronously.
+        private func clearScreenAndScrollback() -> Bool {
+            guard sessionDriver.clearScreenAndScrollback() else { return false }
+            _ = incomingOutputBuffer.append(GhosttyTerminalTranscriptMutation.clearScreenAndScrollback, interactive: false)
+            let outputThroughClear = incomingOutputBuffer.drain()
+            return appendOutput(outputThroughClear.data, interactiveResync: outputThroughClear.isInteractive, shouldBroadcastState: false)
         }
 
         @discardableResult private func ensureOutputHandle() throws -> FileHandle {
@@ -1356,7 +1376,7 @@
                 guard let self else { return }
                 let drainedOutput = incomingOutputBuffer.drain()
                 guard !drainedOutput.data.isEmpty else { return }
-                await MainActor.run { self.appendOutput(drainedOutput.data, interactiveResync: drainedOutput.isInteractive) }
+                _ = await MainActor.run { self.appendOutput(drainedOutput.data, interactiveResync: drainedOutput.isInteractive) }
             }
         }
 
