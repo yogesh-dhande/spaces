@@ -155,6 +155,15 @@ public enum DaemonHandoffStore {
         return table
     }
 
+    /// Deletes the handoff table without reading it. Used on the failed-`execv`
+    /// fallback: `execv` returned, so the just-written table describes a handoff that
+    /// never happened and must not be adopted by any later startup of this same pid.
+    /// `consume` deletes on read; this is the delete-only path for the write-then-abort case.
+    public static func deleteTable(fileManager: FileManager = .default) {
+        guard let path = try? TerminalServicePaths.daemonHandoffTablePath(fileManager: fileManager) else { return }
+        try? fileManager.removeItem(atPath: path)
+    }
+
     /// Clears `FD_CLOEXEC` on a descriptor so it survives the upcoming `execv` into
     /// the staged binary instead of being closed by the kernel at exec time.
     public static func prepareDescriptorForHandoff(_ fd: Int32) throws {
@@ -175,6 +184,42 @@ public enum DaemonHandoffStore {
 
     private static func logHandoffTableDiscarded(_ reason: String) {
         FileHandle.standardError.write(Data("daemon-handoff: discarding handoff table (\(reason)).\n".utf8))
+    }
+}
+
+/// What the resuming daemon should do with a single handoff record, decided purely from
+/// whether its inherited descriptor still looks like a live PTY master and whether its child
+/// process is still alive. Kept a pure function (no syscalls, no I/O) so the resume-selection
+/// contract is unit-testable independent of a live PTY and GhosttyKit.
+public enum DaemonHandoffResumeAction: Equatable, Sendable {
+    /// The descriptor is a live PTY master and the child is alive: rebuild a core and adopt it.
+    case adopt
+    /// The descriptor is a live PTY master but the child has exited: close the fd and finalize the
+    /// session as `.exited` (the normal dead-child teardown), then skip.
+    case finalizeExited
+    /// The descriptor is not a usable PTY master (closed/repurposed across the exec): finalize the
+    /// session as `.exited` and skip. There is no live fd to close.
+    case discardInvalidDescriptor
+}
+
+/// Pure decisions the daemon exec seam makes around a handoff, factored out of the private
+/// `SpacesDaemonController` (an executable target's types are not importable by tests) so the
+/// generation-guard and resume-selection contracts can be unit-tested directly.
+public enum DaemonHandoffDecision {
+    /// Whether to refuse an exec-in-place handoff to guard against an exec loop between two builds.
+    /// Refuses once `generation` reaches the threshold AND the version we last resumed from equals
+    /// the version we are currently running — i.e. repeated handoffs keep landing on the same
+    /// `sourceVersion` without advancing. A version change (`lastSourceVersion != currentVersion`,
+    /// including the fresh-boot `nil`) always proceeds, resetting the loop.
+    public static func refusesExecByGenerationGuard(generation: Int, lastSourceVersion: String?, currentVersion: String) -> Bool {
+        generation >= 3 && lastSourceVersion == currentVersion
+    }
+
+    /// See `DaemonHandoffResumeAction`. A record with a bad descriptor is discarded regardless of
+    /// child liveness (there is nothing to adopt without a PTY master).
+    public static func resumeAction(descriptorLooksLikePTYMaster: Bool, childIsAlive: Bool) -> DaemonHandoffResumeAction {
+        guard descriptorLooksLikePTYMaster else { return .discardInvalidDescriptor }
+        return childIsAlive ? .adopt : .finalizeExited
     }
 }
 

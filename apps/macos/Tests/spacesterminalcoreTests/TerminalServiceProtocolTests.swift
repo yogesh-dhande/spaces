@@ -72,6 +72,20 @@ final class TerminalServiceProtocolTests: XCTestCase {
         XCTAssertEqual(try TerminalServiceCodec.decodeResponse(TerminalServiceCodec.encodeResponse(response)), response)
     }
 
+    func testApplyStagedUpdateCommandRoundTripsThroughCodec() throws {
+        let request = TerminalServiceRequest(command: .applyStagedUpdate)
+        XCTAssertEqual(try TerminalServiceCodec.decodeRequest(TerminalServiceCodec.encodeRequest(request)), request)
+        XCTAssertEqual(request.commandName, "applyStagedUpdate")
+    }
+
+    func testApplyStagedUpdateDecodesFromFrozenRawJSON() throws {
+        // Frozen shape — never change. A same-or-older bundled CLI/installer sends exactly this bytes
+        // to any future daemon to trigger an exec-in-place staged-update handoff, so the daemon must
+        // keep decoding this literal request forever.
+        let json = Data(#"{"command":{"applyStagedUpdate":{}}}"#.utf8)
+        XCTAssertEqual(try TerminalServiceCodec.decodeRequest(json).command, .applyStagedUpdate)
+    }
+
     func testRequestDecodeRejectsAmbiguousCommandPayloads() {
         let emptyCommand = #"{"command":{}}"#.data(using: .utf8)!
         let multipleCommands = #"{"command":{"ping":{},"list":{}}}"#.data(using: .utf8)!
