@@ -1752,6 +1752,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 return self.applyRemoteAgentSignals(events)
             }
             let remoteClientStore = RemoteTerminalWindowClientStore()
+            // Reuse the owner client id this device stored on its last successful owner attach/takeover
+            // for this session so a relaunch of this Mac (e.g. after an app upgrade) presents the same id
+            // and silently reclaims the still-running session's orphaned `localWindow` owner attachment.
+            // Keyed by the local device id; a stale mapping is inert since it matches no current owner.
+            let ownerClientIDStore = ClientTerminalOwnerClientIDStore()
+            let reusableOwnerClientID = try? ownerClientIDStore.clientID(sessionID: sessionID)
             // Resolved once here (this runs on the main actor); the attach closure is @Sendable and may
             // run off-main, so it cannot read NSApp. Seeds the shared appearance store, which the attach
             // reads when it fires and the broadcast path advances on a mid-session appearance change
@@ -1769,6 +1775,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                             TerminalControlAttachPayload(client: client, attachmentMode: attachmentMode, appearance: appearanceStore.current()))),
                     requestSender: requestSender, refreshStateAfterControl: true, applyState: applyControlState)
                 guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
+                // Persist the owner client id only once the daemon confirms this client attached as
+                // OWNER, so a relaunch of this Mac reuses it and silently reclaims the still-running
+                // session's orphaned owner attachment. Not optimistic: response.ok means the daemon
+                // recorded this client as the owner attachment.
+                if attachmentMode == .owner { try? ownerClientIDStore.setClientID(sessionID: sessionID, clientID: client.id) }
             }
             let detachClientAction: @Sendable (String) throws -> Void = { clientID in
                 if remoteClientStore.current() == clientID { remoteClientStore.set(nil) }
@@ -1805,9 +1816,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 return try await stateModel.pasteImage(image, clientID: clientID, ownerEpoch: ownerEpoch)
             }
             let takeoverAction: @Sendable (String) throws -> TerminalControlResponse = { clientID in
-                try Self.sendDeviceTerminalControl(
+                let response = try Self.sendDeviceTerminalControl(
                     sessionID: sessionID, request: TerminalControlRequest(command: .takeover(TerminalControlClientPayload(clientID: clientID))),
                     requestSender: requestSender, refreshStateAfterControl: true, applyState: applyControlState)
+                // A successful takeover transfers ownership to this client on the daemon via
+                // `transferOwnership` (not a re-attach through `attachClientAction`), so persist the
+                // owner id here too — otherwise the reclaimed-after-takeover id would not survive a
+                // relaunch.
+                if response.ok { try? ownerClientIDStore.setClientID(sessionID: sessionID, clientID: clientID) }
+                return response
             }
             // Re-themes this session to a new app appearance mid-session (see `applyAppearanceToLiveSession`).
             // Reuses the pane's captured request sender and `remoteClientStore` clientID, mirroring the input
@@ -1826,8 +1843,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             let linkOpenBox = TerminalLinkOpenHandlerBox()
             let pane = TerminalSessionPaneViewController(
                 sessionID: sessionID, paths: paths, stateProvider: stateModel, preferredAttachmentMode: .owner, performInitialRefresh: false,
-                sendInputAction: sendInputAction, sendKeyAction: sendKeyAction, pasteImageAction: pasteImageAction, takeoverAction: takeoverAction,
-                attachClientAction: attachClientAction, detachClientAction: detachClientAction, detachClientSynchronouslyOnClose: false,
+                reusableOwnerClientID: reusableOwnerClientID, sendInputAction: sendInputAction, sendKeyAction: sendKeyAction,
+                pasteImageAction: pasteImageAction, takeoverAction: takeoverAction, attachClientAction: attachClientAction,
+                detachClientAction: detachClientAction, detachClientSynchronouslyOnClose: false,
                 onCloseClientDetached: { [weak self] in self?.terminateUnattachedAdHocBuiltInTerminalSessionIfNeeded(sessionID: sessionID) },
                 sessionHostProvider: { launchConfiguration, paths in
                     Self.terminalSessionHost(
