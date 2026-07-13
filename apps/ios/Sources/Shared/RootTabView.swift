@@ -10,13 +10,16 @@ struct RootTabView: View {
     var body: some View {
         TabView(selection: $model.selectedTab) {
             AlertsTabView(model: model)
+                .id(model.activeDeviceID)
                 .tag(SpacesMobileTab.alerts)
                 .tabItem { Label("Alerts", systemImage: "bell") }
                 .badge(model.undismissedAlertCount)
             SpacesTabView(model: model)
+                .id(model.activeDeviceID)
                 .tag(SpacesMobileTab.spaces)
                 .tabItem { Label("Spaces", systemImage: "rectangle.stack") }
             AgentsTabView(model: model)
+                .id(model.activeDeviceID)
                 .tag(SpacesMobileTab.agents)
                 .tabItem { Label("Agents", systemImage: "cpu") }
             SettingsTabView(model: model)

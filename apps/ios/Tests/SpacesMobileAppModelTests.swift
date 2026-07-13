@@ -112,6 +112,26 @@
             XCTAssertFalse(model.terminalGroups.contains { $0.id == "workspace-feature" })
         }
 
+        func testHideWorkspaceRechecksRunningStateBeforeStoppingAndHiding() async {
+            let recorder = SpacesMobileRequestRecorder()
+            let settings = SpacesMobileConnectionSettings()
+            let runningOverview = makeOverview(featureIsRunning: true)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                if request.commandName == "overview" {
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(runningOverview))
+                }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            let staleStoppedWorkspace = makeOverview(featureIsRunning: false).workspaces[0]
+
+            await model.hideWorkspace(staleStoppedWorkspace)
+
+            let requests = await recorder.snapshot()
+            XCTAssertEqual(requests.map(\.commandName), ["overview", "stopWorkspace", "updateWorkspaceMetadata"])
+        }
+
         /// A browser session has no run state, so its row draws no status dot — while the process and
         /// terminal rows beside it still do.
         func testBrowserSessionRowHasNoStatusDot() {
@@ -667,6 +687,7 @@
             featureProcessRows: [SpacesDeviceWorkspaceProcessRow]? = nil,
             featureCodingAgentRows: [SpacesDeviceWorkspaceCodingAgentRow]? = nil,
             featureTerminalRows: [SpacesDeviceWorkspaceTerminalRow] = [],
+            featureIsRunning: Bool = true,
             featureIsHidden: Bool = false,
             featureAssignedPorts: [SpacesDeviceAssignedPort] = [],
             featureConfig: SpacesDeviceWorkspaceConfig = SpacesDeviceWorkspaceConfig(),
@@ -691,7 +712,7 @@
                 ]
             let feature = SpacesDeviceWorkspaceSummary(
                 id: "workspace-feature", projectID: project.id, projectName: project.name, branch: "feature",
-                baseBranch: "main", dir: "/repo/feature", isRunning: true, isArchived: false, isHidden: featureIsHidden, isDefault: false,
+                baseBranch: "main", dir: "/repo/feature", isRunning: featureIsRunning, isArchived: false, isHidden: featureIsHidden, isDefault: false,
                 sessionCount: 1,
                 assignedPorts: featureAssignedPorts,
                 config: featureConfig,

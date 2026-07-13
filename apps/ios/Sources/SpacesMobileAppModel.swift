@@ -1027,7 +1027,11 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// leaves a hidden workspace running with no row left to stop it from.
     func hideWorkspace(_ workspace: SpacesDeviceWorkspaceSummary) async {
         await performWorkspaceMutation {
-            if workspace.isRunning {
+            let currentOverview = try await bridgeClient.fetchOverview(commandChannel: commandChannel)
+            guard let currentWorkspace = currentOverview.workspaces.first(where: { $0.id == workspace.id }) else {
+                throw SpacesDeviceAPIClientError.requestFailed("This workspace is no longer available.")
+            }
+            if currentWorkspace.isRunning {
                 _ = try await bridgeClient.stopWorkspace(workspaceID: workspace.id, commandChannel: commandChannel)
             }
             return try await bridgeClient.setWorkspaceHidden(workspaceID: workspace.id, isHidden: true, commandChannel: commandChannel)
