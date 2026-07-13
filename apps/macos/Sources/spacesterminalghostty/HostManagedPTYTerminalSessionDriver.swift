@@ -70,6 +70,9 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
         var master: Int32 = -1
         var windowSize = winsize(ws_row: UInt16(cellSize.rows), ws_col: UInt16(cellSize.columns), ws_xpixel: 0, ws_ypixel: 0)
         let command = Self.execCommand(for: launchConfiguration)
+        #if os(macOS)
+            let terminfoDirectoryPath = try Self.resolvedTerminfoDirectoryPath()
+        #endif
         guard let executable = strdup(command.executable) else { throw POSIXError(.ENOMEM) }
         var arguments = command.arguments.map { strdup($0) } + [nil]
         defer {
@@ -84,7 +87,12 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
             Self.scrubInheritedEnvironmentForExec()
             Self.closeInheritedFileDescriptorsForExec()
             if !launchConfiguration.workingDirectory.isEmpty { _ = chdir(launchConfiguration.workingDirectory) }
-            setenv("TERM", "xterm-256color", 1)
+            #if os(macOS)
+                setenv("TERM", "xterm-ghostty", 1)
+                setenv("TERMINFO", terminfoDirectoryPath, 1)
+            #else
+                setenv("TERM", "xterm-256color", 1)
+            #endif
             setenv("COLORTERM", "truecolor", 1)
             execv(executable, &arguments)
             _exit(127)
@@ -323,6 +331,15 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
         }
         return (shell, [shellName, "-l", "-c", resolvedCommand])
     }
+
+    #if os(macOS)
+        private static func resolvedTerminfoDirectoryPath() throws -> String {
+            switch GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath) {
+            case .available(let paths): paths.terminfoDirectoryPath
+            case .unavailable(let reason): throw GhosttyEmbeddedAppServiceError.configuration(reason)
+            }
+        }
+    #endif
 
     private static func forkPTY(master: inout Int32, windowSize: inout winsize) -> Int32 {
         #if os(Linux)

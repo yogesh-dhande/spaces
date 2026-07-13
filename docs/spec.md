@@ -97,7 +97,8 @@ Every terminal runs in the built-in terminal, never an external terminal app. A 
 - When Google Chrome is not installed, or the permission state cannot be determined, Spaces does not block and opens straight to the main UI, because there is nothing to grant. The macOS Automation prompt then appears the first time a browser session is focused.
 - Installed builds should default to one shared profile rooted at `~/.spaces/`, while repo-local development builds should default to one profile per git worktree. (Profile and environment-override mechanics live in [implementation.md](implementation.md).)
 - App launch should not stall on the user's shell startup files while resolving command locations.
-- Spaces should treat its built-in terminal as the only supported terminal path and should not require any external terminal app.
+- Spaces should treat its built-in terminal as the only supported terminal path and should not require any external terminal app. Installed terminals provide the `xterm-ghostty` terminfo entry so terminal-aware and curses applications recognize the terminal.
+- A standard Spaces app installation includes everything required to create and render built-in terminals; it does not require a repository checkout or terminal-specific environment variables.
 - Workspace processes launch, stop, recover, and reopen through Spaces-owned built-in terminal sessions.
 - Launching a second app instance for the same profile should fail immediately and identify the existing owner process.
 - Launching a different profile while another Spaces instance already owns desktop-global control should still load profile data and windows, but it should start in passive mode with local in-app shortcuts only and a compact status that global shortcuts are unavailable.

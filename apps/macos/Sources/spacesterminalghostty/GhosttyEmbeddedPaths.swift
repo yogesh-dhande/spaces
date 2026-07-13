@@ -1,13 +1,15 @@
 import Foundation
 
 public struct GhosttyEmbeddedPaths: Sendable, Equatable {
-    public let xcframeworkRootPath: String
-    public let resourcesDirectoryPath: String?
+    public let resourcesDirectoryPath: String
 
-    public init(xcframeworkRootPath: String, resourcesDirectoryPath: String?) {
-        self.xcframeworkRootPath = xcframeworkRootPath
-        self.resourcesDirectoryPath = resourcesDirectoryPath
+    var terminfoDirectoryPath: String {
+        URL(fileURLWithPath: resourcesDirectoryPath, isDirectory: true).deletingLastPathComponent().appendingPathComponent(
+            "terminfo", isDirectory: true
+        ).standardizedFileURL.path
     }
+
+    public init(resourcesDirectoryPath: String) { self.resourcesDirectoryPath = resourcesDirectoryPath }
 }
 
 public enum GhosttyEmbeddedAvailability: Sendable, Equatable {
@@ -22,44 +24,70 @@ public enum GhosttyEmbeddedLocator {
     public static func resolve(
         environment: [String: String] = ProcessInfo.processInfo.environment, fileManager: FileManager = .default, currentDirectoryPath: String? = nil
     ) -> GhosttyEmbeddedAvailability {
-        let searchRoots = candidateXCFrameworkRoots(environment: environment, fileManager: fileManager, currentDirectoryPath: currentDirectoryPath)
-        for root in searchRoots {
-            let xcframeworkURL = URL(fileURLWithPath: root, isDirectory: true)
-            guard containsRequiredArtifacts(at: xcframeworkURL, fileManager: fileManager) else { continue }
+        resolve(
+            environment: environment, fileManager: fileManager, currentDirectoryPath: currentDirectoryPath,
+            bundleResourcesURL: Bundle.main.resourceURL, executableURL: Bundle.main.executableURL)
+    }
 
-            let resourcesPath = resolvedResourcesPath(
-                environment: environment, xcframeworkRootPath: xcframeworkURL.deletingLastPathComponent().path, fileManager: fileManager)
-            return .available(.init(xcframeworkRootPath: xcframeworkURL.path, resourcesDirectoryPath: resourcesPath))
+    static func resolve(
+        environment: [String: String], fileManager: FileManager = .default, currentDirectoryPath: String?, bundleResourcesURL: URL?,
+        executableURL: URL?
+    ) -> GhosttyEmbeddedAvailability {
+        let candidates = candidateResourcesDirectories(
+            environment: environment, fileManager: fileManager, currentDirectoryPath: currentDirectoryPath, bundleResourcesURL: bundleResourcesURL,
+            executableURL: executableURL)
+        for candidate in candidates {
+            var isDirectory: ObjCBool = false
+            if fileManager.fileExists(atPath: candidate, isDirectory: &isDirectory), isDirectory.boolValue {
+                return .available(.init(resourcesDirectoryPath: candidate))
+            }
         }
 
-        return .unavailable(reason: missingFrameworkReason(searchRoots: searchRoots))
+        return .unavailable(reason: missingResourcesReason(candidates: candidates))
+    }
+
+    private static func candidateResourcesDirectories(
+        environment: [String: String], fileManager: FileManager, currentDirectoryPath: String?, bundleResourcesURL: URL?, executableURL: URL?
+    ) -> [String] {
+        var candidates: [URL] = []
+        if let override = normalizedEnvironmentPath(environment[resourcesEnvironmentVariable]) {
+            candidates.append(URL(fileURLWithPath: override, isDirectory: true))
+        }
+        if let bundleResourcesURL { candidates.append(bundleResourcesURL.appendingPathComponent("ghostty", isDirectory: true)) }
+        if let executableURL {
+            // The installed LaunchAgent runs ~/.spaces/bin/spacesd, a symlink into the app bundle.
+            // Resolve it before looking for the sibling bundled resources directory.
+            candidates.append(
+                executableURL.resolvingSymlinksInPath().deletingLastPathComponent().appendingPathComponent("ghostty", isDirectory: true))
+        }
+
+        // Development artifacts keep resources beside GhosttyKit.xcframework's parent directory.
+        for frameworkRoot in candidateXCFrameworkRoots(environment: environment, fileManager: fileManager, currentDirectoryPath: currentDirectoryPath)
+        {
+            candidates.append(
+                URL(fileURLWithPath: frameworkRoot, isDirectory: true).deletingLastPathComponent().appendingPathComponent(
+                    "Resources/ghostty", isDirectory: true))
+        }
+
+        var seen: Set<String> = []
+        return candidates.compactMap { candidate in
+            let path = candidate.standardizedFileURL.path
+            return seen.insert(path).inserted ? path : nil
+        }
     }
 
     private static func candidateXCFrameworkRoots(environment: [String: String], fileManager: FileManager, currentDirectoryPath: String?) -> [String]
     {
         var candidates: [String] = []
-        if let override = normalizedEnvironmentPath(environment[xcframeworkEnvironmentVariable]), !override.isEmpty {
+        if let override = normalizedEnvironmentPath(environment[xcframeworkEnvironmentVariable]) {
             candidates.append(URL(fileURLWithPath: override).standardizedFileURL.path)
         }
 
-        let roots = candidateSearchRoots(fileManager: fileManager, currentDirectoryPath: currentDirectoryPath)
-        for root in roots {
+        for root in candidateSearchRoots(fileManager: fileManager, currentDirectoryPath: currentDirectoryPath) {
             candidates.append(URL(fileURLWithPath: root, isDirectory: true).appendingPathComponent("GhosttyKit.xcframework").path)
             candidates.append(URL(fileURLWithPath: root, isDirectory: true).appendingPathComponent("GhosttyKit/GhosttyKit.xcframework").path)
         }
-
-        return Array(NSOrderedSet(array: candidates)) as? [String] ?? candidates
-    }
-
-    private static func resolvedResourcesPath(environment: [String: String], xcframeworkRootPath: String, fileManager: FileManager) -> String? {
-        if let override = normalizedEnvironmentPath(environment[resourcesEnvironmentVariable]), fileManager.fileExists(atPath: override) {
-            return URL(fileURLWithPath: override).standardizedFileURL.path
-        }
-
-        let rootURL = URL(fileURLWithPath: xcframeworkRootPath, isDirectory: true)
-        let bundledResources = rootURL.appendingPathComponent("Resources/ghostty", isDirectory: true)
-        if fileManager.fileExists(atPath: bundledResources.path) { return bundledResources.path }
-        return nil
+        return candidates
     }
 
     private static func candidateSearchRoots(fileManager: FileManager, currentDirectoryPath: String?) -> [String] {
@@ -77,17 +105,8 @@ public enum GhosttyEmbeddedLocator {
         return Array(NSOrderedSet(array: roots)) as? [String] ?? roots
     }
 
-    private static func missingFrameworkReason(searchRoots: [String]) -> String {
-        let joined = searchRoots.joined(separator: ", ")
-        return
-            "GhosttyKit.xcframework is not configured. Set \(xcframeworkEnvironmentVariable) or place GhosttyKit.xcframework under one of: \(joined)"
-    }
-
-    private static func containsRequiredArtifacts(at xcframeworkURL: URL, fileManager: FileManager) -> Bool {
-        let macOSSliceURL = xcframeworkURL.appendingPathComponent("macos-arm64_x86_64", isDirectory: true)
-        let libraryURL = macOSSliceURL.appendingPathComponent("libghostty-internal.a")
-        let headersURL = macOSSliceURL.appendingPathComponent("Headers", isDirectory: true)
-        return fileManager.fileExists(atPath: libraryURL.path) && fileManager.fileExists(atPath: headersURL.path)
+    private static func missingResourcesReason(candidates: [String]) -> String {
+        "Ghostty runtime resources are not configured. Set \(resourcesEnvironmentVariable) or place them under one of: \(candidates.joined(separator: ", "))"
     }
 
     private static func normalizedEnvironmentPath(_ rawValue: String?) -> String? {
