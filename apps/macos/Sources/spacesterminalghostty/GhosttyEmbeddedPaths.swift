@@ -3,6 +3,12 @@ import Foundation
 public struct GhosttyEmbeddedPaths: Sendable, Equatable {
     public let resourcesDirectoryPath: String
 
+    var terminfoDirectoryPath: String {
+        URL(fileURLWithPath: resourcesDirectoryPath, isDirectory: true).deletingLastPathComponent().appendingPathComponent(
+            "terminfo", isDirectory: true
+        ).standardizedFileURL.path
+    }
+
     public init(resourcesDirectoryPath: String) { self.resourcesDirectoryPath = resourcesDirectoryPath }
 }
 
