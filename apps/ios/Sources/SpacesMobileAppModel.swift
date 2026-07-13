@@ -1053,16 +1053,16 @@ private enum SpacesMobileMutationTimeoutRecovery {
 
     /// Where a runtime row's name lives, and so how a rename reaches the daemon: an ad hoc terminal owns its
     /// session title, while a configured process, coding agent, or browser session owns an entry in the
-    /// workspace config. The config snapshot travels with the entry so the index stays valid for the config
-    /// the rename is applied to.
+    /// workspace config. Configured entries carry stable identity so the mutation can resolve them against a
+    /// fresh config instead of replacing concurrent edits with the overview's cached snapshot.
     private enum RuntimeRowRename {
         case terminalSession(sessionID: String)
-        case workspaceConfig(SpacesDeviceWorkspaceConfig, entry: ConfigEntry)
+        case workspaceConfig(entry: ConfigEntry)
 
         enum ConfigEntry {
-            case process(index: Int)
-            case agentLauncher(index: Int)
-            case browserSession(index: Int)
+            case process(id: String)
+            case agentLauncher(id: String)
+            case browserSession(name: String)
         }
     }
 
@@ -1084,9 +1084,13 @@ private enum SpacesMobileMutationTimeoutRecovery {
             case .terminalSession(let sessionID):
                 return try await bridgeClient.renameTerminalSession(
                     workspaceID: row.workspaceID, sessionID: sessionID, title: title, commandChannel: commandChannel)
-            case .workspaceConfig(let config, let entry):
+            case .workspaceConfig(let entry):
+                let currentOverview = try await bridgeClient.fetchOverview(commandChannel: commandChannel)
+                guard let config = currentOverview.workspaces.first(where: { $0.id == row.workspaceID })?.config else {
+                    throw SpacesDeviceAPIClientError.requestFailed("This workspace is no longer available.")
+                }
                 return try await bridgeClient.updateWorkspaceConfig(
-                    workspaceID: row.workspaceID, config: renamedConfig(config, entry: entry, to: title), commandChannel: commandChannel)
+                    workspaceID: row.workspaceID, config: try renamedConfig(config, entry: entry, to: title), commandChannel: commandChannel)
             }
         }
     }
@@ -1098,22 +1102,22 @@ private enum SpacesMobileMutationTimeoutRecovery {
             return .terminalSession(sessionID: sessionID)
         case .process(let process):
             guard let config = workspaceConfig(for: row.workspaceID), let templateID = process.templateID,
-                let index = config.processes.firstIndex(where: { $0.id == templateID })
+                config.processes.contains(where: { $0.id == templateID })
             else { return nil }
-            return .workspaceConfig(config, entry: .process(index: index))
+            return .workspaceConfig(entry: .process(id: templateID))
         case .codingAgent(let agent):
             guard let config = workspaceConfig(for: row.workspaceID), let launcherID = agent.launcherID,
-                let index = config.agentLaunchers.firstIndex(where: { $0.id == launcherID })
+                config.agentLaunchers.contains(where: { $0.id == launcherID })
             else { return nil }
-            return .workspaceConfig(config, entry: .agentLauncher(index: index))
+            return .workspaceConfig(entry: .agentLauncher(id: launcherID))
         case .browserSession(let browser):
             // Configured browser sessions carry no id, but the daemon requires their names to be present and
             // unique within the workspace, and resolution preserves the configured name, so the name is the
             // entry's identity — the URL is not, since resolution expands environment variables in it.
             guard let config = workspaceConfig(for: row.workspaceID), let name = browser.route.sessionName,
-                let index = config.browserSessions.firstIndex(where: { $0.name == name })
+                config.browserSessions.contains(where: { $0.name == name })
             else { return nil }
-            return .workspaceConfig(config, entry: .browserSession(index: index))
+            return .workspaceConfig(entry: .browserSession(name: name))
         }
     }
 
@@ -1121,19 +1125,28 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// workspace's whole config, so a rename echoes every other field back unchanged.
     private func renamedConfig(
         _ config: SpacesDeviceWorkspaceConfig, entry: RuntimeRowRename.ConfigEntry, to name: String
-    ) -> SpacesDeviceWorkspaceConfig {
+    ) throws -> SpacesDeviceWorkspaceConfig {
         var processes = config.processes
         var agentLaunchers = config.agentLaunchers
         var browserSessions = config.browserSessions
         switch entry {
-        case .process(let index):
+        case .process(let id):
+            guard let index = processes.firstIndex(where: { $0.id == id }) else {
+                throw SpacesDeviceAPIClientError.requestFailed("This process is no longer configured.")
+            }
             let process = processes[index]
             processes[index] = SpacesDeviceProcessTemplate(
                 id: process.id, name: name, command: process.command, kind: process.kind, onExit: process.onExit)
-        case .agentLauncher(let index):
+        case .agentLauncher(let id):
+            guard let index = agentLaunchers.firstIndex(where: { $0.id == id }) else {
+                throw SpacesDeviceAPIClientError.requestFailed("This coding agent is no longer configured.")
+            }
             let launcher = agentLaunchers[index]
             agentLaunchers[index] = SpacesDeviceAgentLauncher(id: launcher.id, name: name, command: launcher.command)
-        case .browserSession(let index):
+        case .browserSession(let currentName):
+            guard let index = browserSessions.firstIndex(where: { $0.name == currentName }) else {
+                throw SpacesDeviceAPIClientError.requestFailed("This browser session is no longer configured.")
+            }
             browserSessions[index] = SpacesDeviceBrowserSession(name: name, url: browserSessions[index].url)
         }
         return SpacesDeviceWorkspaceConfig(

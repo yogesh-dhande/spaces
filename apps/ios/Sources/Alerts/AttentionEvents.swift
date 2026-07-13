@@ -130,11 +130,11 @@ enum SpacesMobileAttention {
         }
     }
 
-    /// Parses the daemon's ISO-8601 timestamps (no fractional seconds). Unparseable or absent
-    /// values return nil so the caller skips the source instead of inventing a date.
+    /// Parses the daemon's ISO-8601 timestamps, including the fractional seconds emitted by Linux
+    /// runtime state. Unparseable or absent values return nil so the caller skips the source.
     static func date(fromISO8601 value: String?) -> Date? {
         guard let value, !value.isEmpty else { return nil }
-        return try? Date(value, strategy: .iso8601)
+        return GhosttyRemoteSessionStateTimestamp.date(from: value)
     }
 
     /// Abbreviated relative age for event rows: "now", "5m", "3h", "2d".

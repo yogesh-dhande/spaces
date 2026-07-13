@@ -573,7 +573,9 @@
 
             await model.rename(row: row, to: "backend")
 
-            guard case .updateWorkspaceConfig(let request)? = await recorder.snapshot().first?.command else {
+            let requests = await recorder.snapshot()
+            XCTAssertEqual(requests.map(\.commandName), ["overview", "updateWorkspaceConfig"])
+            guard case .updateWorkspaceConfig(let request)? = requests.last?.command else {
                 return XCTFail("Expected an updateWorkspaceConfig command.")
             }
             XCTAssertEqual(request.workspaceID, "workspace-feature")
@@ -592,7 +594,7 @@
 
             await model.rename(row: row, to: "Reviewer")
 
-            guard case .updateWorkspaceConfig(let request)? = await recorder.snapshot().first?.command else {
+            guard case .updateWorkspaceConfig(let request)? = await recorder.snapshot().last?.command else {
                 return XCTFail("Expected an updateWorkspaceConfig command.")
             }
             XCTAssertEqual(request.config.agentLaunchers.map(\.name), ["Reviewer"])
@@ -612,11 +614,41 @@
 
             await model.rename(row: row, to: "App")
 
-            guard case .updateWorkspaceConfig(let request)? = await recorder.snapshot().first?.command else {
+            guard case .updateWorkspaceConfig(let request)? = await recorder.snapshot().last?.command else {
                 return XCTFail("Expected an updateWorkspaceConfig command.")
             }
             XCTAssertEqual(request.config.browserSessions.map(\.name), ["App"])
             XCTAssertEqual(request.config.browserSessions.map(\.url), ["http://localhost:${PORT_web}/dashboard"])
+        }
+
+        func testRenameConfiguredRowPreservesConcurrentConfigEdits() async throws {
+            let cachedOverview = makeOverview(featureProcessRows: [configuredProcessRow()], featureConfig: config())
+            let latestConfig = SpacesDeviceWorkspaceConfig(
+                stopScript: "updated stop",
+                ports: [
+                    SpacesDeviceServiceDefinition(id: "port-api", name: "api"),
+                    SpacesDeviceServiceDefinition(id: "port-web", name: "web"),
+                ],
+                processes: [
+                    SpacesDeviceProcessTemplate(id: "template-worker", name: "worker", command: "npm run worker"),
+                    SpacesDeviceProcessTemplate(id: "template-api", name: "api", command: "npm run dev"),
+                ],
+                browserSessions: [SpacesDeviceBrowserSession(name: "Docs", url: "http://localhost:4000")],
+                agentLaunchers: [SpacesDeviceAgentLauncher(id: "launcher-review", name: "Review", command: "review")])
+            let latestOverview = makeOverview(featureProcessRows: [configuredProcessRow()], featureConfig: latestConfig)
+            let (model, recorder) = makeRenamingModel(overview: cachedOverview, fetchedOverview: latestOverview)
+            let row = try XCTUnwrap(model.workspaceGroups.flatMap(\.rows).first { $0.title == "api" })
+
+            await model.rename(row: row, to: "backend")
+
+            guard case .updateWorkspaceConfig(let request)? = await recorder.snapshot().last?.command else {
+                return XCTFail("Expected an updateWorkspaceConfig command.")
+            }
+            XCTAssertEqual(request.config.stopScript, "updated stop")
+            XCTAssertEqual(request.config.ports.map(\.name), ["api", "web"])
+            XCTAssertEqual(request.config.processes.map(\.name), ["worker", "backend"])
+            XCTAssertEqual(request.config.browserSessions.map(\.name), ["Docs"])
+            XCTAssertEqual(request.config.agentLaunchers.map(\.name), ["Review"])
         }
 
         /// A process running without a configured entry takes its name from the running process, so there is
@@ -644,12 +676,16 @@
         }
 
         private func makeRenamingModel(
-            overview: SpacesDeviceOverviewPayload
+            overview: SpacesDeviceOverviewPayload,
+            fetchedOverview: SpacesDeviceOverviewPayload? = nil
         ) -> (model: SpacesMobileAppModel, recorder: SpacesMobileRequestRecorder) {
             let recorder = SpacesMobileRequestRecorder()
             let settings = SpacesMobileConnectionSettings()
             let client = SpacesDeviceAPIClient(settings: settings) { request in
                 await recorder.append(request)
+                if case .overview = request.command {
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(fetchedOverview ?? overview))
+                }
                 return SpacesDeviceAPIResponse(ok: true, message: "ok")
             }
             let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)

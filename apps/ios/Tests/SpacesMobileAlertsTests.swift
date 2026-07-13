@@ -49,6 +49,26 @@
             XCTAssertTrue(SpacesMobileAttention.events(in: overview).isEmpty)
         }
 
+        func testAcceptsFractionalLinuxDaemonTimestamps() {
+            let overview = makeOverview(
+                processRows: [
+                    makeProcessRow(
+                        id: "process-web", name: "web", runState: .exited,
+                        exitedAt: "2026-07-12T12:34:56.123Z")
+                ],
+                sessions: [
+                    makeSession(
+                        id: "session-loose", title: "zsh", state: .failed,
+                        updatedAt: "2026-07-12T12:34:57.456Z")
+                ]
+            )
+
+            let events = SpacesMobileAttention.events(in: overview)
+
+            XCTAssertEqual(Set(events.map(\.sourceID)), ["process:process-web", "session:session-loose"])
+            XCTAssertTrue(events.allSatisfy { $0.date.timeIntervalSince1970 > 0 })
+        }
+
         func testSessionRepresentedByProcessRowProducesOneEvent() {
             let overview = makeOverview(
                 processRows: [
