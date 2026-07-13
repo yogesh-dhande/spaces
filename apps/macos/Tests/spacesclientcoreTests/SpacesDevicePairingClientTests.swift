@@ -309,7 +309,10 @@ final class SpacesDevicePairingClientTests: XCTestCase {
         XCTAssertTrue(script.contains(#"staged_daemon_identity="$(stat -Lc '%d:%i' "$release_dir/bin/spacesd-bin")""#))
         XCTAssertTrue(script.contains("/proc/$daemon_pid/exe"))
         XCTAssertTrue(script.contains("wait_for_staged_daemon \"$handoff_pid\""))
-        XCTAssertTrue(script.contains("spacesd did not complete the staged handoff; restarting it with systemd"))
+        XCTAssertTrue(script.contains("spacesd is running the installed daemon image and is still resuming sessions"))
+        XCTAssertTrue(script.contains("leaving the running daemon and its sessions untouched"))
+        XCTAssertTrue(script.contains("accepted the staged handoff but did not exec the installed image within 10s; leaving it running"))
+        XCTAssertFalse(script.contains("spacesd did not complete the staged handoff; restarting it with systemd"))
         XCTAssertTrue(script.contains("spacesd did not start the installed daemon image within 10s"))
     }
 

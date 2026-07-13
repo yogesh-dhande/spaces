@@ -521,18 +521,25 @@ wait_for_staged_daemon() {
 # quiesce its sessions and exec the newly staged binary in place at the same pid, so shells,
 # coding agents, and workspace processes started before this reinstall keep running. The command
 # acknowledges before the asynchronous handoff starts, so success requires both a responsive daemon
-# and proof that the preserved pid is executing the staged binary. A failed or unsupported handoff
-# falls back to a real systemd restart, whose replacement image is verified by the same checks.
+# and proof that the preserved pid is executing the staged binary. Once a running daemon accepts the
+# request, the installer never restarts it: the request may be quiescing or replaying sessions even
+# while the request socket is unavailable. A systemd start is only safe when there was no daemon pid.
 handoff_pid="$(systemd_daemon_pid)"
-handoff_completed=false
-if [ -n "$handoff_pid" ] && [ "$handoff_pid" -gt 0 ] 2>/dev/null \
-    && "$bin_root/spaces" daemon apply-update >/dev/null 2>&1 \
-    && wait_for_staged_daemon "$handoff_pid"; then
-    handoff_completed=true
-fi
-
-if [ "$handoff_completed" != true ]; then
-    echo "spacesd did not complete the staged handoff; restarting it with systemd" >&2
+if [ -n "$handoff_pid" ] && [ "$handoff_pid" -gt 0 ] 2>/dev/null; then
+    if ! "$bin_root/spaces" daemon apply-update >/dev/null 2>&1; then
+        echo "spacesd did not accept the staged handoff; leaving the running daemon and its sessions untouched" >&2
+        exit 1
+    fi
+    if ! wait_for_staged_daemon "$handoff_pid"; then
+        resumed_pid="$(systemd_daemon_pid)"
+        if [ "$resumed_pid" = "$handoff_pid" ] && daemon_runs_staged_image "$resumed_pid"; then
+            echo "spacesd is running the installed daemon image and is still resuming sessions" >&2
+        else
+            echo "spacesd accepted the staged handoff but did not exec the installed image within 10s; leaving it running" >&2
+            exit 1
+        fi
+    fi
+else
     systemctl --user restart spacesd.service
     if ! wait_for_staged_daemon; then
         echo "spacesd did not start the installed daemon image within 10s" >&2

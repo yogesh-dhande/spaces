@@ -410,6 +410,7 @@ Every terminal runs in the built-in terminal, never an external terminal app. A 
 - Manual downloads may still be published separately, but the in-app updater should not depend on GitHub release APIs.
 - The manual-download DMG should present a single guided installer entry point that installs `Spaces.app`, links `/usr/local/bin/spaces`, `/usr/local/bin/spacesd`, and `/usr/local/bin/spaces-caddy` to the app bundle resources, creates `~/.spaces/bin/spaces` and `~/.spaces/bin/spacesd` helper links to the same resources, and writes the per-user LaunchAgent used by built-in terminal commands and remote Mac pairing.
 - The Ubuntu 24.04 install/upgrade path should install release-managed daemon helpers under `~/.spaces`, expose `spaces` at `~/.local/bin/spaces` for normal terminal use, and run the user systemd service from `~/.spaces/bin/spacesd`.
+- An Ubuntu upgrade with a running daemon should preserve that daemon's pid and sessions through the in-place update, including while long transcript replay keeps it temporarily unavailable. The installer should leave an active daemon untouched and report an error when the in-place handoff cannot be accepted or does not reach the installed image; systemd should start the service only when no daemon is running.
 - When launched from `/Applications/Spaces.app`, the app should keep Spaces-owned helper links and the LaunchAgent plist aligned with the installed app bundle without restarting `spacesd` automatically.
 - `spaces --version` should report the current version.
 

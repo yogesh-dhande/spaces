@@ -207,13 +207,12 @@ public enum DaemonHandoffResumeAction: Equatable, Sendable {
 /// generation-guard and resume-selection contracts can be unit-tested directly.
 public enum DaemonHandoffDecision {
     /// Whether to refuse an exec-in-place handoff to guard against an exec loop between two builds.
-    /// Refuses once `generation` reaches the threshold AND the version we last resumed from equals
-    /// the version we are currently running — i.e. repeated handoffs keep landing on the same
-    /// `sourceVersion` without advancing. A version change (`lastSourceVersion != currentVersion`,
-    /// including the fresh-boot `nil`) always proceeds, resetting the loop.
-    public static func refusesExecByGenerationGuard(generation: Int, lastSourceVersion: String?, currentVersion: String) -> Bool {
-        generation >= 3 && lastSourceVersion == currentVersion
-    }
+    /// Refuses once `generation` reaches the threshold AND another exec would land on the version
+    /// already involved in the loop. A genuinely different staged target always proceeds, even when
+    /// repeated same-version handoffs have exhausted the current generation budget.
+    public static func refusesExecByGenerationGuard(generation: Int, lastSourceVersion: String?, currentVersion: String, stagedVersion: String?)
+        -> Bool
+    { generation >= 3 && lastSourceVersion == currentVersion && (stagedVersion == nil || stagedVersion == currentVersion) }
 
     /// See `DaemonHandoffResumeAction`. A record with a bad descriptor is discarded regardless of
     /// child liveness (there is nothing to adopt without a PTY master).

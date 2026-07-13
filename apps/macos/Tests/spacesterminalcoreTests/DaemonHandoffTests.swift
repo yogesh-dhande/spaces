@@ -172,6 +172,10 @@ final class DaemonHandoffTests: XCTestCase {
         XCTAssertEqual(fcntl(fds[0], F_GETFD) & FD_CLOEXEC, 0)
     }
 
+    func testPrepareDescriptorForHandoffThrowsForInvalidDescriptor() {
+        XCTAssertThrowsError(try DaemonHandoffStore.prepareDescriptorForHandoff(987_654))
+    }
+
     func testDescriptorLooksLikePTYMasterDistinguishesPTYFromPipeAndClosedFD() throws {
         let master = posix_openpt(O_RDWR)
         XCTAssertGreaterThanOrEqual(master, 0)

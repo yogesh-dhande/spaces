@@ -39,7 +39,7 @@ import workspacecore
     /// Feeds the exec-loop generation guard together with `lastHandoffSourceVersion`.
     private var handoffGeneration = 0
     /// The `sourceVersion` of the daemon image that handed off to this one (nil on a fresh boot).
-    /// The generation guard refuses another handoff only while this keeps equalling `AppVersion.current`.
+    /// The generation guard refuses another same-target handoff only while this keeps equalling `AppVersion.current`.
     private var lastHandoffSourceVersion: String?
     /// True while `performExecHandoff()` is between its first await and exec; see its reentrancy guard.
     private var handoffInProgress = false
@@ -357,7 +357,8 @@ import workspacecore
         defer { handoffInProgress = false }
 
         if DaemonHandoffDecision.refusesExecByGenerationGuard(
-            generation: handoffGeneration, lastSourceVersion: lastHandoffSourceVersion, currentVersion: AppVersion.current)
+            generation: handoffGeneration, lastSourceVersion: lastHandoffSourceVersion, currentVersion: AppVersion.current,
+            stagedVersion: InstalledSpacesVersion.current())
         {
             writeStandardError(
                 "spacesd handoff_refused reason=generation_guard generation=\(handoffGeneration) source=\(lastHandoffSourceVersion ?? "")\n")
@@ -401,6 +402,8 @@ import workspacecore
         for record in records {
             do { try DaemonHandoffStore.prepareDescriptorForHandoff(record.masterFD) } catch {
                 writeStandardError("spacesd handoff_prepare_descriptor_failed session=\(record.sessionID) error=\(error)\n")
+                resumeInPlaceAfterFailedHandoff(quiescedCores: quiescedCores)
+                return
             }
         }
 
