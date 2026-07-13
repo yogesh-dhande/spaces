@@ -385,7 +385,7 @@ final class GhosttyEmbeddedSessionHandoffTests: XCTestCase {
         // Restore a writable transcript and prove the old image can rebind the buffered live core.
         try FileManager.default.removeItem(atPath: paths.outputPath)
         XCTAssertTrue(FileManager.default.createFile(atPath: paths.outputPath, contents: nil))
-        core.resumeInPlaceAfterFailedExec()
+        await core.resumeInPlaceAfterFailedExec()
         let afterMarker = "AFTER_PERSISTENCE_FAILURE"
         try headlessHost(for: core).sendRawBytes(Data("\(afterMarker)\n".utf8))
         try await waitAsync { (try? String(contentsOfFile: paths.outputPath))?.contains(afterMarker) == true }
@@ -412,7 +412,13 @@ final class GhosttyEmbeddedSessionHandoffTests: XCTestCase {
         // Quiesce as if about to exec, then take the failed-exec fallback on the SAME core.
         guard let record = try await core.quiesceForHandoff() else { return XCTFail("quiesce produced no handoff record") }
         XCTAssertGreaterThan(record.childPID, 0)
-        core.resumeInPlaceAfterFailedExec()
+        let duringHandoffMarker = "DURING_FAILED_HANDOFF"
+        try headlessHost(for: core).sendRawBytes(Data("\(duringHandoffMarker)\n".utf8))
+        try await waitAsync { (try? String(contentsOfFile: paths.outputPath))?.contains(duringHandoffMarker) == true }
+        XCTAssertFalse(self.snapshotText(of: core)?.contains(duringHandoffMarker) == true, "quiesced output must bypass the renderer")
+
+        await core.resumeInPlaceAfterFailedExec()
+        try await waitAsync { self.snapshotText(of: core)?.contains(duringHandoffMarker) == true }
 
         // The state-stream socket answers again: a fresh subscriber gets an initial payload.
         let received = InitialPayloadCollector()
@@ -429,6 +435,7 @@ final class GhosttyEmbeddedSessionHandoffTests: XCTestCase {
 
         let transcript = try String(contentsOfFile: paths.outputPath)
         XCTAssertEqual(occurrences(of: marker, in: transcript), 1)
+        XCTAssertEqual(occurrences(of: duringHandoffMarker, in: transcript), 1)
         XCTAssertEqual(occurrences(of: afterMarker, in: transcript), 1)
     }
 }

@@ -191,6 +191,25 @@
             XCTAssertEqual(replayed, expected)
         }
 
+        func testTranscriptReplayCanStreamOnlyTheHandoffSuffix() throws {
+            let path = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
+            defer { try? FileManager.default.removeItem(atPath: path) }
+            let prefix = Data("already-rendered\n".utf8)
+            let suffix = Data(repeating: 0x5A, count: GhosttyEmbeddedSessionCore.outputReplayChunkByteCount + 37)
+            try (prefix + suffix).write(to: URL(fileURLWithPath: path))
+
+            var replayed = Data()
+            var chunkSizes: [Int] = []
+            let replayedOutput = try GhosttyEmbeddedSessionCore.replayOutputLog(at: path, startingAt: UInt64(prefix.count)) { chunk in
+                chunkSizes.append(chunk.count)
+                replayed.append(chunk)
+            }
+
+            XCTAssertTrue(replayedOutput)
+            XCTAssertEqual(replayed, suffix)
+            XCTAssertLessThanOrEqual(chunkSizes.max() ?? 0, GhosttyEmbeddedSessionCore.outputReplayChunkByteCount)
+        }
+
         func testOutputDeliveryFenceWaitsForScheduledPersistence() {
             let fence = GhosttyLinuxHandoffOutputDeliveryFence()
             fence.beginDelivery()
@@ -453,7 +472,14 @@
             // Quiesce as if about to exec, then take the failed-exec fallback on the SAME core.
             guard let record = try await core.quiesceForHandoff() else { return XCTFail("quiesce produced no handoff record") }
             XCTAssertGreaterThan(record.childPID, 0)
-            core.resumeInPlaceAfterFailedExec()
+            let duringHandoffMarker = "DURING_FAILED_HANDOFF"
+            let duringHandoffResponse = core.handleControlRequest(TerminalControlRequest(command: "send", text: "\(duringHandoffMarker)\n"))
+            XCTAssertTrue(duringHandoffResponse.ok, "handoff-window input must reach the live child")
+            try await waitAsync { (try? String(contentsOfFile: paths.outputPath))?.contains(duringHandoffMarker) == true }
+            XCTAssertFalse(self.renderedScreenText(of: core)?.contains(duringHandoffMarker) == true, "quiesced output must bypass the renderer")
+
+            await core.resumeInPlaceAfterFailedExec()
+            try await waitAsync { self.renderedScreenText(of: core)?.contains(duringHandoffMarker) == true }
 
             // The state-stream socket answers again: a fresh subscriber gets an initial payload.
             let received = InitialPayloadCollector()
@@ -471,6 +497,7 @@
 
             let transcript = try String(contentsOfFile: paths.outputPath)
             XCTAssertEqual(occurrences(of: marker, in: transcript), 1)
+            XCTAssertEqual(occurrences(of: duringHandoffMarker, in: transcript), 1)
             XCTAssertEqual(occurrences(of: afterMarker, in: transcript), 1)
         }
     }

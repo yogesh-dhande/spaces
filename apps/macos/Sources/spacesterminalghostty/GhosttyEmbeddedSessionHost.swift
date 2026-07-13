@@ -305,6 +305,10 @@
         /// daemon. Cleared on resume (`resumeFromHandoff`) or on the failed-exec
         /// fallback (`resumeInPlaceAfterFailedExec`).
         private var suppressBroadcastsForHandoff = false
+        /// Byte offset where renderer-disconnected output begins. On failed handoff the
+        /// persisted suffix is streamed back into the existing renderer without being
+        /// appended to the transcript again.
+        private var handoffTranscriptReplayOffset: UInt64?
         private var lastResizeSerialByClientID: [String: UInt64] = [:]
         private let onSessionClosed: (@MainActor (GhosttyEmbeddedSessionCore) -> Void)?
 
@@ -481,6 +485,7 @@
         /// nothing live to hand off (the child already exited/closed), in which case the
         /// caller terminates the session normally.
         public func quiesceForHandoff() async throws -> DaemonHandoffSessionRecord? {
+            handoffTranscriptReplayOffset = nil
             suppressBroadcastsForHandoff = true
             runtimeStateTimer?.invalidate()
             runtimeStateTimer = nil
@@ -516,6 +521,7 @@
                     throw error
                 }
             }
+            handoffTranscriptReplayOffset = try transcriptByteCount()
 
             // Flush the buffered bytes to output.log and install the direct-to-file writer
             // that keeps appending until execv.
@@ -538,11 +544,21 @@
         /// nothing was freed. Stop the direct-to-file writer, reopen the output handle for
         /// append, restart the per-session servers, and resume timers/broadcasts. This
         /// rebinds the still-live session; it never rebuilds it.
-        public func resumeInPlaceAfterFailedExec() {
+        public func resumeInPlaceAfterFailedExec() async {
+            // Freeze the direct writer before reading its persisted range or seeking the
+            // replacement FileHandle. PTY output arriving during replay stays buffered.
+            sessionDriver.pauseHandoffOutputForFallback()
+            if let handoffTranscriptReplayOffset {
+                await sessionDriver.replayPersistedHandoffOutput(at: paths.outputPath, startingAt: handoffTranscriptReplayOffset)
+            }
             do {
                 try openOutputHandlePreservingTranscript()
-                sessionDriver.endHandoffOutputBuffering()
-                suppressBroadcastsForHandoff = false
+            } catch { fputs("spaces: ghostty handoff transcript reopen failed: \(error)\n", stderr) }
+            await sessionDriver.endHandoffOutputBuffering()
+            flushPendingIncomingOutputForStateExport()
+            self.handoffTranscriptReplayOffset = nil
+            suppressBroadcastsForHandoff = false
+            do {
                 try startControlServer()
                 try startStateStreamServer()
             } catch { fputs("spaces: ghostty handoff resume-in-place failed: \(error)\n", stderr) }
@@ -1168,6 +1184,13 @@
             let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: paths.outputPath))
             try handle.seekToEnd()
             outputHandle = handle
+        }
+
+        private func transcriptByteCount() throws -> UInt64 {
+            guard FileManager.default.fileExists(atPath: paths.outputPath) else { return 0 }
+            let attributes = try FileManager.default.attributesOfItem(atPath: paths.outputPath)
+            guard let size = attributes[.size] as? NSNumber else { throw POSIXError(.EIO) }
+            return size.uint64Value
         }
 
         func applyActionEvent(_ event: GhosttyActionEvent) {

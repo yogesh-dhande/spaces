@@ -239,22 +239,35 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
         return try operation()
     }
 
-    /// Failed-handoff fallback: this same image keeps running. Close the direct-writer
-    /// fd if open and reinstate normal handler delivery. If persistence failed while
-    /// the sink was still buffering, replay those bytes through the handler after the
-    /// atomic sink swap; the core reopens its normal output handle before calling this.
-    func endHandoffOutputBuffering() {
-        let pending: Data
-        let handler: (@Sendable (Data) -> Void)?
+    /// First failed-handoff fallback step: atomically stop direct transcript appends and
+    /// return to buffering. The core can then replay the already-persisted handoff range
+    /// into its renderer and position its normal transcript handle without either action
+    /// racing another append from this driver.
+    func pauseHandoffOutputForFallback() {
         lock.lock()
         if case .file(let fd) = outputSink { close(fd) }
-        pending = handoffBuffer
-        handler = outputHandler
+        outputSink = .buffer
+        lock.unlock()
+    }
+
+    /// Final failed-handoff fallback step: reinstate normal handler delivery and replay
+    /// bytes accumulated after the direct writer was stopped. The core must first replay
+    /// the persisted handoff range into its renderer and reopen its normal output handle;
+    /// these pending bytes then take the ordinary render-and-persist path exactly once.
+    func endHandoffOutputBuffering() {
+        lock.lock()
+        if case .file(let fd) = outputSink { close(fd) }
+        let pending = handoffBuffer
+        let handler = outputHandler
         handoffBuffer = Data()
+
+        // Deliver the older buffered batch before exposing `.handler`. Holding the sink
+        // lock briefly backpressures the PTY read loop, so a concurrently read byte cannot
+        // overtake this batch and continuous output cannot keep fallback in a drain loop.
+        if !pending.isEmpty { handler?(pending) }
         handoffWriteErrorCode = nil
         outputSink = .handler
         lock.unlock()
-        if !pending.isEmpty { handler?(pending) }
     }
 
     func terminate() {

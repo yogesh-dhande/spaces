@@ -162,7 +162,7 @@
             //    still fully reconstructed — the callback only tees, it does not parse.
             let restoreOutputHandler = outputHandler
             outputHandler = nil
-            await replayOutputLogOffMainActor(at: outputLogPath)
+            await replayOutputLogOffMainActor(at: outputLogPath, startingAt: 0)
             outputHandler = restoreOutputHandler
             ghostty_session_refresh(createdSession)
             GhosttyEmbeddedAppService.shared.tick()
@@ -279,9 +279,10 @@
         /// actor. Awaiting a background dispatch keeps the main actor free to service the
         /// app's wakeup ticks so the blocking process call can complete (mirrors how the
         /// live read loop calls `process` off the main actor while main pumps ticks).
-        private func replayOutputLogOffMainActor(at path: String) async {
+        private func replayOutputLogOffMainActor(at path: String, startingAt offset: UInt64) async {
             guard let handle = FileHandle(forReadingAtPath: path) else { return }
             defer { try? handle.close() }
+            guard (try? handle.seek(toOffset: offset)) != nil else { return }
             let chunkByteCount = 1024 * 1024
             let pipe = outputPipe
             let queue = handoffReplayQueue
@@ -323,11 +324,32 @@
             return try hostPTY.withValidatedHandoffOutputForExec(operation)
         }
 
-        /// Failed-`execv` fallback: stop the direct-to-file writer and reinstate normal
-        /// handler delivery on the still-live PTY driver.
-        func endHandoffOutputBuffering() {
+        /// Stop direct transcript appends before the core reads the persisted handoff
+        /// range or seeks its normal output handle. New PTY bytes remain buffered.
+        func pauseHandoffOutputForFallback() { hostPTY?.pauseHandoffOutputForFallback() }
+
+        /// Replays only the bytes persisted while the renderer was disconnected. The
+        /// Ghostty data callback remains disabled, so replay updates the renderer without
+        /// appending those bytes to the transcript a second time.
+        func replayPersistedHandoffOutput(at path: String, startingAt offset: UInt64) async {
+            await replayOutputLogOffMainActor(at: path, startingAt: offset)
+            if let session { ghostty_session_refresh(session) }
+            GhosttyEmbeddedAppService.shared.tick()
+        }
+
+        /// Final failed-`execv` fallback step: restore the data callback and normal PTY
+        /// delivery, replaying only bytes that accumulated after the direct writer stopped.
+        func endHandoffOutputBuffering() async {
             if let session { ghostty_session_set_data_callback(session, Self.surfaceDataCallback, Unmanaged.passUnretained(self).toOpaque()) }
-            hostPTY?.endHandoffOutputBuffering()
+            guard let hostPTY else { return }
+            let queue = handoffReplayQueue
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                queue.async {
+                    hostPTY.endHandoffOutputBuffering()
+                    continuation.resume()
+                }
+            }
+            await handoffOutputDeliveryFence.waitUntilDrained()
         }
 
         func terminate() {

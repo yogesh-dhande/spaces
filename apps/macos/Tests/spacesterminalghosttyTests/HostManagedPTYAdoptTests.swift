@@ -231,6 +231,7 @@ final class HostManagedPTYAdoptTests: XCTestCase {
         try driver.startIfNeeded()
 
         let filePath = makeTemporaryFilePath()
+        defer { try? FileManager.default.removeItem(atPath: filePath) }
         beginHandoffOutputBuffering(driver)
         try driver.finishHandoffOutputBuffering(appendingTo: filePath)
         driver.endHandoffOutputBuffering()
@@ -242,6 +243,31 @@ final class HostManagedPTYAdoptTests: XCTestCase {
         XCTAssertTrue(waitUntil { collector.string.contains("hello") }, "handler delivery did not resume after endHandoffOutputBuffering")
         XCTAssertEqual(fileByteCount(filePath), byteCountAfterEnd, "output leaked to the handoff file after restore")
 
+        driver.terminate()
+    }
+
+    func testPauseHandoffOutputStopsFileAppendsUntilFallbackDelivery() throws {
+        let configuration = makeConfiguration(sessionID: "pause-fallback", command: "cat")
+        let driver = HostManagedPTYTerminalSessionDriver(launchConfiguration: configuration, terminationEscalationIntervals: fastEscalation)
+        let collector = OutputCollector()
+        driver.setOutputHandler { collector.append($0) }
+        try driver.startIfNeeded()
+
+        let filePath = makeTemporaryFilePath()
+        defer { try? FileManager.default.removeItem(atPath: filePath) }
+        beginHandoffOutputBuffering(driver)
+        try driver.finishHandoffOutputBuffering(appendingTo: filePath)
+        driver.pauseHandoffOutputForFallback()
+        let byteCountAfterPause = fileByteCount(filePath)
+
+        let marker = "buffered-after-direct-writer-stop"
+        driver.sendRawBytes(Data("\(marker)\n".utf8))
+        usleep(100_000)
+        XCTAssertEqual(fileByteCount(filePath), byteCountAfterPause, "the stopped direct writer must not append while the normal handle is positioned")
+        XCTAssertFalse(collector.string.contains(marker))
+
+        driver.endHandoffOutputBuffering()
+        XCTAssertTrue(waitUntil { collector.string.contains(marker) }, "fallback must deliver bytes buffered after the direct writer stopped")
         driver.terminate()
     }
 

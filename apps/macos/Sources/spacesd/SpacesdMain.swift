@@ -251,6 +251,13 @@ import workspacecore
     private func terminateAllSessions() { for sessionID in Array(sessionCores.keys) { _ = terminateSession(id: sessionID) } }
 
     private func handle(_ request: TerminalServiceRequest) -> TerminalServiceResponse {
+        // Socket shutdown is asynchronous, so a request accepted just before cancellation
+        // can reach the main actor after handoff starts. Reject it here, at the mutation
+        // boundary, so the session snapshot cannot gain or lose a core while quiescing.
+        guard !handoffInProgress else {
+            return TerminalServiceResponse(
+                ok: false, message: "spacesd is handing off to an updated daemon.", errorCode: .shuttingDown, servicePID: getpid())
+        }
         switch request.command {
         case .ping: return TerminalServiceResponse(ok: true, message: "pong", servicePID: getpid(), daemonStatus: daemonStatus())
         case .shutdownIfIdle: return shutdownIfIdle()
@@ -394,7 +401,7 @@ import workspacecore
             }
         } catch {
             writeStandardError("spacesd handoff_quiesce_failed error=\(error)\n")
-            resumeInPlaceAfterFailedHandoff(quiescedCores: quiescedCores)
+            await resumeInPlaceAfterFailedHandoff(quiescedCores: quiescedCores)
             return
         }
         writeStandardError("spacesd handoff_quiesced sessions=\(records.count)\n")
@@ -402,7 +409,7 @@ import workspacecore
         for record in records {
             do { try DaemonHandoffStore.prepareDescriptorForHandoff(record.masterFD) } catch {
                 writeStandardError("spacesd handoff_prepare_descriptor_failed session=\(record.sessionID) error=\(error)\n")
-                resumeInPlaceAfterFailedHandoff(quiescedCores: quiescedCores)
+                await resumeInPlaceAfterFailedHandoff(quiescedCores: quiescedCores)
                 return
             }
         }
@@ -411,7 +418,7 @@ import workspacecore
         let table = DaemonHandoffTable(generation: nextGeneration, pid: getpid(), sourceVersion: AppVersion.current, sessions: records)
         do { try DaemonHandoffStore.write(table) } catch {
             writeStandardError("spacesd handoff_table_write_failed error=\(error)\n")
-            resumeInPlaceAfterFailedHandoff(quiescedCores: quiescedCores)
+            await resumeInPlaceAfterFailedHandoff(quiescedCores: quiescedCores)
             return
         }
 
@@ -425,7 +432,7 @@ import workspacecore
         } catch {
             writeStandardError("spacesd handoff_output_persistence_failed error=\(error)\n")
             DaemonHandoffStore.deleteTable()
-            resumeInPlaceAfterFailedHandoff(quiescedCores: quiescedCores)
+            await resumeInPlaceAfterFailedHandoff(quiescedCores: quiescedCores)
             return
         }
 
@@ -434,7 +441,7 @@ import workspacecore
         // the still-live sessions and restart shared services so the daemon is fully functional again.
         writeStandardError("spacesd handoff_exec_failed errno=\(execErrno)\n")
         DaemonHandoffStore.deleteTable()
-        resumeInPlaceAfterFailedHandoff(quiescedCores: quiescedCores)
+        await resumeInPlaceAfterFailedHandoff(quiescedCores: quiescedCores)
     }
 
     /// Nests each session driver's sink lock around the final validation and exec.
@@ -451,8 +458,8 @@ import workspacecore
 
     /// Failed-`execv` fallback: rebind every quiesced core to its still-live PTY (nothing was freed —
     /// masters were never CLOEXEC, so no descriptor restore is needed) and restart shared services.
-    private func resumeInPlaceAfterFailedHandoff(quiescedCores: [GhosttyEmbeddedSessionCore]) {
-        for core in quiescedCores { core.resumeInPlaceAfterFailedExec() }
+    private func resumeInPlaceAfterFailedHandoff(quiescedCores: [GhosttyEmbeddedSessionCore]) async {
+        for core in quiescedCores { await core.resumeInPlaceAfterFailedExec() }
         do { try startSharedServices() } catch { writeStandardError("spacesd handoff_resume_in_place_failed error=\(error)\n") }
     }
 
@@ -511,6 +518,10 @@ import workspacecore
     }
 
     private func createSession(_ request: TerminalServiceCreateRequest) -> TerminalServiceResponse {
+        guard !handoffInProgress else {
+            return TerminalServiceResponse(
+                ok: false, message: "spacesd is handing off to an updated daemon.", errorCode: .shuttingDown, servicePID: getpid())
+        }
         let launchConfiguration = request.launchConfiguration
         do {
             try prepareWorkspace(
@@ -824,7 +835,10 @@ import workspacecore
         return orchestrator
     }
 
-    private func terminateBuiltInTerminalSession(id sessionID: String) { _ = terminateSession(id: sessionID) }
+    private func terminateBuiltInTerminalSession(id sessionID: String) {
+        guard !handoffInProgress else { return }
+        _ = terminateSession(id: sessionID)
+    }
 
     private func launchBuiltInTerminalSession(_ launchConfiguration: TerminalSessionLaunchConfiguration) throws -> TerminalServiceSessionSummary {
         let response = createSession(TerminalServiceCreateRequest(launchConfiguration: launchConfiguration))

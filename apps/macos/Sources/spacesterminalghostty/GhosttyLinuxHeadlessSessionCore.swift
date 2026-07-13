@@ -95,6 +95,9 @@
         /// Cleared on resume (`resumeFromHandoff`) or the failed-exec fallback
         /// (`resumeInPlaceAfterFailedExec`).
         private var suppressBroadcastsForHandoff = false
+        /// Byte offset where renderer-disconnected output begins. Failed handoff streams
+        /// this persisted suffix back through the existing VT without duplicating it.
+        private var handoffTranscriptReplayOffset: UInt64?
         private var renderUpdateBaseline: GhosttyRenderUpdateBaseline?
         private var forceNextBroadcastFullRenderUpdate = false
         private var localOwnerCommandInputOutputResyncPending = false
@@ -195,6 +198,7 @@
         /// nil when there is nothing live to hand off (the child already exited/closed),
         /// in which case the caller terminates the session normally.
         public func quiesceForHandoff() async throws -> DaemonHandoffSessionRecord? {
+            handoffTranscriptReplayOffset = nil
             suppressBroadcastsForHandoff = true
             inputOutputResyncTask?.cancel()
             inputOutputResyncTask = nil
@@ -231,6 +235,7 @@
                     throw error
                 }
             }
+            handoffTranscriptReplayOffset = try transcriptByteCount()
 
             // Flush the buffered bytes to output.log and install the direct-to-file writer
             // that keeps appending until execv.
@@ -253,11 +258,23 @@
         /// still-live session; it never rebuilds it. This core has no periodic timers to
         /// resume — its resync task is armed on demand — so refreshing runtime state is the
         /// whole catch-up.
-        public func resumeInPlaceAfterFailedExec() {
+        public func resumeInPlaceAfterFailedExec() async {
+            ptyDriver.pauseHandoffOutputForFallback()
+            if let handoffTranscriptReplayOffset {
+                do {
+                    _ = try Self.replayOutputLog(at: paths.outputPath, startingAt: handoffTranscriptReplayOffset) { self.writeVTRenderer($0) }
+                } catch {
+                    FileHandle.standardError.write(Data("spaces: ghostty handoff transcript replay failed: \(error)\n".utf8))
+                }
+            }
             do {
                 try openOutputHandlePreservingTranscript()
-                ptyDriver.endHandoffOutputBuffering()
-                suppressBroadcastsForHandoff = false
+            } catch { FileHandle.standardError.write(Data("spaces: ghostty handoff transcript reopen failed: \(error)\n".utf8)) }
+            ptyDriver.endHandoffOutputBuffering()
+            await outputDeliveryFence.waitUntilDrained()
+            self.handoffTranscriptReplayOffset = nil
+            suppressBroadcastsForHandoff = false
+            do {
                 try startControlServer()
                 try startStateStreamServer()
             } catch { FileHandle.standardError.write(Data("spaces: ghostty handoff resume-in-place failed: \(error)\n".utf8)) }
@@ -374,6 +391,13 @@
             let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: paths.outputPath))
             outputByteCount = Int(try handle.seekToEnd())
             outputHandle = handle
+        }
+
+        private func transcriptByteCount() throws -> UInt64 {
+            guard FileManager.default.fileExists(atPath: paths.outputPath) else { return 0 }
+            let attributes = try FileManager.default.attributesOfItem(atPath: paths.outputPath)
+            guard let size = attributes[.size] as? NSNumber else { throw POSIXError(.EIO) }
+            return size.uint64Value
         }
 
         private func startControlServer() throws {
@@ -706,9 +730,12 @@
 
         /// Streams a transcript through `consume` in fixed-size chunks. Internal so
         /// tests can enforce the memory-bound contract independently of file size.
-        @discardableResult nonisolated static func replayOutputLog(at path: String, consume: (Data) throws -> Void) throws -> Bool {
+        @discardableResult nonisolated static func replayOutputLog(
+            at path: String, startingAt offset: UInt64 = 0, consume: (Data) throws -> Void
+        ) throws -> Bool {
             let handle = try FileHandle(forReadingFrom: URL(fileURLWithPath: path))
             defer { try? handle.close() }
+            try handle.seek(toOffset: offset)
             var replayedOutput = false
             while let chunk = try handle.read(upToCount: outputReplayChunkByteCount), !chunk.isEmpty {
                 try consume(chunk)
