@@ -170,6 +170,26 @@
             }.filter { !$0.isEmpty }
         }
 
+        func testTranscriptReplayUsesBoundedChunksWithoutLosingBytes() throws {
+            let path = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
+            defer { try? FileManager.default.removeItem(atPath: path) }
+            var expected = Data(repeating: 0xA5, count: GhosttyEmbeddedSessionCore.outputReplayChunkByteCount * 2)
+            expected.append(Data(repeating: 0x5A, count: 137))
+            try expected.write(to: URL(fileURLWithPath: path))
+
+            var replayed = Data()
+            var chunkSizes: [Int] = []
+            let replayedOutput = try GhosttyEmbeddedSessionCore.replayOutputLog(at: path) { chunk in
+                chunkSizes.append(chunk.count)
+                replayed.append(chunk)
+            }
+
+            XCTAssertTrue(replayedOutput)
+            XCTAssertGreaterThan(chunkSizes.count, 2)
+            XCTAssertLessThanOrEqual(chunkSizes.max() ?? 0, GhosttyEmbeddedSessionCore.outputReplayChunkByteCount)
+            XCTAssertEqual(replayed, expected)
+        }
+
         /// Drives the trusted (client-less) resize command so the recorded grid is a known
         /// non-default size the resume path must restore before replay.
         @MainActor private func resize(_ core: GhosttyEmbeddedSessionCore, columns: Int, rows: Int) {
@@ -223,6 +243,36 @@
             let transcript = try String(contentsOfFile: paths.outputPath)
             XCTAssertEqual(occurrences(of: marker, in: transcript), 1, "replay must not re-append the original transcript to output.log")
             XCTAssertEqual(occurrences(of: secondMarker, in: transcript), 1, "post-handoff output must land in output.log exactly once")
+        }
+
+        @MainActor func testResumePreservesVTParserStateAcrossReplayChunkBoundary() async throws {
+            let paths = try makeTemporaryPaths()
+            defer { try? FileManager.default.removeItem(atPath: paths.rootDirectory) }
+
+            let staleMarker = "SHOULD_BE_CLEARED"
+            let liveMarker = "BOUNDARY_REPLAY_MARKER"
+            var transcript = Data(repeating: 0, count: GhosttyEmbeddedSessionCore.outputReplayChunkByteCount * 2 - staleMarker.utf8.count - 1)
+            transcript.append(contentsOf: staleMarker.utf8)
+            transcript.append(0x1B)
+            transcript.append(contentsOf: "[2J\u{001B}[H\(liveMarker)\n".utf8)
+            try transcript.write(to: URL(fileURLWithPath: paths.outputPath))
+
+            let configuration = makeConfiguration(sessionID: "handoff-chunk-boundary-\(UUID().uuidString)", command: "cat")
+            let pty = try makeAdoptablePTY()
+            let resumedCore = GhosttyEmbeddedSessionCore(launchConfiguration: configuration, paths: paths)
+            defer {
+                tearDown(pty)
+                resumedCore.terminate()
+            }
+            let record = DaemonHandoffSessionRecord(
+                sessionID: configuration.sessionID, masterFD: pty.master, childPID: pty.childPID, columns: 80, rows: 24, ownerEpoch: 0,
+                screenStateRevision: 0, appearance: ThemeAppearance.dark.rawValue)
+
+            try await resumedCore.resumeFromHandoff(record)
+            try attachRemoteOwner(to: resumedCore, id: "remote-owner")
+            let screen = try XCTUnwrap(renderedScreenText(of: resumedCore))
+            XCTAssertTrue(screen.contains(liveMarker), "output after the split escape sequence must render")
+            XCTAssertFalse(screen.contains(staleMarker), "the clear-screen sequence split across chunks must retain parser state")
         }
 
         // MARK: - 2. Reflow invariant (persisted grid before new output)

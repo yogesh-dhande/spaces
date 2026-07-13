@@ -7,11 +7,13 @@
 
     enum GhosttyLinuxHeadlessSessionError: LocalizedError {
         case vtSessionUnavailable
+        case vtReplayFailed
         case snapshotUnavailable
 
         var errorDescription: String? {
             switch self {
             case .vtSessionUnavailable: "libghostty-vt is not available for the headless terminal session."
+            case .vtReplayFailed: "libghostty-vt could not replay the terminal transcript."
             case .snapshotUnavailable: "Unable to export a headless terminal render frame."
             }
         }
@@ -19,6 +21,7 @@
 
     @MainActor public final class GhosttyEmbeddedSessionCore {
         private static let maxScrollbackBytes = TerminalScrollbackBudget.defaultMaxBytes
+        nonisolated static let outputReplayChunkByteCount = 1024 * 1024
 
         private enum RenderStateExportMode {
             case selfContained
@@ -248,10 +251,10 @@
             ptyDriver.setOutputHandler { [weak self] data in Task { @MainActor [weak self] in self?.handleOutput(data) } }
             ptyDriver.setSessionClosedHandler { [weak self] in self?.handleSessionClosed() }
 
-            // Rebuild + replay at the persisted grid. recreateVTRenderer frees any current
-            // vt session (none on a fresh core), makes a new one, and writes output.log into
-            // it synchronously, arming the full-frame flag.
-            recreateVTRenderer(columns: record.columns, rows: record.rows)
+            // Rebuild + replay at the persisted grid. recreateVTRenderer writes output.log
+            // synchronously into a replacement VT session, then swaps it in and arms the
+            // full-frame flag.
+            try recreateVTRenderer(columns: record.columns, rows: record.rows)
 
             // Adopt the inherited PTY only AFTER replay so no live byte races ahead of the
             // replayed transcript. The read loop starts here.
@@ -492,9 +495,11 @@
             guard let columns = request.columns, let rows = request.rows, columns > 0, rows > 0 else {
                 return TerminalControlResponse(ok: false, message: "Missing terminal size.", errorCode: .invalidArgument)
             }
+            do { try recreateVTRenderer(columns: columns, rows: rows) } catch {
+                return TerminalControlResponse(ok: false, message: "Unable to resize the terminal renderer: \(error)")
+            }
             terminalSize = (columns, rows)
             _ = ptyDriver.resizeCellGrid(columns: columns, rows: rows)
-            recreateVTRenderer(columns: columns, rows: rows)
             writeRuntimeState(state: .running)
             broadcastCurrentState(reason: TerminalRemoteSessionStateReason.resize)
             return TerminalControlResponse(ok: true, message: "Resized terminal.")
@@ -609,16 +614,43 @@
             screenStateRevision &+= 1
         }
 
-        private func recreateVTRenderer(columns: Int, rows: Int) {
-            if let vtSession { spaces_ghostty_vt_session_free(vtSession) }
-            vtSession = makeVTSession(columns: columns, rows: rows)
-            renderUpdateBaseline = nil
-            forceNextBroadcastFullRenderUpdate = true
-            guard let vtSession, let data = try? Data(contentsOf: URL(fileURLWithPath: paths.outputPath)), !data.isEmpty else { return }
-            data.withUnsafeBytes { rawBuffer in
-                _ = spaces_ghostty_vt_session_write(vtSession, rawBuffer.bindMemory(to: UInt8.self).baseAddress, rawBuffer.count)
+        /// Rebuilds the VT renderer from the append-only transcript without ever
+        /// materializing the whole file in memory. Replay happens into a replacement
+        /// session first, so a read or VT-write failure leaves the current renderer
+        /// intact and handoff resume can fail before adopting the inherited PTY.
+        private func recreateVTRenderer(columns: Int, rows: Int) throws {
+            guard let replacementSession = makeVTSession(columns: columns, rows: rows) else {
+                throw GhosttyLinuxHeadlessSessionError.vtSessionUnavailable
             }
-            screenStateRevision &+= 1
+            do {
+                let replayedOutput = try Self.replayOutputLog(at: paths.outputPath) { chunk in
+                    let succeeded = chunk.withUnsafeBytes { rawBuffer in
+                        spaces_ghostty_vt_session_write(replacementSession, rawBuffer.bindMemory(to: UInt8.self).baseAddress, rawBuffer.count)
+                    }
+                    guard succeeded else { throw GhosttyLinuxHeadlessSessionError.vtReplayFailed }
+                }
+                if let vtSession { spaces_ghostty_vt_session_free(vtSession) }
+                vtSession = replacementSession
+                renderUpdateBaseline = nil
+                forceNextBroadcastFullRenderUpdate = true
+                if replayedOutput { screenStateRevision &+= 1 }
+            } catch {
+                spaces_ghostty_vt_session_free(replacementSession)
+                throw error
+            }
+        }
+
+        /// Streams a transcript through `consume` in fixed-size chunks. Internal so
+        /// tests can enforce the memory-bound contract independently of file size.
+        @discardableResult nonisolated static func replayOutputLog(at path: String, consume: (Data) throws -> Void) throws -> Bool {
+            let handle = try FileHandle(forReadingFrom: URL(fileURLWithPath: path))
+            defer { try? handle.close() }
+            var replayedOutput = false
+            while let chunk = try handle.read(upToCount: outputReplayChunkByteCount), !chunk.isEmpty {
+                try consume(chunk)
+                replayedOutput = true
+            }
+            return replayedOutput
         }
 
         /// Creates a headless vt session themed with the Spaces terminal colors, so the render
