@@ -115,6 +115,15 @@ Use it when adding or updating UI anywhere in the app. The goal is consistency: 
 - A collapsible navigation row carries its disclosure affordance as a muted right-edge chevron (`chevron.down` when expanded, `chevron.right` when collapsed), kept visually subordinate to the row's own actions. Clicking the chevron toggles expansion without changing the selection, so a row that is both selectable and collapsible (a workspace) keeps the two gestures separate.
 - Flat tab strips use subtle separators between neighboring tabs. Close glyphs are contextual actions and should appear on tab hover while preserving stable tab width.
 
+## iOS List Pattern
+- The iOS navigation shell is a native bottom tab bar; each tab owns its navigation stack, and badge counts (the Alerts unread count) ride the tab item.
+- iOS lists speak one header-band language: a full-bleed secondary-surface (`surface2`) band carries the group header and is the only separation device — no section cards, borders, or per-row dividers. Rows sit directly on the app background beneath their band.
+- Row anatomy is shared with the Mac sidebar: a leading status dot carries state on its own (no state chips), followed by a type-icon tile, a medium-weight title over a muted detail line (monospaced for paths, commands, and branches), and a trailing muted chevron — or an accent play glyph when the row's primary action is launching it.
+- A row family with no run state (a browser session is a URL, not a process) holds the dot's slot empty rather than drawing a dot or dropping the slot, so the icon column stays aligned down the list. Such a row also carries no lifecycle context menu, since it has nothing to run, stop, or restart.
+- Workspace bands lead with a branch glyph (folder for non-git workspaces) and toggle collapse with the standard muted right-edge chevron. Row lifecycle actions (Run, Stop, Restart) live in long-press context menus rather than persistent trailing buttons.
+- Group-level actions get a visible control bar rather than a hidden gesture: an expanded workspace leads its rows with a strip of compact pill buttons (icon plus text label, since an icon alone cannot say what Start starts). Destructive or irreversible group actions — Hide — stay in the long-press menu behind a confirmation that names what it will interrupt.
+- State-dependent controls render only the actions that currently apply instead of showing disabled ones: a stopped workspace offers Start alone, a running one offers Restart and Stop. A control that can never fire in the current state is absent, not greyed.
+
 ## Overflow Menus
 - Use a trailing `⋯` overflow button for contextual actions that do not deserve persistent visibility.
 - Overflow menus should group low-frequency actions without hiding the primary workflow.

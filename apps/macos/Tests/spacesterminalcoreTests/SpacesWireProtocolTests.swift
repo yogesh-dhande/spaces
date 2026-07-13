@@ -26,13 +26,13 @@ final class SpacesWireProtocolTests: XCTestCase {
 
     func testEvaluateFromDaemonStatusUsesAdvertisedVersion() {
         let status = TerminalServiceDaemonStatus(
-            version: "9.9.9", artifactVersion: nil, certificateFingerprint: nil, activeSessionCount: 2, protocolVersion: SpacesWireProtocol.version)
+            version: "9.9.9", installedVersion: nil, certificateFingerprint: nil, activeSessionCount: 2, protocolVersion: SpacesWireProtocol.version)
         XCTAssertEqual(SpacesWireCompatibility.evaluate(daemonStatus: status), .compatible)
     }
 
     func testDaemonStatusRoundTripsAllFields() throws {
         let status = TerminalServiceDaemonStatus(
-            version: "0.2.0", artifactVersion: "abc", certificateFingerprint: "ff", activeSessionCount: 3, protocolVersion: 7, runningProcesses: 2,
+            version: "0.2.0", installedVersion: "abc", certificateFingerprint: "ff", activeSessionCount: 3, protocolVersion: 7, runningProcesses: 2,
             activeAgents: 1, waitingAgents: 4, operatingSystem: "Linux")
         let decoded = try JSONDecoder().decode(TerminalServiceDaemonStatus.self, from: JSONEncoder().encode(status))
         XCTAssertEqual(decoded, status)
@@ -75,5 +75,41 @@ final class SpacesWireProtocolTests: XCTestCase {
         XCTAssertFalse(SpacesWireProtocol.isVersion("", olderThan: "1.0.0"))
         XCTAssertFalse(SpacesWireProtocol.isVersion("1.0.0", olderThan: ""))
         XCTAssertFalse(SpacesWireProtocol.isVersion("", olderThan: ""))
+    }
+
+    func testUpdatePendingWhenInstalledBuildIsNewerThanRunningBuild() {
+        let status = makeStatus(version: "0.1.0", installedVersion: "0.2.0")
+        XCTAssertTrue(status.isUpdatePending)
+    }
+
+    func testUpdateNotPendingWhenRunningBuildIsTheInstalledBuild() {
+        let status = makeStatus(version: "0.2.0", installedVersion: "0.2.0")
+        XCTAssertFalse(status.isUpdatePending)
+    }
+
+    /// The daemon reports no installed build (it runs from a development build directory), which means
+    /// there is nothing staged to restart onto — not "unknown, assume an update".
+    func testUpdateNotPendingWhenDaemonReportsNoInstalledBuild() {
+        let status = makeStatus(version: "0.1.0", installedVersion: nil)
+        XCTAssertFalse(status.isUpdatePending)
+    }
+
+    /// A daemon that has *already* restarted onto a build newer than what is installed (a downgrade on
+    /// disk) is not "pending" — nothing is waiting to be applied.
+    func testUpdateNotPendingWhenRunningBuildIsNewerThanInstalled() {
+        let status = makeStatus(version: "0.3.0", installedVersion: "0.2.0")
+        XCTAssertFalse(status.isUpdatePending)
+    }
+
+    /// The pending-update answer belongs to the daemon's device and travels over the wire, so a client
+    /// gets the same verdict it would compute locally, without consulting its own build version.
+    func testUpdatePendingSurvivesTheWire() throws {
+        let status = makeStatus(version: "0.1.0", installedVersion: "0.2.0")
+        let decoded = try JSONDecoder().decode(TerminalServiceDaemonStatus.self, from: JSONEncoder().encode(status))
+        XCTAssertTrue(decoded.isUpdatePending)
+    }
+
+    private func makeStatus(version: String, installedVersion: String?) -> TerminalServiceDaemonStatus {
+        TerminalServiceDaemonStatus(version: version, installedVersion: installedVersion, certificateFingerprint: nil, activeSessionCount: 0)
     }
 }

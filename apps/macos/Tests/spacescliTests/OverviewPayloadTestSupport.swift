@@ -5,7 +5,7 @@ import workspacecore
 @testable import spacesdeviceapi
 
 extension TerminalServiceDaemonStatus {
-    static let testStatus = TerminalServiceDaemonStatus(version: "test", artifactVersion: nil, certificateFingerprint: nil, activeSessionCount: 0)
+    static let testStatus = TerminalServiceDaemonStatus(version: "test", installedVersion: nil, certificateFingerprint: nil, activeSessionCount: 0)
 }
 
 extension SpacesDeviceOverviewPayload {

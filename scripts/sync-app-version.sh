@@ -5,6 +5,7 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SOURCE_PLIST="$REPO_ROOT/apps/macos/AppVersion.plist"
 APP_VERSION_SWIFT="$REPO_ROOT/apps/macos/Sources/workspacecore/AppVersion.swift"
 INFO_PLIST="$REPO_ROOT/apps/macos/Sources/SpacesApp/Info.plist"
+IOS_INFO_PLIST="$REPO_ROOT/apps/ios/Info.plist"
 
 usage() {
   cat <<'EOF'
@@ -13,6 +14,7 @@ Usage: scripts/sync-app-version.sh [--short <version>] [--build <build>] [--feed
 Updates apps/macos/AppVersion.plist and regenerates:
   - apps/macos/Sources/workspacecore/AppVersion.swift
   - apps/macos/Sources/SpacesApp/Info.plist
+  - apps/ios/Info.plist (version keys only)
 EOF
 }
 
@@ -71,7 +73,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-python3 - "$SOURCE_PLIST" "$APP_VERSION_SWIFT" "$INFO_PLIST" \
+python3 - "$SOURCE_PLIST" "$APP_VERSION_SWIFT" "$INFO_PLIST" "$IOS_INFO_PLIST" \
   "$short_version_set" "$short_version" \
   "$build_version_set" "$build_version" \
   "$feed_url_set" "$feed_url" \
@@ -84,8 +86,9 @@ import sys
 source_plist = pathlib.Path(sys.argv[1])
 app_version_swift = pathlib.Path(sys.argv[2])
 info_plist = pathlib.Path(sys.argv[3])
+ios_info_plist = pathlib.Path(sys.argv[4])
 
-arguments = sys.argv[4:]
+arguments = sys.argv[5:]
 updates = {
     "CFBundleShortVersionString": (arguments[0] == "1", arguments[1]),
     "CFBundleVersion": (arguments[2] == "1", arguments[3]),
@@ -137,20 +140,50 @@ public enum AppVersion {{
     encoding="utf-8",
 )
 
-# Update the existing Info.plist in place rather than regenerating it from a template:
-# the sync script owns only the version/feed/signing fields, and a template would drop
-# any key added to the plist after the template was written (this happened with
-# NSAppleEventsUsageDescription).
-with info_plist.open("rb") as handle:
-    info = plistlib.load(handle)
+info_plist.write_text(
+    f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>Spaces</string>
+    <key>CFBundleExecutable</key>
+    <string>SpacesApp</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleIdentifier</key>
+    <string>dev.usespaces.spaces</string>
+    <key>CFBundleShortVersionString</key>
+    <string>{short_version}</string>
+    <key>CFBundleVersion</key>
+    <string>{build_version}</string>
+    <key>SUFeedURL</key>
+    <string>{feed_url}</string>
+    <key>SUPublicEDKey</key>
+    <string>{public_ed_key}</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>Spaces opens and focuses your workspace browser sessions in Google Chrome.</string>
+</dict>
+</plist>
+""",
+    encoding="utf-8",
+)
 
-info["CFBundleShortVersionString"] = short_version
-info["CFBundleVersion"] = build_version
-info["SUFeedURL"] = feed_url
-info["SUPublicEDKey"] = public_ed_key
+# The iOS bundle carries its own hand-maintained keys (URL types, usage strings), so its version
+# keys are rewritten in place rather than regenerated from a template. Both Apple clients must
+# report the same CFBundleShortVersionString: the iOS app compares its own version against the
+# daemon's to decide whether a daemon update is pending, so a version that drifts ahead of the Mac
+# would flag every healthy daemon as out of date.
+with ios_info_plist.open("rb") as handle:
+    ios_metadata = plistlib.load(handle)
 
-with info_plist.open("wb") as handle:
-    plistlib.dump(info, handle, fmt=plistlib.FMT_XML, sort_keys=False)
+ios_metadata["CFBundleShortVersionString"] = short_version
+ios_metadata["CFBundleVersion"] = build_version
+
+with ios_info_plist.open("wb") as handle:
+    plistlib.dump(ios_metadata, handle, fmt=plistlib.FMT_XML, sort_keys=False)
 
 print("Synced app version metadata:")
 print(f"  short={short_version}")

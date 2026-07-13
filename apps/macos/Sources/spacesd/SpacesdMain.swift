@@ -296,8 +296,8 @@ import workspacecore
 
     private func daemonStatus() -> TerminalServiceDaemonStatus {
         TerminalServiceDaemonStatus(
-            version: AppVersion.current, artifactVersion: normalizedString(ProcessInfo.processInfo.environment["SPACESD_ARTIFACT_VERSION"]),
-            certificateFingerprint: daemonIdentityFingerprint, activeSessionCount: sessionCores.count)
+            version: AppVersion.current, installedVersion: InstalledSpacesVersion.current(), certificateFingerprint: daemonIdentityFingerprint,
+            activeSessionCount: sessionCores.count)
     }
 
     // Exec-in-place update trigger: after a short grace so the already-sent RPC response can flush,

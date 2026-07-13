@@ -249,12 +249,13 @@ final class SpacesDeviceOverviewViewModelTests: XCTestCase {
     }
 
     private static func emptyOverviewResponse() -> SpacesDeviceAPIResponse {
-        SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(SpacesDeviceOverviewPayload(workspaces: [], sessions: [], daemonStatus: status())))
+        SpacesDeviceAPIResponse(
+            ok: true, message: "ok", result: .overview(SpacesDeviceOverviewPayload(workspaces: [], sessions: [], daemonStatus: status())))
     }
 
     private static func status() -> TerminalServiceDaemonStatus {
         TerminalServiceDaemonStatus(
-            version: "1.0.0", artifactVersion: nil, certificateFingerprint: nil, activeSessionCount: 0, protocolVersion: SpacesWireProtocol.version)
+            version: "1.0.0", installedVersion: nil, certificateFingerprint: nil, activeSessionCount: 0, protocolVersion: SpacesWireProtocol.version)
     }
 }
 

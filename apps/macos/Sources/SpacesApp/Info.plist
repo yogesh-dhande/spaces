@@ -2,25 +2,25 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>CFBundleName</key>
-	<string>Spaces</string>
-	<key>CFBundleExecutable</key>
-	<string>SpacesApp</string>
-	<key>CFBundlePackageType</key>
-	<string>APPL</string>
-	<key>CFBundleIdentifier</key>
-	<string>dev.usespaces.spaces</string>
-	<key>CFBundleShortVersionString</key>
-	<string>0.1.0</string>
-	<key>CFBundleVersion</key>
-	<string>1</string>
-	<key>SUFeedURL</key>
-	<string>https://usespaces.dev/releases/appcast.xml</string>
-	<key>SUPublicEDKey</key>
-	<string>JnyOq/Dp/ylfUizbX5a5WwXWFEI3nmV1qQJWmtnlAH4=</string>
-	<key>CFBundleIconFile</key>
-	<string>AppIcon</string>
-	<key>NSAppleEventsUsageDescription</key>
-	<string>Spaces opens and focuses your workspace browser sessions in Google Chrome.</string>
+    <key>CFBundleName</key>
+    <string>Spaces</string>
+    <key>CFBundleExecutable</key>
+    <string>SpacesApp</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleIdentifier</key>
+    <string>dev.usespaces.spaces</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>SUFeedURL</key>
+    <string>https://usespaces.dev/releases/appcast.xml</string>
+    <key>SUPublicEDKey</key>
+    <string>JnyOq/Dp/ylfUizbX5a5WwXWFEI3nmV1qQJWmtnlAH4=</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>Spaces opens and focuses your workspace browser sessions in Google Chrome.</string>
 </dict>
 </plist>
