@@ -228,12 +228,14 @@ public enum DaemonHandoffDecision {
 public enum DaemonHandoffPreflightError: Error, CustomStringConvertible {
     case launchFailed(String)
     case checkFailed(exitCode: Int32, output: String)
+    case timedOut(seconds: Int)
 
     public var description: String {
         switch self {
         case .launchFailed(let message): return "failed to launch the staged daemon for handoff preflight: \(message)."
         case .checkFailed(let exitCode, let output):
             return "staged daemon failed the handoff preflight (exit \(exitCode))\(output.isEmpty ? "" : ": \(output)")."
+        case .timedOut(let seconds): return "staged daemon did not answer the handoff preflight within \(seconds)s."
         }
     }
 }
@@ -262,25 +264,106 @@ public enum DaemonHandoffPreflight {
 
     #if os(macOS) || os(Linux)
         /// Old-binary side: spawns `executablePath --handoff-check <formatVersion>` and
-        /// waits for it to exit. Drains stdout/stderr before `waitUntilExit()` — a child
-        /// that writes more than the kernel's pipe buffer would otherwise deadlock both
-        /// processes if the parent waited first. Throws a descriptive error on launch
-        /// failure or a nonzero exit; callers must treat either as "do not exec". Only
-        /// the daemon platforms spawn the preflight child; iOS never runs spacesd.
+        /// waits for it to exit. Throws a descriptive error on launch failure, a nonzero
+        /// exit, or a blown deadline; callers must treat all of them as "do not exec".
+        /// Only the daemon platforms spawn the preflight child; iOS never runs spacesd.
         public static func run(executablePath: String, formatVersion: Int) throws {
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: executablePath)
-            process.arguments = [checkArgument, String(formatVersion)]
-            let output = Pipe()
-            process.standardOutput = output
-            process.standardError = output
-            do { try process.run() } catch { throw DaemonHandoffPreflightError.launchFailed(error.localizedDescription) }
-            try? output.fileHandleForWriting.close()
-            let data = output.fileHandleForReading.readDataToEndOfFile()
-            process.waitUntilExit()
-            guard process.terminationStatus == 0 else {
+            try run(executablePath: executablePath, formatVersion: formatVersion, deadlineSeconds: 10)
+        }
+
+        /// Deliberately raw `posix_spawn` + `poll` + `waitpid` (the `systembridge`
+        /// spawn idiom) rather than Foundation `Process`: `waitUntilExit()` spins the
+        /// caller's run loop until Foundation's monitor notices the child exit, and on
+        /// Linux that notification can be missed inside the daemon, wedging the handoff
+        /// on the main thread forever with the child long dead. Direct `waitpid` cannot
+        /// miss. The pipe is drained (with `poll`) before reaping so a chatty child can
+        /// never deadlock on a full pipe buffer, and the deadline kills the child so a
+        /// pathological staged binary cannot stall the daemon mid-handoff — a preflight
+        /// failure is the approved keep-running path; a hang is not.
+        internal static func run(executablePath: String, formatVersion: Int, deadlineSeconds: Int) throws {
+            var outputPipe: [Int32] = [-1, -1]
+            guard pipe(&outputPipe) == 0 else { throw DaemonHandoffPreflightError.launchFailed("pipe failed (errno \(errno))") }
+
+            let argumentStrings: [String] = [executablePath, checkArgument, String(formatVersion)]
+            var cArguments: [UnsafeMutablePointer<CChar>?] = argumentStrings.map { strdup($0) }
+            cArguments.append(nil)
+            defer { for argument in cArguments { if let argument { free(argument) } } }
+
+            #if canImport(Darwin)
+                var fileActions: posix_spawn_file_actions_t? = nil
+            #else
+                var fileActions = posix_spawn_file_actions_t()
+            #endif
+            guard posix_spawn_file_actions_init(&fileActions) == 0 else {
+                close(outputPipe[0])
+                close(outputPipe[1])
+                throw DaemonHandoffPreflightError.launchFailed("posix_spawn_file_actions_init failed (errno \(errno))")
+            }
+            defer { posix_spawn_file_actions_destroy(&fileActions) }
+            posix_spawn_file_actions_adddup2(&fileActions, outputPipe[1], STDOUT_FILENO)
+            posix_spawn_file_actions_adddup2(&fileActions, outputPipe[1], STDERR_FILENO)
+            posix_spawn_file_actions_addclose(&fileActions, outputPipe[0])
+            posix_spawn_file_actions_addclose(&fileActions, outputPipe[1])
+
+            var pid: pid_t = 0
+            let spawnResult = posix_spawn(&pid, executablePath, &fileActions, nil, &cArguments, environ)
+            close(outputPipe[1])
+            guard spawnResult == 0 else {
+                close(outputPipe[0])
+                throw DaemonHandoffPreflightError.launchFailed("posix_spawn failed (errno \(spawnResult))")
+            }
+            defer { close(outputPipe[0]) }
+
+            let deadline = Date().addingTimeInterval(TimeInterval(deadlineSeconds))
+            var data = Data()
+            var buffer = [UInt8](repeating: 0, count: 4096)
+            drain: while true {
+                let remainingMS = Int32((deadline.timeIntervalSinceNow * 1000).rounded(.up))
+                guard remainingMS > 0 else {
+                    kill(pid, SIGKILL)
+                    _ = waitpid(pid, nil, 0)
+                    throw DaemonHandoffPreflightError.timedOut(seconds: deadlineSeconds)
+                }
+                var pollDescriptor = pollfd(fd: outputPipe[0], events: Int16(POLLIN), revents: 0)
+                let pollResult = poll(&pollDescriptor, 1, remainingMS)
+                if pollResult < 0 {
+                    if errno == EINTR { continue }
+                    kill(pid, SIGKILL)
+                    _ = waitpid(pid, nil, 0)
+                    throw DaemonHandoffPreflightError.launchFailed("poll failed (errno \(errno))")
+                }
+                if pollResult == 0 { continue }
+                while true {
+                    let count = read(outputPipe[0], &buffer, buffer.count)
+                    if count > 0 {
+                        data.append(buffer, count: count)
+                        continue
+                    }
+                    if count == 0 { break drain }
+                    if errno == EINTR { continue }
+                    break drain
+                }
+            }
+
+            var status: Int32 = 0
+            reap: while true {
+                let result = waitpid(pid, &status, WNOHANG)
+                if result == pid { break reap }
+                if result < 0 && errno != EINTR { throw DaemonHandoffPreflightError.launchFailed("waitpid failed (errno \(errno))") }
+                // EOF arrived, so the child is exiting; give it until the deadline to be reapable.
+                guard Date() < deadline else {
+                    kill(pid, SIGKILL)
+                    _ = waitpid(pid, nil, 0)
+                    throw DaemonHandoffPreflightError.timedOut(seconds: deadlineSeconds)
+                }
+                usleep(10_000)
+            }
+
+            let exitedNormally = (status & 0x7F) == 0
+            let exitCode = exitedNormally ? (status >> 8) & 0xFF : 128 + (status & 0x7F)
+            guard exitedNormally && exitCode == 0 else {
                 let message = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                throw DaemonHandoffPreflightError.checkFailed(exitCode: process.terminationStatus, output: message)
+                throw DaemonHandoffPreflightError.checkFailed(exitCode: exitCode, output: message)
             }
         }
     #endif

@@ -694,7 +694,7 @@ response = request({
                 "title": "artifact smoke",
                 "workingDirectory": work,
                 "shell": "/bin/bash",
-                "command": "echo artifact-smoke; sleep 20",
+                "command": "echo artifact-smoke; sleep 600",
                 "createdAt": "2026-06-11T00:00:00.000Z",
                 "workspaceID": "artifact-workspace",
                 "kind": "process",
@@ -925,8 +925,20 @@ SHIM
             echo "terminal child pid $terminal_child_pid vanished after reinstall; the pre-existing session must survive" >&2
             exit 1
         fi
-        if ! grep -q "handoff_resume generation=1" "$smoke_root/spacesd.log"; then
-            echo "expected 'handoff_resume generation=1' in spacesd.log after reinstall" >&2
+        # The poke responds before the daemon acts (respond-then-act), so the handoff — grace sleep,
+        # preflight child, quiesce, exec, resume — completes a few seconds after install.sh returns.
+        # Wait for the resume marker instead of racing it.
+        handoff_resume_deadline=$((SECONDS + 20))
+        until grep -q "handoff_resume generation=1" "$smoke_root/spacesd.log"; do
+            if [ "$SECONDS" -ge "$handoff_resume_deadline" ]; then
+                echo "expected 'handoff_resume generation=1' in spacesd.log within 20s of reinstall" >&2
+                cat "$smoke_root/spacesd.log" >&2
+                exit 1
+            fi
+            sleep 0.5
+        done
+        if ! kill -0 "$daemon_pid" 2>/dev/null; then
+            echo "daemon pid $daemon_pid vanished across the handoff; exec-in-place must preserve the pid" >&2
             cat "$smoke_root/spacesd.log" >&2
             exit 1
         fi

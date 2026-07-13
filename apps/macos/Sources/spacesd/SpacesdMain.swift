@@ -368,8 +368,10 @@ import workspacecore
             writeStandardError("spacesd handoff_preflight_failed error=\(error)\n")
             return
         }
+        writeStandardError("spacesd handoff_preflight_ok\n")
 
         stopSharedServices()
+        writeStandardError("spacesd handoff_intake_stopped\n")
 
         // Quiesce each live core. A nil return means the child already exited — finalize that session
         // through the normal dead-session teardown before exec so it lands `.exited`, not resumed.
@@ -385,6 +387,7 @@ import workspacecore
                 _ = terminateSession(id: sessionID)
             }
         }
+        writeStandardError("spacesd handoff_quiesced sessions=\(records.count)\n")
 
         for record in records {
             do { try DaemonHandoffStore.prepareDescriptorForHandoff(record.masterFD) } catch {

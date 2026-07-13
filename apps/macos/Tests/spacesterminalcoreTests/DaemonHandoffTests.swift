@@ -241,4 +241,36 @@ final class DaemonHandoffTests: XCTestCase {
 
         XCTAssertNil(DaemonHandoffPreflight.respondsToCheck(arguments: ["spacesd", "--foo", "bar"]))
     }
+
+    // MARK: - preflight child spawn
+
+    func testPreflightRunSucceedsForZeroExitChild() throws {
+        try DaemonHandoffPreflight.run(executablePath: "/usr/bin/true", formatVersion: DaemonHandoffTable.currentFormatVersion)
+    }
+
+    func testPreflightRunThrowsCheckFailedForNonzeroExitChild() throws {
+        XCTAssertThrowsError(try DaemonHandoffPreflight.run(executablePath: "/usr/bin/false", formatVersion: DaemonHandoffTable.currentFormatVersion))
+        { error in guard case DaemonHandoffPreflightError.checkFailed = error else { return XCTFail("expected checkFailed, got \(error)") } }
+    }
+
+    func testPreflightRunThrowsLaunchFailedForMissingExecutable() throws {
+        XCTAssertThrowsError(
+            try DaemonHandoffPreflight.run(
+                executablePath: "/nonexistent/spacesd-\(UUID().uuidString)", formatVersion: DaemonHandoffTable.currentFormatVersion)
+        ) { error in guard case DaemonHandoffPreflightError.launchFailed = error else { return XCTFail("expected launchFailed, got \(error)") } }
+    }
+
+    func testPreflightRunKillsChildAndThrowsOnDeadline() throws {
+        let scriptURL = FileManager.default.temporaryDirectory.appendingPathComponent("handoff-preflight-hang-\(UUID().uuidString).sh")
+        try "#!/bin/sh\nsleep 30\n".write(to: scriptURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+        defer { try? FileManager.default.removeItem(at: scriptURL) }
+
+        let startedAt = Date()
+        XCTAssertThrowsError(
+            try DaemonHandoffPreflight.run(executablePath: scriptURL.path, formatVersion: DaemonHandoffTable.currentFormatVersion, deadlineSeconds: 1)
+        ) { error in guard case DaemonHandoffPreflightError.timedOut = error else { return XCTFail("expected timedOut, got \(error)") } }
+        // The deadline must bound the wall time; the 30s child is killed, not waited for.
+        XCTAssertLessThan(Date().timeIntervalSince(startedAt), 5)
+    }
 }
