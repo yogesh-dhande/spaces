@@ -67,7 +67,7 @@ final class TerminalServiceProtocolTests: XCTestCase {
                     baseBranch: "main", isDefault: false, isArchived: false, isHidden: false, isRunning: false, lastLaunchedAt: nil, notes: nil),
                 terminalOutput: "recent output"),
             daemonStatus: TerminalServiceDaemonStatus(
-                version: "1.2.3", artifactVersion: "1.2.3", certificateFingerprint: "SHA256:abcdef", activeSessionCount: 2))
+                version: "1.2.3", installedVersion: "1.2.3", certificateFingerprint: "SHA256:abcdef", activeSessionCount: 2))
 
         for request in requests { XCTAssertEqual(try TerminalServiceCodec.decodeRequest(TerminalServiceCodec.encodeRequest(request)), request) }
         XCTAssertEqual(try TerminalServiceCodec.decodeResponse(TerminalServiceCodec.encodeResponse(response)), response)

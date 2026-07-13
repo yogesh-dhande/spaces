@@ -3,7 +3,6 @@ import spacesterminalcore
 
 enum SpacesMobileSettingsRoute: Hashable {
     case pairedDevices
-    case daemon
 }
 
 /// Settings tab: connection, appearance, and version in the shared band language.
@@ -26,9 +25,6 @@ struct SettingsTabView: View {
                                 .foregroundStyle(Theme.mutedSecondary)
                                 .monospacedDigit()
                         }
-                        navigationRow(label: "Daemon", identifier: "settings.daemon", destination: .daemon) {
-                            daemonStatusValue
-                        }
                     }
                     settingsGroup("Appearance") {
                         themeRow
@@ -47,8 +43,6 @@ struct SettingsTabView: View {
                 switch route {
                 case .pairedDevices:
                     PairedDevicesView(model: model)
-                case .daemon:
-                    DaemonSettingsView(model: model)
                 }
             }
         }
@@ -109,30 +103,6 @@ struct SettingsTabView: View {
         }
         .buttonStyle(.plain)
         .accessibilityIdentifier(identifier)
-    }
-
-    private var daemonStatusValue: some View {
-        HStack(spacing: 6) {
-            StatusDot(kind: daemonStatusDotKind)
-            Text(daemonStatusLabel)
-                .font(.system(size: 12))
-                .foregroundStyle(Theme.mutedSecondary)
-        }
-    }
-
-    private var daemonStatusDotKind: StatusDot.Kind {
-        if model.isActiveDeviceBlocked || model.daemonUpdatePending { return .waiting }
-        if model.compatibility == .compatible { return .done }
-        return .idle
-    }
-
-    private var daemonStatusLabel: String {
-        switch model.compatibility {
-        case .clientTooOld: "App update required"
-        case .daemonTooOld: "Restart required"
-        case .compatible: model.daemonUpdatePending ? "Update pending" : "Compatible"
-        case nil: "Unknown"
-        }
     }
 
     private var themeRow: some View {

@@ -4466,13 +4466,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
-    /// Compatible, but the daemon reports an older app version than this build — a daemon update is
-    /// staged and applies on the next restart. Non-blocking; surfaced as a quiet caption only.
-    static func daemonUpdatePending(status: TerminalServiceDaemonStatus?) -> Bool {
-        guard let status else { return false }
-        return SpacesWireProtocol.isVersion(status.version, olderThan: AppVersion.short)
-    }
-
     static func restartImpactMessage(status: TerminalServiceDaemonStatus?) -> String {
         guard let status else { return "Running terminals, processes, and coding agents on this device will stop." }
         let agents = status.activeAgents + status.waitingAgents
@@ -10786,6 +10779,6 @@ extension SpacesDeviceOverviewPayload {
     fileprivate static let offlinePlaceholder = SpacesDeviceOverviewPayload(
         workspaces: [], sessions: [],
         daemonStatus: TerminalServiceDaemonStatus(
-            version: "", artifactVersion: nil, certificateFingerprint: nil, activeSessionCount: 0,
+            version: "", installedVersion: nil, certificateFingerprint: nil, activeSessionCount: 0,
             protocolVersion: TerminalServiceDaemonStatus.unknownProtocolVersion))
 }

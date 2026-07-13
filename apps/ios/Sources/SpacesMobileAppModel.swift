@@ -637,14 +637,14 @@ private enum SpacesMobileMutationTimeoutRecovery {
         return !compatibility.isCompatible
     }
 
-    /// Compatible, but the daemon reports an older app version than this client — a non-blocking hint
-    /// that a daemon update is pending and will apply on the next restart.
+    /// Compatible, but a newer Spaces is installed on the active device than the build its daemon is
+    /// running — a non-blocking hint that the update applies on the daemon's next restart. The daemon
+    /// reports this about its own device; this app's own version says nothing about what is installed
+    /// over there, so it is deliberately not part of the comparison.
     var daemonUpdatePending: Bool {
-        guard compatibility == .compatible, let status = daemonStatus else { return false }
-        return SpacesWireProtocol.isVersion(status.version, olderThan: SpacesMobileAppModel.clientAppVersion)
+        guard compatibility == .compatible else { return false }
+        return daemonStatus?.isUpdatePending ?? false
     }
-
-    static let clientAppVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? ""
 
     var connectionSummary: String {
         if let activeDeviceName { return activeDeviceName }

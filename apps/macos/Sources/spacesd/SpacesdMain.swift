@@ -251,7 +251,7 @@ import workspacecore
 
     private func daemonStatus() -> TerminalServiceDaemonStatus {
         TerminalServiceDaemonStatus(
-            version: AppVersion.current, artifactVersion: normalizedString(ProcessInfo.processInfo.environment["SPACESD_ARTIFACT_VERSION"]),
+            version: AppVersion.current, installedVersion: InstalledSpacesVersion.current(),
             certificateFingerprint: daemonIdentityFingerprint, activeSessionCount: sessionCores.count)
     }
 

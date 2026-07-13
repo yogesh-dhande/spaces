@@ -671,7 +671,7 @@
             featureAssignedPorts: [SpacesDeviceAssignedPort] = [],
             featureConfig: SpacesDeviceWorkspaceConfig = SpacesDeviceWorkspaceConfig(),
             daemonStatus: TerminalServiceDaemonStatus = TerminalServiceDaemonStatus(
-                version: "1.0.0", artifactVersion: nil, certificateFingerprint: nil, activeSessionCount: 0, protocolVersion: SpacesWireProtocol.version)
+                version: "1.0.0", installedVersion: nil, certificateFingerprint: nil, activeSessionCount: 0, protocolVersion: SpacesWireProtocol.version)
         ) -> SpacesDeviceOverviewPayload {
             let project = SpacesDeviceProjectSummary(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
             let processRows =
@@ -714,7 +714,7 @@
 
         private func daemonStatus(protocolVersion: Int) -> TerminalServiceDaemonStatus {
             TerminalServiceDaemonStatus(
-                version: "1.0.0", artifactVersion: nil, certificateFingerprint: nil, activeSessionCount: 0, protocolVersion: protocolVersion)
+                version: "1.0.0", installedVersion: nil, certificateFingerprint: nil, activeSessionCount: 0, protocolVersion: protocolVersion)
         }
 
         private func makeSession(

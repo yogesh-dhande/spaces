@@ -866,9 +866,10 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         case .offline: return ("offline", sidebarFailedIndicatorColor())
         case .loaded:
             // Incompatible devices render an actionable button in the caption (see sidebarSectionRowCell);
-            // a compatible-but-older daemon shows a quiet "update pending" caption.
+            // a device with a newer build installed than its daemon is running shows a quiet
+            // "update pending" caption.
             if section.compatibility?.isCompatible == false { return nil }
-            if AppKitController.daemonUpdatePending(status: section.daemonStatus) { return ("update pending", .tertiaryLabelColor) }
+            if section.daemonStatus?.isUpdatePending == true { return ("update pending", .tertiaryLabelColor) }
             return nil
         }
     }

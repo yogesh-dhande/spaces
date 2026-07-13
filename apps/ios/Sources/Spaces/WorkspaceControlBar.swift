@@ -8,7 +8,7 @@ import spacesdevicecore
 /// This matches the Mac sidebar's workspace context menu.
 ///
 /// Starting a workspace launches its configured processes and coding agents — not its browser sessions
-/// or ad hoc terminals, which the daemon never opens — so New Terminal stays a separate action.
+/// or ad hoc terminals, which the daemon never opens — so Terminal stays a separate action.
 struct WorkspaceControlBar: View {
     let workspace: SpacesDeviceWorkspaceSummary
     let isMutating: Bool
@@ -32,7 +32,7 @@ struct WorkspaceControlBar: View {
                     identifier: "workspace.start.\(workspace.id)", action: onStart)
             }
             WorkspaceControlButton(
-                title: "New Terminal", systemImage: "plus", tint: Theme.muted,
+                title: "Terminal", systemImage: "plus", tint: Theme.muted,
                 identifier: "workspace.newTerminal.\(workspace.id)", action: onNewTerminal)
             Spacer(minLength: 0)
         }
