@@ -490,23 +490,54 @@ systemctl --user daemon-reload
 systemctl --user enable spacesd.service
 systemctl --user reset-failed spacesd.service >/dev/null 2>&1 || true
 
+staged_daemon_identity="$(stat -Lc '%d:%i' "$release_dir/bin/spacesd-bin")"
+
+systemd_daemon_pid() {
+    systemctl --user show spacesd.service --property MainPID --value 2>/dev/null || true
+}
+
+daemon_runs_staged_image() {
+    local daemon_pid="$1"
+    [ -n "$daemon_pid" ] && [ "$daemon_pid" -gt 0 ] 2>/dev/null \
+        && [ "$(stat -Lc '%d:%i' "/proc/$daemon_pid/exe" 2>/dev/null || true)" = "$staged_daemon_identity" ]
+}
+
+wait_for_staged_daemon() {
+    local required_pid="${1:-}" deadline daemon_pid
+    deadline=$((SECONDS + 10))
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        daemon_pid="$(systemd_daemon_pid)"
+        if { [ -z "$required_pid" ] || [ "$daemon_pid" = "$required_pid" ]; } \
+            && daemon_runs_staged_image "$daemon_pid" \
+            && "$bin_root/spaces" terminal list >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    return 1
+}
+
 # Prefer poking an already-running daemon over a systemd restart: `apply-update` asks spacesd to
 # quiesce its sessions and exec the newly staged binary in place at the same pid, so shells,
-# coding agents, and workspace processes started before this reinstall keep running. The poke only
-# succeeds against a daemon that is already up and understands the frozen applyStagedUpdate
-# command, so a first install, a daemon that is not running, and an older daemon without the
-# command all fail it and fall back to the restart this script has always done.
-if "$bin_root/spaces" daemon apply-update >/dev/null 2>&1; then
-    handoff_deadline=$((SECONDS + 10))
-    until "$bin_root/spaces" terminal list >/dev/null 2>&1; do
-        if [ "$SECONDS" -ge "$handoff_deadline" ]; then
-            echo "spacesd did not respond within 10s after apply-update; systemd will restart it if the handoff failed" >&2
-            break
-        fi
-        sleep 0.5
-    done
-else
+# coding agents, and workspace processes started before this reinstall keep running. The command
+# acknowledges before the asynchronous handoff starts, so success requires both a responsive daemon
+# and proof that the preserved pid is executing the staged binary. A failed or unsupported handoff
+# falls back to a real systemd restart, whose replacement image is verified by the same checks.
+handoff_pid="$(systemd_daemon_pid)"
+handoff_completed=false
+if [ -n "$handoff_pid" ] && [ "$handoff_pid" -gt 0 ] 2>/dev/null \
+    && "$bin_root/spaces" daemon apply-update >/dev/null 2>&1 \
+    && wait_for_staged_daemon "$handoff_pid"; then
+    handoff_completed=true
+fi
+
+if [ "$handoff_completed" != true ]; then
+    echo "spacesd did not complete the staged handoff; restarting it with systemd" >&2
     systemctl --user restart spacesd.service
+    if ! wait_for_staged_daemon; then
+        echo "spacesd did not start the installed daemon image within 10s" >&2
+        exit 1
+    fi
 fi
 
 printf 'release_dir=%s\n' "$release_dir"
@@ -634,10 +665,11 @@ smoke_artifact() {
         ldd bin/spacesd-bin >/dev/null
         ldd bin/spaces-bin >/dev/null
         timeout 20s env SPACES_DB_PATH="$smoke_root/profile/spaces.db" SPACESD_PRINT_CERTIFICATE_FINGERPRINT=1 bin/spacesd | grep -q '^SHA256:'
-        mkdir -p "$smoke_root/profile/runtime" "$smoke_root/work"
+        mkdir -p "$smoke_root/profile/runtime" "$smoke_root/work" "$smoke_root/reinstall-home/.spaces/bin"
+        ln -s "$PWD/bin/spacesd" "$smoke_root/reinstall-home/.spaces/bin/spacesd"
         env SPACES_DB_PATH="$smoke_root/profile/spaces.db" SPACES_RUNTIME_DIR="$smoke_root/profile/runtime" \
             SPACES_DEVICE_API_HOST=127.0.0.1 SPACES_DEVICE_API_PORT=0 \
-            bin/spacesd >"$smoke_root/spacesd.log" 2>&1 </dev/null &
+            "$smoke_root/reinstall-home/.spaces/bin/spacesd" >"$smoke_root/spacesd.log" 2>&1 </dev/null &
         local daemon_pid=$!
         trap 'kill "$daemon_pid" 2>/dev/null || true; wait "$daemon_pid" 2>/dev/null || true' EXIT
         python3 - "$smoke_root" <<'PY'
@@ -902,12 +934,14 @@ exit 0
 SHIM
         cat > "$systemd_shim_dir/systemctl" <<'SHIM'
 #!/usr/bin/env bash
+case "$*" in
+    *"show spacesd.service --property MainPID --value"*) echo "${SPACES_SMOKE_DAEMON_PID:-0}" ;;
+esac
 exit 0
 SHIM
         chmod +x "$systemd_shim_dir/loginctl" "$systemd_shim_dir/systemctl"
-        mkdir -p "$smoke_root/reinstall-home"
-
         if ! PATH="$systemd_shim_dir:$PATH" HOME="$smoke_root/reinstall-home" \
+            SPACES_SMOKE_DAEMON_PID="$daemon_pid" \
             SPACES_DB_PATH="$smoke_root/profile/spaces.db" SPACES_RUNTIME_DIR="$smoke_root/profile/runtime" \
             ./install.sh >"$smoke_root/reinstall.log" 2>&1; then
             echo "install.sh reinstall failed" >&2

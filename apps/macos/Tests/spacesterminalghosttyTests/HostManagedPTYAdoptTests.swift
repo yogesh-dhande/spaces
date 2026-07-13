@@ -207,4 +207,28 @@ final class HostManagedPTYAdoptTests: XCTestCase {
 
         driver.terminate()
     }
+
+    func testFailedHandoffFileOpenRestoresBufferedOutputToHandler() throws {
+        let configuration = makeConfiguration(sessionID: "restore-buffer", command: "cat")
+        let driver = HostManagedPTYTerminalSessionDriver(launchConfiguration: configuration, terminationEscalationIntervals: fastEscalation)
+        let collector = OutputCollector()
+        driver.setOutputHandler { collector.append($0) }
+        try driver.startIfNeeded()
+
+        driver.beginHandoffOutputBuffering()
+        driver.sendRawBytes(Data("buffered-before-failure\n".utf8))
+        usleep(100_000)
+        XCTAssertFalse(collector.string.contains("buffered-before-failure"), "buffered output must not reach the normal handler before fallback")
+
+        let invalidPath = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: invalidPath, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: invalidPath) }
+        XCTAssertThrowsError(try driver.finishHandoffOutputBuffering(appendingTo: invalidPath.path))
+
+        driver.endHandoffOutputBuffering()
+        XCTAssertTrue(
+            waitUntil { collector.string.contains("buffered-before-failure") },
+            "bytes buffered before the persistence failure must return to normal delivery")
+        driver.terminate()
+    }
 }

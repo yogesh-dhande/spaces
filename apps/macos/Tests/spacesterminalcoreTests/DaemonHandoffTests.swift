@@ -262,7 +262,9 @@ final class DaemonHandoffTests: XCTestCase {
 
     func testPreflightRunKillsChildAndThrowsOnDeadline() throws {
         let scriptURL = FileManager.default.temporaryDirectory.appendingPathComponent("handoff-preflight-hang-\(UUID().uuidString).sh")
-        try "#!/bin/sh\nsleep 30\n".write(to: scriptURL, atomically: true, encoding: .utf8)
+        // Output before the hang exercises the drain's nonblocking boundary: after reading this
+        // chunk, it must return to poll/deadline handling instead of blocking on a second read.
+        try "#!/bin/sh\nprintf 'preflight started\\n'\nexec sleep 30\n".write(to: scriptURL, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
         defer { try? FileManager.default.removeItem(at: scriptURL) }
 

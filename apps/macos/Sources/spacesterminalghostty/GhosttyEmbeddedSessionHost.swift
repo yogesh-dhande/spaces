@@ -472,7 +472,7 @@
         /// record the staged daemon needs to adopt this session, or nil when there is
         /// nothing live to hand off (the child already exited/closed), in which case the
         /// caller terminates the session normally.
-        public func quiesceForHandoff() async -> DaemonHandoffSessionRecord? {
+        public func quiesceForHandoff() async throws -> DaemonHandoffSessionRecord? {
             suppressBroadcastsForHandoff = true
             runtimeStateTimer?.invalidate()
             runtimeStateTimer = nil
@@ -505,9 +505,7 @@
 
             // Flush the buffered bytes to output.log and install the direct-to-file writer
             // that keeps appending until execv.
-            do { try sessionDriver.finishHandoffOutputBuffering(appendingTo: paths.outputPath) } catch {
-                fputs("spaces: ghostty handoff output flush failed: \(error)\n", stderr)
-            }
+            try sessionDriver.finishHandoffOutputBuffering(appendingTo: paths.outputPath)
 
             let size = observedSurfaceSize() ?? lastKnownSurfaceSize ?? (columns: 80, rows: 24)
             return DaemonHandoffSessionRecord(
@@ -531,10 +529,10 @@
         /// append, restart the per-session servers, and resume timers/broadcasts. This
         /// rebinds the still-live session; it never rebuilds it.
         public func resumeInPlaceAfterFailedExec() {
-            sessionDriver.endHandoffOutputBuffering()
-            suppressBroadcastsForHandoff = false
             do {
                 try openOutputHandlePreservingTranscript()
+                sessionDriver.endHandoffOutputBuffering()
+                suppressBroadcastsForHandoff = false
                 try startControlServer()
                 try startStateStreamServer()
             } catch { fputs("spaces: ghostty handoff resume-in-place failed: \(error)\n", stderr) }

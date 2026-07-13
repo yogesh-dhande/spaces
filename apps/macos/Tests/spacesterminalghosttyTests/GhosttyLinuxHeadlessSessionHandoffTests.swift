@@ -191,7 +191,9 @@
             resize(sourceCore, columns: 100, rows: 30)
             try await waitAsync { (try? String(contentsOfFile: paths.outputPath))?.contains(marker) == true }
 
-            guard let record = await sourceCore.quiesceForHandoff() else { return XCTFail("quiesce produced no handoff record for a live session") }
+            guard let record = try await sourceCore.quiesceForHandoff() else {
+                return XCTFail("quiesce produced no handoff record for a live session")
+            }
             XCTAssertEqual(record.columns, 100)
             XCTAssertEqual(record.rows, 30)
             XCTAssertEqual(
@@ -244,7 +246,7 @@
             let preHandoffLines = nonEmptyTrimmedLines(renderedScreenText(of: sourceCore))
             XCTAssertGreaterThanOrEqual(preHandoffLines.count, 2, "a 154-column line must wrap at grid width 100")
 
-            guard let record = await sourceCore.quiesceForHandoff() else { return XCTFail("quiesce produced no handoff record") }
+            guard let record = try await sourceCore.quiesceForHandoff() else { return XCTFail("quiesce produced no handoff record") }
 
             let pty = try makeAdoptablePTY()
             let resumedCore = GhosttyEmbeddedSessionCore(launchConfiguration: configuration, paths: paths)
@@ -281,7 +283,7 @@
             XCTAssertGreaterThan(sourceCore.debugOwnerEpoch, 0, "attaching an owner must advance the owner epoch")
             try await waitAsync { self.renderedScreenText(of: sourceCore)?.contains(marker) == true }
 
-            guard let record = await sourceCore.quiesceForHandoff() else { return XCTFail("quiesce produced no handoff record") }
+            guard let record = try await sourceCore.quiesceForHandoff() else { return XCTFail("quiesce produced no handoff record") }
             XCTAssertEqual(record.ownerEpoch, sourceCore.debugOwnerEpoch, "the record must carry the live owner epoch")
             let recordedEpoch = record.ownerEpoch
             // Do NOT terminate the source core: terminate() detaches active clients, and this
@@ -335,7 +337,7 @@
             // (which flips the session out of its started state).
             try await waitAsync { !core.isStarted }
 
-            let record = await core.quiesceForHandoff()
+            let record = try await core.quiesceForHandoff()
             XCTAssertNil(record, "a session whose child already exited must not produce a handoff record")
         }
 
@@ -355,7 +357,7 @@
             try await waitAsync { (try? String(contentsOfFile: paths.outputPath))?.contains(marker) == true }
 
             // Quiesce as if about to exec, then take the failed-exec fallback on the SAME core.
-            guard let record = await core.quiesceForHandoff() else { return XCTFail("quiesce produced no handoff record") }
+            guard let record = try await core.quiesceForHandoff() else { return XCTFail("quiesce produced no handoff record") }
             XCTAssertGreaterThan(record.childPID, 0)
             core.resumeInPlaceAfterFailedExec()
 

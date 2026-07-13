@@ -190,16 +190,21 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
         lock.unlock()
     }
 
-    /// Failed-`execv` fallback: `execv` returned, so this same image keeps running.
-    /// Close the direct-writer fd if open, replay nothing (the file already holds the
-    /// buffered and direct-written bytes), and reinstate normal handler delivery for
-    /// subsequent reads. Kept minimal — this is only reached when exec did not take.
+    /// Failed-handoff fallback: this same image keeps running. Close the direct-writer
+    /// fd if open and reinstate normal handler delivery. If persistence failed while
+    /// the sink was still buffering, replay those bytes through the handler after the
+    /// atomic sink swap; the core reopens its normal output handle before calling this.
     func endHandoffOutputBuffering() {
+        let pending: Data
+        let handler: (@Sendable (Data) -> Void)?
         lock.lock()
         if case .file(let fd) = outputSink { close(fd) }
+        pending = handoffBuffer
+        handler = outputHandler
         handoffBuffer = Data()
         outputSink = .handler
         lock.unlock()
+        if !pending.isEmpty { handler?(pending) }
     }
 
     func terminate() {

@@ -283,6 +283,13 @@ public enum DaemonHandoffPreflight {
         internal static func run(executablePath: String, formatVersion: Int, deadlineSeconds: Int) throws {
             var outputPipe: [Int32] = [-1, -1]
             guard pipe(&outputPipe) == 0 else { throw DaemonHandoffPreflightError.launchFailed("pipe failed (errno \(errno))") }
+            let outputFlags = fcntl(outputPipe[0], F_GETFL)
+            guard outputFlags >= 0, fcntl(outputPipe[0], F_SETFL, outputFlags | O_NONBLOCK) == 0 else {
+                let code = errno
+                close(outputPipe[0])
+                close(outputPipe[1])
+                throw DaemonHandoffPreflightError.launchFailed("failed to make output pipe nonblocking (errno \(code))")
+            }
 
             let argumentStrings: [String] = [executablePath, checkArgument, String(formatVersion)]
             var cArguments: [UnsafeMutablePointer<CChar>?] = argumentStrings.map { strdup($0) }
@@ -341,7 +348,11 @@ public enum DaemonHandoffPreflight {
                     }
                     if count == 0 { break drain }
                     if errno == EINTR { continue }
-                    break drain
+                    if errno == EAGAIN || errno == EWOULDBLOCK { break }
+                    let code = errno
+                    kill(pid, SIGKILL)
+                    _ = waitpid(pid, nil, 0)
+                    throw DaemonHandoffPreflightError.launchFailed("read failed (errno \(code))")
                 }
             }
 

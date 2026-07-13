@@ -161,7 +161,7 @@ final class GhosttyEmbeddedSessionHandoffTests: XCTestCase {
         XCTAssertTrue(try headlessHost(for: sourceCore).resizeCellGrid(columns: 100, rows: 30))
         try await waitAsync { self.snapshotText(of: sourceCore)?.contains(marker) == true }
 
-        guard let record = await sourceCore.quiesceForHandoff() else { return XCTFail("quiesce produced no handoff record for a live session") }
+        guard let record = try await sourceCore.quiesceForHandoff() else { return XCTFail("quiesce produced no handoff record for a live session") }
         XCTAssertEqual(record.columns, 100)
         XCTAssertEqual(record.rows, 30)
         XCTAssertEqual(occurrences(of: marker, in: try String(contentsOfFile: paths.outputPath)), 1, "transcript must hold the marker exactly once")
@@ -210,7 +210,7 @@ final class GhosttyEmbeddedSessionHandoffTests: XCTestCase {
         let preHandoffLines = nonEmptyTrimmedLines(snapshotText(of: sourceCore))
         XCTAssertGreaterThanOrEqual(preHandoffLines.count, 2, "a 154-column line must wrap at grid width 100")
 
-        guard let record = await sourceCore.quiesceForHandoff() else { return XCTFail("quiesce produced no handoff record") }
+        guard let record = try await sourceCore.quiesceForHandoff() else { return XCTFail("quiesce produced no handoff record") }
         sourceCore.terminate()
 
         let pty = try makeAdoptablePTY()
@@ -250,7 +250,7 @@ final class GhosttyEmbeddedSessionHandoffTests: XCTestCase {
         XCTAssertGreaterThan(sourceCore.debugOwnerEpoch, 0, "attaching an owner must advance the owner epoch")
         try await waitAsync { self.snapshotText(of: sourceCore)?.contains(marker) == true }
 
-        guard let record = await sourceCore.quiesceForHandoff() else { return XCTFail("quiesce produced no handoff record") }
+        guard let record = try await sourceCore.quiesceForHandoff() else { return XCTFail("quiesce produced no handoff record") }
         XCTAssertEqual(record.ownerEpoch, sourceCore.debugOwnerEpoch, "the record must carry the live owner epoch")
         let recordedEpoch = record.ownerEpoch
         // Do NOT terminate the source core here: terminate() detaches active clients, and
@@ -306,8 +306,40 @@ final class GhosttyEmbeddedSessionHandoffTests: XCTestCase {
         // no longer being started instead).
         try await waitAsync { !core.isStarted }
 
-        let record = await core.quiesceForHandoff()
+        let record = try await core.quiesceForHandoff()
         XCTAssertNil(record, "a session whose child already exited must not produce a handoff record")
+    }
+
+    @MainActor func testQuiesceThrowsWhenBufferedOutputCannotBePersisted() async throws {
+        try requireGhosttyAvailable()
+        let paths = try makeTemporaryPaths()
+        defer { try? FileManager.default.removeItem(atPath: paths.rootDirectory) }
+
+        let marker = "PERSISTENCE_FAILURE_MARKER"
+        let configuration = makeConfiguration(
+            sessionID: "handoff-persistence-failure-\(UUID().uuidString)", command: "stty -echo; printf '%s\\n' '\(marker)'; cat")
+        let core = GhosttyEmbeddedSessionCore(launchConfiguration: configuration, paths: paths)
+        defer { core.terminate() }
+        try core.startIfNeeded()
+        try await waitAsync { self.snapshotText(of: core)?.contains(marker) == true }
+
+        // Replace output.log with a directory while the existing handle still refers to the
+        // unlinked file. Quiesce closes that handle, then its direct append open must fail.
+        try FileManager.default.removeItem(atPath: paths.outputPath)
+        try FileManager.default.createDirectory(atPath: paths.outputPath, withIntermediateDirectories: false)
+
+        do {
+            _ = try await core.quiesceForHandoff()
+            XCTFail("quiesce must not produce a handoff record when output.log cannot be opened")
+        } catch { XCTAssertTrue(FileManager.default.fileExists(atPath: paths.outputPath)) }
+
+        // Restore a writable transcript and prove the old image can rebind the buffered live core.
+        try FileManager.default.removeItem(atPath: paths.outputPath)
+        XCTAssertTrue(FileManager.default.createFile(atPath: paths.outputPath, contents: nil))
+        core.resumeInPlaceAfterFailedExec()
+        let afterMarker = "AFTER_PERSISTENCE_FAILURE"
+        try headlessHost(for: core).sendRawBytes(Data("\(afterMarker)\n".utf8))
+        try await waitAsync { (try? String(contentsOfFile: paths.outputPath))?.contains(afterMarker) == true }
     }
 
     // MARK: - 5. Failed-exec rebind
@@ -329,7 +361,7 @@ final class GhosttyEmbeddedSessionHandoffTests: XCTestCase {
         try await waitAsync { self.snapshotText(of: core)?.contains(marker) == true }
 
         // Quiesce as if about to exec, then take the failed-exec fallback on the SAME core.
-        guard let record = await core.quiesceForHandoff() else { return XCTFail("quiesce produced no handoff record") }
+        guard let record = try await core.quiesceForHandoff() else { return XCTFail("quiesce produced no handoff record") }
         XCTAssertGreaterThan(record.childPID, 0)
         core.resumeInPlaceAfterFailedExec()
 

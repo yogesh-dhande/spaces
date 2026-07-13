@@ -151,7 +151,7 @@
         /// Returns the handoff record the staged daemon needs to adopt this session, or
         /// nil when there is nothing live to hand off (the child already exited/closed),
         /// in which case the caller terminates the session normally.
-        public func quiesceForHandoff() async -> DaemonHandoffSessionRecord? {
+        public func quiesceForHandoff() async throws -> DaemonHandoffSessionRecord? {
             suppressBroadcastsForHandoff = true
             inputOutputResyncTask?.cancel()
             inputOutputResyncTask = nil
@@ -186,9 +186,7 @@
 
             // Flush the buffered bytes to output.log and install the direct-to-file writer
             // that keeps appending until execv.
-            do { try ptyDriver.finishHandoffOutputBuffering(appendingTo: paths.outputPath) } catch {
-                FileHandle.standardError.write(Data("spaces: ghostty handoff output flush failed: \(error)\n".utf8))
-            }
+            try ptyDriver.finishHandoffOutputBuffering(appendingTo: paths.outputPath)
 
             return DaemonHandoffSessionRecord(
                 sessionID: launchConfiguration.sessionID, masterFD: descriptor.masterFD, childPID: descriptor.childPID, columns: terminalSize.columns,
@@ -210,10 +208,10 @@
         /// resume — its resync task is armed on demand — so refreshing runtime state is the
         /// whole catch-up.
         public func resumeInPlaceAfterFailedExec() {
-            ptyDriver.endHandoffOutputBuffering()
-            suppressBroadcastsForHandoff = false
             do {
                 try openOutputHandlePreservingTranscript()
+                ptyDriver.endHandoffOutputBuffering()
+                suppressBroadcastsForHandoff = false
                 try startControlServer()
                 try startStateStreamServer()
             } catch { FileHandle.standardError.write(Data("spaces: ghostty handoff resume-in-place failed: \(error)\n".utf8)) }

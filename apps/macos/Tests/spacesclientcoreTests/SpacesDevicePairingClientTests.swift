@@ -301,6 +301,18 @@ final class SpacesDevicePairingClientTests: XCTestCase {
         XCTAssertTrue(script.contains("systemctl --user restart spacesd.service"))
     }
 
+    func testLinuxArtifactInstallerVerifiesHandoffAndRestartCompletion() throws {
+        let scriptURL = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("scripts/build_linux_spacesd_artifact.sh")
+        let script = try String(contentsOf: scriptURL, encoding: .utf8)
+
+        XCTAssertTrue(script.contains(#"staged_daemon_identity="$(stat -Lc '%d:%i' "$release_dir/bin/spacesd-bin")""#))
+        XCTAssertTrue(script.contains("/proc/$daemon_pid/exe"))
+        XCTAssertTrue(script.contains("wait_for_staged_daemon \"$handoff_pid\""))
+        XCTAssertTrue(script.contains("spacesd did not complete the staged handoff; restarting it with systemd"))
+        XCTAssertTrue(script.contains("spacesd did not start the installed daemon image within 10s"))
+    }
+
     func testLinuxArtifactInstallerCreatesUserPathAlias() throws {
         let scriptURL = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("scripts/build_linux_spacesd_artifact.sh")

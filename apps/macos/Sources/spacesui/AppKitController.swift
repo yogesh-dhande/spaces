@@ -4460,13 +4460,18 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// daemon quiesces sessions, applies any update staged on disk, and re-execs at the same pid, so
     /// running terminals, agents, and processes survive), then reloads the sidebar after a short delay
     /// so the app re-handshakes against the new build. Shared by the compatibility block's Restart
-    /// button and `maybeRequestSilentDaemonHandoff` — the only two daemon-restart entry points. A remote
+    /// button, which reports RPC failures, and `maybeRequestSilentDaemonHandoff`, which stays silent —
+    /// the only two daemon-restart entry points. A remote
     /// Linux daemon that is too old for this app is not updated over SSH: the user re-runs the
     /// version-pinned installer on the Linux device — surfaced in the compatibility block — which
     /// replaces the binary and restarts the service.
-    private func fireDaemonRestartRequest(device: SpacesPairedDeviceRecord) {
+    private func fireDaemonRestartRequest(device: SpacesPairedDeviceRecord, reportsFailure: Bool) {
         Task { @MainActor [weak self] in
-            _ = try? await Task.detached(priority: .userInitiated) { try SpacesDeviceClient.requestDaemonRestart(device: device) }.value
+            do { _ = try await Task.detached(priority: .userInitiated) { try SpacesDeviceClient.requestDaemonRestart(device: device) }.value } catch {
+                guard let self else { return }
+                if reportsFailure { self.showError(error) }
+                return
+            }
             guard let self else { return }
             // Give the daemon a moment to complete the handoff, then re-handshake.
             try? await Task.sleep(for: .seconds(2))
@@ -4475,13 +4480,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     /// The compatibility block's explicit Restart button: user-initiated, so an unresolved device
-    /// record is a visible error rather than a silent no-op.
+    /// record or a failed RPC is a visible error rather than a silent no-op.
     private func requestDaemonRestart(deviceID: String) {
         guard let device = deviceRecord(forDeviceID: deviceID) else {
             showDeviceNotLoadedError()
             return
         }
-        fireDaemonRestartRequest(device: device)
+        fireDaemonRestartRequest(device: device, reportsFailure: true)
     }
 
     /// Pure fire/skip decision for the silent daemon-handoff trigger, factored out so it is testable
@@ -4510,7 +4515,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         else { return }
         silentDaemonHandoffRequestedKeys.insert(key)
         guard let device = deviceRecord(forDeviceID: deviceID) else { return }
-        fireDaemonRestartRequest(device: device)
+        fireDaemonRestartRequest(device: device, reportsFailure: false)
     }
 
     private func showLoadingPlaceholder(message: String, detail: String?) {

@@ -379,13 +379,22 @@ import workspacecore
         var quiescedCores: [GhosttyEmbeddedSessionCore] = []
         // Snapshot the cores first: the nil-quiesce branch calls terminateSession, which mutates
         // sessionCores.
-        for (sessionID, core) in Array(sessionCores) {
-            if let record = await core.quiesceForHandoff() {
-                records.append(record)
+        do {
+            for (sessionID, core) in Array(sessionCores) {
+                // Add the core before quiescing so a transcript-persistence failure resumes the
+                // core whose driver is still buffering, as well as every earlier quiesced core.
                 quiescedCores.append(core)
-            } else {
-                _ = terminateSession(id: sessionID)
+                if let record = try await core.quiesceForHandoff() {
+                    records.append(record)
+                } else {
+                    quiescedCores.removeLast()
+                    _ = terminateSession(id: sessionID)
+                }
             }
+        } catch {
+            writeStandardError("spacesd handoff_quiesce_failed error=\(error)\n")
+            resumeInPlaceAfterFailedHandoff(quiescedCores: quiescedCores)
+            return
         }
         writeStandardError("spacesd handoff_quiesced sessions=\(records.count)\n")
 
