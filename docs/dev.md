@@ -303,6 +303,14 @@ apps/macos/Tests/e2e.sh terminal --scenario cli
 
 That scenario exercises `spaces terminal command`, `send`, `key`, `tail`, `show`, and both takeover directions against one isolated Spaces terminal session.
 
+For the daemon's exec-in-place update handoff:
+
+```bash
+apps/macos/Tests/e2e.sh terminal --scenario daemon-exec-handoff
+```
+
+`e2e_daemon_exec_handoff.sh` launches a directly-supervised `spacesd` behind a `bin/spacesd` symlink, starts a long-lived shell session printing a marker then a steady tick output, flips the symlink to a second on-disk copy of the same build, and pokes the daemon with `spaces daemon apply-update`. It proves the daemon pid is unchanged (exec, not a supervisor respawn), the session's child pid survives, the expected `handoff_resume generation=N` line lands in the daemon log, the pre-handoff scrollback marker is still in `terminal tail`, live I/O keeps flowing (a freshly sent line round-trips), and no runtime state lands `.failed`. It repeats the flip-and-poke a second time to also cover a double handoff (`generation=2`) before a normal idle shutdown.
+
 The Spaces terminal `tail` path also depends on the local `libghostty-vt` artifacts. Set them up before building or profiling terminal changes:
 
 ```bash
@@ -628,7 +636,7 @@ This workflow:
 - syncs the checked-in version metadata used by the CLI, app menu, and bundle plist
 - builds universal `arm64` + `x86_64` release binaries for the app, CLI, and `spacesd`
 - code-signs the app, CLI, and spacesd daemon
-- builds and smoke-tests Ubuntu 24.04 `x86_64` and `arm64` remote daemon artifacts
+- builds and smoke-tests Ubuntu 24.04 `x86_64` and `arm64` remote daemon artifacts, including a reinstall leg that pokes the running daemon (`apply-update`) and asserts the exec-in-place handoff preserves the daemon pid and its live session
 - signs `spaces-remote-artifacts.json` with the remote artifact Ed25519 key that the Linux installer uses to verify the Linux artifact download
 - creates a signed manual-download DMG
 - creates a Sparkle-served `Spaces.app` zip archive
