@@ -47,6 +47,11 @@
         private var currentAppearance: ThemeAppearance = .dark
         private var ownerEpoch: UInt64 = 0
         private var screenStateRevision: UInt64 = 0
+        /// Set for the brief exec-in-place quiesce window so no late resync turn
+        /// broadcasts a frame while the session is being handed to the staged daemon.
+        /// Cleared on resume (`resumeFromHandoff`) or the failed-exec fallback
+        /// (`resumeInPlaceAfterFailedExec`).
+        private var suppressBroadcastsForHandoff = false
         private var renderUpdateBaseline: GhosttyRenderUpdateBaseline?
         private var forceNextBroadcastFullRenderUpdate = false
         private var localOwnerCommandInputOutputResyncPending = false
@@ -135,6 +140,141 @@
             onSessionClosed?(self)
         }
 
+        // MARK: - Exec-in-place handoff
+
+        /// Quiesce this session for the exec-in-place daemon handoff: suppress
+        /// broadcasts, stop the per-session resync task, and stop the control +
+        /// state-stream servers (removing their socket files exactly as `terminate()`
+        /// does) WITHOUT detaching clients, killing the child, or freeing the vt
+        /// session. The PTY read loop keeps draining — first into an in-memory buffer,
+        /// then straight to `output.log` — so not a byte is lost across the exec.
+        /// Returns the handoff record the staged daemon needs to adopt this session, or
+        /// nil when there is nothing live to hand off (the child already exited/closed),
+        /// in which case the caller terminates the session normally.
+        public func quiesceForHandoff() async -> DaemonHandoffSessionRecord? {
+            suppressBroadcastsForHandoff = true
+            inputOutputResyncTask?.cancel()
+            inputOutputResyncTask = nil
+            localOwnerCommandInputOutputResyncPending = false
+
+            controlServer?.stop()
+            controlServer = nil
+            TerminalControlServer.removeSocketFileIfPresent(at: paths.controlSocketPath)
+            stateStreamServer?.stop()
+            stateStreamServer = nil
+            GhosttyRemoteSessionStateStreamServer.removeSocketFileIfPresent(at: paths.subscriptionSocketPath)
+
+            // Nothing live to hand off (child dead/closed): caller terminates normally.
+            guard let descriptor = ptyDriver.handoffDescriptorSnapshot() else { return nil }
+
+            // Route further PTY bytes into an in-memory buffer so the read loop never
+            // blocks while we drain the main actor and close the durable output handle.
+            ptyDriver.beginHandoffOutputBuffering()
+
+            // Fence: let already-queued incoming-output Tasks run to completion (they hop
+            // to the main actor and append to output.log). After beginHandoffOutputBuffering
+            // the session ingests no new PTY bytes through the handler, so once these land
+            // the file is complete up to the buffering boundary. Unlike the macOS core this
+            // core has no coalescing buffer to flush synchronously — handleOutput appends
+            // each chunk straight to output.log — so a main-actor yield plus a short settle
+            // is the whole fence.
+            await drainQueuedOutputForHandoff()
+
+            try? outputHandle?.synchronize()
+            try? outputHandle?.close()
+            outputHandle = nil
+
+            // Flush the buffered bytes to output.log and install the direct-to-file writer
+            // that keeps appending until execv.
+            do { try ptyDriver.finishHandoffOutputBuffering(appendingTo: paths.outputPath) } catch {
+                FileHandle.standardError.write(Data("spaces: ghostty handoff output flush failed: \(error)\n".utf8))
+            }
+
+            return DaemonHandoffSessionRecord(
+                sessionID: launchConfiguration.sessionID, masterFD: descriptor.masterFD, childPID: descriptor.childPID, columns: terminalSize.columns,
+                rows: terminalSize.rows, ownerEpoch: ownerEpoch, screenStateRevision: screenStateRevision, appearance: currentAppearance.rawValue)
+        }
+
+        /// Main-actor fence for the quiesce output flush. Yields the main actor so queued
+        /// `handleOutput` Tasks land in output.log, then adds a short settle for any
+        /// in-flight read-loop → Task hop still landing on the main actor.
+        private func drainQueuedOutputForHandoff() async {
+            await Task.yield()
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+
+        /// Failed-`execv` fallback: `execv` returned, so this same image keeps running and
+        /// nothing was freed. Stop the direct-to-file writer, reopen the output handle for
+        /// append, restart the per-session servers, and resume broadcasts. This rebinds the
+        /// still-live session; it never rebuilds it. This core has no periodic timers to
+        /// resume — its resync task is armed on demand — so refreshing runtime state is the
+        /// whole catch-up.
+        public func resumeInPlaceAfterFailedExec() {
+            ptyDriver.endHandoffOutputBuffering()
+            suppressBroadcastsForHandoff = false
+            do {
+                try openOutputHandlePreservingTranscript()
+                try startControlServer()
+                try startStateStreamServer()
+            } catch { FileHandle.standardError.write(Data("spaces: ghostty handoff resume-in-place failed: \(error)\n".utf8)) }
+            writeRuntimeState(state: .running)
+            broadcastCurrentState(reason: TerminalRemoteSessionStateReason.initial)
+        }
+
+        /// Resume side of the exec-in-place handoff, run on a freshly built core in the
+        /// staged daemon image for a session that survived the exec. Rebuilds the vt
+        /// session at the persisted grid size and replays output.log (via
+        /// `recreateVTRenderer`), adopts the inherited PTY, then restarts the servers and
+        /// republishes a full frame so reconnecting clients get a self-contained baseline.
+        ///
+        /// This core's replay is synchronous libghostty-vt (`recreateVTRenderer` writes the
+        /// transcript straight into the vt session), unlike the macOS core whose replay
+        /// blocks on tick-pumped GhosttyKit IO. So there is no off-main-actor dance: the
+        /// replay runs inline. The method stays `async` only for API symmetry with the
+        /// macOS core so stage 5's daemon call site compiles unchanged on both platforms.
+        public func resumeFromHandoff(_ record: DaemonHandoffSessionRecord) async throws {
+            try paths.ensureDirectories()
+            try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+            // Preserve output.log: recreateVTRenderer replays it to rebuild the screen.
+            try openOutputHandlePreservingTranscript()
+
+            // Apply the persisted grid and appearance BEFORE building the vt session so the
+            // replayed frames wrap at the persisted width and carry the right colors
+            // (makeVTSession reads both).
+            terminalSize = (columns: record.columns, rows: record.rows)
+            if let appearanceRaw = record.appearance, let appearance = ThemeAppearance(rawValue: appearanceRaw) { currentAppearance = appearance }
+
+            started = true
+            terminating = false
+            suppressBroadcastsForHandoff = false
+            ptyDriver.setOutputHandler { [weak self] data in Task { @MainActor [weak self] in self?.handleOutput(data) } }
+            ptyDriver.setSessionClosedHandler { [weak self] in self?.handleSessionClosed() }
+
+            // Rebuild + replay at the persisted grid. recreateVTRenderer frees any current
+            // vt session (none on a fresh core), makes a new one, and writes output.log into
+            // it synchronously, arming the full-frame flag.
+            recreateVTRenderer(columns: record.columns, rows: record.rows)
+
+            // Adopt the inherited PTY only AFTER replay so no live byte races ahead of the
+            // replayed transcript. The read loop starts here.
+            ptyDriver.adopt(masterFD: record.masterFD, childPID: record.childPID)
+
+            ownerEpoch = record.ownerEpoch
+            // Advance past the recorded revision and force the first broadcast to a full
+            // render update so reconnecting clients rebuild from a self-contained baseline.
+            screenStateRevision = record.screenStateRevision &+ 1
+            renderUpdateBaseline = nil
+            forceNextBroadcastFullRenderUpdate = true
+
+            try startControlServer()
+            try startStateStreamServer()
+            writeRuntimeState(state: .running)
+            broadcastCurrentState(reason: TerminalRemoteSessionStateReason.initial)
+        }
+
+        var debugOwnerEpoch: UInt64 { ownerEpoch }
+        var isStarted: Bool { started }
+
         private func handleOutput(_ data: Data) {
             guard started, !data.isEmpty else { return }
             logMobileTakeoverPerformance(
@@ -152,6 +292,24 @@
 
         private func ensureOutputHandle() throws {
             _ = FileManager.default.createFile(atPath: paths.outputPath, contents: nil)
+            let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: paths.outputPath))
+            outputByteCount = Int(try handle.seekToEnd())
+            outputHandle = handle
+        }
+
+        /// Opens the durable output handle for append WITHOUT truncating any existing
+        /// transcript, for the handoff resume paths. `resumeFromHandoff` replays output.log
+        /// (via `recreateVTRenderer`) to rebuild the screen and `resumeInPlaceAfterFailedExec`
+        /// continues the same transcript, so both must keep the existing bytes — unlike
+        /// `ensureOutputHandle`, whose `createFile(contents: nil)` recreates (and thus
+        /// empties) the log for a fresh start. Creating the file only when absent leaves any
+        /// existing history in place; `seekToEnd` positions the handle to append and
+        /// re-derive the byte count.
+        private func openOutputHandlePreservingTranscript() throws {
+            guard outputHandle == nil else { return }
+            if !FileManager.default.fileExists(atPath: paths.outputPath) {
+                _ = FileManager.default.createFile(atPath: paths.outputPath, contents: nil)
+            }
             let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: paths.outputPath))
             outputByteCount = Int(try handle.seekToEnd())
             outputHandle = handle
@@ -298,16 +456,12 @@
             var encodedPointer: UnsafeMutablePointer<CChar>?
             var encodedLength: size_t = 0
             let encoded = data.withUnsafeBytes { rawBuffer -> Bool in
-                if data.isEmpty {
-                    return spaces_ghostty_vt_session_encode_paste(vtSession, nil, 0, &encodedPointer, &encodedLength)
-                }
+                if data.isEmpty { return spaces_ghostty_vt_session_encode_paste(vtSession, nil, 0, &encodedPointer, &encodedLength) }
                 guard let baseAddress = rawBuffer.bindMemory(to: UInt8.self).baseAddress else { return false }
                 return spaces_ghostty_vt_session_encode_paste(vtSession, baseAddress, data.count, &encodedPointer, &encodedLength)
             }
             guard encoded else { return nil }
-            defer {
-                if let encodedPointer { spaces_ghostty_vt_free_buffer(encodedPointer) }
-            }
+            defer { if let encodedPointer { spaces_ghostty_vt_free_buffer(encodedPointer) } }
             guard let encodedPointer, encodedLength > 0 else { return Data() }
             return Data(bytes: encodedPointer, count: encodedLength)
         }
@@ -539,6 +693,7 @@
         }
 
         private func broadcastCurrentState(reason: String) {
+            guard !suppressBroadcastsForHandoff else { return }
             let performanceLoggingEnabled = SpacesDeviceTerminalPerformanceLogger.isEnabled()
             let startedAt = performanceLoggingEnabled ? Date() : nil
             guard let payload = makeStatePayload(reason: reason, exportMode: .streamDeltaAllowed) else { return }
