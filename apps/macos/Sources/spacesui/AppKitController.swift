@@ -191,6 +191,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     var localPairedDevice: SpacesPairedDeviceRecord?
     var localDeviceOverview: SpacesDeviceOverviewPayload?
     var deviceSections: [DeviceSection] = []
+    /// `"deviceID|targetVersion"` keys for silent daemon-handoff requests already fired this app run
+    /// (see `maybeRequestSilentDaemonHandoff`), so a status refresh never re-requests a handoff that is
+    /// already staged or that failed/was refused — a failed handoff surfaces via the still-pending
+    /// caption and the daemon log rather than a retry loop.
+    private var silentDaemonHandoffRequestedKeys: Set<String> = []
     var alertsGroups: [AlertsGroup] = []
     /// The single content the detail pane is showing. Mutually exclusive by construction, so presenting
     /// one content replaces the previous one. Written only through `presentDetailPane`.
@@ -4413,7 +4418,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let status = deviceDaemonStatus(forDeviceID: deviceID)
         let card = CompatibilityBlockView(
             verdict: verdict, deviceName: deviceSection(id: deviceID)?.deviceName ?? deviceID, status: status,
-            onRestart: verdict == .clientTooOld ? nil : { [weak self] in self?.confirmDaemonRestart(deviceID: deviceID) })
+            onRestart: verdict == .clientTooOld ? nil : { [weak self] in self?.requestDaemonRestart(deviceID: deviceID) })
         card.translatesAutoresizingMaskIntoConstraints = false
         detailContainer.addSubview(card)
         NSLayoutConstraint.activate([
@@ -4425,36 +4430,32 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         ])
     }
 
-    /// Confirms the restart-impact with the user, then restarts the device's daemon through the
-    /// `requestDaemonRestart` RPC, after which launchd/systemd respawns it (applying any update already
-    /// staged on disk). A remote Linux daemon that is too old for this app is not updated over SSH: the
-    /// user re-runs the version-pinned installer on the Linux device — surfaced in the compatibility
-    /// block — which replaces the binary and restarts the service.
-    private func confirmDaemonRestart(deviceID: String) {
-        let status = deviceDaemonStatus(forDeviceID: deviceID)
-        let alert = NSAlert()
-        alert.messageText = "Restart this device's daemon?"
-        alert.informativeText = Self.restartImpactMessage(status: status)
-        alert.addButton(withTitle: "Restart")
-        alert.addButton(withTitle: "Defer")
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
+    /// Requests the device's daemon exec-in-place handoff through the `requestDaemonRestart` RPC (the
+    /// daemon quiesces sessions, applies any update staged on disk, and re-execs at the same pid, so
+    /// running terminals, agents, and processes survive), then reloads the sidebar after a short delay
+    /// so the app re-handshakes against the new build. Shared by the compatibility block's Restart
+    /// button and `maybeRequestSilentDaemonHandoff` — the only two daemon-restart entry points. A remote
+    /// Linux daemon that is too old for this app is not updated over SSH: the user re-runs the
+    /// version-pinned installer on the Linux device — surfaced in the compatibility block — which
+    /// replaces the binary and restarts the service.
+    private func fireDaemonRestartRequest(device: SpacesPairedDeviceRecord) {
+        Task { @MainActor [weak self] in
+            _ = try? await Task.detached(priority: .userInitiated) { try SpacesDeviceClient.requestDaemonRestart(device: device) }.value
+            guard let self else { return }
+            // Give the daemon a moment to complete the handoff, then re-handshake.
+            try? await Task.sleep(for: .seconds(2))
+            self.requestSidebarReload(forceRemoteRefresh: true)
+        }
+    }
+
+    /// The compatibility block's explicit Restart button: user-initiated, so an unresolved device
+    /// record is a visible error rather than a silent no-op.
+    private func requestDaemonRestart(deviceID: String) {
         guard let device = deviceRecord(forDeviceID: deviceID) else {
             showDeviceNotLoadedError()
             return
         }
-        Task { @MainActor [weak self] in
-            let result: Result<Void, Error> = await Task.detached(priority: .userInitiated) {
-                do {
-                    try SpacesDeviceClient.requestDaemonRestart(device: device)
-                    return .success(())
-                } catch { return .failure(error) }
-            }.value
-            guard let self else { return }
-            if case .failure(let error) = result { self.showError(error) }
-            // Give the daemon a moment to exit and respawn, then re-handshake.
-            try? await Task.sleep(for: .seconds(2))
-            self.requestSidebarReload(forceRemoteRefresh: true)
-        }
+        fireDaemonRestartRequest(device: device)
     }
 
     /// Compatible, but the daemon reports an older app version than this build — a daemon update is
@@ -4464,15 +4465,32 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return SpacesWireProtocol.isVersion(status.version, olderThan: AppVersion.short)
     }
 
-    static func restartImpactMessage(status: TerminalServiceDaemonStatus?) -> String {
-        guard let status else { return "Running terminals, processes, and coding agents on this device will stop." }
-        let agents = status.activeAgents + status.waitingAgents
-        var parts: [String] = []
-        if status.activeSessionCount > 0 { parts.append("\(status.activeSessionCount) terminal\(status.activeSessionCount == 1 ? "" : "s")") }
-        if status.runningProcesses > 0 { parts.append("\(status.runningProcesses) process\(status.runningProcesses == 1 ? "" : "es")") }
-        if agents > 0 { parts.append("\(agents) coding agent\(agents == 1 ? "" : "s")") }
-        guard !parts.isEmpty else { return "No running work will be interrupted." }
-        return "This will stop " + parts.joined(separator: ", ") + ". Defer if you need them to finish first."
+    /// Pure fire/skip decision for the silent daemon-handoff trigger, factored out so it is testable
+    /// without a device record or the RPC: fire only when an update is staged, the daemon speaks a wire
+    /// protocol this app can talk to (an incompatible daemon is handled by the compatibility block, not
+    /// a silent restart), and this exact device/target-version pair has not already been requested.
+    nonisolated static func shouldFireSilentDaemonHandoff(updatePending: Bool, compatibilityIsCompatible: Bool, alreadyRequestedKey: Bool) -> Bool {
+        updatePending && compatibilityIsCompatible && !alreadyRequestedKey
+    }
+
+    /// Silently requests a daemon exec-in-place handoff when a compatible daemon has a staged update
+    /// pending, instead of waiting for the daemon's own next restart. Called from every path where a
+    /// fresh `TerminalServiceDaemonStatus` lands for a device (local snapshot apply, remote pull, remote
+    /// push subscription). Deduped per (deviceID, target app version) for the app's lifetime so a
+    /// failed or refused handoff is not retried on every subsequent status refresh; the "update pending"
+    /// sidebar caption stays visible until the daemon actually comes back on the new build.
+    func maybeRequestSilentDaemonHandoff(deviceID: String, status: TerminalServiceDaemonStatus?) {
+        guard let status else { return }
+        let key = "\(deviceID)|\(AppVersion.short)"
+        guard
+            Self.shouldFireSilentDaemonHandoff(
+                updatePending: Self.daemonUpdatePending(status: status),
+                compatibilityIsCompatible: SpacesWireCompatibility.evaluate(daemonStatus: status).isCompatible,
+                alreadyRequestedKey: silentDaemonHandoffRequestedKeys.contains(key))
+        else { return }
+        silentDaemonHandoffRequestedKeys.insert(key)
+        guard let device = deviceRecord(forDeviceID: deviceID) else { return }
+        fireDaemonRestartRequest(device: device)
     }
 
     private func showLoadingPlaceholder(message: String, detail: String?) {

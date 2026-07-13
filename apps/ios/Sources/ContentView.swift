@@ -11,7 +11,6 @@ struct ContentView: View {
     @State private var terminalListRefreshGeneration = 0
     @State private var isShowingFilters = false
     @State private var workspaceCreateProjectID: String?
-    @State private var isConfirmingRestart = false
     let model: SpacesMobileAppModel
 
     var body: some View {
@@ -96,18 +95,6 @@ struct ContentView: View {
             Button("OK", role: .cancel) { model.dismissError() }
         } message: {
             Text(model.errorMessage ?? "")
-        }
-        .confirmationDialog(
-            "Restart this device's daemon?",
-            isPresented: $isConfirmingRestart,
-            titleVisibility: .visible
-        ) {
-            Button("Restart Daemon", role: .destructive) {
-                Task { await model.requestDaemonRestart() }
-            }
-            Button("Defer", role: .cancel) {}
-        } message: {
-            Text(restartConfirmationMessage)
         }
         .task(id: refreshLoopTaskID) {
             guard scenePhase == .active else { return }
@@ -302,24 +289,11 @@ struct ContentView: View {
         }
     }
 
-    private var restartConfirmationMessage: String {
-        guard let status = model.daemonStatus else {
-            return "Running terminals, processes, and coding agents on this device will stop."
-        }
-        let agents = status.activeAgents + status.waitingAgents
-        var parts: [String] = []
-        if status.activeSessionCount > 0 { parts.append("\(status.activeSessionCount) terminal\(status.activeSessionCount == 1 ? "" : "s")") }
-        if status.runningProcesses > 0 { parts.append("\(status.runningProcesses) process\(status.runningProcesses == 1 ? "" : "es")") }
-        if agents > 0 { parts.append("\(agents) coding agent\(agents == 1 ? "" : "s")") }
-        guard !parts.isEmpty else { return "No running work will be interrupted." }
-        return "This will stop " + parts.joined(separator: ", ") + "."
-    }
-
     @ViewBuilder private var compatibilityBanner: some View {
         if let compatibility = model.compatibility, !compatibility.isCompatible {
             CompatibilityBannerView(
                 compatibility: compatibility, daemonStatus: model.daemonStatus, isMutating: model.isMutating
-            ) { isConfirmingRestart = true }
+            ) { Task { await model.requestDaemonRestart() } }
         } else if model.daemonUpdatePending {
             CompatibilityBannerView(
                 compatibility: .compatible, daemonStatus: model.daemonStatus, isMutating: model.isMutating, onRestart: {})

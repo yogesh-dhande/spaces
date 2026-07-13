@@ -667,8 +667,9 @@ private enum SpacesMobileMutationTimeoutRecovery {
         }
     }
 
-    /// Requests a restart of the active device's daemon. The caller should already have confirmed the
-    /// restart impact with the user. After the daemon respawns, the next refresh re-runs the handshake.
+    /// Requests the active device's daemon exec-in-place handoff: it quiesces sessions, applies any
+    /// staged update, and re-execs at the same pid, so running terminals, agents, and processes survive.
+    /// After the daemon comes back up, the next refresh re-runs the handshake.
     func requestDaemonRestart() async {
         guard !isMutating else { return }
         isMutating = true
