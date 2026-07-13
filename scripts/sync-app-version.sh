@@ -137,34 +137,20 @@ public enum AppVersion {{
     encoding="utf-8",
 )
 
-info_plist.write_text(
-    f"""<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>CFBundleName</key>
-    <string>Spaces</string>
-    <key>CFBundleExecutable</key>
-    <string>SpacesApp</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>CFBundleIdentifier</key>
-    <string>dev.usespaces.spaces</string>
-    <key>CFBundleShortVersionString</key>
-    <string>{short_version}</string>
-    <key>CFBundleVersion</key>
-    <string>{build_version}</string>
-    <key>SUFeedURL</key>
-    <string>{feed_url}</string>
-    <key>SUPublicEDKey</key>
-    <string>{public_ed_key}</string>
-    <key>CFBundleIconFile</key>
-    <string>AppIcon</string>
-</dict>
-</plist>
-""",
-    encoding="utf-8",
-)
+# Update the existing Info.plist in place rather than regenerating it from a template:
+# the sync script owns only the version/feed/signing fields, and a template would drop
+# any key added to the plist after the template was written (this happened with
+# NSAppleEventsUsageDescription).
+with info_plist.open("rb") as handle:
+    info = plistlib.load(handle)
+
+info["CFBundleShortVersionString"] = short_version
+info["CFBundleVersion"] = build_version
+info["SUFeedURL"] = feed_url
+info["SUPublicEDKey"] = public_ed_key
+
+with info_plist.open("wb") as handle:
+    plistlib.dump(info, handle, fmt=plistlib.FMT_XML, sort_keys=False)
 
 print("Synced app version metadata:")
 print(f"  short={short_version}")
