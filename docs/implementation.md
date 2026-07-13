@@ -833,6 +833,7 @@ The action is scoped to the local Mac daemon and does not send stop mutations to
 
 ### Terminal Integration Contract
 - Terminal-specific launch, focus, replay, recovery, ownership, rendering, and control rules live in [terminal.md](terminal.md). The window and focus architecture here records only the shared window and workspace-target constraints that apply across target types.
+- macOS release bundles copy Ghostty's runtime resources to `Spaces.app/Contents/Resources/ghostty`. Embedded Ghostty availability depends on that runtime directory rather than the build-time `GhosttyKit.xcframework`: the app resolves it through its bundle resources, while `spacesd` resolves the real target of its installed executable symlink and finds the sibling `ghostty` directory. Environment and repository-relative resource candidates support development builds.
 
 ## Agent Integration
 - Agent events are explicit CLI inputs that attach status to tracked workspace agent windows.

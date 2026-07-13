@@ -107,6 +107,18 @@ require_universal_binary \
   "$mountpoint/Spaces.app/Contents/Resources/spacesd" \
   "Spaces.app bundled spacesd daemon"
 
+ghostty_resources="$mountpoint/Spaces.app/Contents/Resources/ghostty"
+if [[ ! -d "$ghostty_resources" ]]; then
+  echo "Error: Missing bundled Ghostty runtime resources at $ghostty_resources" >&2
+  exit 1
+fi
+for required_resource in shell-integration themes; do
+  if [[ ! -d "$ghostty_resources/$required_resource" ]]; then
+    echo "Error: Bundled Ghostty runtime resources are missing $required_resource at $ghostty_resources" >&2
+    exit 1
+  fi
+done
+
 ghostty_vt_dylib="$mountpoint/Spaces.app/Contents/Frameworks/libghostty-vt.dylib"
 ghostty_vt_real_dylib="$mountpoint/Spaces.app/Contents/Frameworks/libghostty-vt.0.1.0.dylib"
 if [[ ! -e "$ghostty_vt_dylib" && ! -L "$ghostty_vt_dylib" ]]; then

@@ -1337,7 +1337,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
 
     @MainActor func testStartIfNeededRefreshesExitedRuntimeStateForReusedSessionID() throws {
         let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
-        guard case .available = availability else { throw XCTSkip("GhosttyKit.xcframework is unavailable for embedded renderer testing.") }
+        guard case .available = availability else { throw XCTSkip("Ghostty runtime resources are unavailable for embedded renderer testing.") }
 
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -1390,7 +1390,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
 
     @MainActor func testSessionClosePersistsFinalRenderBeforeRendererTeardown() throws {
         let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
-        guard case .available = availability else { throw XCTSkip("GhosttyKit.xcframework is unavailable for embedded renderer testing.") }
+        guard case .available = availability else { throw XCTSkip("Ghostty runtime resources are unavailable for embedded renderer testing.") }
 
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -1421,7 +1421,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
 
     @MainActor func testHeadlessDriverKeepsHostManagedSessionRunningWithoutWindowSurface() throws {
         let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
-        guard case .available = availability else { throw XCTSkip("GhosttyKit.xcframework is unavailable for embedded renderer testing.") }
+        guard case .available = availability else { throw XCTSkip("Ghostty runtime resources are unavailable for embedded renderer testing.") }
 
         let sessionDriver = GhosttyEmbeddedTerminalSessionDriver(
             launchConfiguration: TerminalSessionLaunchConfiguration(
@@ -1453,7 +1453,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
 
     @MainActor func testLocalOwnerControlSendPublishesRenderUpdateWithoutAdditionalInput() throws {
         let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
-        guard case .available = availability else { throw XCTSkip("GhosttyKit.xcframework is unavailable for embedded renderer testing.") }
+        guard case .available = availability else { throw XCTSkip("Ghostty runtime resources are unavailable for embedded renderer testing.") }
 
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -1493,7 +1493,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
 
     @MainActor func testHeadlessDriverClearScreenActionClearsVisibleOutput() throws {
         let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
-        guard case .available = availability else { throw XCTSkip("GhosttyKit.xcframework is unavailable for embedded renderer testing.") }
+        guard case .available = availability else { throw XCTSkip("Ghostty runtime resources are unavailable for embedded renderer testing.") }
 
         let readyMarker = "host managed clear ready"
         let sessionDriver = GhosttyEmbeddedTerminalSessionDriver(
@@ -1524,7 +1524,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
 
     @MainActor func testHeadlessDriverExportsHostManagedSnapshotAfterOutputAndResize() throws {
         let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
-        guard case .available = availability else { throw XCTSkip("GhosttyKit.xcframework is unavailable for embedded renderer testing.") }
+        guard case .available = availability else { throw XCTSkip("Ghostty runtime resources are unavailable for embedded renderer testing.") }
 
         let sessionDriver = GhosttyEmbeddedTerminalSessionDriver(
             launchConfiguration: TerminalSessionLaunchConfiguration(
@@ -1554,7 +1554,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
 
     @MainActor func testHeadlessDriverExportsNativeScrollRectAfterAppendedOutputScrolls() throws {
         let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
-        guard case .available = availability else { throw XCTSkip("GhosttyKit.xcframework is unavailable for embedded renderer testing.") }
+        guard case .available = availability else { throw XCTSkip("Ghostty runtime resources are unavailable for embedded renderer testing.") }
 
         let sessionDriver = GhosttyEmbeddedTerminalSessionDriver(
             launchConfiguration: TerminalSessionLaunchConfiguration(
@@ -1585,7 +1585,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
 
     @MainActor func testApplyColorSchemeRethemesLiveHeadlessSessionBackground() throws {
         let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
-        guard case .available = availability else { throw XCTSkip("GhosttyKit.xcframework is unavailable for embedded renderer testing.") }
+        guard case .available = availability else { throw XCTSkip("Ghostty runtime resources are unavailable for embedded renderer testing.") }
 
         let lightBackground = ActiveTheme.descriptor.terminal(for: .light).background.packedRGB
         let darkBackground = ActiveTheme.descriptor.terminal(for: .dark).background.packedRGB
@@ -1625,7 +1625,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
 
     @MainActor func testControlAttachAppliesRequestedAppearanceToLiveSession() throws {
         let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
-        guard case .available = availability else { throw XCTSkip("GhosttyKit.xcframework is unavailable for embedded renderer testing.") }
+        guard case .available = availability else { throw XCTSkip("Ghostty runtime resources are unavailable for embedded renderer testing.") }
 
         let lightBackground = ActiveTheme.descriptor.terminal(for: .light).background.packedRGB
         let darkBackground = ActiveTheme.descriptor.terminal(for: .dark).background.packedRGB
@@ -1683,7 +1683,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
 
     @MainActor func testControlSetAppearanceRethemesLiveSessionForViewerClient() throws {
         let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
-        guard case .available = availability else { throw XCTSkip("GhosttyKit.xcframework is unavailable for embedded renderer testing.") }
+        guard case .available = availability else { throw XCTSkip("Ghostty runtime resources are unavailable for embedded renderer testing.") }
 
         let lightBackground = ActiveTheme.descriptor.terminal(for: .light).background.packedRGB
         let darkBackground = ActiveTheme.descriptor.terminal(for: .dark).background.packedRGB
@@ -1739,7 +1739,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
 
     @MainActor func testHeadlessDriverExportsNativeScrollRectAfterViewportScrollback() throws {
         let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
-        guard case .available = availability else { throw XCTSkip("GhosttyKit.xcframework is unavailable for embedded renderer testing.") }
+        guard case .available = availability else { throw XCTSkip("Ghostty runtime resources are unavailable for embedded renderer testing.") }
 
         let sessionDriver = GhosttyEmbeddedTerminalSessionDriver(
             launchConfiguration: TerminalSessionLaunchConfiguration(
@@ -1772,7 +1772,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
 
     @MainActor func testHeadlessDriverExportsHostManagedSynchronizedOutput() throws {
         let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
-        guard case .available = availability else { throw XCTSkip("GhosttyKit.xcframework is unavailable for embedded renderer testing.") }
+        guard case .available = availability else { throw XCTSkip("Ghostty runtime resources are unavailable for embedded renderer testing.") }
 
         let sessionDriver = GhosttyEmbeddedTerminalSessionDriver(
             launchConfiguration: TerminalSessionLaunchConfiguration(
@@ -1797,7 +1797,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
 
     @MainActor func testHeadlessDriverExportsCodexStyleHostManagedFrame() throws {
         let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
-        guard case .available = availability else { throw XCTSkip("GhosttyKit.xcframework is unavailable for embedded renderer testing.") }
+        guard case .available = availability else { throw XCTSkip("Ghostty runtime resources are unavailable for embedded renderer testing.") }
 
         let sessionDriver = GhosttyEmbeddedTerminalSessionDriver(
             launchConfiguration: TerminalSessionLaunchConfiguration(
@@ -1834,7 +1834,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
 
     @MainActor func testHostSnapshotUsesRenderableSurfaceForLiveOwnerState() throws {
         let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
-        guard case .available = availability else { throw XCTSkip("GhosttyKit.xcframework is unavailable for embedded renderer testing.") }
+        guard case .available = availability else { throw XCTSkip("Ghostty runtime resources are unavailable for embedded renderer testing.") }
 
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -1867,7 +1867,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
 
     @MainActor func testHeadlessDriverScrollRequestsHostManagedSnapshotRefresh() throws {
         let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
-        guard case .available = availability else { throw XCTSkip("GhosttyKit.xcframework is unavailable for embedded renderer testing.") }
+        guard case .available = availability else { throw XCTSkip("Ghostty runtime resources are unavailable for embedded renderer testing.") }
 
         let sessionDriver = GhosttyEmbeddedTerminalSessionDriver(
             launchConfiguration: TerminalSessionLaunchConfiguration(
@@ -1889,7 +1889,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
 
     @MainActor func testHeadlessDriverForwardsPreciseScrollMods() throws {
         let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
-        guard case .available = availability else { throw XCTSkip("GhosttyKit.xcframework is unavailable for embedded renderer testing.") }
+        guard case .available = availability else { throw XCTSkip("Ghostty runtime resources are unavailable for embedded renderer testing.") }
 
         let sessionDriver = GhosttyEmbeddedTerminalSessionDriver(
             launchConfiguration: TerminalSessionLaunchConfiguration(
@@ -2017,7 +2017,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
 
     @MainActor func testControlKeyCommandKClearsScreenThroughHostAction() throws {
         let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
-        guard case .available = availability else { throw XCTSkip("GhosttyKit.xcframework is unavailable for embedded renderer testing.") }
+        guard case .available = availability else { throw XCTSkip("Ghostty runtime resources are unavailable for embedded renderer testing.") }
 
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -2059,7 +2059,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
 
     @MainActor func testLocalMacCommandKClearsScreenThroughHostAction() throws {
         let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
-        guard case .available = availability else { throw XCTSkip("GhosttyKit.xcframework is unavailable for embedded renderer testing.") }
+        guard case .available = availability else { throw XCTSkip("Ghostty runtime resources are unavailable for embedded renderer testing.") }
 
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
