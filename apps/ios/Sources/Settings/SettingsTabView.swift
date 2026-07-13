@@ -136,10 +136,7 @@ struct SettingsTabView: View {
     }
 
     private var versionString: String {
-        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? ""
-        let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? ""
-        guard !build.isEmpty else { return version }
-        return "\(version) (\(build))"
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? ""
     }
 
     private func settingsLabel(_ text: String) -> some View {
