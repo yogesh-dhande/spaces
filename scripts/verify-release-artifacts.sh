@@ -119,6 +119,16 @@ for required_resource in shell-integration themes; do
   fi
 done
 
+ghostty_terminfo="$mountpoint/Spaces.app/Contents/Resources/terminfo"
+if [[ ! -d "$ghostty_terminfo" ]]; then
+  echo "Error: Missing bundled Ghostty terminfo database at $ghostty_terminfo" >&2
+  exit 1
+fi
+if [[ -z "$(find "$ghostty_terminfo" -type f -name xterm-ghostty -print -quit)" ]]; then
+  echo "Error: Bundled Ghostty terminfo database is missing the xterm-ghostty entry at $ghostty_terminfo" >&2
+  exit 1
+fi
+
 ghostty_vt_dylib="$mountpoint/Spaces.app/Contents/Frameworks/libghostty-vt.dylib"
 ghostty_vt_real_dylib="$mountpoint/Spaces.app/Contents/Frameworks/libghostty-vt.0.1.0.dylib"
 if [[ ! -e "$ghostty_vt_dylib" && ! -L "$ghostty_vt_dylib" ]]; then
