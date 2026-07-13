@@ -325,7 +325,15 @@ write_binary_wrapper() {
 #!/usr/bin/env bash
 set -euo pipefail
 
-source_path="\${BASH_SOURCE[0]:-\$0}"
+# Captured before symlink resolution: this is the path the caller actually invoked (e.g. the
+# stable ~/.spaces/bin/spacesd symlink install.sh points at this wrapper's current release),
+# not wherever it currently resolves to. spacesd's exec-in-place update handoff re-execs its
+# own argv[0] to pick up a newly staged release, so argv[0] must stay this stable invoked path
+# rather than the versioned real binary below -- a fully resolved argv[0] would keep
+# re-executing the SAME (old) release forever.
+original_invocation="\${BASH_SOURCE[0]:-\$0}"
+
+source_path="\$original_invocation"
 while [ -L "\$source_path" ]; do
     source_dir="\$(cd -P "\$(dirname "\$source_path")" && pwd)"
     target_path="\$(readlink "\$source_path")"
@@ -337,8 +345,25 @@ done
 
 bin_dir="\$(cd -P "\$(dirname "\$source_path")" && pwd)"
 artifact_root="\$(cd -P "\$bin_dir/.." && pwd)"
-export LD_LIBRARY_PATH="\$artifact_root/lib\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
-exec "\$artifact_root/bin/$binary_name" "\$@"
+
+# Drop any releases/<version>/lib entry from a prior invocation before prepending the current
+# one. Exec-in-place handoffs re-invoke this wrapper without ever restarting the shell, so
+# LD_LIBRARY_PATH would otherwise gain one stale entry per handoff.
+ld_library_path_without_stale_releases=""
+if [ -n "\${LD_LIBRARY_PATH:-}" ]; then
+    saved_ifs="\$IFS"
+    IFS=':'
+    for ld_library_path_entry in \$LD_LIBRARY_PATH; do
+        case "\$ld_library_path_entry" in
+            *"/.spaces/daemon/releases/"*) ;;
+            *) ld_library_path_without_stale_releases="\${ld_library_path_without_stale_releases:+\$ld_library_path_without_stale_releases:}\$ld_library_path_entry" ;;
+        esac
+    done
+    IFS="\$saved_ifs"
+fi
+export LD_LIBRARY_PATH="\$artifact_root/lib\${ld_library_path_without_stale_releases:+:\$ld_library_path_without_stale_releases}"
+
+exec -a "\$original_invocation" "\$artifact_root/bin/$binary_name" "\$@"
 EOF
     chmod +x "$destination"
 }
@@ -464,7 +489,25 @@ ensure_user_linger
 systemctl --user daemon-reload
 systemctl --user enable spacesd.service
 systemctl --user reset-failed spacesd.service >/dev/null 2>&1 || true
-systemctl --user restart spacesd.service
+
+# Prefer poking an already-running daemon over a systemd restart: `apply-update` asks spacesd to
+# quiesce its sessions and exec the newly staged binary in place at the same pid, so shells,
+# coding agents, and workspace processes started before this reinstall keep running. The poke only
+# succeeds against a daemon that is already up and understands the frozen applyStagedUpdate
+# command, so a first install, a daemon that is not running, and an older daemon without the
+# command all fail it and fall back to the restart this script has always done.
+if "$bin_root/spaces" daemon apply-update >/dev/null 2>&1; then
+    handoff_deadline=$((SECONDS + 10))
+    until "$bin_root/spaces" terminal list >/dev/null 2>&1; do
+        if [ "$SECONDS" -ge "$handoff_deadline" ]; then
+            echo "spacesd did not respond within 10s after apply-update; systemd will restart it if the handoff failed" >&2
+            break
+        fi
+        sleep 0.5
+    done
+else
+    systemctl --user restart spacesd.service
+fi
 
 printf 'release_dir=%s\n' "$release_dir"
 printf 'current=%s\n' "$install_root/current"
@@ -818,6 +861,92 @@ while True:
         raise SystemExit(tailed)
     _time.sleep(0.5)
 PY
+
+        # --- Exec-in-place handoff leg -----------------------------------------------------
+        # A Linux reinstall of the SAME artifact must poke the already-running daemon instead of
+        # restarting it: spacesd quiesces its sessions and execs its own staged binary in place at
+        # the same pid, then resumes them. Drive this through the bundled install.sh so the poke
+        # branch added to write_linux_install_script runs for real. install.sh's
+        # ensure_user_linger/systemctl steps talk to a real user systemd + logind session that this
+        # Docker smoke sandbox does not run, so loginctl/systemctl are shimmed as no-ops on PATH for
+        # this leg only; the poke, readiness poll, and (if the poke failed) restart fallback are the
+        # real generated commands running against the real already-running daemon.
+        echo "==> smoke: reinstall handoff (install.sh apply-update poke)"
+        terminal_child_pid="$(python3 - "$smoke_root" <<'PY'
+import os
+import sqlite3
+import sys
+
+root = sys.argv[1]
+conn = sqlite3.connect(os.path.join(root, "profile", "spaces.db"))
+row = conn.execute(
+    "SELECT child_pid FROM terminal_runtime_states WHERE session_id = ?", ("linux-artifact-smoke",)
+).fetchone()
+conn.close()
+if not row or row[0] is None:
+    raise SystemExit("no child_pid recorded for session linux-artifact-smoke")
+print(row[0])
+PY
+)"
+        kill -0 "$daemon_pid"
+        kill -0 "$terminal_child_pid"
+
+        systemd_shim_dir="$smoke_root/systemd-shim"
+        mkdir -p "$systemd_shim_dir"
+        cat > "$systemd_shim_dir/loginctl" <<'SHIM'
+#!/usr/bin/env bash
+case "$*" in
+    *"-p Linger --value"*) echo "yes" ;;
+esac
+exit 0
+SHIM
+        cat > "$systemd_shim_dir/systemctl" <<'SHIM'
+#!/usr/bin/env bash
+exit 0
+SHIM
+        chmod +x "$systemd_shim_dir/loginctl" "$systemd_shim_dir/systemctl"
+        mkdir -p "$smoke_root/reinstall-home"
+
+        if ! PATH="$systemd_shim_dir:$PATH" HOME="$smoke_root/reinstall-home" \
+            SPACES_DB_PATH="$smoke_root/profile/spaces.db" SPACES_RUNTIME_DIR="$smoke_root/profile/runtime" \
+            ./install.sh >"$smoke_root/reinstall.log" 2>&1; then
+            echo "install.sh reinstall failed" >&2
+            cat "$smoke_root/reinstall.log" >&2
+            exit 1
+        fi
+
+        if ! kill -0 "$daemon_pid" 2>/dev/null; then
+            echo "daemon pid $daemon_pid vanished after reinstall; exec-in-place must preserve the pid" >&2
+            cat "$smoke_root/reinstall.log" >&2
+            cat "$smoke_root/spacesd.log" >&2
+            exit 1
+        fi
+        if ! kill -0 "$terminal_child_pid" 2>/dev/null; then
+            echo "terminal child pid $terminal_child_pid vanished after reinstall; the pre-existing session must survive" >&2
+            exit 1
+        fi
+        if ! grep -q "handoff_resume generation=1" "$smoke_root/spacesd.log"; then
+            echo "expected 'handoff_resume generation=1' in spacesd.log after reinstall" >&2
+            cat "$smoke_root/spacesd.log" >&2
+            exit 1
+        fi
+
+        env SPACES_DB_PATH="$smoke_root/profile/spaces.db" SPACES_RUNTIME_DIR="$smoke_root/profile/runtime" \
+            bin/spaces terminal list | grep -q '^linux-artifact-smoke\b'
+
+        env SPACES_DB_PATH="$smoke_root/profile/spaces.db" SPACES_RUNTIME_DIR="$smoke_root/profile/runtime" \
+            bin/spaces terminal send text linux-artifact-smoke post-handoff-marker --newline >/dev/null
+
+        post_handoff_deadline=$((SECONDS + 15))
+        until env SPACES_DB_PATH="$smoke_root/profile/spaces.db" SPACES_RUNTIME_DIR="$smoke_root/profile/runtime" \
+            bin/spaces terminal tail linux-artifact-smoke --lines 50 | grep -q "post-handoff-marker"; do
+            if [ "$SECONDS" -ge "$post_handoff_deadline" ]; then
+                echo "post-handoff send/tail marker never appeared" >&2
+                exit 1
+            fi
+            sleep 0.5
+        done
+        echo "==> smoke: reinstall handoff OK (daemon pid $daemon_pid unchanged, session and child $terminal_child_pid survived)"
     )
     rm -rf "$smoke_root"
 }
