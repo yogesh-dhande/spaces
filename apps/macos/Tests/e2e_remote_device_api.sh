@@ -430,6 +430,7 @@ remote_device_parity() {
   remote_web_service_url="$(json_file_field "$parity_json" "remoteWebServiceURL")"
   remote_web_browser_url="$(json_file_field "$parity_json" "remoteWebBrowserURL")"
   verify_remote_ssh_forward "$project_dir"
+  verify_service_tunnel "$workspace_id"
   write_result_json "$project_dir" "$project_id" "$default_workspace_id" "$workspace_id" "$session_id" "$remote_web_service_port" "$remote_web_service_url" "$remote_web_browser_url"
 }
 
@@ -491,6 +492,101 @@ while time.time() < deadline:
     time.sleep(0.5)
 raise SystemExit(f"SSH-forwarded HTTP check failed: {last_error}")
 PY
+}
+
+tunnel_device_request() {
+  local command="$1"
+  local payload_json="$2"
+  local request_json
+  request_json="$(
+    python3 - "$AUTH_TOKEN" "$command" "$payload_json" <<'PY'
+import json
+import sys
+auth_token, command, payload_json = sys.argv[1:4]
+print(json.dumps({
+    "authToken": auth_token,
+    "clientApp": {
+        "installationID": "REMOTE-DEVICE-E2E",
+        "bundleID": "dev.usespaces.spacesmobile",
+        "platform": "ios",
+        "deviceName": "Remote Device E2E",
+        "appVersion": "1.0",
+    },
+    "command": {command: json.loads(payload_json)},
+}, separators=(",", ":")))
+PY
+  )"
+  device_request "$request_json"
+}
+
+verify_service_tunnel() {
+  local workspace_id="$1"
+  local tunnel_output negative_output overview_json stop_payload
+  printf '[remote-device] verifying service tunnel\n'
+  # The parity flow leaves the workspace's web-server process stopped, and the daemon's port reserver
+  # keeps the assigned port bound while no service runs — so the only way anything can listen on the
+  # service port is the daemon's own run path. Run the configured process, then reach it through the
+  # tunnel; the poll below absorbs process startup (transient serviceNotRunning).
+  tunnel_device_request runWorkspaceProcess \
+    "{\"workspaceID\": \"$workspace_id\", \"processKey\": \"remote-web-server\", \"processTemplateID\": null}" >/dev/null \
+    || fail "runWorkspaceProcess for remote-web-server failed"
+  tunnel_output=""
+  for _ in $(seq 1 30); do
+    if tunnel_output="$(
+      "$SPACES_E2E_BIN" service-tunnel \
+        --host "$REMOTE_DAEMON_HOST" \
+        --port "$REMOTE_DAEMON_PORT" \
+        --certificate-fingerprint="$CERTIFICATE_FINGERPRINT" \
+        --auth-token "$AUTH_TOKEN" \
+        --client-installation-id "REMOTE-DEVICE-E2E" \
+        --workspace-id "$workspace_id" \
+        --service-name web \
+        --http-get /README.txt 2>&1
+    )" && [[ "$tunnel_output" == *"remote device api sentinel"* ]]; then
+      break
+    fi
+    sleep 1
+  done
+  [[ "$tunnel_output" == *"HTTP/1."* ]] || fail "Service tunnel response missing HTTP status line: $tunnel_output"
+  [[ "$tunnel_output" == *"remote device api sentinel"* ]] || fail "Service tunnel response missing fixture sentinel: $tunnel_output"
+  if negative_output="$(
+    "$SPACES_E2E_BIN" service-tunnel \
+      --host "$REMOTE_DAEMON_HOST" \
+      --port "$REMOTE_DAEMON_PORT" \
+      --certificate-fingerprint="$CERTIFICATE_FINGERPRINT" \
+      --auth-token "$AUTH_TOKEN" \
+      --client-installation-id "REMOTE-DEVICE-E2E" \
+      --workspace-id "$workspace_id" \
+      --service-name no-such-service \
+      --http-get /README.txt 2>&1
+  )"; then
+    fail "Service tunnel to missing service unexpectedly succeeded: $negative_output"
+  fi
+  [[ "$negative_output" == *"notFound"* ]] || fail "Service tunnel missing-service failure did not report notFound: $negative_output"
+  # Leave the workspace as the parity flow left it: stop the process the tunnel check started.
+  overview_json="$(tunnel_device_request overview "{}")" || fail "overview fetch after tunnel check failed"
+  stop_payload="$(
+    python3 - "$overview_json" "$workspace_id" <<'PY'
+import json
+import sys
+payload = json.loads(sys.argv[1])
+workspace_id = sys.argv[2]
+for workspace in ((payload.get("result") or {}).get("overview") or {}).get("workspaces") or []:
+    if workspace.get("id") != workspace_id:
+        continue
+    for row in workspace.get("processRows") or []:
+        if row.get("name") == "remote-web-server":
+            print(json.dumps({
+                "workspaceID": workspace_id,
+                "processID": row.get("processID"),
+                "processKey": "remote-web-server",
+                "processTemplateID": row.get("templateID"),
+            }, separators=(",", ":")))
+            raise SystemExit(0)
+raise SystemExit("remote-web-server process row not found in overview")
+PY
+  )" || fail "could not locate remote-web-server process row to stop"
+  tunnel_device_request stopWorkspaceProcess "$stop_payload" >/dev/null || fail "stopWorkspaceProcess for remote-web-server failed"
 }
 
 write_result_json() {
@@ -574,7 +670,7 @@ main() {
   wait_for_remote_daemon
   printf '[remote-device] pairing mobile and macOS clients through structured remote CLI metadata\n'
   pair_remote_devices
-  printf '[remote-device] creating project, workspace, terminal, and SSH forward\n'
+  printf '[remote-device] creating project, workspace, terminal, SSH forward, and service tunnel\n'
   remote_device_parity
 }
 

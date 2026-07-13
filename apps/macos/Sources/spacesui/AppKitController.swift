@@ -1814,6 +1814,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                         appearance, sessionID: sessionID, clientID: remoteClientStore.current(), lastAppliedAppearance: appearanceStore.current(),
                         requestSender: requestSender, applyState: applyControlState))
             }
+            // The mirror view's link handler is captured when the pane is built, but the coordinator that
+            // routes clicks needs the pane's view for its banner and so can only be built afterward. The
+            // handler box bridges that ordering: the session-host provider reads it lazily on the first
+            // link click, long after the coordinator has been attached below.
+            let linkOpenBox = TerminalLinkOpenHandlerBox()
             let pane = TerminalSessionPaneViewController(
                 sessionID: sessionID, paths: paths, stateProvider: stateModel, preferredAttachmentMode: .owner, performInitialRefresh: false,
                 sendInputAction: sendInputAction, sendKeyAction: sendKeyAction, pasteImageAction: pasteImageAction, takeoverAction: takeoverAction,
@@ -1822,15 +1827,51 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 sessionHostProvider: { launchConfiguration, paths in
                     Self.terminalSessionHost(
                         launchConfiguration: launchConfiguration, paths: paths, terminalServiceRequestSender: requestSender,
-                        stateStreamSubscriber: stateModel.makeHostStateStreamSubscriber(), agentSignalHandler: agentSignalHandler)
+                        stateStreamSubscriber: stateModel.makeHostStateStreamSubscriber(), agentSignalHandler: agentSignalHandler,
+                        linkOpenHandler: { [linkOpenBox] rawLink in linkOpenBox.open(rawLink) })
                 })
+            let linkOpenCoordinator = TerminalLinkOpenCoordinator(
+                sessionID: sessionID, deviceID: resolvedDeviceID, isLocalDevice: resolvedDeviceID == SpacesPairedDeviceRecord.localDeviceID,
+                workingDirectoryProvider: { [weak stateModel] in
+                    let payload = stateModel?.latestRemoteStatePayload
+                    return Self.terminalLinkWorkingDirectory(
+                        runtimeState: stateModel?.currentRuntimeState ?? payload?.runtimeState, streamedWorkingDirectory: payload?.workingDirectory,
+                        launchWorkingDirectory: stateModel?.currentLaunchConfiguration?.workingDirectory,
+                        requestWorkingDirectory: request.workingDirectory)
+                }, requestSender: requestSender, banner: TerminalLinkActivityBanner(hostView: pane.view))
+            linkOpenBox.coordinator = linkOpenCoordinator
             return TerminalPaneContentController(
                 descriptor: .terminalSession(deviceID: resolvedDeviceID, sessionID: sessionID), workspaceID: request.workspaceID,
-                sessionID: sessionID, pane: pane, setAppearanceAction: setAppearanceAction)
+                sessionID: sessionID, pane: pane, setAppearanceAction: setAppearanceAction, linkOpenCoordinator: linkOpenCoordinator)
         } catch {
             showError(error)
             return nil
         }
+    }
+
+    nonisolated static func terminalLinkWorkingDirectory(
+        runtimeState: TerminalSessionRuntimeState?, streamedWorkingDirectory: String?, launchWorkingDirectory: String?,
+        requestWorkingDirectory: String
+    ) -> String {
+        if let liveWorkingDirectory = liveTerminalWorkingDirectory(runtimeState: runtimeState) { return liveWorkingDirectory }
+        if let workingDirectory = normalizedTerminalWorkingDirectory(runtimeState?.workingDirectory) { return workingDirectory }
+        if let workingDirectory = normalizedTerminalWorkingDirectory(streamedWorkingDirectory) { return workingDirectory }
+        if let workingDirectory = normalizedTerminalWorkingDirectory(launchWorkingDirectory) { return workingDirectory }
+        return requestWorkingDirectory
+    }
+
+    private nonisolated static func liveTerminalWorkingDirectory(runtimeState: TerminalSessionRuntimeState?) -> String? {
+        guard let runtimeState else { return nil }
+        if let foregroundPID = runtimeState.foregroundPID, let cwd = TerminalForegroundProcessInspector.workingDirectory(pid: foregroundPID) {
+            return cwd
+        }
+        if let childPID = runtimeState.childPID, let cwd = TerminalForegroundProcessInspector.workingDirectory(pid: childPID) { return cwd }
+        return nil
+    }
+
+    private nonisolated static func normalizedTerminalWorkingDirectory(_ value: String?) -> String? {
+        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else { return nil }
+        return trimmed
     }
 
     /// Starts a fresh ad hoc terminal session on the workspace's owning daemon and
@@ -1885,7 +1926,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             action: action, sessionID: sessionID, clientID: request.clientID, client: request.client, attachmentMode: request.attachmentMode,
             text: request.text, key: request.key, columns: request.columns, rows: request.rows, ownerEpoch: request.ownerEpoch,
             resizeSerial: request.resizeSerial, scrollHorizontal: request.scrollHorizontal, scrollVertical: request.scrollVertical,
-            scrollMods: request.scrollMods, appendNewline: request.appendNewline, appearance: request.appearance)
+            scrollMods: request.scrollMods, appendNewline: request.appendNewline, asPaste: request.asPaste, appearance: request.appearance)
     }
 
     /// Issues a terminal control request to the session's owning device and returns
@@ -2302,11 +2343,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     @MainActor static func terminalSessionHost(
         launchConfiguration: TerminalSessionLaunchConfiguration, paths: TerminalSessionPaths,
         terminalServiceRequestSender: RemoteGhosttyTerminalServiceRequestSender? = nil,
-        stateStreamSubscriber: RemoteGhosttyStateStreamSubscriber? = nil, agentSignalHandler: RemoteGhosttyAgentSignalHandler? = nil
+        stateStreamSubscriber: RemoteGhosttyStateStreamSubscriber? = nil, agentSignalHandler: RemoteGhosttyAgentSignalHandler? = nil,
+        linkOpenHandler: (@MainActor (String) -> Void)? = nil
     ) -> any TerminalGhosttySessionHosting {
         RemoteGhosttySessionHost(
             launchConfiguration: launchConfiguration, paths: paths, terminalServiceRequestSender: terminalServiceRequestSender,
-            stateStreamSubscriber: stateStreamSubscriber, agentSignalHandler: agentSignalHandler)
+            stateStreamSubscriber: stateStreamSubscriber, agentSignalHandler: agentSignalHandler, linkOpenHandler: linkOpenHandler)
     }
 
     nonisolated static func launchServiceBuiltInTerminalSession(_ launchConfiguration: TerminalSessionLaunchConfiguration) throws
@@ -3405,6 +3447,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                     kind: .browser, processID: nil, windowListIndex: nil, targetURL: targetURL, processKey: nil, launcherName: nil, agentWindow: nil))
         }
 
+        // Row families are grouped: browser sessions, then configured processes, then coding agents, then
+        // ad hoc terminals. `processEntries` interleaves configured processes with ad hoc terminal windows
+        // in one list, so it is walked twice — configured processes here, terminal windows after the agents
+        // — to keep each family contiguous. Order within a family is the order `processEntries` already
+        // established (config order for configured processes, window order for terminals).
         for entry in processEntries {
             switch entry.kind {
             case .process:
@@ -3413,18 +3460,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                     WorkspaceRunShortcutTarget(
                         kind: .process, processID: processID, windowListIndex: nil, targetURL: nil, processKey: nil, launcherName: nil,
                         agentWindow: nil))
-            case .window:
-                guard let windowListIndex = entry.windowListIndex else { continue }
-                targets.append(
-                    WorkspaceRunShortcutTarget(
-                        kind: .window, processID: nil, windowListIndex: windowListIndex, targetURL: nil, processKey: nil, launcherName: nil,
-                        agentWindow: nil))
             case .missingConfiguredProcess:
                 guard let processKey = entry.processKey else { continue }
                 targets.append(
                     WorkspaceRunShortcutTarget(
                         kind: .missingConfiguredProcess, processID: nil, windowListIndex: nil, targetURL: nil, processKey: processKey,
                         launcherName: nil, agentWindow: nil))
+            case .window:
+                continue
             }
         }
 
@@ -3433,6 +3476,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 WorkspaceRunShortcutTarget(
                     kind: entry.kind, processID: nil, windowListIndex: nil, targetURL: nil, processKey: nil,
                     launcherName: entry.agentWindow == nil ? entry.launcherName : nil, agentWindow: entry.agentWindow))
+        }
+
+        for entry in processEntries {
+            guard case .window = entry.kind, let windowListIndex = entry.windowListIndex else { continue }
+            targets.append(
+                WorkspaceRunShortcutTarget(
+                    kind: .window, processID: nil, windowListIndex: windowListIndex, targetURL: nil, processKey: nil, launcherName: nil,
+                    agentWindow: nil))
         }
 
         return targets
@@ -4408,13 +4459,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             try? await Task.sleep(for: .seconds(2))
             self.requestSidebarReload(forceRemoteRefresh: true)
         }
-    }
-
-    /// Compatible, but the daemon reports an older app version than this build — a daemon update is
-    /// staged and applies on the next restart. Non-blocking; surfaced as a quiet caption only.
-    static func daemonUpdatePending(status: TerminalServiceDaemonStatus?) -> Bool {
-        guard let status else { return false }
-        return SpacesWireProtocol.isVersion(status.version, olderThan: AppVersion.short)
     }
 
     static func restartImpactMessage(status: TerminalServiceDaemonStatus?) -> String {
@@ -5719,6 +5763,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         notesButton.setAccessibilityIdentifier("workspace-detail-notes")
         footer.addArrangedSubview(notesButton)
 
+        // Lifecycle actions follow the workspace's state, matching the sidebar row's context menu: a stopped
+        // workspace can only be started, so it offers Launch alone; a running one offers Restart and Stop.
         let launchOrRestartButton = footerActionButton(
             symbol: workspace.isRunning ? "arrow.clockwise.circle" : "play.circle", tooltip: workspace.isRunning ? "Restart" : "Launch",
             action: workspace.isRunning ? #selector(restartWorkspace(_:)) : #selector(launchWorkspace(_:)))
@@ -5726,10 +5772,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         launchOrRestartButton.setAccessibilityIdentifier("workspace-detail-launch-restart")
         footer.addArrangedSubview(launchOrRestartButton)
 
-        let stopButton = footerActionButton(symbol: "stop.circle", tooltip: "Stop", action: #selector(stopWorkspace(_:)))
-        stopButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
-        stopButton.setAccessibilityIdentifier("workspace-detail-stop")
-        footer.addArrangedSubview(stopButton)
+        if workspace.isRunning {
+            let stopButton = footerActionButton(symbol: "stop.circle", tooltip: "Stop", action: #selector(stopWorkspace(_:)))
+            stopButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
+            stopButton.setAccessibilityIdentifier("workspace-detail-stop")
+            footer.addArrangedSubview(stopButton)
+        }
 
         let overflowButton = footerActionButton(symbol: "ellipsis.circle", tooltip: "More actions", action: #selector(showWorkspaceOverflowMenu(_:)))
         overflowButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
@@ -7980,6 +8028,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     @objc private func archiveWorkspace(_ sender: Any) {
         guard let id = Self.senderIdentifier(sender) else { return }
+        archiveWorkspace(id: id, sender: sender)
+    }
+
+    /// Archives a workspace by id, so the detail ⋯ overflow menu and the sidebar row's right-click menu
+    /// share one confirmation and teardown path. `sender` is only used to disable the originating button
+    /// while the mutation is in flight; a menu item passes none.
+    func archiveWorkspace(id: String, sender: Any? = nil) {
         guard let (project, workspace) = findWorkspace(id: id) else { return }
         if workspace.isDefault {
             showInfoMessage(
@@ -10767,6 +10822,6 @@ extension SpacesDeviceOverviewPayload {
     fileprivate static let offlinePlaceholder = SpacesDeviceOverviewPayload(
         workspaces: [], sessions: [],
         daemonStatus: TerminalServiceDaemonStatus(
-            version: "", artifactVersion: nil, certificateFingerprint: nil, activeSessionCount: 0,
+            version: "", installedVersion: nil, certificateFingerprint: nil, activeSessionCount: 0,
             protocolVersion: TerminalServiceDaemonStatus.unknownProtocolVersion))
 }

@@ -39,6 +39,18 @@ export default function BrowserSessionsDocsPage() {
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">On iPhone</h2>
+        <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
+          <li>• Browser sessions show up as rows in the iOS app too, alongside each workspace&apos;s processes, coding agents, and terminals.</li>
+          <li>• Tap one to open the dev server right inside the app, with back, forward, reload, and screenshot controls — no need to unlock your Mac or remember a URL.</li>
+          <li>• Cookies and local storage stay isolated per service, the same way they do in Chrome on the Mac.</li>
+          <li>• This works for a remote Linux workspace too, and even while the Mac is asleep, as long as your phone is paired with the device that owns the workspace.</li>
+          <li>• If the service isn&apos;t running yet, tapping the row shows a clear message instead of a blank page.</li>
+          <li>• Browser sessions work while Spaces is in the foreground; backgrounding the app closes the connection, and reopening it restores your sessions automatically.</li>
+        </ul>
+      </article>
+
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Example</h2>
         <pre className="mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-lg border border-line/70 bg-background-soft/60 p-3 text-xs leading-6 text-foreground">
           <code>{`web        $SPACES_WEB_URL

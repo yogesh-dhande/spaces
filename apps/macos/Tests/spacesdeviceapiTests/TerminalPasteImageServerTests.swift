@@ -51,6 +51,7 @@
                 XCTAssertEqual(terminalRequest.command, "send")
                 XCTAssertEqual(terminalRequest.clientID, clientID)
                 XCTAssertEqual(terminalRequest.ownerEpoch, ownerEpoch)
+                XCTAssertTrue(terminalRequest.asPaste)
                 XCTAssertTrue(remotePath.hasPrefix("/tmp/spaces-paste-"))
                 XCTAssertTrue(remotePath.hasSuffix(".png"))
                 XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: remotePath)), imageData)

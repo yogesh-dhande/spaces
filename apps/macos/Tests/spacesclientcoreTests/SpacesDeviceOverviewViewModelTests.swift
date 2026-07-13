@@ -254,7 +254,7 @@ final class SpacesDeviceOverviewViewModelTests: XCTestCase {
 
     private static func status() -> TerminalServiceDaemonStatus {
         TerminalServiceDaemonStatus(
-            version: "1.0.0", artifactVersion: nil, certificateFingerprint: nil, activeSessionCount: 0, protocolVersion: SpacesWireProtocol.version)
+            version: "1.0.0", installedVersion: nil, certificateFingerprint: nil, activeSessionCount: 0, protocolVersion: SpacesWireProtocol.version)
     }
 }
 

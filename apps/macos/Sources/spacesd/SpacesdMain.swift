@@ -235,7 +235,9 @@ import workspacecore
             } catch { return Self.failureResponse(error) }
         case .runWorkspaceCommand(let payload): return runWorkspaceCommand(payload)
         case .terminate(let payload):
-            guard !payload.sessionID.isEmpty else { return TerminalServiceResponse(ok: false, message: "Missing session ID.", errorCode: .invalidArgument) }
+            guard !payload.sessionID.isEmpty else {
+                return TerminalServiceResponse(ok: false, message: "Missing session ID.", errorCode: .invalidArgument)
+            }
             return terminateSession(id: payload.sessionID)
         case .list: return listSessions()
         case .state(let payload): return loadTerminalState(sessionID: payload.sessionID)
@@ -251,8 +253,8 @@ import workspacecore
 
     private func daemonStatus() -> TerminalServiceDaemonStatus {
         TerminalServiceDaemonStatus(
-            version: AppVersion.current, artifactVersion: normalizedString(ProcessInfo.processInfo.environment["SPACESD_ARTIFACT_VERSION"]),
-            certificateFingerprint: daemonIdentityFingerprint, activeSessionCount: sessionCores.count)
+            version: AppVersion.current, installedVersion: InstalledSpacesVersion.current(), certificateFingerprint: daemonIdentityFingerprint,
+            activeSessionCount: sessionCores.count)
     }
 
     // Frozen-core restart: terminate gracefully after a short grace so the Device API response can
@@ -446,7 +448,9 @@ import workspacecore
     }
 
     private func acknowledgeAgentSignals(_ request: TerminalServiceAgentSignalAcknowledgementRequest) -> TerminalServiceResponse {
-        guard !request.sessionID.isEmpty else { return TerminalServiceResponse(ok: false, message: "Missing session ID.", errorCode: .invalidArgument) }
+        guard !request.sessionID.isEmpty else {
+            return TerminalServiceResponse(ok: false, message: "Missing session ID.", errorCode: .invalidArgument)
+        }
         do {
             try TerminalSessionPersistence.acknowledgeAgentSignals(
                 ids: request.eventIDs, sessionID: request.sessionID, paths: try TerminalSessionPaths.forSession(id: request.sessionID),
@@ -621,9 +625,9 @@ import workspacecore
 
     private func profileWorkspaceRecord(_ value: WorkspaceRecord) -> TerminalServiceProfileWorkspaceRecord {
         TerminalServiceProfileWorkspaceRecord(
-            id: value.id, projectID: value.projectID, dir: value.dir, dirname: value.dirname, branch: value.branch,
-            baseBranch: value.baseBranch, isDefault: value.isDefault, isArchived: value.isArchived, isHidden: value.isHidden,
-            isRunning: value.isRunning, lastLaunchedAt: value.lastLaunchedAt, notes: value.notes)
+            id: value.id, projectID: value.projectID, dir: value.dir, dirname: value.dirname, branch: value.branch, baseBranch: value.baseBranch,
+            isDefault: value.isDefault, isArchived: value.isArchived, isHidden: value.isHidden, isRunning: value.isRunning,
+            lastLaunchedAt: value.lastLaunchedAt, notes: value.notes)
     }
 
     private func requiredProfileWorkspace(id: String, orchestrator: WorkspaceOrchestrator) throws -> WorkspaceRecord {
@@ -687,25 +691,19 @@ import workspacecore
             )
         case .working, .blocked, .done:
             try orchestrator.updateAgentWindowStatus(
-                workspaceID: workspaceID, provider: .spaces, terminalTrackingID: sessionID,
-                label: signalLabel, status: type.status, eventType: type.rawValue, eventSource: "spaces_agent_signal",
-                environmentKeys: environmentKeys)
+                workspaceID: workspaceID, provider: .spaces, terminalTrackingID: sessionID, label: signalLabel, status: type.status,
+                eventType: type.rawValue, eventSource: "spaces_agent_signal", environmentKeys: environmentKeys)
         case .exit:
             guard let existingAgent else { return TerminalServiceProfileCommandResponse(message: "Agent exit ignored.") }
             try orchestrator.handleAgentExit(
-                existingAgent, eventType: type.rawValue, eventSource: "spaces_agent_signal",
-                environmentKeys: environmentKeys)
+                existingAgent, eventType: type.rawValue, eventSource: "spaces_agent_signal", environmentKeys: environmentKeys)
         }
         postAgentEventNotification()
         return TerminalServiceProfileCommandResponse(message: "Agent \(type.rawValue) recorded.")
     }
 
     private func matchingProfileAgentWindow(workspaceID: String, sessionID: String, orchestrator: WorkspaceOrchestrator) throws -> AgentWindowRecord?
-    {
-        try orchestrator.agentWindows(workspaceID: workspaceID).first {
-            $0.provider == .spaces && $0.terminalTrackingID == sessionID
-        }
-    }
+    { try orchestrator.agentWindows(workspaceID: workspaceID).first { $0.provider == .spaces && $0.terminalTrackingID == sessionID } }
 
     private func profileAgentRuntimeLabel(sessionID: String) -> String? {
         guard let paths = try? TerminalSessionPaths.forSession(id: sessionID) else { return nil }
@@ -742,7 +740,8 @@ import workspacecore
                 return TerminalServiceResponse(ok: false, message: "Terminal session '\(sessionID)' is not running.", errorCode: .sessionNotRunning)
             }
             guard FileManager.default.fileExists(atPath: paths.controlSocketPath) else {
-                return TerminalServiceResponse(ok: false, message: "Terminal session '\(sessionID)' is not available.", errorCode: .sessionNotAvailable)
+                return TerminalServiceResponse(
+                    ok: false, message: "Terminal session '\(sessionID)' is not available.", errorCode: .sessionNotAvailable)
             }
             let response = try TerminalControlClient.send(request: controlRequest, socketPath: paths.controlSocketPath)
             return terminalControlResponse(
@@ -770,9 +769,19 @@ import workspacecore
             if canResolveTerminalLinkWithoutLocalState(link) {
                 metadata = try SpacesDeviceTerminalLinkResolver.resolve(sessionID: sessionID, link: link, workingDirectory: nil, workspaceRoots: [])
             } else {
-                let workingDirectory = try terminalWorkingDirectory(sessionID: sessionID)
+                // Unlike SpacesDeviceAPIServer's workspaceRoots (loaded from every project/workspace in the
+                // DB), this daemon only ever authorizes a single extra root: the session's own working
+                // directory. So the lookup is still attempted for absolute/tilde/file:// links too (best
+                // effort, via `try?`) to keep authorizing paths under that root exactly as before; only a
+                // relative link's *requirement* for a working directory still hard-fails resolution (with
+                // the informative unknownSession error) when session launch/runtime state is unavailable.
+                let workingDirectory: String?
+                do { workingDirectory = try terminalWorkingDirectory(sessionID: sessionID) } catch {
+                    guard !SpacesDeviceTerminalLinkResolver.requiresWorkingDirectory(link: link) else { throw error }
+                    workingDirectory = nil
+                }
                 metadata = try SpacesDeviceTerminalLinkResolver.resolve(
-                    sessionID: sessionID, link: link, workingDirectory: workingDirectory, workspaceRoots: [workingDirectory])
+                    sessionID: sessionID, link: link, workingDirectory: workingDirectory, workspaceRoots: workingDirectory.map { [$0] } ?? [])
             }
             if metadata.source == .localFile {
                 let resolvedPath = try SpacesDeviceTerminalLinkResolver.resolvedLocalFilePath(linkID: metadata.id)
@@ -1041,10 +1050,24 @@ import workspacecore
 
     private func terminalWorkingDirectory(sessionID: String) throws -> String {
         let paths = try TerminalSessionPaths.forSession(id: sessionID)
-        if let workingDirectory = normalizedString((try? TerminalSessionPersistence.readRuntimeState(paths: paths))?.workingDirectory) {
-            return workingDirectory
-        }
+        let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths)
+        // Prefer the live cwd of the session's foreground process (falling back to its child shell).
+        // The tracked runtime-state working directory only advances when the shell reports a new PWD
+        // through Ghostty shell integration (OSC 7), which many shells never emit — so it is stale
+        // after a plain `cd`. The owning process's real cwd is always current, anchoring relative
+        // links (e.g. `./statement.pdf`) in the directory the shell is actually sitting in.
+        if let liveWorkingDirectory = normalizedString(Self.liveTerminalWorkingDirectory(runtimeState: runtimeState)) { return liveWorkingDirectory }
+        if let workingDirectory = normalizedString(runtimeState?.workingDirectory) { return workingDirectory }
         return try TerminalSessionPersistence.readLaunchConfiguration(paths: paths).workingDirectory
+    }
+
+    private static func liveTerminalWorkingDirectory(runtimeState: TerminalSessionRuntimeState?) -> String? {
+        guard let runtimeState else { return nil }
+        if let foregroundPID = runtimeState.foregroundPID, let cwd = TerminalForegroundProcessInspector.workingDirectory(pid: foregroundPID) {
+            return cwd
+        }
+        if let childPID = runtimeState.childPID, let cwd = TerminalForegroundProcessInspector.workingDirectory(pid: childPID) { return cwd }
+        return nil
     }
 
     private func normalizedString(_ value: String?) -> String? {
@@ -1055,7 +1078,7 @@ import workspacecore
     private func terminalServiceLinkMetadata(_ metadata: SpacesDeviceTerminalLinkMetadata) -> TerminalServiceTerminalLinkMetadata {
         TerminalServiceTerminalLinkMetadata(
             id: metadata.id, source: metadata.source.rawValue, originalLink: metadata.originalLink, displayName: metadata.displayName,
-            contentType: metadata.contentType, mediaKind: metadata.mediaKind?.rawValue, byteCount: metadata.byteCount,
+            contentType: metadata.contentType, artifactKind: metadata.artifactKind?.rawValue, byteCount: metadata.byteCount,
             externalURL: metadata.externalURL)
     }
 

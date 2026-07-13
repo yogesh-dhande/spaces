@@ -198,7 +198,7 @@ apps/macos/Tests/e2e.sh device-api local
 apps/macos/Tests/e2e.sh device-api remote
 ```
 
-Both targets create a project and workspace through the paired daemon, open and stop a workspace terminal, run/restart/stop a configured process, and run/restart/stop a configured coding agent. During the terminal portion, the parity flow writes `terminal-latency-summary.json` with open-terminal request timing, state-readiness timing, send-to-state-progress samples, state request timing, and state progress counters. The remote target installs its test daemon against an isolated remote E2E database/runtime root, relies on the Linux installer enabling user lingering, and verifies the daemon remains reachable from the Mac after the setup SSH command exits; it does not keep a persistent SSH session open for service lifetime. `apps/macos/Tests/e2e.sh device-api` runs local and remote parity.
+Both targets create a project and workspace through the paired daemon, open and stop a workspace terminal, run/restart/stop a configured process, and run/restart/stop a configured coding agent. During the terminal portion, the parity flow writes `terminal-latency-summary.json` with open-terminal request timing, state-readiness timing, send-to-state-progress samples, state request timing, and state progress counters. The remote target installs its test daemon against an isolated remote E2E database/runtime root, relies on the Linux installer enabling user lingering, and verifies the daemon remains reachable from the Mac after the setup SSH command exits; it does not keep a persistent SSH session open for service lifetime. The remote target also verifies the Device API service tunnel: `spacese2e service-tunnel` performs an HTTP GET through the paired daemon to the workspace's running `web` service, and a request for a missing service must fail with `notFound`. `apps/macos/Tests/e2e.sh device-api` runs local and remote parity.
 
 Focused remote terminal latency comparisons use the configured `.env` remote host, create one remote Device API workspace, and compare Device API workspace-terminal latency against a local Spaces terminal that SSHes into the same remote workspace directory:
 
@@ -349,6 +349,8 @@ xcodebuild -project apps/ios/SpacesMobile.xcodeproj -scheme SpacesMobile -destin
 
 On first launch, the iOS client opens its Devices sheet. Open Devices in the Mac sidebar or run `spaces device pair`, then scan the QR code. The mobile demo lane opens one daemon pairing window per simulator and seeds both the iPad and iPhone simulator settings automatically. The harness stores Mac client metadata in an isolated SQLite file by exporting `SPACES_CLIENT_DB_PATH` and stores harness-only Mac client secrets under `SPACES_CLIENT_SECRET_DIR`; these overrides are for E2E and demo profiles so test pairings do not mix with the user client database or client secret files. Remote mobile scenarios pair the Mac client and iOS simulators with the remote daemon over SSH-backed pairing windows before launching the apps. The demo keeps a local SSH forward to the remote daemon Device API and seeds the demo clients with that forwarded endpoint so the demo works from networks where the remote daemon port is not directly reachable. After pairing, the iOS client stores the issued credential and pinned daemon fingerprint and reconnects automatically on later launches. The client lists workspaces and live terminal sessions from the selected daemon, auto-attempts takeover when a session detail is opened, renders service-published Ghostty render frames only after ownership is acquired, and shows takeover or status UI while another client still owns the session.
 For the iOS simulator, a seeded pairing link with `127.0.0.1` works because the daemon Device API binds all IPv4 interfaces by default. A real device scans the Mac QR code from the Devices panel. The iOS terminal detail path renders the owner-bootstrap Ghostty render frame through the same terminal-grid compatibility data as macOS, so the simulator should show a terminal-like view after takeover rather than a plain-text fallback.
+
+The demo's seeded projects also exercise iOS browser sessions: each workspace carries `docs` and `admin` browser sessions templated on `http://localhost:$SPACES_APP_PORT/...`, which resolve against the workspace's assigned `app` service port and serve real pages once the seeded `frontend` process runs. From a paired simulator or device, tap Run on the `frontend` process row, then tap the `docs` or `admin` browser-session row — the page loads through the Device API service tunnel in the in-app web view. Tapping the row while `frontend` is stopped shows the styled service-not-running page.
 
 For manual real-device verification of the iOS client:
 
@@ -543,7 +545,7 @@ Expected output:
 
 The pre-commit hook runs `scripts/verify.sh`, which formats staged macOS Swift source and test files, lints, builds, runs coverage, and runs iOS unit tests.
 
-Pull requests are checked in GitHub Actions with [`.github/workflows/pr-checks.yml`](../.github/workflows/pr-checks.yml), which runs the same Swift verification flow plus the static website build.
+Pull requests are checked in GitHub Actions with [`.github/workflows/pr-checks.yml`](../.github/workflows/pr-checks.yml), which runs the same Swift verification flow, the static website build, and Linux artifact builds on native x86_64 and arm64 runners.
 
 ## Manual E2E
 
@@ -611,6 +613,24 @@ Run from `apps/web`:
 npm run dev
 npm run build
 ```
+
+## Version Metadata
+
+`apps/macos/AppVersion.plist` is the only place a Spaces version is authored. Every consumer is generated from it by `scripts/sync-app-version.sh`:
+
+```bash
+scripts/sync-app-version.sh --short <version> --build <build-number>
+```
+
+- `apps/macos/Sources/workspacecore/AppVersion.swift` — the constants the CLI, app menu, and daemon report
+- `apps/macos/Sources/SpacesApp/Info.plist` — regenerated wholesale from a template in the script
+- `apps/ios/Info.plist` — version keys rewritten in place, leaving its hand-maintained keys alone
+
+Edit none of these by hand. Spaces ships one version across its clients, so the Mac and iPhone apps report the same `CFBundleShortVersionString`; `AppVersionMetadataTests` fails the build on any drift between the source and either bundle.
+
+A client's own version is never compared against a daemon's to decide anything — see the daemon-compatibility notes in [implementation.md](implementation.md).
+
+Because the macOS `Info.plist` is regenerated from a template rather than edited in place, a new key belongs in that template in `scripts/sync-app-version.sh` — a key added only to the generated file is silently dropped on the next sync.
 
 ## macOS Release
 

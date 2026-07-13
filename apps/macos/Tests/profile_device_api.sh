@@ -137,6 +137,7 @@ def typed_device_api_payload(payload: dict) -> dict:
     if command in ("attach", "detach", "heartbeat", "takeover", "send", "key", "clear", "clearScreen", "resize", "scroll"):
         command_payload["action"] = "clearScreen" if command == "clear" else command
         command_payload.setdefault("appendNewline", False)
+        command_payload.setdefault("asPaste", False)
         typed_command = {"terminalControl": command_payload}
     else:
         typed_command = {command: command_payload}

@@ -7,7 +7,7 @@ import spacesterminalcore
 
     var body: some Scene {
         WindowGroup {
-            ContentView(model: model)
+            RootTabView(model: model)
                 .preferredColorScheme(appearanceMode.colorScheme)
         }
     }

@@ -1511,8 +1511,8 @@ run_demo_env \
   SPACES_PROJECT_DIR="$repo_root" \
   "$spacese2e" seed-fixture \
     --project-dir "$local_project_dir" \
-    --docs-url "http://127.0.0.1:20001" \
-    --admin-url "http://127.0.0.1:20002" >/dev/null
+    --docs-url 'http://localhost:$SPACES_APP_PORT/docs/' \
+    --admin-url 'http://localhost:$SPACES_APP_PORT/admin/' >/dev/null
 
 run_demo_env \
   HOME="$demo_home" \
@@ -1524,8 +1524,8 @@ run_demo_env \
   SPACES_PROJECT_DIR="$repo_root" \
   "$spacese2e" seed-fixture \
     --project-dir "$secondary_project_dir" \
-    --docs-url "http://127.0.0.1:20003" \
-    --admin-url "http://127.0.0.1:20004" >/dev/null
+    --docs-url 'http://localhost:$SPACES_APP_PORT/docs/' \
+    --admin-url 'http://localhost:$SPACES_APP_PORT/admin/' >/dev/null
 
 run_demo_env \
   HOME="$demo_home" \

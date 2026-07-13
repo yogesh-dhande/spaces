@@ -244,7 +244,9 @@ public enum SpacesDeviceClient {
         device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
     ) throws -> [AgentHookStatus] {
         let response = try request(.init(command: .agentHooksStatus), device: device, clientApp: clientApp, profile: profile)
-        guard let payload = response.agentHooksStatus else { throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode) }
+        guard let payload = response.agentHooksStatus else {
+            throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode)
+        }
         return payload.agents
     }
 
@@ -256,8 +258,7 @@ public enum SpacesDeviceClient {
         _ kinds: [SupportedCodingAgentHook], device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
         profile: SpacesProfile? = nil
     ) throws -> AgentHookInstallOutcome {
-        let response = try request(
-            .init(command: .installAgentHooks(.init(kinds: kinds))), device: device, clientApp: clientApp, profile: profile)
+        let response = try request(.init(command: .installAgentHooks(.init(kinds: kinds))), device: device, clientApp: clientApp, profile: profile)
         guard let payload = response.agentHooksInstall else {
             throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode)
         }
@@ -671,7 +672,7 @@ public enum SpacesDeviceClient {
         case .pair, .ping, .daemonStatus, .requestDaemonRestart, .overview, .previewProject, .listDirectories, .workspaceCreateOptions,
             .updateProjectConfig, .updateWorkspaceConfig, .updateWorkspaceMetadata, .renameTerminalSession, .state, .terminalControl,
             .terminalPasteImage, .sendTerminalInput, .tailTerminalOutput, .resolveTerminalLink, .readTerminalLinkChunk, .subscribe,
-            .subscribeDeviceOverview, .agentHooksStatus:
+            .subscribeDeviceOverview, .agentHooksStatus, .openServiceTunnel:
             defaultRequestTimeoutSeconds
         }
     }

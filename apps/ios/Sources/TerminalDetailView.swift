@@ -1,5 +1,6 @@
 import QuickLook
 import SwiftUI
+import UIKit
 import spacesterminalmobileghostty
 import spacesdevicecore
 import spacesterminalcore
@@ -20,6 +21,7 @@ struct TerminalDetailView: View {
 
     @State private var hasMountedTerminalSurface = false
     @State private var isBackNavigationInProgress = false
+    @State private var isShowingComposer = false
     @State private var renderedText = ""
     @State private var model: TerminalViewerModel
     /// The app's effective light/dark scheme. `preferredColorScheme` at the app scene stamps the forced
@@ -88,8 +90,8 @@ struct TerminalDetailView: View {
                             onViewportSizeChanged: { columns, rows in
                                 model.updateViewportSize(columns: columns, rows: rows)
                             },
-                            onSendText: { text in
-                                sendTerminalText(text)
+                            onSendText: { text, asPaste in
+                                sendTerminalText(text, asPaste: asPaste)
                             },
                             onSendKey: { key in
                                 sendTerminalKey(key)
@@ -99,6 +101,9 @@ struct TerminalDetailView: View {
                             },
                             onOpenLink: { link in
                                 openTerminalLink(link)
+                            },
+                            onOpenComposer: {
+                                isShowingComposer = true
                             }
                         )
                         .accessibilityIdentifier("terminal.surface")
@@ -150,6 +155,9 @@ struct TerminalDetailView: View {
         ) { preview in
             TerminalLinkPreviewSheet(preview: preview)
         }
+        .sheet(isPresented: $isShowingComposer) {
+            TerminalComposerSheet(model: model, stagedScreenshots: appModel.stagedScreenshots)
+        }
         .onDisappear { model.stop() }
     }
 
@@ -161,14 +169,17 @@ struct TerminalDetailView: View {
             if let previewErrorMessage = model.linkPreviewErrorMessage {
                 errorBanner(previewErrorMessage)
             }
+            if let linkNotice = model.linkNotice {
+                noticeBanner(linkNotice)
+            }
         }
         .allowsHitTesting(false)
     }
 
-    private func sendTerminalText(_ text: String) {
+    private func sendTerminalText(_ text: String, asPaste: Bool = false) {
         guard !text.isEmpty else { return }
         writeE2EEventIfNeeded(kind: "send_text", detail: text)
-        Task { await model.sendText(text) }
+        Task { await model.sendText(text, asPaste: asPaste) }
     }
 
     private func sendTerminalKey(_ key: String) {
@@ -413,6 +424,17 @@ struct TerminalDetailView: View {
             .accessibilityIdentifier("terminal.errorBanner")
     }
 
+    private func noticeBanner(_ message: String) -> some View {
+        Text(message)
+            .font(.footnote)
+            .foregroundStyle(.primary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            .background(Color(uiColor: .secondarySystemBackground))
+            .accessibilityIdentifier("terminal.linkNotice")
+    }
+
     private func previewStatusBanner(_ message: String) -> some View {
         HStack(spacing: 8) {
             ProgressView()
@@ -445,8 +467,10 @@ struct TerminalDetailView: View {
             model.errorMessage ?? "",
             model.isPreparingLinkPreview ? "previewPreparing" : "previewIdle",
             model.linkPreview?.title ?? "",
-            model.linkPreview?.mediaKind.rawValue ?? "",
+            model.linkPreview?.kind?.rawValue ?? "",
+            model.linkPreview?.content.caseName ?? "",
             model.linkPreviewErrorMessage ?? "",
+            model.linkNotice ?? "",
             shouldCaptureRenderedText ? renderedText : "",
         ].joined(separator: "|")
     }
@@ -478,8 +502,10 @@ struct TerminalDetailView: View {
                 errorMessage: model.errorMessage,
                 isPreparingLinkPreview: model.isPreparingLinkPreview,
                 linkPreviewTitle: model.linkPreview?.title,
-                linkPreviewMediaKind: model.linkPreview?.mediaKind,
+                linkPreviewArtifactKind: model.linkPreview?.kind,
+                linkPreviewContentKind: model.linkPreview?.content.caseName,
                 linkPreviewErrorMessage: model.linkPreviewErrorMessage,
+                linkNotice: model.linkNotice,
                 visibleText: model.visibleText,
                 renderedText: renderedText,
                 renderStateKey: model.renderStateKey,
@@ -562,18 +588,50 @@ private struct TerminalLinkPreviewSheet: View {
 
     var body: some View {
         NavigationStack {
-            TerminalQuickLookPreview(url: preview.url)
+            content
                 .ignoresSafeArea(edges: .bottom)
                 .accessibilityIdentifier("terminal.linkPreview")
                 .navigationTitle(preview.title)
                 .navigationBarTitleDisplayMode(.inline)
-                .toolbar {
-                    ToolbarItem(placement: .topBarTrailing) {
-                        ShareLink(item: preview.url) {
-                            Label("Open In", systemImage: "square.and.arrow.up")
-                        }
-                    }
+                .toolbar { toolbarContent }
+        }
+    }
+
+    /// Each content kind renders through its dedicated viewer: image/video/PDF keep QuickLook, plain text
+    /// gets the selectable monospaced text view, Markdown gets the rendered/raw viewer, a local HTML
+    /// artifact and an external web page both use the isolated web view (file mode vs. request mode).
+    @ViewBuilder private var content: some View {
+        switch preview.content {
+        case .quickLook(let url):
+            TerminalQuickLookPreview(url: url)
+        case .text(let url):
+            TerminalTextArtifactView(url: url)
+        case .markdown(let url):
+            TerminalMarkdownArtifactView(url: url)
+        case .htmlFile(let url):
+            TerminalWebArtifactView(load: .fileURL(url))
+        case .webPage(let url):
+            TerminalWebArtifactView(load: .request(url))
+        }
+    }
+
+    /// File-backed content (all except `.webPage`) offers Share to hand the on-device file to another app;
+    /// an external web page has no local file, so its equivalent affordance is opening the URL in Safari.
+    @ToolbarContentBuilder private var toolbarContent: some ToolbarContent {
+        ToolbarItem(placement: .topBarTrailing) {
+            switch preview.content {
+            case .quickLook(let url), .text(let url), .markdown(let url), .htmlFile(let url):
+                ShareLink(item: url) {
+                    Label("Open In", systemImage: "square.and.arrow.up")
                 }
+            case .webPage(let url):
+                Button {
+                    UIApplication.shared.open(url)
+                } label: {
+                    Label("Open in Safari", systemImage: "safari")
+                }
+                .accessibilityIdentifier("terminal.linkPreview.openInSafari")
+            }
         }
     }
 }

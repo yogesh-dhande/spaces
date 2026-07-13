@@ -149,7 +149,7 @@ import XCTest
 
         private func makeDaemonStatus(protocolVersion: Int, activeSessionCount: Int = 0) -> TerminalServiceDaemonStatus {
             TerminalServiceDaemonStatus(
-                version: "0.1.0", artifactVersion: nil, certificateFingerprint: nil, activeSessionCount: activeSessionCount,
+                version: "0.1.0", installedVersion: nil, certificateFingerprint: nil, activeSessionCount: activeSessionCount,
                 protocolVersion: protocolVersion)
         }
 

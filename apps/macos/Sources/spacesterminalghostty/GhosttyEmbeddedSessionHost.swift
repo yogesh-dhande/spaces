@@ -37,6 +37,7 @@
         func sessionSnapshotText() -> String?
         func copySelectionToPasteboard() -> Bool
         func pasteClipboardContents() -> Bool
+        @discardableResult func sendTextAsPaste(_ text: String) -> Bool
         @discardableResult func performBindingAction(_ action: String) -> Bool
         @discardableResult func sendScroll(horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32) -> Bool
         @discardableResult func clearScreenAndScrollback() -> Bool
@@ -78,6 +79,13 @@
         func sendRawBytes(_ data: Data) {
             sessionDriver.sendRawBytes(data)
             inputActivityHandler?(data.count)
+        }
+
+        @discardableResult public func sendTextAsPaste(_ text: String) -> Bool {
+            guard !text.isEmpty else { return false }
+            sessionDriver.sendTextAsPaste(text)
+            inputActivityHandler?(text.utf8.count)
+            return true
         }
 
         func foregroundPID() -> Int32? { sessionDriver.foregroundPID() }
@@ -143,8 +151,7 @@
 
         public func pasteClipboardContents() -> Bool {
             guard let text = NSPasteboard.general.string(forType: .string), !text.isEmpty else { return false }
-            sendRawBytes(Data(text.utf8))
-            return true
+            return sendTextAsPaste(text)
         }
 
         @discardableResult public func performBindingAction(_ action: String) -> Bool { sessionDriver.performBindingAction(action) }
@@ -257,6 +264,7 @@
         private var didTerminateCurrentRun = false
         private var currentTitle: String?
         private var currentWorkingDirectory: String?
+        private var lastObservedProcessWorkingDirectory: String?
         private var lastKnownChildPID: Int32?
         private var lastKnownSurfaceSize: (columns: Int, rows: Int)?
         private var lastSessionStateRevision: UInt64?
@@ -450,7 +458,15 @@
 
         public func childPID() -> Int32? { observedChildPID() }
         public var effectiveTitle: String { currentTitle ?? launchConfiguration.title }
-        public var effectiveWorkingDirectory: String { currentWorkingDirectory ?? launchConfiguration.workingDirectory }
+        // Prefer the live cwd observed from the foreground/child process (cached by refreshRuntimeState)
+        // so the working directory clients see converges on reality even when the shell never reports a
+        // new PWD through Ghostty shell integration (OSC 7). currentWorkingDirectory (the PWD-action
+        // value) remains the next fallback, then the launch directory. This property is read on the
+        // per-render broadcast path, so it only reads the cached value — the proc lookup that fills the
+        // cache runs on the slower runtime-state refresh path.
+        public var effectiveWorkingDirectory: String {
+            lastObservedProcessWorkingDirectory ?? currentWorkingDirectory ?? launchConfiguration.workingDirectory
+        }
 
         private func startControlServer() throws {
             let controlServer = TerminalControlServer(socketPath: paths.controlSocketPath, queue: controlQueue) { [weak self] request in
@@ -679,16 +695,31 @@
             guard isRuntimeInteractiveForControl() else { return TerminalControlResponse(ok: false, message: "Terminal session is not running.", errorCode: .sessionNotRunning) }
             if let clientID = request.clientID { try? TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: nowISO8601()) }
             if let rejection = ownerRequestRejection(for: request, commandName: "send", startedAt: startedAt) { return rejection }
-            guard var payload = request.inputPayload else {
-                return TerminalControlResponse(ok: false, message: "Missing input payload.", errorCode: .invalidArgument)
+            if request.asPaste {
+                guard var text = request.text, request.bytes == nil else {
+                    return TerminalControlResponse(ok: false, message: "Paste input requires text payload.", errorCode: .invalidArgument)
+                }
+                if request.appendNewline { text.append("\n") }
+                markLocalOwnerCommandInputOutputResyncPending()
+                guard rendererHostStorage.sendTextAsPaste(text) else {
+                    return TerminalControlResponse(ok: false, message: "Missing input payload.", errorCode: .invalidArgument)
+                }
+                TerminalPerformance.logMetric(
+                    "terminal_control_send", target: "session=\(launchConfiguration.sessionID)",
+                    elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true, detail: "bytes=\(text.utf8.count)")
+                return TerminalControlResponse(ok: true, message: "Sent input.")
+            } else {
+                guard var payload = request.inputPayload else {
+                    return TerminalControlResponse(ok: false, message: "Missing input payload.", errorCode: .invalidArgument)
+                }
+                if request.appendNewline { payload.append(0x0A) }
+                markLocalOwnerCommandInputOutputResyncPending()
+                rendererHostStorage.sendRawBytes(payload)
+                TerminalPerformance.logMetric(
+                    "terminal_control_send", target: "session=\(launchConfiguration.sessionID)",
+                    elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true, detail: "bytes=\(payload.count)")
+                return TerminalControlResponse(ok: true, message: "Sent input.")
             }
-            if request.appendNewline { payload.append(0x0A) }
-            markLocalOwnerCommandInputOutputResyncPending()
-            rendererHostStorage.sendRawBytes(payload)
-            TerminalPerformance.logMetric(
-                "terminal_control_send", target: "session=\(launchConfiguration.sessionID)",
-                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true, detail: "bytes=\(payload.count)")
-            return TerminalControlResponse(ok: true, message: "Sent input.")
         }
 
         private func controlResponseForKeyRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
@@ -846,6 +877,11 @@
             }
             let foregroundProcess = foregroundPID.flatMap(foregroundProcessResolver)
             let foregroundAgent = foregroundProcess.flatMap(TerminalForegroundProcessInspector.classify)
+            // Refresh the cached live cwd here (off the per-render broadcast path) so effectiveWorkingDirectory
+            // publishes the process's real directory even when the shell never emits an OSC 7 PWD report.
+            if let liveWorkingDirectory = Self.liveProcessWorkingDirectory(foregroundPID: foregroundPID, childPID: childPID) {
+                lastObservedProcessWorkingDirectory = liveWorkingDirectory
+            }
             let state = TerminalSessionRuntimeState(
                 sessionID: launchConfiguration.sessionID, backend: launchConfiguration.backend, servicePID: getpid(),
                 childPID: childPID ?? lastKnownChildPID, state: .running, updatedAt: TerminalSessionTimestamp.string(from: now), title: effectiveTitle,
@@ -995,6 +1031,12 @@
         }
 
         private func observedForegroundPID() -> Int32? { foregroundPIDOverrideForTesting ?? rendererHostStorage.foregroundPID() }
+
+        private static func liveProcessWorkingDirectory(foregroundPID: Int32?, childPID: Int32?) -> String? {
+            if let foregroundPID, let cwd = TerminalForegroundProcessInspector.workingDirectory(pid: foregroundPID) { return cwd }
+            if let childPID, let cwd = TerminalForegroundProcessInspector.workingDirectory(pid: childPID) { return cwd }
+            return nil
+        }
 
         private func observedSurfaceSize() -> (columns: Int, rows: Int)? {
             if let size = rendererHostStorage.surfaceCellSize() {
@@ -1511,6 +1553,8 @@
         public func copySelectionToPasteboard() -> Bool { core.rendererHost.copySelectionToPasteboard() }
 
         public func pasteClipboardContents() -> Bool { core.rendererHost.pasteClipboardContents() }
+
+        @discardableResult public func sendTextAsPaste(_ text: String) -> Bool { core.rendererHost.sendTextAsPaste(text) }
 
         @discardableResult public func performBindingAction(_ action: String) -> Bool { core.rendererHost.performBindingAction(action) }
 

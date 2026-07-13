@@ -17,7 +17,9 @@ typedef void (*GhosttyTerminalFreeFn)(GhosttyTerminal);
 typedef void (*GhosttyTerminalVtWriteFn)(GhosttyTerminal, const uint8_t *, size_t);
 typedef void (*GhosttyTerminalScrollViewportFn)(GhosttyTerminal, GhosttyTerminalScrollViewport);
 typedef GhosttyResult (*GhosttyTerminalGetFn)(GhosttyTerminal, GhosttyTerminalData, void *);
+typedef GhosttyResult (*GhosttyTerminalModeGetFn)(GhosttyTerminal, GhosttyMode, bool *);
 typedef GhosttyResult (*GhosttyTerminalSetFn)(GhosttyTerminal, GhosttyTerminalOption, const void *);
+typedef GhosttyResult (*GhosttyPasteEncodeFn)(char *, size_t, bool, char *, size_t, size_t *);
 typedef GhosttyResult (*GhosttyFormatterTerminalNewFn)(
     const GhosttyAllocator *,
     GhosttyFormatter *,
@@ -49,7 +51,9 @@ typedef struct {
     GhosttyTerminalVtWriteFn terminal_vt_write;
     GhosttyTerminalScrollViewportFn terminal_scroll_viewport;
     GhosttyTerminalGetFn terminal_get;
+    GhosttyTerminalModeGetFn terminal_mode_get;
     GhosttyTerminalSetFn terminal_set;
+    GhosttyPasteEncodeFn paste_encode;
     GhosttyFormatterTerminalNewFn formatter_terminal_new;
     GhosttyFormatterFormatAllocFn formatter_format_alloc;
     GhosttyFormatterFreeFn formatter_free;
@@ -274,9 +278,11 @@ static bool spaces_ghostty_vt_load_symbols(SpacesGhosttyVtSymbols *symbols) {
     symbols->terminal_vt_write = (GhosttyTerminalVtWriteFn)dlsym(handle, "ghostty_terminal_vt_write");
     symbols->terminal_scroll_viewport = (GhosttyTerminalScrollViewportFn)dlsym(handle, "ghostty_terminal_scroll_viewport");
     symbols->terminal_get = (GhosttyTerminalGetFn)dlsym(handle, "ghostty_terminal_get");
+    symbols->terminal_mode_get = (GhosttyTerminalModeGetFn)dlsym(handle, "ghostty_terminal_mode_get");
     // Optional: present in libghostty-vt builds that expose default-color configuration. Kept out
     // of the required-symbol check below so an older library still loads (theming is skipped).
     symbols->terminal_set = (GhosttyTerminalSetFn)dlsym(handle, "ghostty_terminal_set");
+    symbols->paste_encode = (GhosttyPasteEncodeFn)dlsym(handle, "ghostty_paste_encode");
     symbols->formatter_terminal_new = (GhosttyFormatterTerminalNewFn)dlsym(handle, "ghostty_formatter_terminal_new");
     symbols->formatter_format_alloc = (GhosttyFormatterFormatAllocFn)dlsym(handle, "ghostty_formatter_format_alloc");
     symbols->formatter_free = (GhosttyFormatterFreeFn)dlsym(handle, "ghostty_formatter_free");
@@ -302,6 +308,8 @@ static bool spaces_ghostty_vt_load_symbols(SpacesGhosttyVtSymbols *symbols) {
         symbols->terminal_vt_write == NULL ||
         symbols->terminal_scroll_viewport == NULL ||
         symbols->terminal_get == NULL ||
+        symbols->terminal_mode_get == NULL ||
+        symbols->paste_encode == NULL ||
         symbols->formatter_terminal_new == NULL ||
         symbols->formatter_format_alloc == NULL ||
         symbols->formatter_free == NULL ||
@@ -540,6 +548,59 @@ bool spaces_ghostty_vt_session_write(SpacesGhosttyVtSession *session, const uint
     if (session == NULL || session->terminal == NULL) return false;
     if (input == NULL || input_len == 0) return true;
     session->symbols.terminal_vt_write(session->terminal, input, input_len);
+    return true;
+}
+
+bool spaces_ghostty_vt_session_encode_paste(
+    SpacesGhosttyVtSession *session,
+    const uint8_t *input,
+    size_t input_len,
+    char **out_ptr,
+    size_t *out_len
+) {
+    if (out_ptr == NULL || out_len == NULL) return false;
+    *out_ptr = NULL;
+    *out_len = 0;
+    if (session == NULL || session->terminal == NULL) return false;
+    if (input_len == 0) return true;
+    if (input == NULL) return false;
+
+    bool bracketed = false;
+    if (session->symbols.terminal_mode_get(session->terminal, GHOSTTY_MODE_BRACKETED_PASTE, &bracketed) != GHOSTTY_SUCCESS) {
+        return false;
+    }
+
+    char *mutable_input = (char *)malloc(input_len);
+    if (mutable_input == NULL) return false;
+    memcpy(mutable_input, input, input_len);
+
+    size_t required = 0;
+    GhosttyResult result = session->symbols.paste_encode(mutable_input, input_len, bracketed, NULL, 0, &required);
+    if (result != GHOSTTY_OUT_OF_SPACE && result != GHOSTTY_SUCCESS) {
+        free(mutable_input);
+        return false;
+    }
+    if (required == 0) {
+        free(mutable_input);
+        return true;
+    }
+
+    char *encoded = (char *)malloc(required);
+    if (encoded == NULL) {
+        free(mutable_input);
+        return false;
+    }
+
+    size_t written = 0;
+    result = session->symbols.paste_encode(mutable_input, input_len, bracketed, encoded, required, &written);
+    free(mutable_input);
+    if (result != GHOSTTY_SUCCESS) {
+        free(encoded);
+        return false;
+    }
+
+    *out_ptr = encoded;
+    *out_len = written;
     return true;
 }
 

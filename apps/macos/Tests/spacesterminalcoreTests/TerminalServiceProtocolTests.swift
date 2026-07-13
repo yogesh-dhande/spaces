@@ -50,8 +50,8 @@ final class TerminalServiceProtocolTests: XCTestCase {
             commandResult: TerminalServiceCommandResult(exitCode: 0, logPath: "/tmp/setup.log"),
             controlResponse: TerminalControlResponse(ok: true, message: "sent"),
             terminalLinkMetadata: TerminalServiceTerminalLinkMetadata(
-                id: "link-1", source: "localFile", originalLink: "image.png", displayName: "image.png", contentType: "image/png", mediaKind: "image",
-                byteCount: 12, externalURL: nil),
+                id: "link-1", source: "localFile", originalLink: "image.png", displayName: "image.png", contentType: "image/png",
+                artifactKind: "image", byteCount: 12, externalURL: nil),
             terminalLinkChunk: TerminalServiceTerminalLinkChunk(
                 linkID: "link-1", offset: 0, byteCount: 4, isFinal: true, base64Data: Data([1, 2, 3, 4]).base64EncodedString()),
             agentSignals: [
@@ -67,7 +67,7 @@ final class TerminalServiceProtocolTests: XCTestCase {
                     baseBranch: "main", isDefault: false, isArchived: false, isHidden: false, isRunning: false, lastLaunchedAt: nil, notes: nil),
                 terminalOutput: "recent output"),
             daemonStatus: TerminalServiceDaemonStatus(
-                version: "1.2.3", artifactVersion: "1.2.3", certificateFingerprint: "SHA256:abcdef", activeSessionCount: 2))
+                version: "1.2.3", installedVersion: "1.2.3", certificateFingerprint: "SHA256:abcdef", activeSessionCount: 2))
 
         for request in requests { XCTAssertEqual(try TerminalServiceCodec.decodeRequest(TerminalServiceCodec.encodeRequest(request)), request) }
         XCTAssertEqual(try TerminalServiceCodec.decodeResponse(TerminalServiceCodec.encodeResponse(response)), response)
