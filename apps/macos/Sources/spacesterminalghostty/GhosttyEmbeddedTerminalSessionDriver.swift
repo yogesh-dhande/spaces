@@ -30,6 +30,44 @@
         }
     }
 
+    /// Counts Ghostty data callbacks that have entered Spaces persistence. Handoff
+    /// first stops new callbacks at the Ghostty session, then awaits this fence before
+    /// the core drains its coalescing buffer and closes output.log.
+    final class GhosttyEmbeddedHandoffOutputDeliveryFence: @unchecked Sendable {
+        private let lock = NSLock()
+        private var deliveryCount = 0
+        private var drainWaiters: [CheckedContinuation<Void, Never>] = []
+
+        func beginDelivery() {
+            lock.lock()
+            deliveryCount += 1
+            lock.unlock()
+        }
+
+        func finishDelivery() {
+            lock.lock()
+            precondition(deliveryCount > 0, "finishing an output delivery that was never registered")
+            deliveryCount -= 1
+            let waiters = deliveryCount == 0 ? drainWaiters : []
+            if deliveryCount == 0 { drainWaiters.removeAll() }
+            lock.unlock()
+            for waiter in waiters { waiter.resume() }
+        }
+
+        func waitUntilDrained() async {
+            await withCheckedContinuation { continuation in
+                lock.lock()
+                guard deliveryCount > 0 else {
+                    lock.unlock()
+                    continuation.resume()
+                    return
+                }
+                drainWaiters.append(continuation)
+                lock.unlock()
+            }
+        }
+    }
+
     @MainActor final class GhosttyEmbeddedTerminalSessionDriver {
         private let launchConfiguration: TerminalSessionLaunchConfiguration
 
@@ -38,6 +76,7 @@
         private var headlessHostView: GhosttyHeadlessSessionHostView?
         private var surfaceUserData: GhosttyEmbeddedSurfaceUserData?
         private let outputPipe = GhosttyHostManagedOutputPipe()
+        private let handoffOutputDeliveryFence = GhosttyEmbeddedHandoffOutputDeliveryFence()
         /// Serial queue that runs the blocking `output.log` replay off the main actor
         /// during a handoff resume (see `replayOutputLogOffMainActor`).
         private let handoffReplayQueue = DispatchQueue(label: "spaces.terminal.session.handoff-replay")
@@ -268,15 +307,28 @@
         /// draining while the daemon quiesces and closes its durable output handle.
         func beginHandoffOutputBuffering() async {
             if let hostPTY { await hostPTY.beginHandoffOutputBuffering() }
+            // The PTY barrier above waits for every processOutput call selected before
+            // its sink swap. Removing the callback then closes Ghostty's delivery source;
+            // the second fence proves callbacks already inside Spaces have returned.
+            if let session { ghostty_session_set_data_callback(session, nil, nil) }
+            await handoffOutputDeliveryFence.waitUntilDrained()
         }
 
         /// Flush the buffered PTY bytes to `path` and install a direct-to-file writer
         /// that keeps appending until `execv`.
         func finishHandoffOutputBuffering(appendingTo path: String) throws { try hostPTY?.finishHandoffOutputBuffering(appendingTo: path) }
 
+        func withValidatedHandoffOutputForExec<T>(_ operation: () throws -> T) throws -> T {
+            guard let hostPTY else { throw POSIXError(.EIO) }
+            return try hostPTY.withValidatedHandoffOutputForExec(operation)
+        }
+
         /// Failed-`execv` fallback: stop the direct-to-file writer and reinstate normal
         /// handler delivery on the still-live PTY driver.
-        func endHandoffOutputBuffering() { hostPTY?.endHandoffOutputBuffering() }
+        func endHandoffOutputBuffering() {
+            if let session { ghostty_session_set_data_callback(session, Self.surfaceDataCallback, Unmanaged.passUnretained(self).toOpaque()) }
+            hostPTY?.endHandoffOutputBuffering()
+        }
 
         func terminate() {
             let currentSession = session
@@ -498,6 +550,8 @@
         private nonisolated static let surfaceDataCallback: ghostty_surface_data_cb = { userdata, bytes, len in
             guard let userdata, let bytes, len > 0 else { return }
             let runtime = Unmanaged<GhosttyEmbeddedTerminalSessionDriver>.fromOpaque(userdata).takeUnretainedValue()
+            runtime.handoffOutputDeliveryFence.beginDelivery()
+            defer { runtime.handoffOutputDeliveryFence.finishDelivery() }
             if runtime.outputHandler == nil { return }
             let data = Data(bytes: bytes, count: Int(len))
             runtime.outputHandler?(data)

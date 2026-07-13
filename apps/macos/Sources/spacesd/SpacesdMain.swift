@@ -416,15 +416,37 @@ import workspacecore
         }
 
         writeStandardError("spacesd handoff_exec path=\(launchExecutablePath) generation=\(nextGeneration) sessions=\(records.count)\n")
-        execStagedBinary(path: launchExecutablePath)
+        var execErrno = Int32(0)
+        do {
+            try withValidatedHandoffOutputsForExec(ArraySlice(quiescedCores)) {
+                execStagedBinary(path: launchExecutablePath)
+                execErrno = errno
+            }
+        } catch {
+            writeStandardError("spacesd handoff_output_persistence_failed error=\(error)\n")
+            DaemonHandoffStore.deleteTable()
+            resumeInPlaceAfterFailedHandoff(quiescedCores: quiescedCores)
+            return
+        }
 
         // `execv` only returns on failure. The written table describes a handoff that never happened,
         // so delete it (a leftover would be adopted by a later respawn of this same pid), then rebind
         // the still-live sessions and restart shared services so the daemon is fully functional again.
-        let execErrno = errno
         writeStandardError("spacesd handoff_exec_failed errno=\(execErrno)\n")
         DaemonHandoffStore.deleteTable()
         resumeInPlaceAfterFailedHandoff(quiescedCores: quiescedCores)
+    }
+
+    /// Nests each session driver's sink lock around the final validation and exec.
+    /// A PTY read can neither fail nor begin a transcript write after its session has
+    /// validated; successful exec replaces the process, while a returned exec unwinds
+    /// every lock before the in-place resume path runs.
+    private func withValidatedHandoffOutputsForExec(_ cores: ArraySlice<GhosttyEmbeddedSessionCore>, operation: () throws -> Void) throws {
+        guard let core = cores.first else {
+            try operation()
+            return
+        }
+        try core.withValidatedHandoffOutputForExec { try withValidatedHandoffOutputsForExec(cores.dropFirst(), operation: operation) }
     }
 
     /// Failed-`execv` fallback: rebind every quiesced core to its still-live PTY (nothing was freed —

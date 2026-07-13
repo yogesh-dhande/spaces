@@ -500,16 +500,22 @@
             // blocks while we drain the main actor and close the durable output handle.
             await sessionDriver.beginHandoffOutputBuffering()
 
-            // Fence: let already-queued incoming-output Tasks run to completion (they hop
-            // to the main actor and append to output.log), then synchronously flush any
-            // bytes still sitting in the coalescing buffer. After beginHandoffOutputBuffering
-            // the session ingests no new PTY bytes, so once these land the file is complete
-            // up to the buffering boundary.
-            await drainQueuedOutputForHandoff()
+            // The driver has disabled Ghostty's data callback and awaited both the PTY
+            // handler boundary and every callback already inside Spaces. All callback
+            // bytes are therefore registered in this locked buffer; drain it directly.
+            flushPendingIncomingOutputForStateExport()
 
-            try? outputHandle?.synchronize()
-            try? outputHandle?.close()
-            outputHandle = nil
+            if let outputHandle {
+                do {
+                    try outputHandle.synchronize()
+                    try outputHandle.close()
+                    self.outputHandle = nil
+                } catch {
+                    try? outputHandle.close()
+                    self.outputHandle = nil
+                    throw error
+                }
+            }
 
             // Flush the buffered bytes to output.log and install the direct-to-file writer
             // that keeps appending until execv.
@@ -522,14 +528,10 @@
                 appearance: GhosttyEmbeddedAppService.shared.currentAppearance.rawValue)
         }
 
-        /// Main-actor fence for the quiesce output flush. Yields the main actor so queued
-        /// `enqueueIncomingOutput` Tasks land in output.log, adds a short settle for any
-        /// in-flight GhosttyKit data-callback → enqueue chain, then drains the coalescing
-        /// buffer synchronously.
-        private func drainQueuedOutputForHandoff() async {
-            await Task.yield()
-            try? await Task.sleep(for: .milliseconds(20))
-            flushPendingIncomingOutputForStateExport()
+        /// Holds the PTY sink boundary while the daemon performs its final persistence
+        /// validation and `execv`, preventing a direct write from racing after the check.
+        public func withValidatedHandoffOutputForExec<T>(_ operation: () throws -> T) throws -> T {
+            try sessionDriver.withValidatedHandoffOutputForExec(operation)
         }
 
         /// Failed-`execv` fallback: `execv` returned, so this same image keeps running and

@@ -181,8 +181,7 @@ final class HostManagedPTYAdoptTests: XCTestCase {
         }
 
         XCTAssertEqual(
-            bufferingReturned.wait(timeout: .now() + 0.1), .timedOut,
-            "buffering must not return while a pre-swap handler delivery is still running")
+            bufferingReturned.wait(timeout: .now() + 0.1), .timedOut, "buffering must not return while a pre-swap handler delivery is still running")
         releaseHandler.signal()
         XCTAssertEqual(bufferingReturned.wait(timeout: .now() + 5), .success)
         wait(for: [sessionClosed], timeout: 5)
@@ -267,6 +266,36 @@ final class HostManagedPTYAdoptTests: XCTestCase {
         XCTAssertTrue(
             waitUntil { collector.string.contains("buffered-before-failure") },
             "bytes buffered before the persistence failure must return to normal delivery")
+        driver.terminate()
+    }
+
+    func testDirectHandoffWriteFailureAbortsExecAndRestoresOutputToHandler() throws {
+        let configuration = makeConfiguration(sessionID: "direct-write-failure", command: "cat")
+        let driver = HostManagedPTYTerminalSessionDriver(
+            launchConfiguration: configuration, terminationEscalationIntervals: fastEscalation,
+            handoffWriteAction: { _, data in data.isEmpty ? .success(byteCount: 0) : .failure(bytesWritten: 0, errorCode: ENOSPC) })
+        let collector = OutputCollector()
+        driver.setOutputHandler { collector.append($0) }
+        try driver.startIfNeeded()
+
+        let filePath = makeTemporaryFilePath()
+        defer { try? FileManager.default.removeItem(atPath: filePath) }
+        beginHandoffOutputBuffering(driver)
+        try driver.finishHandoffOutputBuffering(appendingTo: filePath)
+
+        let marker = "restore-after-direct-write-failure"
+        driver.sendRawBytes(Data("\(marker)\n".utf8))
+        XCTAssertTrue(
+            waitUntil { (try? driver.withValidatedHandoffOutputForExec {}) == nil },
+            "the final exec boundary must surface a direct transcript write failure")
+
+        var reachedExecBoundary = false
+        XCTAssertThrowsError(try driver.withValidatedHandoffOutputForExec { reachedExecBoundary = true })
+        XCTAssertFalse(reachedExecBoundary)
+
+        driver.endHandoffOutputBuffering()
+        XCTAssertTrue(
+            waitUntil { collector.string.contains(marker) }, "unwritten direct-sink bytes must return to normal persistence on failed handoff")
         driver.terminate()
     }
 }

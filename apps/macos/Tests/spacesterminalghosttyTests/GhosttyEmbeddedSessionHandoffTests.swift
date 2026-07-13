@@ -45,6 +45,21 @@ final class GhosttyEmbeddedSessionHandoffTests: XCTestCase {
         try super.tearDownWithError()
     }
 
+    func testGhosttyOutputDeliveryFenceWaitsForRegisteredCallback() {
+        let fence = GhosttyEmbeddedHandoffOutputDeliveryFence()
+        let drained = DispatchSemaphore(value: 0)
+        fence.beginDelivery()
+
+        Task {
+            await fence.waitUntilDrained()
+            drained.signal()
+        }
+
+        XCTAssertEqual(drained.wait(timeout: .now() + 0.1), .timedOut)
+        fence.finishDelivery()
+        XCTAssertEqual(drained.wait(timeout: .now() + 5), .success)
+    }
+
     // MARK: - Fixtures
 
     /// A test-owned PTY plus a live child pid, standing in for the master fd and child

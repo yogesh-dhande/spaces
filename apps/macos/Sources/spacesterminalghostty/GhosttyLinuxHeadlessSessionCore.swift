@@ -220,9 +220,17 @@
             // every registered persistence task completed without relying on timing.
             await outputDeliveryFence.waitUntilDrained()
 
-            try? outputHandle?.synchronize()
-            try? outputHandle?.close()
-            outputHandle = nil
+            if let outputHandle {
+                do {
+                    try outputHandle.synchronize()
+                    try outputHandle.close()
+                    self.outputHandle = nil
+                } catch {
+                    try? outputHandle.close()
+                    self.outputHandle = nil
+                    throw error
+                }
+            }
 
             // Flush the buffered bytes to output.log and install the direct-to-file writer
             // that keeps appending until execv.
@@ -231,6 +239,12 @@
             return DaemonHandoffSessionRecord(
                 sessionID: launchConfiguration.sessionID, masterFD: descriptor.masterFD, childPID: descriptor.childPID, columns: terminalSize.columns,
                 rows: terminalSize.rows, ownerEpoch: ownerEpoch, screenStateRevision: screenStateRevision, appearance: currentAppearance.rawValue)
+        }
+
+        /// Holds the PTY sink boundary while the daemon performs its final persistence
+        /// validation and `execv`, preventing a direct write from racing after the check.
+        public func withValidatedHandoffOutputForExec<T>(_ operation: () throws -> T) throws -> T {
+            try ptyDriver.withValidatedHandoffOutputForExec(operation)
         }
 
         /// Failed-`execv` fallback: `execv` returned, so this same image keeps running and

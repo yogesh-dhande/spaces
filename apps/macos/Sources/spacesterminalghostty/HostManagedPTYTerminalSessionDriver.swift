@@ -15,6 +15,14 @@ import spacesterminalcore
 #endif
 
 final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
+    struct HandoffWriteResult: Sendable {
+        let bytesWritten: Int
+        let errorCode: Int32?
+
+        static func success(byteCount: Int) -> Self { Self(bytesWritten: byteCount, errorCode: nil) }
+        static func failure(bytesWritten: Int, errorCode: Int32) -> Self { Self(bytesWritten: bytesWritten, errorCode: errorCode) }
+    }
+
     /// Grace periods between escalating termination signals (SIGHUP already sent, then SIGTERM, then SIGKILL).
     /// Production uses generous waits; tests can shrink them so escalation paths exercise quickly.
     struct TerminationEscalationIntervals: Sendable {
@@ -29,6 +37,7 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
     private let terminationEscalationIntervals: TerminationEscalationIntervals
     private let readQueue: DispatchQueue
     private let writeQueue: DispatchQueue
+    private let handoffWriteAction: @Sendable (Int32, Data) -> HandoffWriteResult
     private let lock = NSLock()
     private var masterFD: Int32 = -1
     private var masterFDGeneration: UInt64 = 0
@@ -62,14 +71,21 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
     /// Bytes read while the sink is `.buffer`, flushed to the file the moment
     /// `finishHandoffOutputBuffering` opens it. Only touched under `lock`.
     private var handoffBuffer = Data()
+    /// First direct-writer failure. Once set, subsequent PTY bytes stay buffered and
+    /// the daemon must refuse exec so the current image can restore normal delivery.
+    private var handoffWriteErrorCode: Int32?
     private static let inheritedEnvironmentKeysRemovedForExec: Set<String> = [
         "INVOCATION_ID", "JOURNAL_STREAM", "LISTEN_FDS", "LISTEN_PID", "MAINPID", "NOTIFY_SOCKET", "SPACES_DEVICE_API_HOST", "SPACES_DEVICE_API_PORT",
         "WATCHDOG_PID", "WATCHDOG_USEC",
     ]
 
-    init(launchConfiguration: TerminalSessionLaunchConfiguration, terminationEscalationIntervals: TerminationEscalationIntervals = .default) {
+    init(
+        launchConfiguration: TerminalSessionLaunchConfiguration, terminationEscalationIntervals: TerminationEscalationIntervals = .default,
+        handoffWriteAction: (@Sendable (Int32, Data) -> HandoffWriteResult)? = nil
+    ) {
         self.launchConfiguration = launchConfiguration
         self.terminationEscalationIntervals = terminationEscalationIntervals
+        self.handoffWriteAction = handoffWriteAction ?? Self.writeAll
         readQueue = DispatchQueue(label: "spaces.terminal.host-managed-pty.read.\(launchConfiguration.sessionID)")
         writeQueue = DispatchQueue(label: "spaces.terminal.host-managed-pty.write.\(launchConfiguration.sessionID)")
     }
@@ -166,6 +182,7 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
     func beginHandoffOutputBuffering() async {
         await withCheckedContinuation { continuation in
             lock.lock()
+            handoffWriteErrorCode = nil
             outputSink = .buffer
             guard handlerDeliveriesInFlight > 0 else {
                 lock.unlock()
@@ -191,16 +208,35 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
         lock.lock()
         let pending = handoffBuffer
         handoffBuffer = Data()
-        guard Self.writeAll(fd: fd, data: pending) else {
-            // Restore the buffer (no delivery could have run under the lock) and stay
-            // in the buffering state so the caller can retry or fall back cleanly.
-            handoffBuffer = pending
+        let result = handoffWriteAction(fd, pending)
+        guard result.errorCode == nil, result.bytesWritten == pending.count else {
+            // No delivery can run under the lock. Preserve only the unwritten suffix:
+            // a short write's prefix is already durable and replaying it would duplicate output.
+            handoffBuffer = Data(pending.dropFirst(min(max(result.bytesWritten, 0), pending.count)))
             lock.unlock()
             close(fd)
-            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            throw POSIXError(POSIXErrorCode(rawValue: result.errorCode ?? EIO) ?? .EIO)
         }
         outputSink = .file(fd: fd)
         lock.unlock()
+    }
+
+    /// Holds the sink lock from the final persistence check through `operation`.
+    /// PTY reads therefore cannot begin another direct write between validation and
+    /// `execv`; a returned exec unwinds the lock and takes the normal fallback path.
+    func withValidatedHandoffOutputForExec<T>(_ operation: () throws -> T) throws -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        if let handoffWriteErrorCode { throw POSIXError(POSIXErrorCode(rawValue: handoffWriteErrorCode) ?? .EIO) }
+        guard case .file(let fd) = outputSink else { throw POSIXError(.EIO) }
+        guard fsync(fd) == 0 else {
+            let code = errno
+            handoffWriteErrorCode = code
+            outputSink = .buffer
+            close(fd)
+            throw POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)
+        }
+        return try operation()
     }
 
     /// Failed-handoff fallback: this same image keeps running. Close the direct-writer
@@ -215,6 +251,7 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
         pending = handoffBuffer
         handler = outputHandler
         handoffBuffer = Data()
+        handoffWriteErrorCode = nil
         outputSink = .handler
         lock.unlock()
         if !pending.isEmpty { handler?(pending) }
@@ -383,7 +420,13 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
             // interleave a later chunk ahead of this one and a concurrent sink swap
             // cannot slip in mid-write. Writes target a regular file, not a pipe, so
             // this does not block on a reader.
-            _ = Self.writeAll(fd: fd, data: data)
+            let result = handoffWriteAction(fd, data)
+            if result.errorCode != nil || result.bytesWritten != data.count {
+                handoffBuffer.append(data.dropFirst(min(max(result.bytesWritten, 0), data.count)))
+                handoffWriteErrorCode = result.errorCode ?? EIO
+                outputSink = .buffer
+                close(fd)
+            }
             lock.unlock()
         }
     }
@@ -509,23 +552,22 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
 
     private static func writeStandardError(_ message: String) { FileHandle.standardError.write(Data(message.utf8)) }
 
-    /// Full-write loop for the handoff file sink: writes every byte, retrying short
-    /// writes and `EINTR`, and returns false on an unrecoverable error so the caller
-    /// can keep buffering rather than silently losing bytes.
-    private static func writeAll(fd: Int32, data: Data) -> Bool {
-        guard !data.isEmpty else { return true }
-        return data.withUnsafeBytes { rawBuffer -> Bool in
-            guard let baseAddress = rawBuffer.bindMemory(to: UInt8.self).baseAddress else { return false }
+    /// Full-write loop for the handoff file sink. The result identifies the durable
+    /// prefix so a failed handoff can replay only the unwritten suffix without loss or duplication.
+    private static func writeAll(fd: Int32, data: Data) -> HandoffWriteResult {
+        guard !data.isEmpty else { return .success(byteCount: 0) }
+        return data.withUnsafeBytes { rawBuffer -> HandoffWriteResult in
+            guard let baseAddress = rawBuffer.bindMemory(to: UInt8.self).baseAddress else { return .failure(bytesWritten: 0, errorCode: EIO) }
             var sent = 0
             while sent < data.count {
                 let written = write(fd, baseAddress.advanced(by: sent), data.count - sent)
                 if written <= 0 {
                     if written < 0, errno == EINTR { continue }
-                    return false
+                    return .failure(bytesWritten: sent, errorCode: written < 0 ? errno : EIO)
                 }
                 sent += written
             }
-            return true
+            return .success(byteCount: sent)
         }
     }
 
