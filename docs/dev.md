@@ -614,6 +614,24 @@ npm run dev
 npm run build
 ```
 
+## Version Metadata
+
+`apps/macos/AppVersion.plist` is the only place a Spaces version is authored. Every consumer is generated from it by `scripts/sync-app-version.sh`:
+
+```bash
+scripts/sync-app-version.sh --short <version> --build <build-number>
+```
+
+- `apps/macos/Sources/workspacecore/AppVersion.swift` — the constants the CLI, app menu, and daemon report
+- `apps/macos/Sources/SpacesApp/Info.plist` — regenerated wholesale from a template in the script
+- `apps/ios/Info.plist` — version keys rewritten in place, leaving its hand-maintained keys alone
+
+Edit none of these by hand. Spaces ships one version across its clients, so the Mac and iPhone apps report the same `CFBundleShortVersionString`; `AppVersionMetadataTests` fails the build on any drift between the source and either bundle.
+
+A client's own version is never compared against a daemon's to decide anything — see the daemon-compatibility notes in [implementation.md](implementation.md).
+
+Because the macOS `Info.plist` is regenerated from a template rather than edited in place, a new key belongs in that template in `scripts/sync-app-version.sh` — a key added only to the generated file is silently dropped on the next sync.
+
 ## macOS Release
 
 Publish macOS releases to GitHub Releases with:

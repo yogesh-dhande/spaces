@@ -1461,8 +1461,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
 
     private static func makeDaemonStatus(activeSessionCount: Int, impact: RestartImpactCounts) -> TerminalServiceDaemonStatus {
         TerminalServiceDaemonStatus(
-            version: AppVersion.current,
-            artifactVersion: ProcessInfo.processInfo.environment["SPACESD_ARTIFACT_VERSION"].flatMap { $0.isEmpty ? nil : $0 },
+            version: AppVersion.current, installedVersion: InstalledSpacesVersion.current(),
             certificateFingerprint: nil, activeSessionCount: activeSessionCount, runningProcesses: impact.runningProcesses,
             activeAgents: impact.activeAgents, waitingAgents: impact.waitingAgents)
     }

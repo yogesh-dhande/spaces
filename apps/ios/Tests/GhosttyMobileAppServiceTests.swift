@@ -121,6 +121,14 @@
                     return false
                 }.count
             }
+
+            func lastAttachedClient() -> TerminalClient? {
+                for request in requests.reversed() {
+                    guard case .terminalControl(let payload) = request.command, payload.action == .attach else { continue }
+                    return payload.client
+                }
+                return nil
+            }
         }
 
         private actor AuthenticationPromptRecorder {
@@ -486,16 +494,17 @@
             XCTAssertFalse(model.acceptsInput)
         }
 
-        func testStopCancelsActiveStreamBeforeRestartingViewer() async throws {
+        func testStopDetachesEveryRestartedViewerLifecycle() async throws {
             let streamServer = try HoldOpenTCPServer()
             defer { streamServer.stop() }
             var settings = settings()
             settings.port = streamServer.port
             let recorder = DeviceAPIRequestRecorder()
-            let runningState = Self.runningTerminalState()
             let bridgeClient = SpacesDeviceAPIClient(settings: settings) { request in
                 await recorder.append(request)
-                if case .state = request.command { return Self.terminalStateResponse(runningState) }
+                if case .state = request.command, let client = await recorder.lastAttachedClient() {
+                    return Self.terminalStateResponse(Self.runningTerminalState(attachedClient: client))
+                }
                 return SpacesDeviceAPIResponse(ok: true, message: "ok")
             }
             let model = TerminalViewerModel(
@@ -511,10 +520,16 @@
             XCTAssertTrue(didRefreshStateInitially, "Expected the initial viewer start to reach the post-subscribe state refresh.")
 
             model.stop()
+            let didDetachInitially = try await waitForTerminalControlAction(.detach, count: 1, recorder: recorder)
+            XCTAssertTrue(didDetachInitially, "Expected stopping the initial viewer lifecycle to detach it.")
             model.start()
 
             let didAttachAfterRestart = try await waitForTerminalControlAction(.attach, count: 2, recorder: recorder)
             XCTAssertTrue(didAttachAfterRestart, "Expected restarting the same viewer model after stop() to open a fresh stream.")
+
+            model.stop()
+            let didDetachAfterRestart = try await waitForTerminalControlAction(.detach, count: 2, recorder: recorder)
+            XCTAssertTrue(didDetachAfterRestart, "Expected stopping the restarted viewer lifecycle to detach it again.")
         }
 
         func testAuthenticationFailureAfterSubscribingCancelsStreamBeforeRestartingViewer() async throws {
@@ -1489,8 +1504,10 @@
             return await recorder.countStateRequests() >= expectedCount
         }
 
-        private nonisolated static func runningTerminalState() -> GhosttyRemoteSessionStatePayload {
-            GhosttyRemoteSessionStatePayload(
+        private nonisolated static func runningTerminalState(attachedClient: TerminalClient) -> GhosttyRemoteSessionStatePayload {
+            let attachment = TerminalAttachment(
+                sessionID: "terminal-session", clientID: attachedClient.id, mode: .viewer, attachedAt: "2026-06-04T14:23:30Z")
+            return GhosttyRemoteSessionStatePayload(
                 sessionID: "terminal-session",
                 reason: TerminalRemoteSessionStateReason.initial,
                 emittedAt: "2026-06-04T14:23:30Z",
@@ -1503,7 +1520,7 @@
                     childPID: 200,
                     state: .running,
                     updatedAt: "2026-06-04T14:23:30Z"),
-                attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
+                attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [attachedClient], attachments: [attachment]),
                 title: "terminal",
                 workingDirectory: "/tmp/work",
                 outputByteCount: 0)

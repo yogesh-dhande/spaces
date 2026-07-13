@@ -72,6 +72,85 @@
             XCTAssertEqual(browserRow?.canRestart, false)
         }
 
+        /// Runtime rows group by family in the Mac sidebar's order: browser sessions, configured processes,
+        /// coding agents, then ad hoc terminals.
+        func testRuntimeRowsGroupByFamilyInMacSidebarOrder() {
+            let model = makeModel()
+            model.overview = makeOverview(
+                featureTerminalRows: [
+                    SpacesDeviceWorkspaceTerminalRow(
+                        id: "terminal-shell", workspaceID: "workspace-feature", title: "shell", workingDirectory: "/repo/feature",
+                        sessionID: "session-shell", runState: .running, canOpenTerminal: true, canStop: true)
+                ],
+                featureAssignedPorts: [SpacesDeviceAssignedPort(name: "web", port: 3_000, url: "http://web.feature.localhost:3000")],
+                featureConfig: SpacesDeviceWorkspaceConfig(
+                    resolvedBrowserSessions: [SpacesDeviceBrowserSession(name: "Dashboard", url: "http://localhost:3000/dashboard")]))
+
+            let rows = model.workspaceGroups.first { $0.workspace.id == "workspace-feature" }?.rows ?? []
+
+            XCTAssertEqual(rows.map(\.type), [.browserSessions, .processes, .codingAgents, .workspaceTerminals])
+            XCTAssertEqual(rows.map(\.title), ["Dashboard", "api", "Codex", "shell"])
+        }
+
+        /// `isHidden` is daemon-owned state shared with the Mac sidebar, so a workspace hidden on the Mac
+        /// is absent from the phone's list too.
+        func testHiddenWorkspaceIsExcludedFromWorkspaceGroups() {
+            let model = makeModel()
+            model.overview = makeOverview(featureIsHidden: true)
+
+            let workspaceIDs = model.workspaceGroups.map(\.workspace.id)
+            XCTAssertFalse(workspaceIDs.contains("workspace-feature"))
+            XCTAssertTrue(workspaceIDs.contains("workspace-docs"))
+        }
+
+        /// Hiding a workspace must not leak its loose terminal sessions back into the list as their own
+        /// group — hiding removes the workspace's rows, not just its band.
+        func testHiddenWorkspaceLooseSessionsAreExcludedFromTerminalGroups() {
+            let model = makeModel()
+            model.overview = makeOverview(sessions: [makeSession(id: "session-loose")], featureIsHidden: true)
+
+            XCTAssertFalse(model.terminalGroups.contains { $0.id == "workspace-feature" })
+        }
+
+        func testHideWorkspaceRechecksRunningStateBeforeStoppingAndHiding() async {
+            let recorder = SpacesMobileRequestRecorder()
+            let settings = SpacesMobileConnectionSettings()
+            let runningOverview = makeOverview(featureIsRunning: true)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                if request.commandName == "overview" {
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(runningOverview))
+                }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            let staleStoppedWorkspace = makeOverview(featureIsRunning: false).workspaces[0]
+
+            await model.hideWorkspace(staleStoppedWorkspace)
+
+            let requests = await recorder.snapshot()
+            XCTAssertEqual(requests.map(\.commandName), ["overview", "stopWorkspace", "updateWorkspaceMetadata"])
+        }
+
+        /// A browser session has no run state, so its row draws no status dot — while the process and
+        /// terminal rows beside it still do.
+        func testBrowserSessionRowHasNoStatusDot() {
+            let model = makeModel()
+            model.overview = makeOverview(
+                featureAssignedPorts: [SpacesDeviceAssignedPort(name: "web", port: 3_000, url: "http://web.feature.localhost:3000")],
+                featureConfig: SpacesDeviceWorkspaceConfig(
+                    resolvedBrowserSessions: [SpacesDeviceBrowserSession(name: "Dashboard", url: "http://localhost:3000/dashboard")]))
+
+            let rows = model.workspaceGroups.first { $0.workspace.id == "workspace-feature" }?.rows ?? []
+            let browserRow = rows.first { $0.title == "Dashboard" }
+            let processRow = rows.first { $0.title == "api" }
+
+            XCTAssertEqual(browserRow?.isBrowserSession, true)
+            XCTAssertNil(browserRow?.statusDotKind)
+            XCTAssertEqual(processRow?.isBrowserSession, false)
+            XCTAssertNotNil(processRow?.statusDotKind)
+        }
+
         func testBrowserSessionRowsSurviveRunStateFilter() {
             let model = makeModel()
             model.overview = makeOverview(
@@ -462,14 +541,194 @@
             XCTAssertNil(model.overview)
         }
 
+        // MARK: - Renaming runtime rows
+
+        func testRenameAdHocTerminalRowRenamesItsSession() async throws {
+            let (model, recorder) = makeRenamingModel(
+                overview: makeOverview(
+                    featureTerminalRows: [
+                        SpacesDeviceWorkspaceTerminalRow(
+                            id: "terminal-shell", workspaceID: "workspace-feature", title: "shell", workingDirectory: "/repo/feature",
+                            sessionID: "session-shell", runState: .running, canOpenTerminal: true, canStop: true)
+                    ]))
+            let row = try XCTUnwrap(model.workspaceGroups.flatMap(\.rows).first { $0.title == "shell" })
+
+            XCTAssertEqual(model.canRename(row: row), true)
+            await model.rename(row: row, to: "  build log  ")
+
+            guard case .renameTerminalSession(let request)? = await recorder.snapshot().first?.command else {
+                return XCTFail("Expected a renameTerminalSession command.")
+            }
+            XCTAssertEqual(request.workspaceID, "workspace-feature")
+            XCTAssertEqual(request.sessionID, "session-shell")
+            XCTAssertEqual(request.title, "build log")
+            XCTAssertNil(model.errorMessage)
+        }
+
+        /// A configured process is named by its workspace config, not by its session, so the rename edits the
+        /// config entry — echoing every other configured field back unchanged.
+        func testRenameConfiguredProcessRowEditsItsConfigEntry() async throws {
+            let (model, recorder) = makeRenamingModel(overview: makeOverview(featureProcessRows: [configuredProcessRow()], featureConfig: config()))
+            let row = try XCTUnwrap(model.workspaceGroups.flatMap(\.rows).first { $0.title == "api" })
+
+            await model.rename(row: row, to: "backend")
+
+            let requests = await recorder.snapshot()
+            XCTAssertEqual(requests.map(\.commandName), ["overview", "updateWorkspaceConfig"])
+            guard case .updateWorkspaceConfig(let request)? = requests.last?.command else {
+                return XCTFail("Expected an updateWorkspaceConfig command.")
+            }
+            XCTAssertEqual(request.workspaceID, "workspace-feature")
+            XCTAssertEqual(request.config.processes.map(\.name), ["backend"])
+            XCTAssertEqual(request.config.processes.map(\.command), ["npm run dev"])
+            XCTAssertEqual(request.config.stopScript, "npm stop")
+            XCTAssertEqual(request.config.ports.map(\.name), ["web"])
+            XCTAssertEqual(request.config.agentLaunchers.map(\.name), ["Codex"])
+            XCTAssertEqual(request.config.browserSessions.map(\.name), ["Dashboard"])
+        }
+
+        func testRenameConfiguredCodingAgentRowEditsItsLauncherEntry() async throws {
+            let (model, recorder) = makeRenamingModel(
+                overview: makeOverview(featureCodingAgentRows: [configuredCodingAgentRow()], featureConfig: config()))
+            let row = try XCTUnwrap(model.workspaceGroups.flatMap(\.rows).first { $0.title == "Codex" })
+
+            await model.rename(row: row, to: "Reviewer")
+
+            guard case .updateWorkspaceConfig(let request)? = await recorder.snapshot().last?.command else {
+                return XCTFail("Expected an updateWorkspaceConfig command.")
+            }
+            XCTAssertEqual(request.config.agentLaunchers.map(\.name), ["Reviewer"])
+            XCTAssertEqual(request.config.agentLaunchers.map(\.command), ["codex"])
+            XCTAssertEqual(request.config.processes.map(\.name), ["api"])
+        }
+
+        /// The configured browser session is matched by name and its raw URL is preserved: resolution expands
+        /// environment variables in the URL, so sending the resolved URL back would bake the expansion into
+        /// the config.
+        func testRenameBrowserSessionRowKeepsItsUnresolvedURL() async throws {
+            let (model, recorder) = makeRenamingModel(
+                overview: makeOverview(
+                    featureAssignedPorts: [SpacesDeviceAssignedPort(name: "web", port: 3_000, url: "http://web.feature.localhost:3000")],
+                    featureConfig: config()))
+            let row = try XCTUnwrap(model.workspaceGroups.flatMap(\.rows).first { $0.title == "Dashboard" })
+
+            await model.rename(row: row, to: "App")
+
+            guard case .updateWorkspaceConfig(let request)? = await recorder.snapshot().last?.command else {
+                return XCTFail("Expected an updateWorkspaceConfig command.")
+            }
+            XCTAssertEqual(request.config.browserSessions.map(\.name), ["App"])
+            XCTAssertEqual(request.config.browserSessions.map(\.url), ["http://localhost:${PORT_web}/dashboard"])
+        }
+
+        func testRenameConfiguredRowPreservesConcurrentConfigEdits() async throws {
+            let cachedOverview = makeOverview(featureProcessRows: [configuredProcessRow()], featureConfig: config())
+            let latestConfig = SpacesDeviceWorkspaceConfig(
+                stopScript: "updated stop",
+                ports: [
+                    SpacesDeviceServiceDefinition(id: "port-api", name: "api"),
+                    SpacesDeviceServiceDefinition(id: "port-web", name: "web"),
+                ],
+                processes: [
+                    SpacesDeviceProcessTemplate(id: "template-worker", name: "worker", command: "npm run worker"),
+                    SpacesDeviceProcessTemplate(id: "template-api", name: "api", command: "npm run dev"),
+                ],
+                browserSessions: [SpacesDeviceBrowserSession(name: "Docs", url: "http://localhost:4000")],
+                agentLaunchers: [SpacesDeviceAgentLauncher(id: "launcher-review", name: "Review", command: "review")])
+            let latestOverview = makeOverview(featureProcessRows: [configuredProcessRow()], featureConfig: latestConfig)
+            let (model, recorder) = makeRenamingModel(overview: cachedOverview, fetchedOverview: latestOverview)
+            let row = try XCTUnwrap(model.workspaceGroups.flatMap(\.rows).first { $0.title == "api" })
+
+            await model.rename(row: row, to: "backend")
+
+            guard case .updateWorkspaceConfig(let request)? = await recorder.snapshot().last?.command else {
+                return XCTFail("Expected an updateWorkspaceConfig command.")
+            }
+            XCTAssertEqual(request.config.stopScript, "updated stop")
+            XCTAssertEqual(request.config.ports.map(\.name), ["api", "web"])
+            XCTAssertEqual(request.config.processes.map(\.name), ["worker", "backend"])
+            XCTAssertEqual(request.config.browserSessions.map(\.name), ["Docs"])
+            XCTAssertEqual(request.config.agentLaunchers.map(\.name), ["Review"])
+        }
+
+        /// A process running without a configured entry takes its name from the running process, so there is
+        /// nothing to rename and the row offers no Rename.
+        func testUnconfiguredProcessRowCannotBeRenamed() async throws {
+            let (model, recorder) = makeRenamingModel(overview: makeOverview(featureConfig: config()))
+            let row = try XCTUnwrap(model.workspaceGroups.flatMap(\.rows).first { $0.title == "api" })
+
+            XCTAssertEqual(model.canRename(row: row), false)
+            await model.rename(row: row, to: "backend")
+
+            let commandNames = await recorder.snapshot().map(\.commandName)
+            XCTAssertEqual(commandNames, [])
+        }
+
+        func testRenameIgnoresEmptyAndUnchangedTitles() async throws {
+            let (model, recorder) = makeRenamingModel(overview: makeOverview(featureProcessRows: [configuredProcessRow()], featureConfig: config()))
+            let row = try XCTUnwrap(model.workspaceGroups.flatMap(\.rows).first { $0.title == "api" })
+
+            await model.rename(row: row, to: "   ")
+            await model.rename(row: row, to: "api")
+
+            let commandNames = await recorder.snapshot().map(\.commandName)
+            XCTAssertEqual(commandNames, [])
+        }
+
+        private func makeRenamingModel(
+            overview: SpacesDeviceOverviewPayload,
+            fetchedOverview: SpacesDeviceOverviewPayload? = nil
+        ) -> (model: SpacesMobileAppModel, recorder: SpacesMobileRequestRecorder) {
+            let recorder = SpacesMobileRequestRecorder()
+            let settings = SpacesMobileConnectionSettings()
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                if case .overview = request.command {
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(fetchedOverview ?? overview))
+                }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            model.overview = overview
+            return (model, recorder)
+        }
+
+        /// The feature workspace's configuration, matching the configured process, launcher, and browser
+        /// session the rename tests target.
+        private func config() -> SpacesDeviceWorkspaceConfig {
+            SpacesDeviceWorkspaceConfig(
+                stopScript: "npm stop",
+                ports: [SpacesDeviceServiceDefinition(id: "port-web", name: "web")],
+                processes: [SpacesDeviceProcessTemplate(id: "template-api", name: "api", command: "npm run dev")],
+                browserSessions: [SpacesDeviceBrowserSession(name: "Dashboard", url: "http://localhost:${PORT_web}/dashboard")],
+                resolvedBrowserSessions: [SpacesDeviceBrowserSession(name: "Dashboard", url: "http://localhost:3000/dashboard")],
+                agentLaunchers: [SpacesDeviceAgentLauncher(id: "launcher-codex", name: "Codex", command: "codex")])
+        }
+
+        private func configuredProcessRow() -> SpacesDeviceWorkspaceProcessRow {
+            SpacesDeviceWorkspaceProcessRow(
+                id: "template-api", workspaceID: "workspace-feature", name: "api", command: "npm run dev", templateID: "template-api",
+                processID: "runtime-api", sessionID: "session-api", runState: .running, canRun: false, canStop: true, canRestart: true)
+        }
+
+        private func configuredCodingAgentRow() -> SpacesDeviceWorkspaceCodingAgentRow {
+            SpacesDeviceWorkspaceCodingAgentRow(
+                id: "agent-codex", workspaceID: "workspace-feature", name: "Codex", command: "codex", launcherID: "launcher-codex",
+                agentID: "runtime-codex", sessionID: "session-codex", isConfigured: true, runState: .running, activityState: .spinning,
+                canRun: false, canStop: true, canRestart: true)
+        }
+
         private func makeOverview(
             sessions: [SpacesDeviceTerminalSessionSummary] = [],
             featureProcessRows: [SpacesDeviceWorkspaceProcessRow]? = nil,
             featureCodingAgentRows: [SpacesDeviceWorkspaceCodingAgentRow]? = nil,
+            featureTerminalRows: [SpacesDeviceWorkspaceTerminalRow] = [],
+            featureIsRunning: Bool = true,
+            featureIsHidden: Bool = false,
             featureAssignedPorts: [SpacesDeviceAssignedPort] = [],
             featureConfig: SpacesDeviceWorkspaceConfig = SpacesDeviceWorkspaceConfig(),
             daemonStatus: TerminalServiceDaemonStatus = TerminalServiceDaemonStatus(
-                version: "1.0.0", artifactVersion: nil, certificateFingerprint: nil, activeSessionCount: 0, protocolVersion: SpacesWireProtocol.version)
+                version: "1.0.0", installedVersion: nil, certificateFingerprint: nil, activeSessionCount: 0, protocolVersion: SpacesWireProtocol.version)
         ) -> SpacesDeviceOverviewPayload {
             let project = SpacesDeviceProjectSummary(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
             let processRows =
@@ -489,13 +748,13 @@
                 ]
             let feature = SpacesDeviceWorkspaceSummary(
                 id: "workspace-feature", projectID: project.id, projectName: project.name, branch: "feature",
-                baseBranch: "main", dir: "/repo/feature", isRunning: true, isArchived: false, isHidden: false, isDefault: false,
+                baseBranch: "main", dir: "/repo/feature", isRunning: featureIsRunning, isArchived: false, isHidden: featureIsHidden, isDefault: false,
                 sessionCount: 1,
                 assignedPorts: featureAssignedPorts,
                 config: featureConfig,
                 processRows: processRows,
                 codingAgentRows: codingAgentRows,
-                terminalRows: [])
+                terminalRows: featureTerminalRows)
             let docs = SpacesDeviceWorkspaceSummary(
                 id: "workspace-docs", projectID: project.id, projectName: project.name, branch: "docs", baseBranch: "main",
                 dir: "/repo/docs", isRunning: false, isArchived: false, isHidden: false, isDefault: false, sessionCount: 0,
@@ -512,7 +771,7 @@
 
         private func daemonStatus(protocolVersion: Int) -> TerminalServiceDaemonStatus {
             TerminalServiceDaemonStatus(
-                version: "1.0.0", artifactVersion: nil, certificateFingerprint: nil, activeSessionCount: 0, protocolVersion: protocolVersion)
+                version: "1.0.0", installedVersion: nil, certificateFingerprint: nil, activeSessionCount: 0, protocolVersion: protocolVersion)
         }
 
         private func makeSession(

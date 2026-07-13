@@ -866,9 +866,10 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         case .offline: return ("offline", sidebarFailedIndicatorColor())
         case .loaded:
             // Incompatible devices render an actionable button in the caption (see sidebarSectionRowCell);
-            // a compatible-but-older daemon shows a quiet "update pending" caption.
+            // a device with a newer build installed than its daemon is running shows a quiet
+            // "update pending" caption.
             if section.compatibility?.isCompatible == false { return nil }
-            if AppKitController.daemonUpdatePending(status: section.daemonStatus) { return ("update pending", .tertiaryLabelColor) }
+            if section.daemonStatus?.isUpdatePending == true { return ("update pending", .tertiaryLabelColor) }
             return nil
         }
     }
@@ -1349,6 +1350,9 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         }
         menu.addItem(.separator())
         addItem("Hide", symbol: "eye.slash", target: self, action: #selector(hideWorkspaceMenuItem(_:)), identifier: workspace.id)
+        // Archive is destructive (it removes the git worktree), so it sits last, below the separator, and
+        // routes through the same confirmation the detail ⋯ overflow menu uses.
+        addItem("Archive…", symbol: "archivebox", target: self, action: #selector(archiveWorkspaceMenuItem(_:)), identifier: workspace.id)
         return menu
     }
 
@@ -1370,6 +1374,11 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     @objc private func hideWorkspaceMenuItem(_ sender: NSMenuItem) {
         guard let id = sender.identifier?.rawValue else { return }
         host.hideWorkspace(id: id)
+    }
+
+    @objc private func archiveWorkspaceMenuItem(_ sender: NSMenuItem) {
+        guard let id = sender.identifier?.rawValue else { return }
+        host.archiveWorkspace(id: id)
     }
 
     private func runtimeTargetMenu(workspace: WorkspaceSummary, item: SidebarRuntimeTargetItem) -> NSMenu {

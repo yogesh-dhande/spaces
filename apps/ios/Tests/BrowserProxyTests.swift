@@ -499,7 +499,7 @@
             return SpacesDeviceOverviewPayload(
                 projects: [], workspaces: [workspace], sessions: [],
                 daemonStatus: TerminalServiceDaemonStatus(
-                    version: "1.0.0", artifactVersion: nil, certificateFingerprint: nil, activeSessionCount: 0,
+                    version: "1.0.0", installedVersion: nil, certificateFingerprint: nil, activeSessionCount: 0,
                     protocolVersion: SpacesWireProtocol.version))
         }
 

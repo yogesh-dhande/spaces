@@ -192,6 +192,15 @@ enum SpacesMobileE2EDumpWriter {
     }
 }
 
+/// Bottom tab bar destinations. Selection lives on the app model so non-tab surfaces
+/// (the not-paired state, pairing links, auth recovery) can switch tabs programmatically.
+enum SpacesMobileTab: String, Hashable, Sendable {
+    case alerts
+    case spaces
+    case agents
+    case settings
+}
+
 struct SpacesMobileTerminalWorkspaceGroup: Identifiable {
     let id: String
     let projectName: String
@@ -303,6 +312,13 @@ struct SpacesMobileWorkspaceRuntimeRow: Identifiable, Sendable {
         }
     }
 
+    /// A browser session is a URL, not a process: it has no run state, no lifecycle actions, and its
+    /// row opens a web view instead of a terminal, so several UI rules key off this.
+    var isBrowserSession: Bool {
+        if case .browserSession = source { return true }
+        return false
+    }
+
     var title: String {
         switch source {
         case .process(let row): row.name
@@ -397,6 +413,14 @@ struct SpacesMobileWorkspaceRuntimeRow: Identifiable, Sendable {
     var hasTerminalDetailActions: Bool { canRun || canStopFromTerminalDetail || canRestartFromTerminalDetail }
 }
 
+extension SpacesDeviceWorkspaceSummary {
+    /// Git workspaces are branch-backed; non-git workspaces are the project directory itself.
+    var isGitWorkspace: Bool {
+        guard let branch else { return false }
+        return !branch.isEmpty
+    }
+}
+
 struct SpacesMobileWorkspaceGroup: Identifiable {
     let workspace: SpacesDeviceWorkspaceSummary
     let rows: [SpacesMobileWorkspaceRuntimeRow]
@@ -446,11 +470,18 @@ private enum SpacesMobileMutationTimeoutRecovery {
     var visibleRowTypes: Set<SpacesMobileWorkspaceRowType> = Set(SpacesMobileWorkspaceRowType.allCases)
     var visibleRunStates: Set<SpacesDeviceRunState> = Set([.notStarted, .running, .exited])
     var workspaceCreateOptions: SpacesDeviceWorkspaceCreateOptions?
+    var selectedTab: SpacesMobileTab = .spaces
+    /// Workspaces whose runtime rows are collapsed on the Spaces tab. In-memory only; a fresh
+    /// launch starts fully expanded.
+    var collapsedWorkspaceIDs: Set<String> = []
+    /// Attention events the user cleared. In-memory only; identities are stable per source+kind+date
+    /// so a cleared event stays cleared across refreshes until the source changes state again.
+    var dismissedAlertIDs: Set<String> = []
     @ObservationIgnored private var bridgeClient: SpacesDeviceAPIClient
     @ObservationIgnored private var commandChannel: SpacesDeviceAPICommandChannel
     /// On-device loopback reverse proxy WKWebView browser sessions load through. Owned for the app's
     /// lifetime (its installation identity is stable across device switches), started/stopped by
-    /// `ContentView`'s scene-phase observation.
+    /// `RootTabView`'s scene-phase observation.
     @ObservationIgnored private let browserProxy: SpacesMobileBrowserProxy
     /// Routing table refreshed from accepted active-device overviews, and pruned when a device is unpaired.
     /// Kept on the model (rather than rebuilt from scratch each time) so `removeDevice` can drop just
@@ -489,13 +520,20 @@ private enum SpacesMobileMutationTimeoutRecovery {
         self.browserProxy = browserProxy ?? SpacesMobileBrowserProxy(installationID: settings.installationID)
     }
 
+    /// The workspaces this client lists: neither archived nor hidden, matching the Mac sidebar's
+    /// `isVisibleWorkspace` rule. `isHidden` is daemon-owned workspace state, so a workspace hidden
+    /// from the Mac's Workspace Visibility dialog is hidden here too.
+    private var visibleWorkspaces: [SpacesDeviceWorkspaceSummary] {
+        (overview?.workspaces ?? []).filter { !$0.isArchived && !$0.isHidden }
+    }
+
     var workspaceGroups: [SpacesMobileWorkspaceGroup] {
         let allFiltersSelected =
             visibleRowTypes.count == SpacesMobileWorkspaceRowType.allCases.count
             && visibleRunStates.count == 3
             && searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        return (overview?.workspaces ?? []).filter { !$0.isArchived }.compactMap { workspace in
+        return visibleWorkspaces.compactMap { workspace in
             let allRows = workspaceRuntimeRows(for: workspace)
             let filteredRows = allRows.filter { row in rowMatchesFilters(row, workspace: workspace, query: query) }
             if allFiltersSelected { return SpacesMobileWorkspaceGroup(workspace: workspace, rows: allRows) }
@@ -508,12 +546,16 @@ private enum SpacesMobileMutationTimeoutRecovery {
     }
 
     var terminalGroups: [SpacesMobileTerminalWorkspaceGroup] {
-        let workspaces = overview?.workspaces ?? []
+        let workspaces = visibleWorkspaces
         let workspaceByID = Dictionary(uniqueKeysWithValues: workspaces.map { ($0.id, $0) })
         let representedSessionIDs = Set(workspaces.flatMap { workspaceRuntimeRows(for: $0).compactMap(\.sessionID) })
+        // A hidden workspace's loose sessions are hidden with it; otherwise hiding a workspace would just
+        // move its terminals into a loose group instead of removing them from the list.
+        let hiddenWorkspaceIDs = Set((overview?.workspaces ?? []).filter(\.isHidden).map(\.id))
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         let sessions = (overview?.sessions ?? []).filter { session in
-            !representedSessionIDs.contains(session.id) && terminalSessionMatchesFilters(session, query: query)
+            !hiddenWorkspaceIDs.contains(session.workspaceID) && !representedSessionIDs.contains(session.id)
+                && terminalSessionMatchesFilters(session, query: query)
         }
         let grouped = Dictionary(grouping: sessions) { $0.workspaceID }
 
@@ -536,20 +578,73 @@ private enum SpacesMobileMutationTimeoutRecovery {
         .sorted(by: groupSort)
     }
 
+    /// Attention-event groups for the Alerts tab, derived client-side from the overview payload
+    /// with the user's cleared events filtered out.
+    var attentionGroups: [SpacesMobileAttentionGroup] {
+        guard let overview else { return [] }
+        return SpacesMobileAttention.groups(in: overview, dismissedEventIDs: dismissedAlertIDs)
+    }
+
+    /// Undismissed attention-event count, shown as the Alerts tab badge.
+    var undismissedAlertCount: Int {
+        attentionGroups.reduce(0) { $0 + $1.events.count }
+    }
+
+    /// Marks every currently derived attention event dismissed.
+    func clearAlerts() {
+        guard let overview else { return }
+        dismissedAlertIDs.formUnion(SpacesMobileAttention.events(in: overview).map(\.id))
+    }
+
+    /// Coding-agent rows across all workspaces grouped by activity for the Agents tab.
+    var agentGroups: [SpacesMobileAgentGroup] {
+        guard let overview else { return [] }
+        return SpacesMobileAgentGrouping.groups(in: overview)
+    }
+
+    func toggleWorkspaceCollapsed(_ workspaceID: String) {
+        if collapsedWorkspaceIDs.contains(workspaceID) {
+            collapsedWorkspaceIDs.remove(workspaceID)
+        } else {
+            collapsedWorkspaceIDs.insert(workspaceID)
+        }
+    }
+
+    /// Resolves a session summary for navigation, including sessions synthesized from
+    /// workspace terminal rows that are not in the overview's session list.
+    func session(forSessionID sessionID: String) -> SpacesDeviceTerminalSessionSummary? {
+        if let session = overview?.sessions.first(where: { $0.id == sessionID }) { return session }
+        return runtimeRow(forSessionID: sessionID).flatMap(terminalSession(for:))
+    }
+
+    /// Impact summary shown before a daemon restart is confirmed.
+    var daemonRestartImpactMessage: String {
+        guard let status = daemonStatus else {
+            return "Running terminals, processes, and coding agents on this device will stop."
+        }
+        let agents = status.activeAgents + status.waitingAgents
+        var parts: [String] = []
+        if status.activeSessionCount > 0 { parts.append("\(status.activeSessionCount) terminal\(status.activeSessionCount == 1 ? "" : "s")") }
+        if status.runningProcesses > 0 { parts.append("\(status.runningProcesses) process\(status.runningProcesses == 1 ? "" : "es")") }
+        if agents > 0 { parts.append("\(agents) coding agent\(agents == 1 ? "" : "s")") }
+        guard !parts.isEmpty else { return "No running work will be interrupted." }
+        return "This will stop " + parts.joined(separator: ", ") + "."
+    }
+
     /// The active device cannot be used until its daemon is restarted/updated or this app updates.
     var isActiveDeviceBlocked: Bool {
         guard let compatibility else { return false }
         return !compatibility.isCompatible
     }
 
-    /// Compatible, but the daemon reports an older app version than this client — a non-blocking hint
-    /// that a daemon update is pending and will apply on the next restart.
+    /// Compatible, but a newer Spaces is installed on the active device than the build its daemon is
+    /// running — a non-blocking hint that the update applies on the daemon's next restart. The daemon
+    /// reports this about its own device; this app's own version says nothing about what is installed
+    /// over there, so it is deliberately not part of the comparison.
     var daemonUpdatePending: Bool {
-        guard compatibility == .compatible, let status = daemonStatus else { return false }
-        return SpacesWireProtocol.isVersion(status.version, olderThan: SpacesMobileAppModel.clientAppVersion)
+        guard compatibility == .compatible else { return false }
+        return daemonStatus?.isUpdatePending ?? false
     }
-
-    static let clientAppVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? ""
 
     var connectionSummary: String {
         if let activeDeviceName { return activeDeviceName }
@@ -906,6 +1001,163 @@ private enum SpacesMobileMutationTimeoutRecovery {
         }
     }
 
+    // MARK: - Workspace-level actions
+
+    /// Starts the whole workspace: every configured process and coding agent. The daemon opens no browser
+    /// session or ad hoc terminal, so those rows are untouched.
+    func launchWorkspace(_ workspace: SpacesDeviceWorkspaceSummary) async {
+        await performWorkspaceMutation {
+            try await bridgeClient.launchWorkspace(workspaceID: workspace.id, commandChannel: commandChannel)
+        }
+    }
+
+    func stopWorkspace(_ workspace: SpacesDeviceWorkspaceSummary) async {
+        await performWorkspaceMutation {
+            try await bridgeClient.stopWorkspace(workspaceID: workspace.id, commandChannel: commandChannel)
+        }
+    }
+
+    func restartWorkspace(_ workspace: SpacesDeviceWorkspaceSummary) async {
+        await performWorkspaceMutation {
+            try await bridgeClient.restartWorkspace(workspaceID: workspace.id, commandChannel: commandChannel)
+        }
+    }
+
+    /// Hides the workspace, stopping it first when it is running — matching the Mac's Hide, which never
+    /// leaves a hidden workspace running with no row left to stop it from.
+    func hideWorkspace(_ workspace: SpacesDeviceWorkspaceSummary) async {
+        await performWorkspaceMutation {
+            let currentOverview = try await bridgeClient.fetchOverview(commandChannel: commandChannel)
+            guard let currentWorkspace = currentOverview.workspaces.first(where: { $0.id == workspace.id }) else {
+                throw SpacesDeviceAPIClientError.requestFailed("This workspace is no longer available.")
+            }
+            if currentWorkspace.isRunning {
+                _ = try await bridgeClient.stopWorkspace(workspaceID: workspace.id, commandChannel: commandChannel)
+            }
+            return try await bridgeClient.setWorkspaceHidden(workspaceID: workspace.id, isHidden: true, commandChannel: commandChannel)
+        }
+    }
+
+    private func performWorkspaceMutation(_ operation: () async throws -> SpacesDeviceAPIResponse) async {
+        guard !isMutating else { return }
+        isMutating = true
+        defer { isMutating = false }
+        do {
+            await applyMutationResponse(try await operation())
+        } catch {
+            handleBridgeError(error)
+        }
+    }
+
+    // MARK: - Renaming runtime rows
+
+    /// Where a runtime row's name lives, and so how a rename reaches the daemon: an ad hoc terminal owns its
+    /// session title, while a configured process, coding agent, or browser session owns an entry in the
+    /// workspace config. Configured entries carry stable identity so the mutation can resolve them against a
+    /// fresh config instead of replacing concurrent edits with the overview's cached snapshot.
+    private enum RuntimeRowRename {
+        case terminalSession(sessionID: String)
+        case workspaceConfig(entry: ConfigEntry)
+
+        enum ConfigEntry {
+            case process(id: String)
+            case agentLauncher(id: String)
+            case browserSession(name: String)
+        }
+    }
+
+    /// Whether the row has a name the daemon can rename. A process or coding agent running without a
+    /// configured entry has no name to edit — its name comes from the running process — and a terminal row
+    /// whose session has ended has no session to rename, so those rows offer no Rename.
+    func canRename(row: SpacesMobileWorkspaceRuntimeRow) -> Bool {
+        renameTarget(for: row) != nil
+    }
+
+    /// Renames a runtime row. Renaming a configured process, coding agent, or browser session edits its
+    /// workspace-config entry, so a running process keeps its current name until it is restarted — the same
+    /// rule the Mac sidebar's rename follows.
+    func rename(row: SpacesMobileWorkspaceRuntimeRow, to newTitle: String) async {
+        let title = newTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty, title != row.title, let target = renameTarget(for: row) else { return }
+        await performWorkspaceMutation {
+            switch target {
+            case .terminalSession(let sessionID):
+                return try await bridgeClient.renameTerminalSession(
+                    workspaceID: row.workspaceID, sessionID: sessionID, title: title, commandChannel: commandChannel)
+            case .workspaceConfig(let entry):
+                let currentOverview = try await bridgeClient.fetchOverview(commandChannel: commandChannel)
+                guard let config = currentOverview.workspaces.first(where: { $0.id == row.workspaceID })?.config else {
+                    throw SpacesDeviceAPIClientError.requestFailed("This workspace is no longer available.")
+                }
+                return try await bridgeClient.updateWorkspaceConfig(
+                    workspaceID: row.workspaceID, config: try renamedConfig(config, entry: entry, to: title), commandChannel: commandChannel)
+            }
+        }
+    }
+
+    private func renameTarget(for row: SpacesMobileWorkspaceRuntimeRow) -> RuntimeRowRename? {
+        switch row.source {
+        case .terminal(let terminal):
+            guard let sessionID = terminal.sessionID else { return nil }
+            return .terminalSession(sessionID: sessionID)
+        case .process(let process):
+            guard let config = workspaceConfig(for: row.workspaceID), let templateID = process.templateID,
+                config.processes.contains(where: { $0.id == templateID })
+            else { return nil }
+            return .workspaceConfig(entry: .process(id: templateID))
+        case .codingAgent(let agent):
+            guard let config = workspaceConfig(for: row.workspaceID), let launcherID = agent.launcherID,
+                config.agentLaunchers.contains(where: { $0.id == launcherID })
+            else { return nil }
+            return .workspaceConfig(entry: .agentLauncher(id: launcherID))
+        case .browserSession(let browser):
+            // Configured browser sessions carry no id, but the daemon requires their names to be present and
+            // unique within the workspace, and resolution preserves the configured name, so the name is the
+            // entry's identity — the URL is not, since resolution expands environment variables in it.
+            guard let config = workspaceConfig(for: row.workspaceID), let name = browser.route.sessionName,
+                config.browserSessions.contains(where: { $0.name == name })
+            else { return nil }
+            return .workspaceConfig(entry: .browserSession(name: name))
+        }
+    }
+
+    /// A copy of `config` with one entry renamed. Config fields are immutable and the daemon replaces the
+    /// workspace's whole config, so a rename echoes every other field back unchanged.
+    private func renamedConfig(
+        _ config: SpacesDeviceWorkspaceConfig, entry: RuntimeRowRename.ConfigEntry, to name: String
+    ) throws -> SpacesDeviceWorkspaceConfig {
+        var processes = config.processes
+        var agentLaunchers = config.agentLaunchers
+        var browserSessions = config.browserSessions
+        switch entry {
+        case .process(let id):
+            guard let index = processes.firstIndex(where: { $0.id == id }) else {
+                throw SpacesDeviceAPIClientError.requestFailed("This process is no longer configured.")
+            }
+            let process = processes[index]
+            processes[index] = SpacesDeviceProcessTemplate(
+                id: process.id, name: name, command: process.command, kind: process.kind, onExit: process.onExit)
+        case .agentLauncher(let id):
+            guard let index = agentLaunchers.firstIndex(where: { $0.id == id }) else {
+                throw SpacesDeviceAPIClientError.requestFailed("This coding agent is no longer configured.")
+            }
+            let launcher = agentLaunchers[index]
+            agentLaunchers[index] = SpacesDeviceAgentLauncher(id: launcher.id, name: name, command: launcher.command)
+        case .browserSession(let currentName):
+            guard let index = browserSessions.firstIndex(where: { $0.name == currentName }) else {
+                throw SpacesDeviceAPIClientError.requestFailed("This browser session is no longer configured.")
+            }
+            browserSessions[index] = SpacesDeviceBrowserSession(name: name, url: browserSessions[index].url)
+        }
+        return SpacesDeviceWorkspaceConfig(
+            stopScript: config.stopScript, ports: config.ports, processes: processes, browserSessions: browserSessions,
+            resolvedBrowserSessions: config.resolvedBrowserSessions, agentLaunchers: agentLaunchers)
+    }
+
+    private func workspaceConfig(for workspaceID: String) -> SpacesDeviceWorkspaceConfig? {
+        overview?.workspaces.first { $0.id == workspaceID }?.config
+    }
+
     private func groupSort(_ lhs: SpacesMobileTerminalWorkspaceGroup, _ rhs: SpacesMobileTerminalWorkspaceGroup) -> Bool {
         if lhs.projectName.localizedStandardCompare(rhs.projectName) != .orderedSame {
             return lhs.projectName.localizedStandardCompare(rhs.projectName) == .orderedAscending
@@ -923,22 +1175,24 @@ private enum SpacesMobileMutationTimeoutRecovery {
         return lhs.createdAt < rhs.createdAt
     }
 
+    /// Runtime rows group by family in the same order the Mac sidebar uses: browser sessions, configured
+    /// processes, coding agents, then ad hoc terminals.
     private func workspaceRuntimeRows(for workspace: SpacesDeviceWorkspaceSummary) -> [SpacesMobileWorkspaceRuntimeRow] {
         let browserRoutes = SpacesDeviceBrowserSessionRoute.routes(
             resolvedBrowserSessions: workspace.config.resolvedBrowserSessions, assignedPorts: workspace.assignedPorts)
-        return workspace.processRows.map { .init(source: .process($0)) }
+        return browserRoutes.enumerated().map { index, route in
+            .init(source: .browserSession(SpacesMobileBrowserSessionRow(workspaceID: workspace.id, index: index, route: route)))
+        }
+            + workspace.processRows.map { .init(source: .process($0)) }
             + workspace.codingAgentRows.map { .init(source: .codingAgent($0)) }
             + workspace.terminalRows.map { .init(source: .terminal($0)) }
-            + browserRoutes.enumerated().map { index, route in
-                .init(source: .browserSession(SpacesMobileBrowserSessionRow(workspaceID: workspace.id, index: index, route: route)))
-            }
     }
 
     private func rowMatchesFilters(_ row: SpacesMobileWorkspaceRuntimeRow, workspace: SpacesDeviceWorkspaceSummary, query: String) -> Bool {
         guard visibleRowTypes.contains(row.type) else { return false }
         // Browser session rows carry no run state (see `SpacesMobileWorkspaceRuntimeRow.runState`), so
         // the run-state filter only applies to rows that actually have one.
-        if case .browserSession = row.source {} else {
+        if !row.isBrowserSession {
             guard visibleRunStates.contains(row.runState) else { return false }
         }
         guard !query.isEmpty else { return true }

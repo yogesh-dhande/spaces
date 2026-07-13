@@ -51,14 +51,16 @@ import workspacecore
             detail: fixtureDetail(), browserSessions: [BrowserSession(name: "App", url: "http://localhost:3000")])
     }
 
+    /// Runtime rows group by family: browser sessions, configured processes, coding agents, then ad hoc
+    /// terminals. Shortcut numbering follows the same order, so ⌘1…⌘0 and the sidebar rows never disagree.
     @Test func itemsFollowShortcutTargetOrderWithStableKeys() {
         let items = fixtureItems()
         #expect(
             items.map(\.key) == [
-                "browser:http://localhost:3000", "process:proc-web", "missing:api", "terminal:sess-term", "agent:agent-1", "launcher:codex",
+                "browser:http://localhost:3000", "process:proc-web", "missing:api", "agent:agent-1", "launcher:codex", "terminal:sess-term",
             ])
         #expect(items.map(\.shortcutIndex) == [1, 2, 3, 4, 5, 6])
-        #expect(items.map(\.title) == ["App", "web", "api", "zsh", "claude", "codex"])
+        #expect(items.map(\.title) == ["App", "web", "api", "claude", "codex", "zsh"])
     }
 
     @Test func itemsCarryRunStateAndCapabilities() {

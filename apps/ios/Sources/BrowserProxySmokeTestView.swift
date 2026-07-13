@@ -20,7 +20,9 @@
         var body: some View {
             VStack(spacing: 0) {
                 statusHeader
-                RowDivider(inset: 0)
+                Rectangle()
+                    .fill(Theme.border)
+                    .frame(height: 1)
                 if let smokeURL = model.smokeURL {
                     WebProbeView(
                         url: smokeURL,
@@ -68,9 +70,12 @@
                         .foregroundStyle(Theme.red)
                 }
                 HStack(spacing: 8) {
-                    MetaChip(text: model.sawExpectedHost ? "Host header seen" : "Host header not seen")
-                    MetaChip(text: navigationStatusText)
+                    Text(model.sawExpectedHost ? "Host header seen" : "Host header not seen")
+                    Text("·")
+                    Text(navigationStatusText)
                 }
+                .font(.system(size: 11))
+                .foregroundStyle(Theme.muted)
             }
             .padding(14)
             .background(Theme.surface)

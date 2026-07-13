@@ -149,7 +149,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     private var commandChannel: SpacesDeviceAPICommandChannel
     @ObservationIgnored private let remoteMediaDownloader: @Sendable (URL, SpacesDeviceTerminalLinkArtifactKind) async throws -> URL
     @ObservationIgnored private let linkPreviewCacheDirectory: URL
-    private let remoteClient: TerminalClient
+    private var remoteClient: TerminalClient
     private var e2eConfig: SpacesMobileE2EConfig { .shared }
     private var streamHandle: SpacesDeviceAPIStreamHandle?
     private var reconnectTask: Task<Void, Never>?
@@ -240,7 +240,11 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         self.linkPreviewCacheDirectory =
             linkPreviewCacheDirectory
             ?? FileManager.default.temporaryDirectory.appendingPathComponent("SpacesTerminalLinkPreviews", isDirectory: true)
-        remoteClient = TerminalClient(
+        remoteClient = Self.makeRemoteClient(settings: settings)
+    }
+
+    private static func makeRemoteClient(settings: SpacesMobileConnectionSettings) -> TerminalClient {
+        TerminalClient(
             kind: .remoteViewer,
             identity: TerminalClientIdentity(
                 label: UIDevice.current.name,
@@ -431,6 +435,14 @@ extension SpacesDeviceTerminalLinkArtifactKind {
 
     func start() {
         guard streamHandle == nil, reconnectTask == nil else { return }
+        if hasSentStopDetach {
+            // A retained navigation destination can disappear with its tab and later reappear. Give
+            // that new lifecycle its own channel and client identity so the prior stop task cannot
+            // close or detach the new stream.
+            commandChannel = bridgeClient.makeCommandChannel()
+            remoteClient = Self.makeRemoteClient(settings: settings)
+            hasSentStopDetach = false
+        }
         isStopping = false
         isSessionUnavailable = false
         hasAttemptedAutomaticTakeover = false

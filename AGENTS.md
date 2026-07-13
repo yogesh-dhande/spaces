@@ -51,6 +51,11 @@
 - Fork PR checks build missing Ghostty artifacts locally without publishing reusable releases.
 - Local debugging may use `apps/macos/scripts/setup_ghostty.sh --build --allow-dirty` for uncommitted Ghostty experiments, but Spaces PR and release workflows must use committed Ghostty fork work.
 
+## Version Metadata Rules
+- `apps/macos/AppVersion.plist` is the only place a Spaces version is authored. Never hand-edit `apps/macos/Sources/workspacecore/AppVersion.swift`, `apps/macos/Sources/SpacesApp/Info.plist`, or the version keys in `apps/ios/Info.plist`; change the source and run `scripts/sync-app-version.sh`. Spaces ships one version across every client, so all of them are generated from that source.
+- A client must never decide anything about a daemon by comparing the daemon's version against its own build version. The clients and a given device's daemon are on unrelated release trains, so that comparison is meaningless: an iPhone build number says nothing about what is installed on a Mac or a Linux box. Facts about a device — what it runs, what it has installed, whether an update is staged — are reported by that device's daemon in `TerminalServiceDaemonStatus` and read identically by every client.
+- The macOS `Info.plist` is regenerated wholesale from a template inside `scripts/sync-app-version.sh`. Add any new key to that template, not to the generated file, or the next sync silently drops it.
+
 ## Data and Migration Rules
 - Installed/default database path: `~/.spaces/spaces.db`.
 - Repo-local development builds default to `~/.spaces-dev/profiles/spaces/<branch-slug>-<worktree-hash>/spaces.db`.
