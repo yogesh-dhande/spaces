@@ -53,8 +53,10 @@ enum SpacesMobileAttention {
         var events: [SpacesMobileAttentionEvent] = []
         var representedSessionIDs: Set<String> = []
         let sessionByID = Dictionary(uniqueKeysWithValues: overview.sessions.map { ($0.id, $0) })
+        let invisibleWorkspaceIDs = Set(
+            overview.workspaces.lazy.filter { $0.isArchived || $0.isHidden }.map(\.id))
 
-        for workspace in overview.workspaces where !workspace.isArchived {
+        for workspace in overview.workspaces where !workspace.isArchived && !workspace.isHidden {
             for agent in workspace.codingAgentRows {
                 if let sessionID = agent.sessionID { representedSessionIDs.insert(sessionID) }
                 let kind: SpacesMobileAttentionEvent.Kind?
@@ -94,7 +96,10 @@ enum SpacesMobileAttention {
 
         // Loose sessions: the same dedupe rule as the home tab's terminal groups — a session already
         // represented by a workspace row is that row's event (or non-event), never a second one.
-        for session in overview.sessions where session.rowKind == .liveSession && !representedSessionIDs.contains(session.id) {
+        for session in overview.sessions
+        where session.rowKind == .liveSession && !representedSessionIDs.contains(session.id)
+            && !invisibleWorkspaceIDs.contains(session.workspaceID)
+        {
             guard let kind = terminalKind(for: session.state), let date = date(fromISO8601: session.updatedAt) else { continue }
             events.append(
                 SpacesMobileAttentionEvent(

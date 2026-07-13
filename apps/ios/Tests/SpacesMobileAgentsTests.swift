@@ -47,6 +47,15 @@
             XCTAssertTrue(SpacesMobileAgentGrouping.groups(in: overview).isEmpty)
         }
 
+        func testSkipsHiddenWorkspaces() {
+            let workspace = makeWorkspace(
+                id: "workspace-hidden", branch: "feature", isHidden: true,
+                codingAgentRows: [makeAgentRow(id: "agent-a", runState: .notStarted, activityState: .idle)])
+            let overview = makeOverview(workspaces: [workspace])
+
+            XCTAssertTrue(SpacesMobileAgentGrouping.groups(in: overview).isEmpty)
+        }
+
         func testDetailShowsProjectAndBranchOrSingleSharedName() {
             let gitEntry = SpacesMobileAgentEntry(
                 row: makeAgentRow(id: "agent-a", runState: .running, activityState: .spinning),
@@ -115,11 +124,12 @@
             id: String,
             branch: String?,
             isArchived: Bool = false,
+            isHidden: Bool = false,
             codingAgentRows: [SpacesDeviceWorkspaceCodingAgentRow] = []
         ) -> SpacesDeviceWorkspaceSummary {
             SpacesDeviceWorkspaceSummary(
                 id: id, projectID: "project-1", projectName: "Project", branch: branch, baseBranch: "main", dir: "/repo/\(id)",
-                isRunning: true, isArchived: isArchived, isHidden: false, isDefault: false, sessionCount: 0,
+                isRunning: true, isArchived: isArchived, isHidden: isHidden, isDefault: false, sessionCount: 0,
                 codingAgentRows: codingAgentRows)
         }
 

@@ -42,12 +42,12 @@ struct SpacesMobileAgentGroup: Identifiable, Equatable, Sendable {
     var id: String { kind.rawValue }
 }
 
-/// Pure grouping of every coding-agent row across non-archived workspaces into activity bands.
+/// Pure grouping of every coding-agent row across visible workspaces into activity bands.
 /// Empty bands are omitted.
 enum SpacesMobileAgentGrouping {
     static func groups(in overview: SpacesDeviceOverviewPayload) -> [SpacesMobileAgentGroup] {
         var entriesByKind: [SpacesMobileAgentGroupKind: [SpacesMobileAgentEntry]] = [:]
-        for workspace in overview.workspaces where !workspace.isArchived {
+        for workspace in overview.workspaces where !workspace.isArchived && !workspace.isHidden {
             for agent in workspace.codingAgentRows {
                 let entry = SpacesMobileAgentEntry(
                     row: agent, workspaceDisplayName: workspace.displayName, projectName: workspace.projectName)

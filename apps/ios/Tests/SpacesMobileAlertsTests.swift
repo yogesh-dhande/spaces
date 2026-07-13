@@ -103,6 +103,33 @@
             XCTAssertEqual(events.first?.date, SpacesMobileAttention.date(fromISO8601: "2026-01-01T00:07:00Z"))
         }
 
+        func testSkipsEventsAndLooseSessionsFromHiddenWorkspaces() {
+            let workspace = makeWorkspace(
+                id: "workspace-feature", branch: "feature", isHidden: true,
+                codingAgentRows: [
+                    makeAgentRow(
+                        id: "agent-hidden", name: "claude", activityState: .waiting,
+                        updatedAt: "2026-01-01T00:01:00Z")
+                ],
+                processRows: [
+                    makeProcessRow(
+                        id: "process-hidden", name: "web", sessionID: "session-process", runState: .exited,
+                        exitedAt: "2026-01-01T00:02:00Z")
+                ],
+                terminalRows: [
+                    makeTerminalRow(id: "terminal-hidden", title: "zsh", sessionID: "session-terminal", runState: .exited)
+                ])
+            let overview = makeOverview(
+                workspaces: [workspace],
+                sessions: [
+                    makeSession(id: "session-process", title: "web", state: .exited, updatedAt: "2026-01-01T00:02:00Z"),
+                    makeSession(id: "session-terminal", title: "zsh", state: .failed, updatedAt: "2026-01-01T00:03:00Z"),
+                    makeSession(id: "session-loose", title: "shell", state: .exited, updatedAt: "2026-01-01T00:04:00Z"),
+                ])
+
+            XCTAssertTrue(SpacesMobileAttention.events(in: overview).isEmpty)
+        }
+
         func testGroupsSortNewestFirstAndEventsWithinGroupNewestFirst() {
             let overview = makeOverview(
                 workspaces: [
@@ -221,13 +248,15 @@
         private func makeWorkspace(
             id: String,
             branch: String?,
+            isArchived: Bool = false,
+            isHidden: Bool = false,
             codingAgentRows: [SpacesDeviceWorkspaceCodingAgentRow] = [],
             processRows: [SpacesDeviceWorkspaceProcessRow] = [],
             terminalRows: [SpacesDeviceWorkspaceTerminalRow] = []
         ) -> SpacesDeviceWorkspaceSummary {
             SpacesDeviceWorkspaceSummary(
                 id: id, projectID: "project-1", projectName: "Project", branch: branch, baseBranch: "main", dir: "/repo/\(id)",
-                isRunning: true, isArchived: false, isHidden: false, isDefault: false, sessionCount: 0, processRows: processRows,
+                isRunning: true, isArchived: isArchived, isHidden: isHidden, isDefault: false, sessionCount: 0, processRows: processRows,
                 codingAgentRows: codingAgentRows, terminalRows: terminalRows)
         }
 
