@@ -48,7 +48,7 @@ import Foundation
             #else
                 let taskDirectory = URL(fileURLWithPath: "/proc/\(parent)/task", isDirectory: true)
                 let taskURLs = (try? FileManager.default.contentsOfDirectory(at: taskDirectory, includingPropertiesForKeys: nil)) ?? []
-                return taskURLs.flatMap { taskURL in
+                return taskURLs.flatMap { taskURL -> [pid_t] in
                     let childrenURL = taskURL.appendingPathComponent("children")
                     guard let contents = try? String(contentsOf: childrenURL, encoding: .utf8) else { return [] }
                     return contents.split(whereSeparator: \.isWhitespace).compactMap { pid_t(String($0)) }
