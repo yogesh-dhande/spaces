@@ -237,15 +237,8 @@ osacompile -o "$installer_app" "$installer_source" >/dev/null
 cp "$REPO_ROOT/apps/macos/Sources/SpacesApp/AppIcon.icns" "$installer_app/Contents/Resources/applet.icns"
 rm -f "$installer_source"
 
-# Sign the complete app bundle (required for notarization)
 IDENTITY="${CODESIGN_IDENTITY:--}"
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-ENTITLEMENTS="$SCRIPT_DIR/entitlements.plist"
-echo "Signing app bundle with identity: $IDENTITY"
-codesign --force --deep --timestamp --options runtime --entitlements "$ENTITLEMENTS" --sign "$IDENTITY" "$app_bundle"
-
-# Verify signature
-codesign --verify --verbose=2 "$app_bundle"
+"$REPO_ROOT/scripts/codesign-spaces-app.sh" "$app_bundle"
 echo "✓ App bundle signature verified"
 
 codesign --force --deep --timestamp --options runtime --sign "$IDENTITY" "$installer_app"

@@ -106,6 +106,10 @@ require_universal_binary \
 require_universal_binary \
   "$mountpoint/Spaces.app/Contents/Resources/spacesd" \
   "Spaces.app bundled spacesd daemon"
+bundled_caddy="$mountpoint/Spaces.app/Contents/Resources/caddy"
+require_universal_binary "$bundled_caddy" "Spaces.app bundled Caddy"
+echo "Verifying bundled Caddy signature..."
+codesign --verify --strict --verbose=2 "$bundled_caddy"
 
 ghostty_resources="$mountpoint/Spaces.app/Contents/Resources/ghostty"
 if [[ ! -d "$ghostty_resources" ]]; then
