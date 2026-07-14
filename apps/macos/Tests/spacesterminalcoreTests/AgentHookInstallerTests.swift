@@ -3,6 +3,12 @@ import Testing
 
 @testable import spacesterminalcore
 
+#if os(Linux)
+    import Glibc
+#else
+    import Darwin
+#endif
+
 @Suite struct AgentHookInstallerTests {
     /// Availability probing reads `PATH`, then the common install directories, then the user's login
     /// shell. Tests pin all three — an empty `PATH`, a `HomeScopedFileManager` that hides executables
@@ -422,6 +428,38 @@ import Testing
         #expect(outcome.failures.first?.message.localizedStandardContains("invalid Codex configuration") == true)
         #expect(outcome.agents.first { $0.kind == .claudeCode }?.installState == .current)
         #expect(outcome.agents.first { $0.kind == .codex }?.installState == .outdated)
+    }
+
+    @Test func codexFeatureCommandTimeoutKillsTheWrapperAndItsChild() throws {
+        let home = try makeHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let codexHome = home.appendingPathComponent(".codex", isDirectory: true)
+        try FileManager.default.createDirectory(at: codexHome, withIntermediateDirectories: true)
+        let executable = try makeExecutable(
+            name: "codex", directory: home.appendingPathComponent(".local/bin", isDirectory: true),
+            contents: #"""
+                #!/bin/sh
+                sleep 30 &
+                child=$!
+                printf '%s\n' "$child" > "$CODEX_HOME/child.pid"
+                wait "$child"
+                """#)
+
+        let startedAt = Date()
+        #expect(throws: (any Error).self) {
+            try AgentHookCodexFeatureToggle.ensureEnabled(executablePath: executable.path, codexHome: codexHome, timeoutSeconds: 2)
+        }
+
+        #expect(Date().timeIntervalSince(startedAt) < 5)
+        let childPID = try #require(pid_t(read(codexHome.appendingPathComponent("child.pid")).trimmingCharacters(in: .whitespacesAndNewlines)))
+        let processExitDeadline = Date().addingTimeInterval(1)
+        while processExists(childPID) && Date() < processExitDeadline { usleep(10_000) }
+        #expect(!processExists(childPID))
+    }
+
+    private func processExists(_ processID: pid_t) -> Bool {
+        errno = 0
+        return kill(processID, 0) == 0 || errno != ESRCH
     }
 
     // MARK: - Status
