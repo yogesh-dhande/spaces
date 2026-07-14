@@ -401,6 +401,31 @@ import Testing
         #expect(invocations.contains("features list|\(codexHome.path)"))
     }
 
+    @Test func codexFeatureCommandsCanResolveARuntimeBesideTheResolvedCLI() throws {
+        let home = try makeHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let runtimeDirectory = home.appendingPathComponent(".fnm/node-versions/v24/installation/bin", isDirectory: true)
+        let codexHome = home.appendingPathComponent(".codex", isDirectory: true)
+        try FileManager.default.createDirectory(at: codexHome, withIntermediateDirectories: true)
+        let executable = try makeExecutable(name: "codex", directory: runtimeDirectory, contents: "#!/usr/bin/env node\n")
+        try makeExecutable(
+            name: "node", directory: runtimeDirectory,
+            contents: #"""
+                #!/bin/sh
+                shift
+                if [ "$1 $2 $3" = "features enable hooks" ]; then
+                  exit 0
+                fi
+                if [ "$1 $2" = "features list" ]; then
+                  printf 'hooks stable true\n'
+                  exit 0
+                fi
+                exit 64
+                """#)
+
+        try AgentHookCodexFeatureToggle.ensureEnabled(executablePath: executable.path, codexHome: codexHome)
+    }
+
     @Test func codexFeatureListParserReadsTheNamedFeaturesEffectiveState() {
         let enabled = """
             apps                                 stable             true

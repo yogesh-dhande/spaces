@@ -30,7 +30,7 @@ import systembridge
     /// so a user who has that step to complete never waits on it at all. A daemon that is wedged must
     /// not hold the app on a spinner forever; giving up costs the user nothing, because the step is
     /// left undismissed and reappears next launch.
-    static let localAgentStatusTimeout: Duration = .seconds(15)
+    static let localAgentStatusTimeout: Duration = .seconds(25)
 
     private unowned let host: any CodingAgentsHost
     private let database: SpacesClientDatabase?

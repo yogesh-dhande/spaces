@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 
+@testable import spacesclientcore
 @testable import spacesterminalcore
 @testable import spacesui
 
@@ -16,6 +17,10 @@ import Testing
     private func requires(_ localAgents: [AgentHookStatus]?, dismissed: Int?) -> Bool {
         SetupFlowController.requiresCodingAgentsSetup(
             localAgents: localAgents, dismissedHookVersion: dismissed, currentHookVersion: currentVersion)
+    }
+
+    @Test func launchWaitExceedsTheAgentStatusRequestTimeout() {
+        #expect(SetupFlowController.localAgentStatusTimeout > .seconds(SpacesDeviceClient.agentHooksStatusRequestTimeoutSeconds))
     }
 
     @Test func stepIsOfferedWhenADetectedAgentNeedsHooks() {

@@ -64,6 +64,11 @@ enum AgentHookCodexFeatureToggle {
             process.arguments = arguments
             var environment = ProcessInfo.processInfo.environment
             environment["CODEX_HOME"] = codexHome.path
+            // Version-manager launchers commonly use `#!/usr/bin/env node`; resolving the launcher
+            // by absolute path is not enough unless its sibling runtime also leads PATH.
+            let executableDirectory = URL(fileURLWithPath: executablePath).deletingLastPathComponent().path
+            let currentPathDirectories = environment["PATH"]?.split(separator: ":").map(String.init) ?? []
+            environment["PATH"] = ([executableDirectory] + currentPathDirectories.filter { $0 != executableDirectory }).joined(separator: ":")
             process.environment = environment
             process.standardInput = FileHandle.nullDevice
 

@@ -77,6 +77,7 @@ public enum SpacesDeviceClient {
     typealias DeviceRequestProvider =
         @Sendable (SpacesDeviceAPIRequest, SpacesPairedDeviceRecord, SpacesDeviceClientApp, SpacesProfile?) throws -> SpacesDeviceAPIResponse
     static let defaultRequestTimeoutSeconds: TimeInterval = 10
+    static let agentHooksStatusRequestTimeoutSeconds: TimeInterval = 20
     static let longRunningMutationTimeoutSeconds: TimeInterval = 60
 
     public static func macOSClientApp(
@@ -669,10 +670,12 @@ public enum SpacesDeviceClient {
             .restartWorkspace, .archiveWorkspace, .runWorkspaceSetup, .openWorkspaceTerminal, .stopWorkspaceTerminal, .runWorkspaceProcess,
             .stopWorkspaceProcess, .restartWorkspaceProcess, .runCodingAgent, .stopCodingAgent, .restartCodingAgent, .installAgentHooks:
             longRunningMutationTimeoutSeconds
+        case .agentHooksStatus:
+            agentHooksStatusRequestTimeoutSeconds
         case .pair, .ping, .daemonStatus, .requestDaemonRestart, .overview, .previewProject, .listDirectories, .workspaceCreateOptions,
             .updateProjectConfig, .updateWorkspaceConfig, .updateWorkspaceMetadata, .renameTerminalSession, .state, .terminalControl,
             .terminalPasteImage, .sendTerminalInput, .tailTerminalOutput, .resolveTerminalLink, .readTerminalLinkChunk, .subscribe,
-            .subscribeDeviceOverview, .agentHooksStatus, .openServiceTunnel:
+            .subscribeDeviceOverview, .openServiceTunnel:
             defaultRequestTimeoutSeconds
         }
     }
