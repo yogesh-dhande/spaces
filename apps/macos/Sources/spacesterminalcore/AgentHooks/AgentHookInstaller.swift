@@ -1,9 +1,10 @@
-import Foundation
 import Dispatch
+import Foundation
+
 #if os(Linux)
-import Glibc
+    import Glibc
 #else
-import Darwin
+    import Darwin
 #endif
 
 /// The install/availability status of one supported coding agent on the machine the daemon runs on.
@@ -82,10 +83,9 @@ public enum AgentHookInstaller {
     /// Idempotently installs hooks for `kinds`, then returns fresh status for every supported agent
     /// alongside one failure entry per agent that could not be installed. Each agent is attempted
     /// independently, so a config Spaces refuses to edit costs only that agent.
-    @discardableResult
-    public static func install(
-        _ kinds: [SupportedCodingAgentHook], home: URL = defaultHome(), fileManager: FileManager = .default
-    ) throws -> AgentHookInstallOutcome {
+    @discardableResult public static func install(_ kinds: [SupportedCodingAgentHook], home: URL = defaultHome(), fileManager: FileManager = .default)
+        throws -> AgentHookInstallOutcome
+    {
         var executableResolver = ExecutableResolver(home: home, fileManager: fileManager)
         return try install(kinds, home: home, fileManager: fileManager, executableResolver: &executableResolver)
     }
@@ -105,8 +105,7 @@ public enum AgentHookInstaller {
         return status(home: home, fileManager: fileManager, executableResolver: &executableResolver)
     }
 
-    @discardableResult
-    static func install(
+    @discardableResult static func install(
         _ kinds: [SupportedCodingAgentHook], home: URL, fileManager: FileManager, environment: [String: String],
         shellPathDirectoryResolver: @escaping ShellPathDirectoryResolver
     ) throws -> AgentHookInstallOutcome {
@@ -135,18 +134,16 @@ public enum AgentHookInstaller {
     private static func install(
         _ kinds: [SupportedCodingAgentHook], home: URL, fileManager: FileManager, executableResolver: inout ExecutableResolver
     ) throws -> AgentHookInstallOutcome {
-        guard let spacesExecutablePath = executableResolver.resolve(named: AgentHookCommand.spacesExecutableName) else {
-            throw AgentHookInstallerError.spacesCLINotFound
-        }
+        guard let resolvedSpacesExecutablePath = executableResolver.resolve(named: AgentHookCommand.spacesExecutableName),
+            let spacesExecutablePath = hookSpacesExecutablePath(resolvedPath: resolvedSpacesExecutablePath, home: home, fileManager: fileManager)
+        else { throw AgentHookInstallerError.spacesCLINotFound }
         var failures: [AgentHookInstallFailure] = []
         for kind in kinds {
             guard isAvailable(kind, executableResolver: &executableResolver) else {
                 failures.append(.init(kind: kind, message: "\(kind.displayName) was not detected on this machine."))
                 continue
             }
-            do {
-                try kind.install(home: home, fileManager: fileManager, spacesExecutablePath: spacesExecutablePath)
-            } catch {
+            do { try kind.install(home: home, fileManager: fileManager, spacesExecutablePath: spacesExecutablePath) } catch {
                 failures.append(.init(kind: kind, message: error.localizedDescription))
             }
         }
@@ -215,197 +212,194 @@ public enum AgentHookInstaller {
 
     private static func commonExecutableDirectories(home: URL) -> [String] {
         [
-            "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin",
-            home.appendingPathComponent(".local/bin").path,
-            home.appendingPathComponent(".bun/bin").path,
-            home.appendingPathComponent(".deno/bin").path,
-            home.appendingPathComponent("bin").path,
+            "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", home.appendingPathComponent(".local/bin").path,
+            home.appendingPathComponent(".bun/bin").path, home.appendingPathComponent(".deno/bin").path, home.appendingPathComponent("bin").path,
         ]
+    }
+
+    /// Linux releases live under a versioned directory, but the installer also maintains one stable
+    /// CLI symlink. Persisting the release path in an agent config would pin hooks to an old CLI after
+    /// the daemon updates. Normalize only this known installed layout; development and other CLI paths
+    /// remain the exact executable the resolver found.
+    private static func hookSpacesExecutablePath(resolvedPath: String, home: URL, fileManager: FileManager) -> String? {
+        let releasesPath = home.appendingPathComponent(".spaces/daemon/releases", isDirectory: true).standardizedFileURL.path
+        let candidatePath = URL(fileURLWithPath: resolvedPath).standardizedFileURL.path
+        guard candidatePath.hasPrefix(releasesPath + "/") else { return candidatePath }
+
+        let stablePath = home.appendingPathComponent(".spaces/bin/spaces").standardizedFileURL.path
+        return fileManager.isExecutableFile(atPath: stablePath) ? stablePath : nil
     }
 
     private static func orderedUnique(_ directories: [String]) -> [String] {
         var seen: Set<String> = []
         var result: [String] = []
-        for directory in directories where seen.insert(directory).inserted {
-            result.append(directory)
-        }
+        for directory in directories where seen.insert(directory).inserted { result.append(directory) }
         return result
     }
 
-#if os(macOS) || os(Linux)
-    /// Spawning an interactive login shell costs seconds — it sources the user's whole rc chain
-    /// (version managers, completions) — and the daemon probes availability on every app launch,
-    /// device connect, and Settings → Coding Agents open. Probes are user-action driven rather than a
-    /// hot loop, so a short TTL collapses the burst each action makes without holding a stale answer.
-    ///
-    /// The TTL is what keeps the "a newly installed agent is picked up on the next connect" contract
-    /// honest. `spacesd` outlives the app, so a cache held for the daemon's lifetime would survive an
-    /// app relaunch: an agent installed through a version manager whose shim directory is not yet on
-    /// the daemon's PATH would stay undetected until the daemon itself restarted.
-    ///
-    /// Failed probes are cached too. A shell that is missing, or an rc script that hangs past the
-    /// probe timeout, would otherwise pay the full timeout on *every* status call forever; caching the
-    /// failure bounds that to once per TTL and still recovers on its own.
-    static let shellDirectoryCacheTTLSeconds: TimeInterval = 60
+    #if os(macOS) || os(Linux)
+        /// Spawning an interactive login shell costs seconds — it sources the user's whole rc chain
+        /// (version managers, completions) — and the daemon probes availability on every app launch,
+        /// device connect, and Settings → Coding Agents open. Probes are user-action driven rather than a
+        /// hot loop, so a short TTL collapses the burst each action makes without holding a stale answer.
+        ///
+        /// The TTL is what keeps the "a newly installed agent is picked up on the next connect" contract
+        /// honest. `spacesd` outlives the app, so a cache held for the daemon's lifetime would survive an
+        /// app relaunch: an agent installed through a version manager whose shim directory is not yet on
+        /// the daemon's PATH would stay undetected until the daemon itself restarted.
+        ///
+        /// Failed probes are cached too. A shell that is missing, or an rc script that hangs past the
+        /// probe timeout, would otherwise pay the full timeout on *every* status call forever; caching the
+        /// failure bounds that to once per TTL and still recovers on its own.
+        static let shellDirectoryCacheTTLSeconds: TimeInterval = 60
 
-    private static let shellDirectoryCache = ShellDirectoryCache()
+        private static let shellDirectoryCache = ShellDirectoryCache()
 
-    private static func cachedLoginShellPathDirectories(home: URL, environment: [String: String], fileManager: FileManager) -> [String] {
-        shellDirectoryCache.directories(home: home) { loginShellPathDirectories(home: home, environment: environment, fileManager: fileManager) }
-    }
-
-    final class ShellDirectoryCache: @unchecked Sendable {
-        private struct Entry {
-            let directories: [String]
-            let capturedAtNanoseconds: UInt64
+        private static func cachedLoginShellPathDirectories(home: URL, environment: [String: String], fileManager: FileManager) -> [String] {
+            shellDirectoryCache.directories(home: home) { loginShellPathDirectories(home: home, environment: environment, fileManager: fileManager) }
         }
 
-        private let lock = NSLock()
-        private var entriesByHome: [String: Entry] = [:]
-        private let ttlNanoseconds: UInt64
-        /// Monotonic, so a system clock change can neither freeze nor expire the cache.
-        private let now: @Sendable () -> UInt64
-
-        init(
-            ttlSeconds: TimeInterval = AgentHookInstaller.shellDirectoryCacheTTLSeconds,
-            now: @escaping @Sendable () -> UInt64 = { DispatchTime.now().uptimeNanoseconds }
-        ) {
-            self.ttlNanoseconds = UInt64(ttlSeconds * 1_000_000_000)
-            self.now = now
-        }
-
-        /// Holds the lock across `compute` so concurrent probes spawn one shell, not one each. One lock
-        /// rather than one per home: a process serves exactly one home (its own user's), so the map is
-        /// keyed by home only to let tests exercise several without sharing state, and contention
-        /// between distinct homes cannot arise in production.
-        func directories(home: URL, compute: () -> [String]) -> [String] {
-            lock.lock()
-            defer { lock.unlock() }
-            let timestamp = now()
-            if let entry = entriesByHome[home.path], timestamp &- entry.capturedAtNanoseconds < ttlNanoseconds {
-                return entry.directories
+        final class ShellDirectoryCache: @unchecked Sendable {
+            private struct Entry {
+                let directories: [String]
+                let capturedAtNanoseconds: UInt64
             }
-            let computed = compute()
-            entriesByHome[home.path] = Entry(directories: computed, capturedAtNanoseconds: timestamp)
-            return computed
-        }
-    }
 
-    private static func loginShellPathDirectories(home: URL, environment: [String: String], fileManager: FileManager) -> [String] {
-        guard let shellPath = userLoginShellPath(environment: environment, fileManager: fileManager),
-            let shellPATH = resolvedLoginShellPATH(shellPath: shellPath, home: home, environment: environment)
-        else {
-            return []
-        }
-        return pathDirectories(from: shellPATH)
-    }
+            private let lock = NSLock()
+            private var entriesByHome: [String: Entry] = [:]
+            private let ttlNanoseconds: UInt64
+            /// Monotonic, so a system clock change can neither freeze nor expire the cache.
+            private let now: @Sendable () -> UInt64
 
-    private static func userLoginShellPath(environment: [String: String], fileManager: FileManager) -> String? {
-        let candidates = [
-            environment["SHELL"].flatMap { $0.isEmpty ? nil : $0 },
-            passwdLoginShellPath(),
-            "/bin/zsh",
-            "/bin/bash",
-            "/bin/sh",
-        ].compactMap(\.self)
-        return candidates.first { fileManager.isExecutableFile(atPath: $0) }
-    }
-
-    private static func passwdLoginShellPath() -> String? {
-        guard let entry = getpwuid(getuid()), let shell = entry.pointee.pw_shell else { return nil }
-        let path = String(cString: shell)
-        return path.isEmpty ? nil : path
-    }
-
-    /// Marks the PATH line in the login shell's output. The shell's rc files write arbitrary text to
-    /// both streams first, so the value is printed on its own line and read back by prefix.
-    static let pathMarkerPrefix = "__SPACES_AGENT_HOOK_PATH__="
-
-    /// Runs the user's login shell and reads back the PATH it would give a Spaces terminal.
-    ///
-    /// The pipe is drained by a readability handler *while* the shell runs, so an rc chain that writes
-    /// more than the 64KB pipe buffer cannot deadlock. Process termination does not imply the handler
-    /// has consumed the last chunk, so the output is read through to EOF before it is parsed —
-    /// otherwise the marker line, which is printed last, can be lost and the shell PATH silently
-    /// ignored.
-    ///
-    /// The shell is interactive (`-i`) because version managers put their shim directories on PATH
-    /// from `.zshrc`, which a login-only shell never sources. An interactive shell that inherits a
-    /// terminal on stdin, though, will touch that terminal — reconfiguring its modes, or taking
-    /// job-control signals that stop the probe until it times out. Both callers can have a terminal on
-    /// stdin (the `spaces` CLI always does), so stdin is redirected to /dev/null: nothing is ever
-    /// written to the shell, only read back from it.
-    static func resolvedLoginShellPATH(shellPath: String, home: URL, environment: [String: String]) -> String? {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: shellPath)
-        process.arguments = ["-l", "-i", "-c", "printf '\\n\(pathMarkerPrefix)%s\\n' \"$PATH\""]
-        var processEnvironment = environment
-        processEnvironment["HOME"] = home.path
-        if processEnvironment["PATH"]?.isEmpty ?? true {
-            processEnvironment["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
-        }
-        process.environment = processEnvironment
-        process.standardInput = FileHandle.nullDevice
-
-        let outputPipe = Pipe()
-        let outputBuffer = PipeOutputBuffer()
-        let endOfOutput = DispatchSemaphore(value: 0)
-        outputPipe.fileHandleForReading.readabilityHandler = { handle in
-            let data = handle.availableData
-            guard !data.isEmpty else {
-                handle.readabilityHandler = nil  // EOF: the shell exited and its write end closed
-                endOfOutput.signal()
-                return
+            init(
+                ttlSeconds: TimeInterval = AgentHookInstaller.shellDirectoryCacheTTLSeconds,
+                now: @escaping @Sendable () -> UInt64 = { DispatchTime.now().uptimeNanoseconds }
+            ) {
+                self.ttlNanoseconds = UInt64(ttlSeconds * 1_000_000_000)
+                self.now = now
             }
-            outputBuffer.append(data)
+
+            /// Holds the lock across `compute` so concurrent probes spawn one shell, not one each. One lock
+            /// rather than one per home: a process serves exactly one home (its own user's), so the map is
+            /// keyed by home only to let tests exercise several without sharing state, and contention
+            /// between distinct homes cannot arise in production.
+            func directories(home: URL, compute: () -> [String]) -> [String] {
+                lock.lock()
+                defer { lock.unlock() }
+                let timestamp = now()
+                if let entry = entriesByHome[home.path], timestamp &- entry.capturedAtNanoseconds < ttlNanoseconds { return entry.directories }
+                let computed = compute()
+                entriesByHome[home.path] = Entry(directories: computed, capturedAtNanoseconds: timestamp)
+                return computed
+            }
         }
-        process.standardOutput = outputPipe
-        process.standardError = outputPipe
 
-        let completion = DispatchSemaphore(value: 0)
-        process.terminationHandler = { _ in completion.signal() }
+        private static func loginShellPathDirectories(home: URL, environment: [String: String], fileManager: FileManager) -> [String] {
+            guard let shellPath = userLoginShellPath(environment: environment, fileManager: fileManager),
+                let shellPATH = resolvedLoginShellPATH(shellPath: shellPath, home: home, environment: environment)
+            else { return [] }
+            return pathDirectories(from: shellPATH)
+        }
 
-        do {
-            try process.run()
-        } catch {
+        private static func userLoginShellPath(environment: [String: String], fileManager: FileManager) -> String? {
+            let candidates = [environment["SHELL"].flatMap { $0.isEmpty ? nil : $0 }, passwdLoginShellPath(), "/bin/zsh", "/bin/bash", "/bin/sh"]
+                .compactMap(\.self)
+            return candidates.first { fileManager.isExecutableFile(atPath: $0) }
+        }
+
+        private static func passwdLoginShellPath() -> String? {
+            guard let entry = getpwuid(getuid()), let shell = entry.pointee.pw_shell else { return nil }
+            let path = String(cString: shell)
+            return path.isEmpty ? nil : path
+        }
+
+        /// Marks the PATH line in the login shell's output. The shell's rc files write arbitrary text to
+        /// both streams first, so the value is printed on its own line and read back by prefix.
+        static let pathMarkerPrefix = "__SPACES_AGENT_HOOK_PATH__="
+
+        /// Runs the user's login shell and reads back the PATH it would give a Spaces terminal.
+        ///
+        /// The pipe is drained by a readability handler *while* the shell runs, so an rc chain that writes
+        /// more than the 64KB pipe buffer cannot deadlock. Process termination does not imply the handler
+        /// has consumed the last chunk, so the output is read through to EOF before it is parsed —
+        /// otherwise the marker line, which is printed last, can be lost and the shell PATH silently
+        /// ignored.
+        ///
+        /// The shell is interactive (`-i`) because version managers put their shim directories on PATH
+        /// from `.zshrc`, which a login-only shell never sources. An interactive shell that inherits a
+        /// terminal on stdin, though, will touch that terminal — reconfiguring its modes, or taking
+        /// job-control signals that stop the probe until it times out. Both callers can have a terminal on
+        /// stdin (the `spaces` CLI always does), so stdin is redirected to /dev/null: nothing is ever
+        /// written to the shell, only read back from it.
+        static func resolvedLoginShellPATH(shellPath: String, home: URL, environment: [String: String]) -> String? {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: shellPath)
+            process.arguments = ["-l", "-i", "-c", "printf '\\n\(pathMarkerPrefix)%s\\n' \"$PATH\""]
+            var processEnvironment = environment
+            processEnvironment["HOME"] = home.path
+            if processEnvironment["PATH"]?.isEmpty ?? true { processEnvironment["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin" }
+            process.environment = processEnvironment
+            process.standardInput = FileHandle.nullDevice
+
+            let outputPipe = Pipe()
+            let outputBuffer = PipeOutputBuffer()
+            let endOfOutput = DispatchSemaphore(value: 0)
+            outputPipe.fileHandleForReading.readabilityHandler = { handle in
+                let data = handle.availableData
+                guard !data.isEmpty else {
+                    handle.readabilityHandler = nil  // EOF: the shell exited and its write end closed
+                    endOfOutput.signal()
+                    return
+                }
+                outputBuffer.append(data)
+            }
+            process.standardOutput = outputPipe
+            process.standardError = outputPipe
+
+            let completion = DispatchSemaphore(value: 0)
+            process.terminationHandler = { _ in completion.signal() }
+
+            do { try process.run() } catch {
+                outputPipe.fileHandleForReading.readabilityHandler = nil
+                return nil
+            }
+
+            if completion.wait(timeout: .now() + 5) == .timedOut {
+                process.terminate()
+                if completion.wait(timeout: .now() + 1) == .timedOut {
+                    kill(process.processIdentifier, SIGKILL)
+                    completion.wait()
+                }
+            }
+            process.waitUntilExit()
+            // The shell has exited, so EOF is imminent; bound the wait anyway rather than hang the daemon
+            // on a grandchild that inherited the write end and outlives its parent.
+            _ = endOfOutput.wait(timeout: .now() + 1)
             outputPipe.fileHandleForReading.readabilityHandler = nil
-            return nil
-        }
 
-        if completion.wait(timeout: .now() + 5) == .timedOut {
-            process.terminate()
-            if completion.wait(timeout: .now() + 1) == .timedOut {
-                kill(process.processIdentifier, SIGKILL)
-                completion.wait()
+            guard process.terminationStatus == 0, let output = String(data: outputBuffer.snapshot(), encoding: .utf8) else { return nil }
+            return output.components(separatedBy: .newlines).last { $0.hasPrefix(pathMarkerPrefix) }.map {
+                String($0.dropFirst(pathMarkerPrefix.count))
             }
         }
-        process.waitUntilExit()
-        // The shell has exited, so EOF is imminent; bound the wait anyway rather than hang the daemon
-        // on a grandchild that inherited the write end and outlives its parent.
-        _ = endOfOutput.wait(timeout: .now() + 1)
-        outputPipe.fileHandleForReading.readabilityHandler = nil
 
-        guard process.terminationStatus == 0, let output = String(data: outputBuffer.snapshot(), encoding: .utf8) else { return nil }
-        return output.components(separatedBy: .newlines).last { $0.hasPrefix(pathMarkerPrefix) }.map { String($0.dropFirst(pathMarkerPrefix.count)) }
-    }
+        private final class PipeOutputBuffer: @unchecked Sendable {
+            private let lock = NSLock()
+            private var data = Data()
 
-    private final class PipeOutputBuffer: @unchecked Sendable {
-        private let lock = NSLock()
-        private var data = Data()
+            func append(_ chunk: Data) {
+                lock.lock()
+                data.append(chunk)
+                lock.unlock()
+            }
 
-        func append(_ chunk: Data) {
-            lock.lock()
-            data.append(chunk)
-            lock.unlock()
+            func snapshot() -> Data {
+                lock.lock()
+                defer { lock.unlock() }
+                return data
+            }
         }
-
-        func snapshot() -> Data {
-            lock.lock()
-            defer { lock.unlock() }
-            return data
-        }
-    }
-#else
-    private static func cachedLoginShellPathDirectories(home: URL, environment: [String: String], fileManager: FileManager) -> [String] { [] }
-#endif
+    #else
+        private static func cachedLoginShellPathDirectories(home: URL, environment: [String: String], fileManager: FileManager) -> [String] { [] }
+    #endif
 }

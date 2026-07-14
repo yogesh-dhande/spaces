@@ -57,7 +57,19 @@ private func deviceAPIStreamRelayAttributes(for data: Data) -> [String: String] 
     return attributes
 }
 
+extension SpacesDeviceAPICommand {
+    fileprivate var isAgentHookCommand: Bool {
+        switch self {
+        case .agentHooksStatus, .installAgentHooks: true
+        default: false
+        }
+    }
+}
+
 public final class SpacesDeviceAPIServer: @unchecked Sendable {
+    typealias AgentHookStatusLoader = @Sendable () -> [AgentHookStatus]
+    typealias AgentHookInstallHandler = @Sendable ([SupportedCodingAgentHook]) throws -> AgentHookInstallOutcome
+
     private static let streamRelayReadBufferSize = 256 * 1024
     private static let defaultTerminalLinkTransferAuthorizationTTL: TimeInterval = 10 * 60
     static let terminalPasteImageMaxBytes = 10 * 1024 * 1024
@@ -322,7 +334,20 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                         }
                         return
                     }
-                    let response = try server.handleRequest(request, peerID: peerID)
+                    if request.command.isAgentHookCommand {
+                        server.handleAgentHookRequestAsync(request) { [weak self] result in self?.finishRequest(result) }
+                    } else {
+                        finishRequest(Result { try server.handleRequest(request, peerID: peerID) })
+                    }
+                } catch { finishRequest(.failure(error)) }
+            }
+
+            /// Sends one request result, then either resumes the reusable request session or closes it
+            /// after a thrown request error. Called only on the Device API queue, including completions
+            /// from the separate agent-hook worker queue.
+            private func finishRequest(_ result: Result<SpacesDeviceAPIResponse, any Error>) {
+                switch result {
+                case .success(let response):
                     server.sendResponse(response, to: connection) { [weak self] error in
                         guard let self else { return }
                         if let error {
@@ -332,7 +357,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                         }
                         self.processBufferedLines()
                     }
-                } catch {
+                case .failure(let error):
                     server.trace("request_error peer=\(peerID) error=\(String(describing: error).replacingOccurrences(of: "\n", with: "\\n"))")
                     let response = SpacesDeviceAPIServer.failureResponse(for: error)
                     server.sendResponse(response, to: connection) { [weak self] _ in self?.connection.cancel() }
@@ -520,9 +545,14 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
 
                     let response: SpacesDeviceAPIResponse
                     do {
-                        response = try server.syncOnQueue {
-                            try server.authorize(request)
-                            return try server.handleRequest(request, peerID: "linux:\(fileDescriptor)")
+                        if request.command.isAgentHookCommand {
+                            try server.syncOnQueue { try server.authorize(request) }
+                            response = try server.handleAgentHookRequestOnWorkerQueue(request)
+                        } else {
+                            response = try server.syncOnQueue {
+                                try server.authorize(request)
+                                return try server.handleRequest(request, peerID: "linux:\(fileDescriptor)")
+                            }
                         }
                     } catch { response = SpacesDeviceAPIServer.failureResponse(for: error) }
                     let responseLine = try SpacesDeviceAPICodec.encodeResponseLine(response)
@@ -742,6 +772,11 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// is respawned by launchd `KeepAlive` / systemd `Restart=always` from the updated binary.
     private let onRestartRequested: (@Sendable () -> Void)?
     private let overviewLoaderForTesting: (@Sendable (SpacesDeviceClientApp?) throws -> SpacesDeviceOverviewPayload)?
+    private let agentHookStatusLoader: AgentHookStatusLoader
+    private let agentHookInstallHandler: AgentHookInstallHandler
+    /// Login-shell probing and config writes can take seconds. Serialize them independently so they
+    /// cannot stall terminal controls, overview requests, or the rest of the Device API state queue.
+    private let agentHookQueue = DispatchQueue(label: "spaces.device.api.agent-hooks", qos: .userInitiated)
     /// Serial queue that confines all request dispatch and relay-registry mutation. Internal so the
     /// service-tunnel relay methods (in `SpacesDeviceServiceTunnel.swift`) run on the same queue.
     let queue: DispatchQueue
@@ -800,6 +835,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         self.builtInTerminalSessionLauncher = builtInTerminalSessionLauncher
         self.onRestartRequested = onRestartRequested
         overviewLoaderForTesting = nil
+        agentHookStatusLoader = { AgentHookInstaller.status() }
+        agentHookInstallHandler = { try AgentHookInstaller.install($0) }
         if let pairingStore { self.pairingStore = pairingStore } else { self.pairingStore = try SpacesDevicePairingStore() }
         #if canImport(Network) && canImport(Security)
             networkShaper = NetworkShaper()
@@ -818,7 +855,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher? = nil,
         onRestartRequested: (@Sendable () -> Void)? = nil,
         terminalLinkTransferAuthorizationTTL: TimeInterval = SpacesDeviceAPIServer.defaultTerminalLinkTransferAuthorizationTTL,
-        overviewLoaderForTesting: (@Sendable (SpacesDeviceClientApp?) throws -> SpacesDeviceOverviewPayload)? = nil
+        overviewLoaderForTesting: (@Sendable (SpacesDeviceClientApp?) throws -> SpacesDeviceOverviewPayload)? = nil,
+        agentHookStatusLoader: @escaping AgentHookStatusLoader = { AgentHookInstaller.status() },
+        agentHookInstallHandler: @escaping AgentHookInstallHandler = { try AgentHookInstaller.install($0) }
     ) {
         self.host = host
         self.port = port
@@ -830,6 +869,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         self.builtInTerminalSessionLauncher = builtInTerminalSessionLauncher
         self.onRestartRequested = onRestartRequested
         self.overviewLoaderForTesting = overviewLoaderForTesting
+        self.agentHookStatusLoader = agentHookStatusLoader
+        self.agentHookInstallHandler = agentHookInstallHandler
         #if canImport(Network) && canImport(Security)
             networkShaper = NetworkShaper(environment: networkEnvironment)
         #endif
@@ -1162,16 +1203,41 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         case .readTerminalLinkChunk(let payload): return try handleReadTerminalLinkChunkRequest(payload)
         case .subscribe, .subscribeDeviceOverview:
             return SpacesDeviceAPIResponse(ok: false, message: "Subscription requests must use the stream path.", errorCode: .misroutedRequest)
-        case .agentHooksStatus:
-            return SpacesDeviceAPIResponse(
-                ok: true, message: "Loaded agent hook status.", result: .agentHooksStatus(.init(agents: AgentHookInstaller.status())))
-        case .installAgentHooks(let payload): return try handleInstallAgentHooksRequest(payload)
+        case .agentHooksStatus, .installAgentHooks: return try handleAgentHookRequest(request)
         case .openServiceTunnel:
             // Hijacks the connection into a raw byte pipe after this response, like a subscription;
             // it cannot be answered on the request/response path handled here.
             return SpacesDeviceAPIResponse(ok: false, message: "Tunnel requests must use the tunnel path.", errorCode: .misroutedRequest)
         }
     }
+
+    private func handleAgentHookRequest(_ request: SpacesDeviceAPIRequest) throws -> SpacesDeviceAPIResponse {
+        switch request.command {
+        case .agentHooksStatus:
+            return SpacesDeviceAPIResponse(
+                ok: true, message: "Loaded agent hook status.", result: .agentHooksStatus(.init(agents: agentHookStatusLoader())))
+        case .installAgentHooks(let payload): return try handleInstallAgentHooksRequest(payload)
+        default: preconditionFailure("Only agent-hook commands run on the agent-hook queue.")
+        }
+    }
+
+    #if canImport(Network) && canImport(Security)
+        private func handleAgentHookRequestAsync(
+            _ request: SpacesDeviceAPIRequest, completion: @escaping @Sendable (Result<SpacesDeviceAPIResponse, any Error>) -> Void
+        ) {
+            agentHookQueue.async { [weak self] in
+                guard let self else { return }
+                let result = Result { try self.handleAgentHookRequest(request) }
+                self.queue.async { completion(result) }
+            }
+        }
+    #endif
+
+    #if os(Linux) && canImport(OpenSSL)
+        private func handleAgentHookRequestOnWorkerQueue(_ request: SpacesDeviceAPIRequest) throws -> SpacesDeviceAPIResponse {
+            try agentHookQueue.sync { try handleAgentHookRequest(request) }
+        }
+    #endif
 
     /// Idempotently installs Spaces lifecycle hooks for the requested agents into this daemon's home
     /// directory, then returns fresh status for every supported agent. Rejects an empty request.
@@ -1183,7 +1249,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         guard !payload.kinds.isEmpty else {
             return SpacesDeviceAPIResponse(ok: false, message: "No coding agents specified.", errorCode: .invalidArgument)
         }
-        let outcome = try AgentHookInstaller.install(payload.kinds)
+        let outcome = try agentHookInstallHandler(payload.kinds)
         let message =
             outcome.failures.isEmpty
             ? "Installed agent hooks." : "Installed agent hooks, except: \(outcome.failures.map(\.message).joined(separator: " "))"

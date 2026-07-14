@@ -12,17 +12,25 @@ import Foundation
 /// event, so there is no `exit` signal.
 enum AgentHookOpencodePluginWriter {
     static let pluginFileName = "spaces-agent-signal.js"
+    private static let ownershipHeaderPrefix = "// spaces-agent-signal — managed by Spaces ("
+
+    struct UnmanagedPluginError: LocalizedError {
+        let path: String
+        var errorDescription: String? { "\(path) already exists and is not managed by Spaces; refusing to overwrite it." }
+    }
 
     static func install(pluginURL: URL, spacesExecutablePath: String, fileManager: FileManager = .default) throws {
+        if fileManager.fileExists(atPath: pluginURL.path) {
+            let existing = try String(contentsOf: pluginURL, encoding: .utf8)
+            guard isSpacesOwned(existing) else { throw UnmanagedPluginError(path: pluginURL.path) }
+        }
         try AgentHookConfigFile.write(pluginContents(spacesExecutablePath: spacesExecutablePath), to: pluginURL, fileManager: fileManager)
     }
 
-    /// A whole-file write means the plugin is either absent, or exactly what some Spaces build wrote.
-    /// The header's version marker is what distinguishes this build's plugin from an older one's.
+    /// The ownership marker distinguishes the Spaces plugin from an unrelated file at the managed
+    /// path; its version marker distinguishes this build's plugin from an older Spaces plugin.
     static func installState(pluginURL: URL) -> AgentHookInstallState {
-        guard let contents = try? String(contentsOf: pluginURL, encoding: .utf8), contents.contains(AgentHookCommand.marker) else {
-            return .notInstalled
-        }
+        guard let contents = try? String(contentsOf: pluginURL, encoding: .utf8), isSpacesOwned(contents) else { return .notInstalled }
         return AgentHookCommand.isCurrent(contents) ? .current : .outdated
     }
 
@@ -33,7 +41,7 @@ enum AgentHookOpencodePluginWriter {
     /// disrupts the agent.
     static func pluginContents(spacesExecutablePath: String) -> String {
         return """
-            // spaces-agent-signal — managed by Spaces (\(AgentHookCommand.versionedMarker())). Do not edit; reinstall from Spaces settings.
+            \(ownershipHeaderPrefix)\(AgentHookCommand.versionedMarker())). Do not edit; reinstall from Spaces settings.
 
             const SPACES_CLI = \(javaScriptStringLiteral(spacesExecutablePath))
 
@@ -62,5 +70,9 @@ enum AgentHookOpencodePluginWriter {
     private static func javaScriptStringLiteral(_ value: String) -> String {
         let escaped = value.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
         return "\"\(escaped)\""
+    }
+
+    private static func isSpacesOwned(_ contents: String) -> Bool {
+        contents.contains(ownershipHeaderPrefix) && contents.contains(AgentHookCommand.marker)
     }
 }

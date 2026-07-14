@@ -35,16 +35,15 @@ import Testing
     }
 
     private func makeHome() throws -> URL {
-        let home = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
-            .appendingPathComponent("agent-hooks-\(UUID().uuidString)", isDirectory: true)
+        let home = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true).appendingPathComponent(
+            "agent-hooks-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
         return home
     }
 
     private func read(_ url: URL) -> String { (try? String(contentsOf: url, encoding: .utf8)) ?? "" }
 
-    @discardableResult
-    private func install(
+    @discardableResult private func install(
         _ kinds: [SupportedCodingAgentHook], home: URL, fileManager: FileManager? = nil, shell: ShellProbeSpy = ShellProbeSpy()
     ) throws -> AgentHookInstallOutcome {
         try AgentHookInstaller.install(
@@ -70,9 +69,7 @@ import Testing
             super.init()
         }
 
-        override func isExecutableFile(atPath path: String) -> Bool {
-            path.hasPrefix(homePath + "/") && super.isExecutableFile(atPath: path)
-        }
+        override func isExecutableFile(atPath path: String) -> Bool { path.hasPrefix(homePath + "/") && super.isExecutableFile(atPath: path) }
     }
 
     /// Every install resolves the Spaces CLI to embed in the hook commands, so a home that has agents
@@ -84,17 +81,13 @@ import Testing
         }
     }
 
-    @discardableResult
-    private func makeSpacesCLIAvailable(home: URL) throws -> URL {
+    @discardableResult private func makeSpacesCLIAvailable(home: URL) throws -> URL {
         try makeExecutable(name: AgentHookCommand.spacesExecutableName, directory: home.appendingPathComponent(".local/bin", isDirectory: true))
     }
 
-    private func spacesCLIPath(home: URL) -> String {
-        home.appendingPathComponent(".local/bin/\(AgentHookCommand.spacesExecutableName)").path
-    }
+    private func spacesCLIPath(home: URL) -> String { home.appendingPathComponent(".local/bin/\(AgentHookCommand.spacesExecutableName)").path }
 
-    @discardableResult
-    private func makeExecutable(name: String, directory: URL, contents: String = "#!/bin/sh\n") throws -> URL {
+    @discardableResult private func makeExecutable(name: String, directory: URL, contents: String = "#!/bin/sh\n") throws -> URL {
         let file = directory.appendingPathComponent(name)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         try contents.write(to: file, atomically: true, encoding: .utf8)
@@ -134,16 +127,15 @@ import Testing
 
         try install(SupportedCodingAgentHook.allCases, home: home)
         let files = [
-            home.appendingPathComponent(".claude/settings.json"),
-            home.appendingPathComponent(".codex/hooks.json"),
-            home.appendingPathComponent(".codex/config.toml"),
-            home.appendingPathComponent(".config/opencode/plugin/spaces-agent-signal.js"),
+            home.appendingPathComponent(".claude/settings.json"), home.appendingPathComponent(".codex/hooks.json"),
+            home.appendingPathComponent(".codex/config.toml"), home.appendingPathComponent(".config/opencode/plugin/spaces-agent-signal.js"),
         ]
         let firstPass = files.map(read)
 
-        try install(SupportedCodingAgentHook.allCases, home: home)
+        let replayOutcome = try install(SupportedCodingAgentHook.allCases, home: home)
         let secondPass = files.map(read)
 
+        #expect(replayOutcome.failures.isEmpty)
         #expect(firstPass == secondPass)
         for contents in firstPass { #expect(!contents.isEmpty) }
     }
@@ -227,9 +219,7 @@ import Testing
         let object = try JSONSerialization.jsonObject(with: Data(contentsOf: settings)) as! [String: Any]
         let hooks = object["hooks"] as! [String: Any]
         let groups = hooks["SessionStart"] as! [[String: Any]]
-        let commands = groups.flatMap { group in
-            ((group["hooks"] as? [[String: Any]]) ?? []).compactMap { $0["command"] as? String }
-        }
+        let commands = groups.flatMap { group in ((group["hooks"] as? [[String: Any]]) ?? []).compactMap { $0["command"] as? String } }
 
         #expect(commands.contains(userCommand))
         let spacesCommands = commands.filter(AgentHookCommand.isSpacesOwned)
@@ -320,6 +310,54 @@ import Testing
         #expect(outcome.failures.map(\.kind) == [.claudeCode])
         #expect(outcome.agents.first { $0.kind == .claudeCode }?.installState == .notInstalled)
         #expect(read(settings) == garbage)
+    }
+
+    @Test func nonObjectHooksConfigIsNotOverwritten() throws {
+        let home = try makeHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        try makeAgentsAvailable([.claudeCode], home: home)
+        let settings = home.appendingPathComponent(".claude/settings.json")
+        try FileManager.default.createDirectory(at: settings.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let existing = "{ \"hooks\": [\"user-managed\"] }"
+        try existing.write(to: settings, atomically: true, encoding: .utf8)
+
+        let outcome = try install([.claudeCode], home: home)
+
+        #expect(outcome.failures.map(\.kind) == [.claudeCode])
+        #expect(outcome.failures.first?.message.localizedStandardContains("unsupported JSON value") == true)
+        #expect(read(settings) == existing)
+    }
+
+    @Test func nonArrayMappedEventIsNotOverwritten() throws {
+        let home = try makeHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        try makeAgentsAvailable([.claudeCode], home: home)
+        let settings = home.appendingPathComponent(".claude/settings.json")
+        try FileManager.default.createDirectory(at: settings.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let existing = "{ \"hooks\": { \"SessionStart\": { \"command\": \"user-managed\" } } }"
+        try existing.write(to: settings, atomically: true, encoding: .utf8)
+
+        let outcome = try install([.claudeCode], home: home)
+
+        #expect(outcome.failures.map(\.kind) == [.claudeCode])
+        #expect(outcome.failures.first?.message.contains("hooks.SessionStart") == true)
+        #expect(read(settings) == existing)
+    }
+
+    @Test func opencodeInstallDoesNotOverwriteAnUnmanagedPlugin() throws {
+        let home = try makeHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        try makeAgentsAvailable([.opencode], home: home)
+        let plugin = home.appendingPathComponent(".config/opencode/plugin/spaces-agent-signal.js")
+        try FileManager.default.createDirectory(at: plugin.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let existing = "export const UserPlugin = async () => ({})\n"
+        try existing.write(to: plugin, atomically: true, encoding: .utf8)
+
+        let outcome = try install([.opencode], home: home)
+
+        #expect(outcome.failures.map(\.kind) == [.opencode])
+        #expect(outcome.failures.first?.message.localizedStandardContains("not managed by Spaces") == true)
+        #expect(read(plugin) == existing)
     }
 
     // MARK: - Codex feature toggle
@@ -584,9 +622,7 @@ import Testing
             "model = \"gpt-5\"\nfeatures = 3\n",  // `features` is a scalar
             "features = [\"a\", \"b\"]\n",  // `features` is an array
         ]
-        for contents in conflicts {
-            #expect(throws: (any Error).self) { try AgentHookCodexFeatureToggle.updatedContents(contents) }
-        }
+        for contents in conflicts { #expect(throws: (any Error).self) { try AgentHookCodexFeatureToggle.updatedContents(contents) } }
     }
 
     /// `hooks` is a boolean feature flag. A `hooks` key holding anything else means the config is
@@ -598,9 +634,7 @@ import Testing
             "features = { hooks = 1 }\n",  // `hooks` inside a top-level inline table
             "features.hooks = \"yes\"\n",  // top-level dotted `features.hooks`
         ]
-        for contents in conflicts {
-            #expect(throws: (any Error).self) { try AgentHookCodexFeatureToggle.updatedContents(contents) }
-        }
+        for contents in conflicts { #expect(throws: (any Error).self) { try AgentHookCodexFeatureToggle.updatedContents(contents) } }
     }
 
     @Test func codexInstallLeavesAConflictingConfigUntouched() throws {
@@ -631,9 +665,7 @@ import Testing
         let original = Data([0xFF, 0xFE, 0xFD])
         try original.write(to: config)
 
-        #expect(throws: (any Error).self) {
-            try AgentHookCodexFeatureToggle.ensureEnabled(fileURL: config)
-        }
+        #expect(throws: (any Error).self) { try AgentHookCodexFeatureToggle.ensureEnabled(fileURL: config) }
         #expect((try? Data(contentsOf: config)) == original)
     }
 
@@ -747,6 +779,37 @@ import Testing
         #expect(!contents.contains("\"command\" : \"spaces agent signal"))
     }
 
+    @Test func installedLinuxReleasePathUsesTheStableSpacesCLI() throws {
+        let home = try makeHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let releaseBin = home.appendingPathComponent(".spaces/daemon/releases/1.2.3/bin", isDirectory: true)
+        try makeExecutable(name: "spaces", directory: releaseBin)
+        try makeExecutable(name: "claude", directory: releaseBin)
+        let stableCLI = try makeExecutable(name: "spaces", directory: home.appendingPathComponent(".spaces/bin", isDirectory: true))
+
+        let outcome = try AgentHookInstaller.install(
+            [.claudeCode], home: home, fileManager: HomeScopedFileManager(home: home), environment: ["PATH": releaseBin.path],
+            shellPathDirectoryResolver: ShellProbeSpy().resolver)
+
+        #expect(outcome.failures.isEmpty)
+        #expect(read(home.appendingPathComponent(".claude/settings.json")).contains("'\(stableCLI.path)' agent signal"))
+    }
+
+    @Test func installedLinuxReleasePathFailsWhenTheStableSpacesCLIIsMissing() throws {
+        let home = try makeHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let releaseBin = home.appendingPathComponent(".spaces/daemon/releases/1.2.3/bin", isDirectory: true)
+        try makeExecutable(name: "spaces", directory: releaseBin)
+        try makeExecutable(name: "claude", directory: releaseBin)
+
+        #expect(throws: AgentHookInstallerError.spacesCLINotFound) {
+            try AgentHookInstaller.install(
+                [.claudeCode], home: home, fileManager: HomeScopedFileManager(home: home), environment: ["PATH": releaseBin.path],
+                shellPathDirectoryResolver: ShellProbeSpy().resolver)
+        }
+        #expect(!FileManager.default.fileExists(atPath: home.appendingPathComponent(".claude").path))
+    }
+
     @Test func hookCommandShellQuotesAPathContainingSpaces() {
         let command = AgentHookCommand.signalCommand(event: .done, spacesExecutablePath: "/Users/a b/bin/spaces")
         #expect(command == "'/Users/a b/bin/spaces' agent signal done >/dev/null 2>&1 || true # \(AgentHookCommand.versionedMarker())")
@@ -798,7 +861,11 @@ import Testing
 
         for _ in 0..<3 {
             clock.advance(seconds: 10)
-            #expect(cache.directories(home: home) { probes += 1; return ["/shims"] } == ["/shims"])
+            #expect(
+                cache.directories(home: home) {
+                    probes += 1
+                    return ["/shims"]
+                } == ["/shims"])
         }
 
         #expect(probes == 1)
@@ -812,10 +879,18 @@ import Testing
         let home = URL(fileURLWithPath: "/Users/test", isDirectory: true)
         var probes = 0
 
-        #expect(cache.directories(home: home) { probes += 1; return ["/old-shims"] } == ["/old-shims"])
+        #expect(
+            cache.directories(home: home) {
+                probes += 1
+                return ["/old-shims"]
+            } == ["/old-shims"])
         clock.advance(seconds: 61)
         // The user installed a version manager; its shim directory is on the shell's PATH now.
-        #expect(cache.directories(home: home) { probes += 1; return ["/old-shims", "/new-shims"] } == ["/old-shims", "/new-shims"])
+        #expect(
+            cache.directories(home: home) {
+                probes += 1
+                return ["/old-shims", "/new-shims"]
+            } == ["/old-shims", "/new-shims"])
 
         #expect(probes == 2)
     }
@@ -828,12 +903,24 @@ import Testing
         let home = URL(fileURLWithPath: "/Users/test", isDirectory: true)
         var probes = 0
 
-        #expect(cache.directories(home: home) { probes += 1; return [] }.isEmpty)
-        #expect(cache.directories(home: home) { probes += 1; return [] }.isEmpty)
+        #expect(
+            cache.directories(home: home) {
+                probes += 1
+                return []
+            }.isEmpty)
+        #expect(
+            cache.directories(home: home) {
+                probes += 1
+                return []
+            }.isEmpty)
         #expect(probes == 1)
 
         clock.advance(seconds: 61)
-        #expect(cache.directories(home: home) { probes += 1; return ["/recovered"] } == ["/recovered"])
+        #expect(
+            cache.directories(home: home) {
+                probes += 1
+                return ["/recovered"]
+            } == ["/recovered"])
         #expect(probes == 2)
     }
 
@@ -842,8 +929,14 @@ import Testing
         let cache = AgentHookInstaller.ShellDirectoryCache(ttlSeconds: 60, now: clock.now)
         var probes = 0
 
-        _ = cache.directories(home: URL(fileURLWithPath: "/Users/one", isDirectory: true)) { probes += 1; return ["/one"] }
-        _ = cache.directories(home: URL(fileURLWithPath: "/Users/two", isDirectory: true)) { probes += 1; return ["/two"] }
+        _ = cache.directories(home: URL(fileURLWithPath: "/Users/one", isDirectory: true)) {
+            probes += 1
+            return ["/one"]
+        }
+        _ = cache.directories(home: URL(fileURLWithPath: "/Users/two", isDirectory: true)) {
+            probes += 1
+            return ["/two"]
+        }
 
         #expect(probes == 2)
     }

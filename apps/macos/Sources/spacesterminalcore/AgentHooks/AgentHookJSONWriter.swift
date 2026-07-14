@@ -19,6 +19,12 @@ enum AgentHookJSONWriter {
         var errorDescription: String? { "\(path) is not valid JSON; refusing to overwrite it." }
     }
 
+    struct UnsupportedConfigShapeError: LocalizedError {
+        let path: String
+        let location: String
+        var errorDescription: String? { "\(path) has an unsupported JSON value at \(location); refusing to overwrite it." }
+    }
+
     /// A single event → Spaces command mapping to install.
     struct EventBinding {
         /// The hook event name key (e.g. "SessionStart").
@@ -30,23 +36,36 @@ enum AgentHookJSONWriter {
     /// Writes the merged hooks to `fileURL`. Creates parent directories and the file as needed.
     static func install(fileURL: URL, bindings: [EventBinding], spacesExecutablePath: String, fileManager: FileManager = .default) throws {
         var root = try loadRootObject(fileURL: fileURL, fileManager: fileManager)
-        var hooks = (root["hooks"] as? [String: Any]) ?? [:]
+        var hooks: [String: Any]
+        if let existingHooks = root["hooks"] {
+            guard let existingHooks = existingHooks as? [String: Any] else {
+                throw UnsupportedConfigShapeError(path: fileURL.path, location: "hooks")
+            }
+            hooks = existingHooks
+        } else {
+            hooks = [:]
+        }
+
+        // A mapped event is the one part of an existing hooks object this install must extend. If its
+        // value is not the array shape the agent defines, replacing it would destroy valid user JSON.
+        for binding in bindings {
+            guard let existingEvent = hooks[binding.eventName] else { continue }
+            guard existingEvent is [[String: Any]] else {
+                throw UnsupportedConfigShapeError(path: fileURL.path, location: "hooks.\(binding.eventName)")
+            }
+        }
 
         // Strip every Spaces-owned entry from all events first, so a reinstall with a changed event
         // set leaves no stale entries behind, then drop events that become empty as a result.
         for (eventName, value) in hooks {
             guard let groups = value as? [[String: Any]] else { continue }
             let kept = groups.compactMap(strippingSpacesOwnedEntries)
-            if kept.isEmpty {
-                hooks.removeValue(forKey: eventName)
-            } else {
-                hooks[eventName] = kept
-            }
+            if kept.isEmpty { hooks.removeValue(forKey: eventName) } else { hooks[eventName] = kept }
         }
 
         // Re-add exactly one Spaces group per mapped event.
         for binding in bindings {
-            var groups = (hooks[binding.eventName] as? [[String: Any]]) ?? []
+            var groups = hooks[binding.eventName] as? [[String: Any]] ?? []
             groups.append(spacesGroup(event: binding.event, spacesExecutablePath: spacesExecutablePath))
             hooks[binding.eventName] = groups
         }
@@ -66,10 +85,9 @@ enum AgentHookJSONWriter {
         else { return .notInstalled }
 
         let ownedCommandsPerBinding = bindings.map { binding in
-            ((hooks[binding.eventName] as? [[String: Any]]) ?? [])
-                .flatMap { ($0["hooks"] as? [[String: Any]]) ?? [] }
-                .compactMap { $0["command"] as? String }
-                .filter(AgentHookCommand.isSpacesOwned)
+            ((hooks[binding.eventName] as? [[String: Any]]) ?? []).flatMap { ($0["hooks"] as? [[String: Any]]) ?? [] }.compactMap {
+                $0["command"] as? String
+            }.filter(AgentHookCommand.isSpacesOwned)
         }
         guard ownedCommandsPerBinding.contains(where: { !$0.isEmpty }) else { return .notInstalled }
         let everyEventBound = ownedCommandsPerBinding.allSatisfy { !$0.isEmpty }
