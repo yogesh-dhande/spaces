@@ -77,9 +77,34 @@ import Testing
     private func makeAgentsAvailable(_ kinds: [SupportedCodingAgentHook], home: URL) throws {
         try makeSpacesCLIAvailable(home: home)
         for name in Set(kinds.flatMap(\.executableNames)) {
-            try makeExecutable(name: name, directory: home.appendingPathComponent(".local/bin", isDirectory: true))
+            let contents = name == "codex" ? Self.codexFeatureCLIScript : "#!/bin/sh\n"
+            try makeExecutable(name: name, directory: home.appendingPathComponent(".local/bin", isDirectory: true), contents: contents)
         }
     }
+
+    /// A small behavioral stand-in for `codex features enable/list`. Product code is tested against
+    /// the command boundary; Codex itself owns the TOML parsing and serialization behind it.
+    private static let codexFeatureCLIScript = #"""
+        #!/bin/sh
+        config="$CODEX_HOME/config.toml"
+        if [ "$1" = "features" ] && [ "$2" = "enable" ] && [ "$3" = "hooks" ]; then
+          if [ -f "$config" ] && grep -Eq '^[[:space:]]*hooks[[:space:]]*=[[:space:]]*true' "$config"; then
+            exit 0
+          fi
+          printf '\n[features]\nhooks = true\n' >> "$config"
+          exit 0
+        fi
+        if [ "$1" = "features" ] && [ "$2" = "list" ]; then
+          enabled=false
+          if [ -f "$config" ] && grep -Eq '^[[:space:]]*hooks[[:space:]]*=[[:space:]]*true' "$config"; then
+            enabled=true
+          fi
+          printf 'hooks                                stable             %s\n' "$enabled"
+          exit 0
+        fi
+        printf 'unexpected codex arguments\n' >&2
+        exit 64
+        """#
 
     @discardableResult private func makeSpacesCLIAvailable(home: URL) throws -> URL {
         try makeExecutable(name: AgentHookCommand.spacesExecutableName, directory: home.appendingPathComponent(".local/bin", isDirectory: true))
@@ -229,35 +254,25 @@ import Testing
 
     /// Agent configs are commonly symlinked into a dotfiles repo. An atomic write to the link path
     /// would replace the link with a regular file and silently detach the user's managed config.
-    @Test func installWritesThroughSymlinkedConfigsAndKeepsTheLinks() throws {
+    @Test func installWritesThroughSymlinkedJSONConfigAndKeepsTheLink() throws {
         let home = try makeHome()
         defer { try? FileManager.default.removeItem(at: home) }
-        try makeAgentsAvailable([.claudeCode, .codex], home: home)
+        try makeAgentsAvailable([.claudeCode], home: home)
 
         let dotfiles = home.appendingPathComponent("dotfiles", isDirectory: true)
         try FileManager.default.createDirectory(at: dotfiles, withIntermediateDirectories: true)
         let managedSettings = dotfiles.appendingPathComponent("settings.json")
         try "{ \"model\": \"opus\" }".write(to: managedSettings, atomically: true, encoding: .utf8)
-        let managedCodexConfig = dotfiles.appendingPathComponent("config.toml")
-        try "model = \"gpt-5\"\n".write(to: managedCodexConfig, atomically: true, encoding: .utf8)
 
         let settings = home.appendingPathComponent(".claude/settings.json")
         try FileManager.default.createDirectory(at: settings.deletingLastPathComponent(), withIntermediateDirectories: true)
         try FileManager.default.createSymbolicLink(at: settings, withDestinationURL: managedSettings)
-        let codexConfig = home.appendingPathComponent(".codex/config.toml")
-        try FileManager.default.createDirectory(at: codexConfig.deletingLastPathComponent(), withIntermediateDirectories: true)
-        // A relative link destination, as `stow` and friends create.
-        try FileManager.default.createSymbolicLink(atPath: codexConfig.path, withDestinationPath: "../dotfiles/config.toml")
 
-        try install([.claudeCode, .codex], home: home)
+        try install([.claudeCode], home: home)
 
         #expect((try? FileManager.default.destinationOfSymbolicLink(atPath: settings.path)) == managedSettings.path)
-        #expect((try? FileManager.default.destinationOfSymbolicLink(atPath: codexConfig.path)) == "../dotfiles/config.toml")
-        // The hooks landed in the dotfiles repo, alongside the settings the user already had there.
         #expect(read(managedSettings).contains(AgentHookCommand.marker))
         #expect(read(managedSettings).contains("opus"))
-        #expect(read(managedCodexConfig).contains("hooks = true"))
-        #expect(read(managedCodexConfig).contains("gpt-5"))
     }
 
     /// A dangling link (dotfiles repo not cloned yet, unmounted volume) points at nothing worth
@@ -360,313 +375,53 @@ import Testing
         #expect(read(plugin) == existing)
     }
 
-    // MARK: - Codex feature toggle
+    // MARK: - Codex feature command
 
-    @Test func codexEnablesFeaturesHooksPreservingConfig() throws {
+    @Test func codexInstallUsesResolvedCLIAndTargetsTheManagedCodexHome() throws {
         let home = try makeHome()
         defer { try? FileManager.default.removeItem(at: home) }
-        try makeAgentsAvailable([.codex], home: home)
-        let config = home.appendingPathComponent(".codex/config.toml")
-        try FileManager.default.createDirectory(at: config.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try "model = \"gpt-5\"\n\n[features]\njs_repl = false\n".write(to: config, atomically: true, encoding: .utf8)
+        try makeSpacesCLIAvailable(home: home)
+        let script = Self.codexFeatureCLIScript.replacingOccurrences(
+            of: "#!/bin/sh\n", with: "#!/bin/sh\nprintf '%s|%s\\n' \"$*\" \"$CODEX_HOME\" >> \"$CODEX_HOME/invocations\"\n")
+        try makeExecutable(name: "codex", directory: home.appendingPathComponent(".local/bin", isDirectory: true), contents: script)
 
-        try install([.codex], home: home)
-        let contents = read(config)
-        #expect(contents.contains("model = \"gpt-5\""))
-        #expect(contents.contains("js_repl = false"))
-        #expect(AgentHookCodexFeatureToggle.isEnabled(fileURL: config))
+        let outcome = try install([.codex], home: home)
+        let codexHome = home.appendingPathComponent(".codex", isDirectory: true)
+        let invocations = read(codexHome.appendingPathComponent("invocations"))
+
+        #expect(outcome.failures.isEmpty)
+        #expect(outcome.agents.first { $0.kind == .codex }?.installState == .current)
+        #expect(invocations.contains("features enable hooks|\(codexHome.path)"))
+        #expect(invocations.contains("features list|\(codexHome.path)"))
     }
 
-    @Test func codexFeatureToggleAppendsSectionWhenAbsent() throws {
-        #expect(try AgentHookCodexFeatureToggle.updatedContents("model = \"gpt-5\"\n")?.contains("[features]") == true)
-        // Already-enabled input needs no change.
-        #expect(try AgentHookCodexFeatureToggle.updatedContents("[features]\nhooks = true\n") == nil)
-    }
-
-    @Test func codexFeatureToggleLeavesEnabledInlineFeaturesTableUntouched() throws {
-        let contents = "model = \"gpt-5\"\nfeatures = { hooks = true, js_repl = false }\n"
-
-        #expect(try AgentHookCodexFeatureToggle.updatedContents(contents) == nil)
-        let home = try makeHome()
-        defer { try? FileManager.default.removeItem(at: home) }
-        let config = home.appendingPathComponent(".codex/config.toml")
-        try FileManager.default.createDirectory(at: config.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try contents.write(to: config, atomically: true, encoding: .utf8)
-        #expect(AgentHookCodexFeatureToggle.isEnabled(fileURL: config))
-    }
-
-    @Test func codexFeatureToggleLeavesEnabledDottedFeaturesHookUntouched() throws {
-        let contents = "model = \"gpt-5\"\nfeatures.hooks = true\n"
-
-        #expect(try AgentHookCodexFeatureToggle.updatedContents(contents) == nil)
-        let home = try makeHome()
-        defer { try? FileManager.default.removeItem(at: home) }
-        let config = home.appendingPathComponent(".codex/config.toml")
-        try FileManager.default.createDirectory(at: config.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try contents.write(to: config, atomically: true, encoding: .utf8)
-        #expect(AgentHookCodexFeatureToggle.isEnabled(fileURL: config))
-    }
-
-    @Test func codexFeatureToggleUpdatesDottedFeaturesHookInPlace() throws {
-        let updated = try AgentHookCodexFeatureToggle.updatedContents("model = \"gpt-5\"\nfeatures.hooks = false # disabled\n")
-
-        #expect(updated?.contains("features.hooks = true # disabled") == true)
-        #expect(updated?.contains("[features]") == false)
-    }
-
-    @Test func codexFeatureToggleAddsDottedHookWhenOtherDottedFeaturesExist() throws {
-        let updated = try AgentHookCodexFeatureToggle.updatedContents("model = \"gpt-5\"\nfeatures.experimental = true\n")
-
-        #expect(updated?.contains("features.experimental = true\nfeatures.hooks = true") == true)
-        #expect(updated?.contains("[features]") == false)
-    }
-
-    @Test func codexFeatureToggleUpdatesInlineFeaturesTableInPlace() throws {
-        let updated = try AgentHookCodexFeatureToggle.updatedContents("model = \"gpt-5\"\nfeatures = { js_repl = false }\n")
-
-        #expect(updated?.contains("features = { hooks = true, js_repl = false }") == true)
-        #expect(updated?.contains("[features]") == false)
-    }
-
-    @Test func codexFeatureToggleDoesNotTreatNestedInlineFeaturesAsGlobal() throws {
-        let updated = try AgentHookCodexFeatureToggle.updatedContents("[agents]\nfeatures = { hooks = true }\n")
-
-        #expect(updated?.contains("[agents]\nfeatures = { hooks = true }") == true)
-        #expect(updated?.contains("[features]\nhooks = true") == true)
-    }
-
-    // MARK: - `features.hooks` already spelled as a table
-    //
-    // `hooks` is a boolean feature flag, but a config may already define `features.hooks` as a *table*
-    // — `[features.hooks]`, `hooks.enabled` inside `[features]`, or `features.hooks.enabled` at top
-    // level. Writing `hooks = true` beside any of those makes TOML see one key as both a table and a
-    // boolean, so Codex refuses the whole config. Every such shape must fail the install and leave the
-    // file untouched, exactly as a non-boolean `hooks` value does.
-
-    @Test func codexFeatureToggleRefusesDottedHooksSubTableInsideFeaturesSection() throws {
-        #expect(throws: AgentHookCodexFeatureToggle.ConflictingFeaturesDefinitionError.self) {
-            try AgentHookCodexFeatureToggle.updatedContents("[features]\nhooks.enabled = true\n")
-        }
-    }
-
-    @Test func codexFeatureToggleRefusesHooksSubTableHeaderBesideFeaturesSection() throws {
-        #expect(throws: AgentHookCodexFeatureToggle.ConflictingFeaturesDefinitionError.self) {
-            try AgentHookCodexFeatureToggle.updatedContents("[features]\njs_repl = true\n\n[features.hooks]\nenabled = true\n")
-        }
-    }
-
-    @Test func codexFeatureToggleRefusesHooksSubTableHeaderBesideDottedFeaturesKeys() throws {
-        #expect(throws: AgentHookCodexFeatureToggle.ConflictingFeaturesDefinitionError.self) {
-            try AgentHookCodexFeatureToggle.updatedContents("model = \"gpt-5\"\nfeatures.experimental = true\n\n[features.hooks]\nenabled = true\n")
-        }
-    }
-
-    @Test func codexFeatureToggleRefusesDottedHooksSubTableAtTopLevel() throws {
-        #expect(throws: AgentHookCodexFeatureToggle.ConflictingFeaturesDefinitionError.self) {
-            try AgentHookCodexFeatureToggle.updatedContents("features.hooks.enabled = true\n")
-        }
-    }
-
-    /// `[[features.hooks]]` names `features.hooks` just as `[features.hooks]` does; neither can coexist
-    /// with a boolean `hooks`. This one previously reached the append path, which is the worst outcome:
-    /// a config Codex parsed today stops parsing tomorrow.
-    @Test func codexFeatureToggleRefusesHooksArrayOfTables() throws {
-        #expect(throws: AgentHookCodexFeatureToggle.ConflictingFeaturesDefinitionError.self) {
-            try AgentHookCodexFeatureToggle.updatedContents("[[features.hooks]]\nenabled = true\n")
-        }
-    }
-
-    /// A deeper table under `hooks` implies `hooks` is a table just the same.
-    @Test func codexFeatureToggleRefusesNestedHooksSubTableHeader() throws {
-        #expect(throws: AgentHookCodexFeatureToggle.ConflictingFeaturesDefinitionError.self) {
-            try AgentHookCodexFeatureToggle.updatedContents("[features.hooks.matchers]\nfoo = 1\n")
-        }
-    }
-
-    /// The guard must not swallow the shapes it has no business rejecting: a sibling sub-table, a plain
-    /// boolean `hooks`, and the dotted `features.hooks` boolean are all still editable.
-    @Test func codexFeatureToggleStillEditsShapesThatOnlyLookLikeHooksTables() throws {
-        #expect(try AgentHookCodexFeatureToggle.updatedContents("[features.sub]\nfoo = 1\n")?.contains("[features]\nhooks = true") == true)
-        #expect(try AgentHookCodexFeatureToggle.updatedContents("[features]\nhooks = false\n") == "[features]\nhooks = true\n")
-        #expect(try AgentHookCodexFeatureToggle.updatedContents("features.hooks = false\n") == "features.hooks = true\n")
-        // `hooks.enabled` under some *other* table says nothing about `features.hooks`.
-        #expect(try AgentHookCodexFeatureToggle.updatedContents("[agents]\nhooks.enabled = true\n")?.contains("[features]\nhooks = true") == true)
-    }
-
-    // MARK: - CRLF configs
-    //
-    // TOML accepts `\r\n` as a newline, so a config synced from a Windows checkout parses fine for
-    // Codex and must parse the same way here. Reading these line-by-line on `\n` alone would leave a
-    // trailing `\r` that hides `[features]` from the header match and turns `true` into a value that
-    // is neither `true` nor `false` — appending a second `[features]` table and handing Codex a
-    // config it can no longer read.
-
-    @Test func codexFeatureToggleLeavesEnabledCRLFSectionUntouched() throws {
-        #expect(try AgentHookCodexFeatureToggle.updatedContents("[features]\r\nhooks = true\r\n") == nil)
-        #expect(try AgentHookCodexFeatureToggle.updatedContents("model = \"gpt-5\"\r\nfeatures = { hooks = true }\r\n") == nil)
-        #expect(try AgentHookCodexFeatureToggle.updatedContents("model = \"gpt-5\"\r\nfeatures.hooks = true\r\n") == nil)
-    }
-
-    @Test func codexFeatureToggleEnablesHooksInExistingCRLFSection() throws {
-        let updated = try #require(try AgentHookCodexFeatureToggle.updatedContents("[features]\r\njs_repl = true\r\n"))
-
-        #expect(updated == "[features]\r\nhooks = true\r\njs_repl = true\r\n")
-        // The existing table is extended, never duplicated.
-        #expect(updated.components(separatedBy: "[features]").count == 2)
-    }
-
-    @Test func codexFeatureToggleFlipsFalseToTrueInCRLFConfig() throws {
-        #expect(try AgentHookCodexFeatureToggle.updatedContents("[features]\r\nhooks = false\r\n") == "[features]\r\nhooks = true\r\n")
+    @Test func codexFeatureListParserReadsTheNamedFeaturesEffectiveState() {
+        let enabled = """
+            apps                                 stable             true
+            hooks                                stable             true
+            experimental_feature                 under development false
+            """
+        #expect(AgentHookCodexFeatureToggle.featuresListHasHooksEnabled(enabled))
         #expect(
-            try AgentHookCodexFeatureToggle.updatedContents("model = \"gpt-5\"\r\nfeatures.hooks = false\r\n")
-                == "model = \"gpt-5\"\r\nfeatures.hooks = true\r\n")
-        #expect(
-            try AgentHookCodexFeatureToggle.updatedContents("model = \"gpt-5\"\r\nfeatures = { js_repl = false }\r\n")
-                == "model = \"gpt-5\"\r\nfeatures = { hooks = true, js_repl = false }\r\n")
+            !AgentHookCodexFeatureToggle.featuresListHasHooksEnabled(
+                enabled.replacingOccurrences(of: "hooks                                stable             true", with: "hooks stable false")))
+        #expect(!AgentHookCodexFeatureToggle.featuresListHasHooksEnabled("other_hooks stable true\n"))
     }
 
-    /// An appended table keeps the newline the config already uses, so the file does not end up with
-    /// one LF-terminated stanza among CRLF lines.
-    @Test func codexFeatureToggleAppendsCRLFSectionToCRLFConfig() throws {
-        let updated = try #require(try AgentHookCodexFeatureToggle.updatedContents("model = \"gpt-5\"\r\n"))
-
-        #expect(updated == "model = \"gpt-5\"\r\n\r\n[features]\r\nhooks = true\r\n")
-        // Swift reads "\r\n" as a single Character, so a CRLF-only string contains no "\n" at all.
-        // A bare LF appended among CRLF lines would show up here.
-        #expect(!updated.contains("\n"))
-    }
-
-    @Test func codexFeatureToggleReportsNonBooleanHooksInCRLFConfig() throws {
-        #expect(throws: AgentHookCodexFeatureToggle.ConflictingFeaturesDefinitionError.self) {
-            try AgentHookCodexFeatureToggle.updatedContents("[features]\r\nhooks = \"yes\"\r\n")
-        }
-    }
-
-    @Test func codexFeatureToggleFlipsFalseToTrueWithoutTouchingOtherSections() throws {
-        let updated = try AgentHookCodexFeatureToggle.updatedContents("[features]\nhooks = false\njs_repl = true\n\n[agents]\nmax_depth = 2\n")
-        #expect(updated?.contains("hooks = true") == true)
-        #expect(updated?.contains("hooks = false") == false)
-        #expect(updated?.contains("js_repl = true") == true)
-        #expect(updated?.contains("[agents]") == true)
-    }
-
-    @Test func codexFeatureToggleRecognizesCommentedSectionHeaders() throws {
-        let updated = try AgentHookCodexFeatureToggle.updatedContents("[features] # flags\njs_repl = true\n\n[agents] # defaults\nhooks = false\n")
-
-        #expect(updated?.hasPrefix("[features] # flags\nhooks = true\njs_repl = true") == true)
-        #expect(updated?.contains("[agents] # defaults\nhooks = false") == true)
-    }
-
-    @Test func codexFeatureToggleLeavesEnabledCommentedHeaderUntouched() throws {
-        let contents = "[features] # flags\nhooks = true # enabled\n"
-
-        #expect(try AgentHookCodexFeatureToggle.updatedContents(contents) == nil)
-    }
-
-    // A `[features]` header the matcher fails to recognize is not a missed edit: the toggle falls
-    // through to appending a second `[features]` table, and the duplicate table definition makes Codex
-    // fail to parse `config.toml` at all. Each spelling below must be edited in place.
-
-    @Test func codexFeatureToggleEditsSpacedSectionHeaderInPlace() throws {
-        let updated = try AgentHookCodexFeatureToggle.updatedContents("[ features ]\njs_repl = false\n")
-
-        #expect(updated?.hasPrefix("[ features ]\nhooks = true\njs_repl = false") == true)
-        #expect(updated?.contains("[features]") == false)  // no duplicate table appended
-    }
-
-    @Test func codexFeatureToggleEditsQuotedSectionHeaderInPlace() throws {
-        let updated = try AgentHookCodexFeatureToggle.updatedContents("[\"features\"]\njs_repl = false\n")
-
-        #expect(updated?.hasPrefix("[\"features\"]\nhooks = true\njs_repl = false") == true)
-        #expect(updated?.contains("[features]") == false)
-    }
-
-    @Test func codexFeatureToggleLeavesEnabledSpacedSectionHeaderUntouched() throws {
-        #expect(try AgentHookCodexFeatureToggle.updatedContents("[ features ]\nhooks = true\n") == nil)
-    }
-
-    @Test func codexFeatureToggleUpdatesQuotedHooksKeyInPlace() throws {
-        let updated = try AgentHookCodexFeatureToggle.updatedContents("[features]\n\"hooks\" = false\n")
-
-        #expect(updated?.contains("\"hooks\" = true") == true)
-        #expect(updated?.contains("hooks = true\n\"hooks\"") == false)  // not inserted alongside
-    }
-
-    @Test func codexFeatureToggleUpdatesQuotedDottedFeaturesHookInPlace() throws {
-        let updated = try AgentHookCodexFeatureToggle.updatedContents("\"features\".hooks = false\n")
-
-        #expect(updated?.contains("\"features\".hooks = true") == true)
-        #expect(updated?.contains("[features]") == false)
-    }
-
-    @Test func codexFeatureTogglePreservesIndentationAndCommentInSectionEdit() throws {
-        let updated = try AgentHookCodexFeatureToggle.updatedContents("[features]\n  hooks = false # keep this note\n")
-
-        #expect(updated?.contains("  hooks = true # keep this note") == true)
-    }
-
-    @Test func codexFeatureToggleTreatsFeaturesSubTableAsSeparateTable() throws {
-        // `[features.sub]` does not define `features.hooks`, so a `[features]` table is still required.
-        let updated = try AgentHookCodexFeatureToggle.updatedContents("[features.sub]\nx = 1\n")
-
-        #expect(updated?.hasSuffix("[features]\nhooks = true\n") == true)
-    }
-
-    /// `features` already defined in a shape the line editor cannot extend. Appending a `[features]`
-    /// table beside any of these is a duplicate key or a table-type conflict, which costs the user
-    /// their whole Codex config — so the install must fail loudly instead.
-    @Test func codexFeatureToggleRefusesToAppendBesideAnUneditableFeaturesDefinition() throws {
-        let conflicts = [
-            "[features.hooks]\nenabled = true\n",  // `hooks` is a table; `hooks = true` would collide
-            "[[features]]\nname = \"a\"\n",  // `features` is an array of tables
-            "model = \"gpt-5\"\nfeatures = 3\n",  // `features` is a scalar
-            "features = [\"a\", \"b\"]\n",  // `features` is an array
-        ]
-        for contents in conflicts { #expect(throws: (any Error).self) { try AgentHookCodexFeatureToggle.updatedContents(contents) } }
-    }
-
-    /// `hooks` is a boolean feature flag. A `hooks` key holding anything else means the config is
-    /// shaped in a way this editor does not understand, and overwriting it with `true` would silently
-    /// destroy whatever the user put there — so refuse, in every spelling the editor otherwise edits.
-    @Test func codexFeatureToggleRefusesToOverwriteANonBooleanHooksValue() throws {
-        let conflicts = [
-            "[features]\nhooks = { enabled = true }\n",  // `hooks` inside the [features] table
-            "features = { hooks = 1 }\n",  // `hooks` inside a top-level inline table
-            "features.hooks = \"yes\"\n",  // top-level dotted `features.hooks`
-        ]
-        for contents in conflicts { #expect(throws: (any Error).self) { try AgentHookCodexFeatureToggle.updatedContents(contents) } }
-    }
-
-    @Test func codexInstallLeavesAConflictingConfigUntouched() throws {
+    @Test func codexCommandFailureIsReportedWithoutBlockingOtherAgents() throws {
         let home = try makeHome()
         defer { try? FileManager.default.removeItem(at: home) }
-        try makeAgentsAvailable([.claudeCode, .codex], home: home)
-        let config = home.appendingPathComponent(".codex/config.toml")
-        try FileManager.default.createDirectory(at: config.deletingLastPathComponent(), withIntermediateDirectories: true)
-        let original = "[[features]]\nname = \"a\"\n"
-        try original.write(to: config, atomically: true, encoding: .utf8)
+        try makeAgentsAvailable([.claudeCode], home: home)
+        try makeExecutable(
+            name: "codex", directory: home.appendingPathComponent(".local/bin", isDirectory: true),
+            contents: "#!/bin/sh\nprintf 'invalid Codex configuration' >&2\nexit 17\n")
 
         let outcome = try install([.claudeCode, .codex], home: home)
 
-        // Codex's config is untouchable, but that must not cost Claude Code its hooks.
         #expect(outcome.failures.map(\.kind) == [.codex])
-        // hooks.json was written before the config.toml toggle failed, so the hook entries themselves
-        // are current — only `features.hooks` is still off, which is `.outdated`, not `.notInstalled`.
-        #expect(outcome.agents.first { $0.kind == .codex }?.installState == .outdated)
+        #expect(outcome.failures.first?.message.localizedStandardContains("invalid Codex configuration") == true)
         #expect(outcome.agents.first { $0.kind == .claudeCode }?.installState == .current)
-        #expect(read(config) == original)
-    }
-
-    @Test func codexFeatureToggleDoesNotOverwriteUnreadableConfig() throws {
-        let home = try makeHome()
-        defer { try? FileManager.default.removeItem(at: home) }
-        let config = home.appendingPathComponent(".codex/config.toml")
-        try FileManager.default.createDirectory(at: config.deletingLastPathComponent(), withIntermediateDirectories: true)
-        let original = Data([0xFF, 0xFE, 0xFD])
-        try original.write(to: config)
-
-        #expect(throws: (any Error).self) { try AgentHookCodexFeatureToggle.ensureEnabled(fileURL: config) }
-        #expect((try? Data(contentsOf: config)) == original)
+        #expect(outcome.agents.first { $0.kind == .codex }?.installState == .outdated)
     }
 
     // MARK: - Status
@@ -727,7 +482,7 @@ import Testing
         let home = try makeHome()
         defer { try? FileManager.default.removeItem(at: home) }
         let shimDirectory = home.appendingPathComponent(".asdf/shims", isDirectory: true)
-        try makeExecutable(name: "codex", directory: shimDirectory)
+        try makeExecutable(name: "codex", directory: shimDirectory, contents: Self.codexFeatureCLIScript)
         // `spaces` lives there too, so resolving it, resolving codex, and the trailing status all ride
         // the same probe rather than spawning a shell each.
         try makeExecutable(name: AgentHookCommand.spacesExecutableName, directory: shimDirectory)

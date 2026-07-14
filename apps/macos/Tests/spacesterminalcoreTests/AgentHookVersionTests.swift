@@ -11,14 +11,20 @@ import Testing
 /// Confusing the two either leaves stale hooks behind or duplicates them on every reinstall.
 @Suite struct AgentHookVersionTests {
     private let bindings: [AgentHookJSONWriter.EventBinding] = [
-        .init(eventName: "SessionStart", event: .initialize),
-        .init(eventName: "Stop", event: .done),
+        .init(eventName: "SessionStart", event: .initialize), .init(eventName: "Stop", event: .done),
     ]
 
     private func makeTemporaryDirectory() throws -> URL {
         let url = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("agent-hook-version-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
+    }
+
+    private func makeCodexFeatureListExecutable(in directory: URL, enabled: Bool) throws -> String {
+        let executable = directory.appendingPathComponent("codex")
+        try "#!/bin/sh\nprintf 'hooks stable \(enabled)\\n'\n".write(to: executable, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        return executable.path
     }
 
     /// A hook command as an older Spaces build would have written it.
@@ -31,9 +37,7 @@ import Testing
         try data.write(to: url)
     }
 
-    private func group(_ command: String) -> [String: Any] {
-        ["matcher": "", "hooks": [["type": "command", "command": command]]]
-    }
+    private func group(_ command: String) -> [String: Any] { ["matcher": "", "hooks": [["type": "command", "command": command]]] }
 
     private func readCommands(_ url: URL, eventName: String) throws -> [String] {
         let data = try Data(contentsOf: url)
@@ -155,8 +159,8 @@ import Testing
         #expect(AgentHookOpencodePluginWriter.installState(pluginURL: plugin) == .current)
 
         // A plugin an older Spaces wrote: ours, but not what this build emits.
-        let stale = try String(contentsOf: plugin, encoding: .utf8)
-            .replacingOccurrences(of: AgentHookCommand.versionedMarker(), with: AgentHookCommand.versionedMarker(0))
+        let stale = try String(contentsOf: plugin, encoding: .utf8).replacingOccurrences(
+            of: AgentHookCommand.versionedMarker(), with: AgentHookCommand.versionedMarker(0))
         try stale.write(to: plugin, atomically: true, encoding: .utf8)
         #expect(AgentHookOpencodePluginWriter.installState(pluginURL: plugin) == .outdated)
     }
@@ -167,15 +171,17 @@ import Testing
     /// off are `.outdated` — the hooks exist but cannot fire, and reinstalling sets the flag.
     @Test func codexIsOutdatedWhenItsHooksAreCurrentButTheFeatureFlagIsOff() throws {
         let home = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: home) }
         let codexDirectory = home.appendingPathComponent(".codex", isDirectory: true)
         try FileManager.default.createDirectory(at: codexDirectory, withIntermediateDirectories: true)
         try AgentHookJSONWriter.install(
             fileURL: codexDirectory.appendingPathComponent("hooks.json"), bindings: SupportedCodingAgentHook.codex.jsonEventBindings,
             spacesExecutablePath: "/usr/local/bin/spaces")
 
-        #expect(SupportedCodingAgentHook.codex.installState(home: home, fileManager: .default) == .outdated)
+        let disabledCodex = try makeCodexFeatureListExecutable(in: home, enabled: false)
+        #expect(SupportedCodingAgentHook.codex.installState(home: home, fileManager: .default, agentExecutablePath: disabledCodex) == .outdated)
 
-        try "[features]\nhooks = true\n".write(to: codexDirectory.appendingPathComponent("config.toml"), atomically: true, encoding: .utf8)
-        #expect(SupportedCodingAgentHook.codex.installState(home: home, fileManager: .default) == .current)
+        let enabledCodex = try makeCodexFeatureListExecutable(in: home, enabled: true)
+        #expect(SupportedCodingAgentHook.codex.installState(home: home, fileManager: .default, agentExecutablePath: enabledCodex) == .current)
     }
 }

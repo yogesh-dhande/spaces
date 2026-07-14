@@ -139,13 +139,14 @@ public enum AgentHookInstaller {
         else { throw AgentHookInstallerError.spacesCLINotFound }
         var failures: [AgentHookInstallFailure] = []
         for kind in kinds {
-            guard isAvailable(kind, executableResolver: &executableResolver) else {
+            guard let agentExecutablePath = resolvedExecutablePath(for: kind, executableResolver: &executableResolver) else {
                 failures.append(.init(kind: kind, message: "\(kind.displayName) was not detected on this machine."))
                 continue
             }
-            do { try kind.install(home: home, fileManager: fileManager, spacesExecutablePath: spacesExecutablePath) } catch {
-                failures.append(.init(kind: kind, message: error.localizedDescription))
-            }
+            do {
+                try kind.install(
+                    home: home, fileManager: fileManager, spacesExecutablePath: spacesExecutablePath, agentExecutablePath: agentExecutablePath)
+            } catch { failures.append(.init(kind: kind, message: error.localizedDescription)) }
         }
         return AgentHookInstallOutcome(
             agents: status(home: home, fileManager: fileManager, executableResolver: &executableResolver), failures: failures)
@@ -153,15 +154,21 @@ public enum AgentHookInstaller {
 
     private static func status(home: URL, fileManager: FileManager, executableResolver: inout ExecutableResolver) -> [AgentHookStatus] {
         SupportedCodingAgentHook.allCases.map { kind in
-            AgentHookStatus(
-                kind: kind, displayName: kind.displayName, available: isAvailable(kind, executableResolver: &executableResolver),
-                installState: kind.installState(home: home, fileManager: fileManager))
+            let executablePath = resolvedExecutablePath(for: kind, executableResolver: &executableResolver)
+            return AgentHookStatus(
+                kind: kind, displayName: kind.displayName, available: executablePath != nil,
+                installState: kind.installState(home: home, fileManager: fileManager, agentExecutablePath: executablePath))
         }
     }
 
     /// An agent is "available" only when its executable resolves on PATH / a common install dir.
     private static func isAvailable(_ kind: SupportedCodingAgentHook, executableResolver: inout ExecutableResolver) -> Bool {
-        kind.executableNames.contains { executableResolver.resolve(named: $0) != nil }
+        resolvedExecutablePath(for: kind, executableResolver: &executableResolver) != nil
+    }
+
+    private static func resolvedExecutablePath(for kind: SupportedCodingAgentHook, executableResolver: inout ExecutableResolver) -> String? {
+        for name in kind.executableNames { if let path = executableResolver.resolve(named: name) { return path } }
+        return nil
     }
 
     /// Resolves executables across `$PATH` plus common install locations, because a daemon started by

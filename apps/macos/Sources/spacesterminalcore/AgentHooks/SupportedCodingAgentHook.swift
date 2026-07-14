@@ -52,19 +52,15 @@ public enum SupportedCodingAgentHook: String, CaseIterable, Sendable, Codable {
         switch self {
         case .claudeCode:
             [
-                .init(eventName: "SessionStart", event: .initialize),
-                .init(eventName: "UserPromptSubmit", event: .working),
-                .init(eventName: "PermissionRequest", event: .blocked),
-                .init(eventName: "Stop", event: .done),
+                .init(eventName: "SessionStart", event: .initialize), .init(eventName: "UserPromptSubmit", event: .working),
+                .init(eventName: "PermissionRequest", event: .blocked), .init(eventName: "Stop", event: .done),
                 .init(eventName: "SessionEnd", event: .exit),
             ]
         case .codex:
             // Codex has no session-end event, so no `exit` binding.
             [
-                .init(eventName: "SessionStart", event: .initialize),
-                .init(eventName: "UserPromptSubmit", event: .working),
-                .init(eventName: "PermissionRequest", event: .blocked),
-                .init(eventName: "Stop", event: .done),
+                .init(eventName: "SessionStart", event: .initialize), .init(eventName: "UserPromptSubmit", event: .working),
+                .init(eventName: "PermissionRequest", event: .blocked), .init(eventName: "Stop", event: .done),
             ]
         case .opencode: []
         }
@@ -72,7 +68,7 @@ public enum SupportedCodingAgentHook: String, CaseIterable, Sendable, Codable {
 
     // MARK: - Per-agent install / status
 
-    func install(home: URL, fileManager: FileManager, spacesExecutablePath: String) throws {
+    func install(home: URL, fileManager: FileManager, spacesExecutablePath: String, agentExecutablePath: String) throws {
         switch self {
         case .claudeCode:
             try AgentHookJSONWriter.install(
@@ -81,21 +77,21 @@ public enum SupportedCodingAgentHook: String, CaseIterable, Sendable, Codable {
         case .codex:
             let codexDir = configDirectoryURL(home: home)
             try AgentHookJSONWriter.install(
-                fileURL: codexDir.appendingPathComponent("hooks.json"), bindings: jsonEventBindings,
-                spacesExecutablePath: spacesExecutablePath, fileManager: fileManager)
-            try AgentHookCodexFeatureToggle.ensureEnabled(fileURL: codexDir.appendingPathComponent("config.toml"), fileManager: fileManager)
+                fileURL: codexDir.appendingPathComponent("hooks.json"), bindings: jsonEventBindings, spacesExecutablePath: spacesExecutablePath,
+                fileManager: fileManager)
+            try AgentHookCodexFeatureToggle.ensureEnabled(executablePath: agentExecutablePath, codexHome: codexDir)
         case .opencode:
             try AgentHookOpencodePluginWriter.install(
                 pluginURL: opencodePluginURL(home: home), spacesExecutablePath: spacesExecutablePath, fileManager: fileManager)
         }
     }
 
-    func installState(home: URL, fileManager: FileManager) -> AgentHookInstallState {
+    func installState(home: URL, fileManager: FileManager, agentExecutablePath: String?) -> AgentHookInstallState {
         switch self {
         case .claudeCode:
             return AgentHookJSONWriter.installState(
-                fileURL: configDirectoryURL(home: home).appendingPathComponent("settings.json"), bindings: jsonEventBindings,
-                fileManager: fileManager)
+                fileURL: configDirectoryURL(home: home).appendingPathComponent("settings.json"), bindings: jsonEventBindings, fileManager: fileManager
+            )
         case .codex:
             // Codex needs both halves: the hook entries, and `features.hooks = true` to run them.
             // Current entries with the flag off are `.outdated`, not `.current` — the hooks exist but
@@ -104,10 +100,10 @@ public enum SupportedCodingAgentHook: String, CaseIterable, Sendable, Codable {
             let json = AgentHookJSONWriter.installState(
                 fileURL: codexDir.appendingPathComponent("hooks.json"), bindings: jsonEventBindings, fileManager: fileManager)
             guard json != .notInstalled else { return .notInstalled }
-            let enabled = AgentHookCodexFeatureToggle.isEnabled(fileURL: codexDir.appendingPathComponent("config.toml"))
+            guard let agentExecutablePath else { return .outdated }
+            let enabled = AgentHookCodexFeatureToggle.isEnabled(executablePath: agentExecutablePath, codexHome: codexDir)
             return json == .current && enabled ? .current : .outdated
-        case .opencode:
-            return AgentHookOpencodePluginWriter.installState(pluginURL: opencodePluginURL(home: home))
+        case .opencode: return AgentHookOpencodePluginWriter.installState(pluginURL: opencodePluginURL(home: home))
         }
     }
 
