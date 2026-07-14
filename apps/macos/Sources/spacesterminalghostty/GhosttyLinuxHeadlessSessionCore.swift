@@ -7,18 +7,60 @@
 
     enum GhosttyLinuxHeadlessSessionError: LocalizedError {
         case vtSessionUnavailable
+        case vtReplayFailed
         case snapshotUnavailable
 
         var errorDescription: String? {
             switch self {
             case .vtSessionUnavailable: "libghostty-vt is not available for the headless terminal session."
+            case .vtReplayFailed: "libghostty-vt could not replay the terminal transcript."
             case .snapshotUnavailable: "Unable to export a headless terminal render frame."
+            }
+        }
+    }
+
+    /// Bridges the PTY driver's synchronous output callback to the main-actor task that
+    /// persists and renders that output. Once the PTY driver has switched to handoff
+    /// buffering, no delivery can register here, so draining this fence is a stable
+    /// boundary before output.log is closed.
+    final class GhosttyLinuxHandoffOutputDeliveryFence: @unchecked Sendable {
+        private let lock = NSLock()
+        private var deliveryCount = 0
+        private var drainWaiters: [CheckedContinuation<Void, Never>] = []
+
+        func beginDelivery() {
+            lock.lock()
+            deliveryCount += 1
+            lock.unlock()
+        }
+
+        func finishDelivery() {
+            lock.lock()
+            precondition(deliveryCount > 0, "finishing an output delivery that was never registered")
+            deliveryCount -= 1
+            let waiters = deliveryCount == 0 ? drainWaiters : []
+            if deliveryCount == 0 { drainWaiters.removeAll() }
+            lock.unlock()
+            for waiter in waiters { waiter.resume() }
+        }
+
+        func waitUntilDrained() async {
+            await withCheckedContinuation { continuation in
+                lock.lock()
+                guard deliveryCount > 0 else {
+                    lock.unlock()
+                    continuation.resume()
+                    return
+                }
+                drainWaiters.append(continuation)
+                lock.unlock()
             }
         }
     }
 
     @MainActor public final class GhosttyEmbeddedSessionCore {
         private static let maxScrollbackBytes = TerminalScrollbackBudget.defaultMaxBytes
+        nonisolated static let outputReplayChunkByteCount = 1024 * 1024
 
         private enum RenderStateExportMode {
             case selfContained
@@ -31,6 +73,7 @@
         private let controlQueue: DispatchQueue
         private let stateStreamQueue: DispatchQueue
         private let ptyDriver: HostManagedPTYTerminalSessionDriver
+        private let outputDeliveryFence = GhosttyLinuxHandoffOutputDeliveryFence()
         private var controlServer: TerminalControlServer?
         private var stateStreamServer: GhosttyRemoteSessionStateStreamServer?
         private var outputHandle: FileHandle?
@@ -47,6 +90,14 @@
         private var currentAppearance: ThemeAppearance = .dark
         private var ownerEpoch: UInt64 = 0
         private var screenStateRevision: UInt64 = 0
+        /// Set for the brief exec-in-place quiesce window so no late resync turn
+        /// broadcasts a frame while the session is being handed to the staged daemon.
+        /// Cleared on resume (`resumeFromHandoff`) or the failed-exec fallback
+        /// (`resumeInPlaceAfterFailedExec`).
+        private var suppressBroadcastsForHandoff = false
+        /// Byte offset where renderer-disconnected output begins. Failed handoff streams
+        /// this persisted suffix back through the existing VT without duplicating it.
+        private var handoffTranscriptReplayOffset: UInt64?
         private var renderUpdateBaseline: GhosttyRenderUpdateBaseline?
         private var forceNextBroadcastFullRenderUpdate = false
         private var localOwnerCommandInputOutputResyncPending = false
@@ -80,7 +131,7 @@
             started = true
             terminating = false
             writeRuntimeState(state: .starting)
-            ptyDriver.setOutputHandler { [weak self] data in Task { @MainActor [weak self] in self?.handleOutput(data) } }
+            installOutputHandler()
             ptyDriver.setSessionClosedHandler { [weak self] in self?.handleSessionClosed() }
             do {
                 try ptyDriver.startIfNeeded()
@@ -135,19 +186,184 @@
             onSessionClosed?(self)
         }
 
+        // MARK: - Exec-in-place handoff
+
+        /// Quiesce this session for the exec-in-place daemon handoff: suppress
+        /// broadcasts, stop the per-session resync task, and stop the control +
+        /// state-stream servers (removing their socket files exactly as `terminate()`
+        /// does) WITHOUT detaching clients, killing the child, or freeing the vt
+        /// session. The PTY read loop keeps draining — first into an in-memory buffer,
+        /// then straight to `output.log` — so not a byte is lost across the exec.
+        /// Returns the handoff record the staged daemon needs to adopt this session, or
+        /// nil when there is nothing live to hand off (the child already exited/closed),
+        /// in which case the caller terminates the session normally.
+        public func quiesceForHandoff() async throws -> DaemonHandoffSessionRecord? {
+            handoffTranscriptReplayOffset = nil
+            suppressBroadcastsForHandoff = true
+            inputOutputResyncTask?.cancel()
+            inputOutputResyncTask = nil
+            localOwnerCommandInputOutputResyncPending = false
+
+            controlServer?.stop()
+            controlServer = nil
+            TerminalControlServer.removeSocketFileIfPresent(at: paths.controlSocketPath)
+            stateStreamServer?.stop()
+            stateStreamServer = nil
+            GhosttyRemoteSessionStateStreamServer.removeSocketFileIfPresent(at: paths.subscriptionSocketPath)
+
+            // Nothing live to hand off (child dead/closed): caller terminates normally.
+            guard let descriptor = ptyDriver.handoffDescriptorSnapshot() else { return nil }
+
+            // Route further PTY bytes into an in-memory buffer so the read loop never
+            // blocks while we drain the main actor and close the durable output handle.
+            await ptyDriver.beginHandoffOutputBuffering()
+
+            // The PTY callback registers this second fence before returning and only
+            // completes it after its main-actor handleOutput task has appended output.log.
+            // The driver's fence above makes the registration set stable; this drain proves
+            // every registered persistence task completed without relying on timing.
+            await outputDeliveryFence.waitUntilDrained()
+
+            if let outputHandle {
+                do {
+                    try outputHandle.synchronize()
+                    try outputHandle.close()
+                    self.outputHandle = nil
+                } catch {
+                    try? outputHandle.close()
+                    self.outputHandle = nil
+                    throw error
+                }
+            }
+            handoffTranscriptReplayOffset = try transcriptByteCount()
+
+            // Flush the buffered bytes to output.log and install the direct-to-file writer
+            // that keeps appending until execv.
+            try ptyDriver.finishHandoffOutputBuffering(appendingTo: paths.outputPath)
+
+            return DaemonHandoffSessionRecord(
+                sessionID: launchConfiguration.sessionID, masterFD: descriptor.masterFD, childPID: descriptor.childPID, columns: terminalSize.columns,
+                rows: terminalSize.rows, ownerEpoch: ownerEpoch, screenStateRevision: screenStateRevision, appearance: currentAppearance.rawValue)
+        }
+
+        /// Holds the PTY sink boundary while the daemon performs its final persistence
+        /// validation and `execv`, preventing a direct write from racing after the check.
+        public func withValidatedHandoffOutputForExec<T>(_ operation: () throws -> T) throws -> T {
+            try ptyDriver.withValidatedHandoffOutputForExec(operation)
+        }
+
+        /// Failed-`execv` fallback: `execv` returned, so this same image keeps running and
+        /// nothing was freed. Stop the direct-to-file writer, reopen the output handle for
+        /// append, restart the per-session servers, and resume broadcasts. This rebinds the
+        /// still-live session; it never rebuilds it. This core has no periodic timers to
+        /// resume — its resync task is armed on demand — so refreshing runtime state is the
+        /// whole catch-up.
+        public func resumeInPlaceAfterFailedExec() async {
+            ptyDriver.pauseHandoffOutputForFallback()
+            if let handoffTranscriptReplayOffset {
+                do {
+                    _ = try Self.replayOutputLog(at: paths.outputPath, startingAt: handoffTranscriptReplayOffset) { self.writeVTRenderer($0) }
+                } catch { FileHandle.standardError.write(Data("spaces: ghostty handoff transcript replay failed: \(error)\n".utf8)) }
+            }
+            do { try openOutputHandlePreservingTranscript() } catch {
+                FileHandle.standardError.write(Data("spaces: ghostty handoff transcript reopen failed: \(error)\n".utf8))
+            }
+            ptyDriver.endHandoffOutputBuffering()
+            await outputDeliveryFence.waitUntilDrained()
+            self.handoffTranscriptReplayOffset = nil
+            suppressBroadcastsForHandoff = false
+            do {
+                try startControlServer()
+                try startStateStreamServer()
+            } catch { FileHandle.standardError.write(Data("spaces: ghostty handoff resume-in-place failed: \(error)\n".utf8)) }
+            writeRuntimeState(state: .running)
+            broadcastCurrentState(reason: TerminalRemoteSessionStateReason.initial)
+        }
+
+        /// Resume side of the exec-in-place handoff, run on a freshly built core in the
+        /// staged daemon image for a session that survived the exec. Rebuilds the vt
+        /// session at the persisted grid size and replays output.log (via
+        /// `recreateVTRenderer`), adopts the inherited PTY, then restarts the servers and
+        /// republishes a full frame so reconnecting clients get a self-contained baseline.
+        ///
+        /// This core's replay is synchronous libghostty-vt (`recreateVTRenderer` writes the
+        /// transcript straight into the vt session), unlike the macOS core whose replay
+        /// blocks on tick-pumped GhosttyKit IO. So there is no off-main-actor dance: the
+        /// replay runs inline. The method stays `async` only for API symmetry with the
+        /// macOS core so stage 5's daemon call site compiles unchanged on both platforms.
+        public func resumeFromHandoff(_ record: DaemonHandoffSessionRecord) async throws {
+            try paths.ensureDirectories()
+            try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+            // Preserve output.log: recreateVTRenderer replays it to rebuild the screen.
+            try openOutputHandlePreservingTranscript()
+
+            // Apply the persisted grid and appearance BEFORE building the vt session so the
+            // replayed frames wrap at the persisted width and carry the right colors
+            // (makeVTSession reads both).
+            terminalSize = (columns: record.columns, rows: record.rows)
+            if let appearanceRaw = record.appearance, let appearance = ThemeAppearance(rawValue: appearanceRaw) { currentAppearance = appearance }
+
+            started = true
+            terminating = false
+            suppressBroadcastsForHandoff = false
+            installOutputHandler()
+            ptyDriver.setSessionClosedHandler { [weak self] in self?.handleSessionClosed() }
+
+            // Rebuild + replay at the persisted grid. recreateVTRenderer writes output.log
+            // synchronously into a replacement VT session, then swaps it in and arms the
+            // full-frame flag.
+            try recreateVTRenderer(columns: record.columns, rows: record.rows)
+
+            // Adopt the inherited PTY only AFTER replay so no live byte races ahead of the
+            // replayed transcript. The read loop starts here.
+            ptyDriver.adopt(masterFD: record.masterFD, childPID: record.childPID)
+
+            ownerEpoch = record.ownerEpoch
+            // Advance past the recorded revision and force the first broadcast to a full
+            // render update so reconnecting clients rebuild from a self-contained baseline.
+            screenStateRevision = record.screenStateRevision &+ 1
+            renderUpdateBaseline = nil
+            forceNextBroadcastFullRenderUpdate = true
+
+            try startControlServer()
+            try startStateStreamServer()
+            writeRuntimeState(state: .running)
+            broadcastCurrentState(reason: TerminalRemoteSessionStateReason.initial)
+        }
+
+        var debugOwnerEpoch: UInt64 { ownerEpoch }
+        var isStarted: Bool { started }
+
+        private func installOutputHandler() {
+            let outputDeliveryFence = outputDeliveryFence
+            ptyDriver.setOutputHandler { [weak self, outputDeliveryFence] data in
+                outputDeliveryFence.beginDelivery()
+                Task { @MainActor [weak self, outputDeliveryFence] in
+                    defer { outputDeliveryFence.finishDelivery() }
+                    self?.handleOutput(data)
+                }
+            }
+        }
+
         private func handleOutput(_ data: Data) {
             guard started, !data.isEmpty else { return }
             logMobileTakeoverPerformance(
                 name: "terminal_output_observed", count: data.count,
                 attributes: ["output_bytes": String(data.count), "output_byte_count_before": String(outputByteCount)])
-            do {
-                try outputHandle?.write(contentsOf: data)
-                outputByteCount += data.count
-            } catch {}
+            _ = appendTranscript(data)
             writeVTRenderer(data)
             writeRuntimeState(state: .running)
             broadcastCurrentState(reason: TerminalRemoteSessionStateReason.output)
             scheduleInputOutputResyncIfNeeded()
+        }
+
+        @discardableResult private func appendTranscript(_ data: Data) -> Bool {
+            guard let outputHandle else { return false }
+            do {
+                try outputHandle.write(contentsOf: data)
+                outputByteCount += data.count
+                return true
+            } catch { return false }
         }
 
         private func ensureOutputHandle() throws {
@@ -155,6 +371,31 @@
             let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: paths.outputPath))
             outputByteCount = Int(try handle.seekToEnd())
             outputHandle = handle
+        }
+
+        /// Opens the durable output handle for append WITHOUT truncating any existing
+        /// transcript, for the handoff resume paths. `resumeFromHandoff` replays output.log
+        /// (via `recreateVTRenderer`) to rebuild the screen and `resumeInPlaceAfterFailedExec`
+        /// continues the same transcript, so both must keep the existing bytes — unlike
+        /// `ensureOutputHandle`, whose `createFile(contents: nil)` recreates (and thus
+        /// empties) the log for a fresh start. Creating the file only when absent leaves any
+        /// existing history in place; `seekToEnd` positions the handle to append and
+        /// re-derive the byte count.
+        private func openOutputHandlePreservingTranscript() throws {
+            guard outputHandle == nil else { return }
+            if !FileManager.default.fileExists(atPath: paths.outputPath) {
+                _ = FileManager.default.createFile(atPath: paths.outputPath, contents: nil)
+            }
+            let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: paths.outputPath))
+            outputByteCount = Int(try handle.seekToEnd())
+            outputHandle = handle
+        }
+
+        private func transcriptByteCount() throws -> UInt64 {
+            guard FileManager.default.fileExists(atPath: paths.outputPath) else { return 0 }
+            let attributes = try FileManager.default.attributesOfItem(atPath: paths.outputPath)
+            guard let size = attributes[.size] as? NSNumber else { throw POSIXError(.EIO) }
+            return size.uint64Value
         }
 
         private func startControlServer() throws {
@@ -298,16 +539,12 @@
             var encodedPointer: UnsafeMutablePointer<CChar>?
             var encodedLength: size_t = 0
             let encoded = data.withUnsafeBytes { rawBuffer -> Bool in
-                if data.isEmpty {
-                    return spaces_ghostty_vt_session_encode_paste(vtSession, nil, 0, &encodedPointer, &encodedLength)
-                }
+                if data.isEmpty { return spaces_ghostty_vt_session_encode_paste(vtSession, nil, 0, &encodedPointer, &encodedLength) }
                 guard let baseAddress = rawBuffer.bindMemory(to: UInt8.self).baseAddress else { return false }
                 return spaces_ghostty_vt_session_encode_paste(vtSession, baseAddress, data.count, &encodedPointer, &encodedLength)
             }
             guard encoded else { return nil }
-            defer {
-                if let encodedPointer { spaces_ghostty_vt_free_buffer(encodedPointer) }
-            }
+            defer { if let encodedPointer { spaces_ghostty_vt_free_buffer(encodedPointer) } }
             guard let encodedPointer, encodedLength > 0 else { return Data() }
             return Data(bytes: encodedPointer, count: encodedLength)
         }
@@ -328,7 +565,11 @@
             guard ownerRequestIsCurrent(request) else {
                 return TerminalControlResponse(ok: false, message: "Only the active owner can clear the terminal.", errorCode: .ownershipRejected)
             }
-            writeVTRenderer(Data("\u{001B}[H\u{001B}[2J\u{001B}[3J".utf8))
+            let mutation = GhosttyTerminalTranscriptMutation.clearScreenAndScrollback
+            guard appendTranscript(mutation) else {
+                return TerminalControlResponse(ok: false, message: "Unable to persist the terminal clear operation.")
+            }
+            writeVTRenderer(mutation)
             broadcastCurrentState(reason: TerminalRemoteSessionStateReason.clearScreen)
             return TerminalControlResponse(ok: true, message: "Cleared terminal screen and scrollback.")
         }
@@ -340,9 +581,11 @@
             guard let columns = request.columns, let rows = request.rows, columns > 0, rows > 0 else {
                 return TerminalControlResponse(ok: false, message: "Missing terminal size.", errorCode: .invalidArgument)
             }
+            do { try recreateVTRenderer(columns: columns, rows: rows) } catch {
+                return TerminalControlResponse(ok: false, message: "Unable to resize the terminal renderer: \(error)")
+            }
             terminalSize = (columns, rows)
             _ = ptyDriver.resizeCellGrid(columns: columns, rows: rows)
-            recreateVTRenderer(columns: columns, rows: rows)
             writeRuntimeState(state: .running)
             broadcastCurrentState(reason: TerminalRemoteSessionStateReason.resize)
             return TerminalControlResponse(ok: true, message: "Resized terminal.")
@@ -457,16 +700,46 @@
             screenStateRevision &+= 1
         }
 
-        private func recreateVTRenderer(columns: Int, rows: Int) {
-            if let vtSession { spaces_ghostty_vt_session_free(vtSession) }
-            vtSession = makeVTSession(columns: columns, rows: rows)
-            renderUpdateBaseline = nil
-            forceNextBroadcastFullRenderUpdate = true
-            guard let vtSession, let data = try? Data(contentsOf: URL(fileURLWithPath: paths.outputPath)), !data.isEmpty else { return }
-            data.withUnsafeBytes { rawBuffer in
-                _ = spaces_ghostty_vt_session_write(vtSession, rawBuffer.bindMemory(to: UInt8.self).baseAddress, rawBuffer.count)
+        /// Rebuilds the VT renderer from the append-only transcript without ever
+        /// materializing the whole file in memory. Replay happens into a replacement
+        /// session first, so a read or VT-write failure leaves the current renderer
+        /// intact and handoff resume can fail before adopting the inherited PTY.
+        private func recreateVTRenderer(columns: Int, rows: Int) throws {
+            guard let replacementSession = makeVTSession(columns: columns, rows: rows) else {
+                throw GhosttyLinuxHeadlessSessionError.vtSessionUnavailable
             }
-            screenStateRevision &+= 1
+            do {
+                let replayedOutput = try Self.replayOutputLog(at: paths.outputPath) { chunk in
+                    let succeeded = chunk.withUnsafeBytes { rawBuffer in
+                        spaces_ghostty_vt_session_write(replacementSession, rawBuffer.bindMemory(to: UInt8.self).baseAddress, rawBuffer.count)
+                    }
+                    guard succeeded else { throw GhosttyLinuxHeadlessSessionError.vtReplayFailed }
+                }
+                if let vtSession { spaces_ghostty_vt_session_free(vtSession) }
+                vtSession = replacementSession
+                renderUpdateBaseline = nil
+                forceNextBroadcastFullRenderUpdate = true
+                if replayedOutput { screenStateRevision &+= 1 }
+            } catch {
+                spaces_ghostty_vt_session_free(replacementSession)
+                throw error
+            }
+        }
+
+        /// Streams a transcript through `consume` in fixed-size chunks. Internal so
+        /// tests can enforce the memory-bound contract independently of file size.
+        @discardableResult nonisolated static func replayOutputLog(at path: String, startingAt offset: UInt64 = 0, consume: (Data) throws -> Void)
+            throws -> Bool
+        {
+            let handle = try FileHandle(forReadingFrom: URL(fileURLWithPath: path))
+            defer { try? handle.close() }
+            try handle.seek(toOffset: offset)
+            var replayedOutput = false
+            while let chunk = try handle.read(upToCount: outputReplayChunkByteCount), !chunk.isEmpty {
+                try consume(chunk)
+                replayedOutput = true
+            }
+            return replayedOutput
         }
 
         /// Creates a headless vt session themed with the Spaces terminal colors, so the render
@@ -539,6 +812,7 @@
         }
 
         private func broadcastCurrentState(reason: String) {
+            guard !suppressBroadcastsForHandoff else { return }
             let performanceLoggingEnabled = SpacesDeviceTerminalPerformanceLogger.isEnabled()
             let startedAt = performanceLoggingEnabled ? Date() : nil
             guard let payload = makeStatePayload(reason: reason, exportMode: .streamDeltaAllowed) else { return }

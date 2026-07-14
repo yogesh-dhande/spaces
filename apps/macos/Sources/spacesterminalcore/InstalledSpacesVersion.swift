@@ -26,9 +26,7 @@ public enum InstalledSpacesVersion {
         /// version by resolving its own executable path back into the bundle that now contains it and
         /// reading that bundle's `Info.plist`.
         static func installedAppBundleVersion(executableURL: URL? = Bundle.main.executableURL) -> String? {
-            guard let executableURL,
-                let bundleURL = enclosingAppBundleURL(of: executableURL.resolvingSymlinksInPath())
-            else { return nil }
+            guard let executableURL, let bundleURL = enclosingAppBundleURL(of: executableURL.resolvingSymlinksInPath()) else { return nil }
             let infoPlistURL = bundleURL.appendingPathComponent("Contents/Info.plist", isDirectory: false)
             guard let data = try? Data(contentsOf: infoPlistURL),
                 let info = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]
@@ -53,9 +51,9 @@ public enum InstalledSpacesVersion {
         /// with, so `current`'s manifest names the installed version.
         static func installedReleaseVersion(homeDirectoryURL: URL) -> String? {
             let manifestURL = homeDirectoryURL.appendingPathComponent(".spaces/daemon/current/manifest.json", isDirectory: false)
-            guard let data = try? Data(contentsOf: manifestURL),
-                let manifest = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-            else { return nil }
+            guard let data = try? Data(contentsOf: manifestURL), let manifest = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                return nil
+            }
             return manifest["app_version"] as? String
         }
     #endif

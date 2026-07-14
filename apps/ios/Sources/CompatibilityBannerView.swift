@@ -2,8 +2,7 @@ import SwiftUI
 import spacesterminalcore
 
 /// Blocking banner shown when the active device's daemon is wire-incompatible with this app, plus a
-/// quiet "update pending" variant when the daemon is compatible but older. The blocking variant
-/// surfaces the restart-impact counts so the user can defer until critical work finishes.
+/// quiet "update pending" variant when the daemon is compatible but older.
 struct CompatibilityBannerView: View {
     let compatibility: SpacesWireCompatibility
     let daemonStatus: TerminalServiceDaemonStatus?
@@ -24,12 +23,6 @@ struct CompatibilityBannerView: View {
                 .font(.system(size: 13))
                 .foregroundStyle(Theme.mutedSecondary)
                 .fixedSize(horizontal: false, vertical: true)
-            if canRestartFromHere, let impact = impactSummary {
-                Text(impact)
-                    .font(.system(size: 12))
-                    .foregroundStyle(Theme.mutedSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
             if canRestartFromHere {
                 Button(action: onRestart) {
                     Text("Restart Daemon")
@@ -72,33 +65,12 @@ struct CompatibilityBannerView: View {
             "This device runs a newer Spaces than this app. Update the app from the App Store to reconnect."
         case .daemonTooOld:
             isLinuxDaemon
-                ? "This device's daemon is older than this app needs. Update it from the Spaces app on your Mac — this app can't update a Linux daemon directly. It reconnects once updated."
-                : "The daemon on this device is older than this app needs. Restart it to apply the update and reconnect."
+                ? "This device's daemon is older than this app needs. Update it from the Spaces app on your Mac — this app can't update a "
+                    + "Linux daemon directly. Running terminals, agents, and processes on it are preserved. It reconnects once updated."
+                : "The daemon on this device is older than this app needs. Restart it to apply the update — running terminals, agents, and "
+                    + "processes keep running."
         case .compatible:
             "A newer Spaces is installed on this device; the daemon keeps running the older build until it restarts."
-        }
-    }
-
-    private var impactSummary: String? {
-        guard needsRestart, let status = daemonStatus else { return nil }
-        var parts: [String] = []
-        if status.activeSessionCount > 0 { parts.append(countPhrase(status.activeSessionCount, "terminal")) }
-        if status.runningProcesses > 0 { parts.append(countPhrase(status.runningProcesses, "process", plural: "processes")) }
-        let agents = status.activeAgents + status.waitingAgents
-        if agents > 0 { parts.append(countPhrase(agents, "coding agent")) }
-        guard !parts.isEmpty else { return "Restarting won't interrupt any running work." }
-        return "Restarting will stop \(listPhrase(parts))."
-    }
-
-    private func countPhrase(_ count: Int, _ singular: String, plural: String? = nil) -> String {
-        "\(count) \(count == 1 ? singular : (plural ?? singular + "s"))"
-    }
-
-    private func listPhrase(_ parts: [String]) -> String {
-        switch parts.count {
-        case 1: parts[0]
-        case 2: "\(parts[0]) and \(parts[1])"
-        default: parts.dropLast().joined(separator: ", ") + ", and " + (parts.last ?? "")
         }
     }
 }

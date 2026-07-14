@@ -279,6 +279,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         } else {
             host.deviceSections.insert(localSection, at: 0)
         }
+        host.maybeRequestSilentDaemonHandoff(deviceID: snapshot.localDeviceID, status: snapshot.localDaemonStatus)
         host.localDeviceID = snapshot.localDeviceID
         host.localDeviceName = snapshot.localDeviceName
         host.localPairedDevice = snapshot.localPairedDevice
@@ -545,6 +546,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
                 host.deviceSections[index].compatibility == load.compatibility && host.deviceSections[index].daemonStatus == load.daemonStatus
             host.deviceSections[index].daemonStatus = load.daemonStatus
             host.deviceSections[index].compatibility = load.compatibility
+            host.maybeRequestSilentDaemonHandoff(deviceID: deviceID, status: load.daemonStatus)
             // If this device's block was showing and it is now compatible, drop the obsolete block.
             host.clearCompatibilityBlockIfResolved(deviceID: deviceID)
             guard let overview = load.overview else {

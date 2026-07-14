@@ -22,8 +22,7 @@ final class SpacesDeviceOverviewViewModelTests: XCTestCase {
             SpacesDeviceClient.requestTimeoutSeconds(
                 for: .restartCodingAgent(.init(workspaceID: "workspace-1", agentID: nil, agentName: "Codex", agentLauncherID: nil))),
             SpacesDeviceClient.longRunningMutationTimeoutSeconds)
-        XCTAssertEqual(
-            SpacesDeviceClient.requestTimeoutSeconds(for: .agentHooksStatus), SpacesDeviceClient.agentHooksStatusRequestTimeoutSeconds)
+        XCTAssertEqual(SpacesDeviceClient.requestTimeoutSeconds(for: .agentHooksStatus), SpacesDeviceClient.agentHooksStatusRequestTimeoutSeconds)
         XCTAssertGreaterThan(SpacesDeviceClient.agentHooksStatusRequestTimeoutSeconds, SpacesDeviceClient.defaultRequestTimeoutSeconds)
     }
 
@@ -252,7 +251,8 @@ final class SpacesDeviceOverviewViewModelTests: XCTestCase {
     }
 
     private static func emptyOverviewResponse() -> SpacesDeviceAPIResponse {
-        SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(SpacesDeviceOverviewPayload(workspaces: [], sessions: [], daemonStatus: status())))
+        SpacesDeviceAPIResponse(
+            ok: true, message: "ok", result: .overview(SpacesDeviceOverviewPayload(workspaces: [], sessions: [], daemonStatus: status())))
     }
 
     private static func status() -> TerminalServiceDaemonStatus {

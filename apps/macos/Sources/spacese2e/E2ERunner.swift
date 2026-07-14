@@ -126,6 +126,9 @@ private struct E2EScenarioDescriptor: Sendable {
             name: "daemon-idle-shutdown",
             kind: .script(scriptName: "e2e_daemon_idle_shutdown.sh", arguments: [], environment: { $0.remoteEnvironment(enabled: false) })),
         E2EScenarioDescriptor(
+            name: "daemon-exec-handoff",
+            kind: .script(scriptName: "e2e_daemon_exec_handoff.sh", arguments: [], environment: { $0.remoteEnvironment(enabled: false) })),
+        E2EScenarioDescriptor(
             name: "edit-shortcuts",
             kind: .script(scriptName: "e2e_terminal_edit_shortcuts.sh", arguments: [], environment: { $0.remoteEnvironment(enabled: false) })),
         E2EScenarioDescriptor(name: "mac-input-latency", kind: .terminalLatency),

@@ -715,18 +715,19 @@ import workspacecore
     /// Relaunches the local `spacesd` daemon after it failed to start. This is the only local-daemon
     /// restart entry point. It calls `TerminalService.relaunch` directly (stop-then-start) rather than
     /// the `requestDaemonRestart` RPC, because a crashed daemon has no reachable control endpoint to
-    /// receive that RPC. On completion it re-renders the Devices pane against an authoritative status
-    /// and reloads the sidebar so the "This Mac" offline caption clears.
+    /// receive that RPC — a stop-then-start relaunch cannot use the exec-in-place handoff either, since
+    /// there is no live daemon process to quiesce sessions and hand off from. On completion it re-renders
+    /// the Devices pane against an authoritative status and reloads the sidebar so the "This Mac" offline
+    /// caption clears.
     ///
     /// The Device API control endpoint can be down while the terminal service still holds live sessions
     /// (`responseEnsuringCurrentTerminalService` deliberately returns the not-running response instead of
-    /// relaunching in that case, to avoid killing them). A relaunch stops the daemon and every live
-    /// session, so warn-before-kill — matching `confirmDaemonRestart` — whenever any session is live.
-    /// Liveness is read from the terminal service's own session list, the same signal that protective
-    /// path keys off; the Device API status is unreachable here, and its terminal-service ping would
-    /// under-report anyway (it omits process/agent counts), so the warning uses the generic
-    /// unknown-count impact message rather than a precise breakdown. When nothing is live (the daemon is
-    /// fully down) the relaunch proceeds with no prompt.
+    /// relaunching in that case, to avoid killing them). Unlike a daemon-update handoff, this relaunch
+    /// really does stop the daemon and every live session, so it warns before proceeding whenever any
+    /// session is live. Liveness is read from the terminal service's own session list, the same signal
+    /// that protective path keys off; the Device API status is unreachable here, so the warning cannot
+    /// give a precise breakdown. When nothing is live (the daemon is fully down) the relaunch proceeds
+    /// with no prompt.
     func restartLocalDaemon() {
         Task { @MainActor [weak self] in
             guard let self, !self.isRelaunchingLocalDaemon else { return }
@@ -735,7 +736,7 @@ import workspacecore
             if hasLiveSessions {
                 let alert = NSAlert()
                 alert.messageText = "Restart the local daemon?"
-                alert.informativeText = AppKitController.restartImpactMessage(status: nil)
+                alert.informativeText = "This will stop all running terminals, processes, and coding agents on this device."
                 alert.addButton(withTitle: "Restart")
                 alert.addButton(withTitle: "Defer")
                 guard alert.runModal() == .alertFirstButtonReturn else { return }

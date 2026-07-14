@@ -21,7 +21,10 @@ public struct SpacesCommand: ParsableCommand {
               - `workspace restart` forces a full stop and relaunch for a workspace.
               - Agent events stay explicit. Workspace runtime commands do not imply agent lifecycle. `agent signal <event>` records those lifecycle transitions for the current Spaces terminal session, or no-ops outside one.
             """, version: AppVersion.current,
-        subcommands: [ProjectCommand.self, WorkspaceCommand.self, AgentCommand.self, TerminalCommand.self, DeviceCommand.self, MCPCommand.self])
+        subcommands: [
+            ProjectCommand.self, WorkspaceCommand.self, AgentCommand.self, TerminalCommand.self, DeviceCommand.self, DaemonCommand.self,
+            MCPCommand.self,
+        ])
 
     public init() {}
 }
@@ -139,8 +142,7 @@ struct AgentSignalCommand: ParsableCommand {
         let sessionID = nonEmpty(session) ?? nonEmpty(environment[WorkspaceOrchestrator.terminalTrackingIDEnvVar])
         if let workspaceID, let sessionID { return (workspaceID, sessionID) }
         guard nonEmpty(workspace) == nil, nonEmpty(session) == nil else {
-            throw ValidationError(
-                "--workspace and --session must be given together, or both omitted to use the Spaces terminal environment.")
+            throw ValidationError("--workspace and --session must be given together, or both omitted to use the Spaces terminal environment.")
         }
         return nil
     }
@@ -304,6 +306,35 @@ struct DeviceRemoveCommand: ParsableCommand {
         try SpacesClientDatabase.defaultDatabase().deletePairedDevice(id: record.id)
         try SpacesDeviceCredentialStore.deleteToken(deviceID: record.id)
         print("Removed paired device \(record.name) (\(record.id))")
+    }
+}
+
+struct DaemonCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "daemon", abstract: "Manage the spacesd daemon on this device.", subcommands: [DaemonApplyUpdateCommand.self])
+}
+
+struct DaemonApplyUpdateCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "apply-update", abstract: "Ask the running daemon to apply a staged binary update in place (running sessions keep running).",
+        discussion: """
+            Sends the frozen applyStagedUpdate command to this device's spacesd over its local socket.
+            The daemon quiesces its terminal sessions, writes a handoff table, and execs its already-staged
+            binary at the same pid, so running shells, coding agents, and workspace processes are not
+            interrupted. This is the mechanism the Linux installer uses to apply a reinstall without a
+            systemd restart; it does not start spacesd and does not retry if the daemon is not reachable.
+            """)
+
+    func run() throws {
+        let context = CLIContext()
+        let socketPath = try TerminalServicePaths.socketPath()
+        guard FileManager.default.fileExists(atPath: socketPath) else {
+            throw WorkspaceError.invalidArgument(message: "spacesd is not running for this user. Expected daemon socket at \(socketPath).")
+        }
+        let response = try TerminalServiceClient.send(
+            request: TerminalServiceRequest(command: .applyStagedUpdate), socketPath: socketPath, timeout: 5)
+        guard response.ok else { throw TerminalServiceError.requestFailed(response.message) }
+        context.output.emit(response.message)
     }
 }
 

@@ -768,8 +768,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     private let onPairingSucceeded: (@Sendable (SpacesDeviceClientApp) -> Void)?
     private let builtInTerminalSessionTerminator: WorkspaceOrchestrator.BuiltInTerminalSessionTerminator?
     private let builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher?
-    /// Frozen-core restart hook. Invoked for `.requestDaemonRestart`; the daemon process exits and
-    /// is respawned by launchd `KeepAlive` / systemd `Restart=always` from the updated binary.
+    /// Frozen-core restart hook. Invoked for `.requestDaemonRestart`; the daemon performs its
+    /// exec-in-place handoff so running terminals, processes, and agents survive the update.
     private let onRestartRequested: (@Sendable () -> Void)?
     private let overviewLoaderForTesting: (@Sendable (SpacesDeviceClientApp?) throws -> SpacesDeviceOverviewPayload)?
     private let agentHookStatusLoader: AgentHookStatusLoader

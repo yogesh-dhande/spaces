@@ -4,20 +4,22 @@ import XCTest
 @testable import spacesterminalcore
 
 final class SpacesWireProtocolTests: XCTestCase {
+    func testCurrentWireProtocolVersion() { XCTAssertEqual(SpacesWireProtocol.version, 5) }
+
     func testEvaluateCompatibleWhenVersionsMatch() {
-        let verdict = SpacesWireCompatibility.evaluate(daemonProtocolVersion: 4, localVersion: 4)
+        let verdict = SpacesWireCompatibility.evaluate(daemonProtocolVersion: 5, localVersion: 5)
         XCTAssertEqual(verdict, .compatible)
         XCTAssertTrue(verdict.isCompatible)
     }
 
     func testEvaluateDaemonTooOldWhenBelowLocal() {
-        let verdict = SpacesWireCompatibility.evaluate(daemonProtocolVersion: 3, localVersion: 4)
+        let verdict = SpacesWireCompatibility.evaluate(daemonProtocolVersion: 4, localVersion: 5)
         XCTAssertEqual(verdict, .daemonTooOld)
         XCTAssertFalse(verdict.isCompatible)
     }
 
     func testEvaluateClientTooOldWhenAboveLocal() {
-        let verdict = SpacesWireCompatibility.evaluate(daemonProtocolVersion: 5, localVersion: 4)
+        let verdict = SpacesWireCompatibility.evaluate(daemonProtocolVersion: 6, localVersion: 5)
         XCTAssertEqual(verdict, .clientTooOld)
         XCTAssertFalse(verdict.isCompatible)
     }
@@ -108,7 +110,6 @@ final class SpacesWireProtocolTests: XCTestCase {
     }
 
     private func makeStatus(version: String, installedVersion: String?) -> TerminalServiceDaemonStatus {
-        TerminalServiceDaemonStatus(
-            version: version, installedVersion: installedVersion, certificateFingerprint: nil, activeSessionCount: 0)
+        TerminalServiceDaemonStatus(version: version, installedVersion: installedVersion, certificateFingerprint: nil, activeSessionCount: 0)
     }
 }

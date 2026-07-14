@@ -23,8 +23,7 @@ final class TerminalServiceProtocolTests: XCTestCase {
         let controlRequest = TerminalControlRequest(command: "send", text: "hello", clientID: "ios-client", ownerEpoch: 7)
         let agentSignal = TerminalServiceAgentSignalEvent(
             id: "event-1", sessionID: "session-1", workspaceID: "workspace-1", workspacePath: "/srv/work", type: "blocked", label: "Mock Agent",
-            terminalTrackingID: "session-1", environmentKeys: ["SPACES_TERMINAL_TRACKING_ID"],
-            createdAt: "2026-06-11T00:00:00Z")
+            terminalTrackingID: "session-1", environmentKeys: ["SPACES_TERMINAL_TRACKING_ID"], createdAt: "2026-06-11T00:00:00Z")
         let profileCommand = TerminalServiceProfileCommand.workspaceCreate(
             .init(projectID: "project-1", branch: "feature", baseBranch: "main", existingBranch: true))
         let requests = [
@@ -57,20 +56,34 @@ final class TerminalServiceProtocolTests: XCTestCase {
             agentSignals: [
                 TerminalServiceAgentSignalEvent(
                     id: "event-1", sessionID: "session-1", workspaceID: "workspace-1", workspacePath: "/srv/work", type: "blocked",
-                    label: "Mock Agent", terminalTrackingID: "session-1",
-                    environmentKeys: ["SPACES_TERMINAL_TRACKING_ID"], createdAt: "2026-06-11T00:00:00Z")
+                    label: "Mock Agent", terminalTrackingID: "session-1", environmentKeys: ["SPACES_TERMINAL_TRACKING_ID"],
+                    createdAt: "2026-06-11T00:00:00Z")
             ],
             profile: TerminalServiceProfileCommandResponse(
                 message: "Created workspace.",
                 workspace: TerminalServiceProfileWorkspaceRecord(
-                    id: "workspace-1", projectID: "project-1", dir: "/srv/work", dirname: "feature", branch: "feature",
-                    baseBranch: "main", isDefault: false, isArchived: false, isHidden: false, isRunning: false, lastLaunchedAt: nil, notes: nil),
+                    id: "workspace-1", projectID: "project-1", dir: "/srv/work", dirname: "feature", branch: "feature", baseBranch: "main",
+                    isDefault: false, isArchived: false, isHidden: false, isRunning: false, lastLaunchedAt: nil, notes: nil),
                 terminalOutput: "recent output"),
             daemonStatus: TerminalServiceDaemonStatus(
                 version: "1.2.3", installedVersion: "1.2.3", certificateFingerprint: "SHA256:abcdef", activeSessionCount: 2))
 
         for request in requests { XCTAssertEqual(try TerminalServiceCodec.decodeRequest(TerminalServiceCodec.encodeRequest(request)), request) }
         XCTAssertEqual(try TerminalServiceCodec.decodeResponse(TerminalServiceCodec.encodeResponse(response)), response)
+    }
+
+    func testApplyStagedUpdateCommandRoundTripsThroughCodec() throws {
+        let request = TerminalServiceRequest(command: .applyStagedUpdate)
+        XCTAssertEqual(try TerminalServiceCodec.decodeRequest(TerminalServiceCodec.encodeRequest(request)), request)
+        XCTAssertEqual(request.commandName, "applyStagedUpdate")
+    }
+
+    func testApplyStagedUpdateDecodesFromFrozenRawJSON() throws {
+        // Frozen shape — never change. A same-or-older bundled CLI/installer sends exactly this bytes
+        // to any future daemon to trigger an exec-in-place staged-update handoff, so the daemon must
+        // keep decoding this literal request forever.
+        let json = Data(#"{"command":{"applyStagedUpdate":{}}}"#.utf8)
+        XCTAssertEqual(try TerminalServiceCodec.decodeRequest(json).command, .applyStagedUpdate)
     }
 
     func testRequestDecodeRejectsAmbiguousCommandPayloads() {
@@ -111,9 +124,12 @@ final class TerminalServiceProtocolTests: XCTestCase {
     func testClosesConnectionAfterDeliveryOnlyForUnauthorizedCode() {
         // The close decision keys on the typed code, not the message: an unauthorized code closes the
         // connection, while a message that merely contains "unauthorized" without the code does not.
-        XCTAssertTrue(TerminalServiceResponse(ok: false, message: "Unauthorized spacesd client.", errorCode: .unauthorized).closesConnectionAfterDelivery)
+        XCTAssertTrue(
+            TerminalServiceResponse(ok: false, message: "Unauthorized spacesd client.", errorCode: .unauthorized).closesConnectionAfterDelivery)
         XCTAssertFalse(TerminalServiceResponse(ok: false, message: "unauthorized-looking message").closesConnectionAfterDelivery)
-        XCTAssertFalse(TerminalServiceResponse(ok: false, message: "Terminal session is not running.", errorCode: .sessionNotRunning).closesConnectionAfterDelivery)
+        XCTAssertFalse(
+            TerminalServiceResponse(ok: false, message: "Terminal session is not running.", errorCode: .sessionNotRunning)
+                .closesConnectionAfterDelivery)
         XCTAssertFalse(TerminalServiceResponse(ok: true, message: "pong").closesConnectionAfterDelivery)
     }
 
@@ -195,8 +211,11 @@ final class TerminalServiceProtocolTests: XCTestCase {
         let originalRuntimeDir = getenv(SpacesProfile.runtimeDirectoryEnvironmentVariable).map { String(cString: $0) }
         setenv(SpacesProfile.runtimeDirectoryEnvironmentVariable, root.path, 1)
         defer {
-            if let originalRuntimeDir { setenv(SpacesProfile.runtimeDirectoryEnvironmentVariable, originalRuntimeDir, 1) }
-            else { unsetenv(SpacesProfile.runtimeDirectoryEnvironmentVariable) }
+            if let originalRuntimeDir {
+                setenv(SpacesProfile.runtimeDirectoryEnvironmentVariable, originalRuntimeDir, 1)
+            } else {
+                unsetenv(SpacesProfile.runtimeDirectoryEnvironmentVariable)
+            }
             try? FileManager.default.removeItem(at: root)
         }
 
@@ -208,10 +227,8 @@ final class TerminalServiceProtocolTests: XCTestCase {
             case .shutdownIfIdle:
                 shutdownIfIdleRequests.increment()
                 return TerminalServiceResponse(ok: false, message: "spacesd has 1 active session(s).", servicePID: getpid())
-            case .ping:
-                return TerminalServiceResponse(ok: true, message: "pong", servicePID: getpid())
-            default:
-                return TerminalServiceResponse(ok: false, message: "unexpected command")
+            case .ping: return TerminalServiceResponse(ok: true, message: "pong", servicePID: getpid())
+            default: return TerminalServiceResponse(ok: false, message: "unexpected command")
             }
         }
         try server.start()
@@ -231,13 +248,25 @@ final class TerminalServiceProtocolTests: XCTestCase {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
 
+        // A record for another live process must still be rejected: only a record for
+        // this process's own pid (the exec-in-place resume case) is adoptable.
+        let foreignProcess = Process()
+        foreignProcess.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        foreignProcess.arguments = ["30"]
+        try foreignProcess.run()
+        defer {
+            foreignProcess.terminate()
+            foreignProcess.waitUntilExit()
+        }
+        let foreignPID = foreignProcess.processIdentifier
+
         let lockPath = root.appendingPathComponent("daemon.lock").path
-        let lock = try TerminalServiceInstanceLock.acquire(path: lockPath)
+        let lock = try TerminalServiceInstanceLock.acquire(path: lockPath, processID: foreignPID)
         XCTAssertThrowsError(try TerminalServiceInstanceLock.acquire(path: lockPath)) { error in
             guard case TerminalServiceInstanceLockError.alreadyRunning(let pid, let path) = error else {
                 return XCTFail("Expected an already-running lock error, got \(error).")
             }
-            XCTAssertEqual(pid, getpid())
+            XCTAssertEqual(pid, foreignPID)
             XCTAssertEqual(path, lockPath)
         }
 
@@ -347,9 +376,7 @@ final class TerminalServiceProtocolTests: XCTestCase {
             let requestCount = LockedCounter()
             let server = TerminalServiceTLSServer(host: "127.0.0.1", port: 0, authToken: "SECRET", identity: identity, queue: queue) { request in
                 let count = requestCount.increment()
-                if count == 1 {
-                    return TerminalServiceResponse(ok: false, message: "Unauthorized test connection close.", errorCode: .unauthorized)
-                }
+                if count == 1 { return TerminalServiceResponse(ok: false, message: "Unauthorized test connection close.", errorCode: .unauthorized) }
                 return TerminalServiceResponse(ok: true, message: "\(request.commandName)-\(request.authToken ?? "")-\(count)")
             }
             try server.start()
