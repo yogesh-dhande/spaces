@@ -376,8 +376,8 @@ const localhostPains: ComparisonItem[] = [
     body: "Every checkout of the same app wants port 3000. You end up hand-assigning ports per branch, editing .env files, and restarting servers just to run two at once.",
   },
   {
-    title: "Shared cookies & sessions",
-    body: "Browsers scope cookies and local storage to hostname, not port — localhost:3000 and localhost:3001 are the same origin for auth. Log in on one, and you're logged into the other.",
+    title: "Shared cookie sessions",
+    body: "Cookies aren't scoped by port, so localhost:3000 and localhost:3001 can share cookie-based sessions. Log in on one, and the other can pick up the same session.",
   },
 ];
 
@@ -1211,7 +1211,7 @@ function SpecItem({ label, value }: { label: string; value: string }) {
       <dt className="font-mono text-[0.62rem] uppercase tracking-[0.14em] text-foreground-soft">
         {label}
       </dt>
-      <dd className="mt-1.5 whitespace-nowrap text-lg font-semibold tracking-tight tabular-nums md:text-xl">
+      <dd className="mt-1.5 text-lg font-semibold leading-tight tracking-tight tabular-nums md:text-xl">
         {value}
       </dd>
     </div>

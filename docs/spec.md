@@ -15,7 +15,10 @@ It should reduce the overhead of:
 Spaces provides a desktop app and a CLI for power users and coding agents.
 
 The public website links to the Spaces GitHub repository from the header and footer,
-and its download actions point to the latest GitHub Release.
+and its download actions point to the latest GitHub Release. Its localhost comparison
+limits cross-port sharing to cookie-based sessions, while the routed hostname comparison
+explains that separate hostnames isolate cookies and local storage. Hero specification
+values wrap on narrow screens instead of overlapping adjacent values.
 
 ## Non-Goals
 - Spaces does not manage window geometry or tiling. It simply focuses windows as laid out by the user.
