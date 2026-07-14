@@ -55,15 +55,17 @@ ios_test_destination() {
   fi
 
   local simulator_arch
+  local simulator_selection
+  local simulator_id
+  local simulator_state
   simulator_arch="$(ios_simulator_arch)"
 
-  xcrun simctl list devices available -j | IOS_SIMULATOR_ARCH="$simulator_arch" python3 -c '
+  simulator_selection="$(
+    xcrun simctl list devices available -j | python3 -c '
 import json
-import os
 import sys
 
 data = json.load(sys.stdin)
-arch = os.environ["IOS_SIMULATOR_ARCH"]
 preferred_names = ("iPhone 17 Pro", "iPhone 16 Pro", "iPhone 15 Pro")
 devices = []
 for runtime, runtime_devices in data.get("devices", {}).items():
@@ -82,14 +84,23 @@ for candidates in (
     for preferred_name in preferred_names:
         for device in candidates:
             if device.get("name") == preferred_name:
-                print("platform=iOS Simulator,id={},arch={}".format(device.get("udid"), arch))
+                print("{}\t{}".format(device.get("udid"), device.get("state")))
                 raise SystemExit(0)
     if candidates:
-        print("platform=iOS Simulator,id={},arch={}".format(candidates[0].get("udid"), arch))
+        print("{}\t{}".format(candidates[0].get("udid"), candidates[0].get("state")))
         raise SystemExit(0)
 
 raise SystemExit("No available iPhone simulator found for iOS tests.")
 '
+  )"
+  IFS=$'\t' read -r simulator_id simulator_state <<<"$simulator_selection"
+
+  if [ "$simulator_state" != "Booted" ]; then
+    printf 'Booting iOS simulator %s...\n' "$simulator_id" >&2
+    xcrun simctl boot "$simulator_id" >&2
+  fi
+  xcrun simctl bootstatus "$simulator_id" -b >&2
+  printf 'platform=iOS Simulator,id=%s,arch=%s\n' "$simulator_id" "$simulator_arch"
 }
 
 run_ios_tests() {
