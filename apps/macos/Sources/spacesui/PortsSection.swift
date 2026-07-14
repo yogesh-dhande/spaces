@@ -22,8 +22,8 @@ import workspacecore
     // MARK: Init
 
     init(
-        ports: [ServiceDefinition] = [], collapsedDisplayPortTexts: [String?] = [], collapsedDisplayURLs: [String?] = [],
-        subtitle: String? = nil, showsEnvironmentVariableHints: Bool = false
+        ports: [ServiceDefinition] = [], collapsedDisplayPortTexts: [String?] = [], collapsedDisplayURLs: [String?] = [], subtitle: String? = nil,
+        showsEnvironmentVariableHints: Bool = false
     ) {
         self.ports = ports
         self.collapsedDisplayPortTexts = collapsedDisplayPortTexts

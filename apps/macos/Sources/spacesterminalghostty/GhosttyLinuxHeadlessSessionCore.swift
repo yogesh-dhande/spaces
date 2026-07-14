@@ -263,13 +263,11 @@
             if let handoffTranscriptReplayOffset {
                 do {
                     _ = try Self.replayOutputLog(at: paths.outputPath, startingAt: handoffTranscriptReplayOffset) { self.writeVTRenderer($0) }
-                } catch {
-                    FileHandle.standardError.write(Data("spaces: ghostty handoff transcript replay failed: \(error)\n".utf8))
-                }
+                } catch { FileHandle.standardError.write(Data("spaces: ghostty handoff transcript replay failed: \(error)\n".utf8)) }
             }
-            do {
-                try openOutputHandlePreservingTranscript()
-            } catch { FileHandle.standardError.write(Data("spaces: ghostty handoff transcript reopen failed: \(error)\n".utf8)) }
+            do { try openOutputHandlePreservingTranscript() } catch {
+                FileHandle.standardError.write(Data("spaces: ghostty handoff transcript reopen failed: \(error)\n".utf8))
+            }
             ptyDriver.endHandoffOutputBuffering()
             await outputDeliveryFence.waitUntilDrained()
             self.handoffTranscriptReplayOffset = nil
@@ -730,9 +728,9 @@
 
         /// Streams a transcript through `consume` in fixed-size chunks. Internal so
         /// tests can enforce the memory-bound contract independently of file size.
-        @discardableResult nonisolated static func replayOutputLog(
-            at path: String, startingAt offset: UInt64 = 0, consume: (Data) throws -> Void
-        ) throws -> Bool {
+        @discardableResult nonisolated static func replayOutputLog(at path: String, startingAt offset: UInt64 = 0, consume: (Data) throws -> Void)
+            throws -> Bool
+        {
             let handle = try FileHandle(forReadingFrom: URL(fileURLWithPath: path))
             defer { try? handle.close() }
             try handle.seek(toOffset: offset)

@@ -435,12 +435,14 @@ import Foundation
 
     public enum TerminalServiceError: LocalizedError {
         case executableNotFound
+        case daemonWireIncompatible(TerminalServiceDaemonWireIncompatibility)
         case requestFailed(String)
         case serviceStartupTimedOut(String)
 
         public var errorDescription: String? {
             switch self {
             case .executableNotFound: "The spacesd executable is required to run built-in terminal sessions."
+            case .daemonWireIncompatible(let incompatibility): incompatibility.message
             case .requestFailed(let message): message
             case .serviceStartupTimedOut(let path): "Timed out waiting for spacesd to start from \(path)."
             }
@@ -556,17 +558,27 @@ import Foundation
     }
 
     public enum TerminalServiceError: LocalizedError {
+        case daemonWireIncompatible(TerminalServiceDaemonWireIncompatibility)
         case requestFailed(String)
         case serviceUnavailable(String)
 
         public var errorDescription: String? {
             switch self {
+            case .daemonWireIncompatible(let incompatibility): incompatibility.message
             case .requestFailed(let message): message
             case .serviceUnavailable(let socketPath): "spacesd is not running for this user. Expected daemon socket at \(socketPath)."
             }
         }
     }
 #endif
+
+public struct TerminalServiceDaemonWireIncompatibility: Sendable {
+    public let verdict: SpacesWireCompatibility
+    public let status: TerminalServiceDaemonStatus?
+    public let message: String
+
+    public var canRestartDaemon: Bool { verdict == .daemonTooOld }
+}
 
 extension TerminalService {
     /// Guards local dispatch against a daemon whose wire contract differs from this build's.
@@ -581,29 +593,31 @@ extension TerminalService {
     /// A ping response with no `daemonStatus` comes from a daemon predating wire-version negotiation,
     /// which counts as too old (never a match) — the same rule `TerminalServiceDaemonStatus` applies to
     /// a missing `protocolVersion`.
-    static func daemonWireIncompatibility(_ response: TerminalServiceResponse) -> String? {
+    static func daemonWireIncompatibilityDetails(_ response: TerminalServiceResponse) -> TerminalServiceDaemonWireIncompatibility? {
         let verdict = response.daemonStatus.map(SpacesWireCompatibility.evaluate(daemonStatus:)) ?? .daemonTooOld
         guard !verdict.isCompatible else { return nil }
+        var message: String
         switch verdict {
-        case .clientTooOld: return "The running spacesd daemon is newer than this Spaces build. Update Spaces to match the daemon, then retry."
+        case .clientTooOld:
+            message = "The running spacesd daemon is newer than this Spaces build. Update Spaces to match the daemon, then retry."
         case .daemonTooOld, .compatible:
             // Quitting/relaunching the Spaces app does not help: the daemon is managed by the OS service
             // manager (launchd `KeepAlive` / systemd `Restart=always`) and outlives the app, and app
             // launch only adopts it. Restarting the daemon makes it exit and respawn from the updated
             // binary — the daemon restart control in the Spaces app (shown for this device) does exactly that.
-            var message =
+            message =
                 "The running spacesd daemon is older than this Spaces build needs. "
-                + "Restart the daemon to load the update — use the daemon restart action in the Spaces app for this device — then retry."
+                + "Restart the daemon to load the update, then retry."
             if let status = response.daemonStatus,
                 status.activeSessionCount > 0 || status.runningProcesses > 0 || status.activeAgents + status.waitingAgents > 0
             {
                 message += " Restarting stops the daemon's running terminals, processes, and agents."
             }
-            return message
         }
+        return TerminalServiceDaemonWireIncompatibility(verdict: verdict, status: response.daemonStatus, message: message)
     }
 
     static func assertDaemonWireCompatible(_ response: TerminalServiceResponse) throws {
-        if let message = daemonWireIncompatibility(response) { throw TerminalServiceError.requestFailed(message) }
+        if let incompatibility = daemonWireIncompatibilityDetails(response) { throw TerminalServiceError.daemonWireIncompatible(incompatibility) }
     }
 }

@@ -319,7 +319,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     // module-internal rather than private.
     weak var visibleWorkspacePortsSection: PortsSection?
     var visiblePortsWorkspaceID: String?
-    var chromeAutomationSetupController: ChromeAutomationSetupController?
+    var setupFlowController: SetupFlowController?
     private var activeWindowShortcutProfile: WindowShortcutProfile?
     private let startupProfileStartTime = startupProfileBaselineUptime
     private var didLogFirstStartupInteraction = false
@@ -517,7 +517,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 guard let self else { return }
                 self.buildShellWindow()
                 self.logStartupProfile("shell_window_ready")
-                self.startWorkspaceUIAfterPermissionCheck()
+                self.enterSetupFlow()
                 self.ensureMainWindowVisibleOnLaunch()
             }
         }
@@ -4030,21 +4030,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
-    /// Decides at launch whether to show the blocking Chrome Automation permission screen or open
-    /// straight to the workspace UI.
-    private func startWorkspaceUIAfterPermissionCheck() {
-        if Self.requiresChromeAutomationSetup(ChromeAutomationPermission.status()) {
-            enterChromeAutomationSetupFlow()
-        } else {
-            presentMainWorkspaceUI()
-        }
-    }
-
     /// Builds the main split-view content and kicks off the initial sidebar load. Shared by the
-    /// normal launch path and the Chrome Automation setup screen's completion handler.
+    /// normal launch path and the setup flow's completion handler.
     private func presentMainWorkspaceUI() {
-        chromeAutomationSetupController?.stop()
-        chromeAutomationSetupController = nil
+        setupFlowController?.stop()
+        setupFlowController = nil
         buildMainWindowContent()
         logStartupProfile("main_content_ready")
         showLoadingPlaceholder(message: "Loading projects and workspaces...", detail: "Spaces is preparing your workspace data.")
@@ -4052,28 +4042,33 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         Task { @MainActor [weak self] in await self?.sidebar.loadInitialSidebarData() }
     }
 
-    /// Presents the blocking permission screen and advances to the workspace UI once the user
-    /// grants Chrome Automation. The controller polls so granting via System Settings (where macOS
-    /// no longer offers an in-app prompt after a denial) advances the app without a restart.
-    private func enterChromeAutomationSetupFlow() {
-        logStartupProfile("chrome_automation_setup_started")
-        chromeAutomationSetupController?.stop()
-        let controller = ChromeAutomationSetupController()
-        chromeAutomationSetupController = controller
-        // Capture `controller` weakly: it owns `onGranted`, so a strong capture would retain the
+    /// Presents the launch setup flow and advances to the workspace UI once its pending steps are
+    /// done. The flow decides internally which steps are pending; when none are, it completes
+    /// immediately and the user never sees it.
+    private func enterSetupFlow() {
+        logStartupProfile("setup_flow_started")
+        setupFlowController?.stop()
+        let controller = SetupFlowController(host: self, database: try? clientDatabase())
+        setupFlowController = controller
+        // Capture `controller` weakly: it owns `onComplete`, so a strong capture would retain the
         // controller (and its view hierarchy) past the point where `presentMainWorkspaceUI` clears
-        // `chromeAutomationSetupController`, leaking a setup controller each time the flow is shown.
-        controller.onGranted = { [weak self, weak controller] in
-            guard let self, let controller, self.chromeAutomationSetupController === controller else { return }
-            self.logStartupProfile("chrome_automation_setup_complete")
+        // `setupFlowController`, leaking a setup controller each time the flow is shown.
+        controller.onComplete = { [weak self, weak controller] in
+            guard let self, let controller, self.setupFlowController === controller else { return }
+            self.logStartupProfile("setup_flow_complete")
             self.presentMainWorkspaceUI()
         }
-        window.contentView = controller.begin()
+        // Install the setup content before starting the flow, never after: with no pending step the
+        // flow completes inside `begin()`, and its completion handler makes the workspace UI the
+        // window's content. Assigning here afterwards would cover it with an empty setup container.
+        window.contentView = controller.view
+        controller.begin()
     }
 
-    /// The app has no prerequisite/onboarding flow: background-refresh failures are always
-    /// logged rather than routed to a setup screen. Retained so call sites that previously
-    /// short-circuited on a deferred-setup requirement keep a single, explicit no-op.
+    /// Background-refresh failures are always logged rather than routed to the launch setup flow,
+    /// which runs once before the workspace UI opens and never reopens over it. Retained so call
+    /// sites that previously short-circuited on a deferred-setup requirement keep a single,
+    /// explicit no-op.
     func handleDeferredSetupRequirementIfNeeded(_ error: Error) -> Bool {
         _ = error
         return false
@@ -4581,6 +4576,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         case general
         case shortcuts
         case devices
+        case codingAgents
         case mcp
 
         var title: String {
@@ -4588,6 +4584,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             case .general: "General"
             case .shortcuts: "Shortcuts"
             case .devices: "Devices"
+            case .codingAgents: "Coding Agents"
             case .mcp: "MCP"
             }
         }
@@ -4597,6 +4594,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             case .general: "gearshape"
             case .shortcuts: "keyboard"
             case .devices: "desktopcomputer.and.macbook"
+            case .codingAgents: "chevron.left.forwardslash.chevron.right"
             case .mcp: "puzzlepiece.extension"
             }
         }
@@ -8248,8 +8246,53 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     func showError(_ error: Error) {
+        if showLocalDaemonCompatibilityBlockIfNeeded(error) { return }
         let alert = NSAlert(error: error)
         alert.runModal()
+    }
+
+    nonisolated static func shouldShowLocalDaemonCompatibilityBlock(for error: Error) -> Bool {
+        if let terminalError = error as? TerminalServiceError, case .daemonWireIncompatible = terminalError { return true }
+        return false
+    }
+
+    @discardableResult func showLocalDaemonCompatibilityBlockIfNeeded(_ error: Error) -> Bool {
+        if Self.shouldShowLocalDaemonCompatibilityBlock(for: error), let terminalError = error as? TerminalServiceError,
+            case .daemonWireIncompatible(let incompatibility) = terminalError
+        {
+            showLocalDaemonCompatibilityBlock(incompatibility)
+            return true
+        }
+        return false
+    }
+
+    private func showLocalDaemonCompatibilityBlock(_ incompatibility: TerminalServiceDaemonWireIncompatibility) {
+        let storedLocalDevice = localPairedDevice ?? (try? clientDatabase().pairedDevice(id: SpacesPairedDeviceRecord.localDeviceID))
+        if let storedLocalDevice {
+            localPairedDevice = storedLocalDevice
+            localDeviceID = storedLocalDevice.id
+            localDeviceName = storedLocalDevice.name
+        }
+        if let index = deviceSections.firstIndex(where: { $0.deviceID == localDeviceID }) {
+            deviceSections[index].device = storedLocalDevice ?? deviceSections[index].device
+            deviceSections[index].daemonStatus = incompatibility.status
+            deviceSections[index].compatibility = incompatibility.verdict
+            deviceSections[index].projects = []
+            deviceSections[index].workspacesByProject = [:]
+            deviceSections[index].workspaceRuntimeStatusByID = [:]
+            deviceSections[index].alertsGroups = []
+            deviceSections[index].overview = nil
+            deviceSections[index].loadState = .loaded
+        } else {
+            deviceSections.insert(
+                DeviceSection(
+                    deviceID: localDeviceID, deviceName: localDeviceName, isLocal: true, loadState: .loaded, device: storedLocalDevice, overview: nil,
+                    daemonStatus: incompatibility.status, compatibility: incompatibility.verdict), at: 0)
+        }
+        rebuildFlatSidebarData()
+        outlineView.reloadData()
+        showCompatibilityBlock(deviceID: localDeviceID, verdict: incompatibility.verdict)
+        if let window { revealTargetedHotkeyWindow(window) }
     }
 
     private func showInfoMessage(title: String, message: String) {

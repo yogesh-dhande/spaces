@@ -10,14 +10,12 @@ import Testing
     private func makeBarInWindow() -> (bar: PanelTabBarView, window: NSWindow) {
         let bar = PanelTabBarView()
         bar.update(tabIDs: ["t1", "t2"], titlesByTabID: ["t1": "one", "t2": "two"], selectedTabID: "t1")
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 600, height: 120), styleMask: [.borderless], backing: .buffered, defer: false)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 120), styleMask: [.borderless], backing: .buffered, defer: false)
         let content = NSView(frame: NSRect(x: 0, y: 0, width: 600, height: 120))
         window.contentView = content
         content.addSubview(bar)
         NSLayoutConstraint.activate([
-            bar.topAnchor.constraint(equalTo: content.topAnchor),
-            bar.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            bar.topAnchor.constraint(equalTo: content.topAnchor), bar.leadingAnchor.constraint(equalTo: content.leadingAnchor),
             bar.trailingAnchor.constraint(equalTo: content.trailingAnchor),
         ])
         content.layoutSubtreeIfNeeded()
@@ -26,17 +24,13 @@ import Testing
 
     private func tabItemView(withID id: String, in root: NSView) -> NSView? {
         if root.accessibilityIdentifier() == "panel-tab-\(id)" { return root }
-        for sub in root.subviews {
-            if let found = tabItemView(withID: id, in: sub) { return found }
-        }
+        for sub in root.subviews { if let found = tabItemView(withID: id, in: sub) { return found } }
         return nil
     }
 
     private func view(withAccessibilityIdentifier identifier: String, in root: NSView) -> NSView? {
         if root.accessibilityIdentifier() == identifier { return root }
-        for sub in root.subviews {
-            if let found = view(withAccessibilityIdentifier: identifier, in: sub) { return found }
-        }
+        for sub in root.subviews { if let found = view(withAccessibilityIdentifier: identifier, in: sub) { return found } }
         return nil
     }
 

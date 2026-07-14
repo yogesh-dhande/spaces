@@ -5,12 +5,59 @@ import spacesterminalcore
 @testable import spacesdevicecore
 
 final class SpacesDeviceAPIProtocolTests: XCTestCase {
+    func testWireProtocolVersionCoversAgentHooksCommands() {
+        XCTAssertGreaterThanOrEqual(SpacesWireProtocol.version, 2)
+    }
+
     func testSubscribeDeviceOverviewRoundTripsThroughCodecAndIsASubscription() throws {
         let request = SpacesDeviceAPIRequest(command: .subscribeDeviceOverview, authToken: "SECRET")
         XCTAssertTrue(request.command.isSubscriptionCommand)
         XCTAssertTrue(request.command.isDeviceOverviewSubscription)
         XCTAssertFalse(SpacesDeviceAPIRequest(command: .overview).command.isDeviceOverviewSubscription)
         XCTAssertEqual(try SpacesDeviceAPICodec.decodeRequest(SpacesDeviceAPICodec.encodeRequest(request)), request)
+    }
+
+    func testAgentHooksStatusCommandIsReplaySafeAndRoundTrips() throws {
+        let request = SpacesDeviceAPIRequest(command: .agentHooksStatus, authToken: "SECRET")
+        XCTAssertTrue(request.isSafeToReplayAfterConnectionFailure)
+        XCTAssertEqual(try SpacesDeviceAPICodec.decodeRequest(SpacesDeviceAPICodec.encodeRequest(request)), request)
+    }
+
+    func testInstallAgentHooksCommandRoundTripsAndIsNotReplaySafe() throws {
+        let request = SpacesDeviceAPIRequest(
+            command: .installAgentHooks(.init(kinds: [.claudeCode, .opencode])), authToken: "SECRET")
+        XCTAssertFalse(request.isSafeToReplayAfterConnectionFailure)
+        XCTAssertEqual(try SpacesDeviceAPICodec.decodeRequest(SpacesDeviceAPICodec.encodeRequest(request)), request)
+    }
+
+    func testAgentHooksStatusResultRoundTripsThroughResponse() throws {
+        let payload = SpacesAgentHooksStatusPayload(agents: [
+            AgentHookStatus(kind: .claudeCode, displayName: "Claude Code", available: true, installState: .current),
+            AgentHookStatus(kind: .codex, displayName: "Codex", available: true, installState: .notInstalled),
+            AgentHookStatus(kind: .opencode, displayName: "opencode", available: false, installState: .notInstalled),
+        ])
+        let response = SpacesDeviceAPIResponse(ok: true, message: "Loaded agent hook status.", result: .agentHooksStatus(payload))
+        let decoded = try SpacesDeviceAPICodec.decodeResponse(SpacesDeviceAPICodec.encodeResponse(response))
+        XCTAssertEqual(decoded, response)
+        XCTAssertEqual(decoded.agentHooksStatus, payload)
+    }
+
+    /// An install answers `ok` even when one agent failed, so the per-agent failures have to survive the
+    /// wire: they are the only way the client learns which agents to record and which to retry.
+    func testAgentHooksInstallResultCarriesPerAgentFailuresThroughResponse() throws {
+        let outcome = AgentHookInstallOutcome(
+            agents: [
+                AgentHookStatus(kind: .claudeCode, displayName: "Claude Code", available: true, installState: .current),
+                AgentHookStatus(kind: .codex, displayName: "Codex", available: true, installState: .notInstalled),
+            ],
+            failures: [AgentHookInstallFailure(kind: .codex, message: "config.toml already defines `features`.")])
+        let response = SpacesDeviceAPIResponse(ok: true, message: "Installed agent hooks.", result: .agentHooksInstall(outcome))
+
+        let decoded = try SpacesDeviceAPICodec.decodeResponse(SpacesDeviceAPICodec.encodeResponse(response))
+
+        XCTAssertEqual(decoded, response)
+        XCTAssertEqual(decoded.agentHooksInstall, outcome)
+        XCTAssertNil(decoded.agentHooksStatus)
     }
 
     func testResponseErrorCodeEncodesWhenSetAndDecodesNilWhenAbsent() throws {

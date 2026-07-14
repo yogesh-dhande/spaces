@@ -233,6 +233,10 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             host.startBackgroundServicesIfNeeded()
         case .failure(let error):
             if host.handleDeferredSetupRequirementIfNeeded(error) { return }
+            if host.showLocalDaemonCompatibilityBlockIfNeeded(error) {
+                host.startBackgroundServicesIfNeeded()
+                return
+            }
             host.showError(error)
             host.showPlaceholder(message: "Spaces couldn't load workspace data.")
             host.startBackgroundServicesIfNeeded()

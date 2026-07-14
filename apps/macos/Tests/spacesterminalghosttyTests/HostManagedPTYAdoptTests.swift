@@ -263,7 +263,8 @@ final class HostManagedPTYAdoptTests: XCTestCase {
         let marker = "buffered-after-direct-writer-stop"
         driver.sendRawBytes(Data("\(marker)\n".utf8))
         usleep(100_000)
-        XCTAssertEqual(fileByteCount(filePath), byteCountAfterPause, "the stopped direct writer must not append while the normal handle is positioned")
+        XCTAssertEqual(
+            fileByteCount(filePath), byteCountAfterPause, "the stopped direct writer must not append while the normal handle is positioned")
         XCTAssertFalse(collector.string.contains(marker))
 
         driver.endHandoffOutputBuffering()

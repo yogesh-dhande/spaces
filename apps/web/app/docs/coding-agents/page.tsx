@@ -2,8 +2,13 @@ import type { Metadata } from "next";
 import { DocsShell } from "../components/docs-shell";
 import { CopyablePrompt } from "../components/copyable-prompt";
 
+// Keep in step with `AgentHookCommand.hookVersion`: hooks written without the current version read
+// back in the app as out of date.
+const HOOK_MARKER = "# spaces-agent-hook v1";
+
+// Spaces embeds the absolute path it resolved for the CLI; `/usr/local/bin/spaces` stands in here.
 const spacesAgentSignalCommand = (event: string) =>
-  `if [ -n "\${SPACES_WORKSPACE_ID:-}" ] && [ -n "\${SPACES_TERMINAL_TRACKING_ID:-}" ]; then spaces agent signal --workspace "$SPACES_WORKSPACE_ID" --session "$SPACES_TERMINAL_TRACKING_ID" ${event}; fi`;
+  `'/usr/local/bin/spaces' agent signal ${event} >/dev/null 2>&1 || true ${HOOK_MARKER}`;
 
 const CLAUDE_PROMPT = `Add global Spaces lifecycle hooks to ~/.claude/settings.json so this agent
 reports its state to Spaces.
@@ -15,8 +20,9 @@ reports its state to Spaces.
   SessionEnd        ->  ${spacesAgentSignalCommand("exit")}
 
 Use an empty matcher ("") for every entry. Do not add or remove any
-other keys. Keep the environment-variable guard in every command so
-non-Spaces terminal sessions exit successfully without reporting an event.
+other keys. Replace '/usr/local/bin/spaces' with the absolute path to my
+spaces CLI. These hooks run quietly, ignore transient Spaces failures,
+and keep the ${HOOK_MARKER} marker.
 After writing the file, show me the diff.`;
 
 const CODEX_PROMPT = `Enable Codex hooks with [features].hooks in ~/.codex/config.toml and add global Spaces lifecycle hooks so this agent
@@ -28,8 +34,9 @@ reports its state to Spaces.
   PermissionRequest ->  ${spacesAgentSignalCommand("blocked")}
 
 Use an empty matcher ("") for every entry. Do not add or remove any
-other keys. Keep the environment-variable guard in every command so
-non-Spaces terminal sessions exit successfully without reporting an event.
+other keys. Replace '/usr/local/bin/spaces' with the absolute path to my
+spaces CLI. These hooks run quietly, ignore transient Spaces failures,
+and keep the ${HOOK_MARKER} marker.
 After writing the file, show me the diff.
 `;
 
@@ -60,7 +67,7 @@ export default function CodingAgentsDocsPage() {
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Lifecycle Events</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Agents report their own state through <code>spaces agent signal --workspace &lt;id&gt; --session &lt;terminal-session-id&gt; &lt;event&gt;</code>. Spaces uses each event to update the agent row. Both <code>blocked</code> and <code>done</code> raise Alerts and dock attention; <code>blocked</code> clears when the agent&apos;s state changes, while <code>done</code> stays in Alerts until you dismiss it.
+          Agents report their own state through <code>spaces agent signal &lt;event&gt;</code>. In a Spaces-managed terminal, the command reads the workspace and session from environment; outside one, it exits successfully without reporting an event. Spaces uses each event to update the agent row. Both <code>blocked</code> and <code>done</code> raise Alerts and dock attention; <code>blocked</code> clears when the agent&apos;s state changes, while <code>done</code> stays in Alerts until you dismiss it.
         </p>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• <strong>init</strong> &mdash; identify the terminal and attach it to a tracked row.</li>
@@ -75,29 +82,34 @@ export default function CodingAgentsDocsPage() {
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Global Hooks</h2>
+        <h2 className="text-2xl font-semibold tracking-tight">Setting Up Hooks</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Claude Code and Codex both support global hooks that run a shell command at lifecycle points. opencode exposes plugin events that can run shell commands. Point those integrations at guarded <code>spaces agent signal</code> commands once in your user config and Spaces-managed sessions report automatically without per-repo setup.
+          Spaces sets these lifecycle hooks up for you, but never behind your back: it asks first. On first launch it offers to install <code>spaces agent signal</code> hooks for every supported agent CLI it detects — Claude Code in <code>~/.claude/settings.json</code>, Codex in <code>~/.codex/hooks.json</code>, and opencode as a plugin in <code>~/.config/opencode/plugin/</code>. You can skip that step and install later, or never. Each hook calls the Spaces CLI by the absolute path found when the hooks were installed, so it runs no matter what <code>PATH</code> your agent hands it; if you move or reinstall the CLI, reinstall the hooks from Settings &rarr; Coding Agents. The command only reports from Spaces-managed terminals and does nothing anywhere else, so nothing else in your setup changes.
         </p>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          The easiest way to install the recommended Claude Code or Codex config is to paste one of the prompts below into the agent you want to configure. Both prompts preserve any existing hooks and only add the Spaces entries.
+          Installation preserves your existing hooks and settings and never duplicates an entry, so it is safe to run again. If a later Spaces release changes the hooks it installs, your agents show as out of date and Spaces offers to update them once — updating replaces the old hooks rather than adding to them.
+        </p>
+        <p className="mt-3 text-sm leading-7 text-foreground-soft">
+          Agents install independently, so one that Spaces will not touch — a Codex <code>config.toml</code> that already defines <code>features</code> in a shape Spaces refuses to rewrite, say — does not stop the others. That agent&apos;s row explains what stopped it.
         </p>
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Setup Prompt for Claude Code</h2>
+        <h2 className="text-2xl font-semibold tracking-tight">Managing Hooks in Settings</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Paste this into Claude Code from any directory. It edits <code>~/.claude/settings.json</code> and leaves unrelated settings untouched.
+          Open <strong>Settings &rarr; Coding Agents</strong> to see, for This Mac or any paired remote, which supported agent CLIs are detected and whether their Spaces hooks are installed, out of date, or missing. Detected agents have an Install, Update, or Reinstall button; unsupported or missing CLIs remain visible without an install action.
         </p>
-        <CopyablePrompt label="Prompt for Claude Code" text={CLAUDE_PROMPT} />
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Setup Prompt for Codex</h2>
+        <h2 className="text-2xl font-semibold tracking-tight">Manual Setup</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Paste this into Codex from any directory. It edits <code>~/.codex/config.toml</code>, enabling hooks with <code>[features].hooks</code> and adding the lifecycle entries as inline <code>[hooks]</code> tables, and leaves unrelated settings untouched. Codex has no session-end event, so the Codex setup omits <code>exit</code>.
+          You normally never need this — Spaces installs and manages the hooks for you. If you want to configure an agent by hand, paste one of these prompts into it. Both preserve any existing hooks and only add the Spaces entries. Claude Code edits <code>~/.claude/settings.json</code>; Codex edits <code>~/.codex/config.toml</code> to enable hooks and adds the lifecycle entries. Codex has no session-end event, so its setup omits <code>exit</code>.
         </p>
-        <CopyablePrompt label="Prompt for Codex" text={CODEX_PROMPT} />
+        <div className="mt-4 space-y-4">
+          <CopyablePrompt label="Prompt for Claude Code" text={CLAUDE_PROMPT} />
+          <CopyablePrompt label="Prompt for Codex" text={CODEX_PROMPT} />
+        </div>
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">

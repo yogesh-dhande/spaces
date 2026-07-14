@@ -14,8 +14,7 @@ final class SidebarOutlineView: NSOutlineView {
         super.drawBackground(inClipRect: clipRect)
         guard let highlight = selectedWorkspaceHighlight?(), highlight.frame.intersects(clipRect) else { return }
 
-        let fillPath = NSBezierPath(
-            roundedRect: highlight.frame, xRadius: UIRadius.regular, yRadius: UIRadius.regular)
+        let fillPath = NSBezierPath(roundedRect: highlight.frame, xRadius: UIRadius.regular, yRadius: UIRadius.regular)
         highlight.fill.setFill()
         fillPath.fill()
 

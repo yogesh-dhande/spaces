@@ -551,9 +551,7 @@
             if let handoffTranscriptReplayOffset {
                 await sessionDriver.replayPersistedHandoffOutput(at: paths.outputPath, startingAt: handoffTranscriptReplayOffset)
             }
-            do {
-                try openOutputHandlePreservingTranscript()
-            } catch { fputs("spaces: ghostty handoff transcript reopen failed: \(error)\n", stderr) }
+            do { try openOutputHandlePreservingTranscript() } catch { fputs("spaces: ghostty handoff transcript reopen failed: \(error)\n", stderr) }
             await sessionDriver.endHandoffOutputBuffering()
             flushPendingIncomingOutputForStateExport()
             self.handoffTranscriptReplayOffset = nil
