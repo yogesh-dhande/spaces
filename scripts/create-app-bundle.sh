@@ -15,6 +15,8 @@ DEFAULT_CADDY_BIN="$REPO_ROOT/apps/macos/.local/caddy/caddy"
 CADDY_BIN="${5:-$DEFAULT_CADDY_BIN}"
 SPARKLE_FRAMEWORK="$REPO_ROOT/apps/macos/.build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
 GHOSTTYVT_LIB_DIR="${SPACES_GHOSTTY_VT_LIB_DIR:-$REPO_ROOT/apps/macos/.local/ghosttyvt/lib}"
+GHOSTTY_RESOURCES_DIR="${SPACES_GHOSTTY_RESOURCES_DIR:-$REPO_ROOT/apps/macos/.local/ghosttykit/Resources/ghostty}"
+GHOSTTY_TERMINFO_DIR="$(dirname "$GHOSTTY_RESOURCES_DIR")/terminfo"
 
 if [[ ! -f "$SPACES_APP" ]]; then
   echo "Error: app binary not found at $SPACES_APP" >&2
@@ -42,6 +44,25 @@ fi
 
 if [[ ! -d "$SPARKLE_FRAMEWORK" ]]; then
   echo "Error: Sparkle framework not found at $SPARKLE_FRAMEWORK. Run scripts/swiftpm.sh build first." >&2
+  exit 1
+fi
+
+if [[ ! -d "$GHOSTTY_RESOURCES_DIR" ]]; then
+  echo "Error: Ghostty runtime resources not found at $GHOSTTY_RESOURCES_DIR. Run apps/macos/scripts/setup_ghostty.sh first." >&2
+  exit 1
+fi
+for required_resource in shell-integration themes; do
+  if [[ ! -d "$GHOSTTY_RESOURCES_DIR/$required_resource" ]]; then
+    echo "Error: Ghostty runtime resources are missing $required_resource at $GHOSTTY_RESOURCES_DIR." >&2
+    exit 1
+  fi
+done
+if [[ ! -d "$GHOSTTY_TERMINFO_DIR" ]]; then
+  echo "Error: Ghostty terminfo database not found at $GHOSTTY_TERMINFO_DIR. Run apps/macos/scripts/setup_ghostty.sh first." >&2
+  exit 1
+fi
+if [[ -z "$(find "$GHOSTTY_TERMINFO_DIR" -type f -name xterm-ghostty -print -quit)" ]]; then
+  echo "Error: Ghostty terminfo database is missing the xterm-ghostty entry at $GHOSTTY_TERMINFO_DIR." >&2
   exit 1
 fi
 
@@ -128,6 +149,8 @@ cp "$SPACES_CLI" "$BUNDLE_OUTPUT/Contents/Resources/spaces"
 chmod +x "$BUNDLE_OUTPUT/Contents/Resources/spaces"
 cp "$SPACESD" "$BUNDLE_OUTPUT/Contents/Resources/spacesd"
 chmod +x "$BUNDLE_OUTPUT/Contents/Resources/spacesd"
+cp -R "$GHOSTTY_RESOURCES_DIR" "$BUNDLE_OUTPUT/Contents/Resources/ghostty"
+cp -R "$GHOSTTY_TERMINFO_DIR" "$BUNDLE_OUTPUT/Contents/Resources/terminfo"
 require_universal_macos_binary "$CADDY_BIN" "caddy router binary"
 cp "$CADDY_BIN" "$BUNDLE_OUTPUT/Contents/Resources/caddy"
 chmod +x "$BUNDLE_OUTPUT/Contents/Resources/caddy"

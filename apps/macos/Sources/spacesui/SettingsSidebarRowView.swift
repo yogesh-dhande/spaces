@@ -7,6 +7,7 @@ final class SettingsSidebarRowView: NSView {
     var isSelected: Bool { didSet { updateBackgroundColor() } }
 
     var selectedBackgroundColor: NSColor = .clear { didSet { updateBackgroundColor() } }
+    var onClick: (() -> Void)?
 
     private var isHovered = false
 
@@ -16,6 +17,8 @@ final class SettingsSidebarRowView: NSView {
         wantsLayer = true
         layer?.cornerRadius = UIRadius.compact
         translatesAutoresizingMaskIntoConstraints = false
+        setAccessibilityElement(true)
+        setAccessibilityRole(.button)
         updateBackgroundColor()
     }
 
@@ -59,6 +62,21 @@ final class SettingsSidebarRowView: NSView {
         isHovered = false
         updateBackgroundColor()
         NSCursor.pop()
+    }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard super.hitTest(point) != nil else { return nil }
+        return self
+    }
+
+    override func mouseDown(with event: NSEvent) { onClick?() }
+
+    override func accessibilityPerformPress() -> Bool {
+        guard let onClick else { return super.accessibilityPerformPress() }
+        onClick()
+        return true
     }
 
     override func resetCursorRects() { addCursorRect(bounds, cursor: .pointingHand) }

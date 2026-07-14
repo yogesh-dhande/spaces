@@ -198,6 +198,7 @@ request = {
     },
     "attachmentMode": attachment_mode,
     "appendNewline": False,
+    "asPaste": False,
 }
 
 client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)

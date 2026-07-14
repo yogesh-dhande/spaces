@@ -40,4 +40,8 @@ public enum ClientSettingsKey {
     /// App-wide UI appearance (an `AppAppearanceMode` raw value: `system`/`light`/`dark`).
     /// An unset value resolves to the dark default.
     public static let appAppearanceMode = "app_appearance_mode"
+    /// The `AgentHookCommand.hookVersion` the user last dismissed the launch coding-agents setup step
+    /// for, as a decimal string. The step reappears only when a Spaces release bumps the hook version,
+    /// so skipping it is respected until the hooks Spaces wants to write actually change.
+    public static let agentHooksSetupDismissedVersion = "agent_hooks_setup_dismissed_version"
 }

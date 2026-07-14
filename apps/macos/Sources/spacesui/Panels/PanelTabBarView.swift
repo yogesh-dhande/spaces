@@ -7,6 +7,8 @@ import systembridge
 /// header of their own until a tab actually holds more than one. Custom chrome instead
 /// of NSTabView so tabs stay compact and the strip can later host drag-out.
 @MainActor final class PanelTabBarView: NSView {
+    static let preferredHeight: CGFloat = 28
+
     /// When this strip is shared chrome (the main window's titlebar accessory), the
     /// workspace panel currently driving it; background panels leave it alone.
     weak var hostingOwner: AnyObject?
@@ -72,7 +74,8 @@ import systembridge
         NSLayoutConstraint.activate([
             row.topAnchor.constraint(equalTo: topAnchor), row.leadingAnchor.constraint(equalTo: leadingAnchor),
             row.trailingAnchor.constraint(equalTo: trailingAnchor), row.bottomAnchor.constraint(equalTo: bottomAnchor),
-            heightAnchor.constraint(equalToConstant: 28), scrollView.heightAnchor.constraint(equalTo: row.heightAnchor, constant: -6),
+            heightAnchor.constraint(equalToConstant: Self.preferredHeight),
+            scrollView.heightAnchor.constraint(equalTo: row.heightAnchor, constant: -6),
             tabsStack.heightAnchor.constraint(equalTo: scrollView.heightAnchor),
         ])
     }
@@ -141,6 +144,18 @@ import systembridge
         requestRebuild()
     }
 
+    /// Clears the strip immediately, bypassing rename-time rebuild deferral used for
+    /// ordinary layout refreshes.
+    func clear() {
+        guard !tabIDs.isEmpty || !titlesByTabID.isEmpty || selectedTabID != nil || renamingTabID != nil || rebuildDeferredForRename else { return }
+        renamingTabID = nil
+        rebuildDeferredForRename = false
+        tabIDs = []
+        titlesByTabID = [:]
+        selectedTabID = nil
+        rebuildTabs()
+    }
+
     /// Rebuilding while the rename editor is up would tear the editor out mid-edit;
     /// apply the pending state when the rename ends instead.
     private func requestRebuild() {
@@ -160,8 +175,8 @@ import systembridge
             tabsStack.addArrangedSubview(
                 PanelTabItemView(
                     tabID: tabID, title: titlesByTabID[tabID] ?? "Terminal", isSelected: tabID == selectedTabID, isRenaming: tabID == renamingTabID,
-                    onSelect: { [weak self] id in self?.onSelectTab?(id) }, onClose: { [weak self] id in self?.onCloseTab?(id) },
-                    onRenameRequest: { [weak self] id in self?.beginRename(tabID: id) },
+                    showsTrailingSeparator: tabID != tabIDs.last, onSelect: { [weak self] id in self?.onSelectTab?(id) },
+                    onClose: { [weak self] id in self?.onCloseTab?(id) }, onRenameRequest: { [weak self] id in self?.beginRename(tabID: id) },
                     onRenameCommit: { [weak self] id, text in self?.endRename(tabID: id, committedTitle: text) },
                     onRenameCancel: { [weak self] _ in self?.endRename(tabID: nil, committedTitle: nil) }))
         }
@@ -219,13 +234,17 @@ import systembridge
     /// removal from the hierarchy can end editing a second time.
     private var renameResolved = false
     private(set) weak var renameEditor: NSTextField?
+    private let closeButton = NSButton()
+    private var isHovering = false
+    private var hoverTrackingArea: NSTrackingArea?
     /// Width is driven by the strip (equal share of visible width); the parent updates
     /// this constant as the tab count or strip width changes.
     private var widthConstraint: NSLayoutConstraint?
 
     init(
-        tabID: String, title: String, isSelected: Bool, isRenaming: Bool, onSelect: @escaping (String) -> Void, onClose: @escaping (String) -> Void,
-        onRenameRequest: @escaping (String) -> Void, onRenameCommit: @escaping (String, String) -> Void, onRenameCancel: @escaping (String) -> Void
+        tabID: String, title: String, isSelected: Bool, isRenaming: Bool, showsTrailingSeparator: Bool, onSelect: @escaping (String) -> Void,
+        onClose: @escaping (String) -> Void, onRenameRequest: @escaping (String) -> Void, onRenameCommit: @escaping (String, String) -> Void,
+        onRenameCancel: @escaping (String) -> Void
     ) {
         self.tabID = tabID
         self.onSelect = onSelect
@@ -260,17 +279,34 @@ import systembridge
             titleView = titleLabel
         }
 
-        let closeButton = NSButton(
-            image: NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close tab")?.withSymbolConfiguration(
-                .init(pointSize: 8, weight: .medium)) ?? NSImage(), target: self, action: #selector(closeClicked))
+        closeButton.image =
+            NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close tab")?.withSymbolConfiguration(.init(pointSize: 8, weight: .medium))
+            ?? NSImage()
+        closeButton.target = self
+        closeButton.action = #selector(closeClicked)
         closeButton.bezelStyle = .inline
         closeButton.isBordered = false
         closeButton.toolTip = "Close tab"
         closeButton.contentTintColor = Theme.mutedSecondary
         closeButton.setContentHuggingPriority(.required, for: .horizontal)
         closeButton.setAccessibilityIdentifier("panel-tab-close-\(tabID)")
+        updateCloseButtonVisibility()
 
-        let stack = NSStackView(views: [titleView, closeButton])
+        let closeButtonContainer = NSView()
+        closeButtonContainer.translatesAutoresizingMaskIntoConstraints = false
+        closeButtonContainer.setContentHuggingPriority(.required, for: .horizontal)
+        closeButtonContainer.setContentCompressionResistancePriority(.required, for: .horizontal)
+        closeButton.translatesAutoresizingMaskIntoConstraints = false
+        closeButtonContainer.addSubview(closeButton)
+        NSLayoutConstraint.activate([
+            closeButtonContainer.widthAnchor.constraint(equalToConstant: 14),
+            closeButtonContainer.heightAnchor.constraint(greaterThanOrEqualToConstant: 14),
+            closeButton.centerXAnchor.constraint(equalTo: closeButtonContainer.centerXAnchor),
+            closeButton.centerYAnchor.constraint(equalTo: closeButtonContainer.centerYAnchor),
+            closeButton.widthAnchor.constraint(equalToConstant: 14), closeButton.heightAnchor.constraint(equalToConstant: 14),
+        ])
+
+        let stack = NSStackView(views: [titleView, closeButtonContainer])
         stack.orientation = .horizontal
         stack.alignment = .centerY
         stack.distribution = .fill
@@ -285,13 +321,28 @@ import systembridge
         bindAppearanceReactiveLayer(underline) { view in view.layer?.backgroundColor = isSelected ? Theme.accent.cgColor : NSColor.clear.cgColor }
         addSubview(underline)
 
-        NSLayoutConstraint.activate([
+        var constraints = [
             stack.topAnchor.constraint(equalTo: topAnchor), stack.leadingAnchor.constraint(equalTo: leadingAnchor),
             stack.trailingAnchor.constraint(equalTo: trailingAnchor), stack.bottomAnchor.constraint(equalTo: bottomAnchor),
             underline.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
             underline.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6), underline.bottomAnchor.constraint(equalTo: bottomAnchor),
             underline.heightAnchor.constraint(equalToConstant: 2),
-        ])
+        ]
+
+        if showsTrailingSeparator {
+            let separator = NSView()
+            separator.translatesAutoresizingMaskIntoConstraints = false
+            separator.wantsLayer = true
+            separator.setAccessibilityIdentifier("tab-separator-\(tabID)")
+            bindAppearanceReactiveLayer(separator) { view in view.layer?.backgroundColor = Theme.border.withAlphaComponent(0.55).cgColor }
+            addSubview(separator)
+            constraints.append(contentsOf: [
+                separator.trailingAnchor.constraint(equalTo: trailingAnchor), separator.centerYAnchor.constraint(equalTo: centerYAnchor),
+                separator.widthAnchor.constraint(equalToConstant: 1), separator.heightAnchor.constraint(equalToConstant: 14),
+            ])
+        }
+
+        NSLayoutConstraint.activate(constraints)
 
         // Start at the default width; the strip narrows this as tabs accumulate.
         let width = widthAnchor.constraint(equalToConstant: 160)
@@ -300,6 +351,29 @@ import systembridge
     }
 
     @available(*, unavailable) required init?(coder: NSCoder) { nil }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let hoverTrackingArea { removeTrackingArea(hoverTrackingArea) }
+        let area = NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect], owner: self, userInfo: nil)
+        addTrackingArea(area)
+        hoverTrackingArea = area
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        isHovering = true
+        updateCloseButtonVisibility()
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        isHovering = false
+        updateCloseButtonVisibility()
+    }
+
+    private func updateCloseButtonVisibility() {
+        closeButton.alphaValue = isHovering ? 1 : 0
+        closeButton.isEnabled = isHovering
+    }
 
     /// Set by the strip to give each tab an equal share of the visible width.
     func setPreferredWidth(_ width: CGFloat) {
@@ -313,6 +387,7 @@ import systembridge
     /// field-editor text view) keep their own hits.
     override func hitTest(_ point: NSPoint) -> NSView? {
         guard let hit = super.hitTest(point) else { return nil }
+        if hit === closeButton { return closeButton.isEnabled ? closeButton : self }
         if hit is NSButton || hit is NSTextView { return hit }
         if let field = hit as? NSTextField, field.isEditable { return field }
         return self

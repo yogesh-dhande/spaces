@@ -242,7 +242,8 @@ extension TerminalSessionPaneViewController {
         view.setAccessibilityValue(isOwner ? "owner" : "viewer")
         let usesInlineControls = visibleRenderer == .textView && isOwner
         inputRowStackView.isHidden = !usesInlineControls
-        let showsTakeoverShell = visibleRenderer == .ghosttyTakeoverStatus && backend == .ghosttyEmbedded
+        let isWaitingForRequestedOwnership = !isOwner && preferredAttachmentMode == .owner
+        let showsTakeoverShell = visibleRenderer == .ghosttyTakeoverStatus && backend == .ghosttyEmbedded && !isWaitingForRequestedOwnership
         takeoverContainerView.isHidden = !(showsTakeoverShell && !isOwner)
         takeoverRowStackView.isHidden = takeoverContainerView.isHidden
         isViewerTakeoverShellActive = !takeoverContainerView.isHidden
@@ -253,8 +254,8 @@ extension TerminalSessionPaneViewController {
         sendButton.isEnabled = usesInlineControls && isInteractive
         interruptButton.isEnabled = usesInlineControls && isInteractive
         newlineButton.isEnabled = usesInlineControls && isInteractive
-        takeoverButton.isHidden = isOwner || !isInteractive
-        takeoverButton.isEnabled = !isOwner && isInteractive && takeoverTask == nil
+        takeoverButton.isHidden = isOwner || !isInteractive || isWaitingForRequestedOwnership
+        takeoverButton.isEnabled = !isOwner && isInteractive && takeoverTask == nil && !isWaitingForRequestedOwnership
         if !isInteractive {
             inputField.placeholderString = "Session is not running"
         } else {

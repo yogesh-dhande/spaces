@@ -19,7 +19,6 @@ Manage parallel coding sessions
 - **Keyboard shortcuts** — focus and cycle windows scoped to the current workspace. Navigation stays inside the work you're on.
 - **Global command palette** — `⌘⌥-` jumps to any window in any workspace. One key to reach anything without hunting through Mission Control.
 
-
 ## Requirements
 
 - macOS 14+

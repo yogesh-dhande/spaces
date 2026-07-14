@@ -124,6 +124,33 @@ public enum TerminalForegroundProcessInspector {
         return classify(process)
     }
 
+    /// The current working directory of `pid`'s process, read live from the OS.
+    ///
+    /// The daemon consults this at terminal-link resolve time (and when publishing session runtime
+    /// state) because the tracked working directory only advances when the shell reports a new PWD
+    /// through Ghostty shell integration (OSC 7), which many shells — including a plain zsh — never
+    /// emit. That leaves the tracked value pinned to the launch directory after a `cd`, so relative
+    /// links anchor in the wrong place. The owning process's real cwd is always current. Returns nil
+    /// on any failure (invalid/dead pid, permission, or an unreadable path).
+    public static func workingDirectory(pid: Int32) -> String? {
+        guard pid > 0 else { return nil }
+        #if os(macOS)
+            var info = proc_vnodepathinfo()
+            let expectedSize = Int32(MemoryLayout<proc_vnodepathinfo>.size)
+            let returnedSize = withUnsafeMutablePointer(to: &info) { pointer in proc_pidinfo(pid, PROC_PIDVNODEPATHINFO, 0, pointer, expectedSize) }
+            guard returnedSize == expectedSize else { return nil }
+            let capacity = MemoryLayout.size(ofValue: info.pvi_cdir.vip_path)
+            let path = withUnsafePointer(to: &info.pvi_cdir.vip_path) { pointer in
+                pointer.withMemoryRebound(to: CChar.self, capacity: capacity) { String(cString: $0) }
+            }
+            return path.nilIfEmpty
+        #elseif os(Linux)
+            return (try? FileManager.default.destinationOfSymbolicLink(atPath: "/proc/\(pid)/cwd"))?.nilIfEmpty
+        #else
+            return nil
+        #endif
+    }
+
     public static func classify(_ process: TerminalForegroundProcessSnapshot) -> TerminalForegroundAgentSnapshot? {
         let argv = boundedArguments(process.argv)
         let commandNameCandidates = commandNameCandidates(executableName: process.executableName, argv: argv)

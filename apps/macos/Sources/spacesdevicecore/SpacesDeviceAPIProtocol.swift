@@ -1,10 +1,6 @@
 import Foundation
 import spacesterminalcore
 
-#if canImport(UniformTypeIdentifiers)
-    import UniformTypeIdentifiers
-#endif
-
 public enum SpacesDeviceFirstPartyPolicy {
     public static let iosBundleID = "dev.usespaces.spacesmobile"
     public static let macOSBundleID = "dev.usespaces.spaces"
@@ -672,11 +668,6 @@ public struct SpacesDeviceDirectorySuggestions: Codable, Sendable, Equatable {
     public init(paths: [String]) { self.paths = paths }
 }
 
-public enum SpacesDeviceTerminalLinkMediaKind: String, Codable, Sendable, Equatable {
-    case image
-    case video
-}
-
 public enum SpacesDeviceTerminalLinkSource: String, Codable, Sendable, Equatable {
     case localFile
     case externalURL
@@ -688,20 +679,20 @@ public struct SpacesDeviceTerminalLinkMetadata: Codable, Sendable, Equatable, Id
     public let originalLink: String
     public let displayName: String
     public let contentType: String?
-    public let mediaKind: SpacesDeviceTerminalLinkMediaKind?
+    public let artifactKind: SpacesDeviceTerminalLinkArtifactKind?
     public let byteCount: Int64?
     public let externalURL: String?
 
     public init(
         id: String, source: SpacesDeviceTerminalLinkSource, originalLink: String, displayName: String, contentType: String?,
-        mediaKind: SpacesDeviceTerminalLinkMediaKind?, byteCount: Int64?, externalURL: String?
+        artifactKind: SpacesDeviceTerminalLinkArtifactKind?, byteCount: Int64?, externalURL: String?
     ) {
         self.id = id
         self.source = source
         self.originalLink = originalLink
         self.displayName = displayName
         self.contentType = contentType
-        self.mediaKind = mediaKind
+        self.artifactKind = artifactKind
         self.byteCount = byteCount
         self.externalURL = externalURL
     }
@@ -721,89 +712,6 @@ public struct SpacesDeviceTerminalLinkChunk: Codable, Sendable, Equatable {
         self.isFinal = isFinal
         self.base64Data = base64Data
     }
-}
-
-public enum SpacesDeviceTerminalLinkClassifier {
-    public static func mediaKind(contentType: String?, pathExtension: String?) -> SpacesDeviceTerminalLinkMediaKind? {
-        let trimmedContentType = contentType?.trimmingCharacters(in: .whitespacesAndNewlines)
-        #if canImport(UniformTypeIdentifiers)
-            if let trimmedContentType, !trimmedContentType.isEmpty, let type = UTType(mimeType: trimmedContentType) { return mediaKind(for: type) }
-        #else
-            if let trimmedContentType, !trimmedContentType.isEmpty, let kind = mediaKind(forContentType: trimmedContentType) { return kind }
-        #endif
-
-        let trimmedExtension = pathExtension?.trimmingCharacters(in: CharacterSet(charactersIn: ".").union(.whitespacesAndNewlines))
-        #if canImport(UniformTypeIdentifiers)
-            if let trimmedExtension, !trimmedExtension.isEmpty, let type = UTType(filenameExtension: trimmedExtension) { return mediaKind(for: type) }
-        #else
-            if let trimmedExtension, !trimmedExtension.isEmpty, let kind = mediaKind(forPathExtension: trimmedExtension) { return kind }
-        #endif
-
-        return nil
-    }
-
-    public static func preferredContentType(pathExtension: String?) -> String? {
-        let trimmedExtension = pathExtension?.trimmingCharacters(in: CharacterSet(charactersIn: ".").union(.whitespacesAndNewlines))
-        guard let trimmedExtension, !trimmedExtension.isEmpty else { return nil }
-        #if canImport(UniformTypeIdentifiers)
-            return UTType(filenameExtension: trimmedExtension)?.preferredMIMEType
-        #else
-            return preferredContentTypesByExtension[trimmedExtension.lowercased()]
-        #endif
-    }
-
-    public static func preferredFilenameExtension(contentType: String?, fallback: String?) -> String {
-        #if canImport(UniformTypeIdentifiers)
-            if let contentType = contentType?.trimmingCharacters(in: .whitespacesAndNewlines), !contentType.isEmpty,
-                let preferred = UTType(mimeType: contentType)?.preferredFilenameExtension
-            {
-                return preferred
-            }
-        #else
-            if let contentType = contentType?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), !contentType.isEmpty,
-                let preferred = preferredExtensionsByContentType[contentType]
-            {
-                return preferred
-            }
-        #endif
-        let fallback = fallback?.trimmingCharacters(in: CharacterSet(charactersIn: ".").union(.whitespacesAndNewlines)) ?? ""
-        return fallback.isEmpty ? "dat" : fallback
-    }
-
-    #if canImport(UniformTypeIdentifiers)
-        private static func mediaKind(for type: UTType) -> SpacesDeviceTerminalLinkMediaKind? {
-            if type.conforms(to: .image) { return .image }
-            if type.conforms(to: .movie) || type.conforms(to: .video) { return .video }
-            return nil
-        }
-    #else
-        private static let imageExtensions: Set<String> = ["avif", "bmp", "gif", "heic", "heif", "jpg", "jpeg", "png", "tif", "tiff", "webp"]
-        private static let videoExtensions: Set<String> = ["m4v", "mov", "mp4", "mpeg", "mpg", "webm"]
-        private static let preferredContentTypesByExtension: [String: String] = [
-            "avif": "image/avif", "bmp": "image/bmp", "gif": "image/gif", "heic": "image/heic", "heif": "image/heif", "jpg": "image/jpeg",
-            "jpeg": "image/jpeg", "m4v": "video/x-m4v", "mov": "video/quicktime", "mp4": "video/mp4", "mpeg": "video/mpeg", "mpg": "video/mpeg",
-            "png": "image/png", "tif": "image/tiff", "tiff": "image/tiff", "webm": "video/webm", "webp": "image/webp",
-        ]
-        private static let preferredExtensionsByContentType: [String: String] = [
-            "image/avif": "avif", "image/bmp": "bmp", "image/gif": "gif", "image/heic": "heic", "image/heif": "heif", "image/jpeg": "jpg",
-            "image/jpg": "jpg", "image/png": "png", "image/tiff": "tiff", "image/webp": "webp", "video/mp4": "mp4", "video/mpeg": "mpeg",
-            "video/quicktime": "mov", "video/webm": "webm", "video/x-m4v": "m4v",
-        ]
-
-        private static func mediaKind(forContentType contentType: String) -> SpacesDeviceTerminalLinkMediaKind? {
-            let lowercased = contentType.lowercased()
-            if lowercased.hasPrefix("image/") { return .image }
-            if lowercased.hasPrefix("video/") { return .video }
-            return nil
-        }
-
-        private static func mediaKind(forPathExtension pathExtension: String) -> SpacesDeviceTerminalLinkMediaKind? {
-            let lowercased = pathExtension.lowercased()
-            if imageExtensions.contains(lowercased) { return .image }
-            if videoExtensions.contains(lowercased) { return .video }
-            return nil
-        }
-    #endif
 }
 
 public struct SpacesDeviceAPIEmptyPayload: Codable, Sendable, Equatable { public init() {} }
@@ -1178,6 +1086,7 @@ public struct SpacesDeviceTerminalControlRequest: Codable, Sendable, Equatable {
     public let scrollVertical: Double?
     public let scrollMods: Int32?
     public let appendNewline: Bool
+    public let asPaste: Bool
     /// The attaching client's OS appearance (light/dark), carried on `attach` so a remote daemon can render
     /// its terminal with the client's theme variant. Mirrors `TerminalControlRequest.appearance`; without it
     /// the daemon keeps its default theme on the device-API attach path.
@@ -1187,7 +1096,7 @@ public struct SpacesDeviceTerminalControlRequest: Codable, Sendable, Equatable {
         action: SpacesDeviceTerminalControlAction, sessionID: String, clientID: String? = nil, client: TerminalClient? = nil,
         attachmentMode: TerminalAttachmentMode? = nil, text: String? = nil, key: String? = nil, columns: Int? = nil, rows: Int? = nil,
         ownerEpoch: UInt64? = nil, resizeSerial: UInt64? = nil, scrollHorizontal: Double? = nil, scrollVertical: Double? = nil,
-        scrollMods: Int32? = nil, appendNewline: Bool = false, appearance: ThemeAppearance? = nil
+        scrollMods: Int32? = nil, appendNewline: Bool = false, asPaste: Bool = false, appearance: ThemeAppearance? = nil
     ) {
         self.action = action
         self.sessionID = sessionID
@@ -1204,6 +1113,7 @@ public struct SpacesDeviceTerminalControlRequest: Codable, Sendable, Equatable {
         self.scrollVertical = scrollVertical
         self.scrollMods = scrollMods
         self.appendNewline = appendNewline
+        self.asPaste = asPaste
         self.appearance = appearance
     }
 }
@@ -1258,6 +1168,21 @@ public struct SpacesDeviceTerminalLinkChunkRequest: Codable, Sendable, Equatable
     }
 }
 
+/// Request to open a raw byte tunnel to a running workspace service. The daemon replies with a single
+/// `ok` response line as usual, then the connection stops speaking newline-delimited JSON and becomes a
+/// transparent byte pipe to the service (relayed for as long as the underlying connection stays open).
+/// The client must finish reading that one response line before writing or reading tunnel bytes; nothing
+/// after the line's trailing newline belongs to the Device API framing.
+public struct SpacesDeviceServiceTunnelRequest: Codable, Sendable, Equatable {
+    public let workspaceID: String
+    public let serviceName: String
+
+    public init(workspaceID: String, serviceName: String) {
+        self.workspaceID = workspaceID
+        self.serviceName = serviceName
+    }
+}
+
 public enum SpacesDeviceAPICommand: Sendable, Equatable {
     case pair(SpacesDevicePairRequest)
     case ping
@@ -1308,6 +1233,12 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
     /// remote daemon's database changes, so paired clients stay live without
     /// polling. No payload: one overview stream per connection.
     case subscribeDeviceOverview
+    /// Reports availability + Spaces hook-install status for supported coding agents on the daemon host.
+    case agentHooksStatus
+    /// Idempotently installs Spaces lifecycle hooks for the requested coding agents on the daemon host.
+    case installAgentHooks(SpacesDeviceInstallAgentHooksRequest)
+    /// Hijacks the connection into a raw byte tunnel to a workspace service after one `ok` response line.
+    case openServiceTunnel(SpacesDeviceServiceTunnelRequest)
 
     public var name: String {
         switch self {
@@ -1351,6 +1282,9 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
         case .resolveTerminalLink: "resolveTerminalLink"
         case .readTerminalLinkChunk: "readTerminalLinkChunk"
         case .subscribeDeviceOverview: "subscribeDeviceOverview"
+        case .agentHooksStatus: "agentHooksStatus"
+        case .installAgentHooks: "installAgentHooks"
+        case .openServiceTunnel: "openServiceTunnel"
         }
     }
 
@@ -1398,10 +1332,21 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
         return false
     }
 
+    /// True for commands that hand the connection over to a raw byte tunnel after one `ok` response line.
+    public var isTunnelCommand: Bool {
+        if case .openServiceTunnel = self { return true }
+        return false
+    }
+
+    /// True for any command that stops speaking newline-delimited JSON after its response — either a
+    /// long-lived subscription stream or a one-shot pipe handover — so the connection handler must not
+    /// treat the connection as request/response after issuing the response.
+    public var hijacksConnection: Bool { isSubscriptionCommand || isTunnelCommand }
+
     var isSafeToReplayAfterConnectionFailure: Bool {
         switch self {
         case .ping, .daemonStatus, .overview, .previewProject, .previewGitProject, .listDirectories, .workspaceCreateOptions, .state,
-            .resolveTerminalLink, .readTerminalLinkChunk, .tailTerminalOutput:
+            .resolveTerminalLink, .readTerminalLinkChunk, .tailTerminalOutput, .agentHooksStatus:
             true
         default: false
         }
@@ -1450,6 +1395,9 @@ extension SpacesDeviceAPICommand: Codable {
         case resolveTerminalLink
         case readTerminalLinkChunk
         case subscribeDeviceOverview
+        case agentHooksStatus
+        case installAgentHooks
+        case openServiceTunnel
     }
 
     public init(from decoder: any Decoder) throws {
@@ -1512,6 +1460,11 @@ extension SpacesDeviceAPICommand: Codable {
         case .subscribeDeviceOverview:
             _ = try container.decode(SpacesDeviceAPIEmptyPayload.self, forKey: key)
             self = .subscribeDeviceOverview
+        case .agentHooksStatus:
+            _ = try container.decode(SpacesDeviceAPIEmptyPayload.self, forKey: key)
+            self = .agentHooksStatus
+        case .installAgentHooks: self = .installAgentHooks(try container.decode(SpacesDeviceInstallAgentHooksRequest.self, forKey: key))
+        case .openServiceTunnel: self = .openServiceTunnel(try container.decode(SpacesDeviceServiceTunnelRequest.self, forKey: key))
         }
     }
 
@@ -1558,6 +1511,9 @@ extension SpacesDeviceAPICommand: Codable {
         case .resolveTerminalLink(let payload): try container.encode(payload, forKey: .resolveTerminalLink)
         case .readTerminalLinkChunk(let payload): try container.encode(payload, forKey: .readTerminalLinkChunk)
         case .subscribeDeviceOverview: try container.encode(SpacesDeviceAPIEmptyPayload(), forKey: .subscribeDeviceOverview)
+        case .agentHooksStatus: try container.encode(SpacesDeviceAPIEmptyPayload(), forKey: .agentHooksStatus)
+        case .installAgentHooks(let payload): try container.encode(payload, forKey: .installAgentHooks)
+        case .openServiceTunnel(let payload): try container.encode(payload, forKey: .openServiceTunnel)
         }
     }
 }
@@ -1612,6 +1568,8 @@ public enum SpacesDeviceAPIResult: Sendable, Equatable {
     case terminalLinkMetadata(SpacesDeviceTerminalLinkMetadata)
     case terminalLinkChunk(SpacesDeviceTerminalLinkChunk)
     case terminalOutput(SpacesDeviceTerminalOutputResult)
+    case agentHooksStatus(SpacesAgentHooksStatusPayload)
+    case agentHooksInstall(AgentHookInstallOutcome)
 }
 
 extension SpacesDeviceAPIResult: Codable {
@@ -1628,6 +1586,8 @@ extension SpacesDeviceAPIResult: Codable {
         case terminalLinkMetadata
         case terminalLinkChunk
         case terminalOutput
+        case agentHooksStatus
+        case agentHooksInstall
     }
 
     public init(from decoder: any Decoder) throws {
@@ -1649,6 +1609,8 @@ extension SpacesDeviceAPIResult: Codable {
         case .terminalLinkMetadata: self = .terminalLinkMetadata(try container.decode(SpacesDeviceTerminalLinkMetadata.self, forKey: key))
         case .terminalLinkChunk: self = .terminalLinkChunk(try container.decode(SpacesDeviceTerminalLinkChunk.self, forKey: key))
         case .terminalOutput: self = .terminalOutput(try container.decode(SpacesDeviceTerminalOutputResult.self, forKey: key))
+        case .agentHooksStatus: self = .agentHooksStatus(try container.decode(SpacesAgentHooksStatusPayload.self, forKey: key))
+        case .agentHooksInstall: self = .agentHooksInstall(try container.decode(AgentHookInstallOutcome.self, forKey: key))
         }
     }
 
@@ -1667,6 +1629,8 @@ extension SpacesDeviceAPIResult: Codable {
         case .terminalLinkMetadata(let payload): try container.encode(payload, forKey: .terminalLinkMetadata)
         case .terminalLinkChunk(let payload): try container.encode(payload, forKey: .terminalLinkChunk)
         case .terminalOutput(let payload): try container.encode(payload, forKey: .terminalOutput)
+        case .agentHooksStatus(let payload): try container.encode(payload, forKey: .agentHooksStatus)
+        case .agentHooksInstall(let payload): try container.encode(payload, forKey: .agentHooksInstall)
         }
     }
 }
@@ -1724,6 +1688,10 @@ public struct SpacesDeviceAPIResponse: Codable, Sendable, Equatable {
     public var terminalLinkChunk: SpacesDeviceTerminalLinkChunk? { if case .terminalLinkChunk(let payload) = result { payload } else { nil } }
 
     public var terminalOutput: String? { if case .terminalOutput(let payload) = result { payload.text } else { nil } }
+
+    public var agentHooksStatus: SpacesAgentHooksStatusPayload? { if case .agentHooksStatus(let payload) = result { payload } else { nil } }
+
+    public var agentHooksInstall: AgentHookInstallOutcome? { if case .agentHooksInstall(let payload) = result { payload } else { nil } }
 }
 
 public enum SpacesDeviceAPICodec {

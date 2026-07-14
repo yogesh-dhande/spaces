@@ -98,9 +98,24 @@ import workspacecore
     private weak var remoteDeviceAdvancedRow: NSView?
     private weak var remoteDeviceAdvancedToggle: NSButton?
     private weak var remoteDevicePairingStatusLabel: NSTextField?
+    /// The Connect button and the recovery install block, retained weakly so the install/connect flows
+    /// can toggle their enabled/hidden state on the live views without a full panel re-render (a re-render
+    /// would wipe the section-local status label).
+    private weak var remoteDeviceConnectButton: NSButton?
+    private weak var remoteDeviceInstallBlock: NSView?
+    private weak var remoteDeviceInstallCommandField: NSTextField?
+    private weak var remoteDeviceInstallButton: NSButton?
+    private weak var remoteDeviceInstallSpinner: NSProgressIndicator?
     private var currentDevicePairingWindow: ClientDevicePairingWindow?
     private var devicePanelStatusMessage: (message: String, isError: Bool)?
     private var isRelaunchingLocalDaemon = false
+    /// The pinned Linux install one-liner surfaced after a pairing attempt found Spaces missing on a Linux
+    /// device. Non-nil drives the recovery install block: the section rebuilds the block from this on every
+    /// render, so it survives panel rebuilds rather than living only on the transient views.
+    private var remoteDeviceLinuxInstallCommand: String?
+    /// True while the SSH install-and-pair recovery is running, so a rebuild keeps the install and Connect
+    /// buttons disabled and the spinner visible.
+    private var isInstallingRemoteSpaces = false
     var renamingClientDeviceID: String?
     weak var renamingClientDeviceField: NSTextField?
 
@@ -372,6 +387,8 @@ import workspacecore
         let connectButton = host.actionButton(
             title: "Connect Remote Device", symbol: "link", tooltip: "Connect this Mac with another device over SSH",
             action: #selector(AppKitController.connectRemoteDeviceFromPairingPanel), primary: true)
+        connectButton.isEnabled = !isInstallingRemoteSpaces
+        remoteDeviceConnectButton = connectButton
         rows.append(mobilePanelButtonRow([connectButton]))
 
         let statusLabel = host.helpTextLabel("")
@@ -379,7 +396,63 @@ import workspacecore
         remoteDevicePairingStatusLabel = statusLabel
         rows.append(statusLabel)
 
+        rows.append(remoteDeviceInstallSection())
+
         return mobilePanelSection(icon: "link.badge.plus", title: "Add Remote Device", rows: rows)
+    }
+
+    /// The recovery block shown after a pairing attempt reports Spaces is missing on a Linux device: the
+    /// pinned install one-liner (copyable) plus a button to run it over SSH and pair. Visibility and content
+    /// derive from `remoteDeviceLinuxInstallCommand`/`isInstallingRemoteSpaces` so a panel rebuild restores
+    /// the block exactly; the flows also toggle the retained views directly to avoid a status-wiping re-render.
+    private func remoteDeviceInstallSection() -> NSView {
+        let commandField = NSTextField(labelWithString: remoteDeviceLinuxInstallCommand ?? "")
+        commandField.isSelectable = true
+        commandField.isEditable = false
+        commandField.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        commandField.lineBreakMode = .byCharWrapping
+        commandField.maximumNumberOfLines = 0
+        commandField.setAccessibilityIdentifier("remote-device-install-command")
+        commandField.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        commandField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        remoteDeviceInstallCommandField = commandField
+
+        let copyButton = host.sidebarRowIconButton(
+            symbol: "doc.on.doc", tooltip: "Copy install command", action: #selector(AppKitController.copyRemoteDeviceInstallCommand))
+        copyButton.setAccessibilityIdentifier("remote-device-install-command-copy")
+
+        let commandRow = NSStackView(views: [commandField, copyButton])
+        commandRow.orientation = .horizontal
+        commandRow.alignment = .top
+        commandRow.spacing = 8
+
+        let installButton = host.actionButton(
+            title: "Install Spaces over SSH", symbol: "arrow.down.circle", tooltip: "Run the installer on the remote device over SSH, then pair",
+            action: #selector(AppKitController.installSpacesOnRemoteDevice), primary: false)
+        installButton.isEnabled = !isInstallingRemoteSpaces
+        installButton.setAccessibilityIdentifier("remote-device-install-ssh")
+        remoteDeviceInstallButton = installButton
+
+        let spinner = NSProgressIndicator()
+        spinner.style = .spinning
+        spinner.controlSize = .small
+        spinner.isDisplayedWhenStopped = false
+        spinner.isHidden = !isInstallingRemoteSpaces
+        if isInstallingRemoteSpaces { spinner.startAnimation(nil) }
+        remoteDeviceInstallSpinner = spinner
+
+        let actionRow = mobilePanelButtonRow([installButton])
+        if let actionStack = actionRow as? NSStackView { actionStack.insertArrangedSubview(spinner, at: 1) }
+
+        let block = NSStackView(views: [commandRow, actionRow])
+        block.orientation = .vertical
+        block.alignment = .leading
+        block.spacing = 8
+        commandRow.widthAnchor.constraint(equalTo: block.widthAnchor).isActive = true
+        actionRow.widthAnchor.constraint(equalTo: block.widthAnchor).isActive = true
+        block.isHidden = remoteDeviceLinuxInstallCommand == nil
+        remoteDeviceInstallBlock = block
+        return block
     }
 
     /// Expands or collapses the optional username/port fields and rotates the disclosure chevron.
@@ -534,6 +607,10 @@ import workspacecore
     }
 
     func connectRemoteDeviceFromPairingPanel() {
+        // Each attempt starts from a clean recovery state: hide any install block left from a prior failure
+        // so it only reappears if this attempt again finds Spaces missing.
+        remoteDeviceLinuxInstallCommand = nil
+        remoteDeviceInstallBlock?.isHidden = true
         let sshHostText = remoteDeviceSSHHostField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let sshUserText = remoteDeviceSSHUserField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let sshPortText = remoteDeviceSSHPortField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -556,25 +633,101 @@ import workspacecore
                 self?.setRemoteDevicePairingStatus("Connected \(result.name).", isError: false)
                 self?.refreshVisibleDeviceSettingsAfterClientDeviceChange()
                 self?.host.requestSidebarReload()
-            } catch { self?.setRemoteDevicePairingStatus(error.localizedDescription, isError: true) }
+            } catch {
+                guard let self else { return }
+                // A Linux device without Spaces installed carries the pinned install one-liner: surface the
+                // recovery block so the user can install over SSH (or copy the command) instead of only an error.
+                if case SpacesRemoteDevicePairingError.remoteSpacesNotInstalled(let message, let linuxInstallCommand) = error,
+                    let command = linuxInstallCommand
+                {
+                    self.remoteDeviceLinuxInstallCommand = command
+                    self.remoteDeviceInstallCommandField?.stringValue = command
+                    self.remoteDeviceInstallBlock?.isHidden = false
+                    self.setRemoteDevicePairingStatus(message, isError: true)
+                } else {
+                    self.remoteDeviceLinuxInstallCommand = nil
+                    self.remoteDeviceInstallBlock?.isHidden = true
+                    self.setRemoteDevicePairingStatus(error.localizedDescription, isError: true)
+                }
+            }
         }
+    }
+
+    /// Runs the pinned Linux installer on the remote host over SSH (up to ten minutes) and then pairs, the
+    /// recovery for a pairing attempt that reported Spaces missing. Reads and validates the SSH fields exactly
+    /// like `connectRemoteDeviceFromPairingPanel`. While it runs, the install and Connect buttons are disabled
+    /// and the spinner spins; on success the block is cleared and the Devices pane refreshes like the connect
+    /// success path, and on failure the block stays so the command remains copyable.
+    func installSpacesOnRemoteDevice() {
+        guard !isInstallingRemoteSpaces else { return }
+        let sshHostText = remoteDeviceSSHHostField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let sshUserText = remoteDeviceSSHUserField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let sshPortText = remoteDeviceSSHPortField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let bundleID = Bundle.main.bundleIdentifier ?? "dev.usespaces.spaces"
+        let deviceName = Host.current().localizedName ?? "Mac"
+        let appVersion = AppVersion.short
+        isInstallingRemoteSpaces = true
+        remoteDeviceInstallButton?.isEnabled = false
+        remoteDeviceConnectButton?.isEnabled = false
+        remoteDeviceInstallSpinner?.isHidden = false
+        remoteDeviceInstallSpinner?.startAnimation(nil)
+        setRemoteDevicePairingStatus("Installing Spaces on \(sshHostText)... This can take a few minutes.", isError: false)
+        Task { [weak self] in
+            do {
+                let sshPort = try Self.parsedSSHPort(sshPortText)
+                let profile = try? SpacesProfile.current()
+                let clientInstallationID = SpacesDevicePairingClient.localMacClientInstallationID(profile: profile)
+                let result = try await Task.detached(priority: .userInitiated) {
+                    try SpacesDevicePairingClient.installSpacesOnRemoteDeviceAndPair(
+                        SpacesRemoteDevicePairingRequest(
+                            sshHost: sshHostText, sshUser: Self.normalizedPanelField(sshUserText), sshPort: sshPort,
+                            clientInstallationID: clientInstallationID, clientBundleID: bundleID, clientDeviceName: deviceName,
+                            clientAppVersion: appVersion, profile: profile))
+                }.value
+                guard let self else { return }
+                self.isInstallingRemoteSpaces = false
+                self.remoteDeviceLinuxInstallCommand = nil
+                self.remoteDeviceInstallSpinner?.stopAnimation(nil)
+                self.remoteDeviceInstallBlock?.isHidden = true
+                self.setRemoteDevicePairingStatus("Connected \(result.name).", isError: false)
+                self.refreshVisibleDeviceSettingsAfterClientDeviceChange()
+                self.host.requestSidebarReload()
+            } catch {
+                guard let self else { return }
+                self.isInstallingRemoteSpaces = false
+                self.remoteDeviceInstallSpinner?.stopAnimation(nil)
+                self.remoteDeviceInstallSpinner?.isHidden = true
+                self.remoteDeviceInstallButton?.isEnabled = true
+                self.remoteDeviceConnectButton?.isEnabled = true
+                self.setRemoteDevicePairingStatus(error.localizedDescription, isError: true)
+            }
+        }
+    }
+
+    /// Copies the pinned install one-liner to the pasteboard. Inlined because `AppKitController.copyToPasteboard`
+    /// is private and this is the only device-panel copy site.
+    func copyRemoteDeviceInstallCommand() {
+        guard let command = remoteDeviceLinuxInstallCommand else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(command, forType: .string)
     }
 
     /// Relaunches the local `spacesd` daemon after it failed to start. This is the only local-daemon
     /// restart entry point. It calls `TerminalService.relaunch` directly (stop-then-start) rather than
     /// the `requestDaemonRestart` RPC, because a crashed daemon has no reachable control endpoint to
-    /// receive that RPC. On completion it re-renders the Devices pane against an authoritative status
-    /// and reloads the sidebar so the "This Mac" offline caption clears.
+    /// receive that RPC — a stop-then-start relaunch cannot use the exec-in-place handoff either, since
+    /// there is no live daemon process to quiesce sessions and hand off from. On completion it re-renders
+    /// the Devices pane against an authoritative status and reloads the sidebar so the "This Mac" offline
+    /// caption clears.
     ///
     /// The Device API control endpoint can be down while the terminal service still holds live sessions
     /// (`responseEnsuringCurrentTerminalService` deliberately returns the not-running response instead of
-    /// relaunching in that case, to avoid killing them). A relaunch stops the daemon and every live
-    /// session, so warn-before-kill — matching `confirmDaemonRestart` — whenever any session is live.
-    /// Liveness is read from the terminal service's own session list, the same signal that protective
-    /// path keys off; the Device API status is unreachable here, and its terminal-service ping would
-    /// under-report anyway (it omits process/agent counts), so the warning uses the generic
-    /// unknown-count impact message rather than a precise breakdown. When nothing is live (the daemon is
-    /// fully down) the relaunch proceeds with no prompt.
+    /// relaunching in that case, to avoid killing them). Unlike a daemon-update handoff, this relaunch
+    /// really does stop the daemon and every live session, so it warns before proceeding whenever any
+    /// session is live. Liveness is read from the terminal service's own session list, the same signal
+    /// that protective path keys off; the Device API status is unreachable here, so the warning cannot
+    /// give a precise breakdown. When nothing is live (the daemon is fully down) the relaunch proceeds
+    /// with no prompt.
     func restartLocalDaemon() {
         Task { @MainActor [weak self] in
             guard let self, !self.isRelaunchingLocalDaemon else { return }
@@ -583,7 +736,7 @@ import workspacecore
             if hasLiveSessions {
                 let alert = NSAlert()
                 alert.messageText = "Restart the local daemon?"
-                alert.informativeText = AppKitController.restartImpactMessage(status: nil)
+                alert.informativeText = "This will stop all running terminals, processes, and coding agents on this device."
                 alert.addButton(withTitle: "Restart")
                 alert.addButton(withTitle: "Defer")
                 guard alert.runModal() == .alertFirstButtonReturn else { return }

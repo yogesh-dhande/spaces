@@ -49,6 +49,58 @@ final class SpacesCommandTests: XCTestCase {
         XCTAssertEqual(command.type, .blocked)
     }
 
+    func testAgentSignalParsesEventWithoutExplicitContext() throws {
+        let command = try AgentSignalCommand.parse(["done"])
+
+        XCTAssertNil(command.workspace)
+        XCTAssertNil(command.session)
+        XCTAssertEqual(command.type, .done)
+    }
+
+    func testAgentSignalResolvesContextFromEnvironment() throws {
+        let context = try AgentSignalCommand.resolvedSignalContext(
+            workspace: nil, session: nil, environment: ["SPACES_WORKSPACE_ID": "workspace-env", "SPACES_TERMINAL_TRACKING_ID": "session-env"])
+
+        XCTAssertEqual(context?.workspaceID, "workspace-env")
+        XCTAssertEqual(context?.sessionID, "session-env")
+    }
+
+    func testAgentSignalExplicitContextOverridesEnvironment() throws {
+        let context = try AgentSignalCommand.resolvedSignalContext(
+            workspace: "workspace-explicit", session: "session-explicit",
+            environment: ["SPACES_WORKSPACE_ID": "workspace-env", "SPACES_TERMINAL_TRACKING_ID": "session-env"])
+
+        XCTAssertEqual(context?.workspaceID, "workspace-explicit")
+        XCTAssertEqual(context?.sessionID, "session-explicit")
+    }
+
+    /// Outside a Spaces terminal, a hook that fires anyway must do nothing rather than fail.
+    func testAgentSignalMissingContextIsNoOp() throws {
+        XCTAssertNil(try AgentSignalCommand.resolvedSignalContext(workspace: nil, session: nil, environment: [:]))
+    }
+
+    /// Naming one ID and not the other is a caller mistake, not "outside a Spaces terminal".
+    func testAgentSignalHalfSuppliedExplicitContextIsAnError() {
+        XCTAssertThrowsError(try AgentSignalCommand.resolvedSignalContext(workspace: "workspace-explicit", session: nil, environment: [:]))
+        XCTAssertThrowsError(try AgentSignalCommand.resolvedSignalContext(workspace: nil, session: "session-explicit", environment: [:]))
+    }
+
+    /// An explicit ID still combines with the environment for the other half.
+    func testAgentSignalExplicitWorkspaceCombinesWithEnvironmentSession() throws {
+        let context = try AgentSignalCommand.resolvedSignalContext(
+            workspace: "workspace-explicit", session: nil, environment: ["SPACES_TERMINAL_TRACKING_ID": "session-env"])
+
+        XCTAssertEqual(context?.workspaceID, "workspace-explicit")
+        XCTAssertEqual(context?.sessionID, "session-env")
+    }
+
+    /// Hook installation and status are owned by the app and the daemon, never the CLI or MCP.
+    func testAgentCommandExposesSignalOnly() {
+        let subcommands = AgentCommand.configuration.subcommands.map { String(describing: $0) }
+        XCTAssertEqual(subcommands, ["AgentSignalCommand"])
+        XCTAssertThrowsError(try AgentCommand.parseAsRoot(["hooks", "status"]))
+    }
+
     func testTerminalListParses() throws { XCTAssertNoThrow(try TerminalListCommand.parse([])) }
 
     func testTerminalCommandsParseDeviceSelector() throws {
@@ -251,7 +303,31 @@ final class SpacesCommandTests: XCTestCase {
 
     func testSpacesCommandListsGroupedPublicVerbs() {
         let subcommands = SpacesCommand.configuration.subcommands.map { String(describing: $0) }
-        XCTAssertEqual(subcommands, ["ProjectCommand", "WorkspaceCommand", "AgentCommand", "TerminalCommand", "DeviceCommand", "MCPCommand"])
+        XCTAssertEqual(
+            subcommands, ["ProjectCommand", "WorkspaceCommand", "AgentCommand", "TerminalCommand", "DeviceCommand", "DaemonCommand", "MCPCommand"])
+    }
+
+    func testDaemonApplyUpdateParses() throws { XCTAssertNoThrow(try DaemonApplyUpdateCommand.parse([])) }
+
+    func testDaemonApplyUpdateFailsClearlyWhenDaemonNotRunning() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let originalRuntimeDir = ProcessInfo.processInfo.environment[SpacesProfile.runtimeDirectoryEnvironmentVariable]
+        setenv(SpacesProfile.runtimeDirectoryEnvironmentVariable, root.path, 1)
+        defer {
+            if let originalRuntimeDir {
+                setenv(SpacesProfile.runtimeDirectoryEnvironmentVariable, originalRuntimeDir, 1)
+            } else {
+                unsetenv(SpacesProfile.runtimeDirectoryEnvironmentVariable)
+            }
+        }
+
+        var command = try DaemonApplyUpdateCommand.parse([])
+        XCTAssertThrowsError(try command.run()) { error in
+            XCTAssertTrue("\(error)".contains("spacesd is not running"), "expected a not-running error, got \(error)")
+        }
     }
 
     func testMCPToolDefinitionsExposeExplicitSpacesOperations() throws {

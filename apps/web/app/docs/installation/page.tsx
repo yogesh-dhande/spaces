@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
-import { DocsShell } from "../components/docs-shell";
 import { CodeBlock } from "../components/code-block";
+import { DocsShell } from "../components/docs-shell";
 import Link from "next/link";
 
 const githubReleasesURL = "https://github.com/yogesh-dhande/spaces/releases/latest";
@@ -117,16 +117,20 @@ rm -rf ~/.spaces ~/spaces`}</CodeBlock>
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Linux</h2>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Install the Spaces daemon on a Linux machine to run workspaces there and drive them from your Mac or iPhone. Ubuntu 24.04 on x86_64 or arm64 is supported. Spaces never installs the daemon for you — run the installer on the Linux machine yourself.
+          Install the Spaces daemon on a Linux machine to run workspaces there and drive them from your Mac or iPhone. Ubuntu 24.04 on x86_64 or arm64 is supported. You can run the installer on the machine yourself, or let the Mac app install it over SSH for you — when you pair a Linux device that has no daemon yet, the pairing screen offers an <strong>Install Spaces over SSH</strong> action that runs this same installer on the device and pairs automatically.
         </p>
 
         <h3 className="mt-6 text-sm font-semibold text-foreground">Install</h3>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          On the Linux machine, run the installer for the version you want, replacing <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">&lt;version&gt;</code> with a released version such as <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">0.1.0</code>:
+          On the Linux machine, install the latest release:
         </p>
-        <CodeBlock>{`curl -fsSL https://github.com/yogesh-dhande/spaces/releases/download/v<version>/spaces-install-linux.sh | bash -s -- <version>`}</CodeBlock>
+        <CodeBlock>{`curl -fsSL https://usespaces.dev/install.sh | bash`}</CodeBlock>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          The Mac app and the <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">spaces</code> CLI print this command with the right version already filled in whenever they reach a Linux machine whose daemon is missing or out of date. Released versions are listed on the{" "}
+          To pin a specific release, pass its version — replacing <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">&lt;version&gt;</code> with a released version such as <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">0.1.0</code>:
+        </p>
+        <CodeBlock>{`curl -fsSL https://usespaces.dev/install.sh | bash -s -- <version>`}</CodeBlock>
+        <p className="mt-2 text-sm leading-7 text-foreground-soft">
+          The Mac app and the <code className="rounded bg-background-soft px-1.5 py-0.5 text-xs">spaces</code> CLI print the version-pinned command with the right version already filled in whenever they reach a Linux machine whose daemon is missing or out of date. Released versions are listed on the{" "}
           <Link
             href={githubReleasesURL}
             className="text-accent hover:underline"
@@ -154,7 +158,7 @@ rm -rf ~/.spaces ~/spaces`}</CodeBlock>
 
         <h3 className="mt-6 text-sm font-semibold text-foreground">Update</h3>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
-          Re-run the same command with the new version. There is no separate update command. The installer puts the new version in place alongside the old one, switches over, and restarts the service, so the daemon comes back on its own.
+          Re-run the same command with the new version. There is no separate update command. The installer puts the new version in place alongside the old one and hands the running daemon over to it without a full restart, so your terminal sessions, processes, and coding agents keep running across the update.
         </p>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           A client and a daemon can only talk to each other when they speak the same protocol, and Spaces will not connect them when they don&apos;t. When that happens Spaces tells you which side is behind: update the Mac app through its built-in updater, or update the Linux daemon with the command Spaces prints for you.

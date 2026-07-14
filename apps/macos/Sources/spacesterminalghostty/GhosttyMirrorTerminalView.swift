@@ -21,7 +21,7 @@
     @MainActor private final class GhosttyMirrorSurfaceHostView: NSView { override func hitTest(_ point: NSPoint) -> NSView? { nil } }
 
     @MainActor final class GhosttyMirrorTerminalView: NSView, NSSearchFieldDelegate {
-        typealias SendTextHandler = @MainActor (String) -> Void
+        typealias SendTextHandler = @MainActor (String, Bool) -> Void
         typealias SendKeyHandler = @MainActor (String) -> Void
         typealias SendScrollHandler = @MainActor (CGFloat, CGFloat, Int32) -> Void
         typealias ViewportSizeHandler = @MainActor (Int, Int) -> Void
@@ -92,6 +92,12 @@
         private(set) var debugRenderFrameApplyCount = 0
         var debugOpenURLHandler: (@MainActor (URL) -> Bool)?
 
+        /// Per-pane link router installed by `RemoteGhosttySessionHost`. When set it fully replaces the
+        /// legacy local-only `GhosttyTerminalLinkOpener.open` path for `.openURL` action events, so the
+        /// coordinator can route web/loopback/remote-file links (fetch-over-Device-API, loopback notice).
+        /// Left nil in contexts with no coordinator (tests, non-device hosts), where the legacy opener
+        /// and its `debugOpenURLHandler` test seam still apply.
+        var onOpenLink: (@MainActor (String) -> Void)?
         var acceptsTerminalInput = false { didSet { restoreFirstResponderIfWindowReady() } }
         var onSendText: SendTextHandler?
         var onSendKey: SendKeyHandler?
@@ -249,7 +255,7 @@
             let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
             if flags.contains(.command) { return false }
             if let characters = GhosttyTerminalInputTranslator.ghosttyText(for: event), !characters.isEmpty {
-                onSendText?(characters)
+                onSendText?(characters, false)
                 return true
             }
             return false
@@ -302,7 +308,7 @@
         func pasteClipboardContents() -> Bool {
             guard acceptsTerminalInput else { return false }
             guard let text = NSPasteboard.general.string(forType: .string), !text.isEmpty else { return false }
-            onSendText?(text)
+            onSendText?(text, true)
             return true
         }
 
@@ -320,7 +326,8 @@
 
         func applyActionEvent(_ event: GhosttyActionEvent) {
             switch event {
-            case .openURL(_, let value): _ = GhosttyTerminalLinkOpener.open(value, openURL: debugOpenURLHandler)
+            case .openURL(_, let value):
+                if let onOpenLink { onOpenLink(value) } else { _ = GhosttyTerminalLinkOpener.open(value, openURL: debugOpenURLHandler) }
             case .mouseOverLink(let value): hoveredLink = value
             case .startSearch(let needle): showSearchOverlay(query: needle, submitSeededQuery: needle != nil)
             case .endSearch: hideSearchOverlay()

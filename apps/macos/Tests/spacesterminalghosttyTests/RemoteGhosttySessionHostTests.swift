@@ -103,6 +103,30 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         XCTAssertEqual(GhosttyMirrorTerminalView.remoteKeySpecifier(for: keyEvent(keyCode: UInt16(kVK_ANSI_K), modifierFlags: .command)), "cmd+k")
     }
 
+    @MainActor func testRemoteMirrorClipboardPasteMarksTextAsPaste() {
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "remote-paste", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: nil,
+            createdAt: "2026-06-05T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+        let mirrorView = GhosttyMirrorTerminalView(launchConfiguration: launchConfiguration)
+        var sentText: [(String, Bool)] = []
+        mirrorView.onSendText = { text, asPaste in sentText.append((text, asPaste)) }
+        mirrorView.acceptsTerminalInput = true
+        let pasteboard = NSPasteboard.general
+        let previousText = pasteboard.string(forType: .string)
+        pasteboard.clearContents()
+        pasteboard.setString("line one\nline two", forType: .string)
+        defer {
+            pasteboard.clearContents()
+            if let previousText { pasteboard.setString(previousText, forType: .string) }
+        }
+
+        XCTAssertTrue(mirrorView.pasteClipboardContents())
+
+        XCTAssertEqual(sentText.count, 1)
+        XCTAssertEqual(sentText.first?.0, "line one\nline two")
+        XCTAssertEqual(sentText.first?.1, true)
+    }
+
     @MainActor func testRemoteMirrorEncodesPreciseScrollMods() {
         XCTAssertEqual(GhosttyMirrorTerminalView.makeScrollMods(hasPreciseDeltas: true, phase: .changed), 0b0000_0111)
         XCTAssertEqual(GhosttyMirrorTerminalView.makeScrollMods(hasPreciseDeltas: true, phase: .ended), 0b0000_1001)
@@ -491,6 +515,29 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         XCTAssertEqual(mirrorView.debugHoveredLink, "https://example.com/report")
         mirrorView.applyActionEvent(.mouseOverLink(nil))
         XCTAssertNil(mirrorView.debugHoveredLink)
+    }
+
+    @MainActor func testMirrorTerminalViewOnOpenLinkTakesPrecedenceOverLegacyOpener() {
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "remote-on-open-link", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: nil,
+            createdAt: "2026-06-08T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+        let mirrorView = GhosttyMirrorTerminalView(launchConfiguration: launchConfiguration)
+        var routedLinks: [String] = []
+        var legacyOpens = 0
+        // When `onOpenLink` is set it fully replaces the legacy local-only opener path, so the
+        // per-pane coordinator can route web/loopback/remote-file clicks. The legacy
+        // `debugOpenURLHandler` seam must not fire.
+        mirrorView.onOpenLink = { routedLinks.append($0) }
+        mirrorView.debugOpenURLHandler = { _ in
+            legacyOpens += 1
+            return true
+        }
+
+        mirrorView.applyActionEvent(.openURL(kind: .unknown, value: "https://example.com/report"))
+        mirrorView.applyActionEvent(.openURL(kind: .unknown, value: "/tmp/screenshot.png"))
+
+        XCTAssertEqual(routedLinks, ["https://example.com/report", "/tmp/screenshot.png"])
+        XCTAssertEqual(legacyOpens, 0)
     }
 
     @MainActor func testRemoteMirrorWindowKeyHandoffRestoresFirstResponderAndSendsEnter() throws {

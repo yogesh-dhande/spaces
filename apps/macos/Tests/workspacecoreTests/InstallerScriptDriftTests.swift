@@ -21,12 +21,33 @@ final class InstallerScriptDriftTests: XCTestCase {
             """)
     }
 
-    private static var installerScriptURL: URL {
+    func testInstallerTargetsLatestReleaseAndAcceptsNoVersionArgument() throws {
+        let script = try String(contentsOf: Self.installerScriptURL, encoding: .utf8)
+        // The evergreen one-liner (`curl ... | bash`) installs the latest release, so the script must
+        // resolve the artifact from the latest-release download URL and must not require a version
+        // argument (no mandatory-arg usage die).
+        XCTAssertTrue(script.contains("releases/latest/download"))
+        XCTAssertFalse(script.contains("usage: spaces-install-linux.sh <version>"))
+    }
+
+    func testWebPrebuildPublishesInstallerAsInstallScript() throws {
+        let package = try String(contentsOf: Self.webPackageURL, encoding: .utf8)
+        // The install script is served at usespaces.dev/install.sh via the web build's prebuild copy;
+        // guard that publish mechanism against drift.
+        XCTAssertTrue(package.contains("\"prebuild\""))
+        XCTAssertTrue(package.contains("spaces-install-linux.sh"))
+        XCTAssertTrue(package.contains("public/install.sh"))
+    }
+
+    private static var repoRootURL: URL {
         URL(fileURLWithPath: #filePath).deletingLastPathComponent()  // workspacecoreTests
             .deletingLastPathComponent()  // Tests
             .deletingLastPathComponent()  // macos
             .deletingLastPathComponent()  // apps
             .deletingLastPathComponent()  // repo root
-            .appendingPathComponent("scripts/spaces-install-linux.sh")
     }
+
+    private static var installerScriptURL: URL { repoRootURL.appendingPathComponent("scripts/spaces-install-linux.sh") }
+
+    private static var webPackageURL: URL { repoRootURL.appendingPathComponent("apps/web/package.json") }
 }

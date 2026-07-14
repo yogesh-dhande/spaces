@@ -1,17 +1,11 @@
 import AppKit
 import Foundation
+import spacesterminalcore
 
-public struct TerminalPasteboardImage: Sendable, Equatable {
-    public static let maxByteCount = 10 * 1024 * 1024
-
-    public let fileExtension: String
-    public let imageData: Data
-
-    public init(fileExtension: String, imageData: Data) {
-        self.fileExtension = fileExtension
-        self.imageData = imageData
-    }
-}
+/// macOS pasteboard-image type, kept as a distinct name from the shared `TerminalImageAttachmentPayload`
+/// so this reader's call sites don't change, while its size cap comes from the shared definition in
+/// `spacesterminalcore` (used by both this reader and the iOS Device API client).
+public typealias TerminalPasteboardImage = TerminalImageAttachmentPayload
 
 public enum TerminalPasteboardImageReadResult: Equatable {
     case image(TerminalPasteboardImage)
@@ -27,7 +21,7 @@ public enum TerminalPasteboardImageReadResult: Equatable {
 public enum TerminalPasteboardImageReader {
     private static let oversizedImageMessage = "Image paste is limited to 10 MiB."
     private static let jpegType = NSPasteboard.PasteboardType("public.jpeg")
-    private static let supportedFileExtensions: Set<String> = ["avif", "bmp", "gif", "heic", "heif", "jpg", "jpeg", "png", "tif", "tiff", "webp"]
+    private static let supportedFileExtensions = TerminalImageAttachmentPayload.supportedFileExtensions
 
     public static func readImage(from pasteboard: NSPasteboard = .general) -> TerminalPasteboardImageReadResult {
         if let pngData = pasteboard.data(forType: .png) { return validatedImage(data: pngData, fileExtension: "png") }

@@ -128,4 +128,47 @@ final class TerminalForegroundProcessInspectorTests: XCTestCase {
 
         XCTAssertEqual(detected?.displayCommand, "codex 'hello world' \(String(repeating: "x", count: 160))...")
     }
+
+    func testWorkingDirectoryReadsLiveProcessCurrentDirectory() throws {
+        // Anchor under /private/tmp so the kernel-reported cwd path matches exactly (the default
+        // temporary directory lives under /var/folders, where /var is a symlink to /private/var).
+        let directory = URL(fileURLWithPath: "/private/tmp", isDirectory: true).appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let expectedPath = directory.path
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        process.arguments = ["30"]
+        process.currentDirectoryURL = directory
+        try process.run()
+        defer {
+            process.terminate()
+            process.waitUntilExit()
+        }
+
+        // The child chdir/execs asynchronously; poll briefly until the live cwd is observable.
+        var observed: String?
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
+            observed = TerminalForegroundProcessInspector.workingDirectory(pid: process.processIdentifier)
+            if observed != nil { break }
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+        XCTAssertEqual(observed, expectedPath)
+    }
+
+    func testWorkingDirectoryReturnsNilForDeadOrInvalidPid() throws {
+        XCTAssertNil(TerminalForegroundProcessInspector.workingDirectory(pid: 0))
+        XCTAssertNil(TerminalForegroundProcessInspector.workingDirectory(pid: -1))
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/echo")
+        process.arguments = ["done"]
+        try process.run()
+        let pid = process.processIdentifier
+        process.waitUntilExit()
+
+        XCTAssertNil(TerminalForegroundProcessInspector.workingDirectory(pid: pid))
+    }
 }

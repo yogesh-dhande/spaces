@@ -67,7 +67,7 @@ final class SpacesDeviceClientResolveOverviewTests: XCTestCase {
 
     private static func status(protocolVersion: Int) -> TerminalServiceDaemonStatus {
         TerminalServiceDaemonStatus(
-            version: "1.0.0", artifactVersion: nil, certificateFingerprint: nil, activeSessionCount: 0, protocolVersion: protocolVersion)
+            version: "1.0.0", installedVersion: nil, certificateFingerprint: nil, activeSessionCount: 0, protocolVersion: protocolVersion)
     }
 }
 
@@ -85,7 +85,7 @@ private final class RequestProbe: @unchecked Sendable {
 
     func provider(
         overviewStatus: TerminalServiceDaemonStatus = TerminalServiceDaemonStatus(
-            version: "1.0.0", artifactVersion: nil, certificateFingerprint: nil, activeSessionCount: 0, protocolVersion: SpacesWireProtocol.version),
+            version: "1.0.0", installedVersion: nil, certificateFingerprint: nil, activeSessionCount: 0, protocolVersion: SpacesWireProtocol.version),
         overviewError: Error? = nil, handshakeStatus: TerminalServiceDaemonStatus? = nil, handshakeError: Error? = nil
     ) -> SpacesDeviceClient.DeviceRequestProvider {
         { request, _, _, _ in

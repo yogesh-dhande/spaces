@@ -127,6 +127,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     /// they read as nested under the project header. A non-git project has no workspace level, so its
     /// runtime-target rows are not given this extra indent.
     private static let workspaceIndent: CGFloat = 16
+    private static let runtimeTargetShortcutSlotWidth: CGFloat = 20
 
     func invalidateVisibleWorkspacesCache() {
         visibleWorkspacesCache.removeAll(keepingCapacity: true)
@@ -136,6 +137,10 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     /// Wires the host's outline view to this controller as its delegate/data source
     /// and installs the row mouse-down and arrow-navigation callbacks.
     func attachOutlineView(_ outlineView: SidebarOutlineView) {
+        outlineView.selectedWorkspaceHighlight = { [weak self, weak outlineView] in
+            guard let self, let outlineView else { return nil }
+            return self.selectedWorkspaceHighlight(in: outlineView)
+        }
         outlineView.onRowMouseDown = { [weak self] row in
             guard let self, let ref = self.host.outlineView.item(atRow: row) as? OutlineItemRef else { return false }
             if case .project(let project) = ref.item {
@@ -228,6 +233,10 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             host.startBackgroundServicesIfNeeded()
         case .failure(let error):
             if host.handleDeferredSetupRequirementIfNeeded(error) { return }
+            if host.showLocalDaemonCompatibilityBlockIfNeeded(error) {
+                host.startBackgroundServicesIfNeeded()
+                return
+            }
             host.showError(error)
             host.showPlaceholder(message: "Spaces couldn't load workspace data.")
             host.startBackgroundServicesIfNeeded()
@@ -270,6 +279,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         } else {
             host.deviceSections.insert(localSection, at: 0)
         }
+        host.maybeRequestSilentDaemonHandoff(deviceID: snapshot.localDeviceID, status: snapshot.localDaemonStatus)
         host.localDeviceID = snapshot.localDeviceID
         host.localDeviceName = snapshot.localDeviceName
         host.localPairedDevice = snapshot.localPairedDevice
@@ -536,6 +546,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
                 host.deviceSections[index].compatibility == load.compatibility && host.deviceSections[index].daemonStatus == load.daemonStatus
             host.deviceSections[index].daemonStatus = load.daemonStatus
             host.deviceSections[index].compatibility = load.compatibility
+            host.maybeRequestSilentDaemonHandoff(deviceID: deviceID, status: load.daemonStatus)
             // If this device's block was showing and it is now compatible, drop the obsolete block.
             host.clearCompatibilityBlockIfResolved(deviceID: deviceID)
             guard let overview = load.overview else {
@@ -861,9 +872,10 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         case .offline: return ("offline", sidebarFailedIndicatorColor())
         case .loaded:
             // Incompatible devices render an actionable button in the caption (see sidebarSectionRowCell);
-            // a compatible-but-older daemon shows a quiet "update pending" caption.
+            // a device with a newer build installed than its daemon is running shows a quiet
+            // "update pending" caption.
             if section.compatibility?.isCompatible == false { return nil }
-            if AppKitController.daemonUpdatePending(status: section.daemonStatus) { return ("update pending", .tertiaryLabelColor) }
+            if section.daemonStatus?.isUpdatePending == true { return ("update pending", .tertiaryLabelColor) }
             return nil
         }
     }
@@ -927,15 +939,17 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     private func projectRowCell(project: ProjectSummary, isSelected: Bool) -> NSTableCellView {
         let cell = NSTableCellView()
         cell.setAccessibilityIdentifier("sidebar-project-\(project.id)")
+        let usesGroupedWorkspaceSelection = isSelected && !project.isGitRepo && host.selectedWorkspaceID != nil
 
         let rowBackground = NSView()
         rowBackground.translatesAutoresizingMaskIntoConstraints = false
         rowBackground.wantsLayer = true
         rowBackground.layer?.cornerRadius = UIRadius.regular
-        rowBackground.layer?.borderWidth = isSelected ? 1 : 0
+        rowBackground.layer?.borderWidth = isSelected && !usesGroupedWorkspaceSelection ? 1 : 0
         bindAppearanceReactiveLayer(rowBackground) { [weak self] view in
             view.layer?.borderColor = self?.sidebarCardBorderColor(isSelected: true).cgColor
-            view.layer?.backgroundColor = isSelected ? self?.sidebarSelectedCardBackgroundColor().cgColor : NSColor.clear.cgColor
+            view.layer?.backgroundColor =
+                isSelected && !usesGroupedWorkspaceSelection ? self?.sidebarSelectedCardBackgroundColor().cgColor : NSColor.clear.cgColor
         }
 
         let titleLabel = NSTextField(labelWithString: project.name)
@@ -1073,10 +1087,10 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         cardView.setAccessibilityIdentifier("sidebar-workspace-card-\(workspace.id)")
         cardView.wantsLayer = true
         cardView.layer?.cornerRadius = UIRadius.regular
-        cardView.layer?.borderWidth = isSelected ? 1 : 0
+        cardView.layer?.borderWidth = 0
         bindAppearanceReactiveLayer(cardView) { [weak self] view in
             view.layer?.borderColor = self?.sidebarCardBorderColor(isSelected: true).cgColor
-            view.layer?.backgroundColor = isSelected ? self?.sidebarSelectedCardBackgroundColor().cgColor : NSColor.clear.cgColor
+            view.layer?.backgroundColor = NSColor.clear.cgColor
         }
 
         let contentStack = NSStackView()
@@ -1177,17 +1191,28 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         }
     }
 
-    private func runtimeTargetSymbolColor(item: SidebarRuntimeTargetItem) -> NSColor {
+    private func runtimeTargetSymbolColor(item: SidebarRuntimeTargetItem, isSelected: Bool) -> NSColor {
         switch item.runState {
         case .running: return sidebarRunningIndicatorColor()
         case .exited: return sidebarFailedIndicatorColor()
-        case .notStarted, nil: return sidebarMetadataTextColor(isSelected: false)
+        case .notStarted, nil: return sidebarMetadataTextColor(isSelected: isSelected)
+        }
+    }
+
+    private func runtimeTargetTextColor(item: SidebarRuntimeTargetItem, isSelected: Bool) -> NSColor {
+        switch item.runState {
+        case .running: return sidebarRunningIndicatorColor()
+        case .exited: return sidebarFailedIndicatorColor()
+        case .notStarted: return sidebarMetadataTextColor(isSelected: isSelected)
+        case nil: return sidebarPrimaryTextColor(isSelected: isSelected, isArchived: false)
         }
     }
 
     private func runtimeTargetRowCell(workspace: WorkspaceSummary, item: SidebarRuntimeTargetItem, nestedUnderWorkspace: Bool) -> NSTableCellView {
         let cell = NSTableCellView()
         cell.setAccessibilityIdentifier("sidebar-target-\(workspace.id)-\(item.key)")
+        let isWorkspaceSelected = host.selectedWorkspaceID == workspace.id
+        let bottomPadding: CGFloat = isWorkspaceSelected && isLastRuntimeTarget(workspaceID: workspace.id, key: item.key) ? 6 : 0
 
         let row = NSStackView()
         row.orientation = .horizontal
@@ -1195,21 +1220,19 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         row.spacing = 6
         row.translatesAutoresizingMaskIntoConstraints = false
 
-        // The ⌘-number chip leads the row (left of the kind icon), matching the
-        // command palette's chip-icon-title ordering. Every row carries the fixed-width
-        // slot — chips render only on the selected workspace's rows, and reserving the
+        // The ⌘-number hint leads the row (left of the kind icon), matching the
+        // command palette's shortcut-icon-title ordering. Every row carries the fixed-width
+        // slot — hints render only on the selected workspace's rows, and reserving the
         // space keeps target rows vertically aligned across workspaces either way.
         let chipSlot = NSView()
         chipSlot.translatesAutoresizingMaskIntoConstraints = false
-        chipSlot.widthAnchor.constraint(equalToConstant: 32).isActive = true
+        chipSlot.widthAnchor.constraint(equalToConstant: Self.runtimeTargetShortcutSlotWidth).isActive = true
         chipSlot.setContentHuggingPriority(.required, for: .horizontal)
         if host.selectedWorkspaceID == workspace.id, let index = item.shortcutIndex {
-            let chip = RowPrimitives.shortcutChip(host.windowShortcutBadgeText(index: index))
+            let chip = RowPrimitives.sidebarShortcutHint(host.windowShortcutBadgeText(index: index))
             chipSlot.addSubview(chip)
             NSLayoutConstraint.activate([
-                chip.leadingAnchor.constraint(equalTo: chipSlot.leadingAnchor),
-                chip.trailingAnchor.constraint(lessThanOrEqualTo: chipSlot.trailingAnchor), chip.topAnchor.constraint(equalTo: chipSlot.topAnchor),
-                chip.bottomAnchor.constraint(equalTo: chipSlot.bottomAnchor),
+                chip.trailingAnchor.constraint(equalTo: chipSlot.trailingAnchor), chip.centerYAnchor.constraint(equalTo: chipSlot.centerYAnchor),
             ])
         }
         row.addArrangedSubview(chipSlot)
@@ -1217,7 +1240,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         let icon = NSImageView()
         icon.image = NSImage(systemSymbolName: Self.runtimeTargetSymbol(kind: item.kind), accessibilityDescription: nil)?.withSymbolConfiguration(
             .init(pointSize: 10, weight: .medium))
-        icon.contentTintColor = runtimeTargetSymbolColor(item: item)
+        icon.contentTintColor = runtimeTargetSymbolColor(item: item, isSelected: isWorkspaceSelected)
         icon.toolTip = item.runState.map { $0 == .running ? "Running" : ($0 == .exited ? "Exited" : "Not started") }
         icon.translatesAutoresizingMaskIntoConstraints = false
         icon.widthAnchor.constraint(equalToConstant: 12).isActive = true
@@ -1240,7 +1263,6 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             }
             row.addArrangedSubview(editor)
         } else {
-            let isPendingLaunchAction = item.kind == .missingConfiguredProcess || item.kind == .agentLauncher
             let titleLabel = PressableLabel(labelWithString: item.title)
             // Mirror the row identifier onto the title label. AppKit does not expose an
             // NSTableCellView's own accessibility identifier as a queryable element (only its
@@ -1255,8 +1277,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
                 self.host.focusSidebarRuntimeTarget(workspaceID: workspace.id, key: item.key)
             }
             titleLabel.font = .systemFont(ofSize: 11, weight: .regular)
-            titleLabel.textColor =
-                isPendingLaunchAction ? sidebarMetadataTextColor(isSelected: false) : sidebarPrimaryTextColor(isSelected: false, isArchived: false)
+            titleLabel.textColor = runtimeTargetTextColor(item: item, isSelected: isWorkspaceSelected)
             titleLabel.lineBreakMode = .byTruncatingTail
             titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
             titleLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
@@ -1273,10 +1294,12 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             row.leadingAnchor.constraint(
                 equalTo: cell.leadingAnchor, constant: nestedUnderWorkspace ? Self.workspaceIndent * 2 : Self.workspaceIndent),
             row.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -10), row.topAnchor.constraint(equalTo: cell.topAnchor),
-            row.bottomAnchor.constraint(equalTo: cell.bottomAnchor),
+            row.bottomAnchor.constraint(equalTo: cell.bottomAnchor, constant: -bottomPadding),
         ])
         return cell
     }
+
+    private func isLastRuntimeTarget(workspaceID: String, key: String) -> Bool { runtimeTargetItems(workspaceID: workspaceID).last?.key == key }
 
     /// Context payload carried on runtime-target menu items so the action selectors can
     /// recover the clicked target without re-deriving it from the outline row.
@@ -1334,6 +1357,9 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         }
         menu.addItem(.separator())
         addItem("Hide", symbol: "eye.slash", target: self, action: #selector(hideWorkspaceMenuItem(_:)), identifier: workspace.id)
+        // Archive is destructive (it removes the git worktree), so it sits last, below the separator, and
+        // routes through the same confirmation the detail ⋯ overflow menu uses.
+        addItem("Archive…", symbol: "archivebox", target: self, action: #selector(archiveWorkspaceMenuItem(_:)), identifier: workspace.id)
         return menu
     }
 
@@ -1355,6 +1381,11 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     @objc private func hideWorkspaceMenuItem(_ sender: NSMenuItem) {
         guard let id = sender.identifier?.rawValue else { return }
         host.hideWorkspace(id: id)
+    }
+
+    @objc private func archiveWorkspaceMenuItem(_ sender: NSMenuItem) {
+        guard let id = sender.identifier?.rawValue else { return }
+        host.archiveWorkspace(id: id)
     }
 
     private func runtimeTargetMenu(workspace: WorkspaceSummary, item: SidebarRuntimeTargetItem) -> NSMenu {
@@ -1487,7 +1518,8 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             return host.selectedProjectID == project.id && isSelected ? 32 : 30
         case .workspace: return 32
         case .emptyProject: return 28
-        case .runtimeTarget: return 22
+        case .runtimeTarget(_, let workspace, let item):
+            return host.selectedWorkspaceID == workspace.id && isLastRuntimeTarget(workspaceID: workspace.id, key: item.key) ? 28 : 22
         }
     }
 
@@ -1620,7 +1652,9 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             }
         }
         guard !rowsToReload.isEmpty else { return }
+        host.outlineView.noteHeightOfRows(withIndexesChanged: rowsToReload)
         host.outlineView.reloadData(forRowIndexes: rowsToReload, columnIndexes: IndexSet(integer: 0))
+        host.outlineView.needsDisplay = true
     }
 
     private func rowIndex(forWorkspaceID workspaceID: String) -> Int? {
@@ -1645,6 +1679,40 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             if case .device(let id) = ref.item, id == deviceID { return row }
         }
         return nil
+    }
+
+    private func selectedWorkspaceHighlight(in outlineView: NSOutlineView) -> (frame: NSRect, fill: NSColor, border: NSColor)? {
+        guard let selectedWorkspaceID = host.selectedWorkspaceID else { return nil }
+
+        var firstRow: Int?
+        var lastRow: Int?
+        var leadingInset: CGFloat = 0
+
+        for row in 0..<outlineView.numberOfRows {
+            guard let ref = outlineView.item(atRow: row) as? OutlineItemRef else { continue }
+            switch ref.item {
+            case .workspace(let project, let workspace) where workspace.id == selectedWorkspaceID:
+                firstRow = row
+                lastRow = row
+                leadingInset = project.isGitRepo ? Self.workspaceIndent : 0
+            case .project(let project) where !project.isGitRepo:
+                guard let workspace = visibleWorkspaces(projectID: project.id).first, workspace.id == selectedWorkspaceID else { continue }
+                firstRow = row
+                lastRow = row
+                leadingInset = 0
+            case .runtimeTarget(_, let workspace, _) where workspace.id == selectedWorkspaceID && firstRow != nil: lastRow = row
+            default: if firstRow != nil { break }
+            }
+        }
+
+        guard let firstRow, let lastRow else { return nil }
+        let firstFrame = outlineView.rect(ofRow: firstRow)
+        let lastFrame = outlineView.rect(ofRow: lastRow)
+        let verticalFrame = NSUnionRect(firstFrame, lastFrame).insetBy(dx: 0, dy: 2)
+        guard verticalFrame.height > 0 else { return nil }
+        let highlightFrame = NSRect(
+            x: leadingInset, y: verticalFrame.minY, width: max(0, outlineView.bounds.width - leadingInset), height: verticalFrame.height)
+        return (highlightFrame, sidebarSelectedCardBackgroundColor(), sidebarCardBorderColor(isSelected: true))
     }
 
     func toggleProjectExpanded(projectID: String) {
@@ -1883,19 +1951,15 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
 
         let badge = NSTextField(labelWithString: "")
         badge.font = .monospacedSystemFont(ofSize: 10, weight: .bold)
-        badge.textColor = .white
-        badge.alignment = .center
-        badge.wantsLayer = true
-        bindAppearanceReactiveLayer(badge) { [weak self] view in view.layer?.backgroundColor = self?.sidebarFailedIndicatorColor().cgColor }
-        badge.layer?.cornerRadius = UIRadius.pill(forHeight: 14)
+        badge.textColor = sidebarFailedIndicatorColor()
+        badge.alignment = .right
         badge.isBordered = false
         badge.isEditable = false
         badge.drawsBackground = false
         badge.isHidden = true
         badge.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            badge.widthAnchor.constraint(greaterThanOrEqualToConstant: 18), badge.heightAnchor.constraint(equalToConstant: 14),
-        ])
+        badge.setContentHuggingPriority(.required, for: .horizontal)
+        badge.setContentCompressionResistancePriority(.required, for: .horizontal)
         alertsRowBadge = badge
 
         let stack = NSStackView()
@@ -1905,6 +1969,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         stack.edgeInsets = NSEdgeInsets(top: 7, left: 8, bottom: 7, right: 8)
         stack.wantsLayer = true
         stack.layer?.cornerRadius = UIRadius.regular
+        stack.layer?.borderWidth = 0
         stack.translatesAutoresizingMaskIntoConstraints = false
         stack.addArrangedSubview(bellIcon)
         stack.addArrangedSubview(titleLabel)
@@ -1928,8 +1993,10 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     func updateAlertsRowAppearance() {
         guard let stack = alertsRowStack else { return }
         let isShowingAlerts = host.showingAlerts
+        stack.layer?.borderWidth = isShowingAlerts ? 1 : 0
         bindAppearanceReactiveLayer(stack) { [weak self] view in
             view.layer?.backgroundColor = isShowingAlerts ? self?.sidebarSelectedCardBackgroundColor().cgColor : NSColor.clear.cgColor
+            view.layer?.borderColor = self?.sidebarCardBorderColor(isSelected: true).cgColor
         }
     }
 }

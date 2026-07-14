@@ -342,10 +342,12 @@ import workspacecore
             processesByID: Dictionary(uniqueKeysWithValues: processes.map { ($0.id, $0) }), configuredAgentLaunchers: configuredAgentLaunchers,
             agentWindows: [])
 
+        // Families are ordered browser, processes, coding agents, ad hoc terminals — so the agent takes the
+        // index right after the process, and the terminal window is pushed behind it.
         #expect(shortcutIndices.browserSessionsByURL["http://localhost:3000"] == 1)
         #expect(shortcutIndices.processesByName["web"] == 2)
-        #expect(shortcutIndices.codingAgentsByName["claude"] == 4)
-        #expect(shortcutIndices.codingAgentsByIdentity[AppKitController.codingAgentShortcutIdentity(launcherName: "claude")] == 4)
+        #expect(shortcutIndices.codingAgentsByName["claude"] == 3)
+        #expect(shortcutIndices.codingAgentsByIdentity[AppKitController.codingAgentShortcutIdentity(launcherName: "claude")] == 3)
     }
 
     @Test func unlabeledAgentRowsStillReceiveShortcutIdentity() {
@@ -442,11 +444,40 @@ import workspacecore
         let withOpenBrowserAndShell = AppKitController.cycleWindowTargets(
             detail: detail, browserSessions: [BrowserSession(name: "docs", url: "http://localhost:3000")],
             openTerminalSessionIDs: ["session-web", "session-shell", "session-agent"])
-        #expect(withOpenBrowserAndShell.map(\.kind) == [.browser, .process, .window, .agent])
+        #expect(withOpenBrowserAndShell.map(\.kind) == [.browser, .process, .agent, .window])
         #expect(
             withOpenBrowserAndShell.map { AppKitController.cycleCursorKey(for: $0, detail: detail) } == [
-                "browser:http://localhost:3000", "process:process-web", "terminal:session-shell", "agent:agent-1",
+                "browser:http://localhost:3000", "process:process-web", "agent:agent-1", "terminal:session-shell",
             ])
+    }
+
+    @Test func remoteRoutedBrowserSessionCountsAsOpenForCycle() {
+        let sessions = [SpacesDeviceBrowserSession(name: "docs", url: "http://localhost:32001/docs")]
+        let assignedPorts = [SpacesDeviceAssignedPort(name: "web", port: 32001, url: "http://web.feature-123.localhost:9000")]
+        let routedURL = "http://web.feature-123.localhost:7391/docs"
+
+        let openSessions = AppKitController.openBrowserSessionsForCycle(
+            resolvedSessions: sessions, assignedPorts: assignedPorts, trackedTargetURLs: [routedURL], openTabURLs: [routedURL])
+
+        #expect(openSessions.map(\.name) == ["docs"])
+        #expect(openSessions.map(\.url) == ["http://localhost:32001/docs"])
+    }
+
+    @Test func remoteRoutedBrowserSessionMatchingExcludesLongerSiblingTargets() {
+        let rootURL = "http://localhost:32001"
+        let adminURL = "http://localhost:32001/admin"
+        let assignedPorts = [SpacesDeviceAssignedPort(name: "web", port: 32001, url: "http://web.feature-123.localhost:9000")]
+        let configuredTargetURLs = [rootURL, adminURL]
+        let rootSiblings = AppKitController.browserSessionSiblingTargetURLs(targetURL: rootURL, targetURLs: configuredTargetURLs)
+        let adminSiblings = AppKitController.browserSessionSiblingTargetURLs(targetURL: adminURL, targetURLs: configuredTargetURLs)
+        let observedAdminURL = "http://web.feature-123.localhost:7391/admin/users"
+
+        #expect(
+            !AppKitController.browserObservedURL(
+                observedAdminURL, matchesBrowserSessionTargetURL: rootURL, excluding: rootSiblings, assignedPorts: assignedPorts))
+        #expect(
+            AppKitController.browserObservedURL(
+                observedAdminURL, matchesBrowserSessionTargetURL: adminURL, excluding: adminSiblings, assignedPorts: assignedPorts))
     }
 
     @Test func browserSessionPrefixMatchingSkipsLongerSiblingTargets() {
@@ -529,8 +560,10 @@ import workspacecore
         #expect(
             AppKitController.deviceWindowShortcutResolution(index: 3, selectedWorkspaceID: "workspace", overview: overview)
                 == .runProcess(workspaceID: "workspace", processKey: "api", processTemplateID: "tpl-api"))
+        // Order is browser(1), web(2), api(3), claude(4), codex(5), shell terminal(6): the idle codex launcher
+        // sits with the other coding agents, ahead of the ad hoc terminal.
         #expect(
-            AppKitController.deviceWindowShortcutResolution(index: 6, selectedWorkspaceID: "workspace", overview: overview)
+            AppKitController.deviceWindowShortcutResolution(index: 5, selectedWorkspaceID: "workspace", overview: overview)
                 == .runCodingAgent(workspaceID: "workspace", agentName: "codex", agentLauncherID: "launcher-codex"))
     }
 

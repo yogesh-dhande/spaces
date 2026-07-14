@@ -546,14 +546,14 @@ final class SpacesMobileUITests: XCTestCase {
         while Date() < deadline {
             if hasVisibleLinkPreview(in: app, title: title) { return true }
             if let dump = latestRenderDump(configuration: configuration) {
-                if dump.hasLinkPreview(title: title, mediaKind: "image") { return true }
+                if dump.hasLinkPreview(title: title, artifactKind: "image") { return true }
                 if dump.hasLinkPreviewError, !hasVisibleLinkPreview(in: app, title: title) { return false }
             }
             RunLoop.current.run(until: Date().addingTimeInterval(0.2))
         }
         if hasVisibleLinkPreview(in: app, title: title) { return true }
         guard let dump = latestRenderDump(configuration: configuration) else { return false }
-        return dump.hasLinkPreview(title: title, mediaKind: "image")
+        return dump.hasLinkPreview(title: title, artifactKind: "image")
     }
 
     private func hasVisibleLinkPreview(in app: XCUIApplication, title: String) -> Bool {
@@ -567,7 +567,7 @@ final class SpacesMobileUITests: XCTestCase {
         if let error = dump.linkPreviewErrorMessage?.trimmingCharacters(in: .whitespacesAndNewlines), !error.isEmpty {
             return "Preview error: \(error)"
         }
-        return "Latest preview state: preparing=\(dump.isPreparingLinkPreview) title=\(dump.linkPreviewTitle ?? "") mediaKind=\(dump.linkPreviewMediaKind ?? "")."
+        return "Latest preview state: preparing=\(dump.isPreparingLinkPreview) title=\(dump.linkPreviewTitle ?? "") artifactKind=\(dump.linkPreviewArtifactKind ?? "")."
     }
 
     private static func terminalSurfaceInkMetrics(from pngData: Data, isFullAppScreenshot: Bool) -> TerminalSurfaceInkMetrics? {
@@ -1274,7 +1274,7 @@ private struct UITestRenderDump: Decodable, CustomStringConvertible {
     let errorMessage: String?
     let isPreparingLinkPreview: Bool
     let linkPreviewTitle: String?
-    let linkPreviewMediaKind: String?
+    let linkPreviewArtifactKind: String?
     let linkPreviewErrorMessage: String?
     let visibleText: String
     let renderedText: String
@@ -1294,7 +1294,7 @@ private struct UITestRenderDump: Decodable, CustomStringConvertible {
         case errorMessage
         case isPreparingLinkPreview
         case linkPreviewTitle
-        case linkPreviewMediaKind
+        case linkPreviewArtifactKind
         case linkPreviewErrorMessage
         case visibleText
         case renderedText
@@ -1316,7 +1316,7 @@ private struct UITestRenderDump: Decodable, CustomStringConvertible {
         errorMessage = try container.decodeIfPresent(String.self, forKey: .errorMessage)
         isPreparingLinkPreview = try container.decodeIfPresent(Bool.self, forKey: .isPreparingLinkPreview) ?? false
         linkPreviewTitle = try container.decodeIfPresent(String.self, forKey: .linkPreviewTitle)
-        linkPreviewMediaKind = try container.decodeIfPresent(String.self, forKey: .linkPreviewMediaKind)
+        linkPreviewArtifactKind = try container.decodeIfPresent(String.self, forKey: .linkPreviewArtifactKind)
         linkPreviewErrorMessage = try container.decodeIfPresent(String.self, forKey: .linkPreviewErrorMessage)
         visibleText = try container.decode(String.self, forKey: .visibleText)
         renderedText = try container.decode(String.self, forKey: .renderedText)
@@ -1337,9 +1337,9 @@ private struct UITestRenderDump: Decodable, CustomStringConvertible {
         return !linkPreviewErrorMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
-    func hasLinkPreview(title expectedTitle: String, mediaKind expectedMediaKind: String) -> Bool {
+    func hasLinkPreview(title expectedTitle: String, artifactKind expectedArtifactKind: String) -> Bool {
         guard !isPreparingLinkPreview else { return false }
-        guard linkPreviewMediaKind == expectedMediaKind else { return false }
+        guard linkPreviewArtifactKind == expectedArtifactKind else { return false }
         guard let linkPreviewTitle else { return false }
         return expectedTitle.isEmpty || linkPreviewTitle == expectedTitle
     }
@@ -1357,7 +1357,7 @@ private struct UITestRenderDump: Decodable, CustomStringConvertible {
             "errorMessage=\(errorMessage ?? "")",
             "isPreparingLinkPreview=\(isPreparingLinkPreview)",
             "linkPreviewTitle=\(linkPreviewTitle ?? "")",
-            "linkPreviewMediaKind=\(linkPreviewMediaKind ?? "")",
+            "linkPreviewArtifactKind=\(linkPreviewArtifactKind ?? "")",
             "linkPreviewErrorMessage=\(linkPreviewErrorMessage ?? "")",
             "visibleText=\(visibleText)",
             "snapshotTextLength=\(snapshotText?.count ?? 0)",

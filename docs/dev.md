@@ -37,7 +37,7 @@ scripts/verify.sh
 `scripts/format-staged-swift.sh` formats staged macOS Swift source and test files in place and re-stages them.
 `scripts/lint.sh` runs `scripts/format-staged-swift.sh` and then `SwiftLint` when `swiftlint` is available.
 `scripts/coverage.sh` runs SwiftPM tests in parallel. Process-wide environment mutations stay isolated because XCTest cases run in separate processes and the few Swift Testing suites that override `SPACES_DB_PATH` are serialized. Set `SPACES_TEST_PARALLEL=0` to force a serial run when debugging a contention issue; auto-detected workers are capped at `8` unless you override it with `SPACES_TEST_WORKERS` or change the cap with `SPACES_TEST_MAX_AUTO_WORKERS`. When the debug CLI exists, coverage exports that CLI's repo-local profile before tests so profile-sensitive tests do not read the installed database. Coverage also points `XDG_CONFIG_HOME` at an empty build-local directory so Ghostty tests do not load a developer's personal Ghostty config.
-`scripts/verify.sh` is the canonical sequential local verification path: staged formatting and lint, build, repo-local profile export, current-profile app and spacesd shutdown, coverage, then iOS unit tests. The profile shutdown is scoped to the repo-local profile so native Ghostty tests do not contend with a running debug app; set `SPACES_VERIFY_KEEP_PROFILE_RUNTIME=1` to leave that runtime running. The iOS unit pass prefers an available non-booted iPhone simulator so it does not attach to a simulator already owned by mobile E2E, and the generated destination includes the host simulator architecture so Xcode resolves one concrete simulator target; set `SPACES_IOS_TEST_DESTINATION` to override the destination, or `SPACES_IOS_DERIVED_DATA` to override its DerivedData directory. A watchdog force-kills the whole run and exits non-zero if it exceeds `SPACES_VERIFY_TIMEOUT_SECONDS` (default 900), so a hung or deadlocked test fails the gate fast instead of blocking a commit indefinitely; set it to `0` to disable the ceiling (for example when attaching a debugger).
+`scripts/verify.sh` is the canonical sequential local verification path: staged formatting and lint, build, repo-local profile export, current-profile app and spacesd shutdown, coverage, then iOS unit tests. The profile shutdown is scoped to the repo-local profile so native Ghostty tests do not contend with a running debug app; set `SPACES_VERIFY_KEEP_PROFILE_RUNTIME=1` to leave that runtime running. The iOS unit pass prefers an available non-booted iPhone simulator so it does not attach to a simulator already owned by mobile E2E, and the generated destination includes the host simulator architecture so Xcode resolves one concrete simulator target; set `SPACES_IOS_TEST_DESTINATION` to override the destination, or `SPACES_IOS_DERIVED_DATA` to override its DerivedData directory. A watchdog force-kills the whole run and exits non-zero once it has produced no output for `SPACES_VERIFY_STALL_SECONDS` (default 600), so a hung or deadlocked test fails the gate fast instead of blocking a commit indefinitely; set it to `0` to disable the watchdog (for example when attaching a debugger). The watchdog measures silence rather than total elapsed time, because a cold run legitimately spends most of its wall clock compiling test targets under coverage instrumentation while streaming progress, whereas a hang goes quiet.
 `scripts/swiftpm.sh` also uses a fail-fast lock around SwiftPM itself so overlapping build, test, or coverage commands stop immediately with a clear message instead of silently contending on the shared `.build` directory.
 
 Useful local entry points:
@@ -51,7 +51,7 @@ apps/macos/.build/debug/spaces workspace create --project <project-id> --branch 
 apps/macos/.build/debug/spaces workspace restart --workspace <workspace-id>
 ```
 
-Use `scripts/dev-build-and-launch.sh` to launch the debug app without touching the installed app's database. The script prepares Ghostty artifacts before invoking SwiftPM; in Git worktrees it derives the primary checkout from `.git` metadata when `SPACES_GHOSTTY_CACHE_DIR` is unset, so branch worktrees restore prebuilt artifacts from the shared cache. Repo-local debug binaries derive a per-worktree profile automatically under `~/.spaces-dev/profiles/spaces/<branch-slug>-<worktree-hash>/`, and the script stops only that profile's running app instance before it relaunches; the profile's spacesd is stopped only when it owns no sessions, so live terminal sessions and workspace processes survive the relaunch and the app reattaches to them. When sessions are preserved, the running daemon may be an older build; replace it through the app's daemon-restart prompt, which warns about the sessions it would stop. When the repo `.env` configures `SPACES_E2E_REMOTE_SSH_HOST`, the script builds or reuses the current-checkout Ubuntu artifact, uploads it, installs it into the remote account's `~/.spaces` daemon, points that service at a remote database/runtime under `~/.spaces-dev/profiles/spaces/<local-profile-name>/` unless `SPACES_E2E_REMOTE_DEVICE_ROOT` is set, waits for the configured Device API port, and then relaunches the local app. Remote pairing from that repo-local app or CLI uses the matching remote profile environment when it runs `~/.spaces/bin/spaces device pair --json` over SSH. Pass `--local` to skip the remote deploy and only build and relaunch locally.
+Use `scripts/dev-build-and-launch.sh` to launch the debug app without touching the installed app's database. The script prepares Ghostty artifacts before invoking SwiftPM; in Git worktrees it derives the primary checkout from `.git` metadata when `SPACES_GHOSTTY_CACHE_DIR` is unset, so branch worktrees restore prebuilt artifacts from the shared cache. Repo-local debug binaries derive a per-worktree profile automatically under `~/.spaces-dev/profiles/spaces/<branch-slug>-<worktree-hash>/`, and the script stops only that profile's running app instance before it relaunches; the profile's spacesd is stopped only when it owns no sessions, so live terminal sessions and workspace processes survive the relaunch and the app reattaches to them. When sessions are preserved, the running daemon may be an older build; the relaunched app applies the staged debug binary through the exec-in-place handoff on its own, and the sessions keep running. When the repo `.env` configures `SPACES_E2E_REMOTE_SSH_HOST`, the script builds or reuses the current-checkout Ubuntu artifact, uploads it, installs it into the remote account's `~/.spaces` daemon, points that service at a remote database/runtime under `~/.spaces-dev/profiles/spaces/<local-profile-name>/` unless `SPACES_E2E_REMOTE_DEVICE_ROOT` is set, waits for the configured Device API port, and then relaunches the local app. Remote pairing from that repo-local app or CLI uses the matching remote profile environment when it runs `~/.spaces/bin/spaces device pair --json` over SSH. Pass `--local` to skip the remote deploy and only build and relaunch locally.
 
 For manual worktree-local shell sessions, export the same derived profile before launching the app, CLI, or E2E helper:
 
@@ -183,6 +183,8 @@ Each `apps/macos/Tests/e2e.sh` invocation writes an ignored Markdown report unde
 
 `apps/macos/Tests/e2e.sh all` is the shared-setup smoke lane for app, terminal, mobile, and paired-device coverage. `apps/macos/Tests/e2e.sh exhaustive` is the full manual lane: app full coverage, every terminal scenario, every mobile scenario, local and constrained iOS latency profiles, local and remote Device API parity, and Device API profiling.
 
+`apps/macos/.build/debug/spacese2e e2e app --scenario window-cycle-small` runs the compact app-side window-cycle profile. The scenario includes the local primary workspace and, with the repo `.env` remote host configuration, a paired remote workspace. The remote portion opens a configured process pane and an ad hoc terminal pane on the Mac client, records sidebar direct-focus latency for the already-open process pane, and records cycle latency between the two already-open remote terminal panes.
+
 Mobile terminal latency sweeps target the local paired daemon over the Device API; remote terminal latency runs through the paired-device parity harness instead of a separate direct-daemon channel.
 
 The daemon-hosted Device API is a paired Spaces-only transport rather than a third-party external API surface. `spacese2e mobile-serve` is available when a harness needs a standalone Device API process with explicit host, port, or one-time pairing-window output; harness JSON calls go through `spacese2e mobile-request` so local scripts use the same pinned-TLS transport as the iOS app.
@@ -196,7 +198,7 @@ apps/macos/Tests/e2e.sh device-api local
 apps/macos/Tests/e2e.sh device-api remote
 ```
 
-Both targets create a project and workspace through the paired daemon, open and stop a workspace terminal, run/restart/stop a configured process, and run/restart/stop a configured coding agent. During the terminal portion, the parity flow writes `terminal-latency-summary.json` with open-terminal request timing, state-readiness timing, send-to-state-progress samples, state request timing, and state progress counters. The remote target installs its test daemon against an isolated remote E2E database/runtime root, relies on the Linux installer enabling user lingering, and verifies the daemon remains reachable from the Mac after the setup SSH command exits; it does not keep a persistent SSH session open for service lifetime. `apps/macos/Tests/e2e.sh device-api` runs local and remote parity.
+Both targets create a project and workspace through the paired daemon, open and stop a workspace terminal, run/restart/stop a configured process, and run/restart/stop a configured coding agent. During the terminal portion, the parity flow writes `terminal-latency-summary.json` with open-terminal request timing, state-readiness timing, send-to-state-progress samples, state request timing, and state progress counters. The remote target installs its test daemon against an isolated remote E2E database/runtime root, relies on the Linux installer enabling user lingering, and verifies the daemon remains reachable from the Mac after the setup SSH command exits; it does not keep a persistent SSH session open for service lifetime. The remote target also verifies the Device API service tunnel: `spacese2e service-tunnel` performs an HTTP GET through the paired daemon to the workspace's running `web` service, and a request for a missing service must fail with `notFound`. `apps/macos/Tests/e2e.sh device-api` runs local and remote parity.
 
 Focused remote terminal latency comparisons use the configured `.env` remote host, create one remote Device API workspace, and compare Device API workspace-terminal latency against a local Spaces terminal that SSHes into the same remote workspace directory:
 
@@ -225,13 +227,23 @@ docker run --rm --init --platform linux/amd64 \
 
 The zig and SwiftPM cache/build paths must live in named Docker volumes, not on the bind-mounted workspace: lock acquisition over Docker Desktop's macOS file sharing can deadlock the ghostty-vt `zig build` (workers park in `futex_wait` with finished compile children unreaped and container CPU pinned at 0%). Named volumes live on the Docker Desktop Linux VM's own filesystem where POSIX locking works, and they persist across runs so caches survive between builds. Sources are read from the mount and the artifact is written back to `dist/linux/` on the mount; only lock-holding state stays in the volumes.
 
-Use `--platform linux/arm64` with `--arch arm64` for the Ubuntu arm64 artifact. The archive contains `bin/spacesd`, `bin/spaces`, `install.sh`, the `spacesd-bin` executable, `libghostty-vt`, and the Swift runtime libraries needed on stock Ubuntu 24.04. The install script places the release under `~/.spaces/daemon/releases/<version>/`, updates `~/.spaces/daemon/current`, updates `~/.spaces/bin/spacesd` and `~/.spaces/bin/spaces`, points `~/.local/bin/spaces` to the managed CLI helper, creates `~/.spaces/runtime`, `~/spaces/workspaces`, and `~/spaces/repos`, installs `~/.config/systemd/user/spacesd.service`, enables user lingering so the service survives SSH disconnects, enables the user service, and restarts it. If the Linux account cannot enable lingering itself, run `sudo loginctl enable-linger <user>` on the Linux device and retry.
+Use `--platform linux/arm64` with `--arch arm64` for the Ubuntu arm64 artifact. The archive contains `bin/spacesd`, `bin/spaces`, `install.sh`, the `spacesd-bin` executable, `libghostty-vt`, and the Swift runtime libraries needed on stock Ubuntu 24.04. The install script places the release under `~/.spaces/daemon/releases/<version>/`, updates `~/.spaces/daemon/current`, updates `~/.spaces/bin/spacesd` and `~/.spaces/bin/spaces`, points `~/.local/bin/spaces` to the managed CLI helper, creates `~/.spaces/runtime`, `~/spaces/workspaces`, and `~/spaces/repos`, installs `~/.config/systemd/user/spacesd.service`, enables user lingering so the service survives SSH disconnects, and enables the user service. An already-running compatible daemon applies the installed image through the exec-in-place handoff. The installer verifies the preserved pid and installed executable; an installed image that is still replaying sessions after the readiness deadline is left running, and any accepted handoff that has not execed by the deadline fails non-destructively. Systemd starts the service only when no daemon pid exists. If the Linux account cannot enable lingering itself, run `sudo loginctl enable-linger <user>` on the Linux device and retry.
 
-The single user-facing Linux install/upgrade path is the published `spaces-install-linux.sh` one-liner, run on the Ubuntu 24.04 device for a specific released version (the Mac app and CLI print this command when a remote daemon is missing or wire-incompatible):
+The single user-facing Linux install/upgrade path is `scripts/spaces-install-linux.sh`, served at `https://usespaces.dev/install.sh`. `apps/web`'s npm `prebuild` step copies the script into `apps/web/public/install.sh`, so every Firebase website deploy republishes the current installer; the script is not uploaded as a per-release GitHub asset. The script takes an optional version argument, run on the Ubuntu 24.04 device:
 
 ```bash
-curl -fsSL https://github.com/yogesh-dhande/spaces/releases/download/v<version>/spaces-install-linux.sh | bash -s -- <version>
+curl -fsSL https://usespaces.dev/install.sh | bash
 ```
+
+installs the latest release. A version-pinned form:
+
+```bash
+curl -fsSL https://usespaces.dev/install.sh | bash -s -- <version>
+```
+
+installs a specific released version; the Mac app and CLI print this form when pairing needs a daemon wire-compatible with that client.
+
+The no-version form resolves the latest release through GitHub's `releases/latest/download` redirect, which only works while Spaces releases hold the repo's "latest" marker: the release workflows create Spaces releases with `--latest`, and `ensure_ghostty_artifacts.sh` publishes `ghostty-artifacts-<sha>` releases as prereleases so internal artifact releases never capture `releases/latest`.
 
 For development or debugging against an unreleased build, install a locally built artifact on a reachable Linux device with scp plus the bundled `install.sh` (this is the offline alternative to the published one-liner):
 
@@ -291,6 +303,14 @@ apps/macos/Tests/e2e.sh terminal --scenario cli
 
 That scenario exercises `spaces terminal command`, `send`, `key`, `tail`, `show`, and both takeover directions against one isolated Spaces terminal session.
 
+For the daemon's exec-in-place update handoff:
+
+```bash
+apps/macos/Tests/e2e.sh terminal --scenario daemon-exec-handoff
+```
+
+`e2e_daemon_exec_handoff.sh` launches a directly-supervised `spacesd` behind a `bin/spacesd` symlink, starts a long-lived shell session printing a marker then a steady tick output, flips the symlink to a second on-disk copy of the same build, and pokes the daemon with `spaces daemon apply-update`. It proves the daemon pid is unchanged (exec, not a supervisor respawn), the session's child pid survives, the expected `handoff_resume generation=N` line lands in the daemon log, the pre-handoff scrollback marker is still in `terminal tail`, live I/O keeps flowing (a freshly sent line round-trips), and no runtime state lands `.failed`. It repeats the flip-and-poke a second time to also cover a double handoff (`generation=2`) before a normal idle shutdown.
+
 The Spaces terminal `tail` path also depends on the local `libghostty-vt` artifacts. Set them up before building or profiling terminal changes:
 
 ```bash
@@ -337,6 +357,8 @@ xcodebuild -project apps/ios/SpacesMobile.xcodeproj -scheme SpacesMobile -destin
 
 On first launch, the iOS client opens its Devices sheet. Open Devices in the Mac sidebar or run `spaces device pair`, then scan the QR code. The mobile demo lane opens one daemon pairing window per simulator and seeds both the iPad and iPhone simulator settings automatically. The harness stores Mac client metadata in an isolated SQLite file by exporting `SPACES_CLIENT_DB_PATH` and stores harness-only Mac client secrets under `SPACES_CLIENT_SECRET_DIR`; these overrides are for E2E and demo profiles so test pairings do not mix with the user client database or client secret files. Remote mobile scenarios pair the Mac client and iOS simulators with the remote daemon over SSH-backed pairing windows before launching the apps. The demo keeps a local SSH forward to the remote daemon Device API and seeds the demo clients with that forwarded endpoint so the demo works from networks where the remote daemon port is not directly reachable. After pairing, the iOS client stores the issued credential and pinned daemon fingerprint and reconnects automatically on later launches. The client lists workspaces and live terminal sessions from the selected daemon, auto-attempts takeover when a session detail is opened, renders service-published Ghostty render frames only after ownership is acquired, and shows takeover or status UI while another client still owns the session.
 For the iOS simulator, a seeded pairing link with `127.0.0.1` works because the daemon Device API binds all IPv4 interfaces by default. A real device scans the Mac QR code from the Devices panel. The iOS terminal detail path renders the owner-bootstrap Ghostty render frame through the same terminal-grid compatibility data as macOS, so the simulator should show a terminal-like view after takeover rather than a plain-text fallback.
+
+The demo's seeded projects also exercise iOS browser sessions: each workspace carries `docs` and `admin` browser sessions templated on `http://localhost:$SPACES_APP_PORT/...`, which resolve against the workspace's assigned `app` service port and serve real pages once the seeded `frontend` process runs. From a paired simulator or device, tap Run on the `frontend` process row, then tap the `docs` or `admin` browser-session row — the page loads through the Device API service tunnel in the in-app web view. Tapping the row while `frontend` is stopped shows the styled service-not-running page.
 
 For manual real-device verification of the iOS client:
 
@@ -531,7 +553,7 @@ Expected output:
 
 The pre-commit hook runs `scripts/verify.sh`, which formats staged macOS Swift source and test files, lints, builds, runs coverage, and runs iOS unit tests.
 
-Pull requests are checked in GitHub Actions with [`.github/workflows/pr-checks.yml`](../.github/workflows/pr-checks.yml), which runs the same Swift verification flow plus the static website build.
+Pull requests are checked in GitHub Actions with [`.github/workflows/pr-checks.yml`](../.github/workflows/pr-checks.yml), which runs the same Swift verification flow, the static website build, and Linux artifact builds on native x86_64 and arm64 runners.
 
 ## Manual E2E
 
@@ -600,6 +622,24 @@ npm run dev
 npm run build
 ```
 
+## Version Metadata
+
+`apps/macos/AppVersion.plist` is the only place a Spaces version is authored. Every consumer is generated from it by `scripts/sync-app-version.sh`:
+
+```bash
+scripts/sync-app-version.sh --short <version> --build <build-number>
+```
+
+- `apps/macos/Sources/workspacecore/AppVersion.swift` — the constants the CLI, app menu, and daemon report
+- `apps/macos/Sources/SpacesApp/Info.plist` — regenerated wholesale from a template in the script
+- `apps/ios/Info.plist` — version keys rewritten in place, leaving its hand-maintained keys alone
+
+Edit none of these by hand. Spaces ships one version across its clients, so the Mac and iPhone apps report the same `CFBundleShortVersionString`; `AppVersionMetadataTests` fails the build on any drift between the source and either bundle.
+
+A client's own version is never compared against a daemon's to decide anything — see the daemon-compatibility notes in [implementation.md](implementation.md).
+
+Because the macOS `Info.plist` is regenerated from a template rather than edited in place, a new key belongs in that template in `scripts/sync-app-version.sh` — a key added only to the generated file is silently dropped on the next sync.
+
 ## macOS Release
 
 Publish macOS releases to GitHub Releases with:
@@ -608,14 +648,14 @@ Publish macOS releases to GitHub Releases with:
 scripts/release-and-deploy.sh <version> [build-number]
 ```
 
-Local release runs the Ubuntu remote daemon artifact builds inside Docker for `linux/amd64` and `linux/arm64`, so Docker must be available before running the script. These Linux artifacts are installed by the user-run `spaces-install-linux.sh` one-liner on the Ubuntu device; Spaces does not install them over SSH. Remote Macs use the signed DMG rather than a separate daemon artifact.
+Local release runs the Ubuntu remote daemon artifact builds inside Docker for `linux/amd64` and `linux/arm64`, so Docker must be available before running the script. These Linux artifacts are installed by the published `https://usespaces.dev/install.sh` script, run on the Ubuntu device manually or by the Mac app over SSH during pairing recovery. Remote Macs use the signed DMG rather than a separate daemon artifact.
 
 This workflow:
 - syncs the checked-in version metadata used by the CLI, app menu, and bundle plist
 - builds universal `arm64` + `x86_64` release binaries for the app, CLI, and `spacesd`
 - code-signs the app, CLI, and spacesd daemon
-- builds and smoke-tests Ubuntu 24.04 `x86_64` and `arm64` remote daemon artifacts
-- signs `spaces-remote-artifacts.json` with the remote artifact Ed25519 key that the `spaces-install-linux.sh` installer uses to verify the Linux artifact download
+- builds and smoke-tests Ubuntu 24.04 `x86_64` and `arm64` remote daemon artifacts, including a reinstall leg that pokes the running daemon (`apply-update`) and asserts the exec-in-place handoff preserves the daemon pid and its live session
+- signs `spaces-remote-artifacts.json` with the remote artifact Ed25519 key that the Linux installer uses to verify the Linux artifact download
 - creates a signed manual-download DMG
 - creates a Sparkle-served `Spaces.app` zip archive
 - updates `dist/updates/stable/appcast.xml` plus any Sparkle delta files
@@ -644,7 +684,7 @@ Important environment variables:
 
 For GitHub Actions releases, `CODESIGN_CERTIFICATE_P12` must be the base64-encoded Developer ID Application `.p12` bundle that matches `CODESIGN_IDENTITY`, and `CODESIGN_CERTIFICATE_PASSWORD` must be the password used when exporting that `.p12`.
 
-Sparkle update hosting lives under `https://usespaces.dev/releases/` on the static Firebase site. The update feed and Sparkle archives are staged into `apps/web/public/releases`, which Next.js exports as real static files before Firebase deploy. The release pipeline keeps a single DMG, a single Sparkle zip, one stable `appcast.xml`, the `spaces-install-linux.sh` installer, and signed Linux remote artifacts the installer downloads. The app bundle carries `spaces`, `spacesd`, and Caddy in `Contents/Resources`; the DMG installer links `/usr/local/bin` and `~/.spaces/bin` helpers to those bundled binaries so installed CLI commands, launchd, and remote Mac pairing use the updated app bundle after Sparkle updates. Linux artifacts link `~/.local/bin/spaces` to the managed `~/.spaces/bin/spaces` helper so user shells can run `spaces` without a system-wide install.
+Sparkle update hosting lives under `https://usespaces.dev/releases/` on the static Firebase site. The update feed and Sparkle archives are staged into `apps/web/public/releases`, which Next.js exports as real static files before Firebase deploy. The release pipeline keeps a single DMG, a single Sparkle zip, one stable `appcast.xml`, and signed Linux remote artifacts the installer downloads; the Linux installer itself is published separately at `https://usespaces.dev/install.sh` through the `apps/web` `prebuild` copy rather than as a GitHub release asset. The app bundle carries `spaces`, `spacesd`, and Caddy in `Contents/Resources`; the DMG installer links `/usr/local/bin` and `~/.spaces/bin` helpers to those bundled binaries so installed CLI commands, launchd, and remote Mac pairing use the updated app bundle after Sparkle updates. Linux artifacts link `~/.local/bin/spaces` to the managed `~/.spaces/bin/spaces` helper so user shells can run `spaces` without a system-wide install.
 
 ## Website Deploy
 

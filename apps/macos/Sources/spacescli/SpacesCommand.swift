@@ -15,13 +15,16 @@ public struct SpacesCommand: ParsableCommand {
               - Repo-local development builds default to a per-worktree profile under ~/.spaces-dev/profiles/spaces.
               - Installed or non-dev builds default to ~/.spaces/spaces.db.
               - Runtime state defaults to <profile-root>/runtime unless `SPACES_RUNTIME_DIR` overrides it.
-              - Workspace and agent commands require explicit IDs.
+              - Workspace commands require explicit IDs; agent signal defaults workspace/session IDs from Spaces terminal environment.
               - `workspace create` targets this device's spacesd daemon.
               - `workspace start` waits for pending/running setup to complete and fails with the setup error if setup failed. It ensures a workspace and all its processes are running: launches when stopped; when already running, restarts any exited processes. Windows open without activating the app.
               - `workspace restart` forces a full stop and relaunch for a workspace.
-              - Agent events stay explicit. Workspace runtime commands do not imply agent lifecycle. `agent signal <event>` records those lifecycle transitions for an explicit workspace and terminal session.
+              - Agent events stay explicit. Workspace runtime commands do not imply agent lifecycle. `agent signal <event>` records those lifecycle transitions for the current Spaces terminal session, or no-ops outside one.
             """, version: AppVersion.current,
-        subcommands: [ProjectCommand.self, WorkspaceCommand.self, AgentCommand.self, TerminalCommand.self, DeviceCommand.self, MCPCommand.self])
+        subcommands: [
+            ProjectCommand.self, WorkspaceCommand.self, AgentCommand.self, TerminalCommand.self, DeviceCommand.self, DaemonCommand.self,
+            MCPCommand.self,
+        ])
 
     public init() {}
 }
@@ -109,18 +112,44 @@ struct AgentCommand: ParsableCommand {
 }
 
 struct AgentSignalCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "signal", abstract: "Record a lifecycle event for an explicit terminal session.")
+    static let configuration = CommandConfiguration(commandName: "signal", abstract: "Record a lifecycle event for a Spaces terminal session.")
 
-    @Option(name: .long, help: "Workspace ID.") var workspace: String
-    @Option(name: .long, help: "Spaces terminal session ID.") var session: String
+    @Option(name: .long, help: "Workspace ID. Defaults to SPACES_WORKSPACE_ID.") var workspace: String?
+    @Option(name: .long, help: "Spaces terminal session ID. Defaults to SPACES_TERMINAL_TRACKING_ID.") var session: String?
     @Argument(
         help: ArgumentHelp("Lifecycle event to record.", discussion: "Allowed values: \(AgentEventType.allValueStrings.joined(separator: ", "))."))
     var type: AgentEventType
 
     func run() throws {
-        let context = CLIContext()
-        _ = try TerminalService.sendProfileCommand(.agentSignal(.init(workspaceID: workspace, terminalSessionID: session, event: type.rawValue)))
-        context.output.emit("Agent \(type.rawValue): workspace=\(workspace)")
+        guard let context = try Self.resolvedSignalContext(workspace: workspace, session: session, environment: ProcessInfo.processInfo.environment)
+        else { return }
+        let cliContext = CLIContext()
+        _ = try TerminalService.sendProfileCommand(
+            .agentSignal(.init(workspaceID: context.workspaceID, terminalSessionID: context.sessionID, event: type.rawValue)))
+        cliContext.output.emit("Agent \(type.rawValue): workspace=\(context.workspaceID)")
+    }
+
+    /// Resolves the workspace and session to signal for, or `nil` when this is not a Spaces-managed
+    /// terminal and the caller supplied nothing — the case that lets globally-installed agent hooks run
+    /// harmlessly in any terminal.
+    ///
+    /// Passing one ID explicitly and not the other is a different situation: the caller meant to name a
+    /// session, so silently reporting nothing would hide their mistake. That errors instead.
+    static func resolvedSignalContext(workspace: String?, session: String?, environment: [String: String]) throws -> (
+        workspaceID: String, sessionID: String
+    )? {
+        let workspaceID = nonEmpty(workspace) ?? nonEmpty(environment["SPACES_WORKSPACE_ID"])
+        let sessionID = nonEmpty(session) ?? nonEmpty(environment[WorkspaceOrchestrator.terminalTrackingIDEnvVar])
+        if let workspaceID, let sessionID { return (workspaceID, sessionID) }
+        guard nonEmpty(workspace) == nil, nonEmpty(session) == nil else {
+            throw ValidationError("--workspace and --session must be given together, or both omitted to use the Spaces terminal environment.")
+        }
+        return nil
+    }
+
+    private static func nonEmpty(_ value: String?) -> String? {
+        guard let value, !value.isEmpty else { return nil }
+        return value
     }
 }
 
@@ -277,6 +306,35 @@ struct DeviceRemoveCommand: ParsableCommand {
         try SpacesClientDatabase.defaultDatabase().deletePairedDevice(id: record.id)
         try SpacesDeviceCredentialStore.deleteToken(deviceID: record.id)
         print("Removed paired device \(record.name) (\(record.id))")
+    }
+}
+
+struct DaemonCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "daemon", abstract: "Manage the spacesd daemon on this device.", subcommands: [DaemonApplyUpdateCommand.self])
+}
+
+struct DaemonApplyUpdateCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "apply-update", abstract: "Ask the running daemon to apply a staged binary update in place (running sessions keep running).",
+        discussion: """
+            Sends the frozen applyStagedUpdate command to this device's spacesd over its local socket.
+            The daemon quiesces its terminal sessions, writes a handoff table, and execs its already-staged
+            binary at the same pid, so running shells, coding agents, and workspace processes are not
+            interrupted. This is the mechanism the Linux installer uses to apply a reinstall without a
+            systemd restart; it does not start spacesd and does not retry if the daemon is not reachable.
+            """)
+
+    func run() throws {
+        let context = CLIContext()
+        let socketPath = try TerminalServicePaths.socketPath()
+        guard FileManager.default.fileExists(atPath: socketPath) else {
+            throw WorkspaceError.invalidArgument(message: "spacesd is not running for this user. Expected daemon socket at \(socketPath).")
+        }
+        let response = try TerminalServiceClient.send(
+            request: TerminalServiceRequest(command: .applyStagedUpdate), socketPath: socketPath, timeout: 5)
+        guard response.ok else { throw TerminalServiceError.requestFailed(response.message) }
+        context.output.emit(response.message)
     }
 }
 

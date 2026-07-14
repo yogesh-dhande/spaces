@@ -65,7 +65,7 @@ public enum SpacesRemoteDevicePairingError: LocalizedError, Equatable {
     case sshValidationFailed(String)
     case remoteInstallPreflightTimedOut(String)
     case remoteInstallPreflightFailed(String)
-    case remoteSpacesNotInstalled(String)
+    case remoteSpacesNotInstalled(message: String, linuxInstallCommand: String?)
     case remotePairCommandTimedOut(String)
     case remotePairCommandFailed(String)
     case invalidRemotePairingOutput(String)
@@ -73,6 +73,8 @@ public enum SpacesRemoteDevicePairingError: LocalizedError, Equatable {
     case pairingVersionIncompatible(String)
     case pairingRejected(String)
     case missingAuthToken
+    case remoteInstallTimedOut(String)
+    case remoteInstallFailed(String)
 
     public var errorDescription: String? {
         switch self {
@@ -85,7 +87,10 @@ public enum SpacesRemoteDevicePairingError: LocalizedError, Equatable {
         case .remoteInstallPreflightTimedOut(let destination):
             "SSH connected to \(destination), but the remote Spaces install check timed out. Confirm the remote user can run shell commands over SSH."
         case .remoteInstallPreflightFailed(let message): message
-        case .remoteSpacesNotInstalled(let message): message
+        case .remoteSpacesNotInstalled(let message, let linuxInstallCommand):
+            // Keep CLI output fully actionable: when the probe identified a Linux device, append the
+            // exact install/upgrade one-liner; otherwise the message already carries the guidance.
+            if let linuxInstallCommand { "\(message)\n  \(linuxInstallCommand)" } else { message }
         case .remotePairCommandTimedOut(let destination):
             "SSH connected to \(destination), but Spaces did not finish preparing the connection. Confirm Spaces is installed and available for that user, then retry."
         case .remotePairCommandFailed(let message): message
@@ -95,6 +100,9 @@ public enum SpacesRemoteDevicePairingError: LocalizedError, Equatable {
         case .pairingVersionIncompatible(let message): message
         case .pairingRejected(let message): "The remote device rejected pairing. \(message)"
         case .missingAuthToken: "The remote device accepted pairing but did not issue an auth token."
+        case .remoteInstallTimedOut(let destination):
+            "Installing Spaces on \(destination) timed out after 10 minutes. Check the device's network and try again."
+        case .remoteInstallFailed(let message): message
         }
     }
 }
@@ -102,6 +110,9 @@ public enum SpacesRemoteDevicePairingError: LocalizedError, Equatable {
 public enum SpacesDevicePairingClient {
     private static let sshPath = "/usr/bin/ssh"
     static let baseRemotePairCommand = "~/.spaces/bin/spaces device pair --json"
+    /// The remote installer downloads a release artifact and restarts the systemd user service, which
+    /// needs far more headroom than the short pairing SSH calls (12-15s).
+    static let remoteInstallTimeoutSeconds: TimeInterval = 600
     private static let remoteInstallProbeCommand = #"""
         os="$(uname -s 2>/dev/null || true)"
         arch="$(uname -m 2>/dev/null || true)"
@@ -157,6 +168,34 @@ public enum SpacesDevicePairingClient {
                 updatedAt: now, lastSelectedAt: now))
         try SpacesDeviceCredentialStore.saveToken(authToken, deviceID: deviceID, profile: request.profile)
         return SpacesRemoteDevicePairingResult(deviceID: deviceID, name: metadata.name, host: deviceAPIHost, port: metadata.port)
+    }
+
+    /// Runs the Linux installer one-liner on the remote host over SSH, pinned to this client's app
+    /// version for wire compatibility, then pairs. Intended for recovery after pairing failed with
+    /// `remoteSpacesNotInstalled` on a Linux device.
+    public static func installSpacesOnRemoteDeviceAndPair(_ request: SpacesRemoteDevicePairingRequest) throws -> SpacesRemoteDevicePairingResult {
+        let sshHost = try normalizedSSHHost(request.sshHost)
+        let sshUser = normalized(request.sshUser)
+        try validateSSHPort(request.sshPort)
+        let destination = sshDestination(host: sshHost, user: sshUser)
+        openSSHControlMaster(destination: destination, port: request.sshPort)
+        defer { closeSSHControlMaster(destination: destination, port: request.sshPort) }
+
+        let installCommand = SpacesLinuxInstaller.sshInstallCommand(version: normalized(request.clientAppVersion))
+        let result = try runSSH(
+            destination: destination, port: request.sshPort, remoteCommand: installCommand, timeoutSeconds: remoteInstallTimeoutSeconds)
+        if result.timedOut { throw SpacesRemoteDevicePairingError.remoteInstallTimedOut(destination) }
+        guard result.exitStatus == 0 else {
+            throw SpacesRemoteDevicePairingError.remoteInstallFailed(
+                remoteInstallFailureMessage(
+                    destination: destination, standardOutput: result.standardOutput, standardError: result.standardError,
+                    exitStatus: result.exitStatus))
+        }
+        // Pairing nests inside this flow's already-open ControlMaster: openSSHControlMaster returns early
+        // when the master is live, so pairRemoteDevice reuses it, and its own defer closes it. The outer
+        // defer's `-O exit` then no-ops harmlessly (runDetachedSSHProcess swallows failures and the socket
+        // removal is `try?`). This nesting is intentional and safe.
+        return try pairRemoteDevice(request)
     }
 
     /// Pairs this client with a daemon from a `spaces://pair` link — code and nonce redeemed over
@@ -420,9 +459,8 @@ public enum SpacesDevicePairingClient {
             // A missing `spaces` binary (exit 127 / "not found") means the remote has no Spaces installed.
             // We never auto-install; surface actionable install instructions for the remote's OS instead.
             if remoteSpacesNotInstalled(exitStatus: result.exitStatus, standardError: result.standardError, standardOutput: result.standardOutput) {
-                throw SpacesRemoteDevicePairingError.remoteSpacesNotInstalled(
-                    installInstructionsMessage(
-                        lead: "SSH connected to \(destination), but Spaces is not installed for that user.", probe: probe, appVersion: appVersion))
+                throw remoteSpacesNotInstalledError(
+                    lead: "SSH connected to \(destination), but Spaces is not installed for that user.", probe: probe, appVersion: appVersion)
             }
             throw SpacesRemoteDevicePairingError.remotePairCommandFailed(
                 remotePairCommandFailureMessage(
@@ -439,34 +477,38 @@ public enum SpacesDevicePairingClient {
         // never-opened install), which the same install/setup guidance still resolves.
         guard let data = trimmedOutput.data(using: .utf8), !data.isEmpty else {
             if outputReportsMissingBinary(result.standardError) {
-                throw SpacesRemoteDevicePairingError.remoteSpacesNotInstalled(
-                    installInstructionsMessage(
-                        lead: "SSH connected to \(destination), but Spaces is not installed for that user.", probe: probe, appVersion: appVersion))
+                throw remoteSpacesNotInstalledError(
+                    lead: "SSH connected to \(destination), but Spaces is not installed for that user.", probe: probe, appVersion: appVersion)
             }
             throw SpacesRemoteDevicePairingError.invalidRemotePairingOutput(
-                installInstructionsMessage(
-                    lead: "SSH connected to \(destination), but Spaces there did not return a pairing window.", probe: probe, appVersion: appVersion))
+                installGuidanceMessage(lead: "SSH connected to \(destination), but Spaces there did not return a pairing window.", probe: probe))
         }
         do { return try JSONDecoder().decode(RemotePairingMetadata.self, from: data).validated() } catch {
             throw SpacesRemoteDevicePairingError.invalidRemotePairingOutput(
-                installInstructionsMessage(
+                installGuidanceMessage(
                     lead:
                         "SSH connected to \(destination), but Spaces there returned an unreadable pairing response (\(error.localizedDescription)).",
-                    probe: probe, appVersion: appVersion))
+                    probe: probe))
         }
     }
 
-    /// Builds the actionable message shown when SSH reaches the remote but Spaces there cannot hand back a
-    /// pairing window — because it is not installed for that user, or is installed but not returning
-    /// pairing metadata. `lead` states what went wrong; this appends platform-specific install/setup
-    /// guidance. Spaces never auto-installs remote daemons: Linux users run the version-pinned installer
-    /// one-liner on the device, and Mac users install and open the Spaces app there.
-    static func installInstructionsMessage(lead: String, probe: RemoteInstallProbe, appVersion: String?) -> String {
-        if probe.operatingSystem == "Linux" {
-            return
-                "\(lead) Install or update Spaces on the Ubuntu 24.04 device, then pair again:\n  \(SpacesLinuxInstaller.installCommand(version: normalized(appVersion) ?? "latest"))"
-        }
+    /// Builds the actionable install/setup guidance shown when SSH reaches the remote but Spaces there
+    /// cannot hand back a pairing window. `lead` states what went wrong; this appends platform-specific
+    /// guidance without embedding any install command (the command travels separately on the structured
+    /// `remoteSpacesNotInstalled` error). Spaces never auto-installs remote daemons: Linux users run the
+    /// installer one-liner on the device, and Mac users install and open the Spaces app there.
+    static func installGuidanceMessage(lead: String, probe: RemoteInstallProbe) -> String {
+        if probe.operatingSystem == "Linux" { return "\(lead) Install or update Spaces on the Ubuntu 24.04 device, then pair again." }
         return "\(lead) Install the Spaces app on the remote Mac, open it once, then pair again."
+    }
+
+    /// Constructs the structured not-installed error. For Linux probes the version-pinned install
+    /// command travels alongside the guidance so the CLI can print a copy-pasteable one-liner; a
+    /// nil/unnormalizable `appVersion` yields the evergreen (latest-release) command. Mac probes carry
+    /// no command — the user installs the app instead.
+    static func remoteSpacesNotInstalledError(lead: String, probe: RemoteInstallProbe, appVersion: String?) -> SpacesRemoteDevicePairingError {
+        let command = probe.operatingSystem == "Linux" ? SpacesLinuxInstaller.installCommand(version: normalized(appVersion)) : nil
+        return .remoteSpacesNotInstalled(message: installGuidanceMessage(lead: lead, probe: probe), linuxInstallCommand: command)
     }
 
     // MARK: SSH connection multiplexing
@@ -672,6 +714,16 @@ public enum SpacesDevicePairingClient {
         }
         let suffix = detail.isEmpty ? "Exit status \(exitStatus)." : detail
         return "SSH connected to \(destination), but `\(baseRemotePairCommand)` failed. \(suffix)"
+    }
+
+    /// Message for a nonzero-exit remote install. The installer script's `die` messages are user-facing,
+    /// so the tail (last ~10 lines) of combined stdout+stderr is surfaced verbatim to explain the failure.
+    static func remoteInstallFailureMessage(destination: String, standardOutput: String, standardError: String, exitStatus: Int32) -> String {
+        let combined = [standardOutput, standardError].map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }.joined(
+            separator: "\n")
+        let tail = combined.split(separator: "\n", omittingEmptySubsequences: false).suffix(10).joined(separator: "\n")
+        let suffix = tail.isEmpty ? "Exit status \(exitStatus)." : tail
+        return "Installing Spaces on \(destination) failed. \(suffix)"
     }
 
     private static func sshDestination(host: String, user: String?) -> String { user.map { "\($0)@\(host)" } ?? host }

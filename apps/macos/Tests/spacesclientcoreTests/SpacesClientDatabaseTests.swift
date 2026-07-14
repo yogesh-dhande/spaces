@@ -383,6 +383,51 @@ final class SpacesClientDatabaseTests: XCTestCase {
         XCTAssertEqual(try database.browserSessionWindowID(deviceID: deviceID, workspaceID: "ws-2", targetURL: "http://localhost:3000"), 33)
     }
 
+    func testTerminalOwnerClientIDPersistsUpdatesAndScopesByDeviceAndSession() throws {
+        let database = try makeTemporaryClientDatabase()
+
+        XCTAssertNil(try database.terminalOwnerClientID(deviceID: "local", sessionID: "session-1"))
+
+        try database.setTerminalOwnerClientID(deviceID: "local", sessionID: "session-1", clientID: "client-a")
+        XCTAssertEqual(try database.terminalOwnerClientID(deviceID: "local", sessionID: "session-1"), "client-a")
+
+        // A later successful owner attach replaces the mapping for the same (device, session).
+        try database.setTerminalOwnerClientID(deviceID: "local", sessionID: "session-1", clientID: "client-b")
+        XCTAssertEqual(try database.terminalOwnerClientID(deviceID: "local", sessionID: "session-1"), "client-b")
+
+        // Distinct sessions and devices keep separate mappings.
+        try database.setTerminalOwnerClientID(deviceID: "local", sessionID: "session-2", clientID: "client-c")
+        try database.setTerminalOwnerClientID(deviceID: "remote", sessionID: "session-1", clientID: "client-d")
+        XCTAssertEqual(try database.terminalOwnerClientID(deviceID: "local", sessionID: "session-2"), "client-c")
+        XCTAssertEqual(try database.terminalOwnerClientID(deviceID: "remote", sessionID: "session-1"), "client-d")
+        XCTAssertEqual(try database.terminalOwnerClientID(deviceID: "local", sessionID: "session-1"), "client-b")
+    }
+
+    // A version-1 database (this build's first shipped schema) upgrades to version 2 by adding the
+    // terminal owner client id table while carrying every existing row forward untouched.
+    func testMigratesVersionOneDatabaseToTerminalOwnerClientIDs() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        let path = root.appendingPathComponent("spaces-client.db").path
+
+        // Open at version 1 with no migration steps and seed a device. `createSchema` writes the whole
+        // current schema, so drop the terminal table by hand to reproduce a genuine pre-version-2
+        // on-disk database that lacks it.
+        let versionOne = try SpacesClientDatabase(path: path, currentVersion: 1, migrationSteps: [])
+        let record = device(id: "device-carried-forward")
+        try versionOne.upsert(device: record)
+        try withRawSQLiteConnection(path: path) { handle in
+            XCTAssertEqual(sqlite3_exec(handle, "DROP TABLE terminal_owner_client_ids;", nil, nil, nil), SQLITE_OK)
+        }
+
+        // Reopening at the current version runs the 1 -> 2 step, which recreates the table.
+        let upgraded = try SpacesClientDatabase(path: path)
+        XCTAssertEqual(try upgraded.pairedDevice(id: record.id), record)
+        try upgraded.setTerminalOwnerClientID(deviceID: "local", sessionID: "session-1", clientID: "client-a")
+        XCTAssertEqual(try upgraded.terminalOwnerClientID(deviceID: "local", sessionID: "session-1"), "client-a")
+    }
+
     private func device(id: String) -> SpacesPairedDeviceRecord {
         SpacesPairedDeviceRecord(
             id: id, name: "Studio Mac", platform: "macos", host: "studio.local", port: 7443, certificateFingerprint: "SHA256:abc",

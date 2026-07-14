@@ -35,11 +35,7 @@ import Foundation
             case .unavailable(let reason): throw GhosttyEmbeddedAppServiceError.configuration(reason)
             }
 
-            if let resourcesPath = paths.resourcesDirectoryPath {
-                setenv("GHOSTTY_RESOURCES_DIR", resourcesPath, 1)
-            } else {
-                throw GhosttyEmbeddedAppServiceError.configuration("Ghostty runtime resources are not configured.")
-            }
+            setenv("GHOSTTY_RESOURCES_DIR", paths.resourcesDirectoryPath, 1)
 
             if !initialized {
                 let result = ghostty_init(UInt(CommandLine.argc), CommandLine.unsafeArgv)

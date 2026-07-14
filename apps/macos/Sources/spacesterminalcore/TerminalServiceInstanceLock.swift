@@ -72,7 +72,11 @@ public final class TerminalServiceInstanceLock {
             try? fileManager.removeItem(atPath: path)
             return true
         }
-        guard !processIsAlive(record.pid) else { return false }
+        // After exec-in-place the resumed daemon re-enters at the same pid, but the old
+        // in-memory TerminalServiceInstanceLock was never released (execv destroyed it
+        // mid-flight), so its on-disk record is still this pid's own — replace it instead
+        // of treating it as another live owner.
+        guard record.pid == getpid() || !processIsAlive(record.pid) else { return false }
         guard (try existingRecord(path: path))?.token == record.token else { return false }
         try fileManager.removeItem(atPath: path)
         return true

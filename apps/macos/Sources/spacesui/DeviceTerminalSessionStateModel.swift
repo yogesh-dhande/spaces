@@ -26,6 +26,11 @@
     /// `makeHostStateStreamSubscriber()` and issues control/state requests through
     /// `terminalServiceRequestSender`. Nothing here writes to local `spaces.db`.
     @MainActor final class DeviceTerminalSessionStateModel: TerminalSessionStateProviding {
+        struct PreparedCredentials: Sendable, Equatable {
+            let certificateFingerprint: String
+            let authToken: String?
+        }
+
         private let device: SpacesPairedDeviceRecord
         private let sessionID: String
         private let clientApp: SpacesDeviceClientApp
@@ -66,29 +71,28 @@
         init(
             device: SpacesPairedDeviceRecord, sessionID: String, launchConfiguration: TerminalSessionLaunchConfiguration,
             initialRuntimeState: TerminalSessionRuntimeState? = nil, initialAttachmentSnapshot: TerminalSessionAttachmentSnapshot? = nil,
-            clientApp: SpacesDeviceClientApp, profile: SpacesProfile? = nil
+            clientApp: SpacesDeviceClientApp, preparedCredentials: PreparedCredentials
         ) throws {
-            // This model opens its own pinned-TLS Device API connections directly instead of going
-            // through SpacesDeviceClient.request, so it must apply the same local-credential recovery
-            // that request does: a local device whose stored auth token went missing (e.g. an earlier
-            // bootstrap failed while the daemon was down) is re-bootstrapped here — refreshing its
-            // pinned certificate fingerprint — rather than dead-ending the pane. A remote device cannot
-            // self-heal, so a missing remote fingerprint still surfaces as missingCertificateFingerprint.
-            let (certificateFingerprint, resolvedAuthToken) = try SpacesDeviceClient.credentialsEnsuringLocalRecovery(
-                device: device, clientApp: clientApp, profile: profile)
             self.device = device
             self.sessionID = sessionID
             self.clientApp = clientApp
-            self.certificateFingerprint = certificateFingerprint
-            authToken = resolvedAuthToken
+            certificateFingerprint = preparedCredentials.certificateFingerprint
+            authToken = preparedCredentials.authToken
             requestClient = try SpacesDeviceAPIRequestSessionClient(
-                host: device.host, port: device.port, certificateFingerprint: certificateFingerprint)
+                host: device.host, port: device.port, certificateFingerprint: preparedCredentials.certificateFingerprint)
             currentLaunchConfiguration = launchConfiguration
             currentRuntimeState = initialRuntimeState
             // Seed the owner from the overview so an owner-seeking open sees the existing
             // owner immediately and takes the takeover path, rather than attaching as owner
             // before the live subscription catches up.
             currentAttachmentSnapshot = initialAttachmentSnapshot
+        }
+
+        nonisolated static func resolveCredentials(device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp, profile: SpacesProfile? = nil)
+            throws -> PreparedCredentials
+        {
+            let credentials = try SpacesDeviceClient.credentialsEnsuringLocalRecovery(device: device, clientApp: clientApp, profile: profile)
+            return PreparedCredentials(certificateFingerprint: credentials.certificateFingerprint, authToken: credentials.authToken)
         }
 
         deinit {
@@ -310,7 +314,13 @@
             } catch { return .failure(error) }
         }
 
-        private nonisolated static func sendTerminalServiceRequest(
+        /// Internal (not `private`) so `spacesuiTests` can drive it directly through
+        /// `@testable import spacesui` against a real `SpacesDeviceAPIRequestSessionClient`
+        /// pointed at an in-process `SpacesDeviceAPIServer`. `SpacesDeviceAPIRequestSessionClient`
+        /// is a concrete `final class` that always opens a real pinned-TLS connection — there is no
+        /// protocol seam to fake it through — so the closest faithful test doubles as an integration
+        /// test of the request/response mapping below.
+        nonisolated static func sendTerminalServiceRequest(
             _ request: TerminalServiceRequest, defaultSessionID: String, requestClient: SpacesDeviceAPIRequestSessionClient, authToken: String?,
             clientApp: SpacesDeviceClientApp
         ) throws -> TerminalServiceResponse {
@@ -329,8 +339,52 @@
                 return TerminalServiceResponse(
                     ok: response.ok, message: response.message, sessionState: response.sessionState,
                     controlResponse: TerminalControlResponse(ok: response.ok, message: response.message))
+            case .resolveTerminalLink(let payload):
+                guard let terminalLink = payload.terminalLink?.trimmingCharacters(in: .whitespacesAndNewlines), !terminalLink.isEmpty else {
+                    throw WorkspaceError.invalidArgument(message: "Missing terminal link to resolve.")
+                }
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .resolveTerminalLink(
+                            SpacesDeviceTerminalLinkResolveRequest(sessionID: payload.sessionID, terminalLink: terminalLink)), authToken: authToken,
+                        clientApp: clientApp))
+                return TerminalServiceResponse(
+                    ok: response.ok, message: response.message,
+                    terminalLinkMetadata: response.terminalLinkMetadata.map(Self.terminalServiceLinkMetadata))
+            case .readTerminalLinkChunk(let payload):
+                guard let terminalLinkID = payload.terminalLinkID?.trimmingCharacters(in: .whitespacesAndNewlines), !terminalLinkID.isEmpty else {
+                    throw WorkspaceError.invalidArgument(message: "Missing terminal link id to read.")
+                }
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .readTerminalLinkChunk(
+                            SpacesDeviceTerminalLinkChunkRequest(
+                                sessionID: payload.sessionID, terminalLinkID: terminalLinkID, offset: payload.offset, limit: payload.limit)),
+                        authToken: authToken, clientApp: clientApp))
+                return TerminalServiceResponse(
+                    ok: response.ok, message: response.message, terminalLinkChunk: response.terminalLinkChunk.map(Self.terminalServiceLinkChunk))
             default: throw WorkspaceError.invalidArgument(message: "Device terminal command '\(request.commandName)' is not supported.")
             }
+        }
+
+        /// Maps a Device API terminal-link metadata payload into the terminal-service wire type.
+        /// Mirrors the daemon's own mapping for the reverse direction (a local Ghostty-embedded
+        /// session resolving a link), see `SpacesdMain.terminalServiceLinkMetadata`, so a link
+        /// resolved through either path produces the same `TerminalServiceTerminalLinkMetadata`.
+        private nonisolated static func terminalServiceLinkMetadata(_ metadata: SpacesDeviceTerminalLinkMetadata)
+            -> TerminalServiceTerminalLinkMetadata
+        {
+            TerminalServiceTerminalLinkMetadata(
+                id: metadata.id, source: metadata.source.rawValue, originalLink: metadata.originalLink, displayName: metadata.displayName,
+                contentType: metadata.contentType, artifactKind: metadata.artifactKind?.rawValue, byteCount: metadata.byteCount,
+                externalURL: metadata.externalURL)
+        }
+
+        /// Maps a Device API terminal-link chunk payload into the terminal-service wire type.
+        /// Mirrors `SpacesdMain.terminalServiceLinkChunk`.
+        private nonisolated static func terminalServiceLinkChunk(_ chunk: SpacesDeviceTerminalLinkChunk) -> TerminalServiceTerminalLinkChunk {
+            TerminalServiceTerminalLinkChunk(
+                linkID: chunk.linkID, offset: chunk.offset, byteCount: chunk.byteCount, isFinal: chunk.isFinal, base64Data: chunk.base64Data)
         }
     }
 

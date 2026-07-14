@@ -15,6 +15,14 @@ import spacesterminalcore
 #endif
 
 final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
+    struct HandoffWriteResult: Sendable {
+        let bytesWritten: Int
+        let errorCode: Int32?
+
+        static func success(byteCount: Int) -> Self { Self(bytesWritten: byteCount, errorCode: nil) }
+        static func failure(bytesWritten: Int, errorCode: Int32) -> Self { Self(bytesWritten: bytesWritten, errorCode: errorCode) }
+    }
+
     /// Grace periods between escalating termination signals (SIGHUP already sent, then SIGTERM, then SIGKILL).
     /// Production uses generous waits; tests can shrink them so escalation paths exercise quickly.
     struct TerminationEscalationIntervals: Sendable {
@@ -29,22 +37,55 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
     private let terminationEscalationIntervals: TerminationEscalationIntervals
     private let readQueue: DispatchQueue
     private let writeQueue: DispatchQueue
+    private let handoffWriteAction: @Sendable (Int32, Data) -> HandoffWriteResult
     private let lock = NSLock()
     private var masterFD: Int32 = -1
     private var masterFDGeneration: UInt64 = 0
     private var childPIDValue: Int32?
     private var outputHandler: (@Sendable (Data) -> Void)?
+    /// Handler calls selected before a handoff sink swap execute outside `lock` and
+    /// may block in Ghostty processing. Quiesce awaits these calls before closing the
+    /// transcript so their resulting output cannot arrive after the handoff boundary.
+    private var handlerDeliveriesInFlight = 0
+    private var handlerDeliveryWaiters: [CheckedContinuation<Void, Never>] = []
     private var onSessionClosed: (@MainActor () -> Void)?
     private var cellSize: (columns: Int, rows: Int) = (80, 24)
     private var closed = false
+    /// Where the read loop delivers PTY bytes. The exec-in-place handoff walks this
+    /// through `.handler` → `.buffer` → `.file` so that not one byte is lost,
+    /// duplicated, or reordered across the transition: reads are serialized on
+    /// `readQueue`, and every delivery routes through `dispatchOutput` under `lock`,
+    /// so a sink swap made under the same lock is atomic with respect to delivery.
+    private enum OutputSink {
+        /// Normal delivery: invoke `outputHandler` (the only steady state).
+        case handler
+        /// Handoff buffering: reads append to `handoffBuffer` while the daemon drains
+        /// queued work and closes the durable output handle, until the file writer
+        /// takes over in `finishHandoffOutputBuffering`.
+        case buffer
+        /// Handoff direct-write: reads are written straight to the append-only output
+        /// file (with `O_CLOEXEC`) until `execv` destroys this image.
+        case file(fd: Int32)
+    }
+    private var outputSink: OutputSink = .handler
+    /// Bytes read while the sink is `.buffer`, flushed to the file the moment
+    /// `finishHandoffOutputBuffering` opens it. Only touched under `lock`.
+    private var handoffBuffer = Data()
+    /// First direct-writer failure. Once set, subsequent PTY bytes stay buffered and
+    /// the daemon must refuse exec so the current image can restore normal delivery.
+    private var handoffWriteErrorCode: Int32?
     private static let inheritedEnvironmentKeysRemovedForExec: Set<String> = [
         "INVOCATION_ID", "JOURNAL_STREAM", "LISTEN_FDS", "LISTEN_PID", "MAINPID", "NOTIFY_SOCKET", "SPACES_DEVICE_API_HOST", "SPACES_DEVICE_API_PORT",
         "WATCHDOG_PID", "WATCHDOG_USEC",
     ]
 
-    init(launchConfiguration: TerminalSessionLaunchConfiguration, terminationEscalationIntervals: TerminationEscalationIntervals = .default) {
+    init(
+        launchConfiguration: TerminalSessionLaunchConfiguration, terminationEscalationIntervals: TerminationEscalationIntervals = .default,
+        handoffWriteAction: (@Sendable (Int32, Data) -> HandoffWriteResult)? = nil
+    ) {
         self.launchConfiguration = launchConfiguration
         self.terminationEscalationIntervals = terminationEscalationIntervals
+        self.handoffWriteAction = handoffWriteAction ?? Self.writeAll
         readQueue = DispatchQueue(label: "spaces.terminal.host-managed-pty.read.\(launchConfiguration.sessionID)")
         writeQueue = DispatchQueue(label: "spaces.terminal.host-managed-pty.write.\(launchConfiguration.sessionID)")
     }
@@ -70,6 +111,9 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
         var master: Int32 = -1
         var windowSize = winsize(ws_row: UInt16(cellSize.rows), ws_col: UInt16(cellSize.columns), ws_xpixel: 0, ws_ypixel: 0)
         let command = Self.execCommand(for: launchConfiguration)
+        #if os(macOS)
+            let terminfoDirectoryPath = try Self.resolvedTerminfoDirectoryPath()
+        #endif
         guard let executable = strdup(command.executable) else { throw POSIXError(.ENOMEM) }
         var arguments = command.arguments.map { strdup($0) } + [nil]
         defer {
@@ -84,7 +128,12 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
             Self.scrubInheritedEnvironmentForExec()
             Self.closeInheritedFileDescriptorsForExec()
             if !launchConfiguration.workingDirectory.isEmpty { _ = chdir(launchConfiguration.workingDirectory) }
-            setenv("TERM", "xterm-256color", 1)
+            #if os(macOS)
+                setenv("TERM", "xterm-ghostty", 1)
+                setenv("TERMINFO", terminfoDirectoryPath, 1)
+            #else
+                setenv("TERM", "xterm-256color", 1)
+            #endif
             setenv("COLORTERM", "truecolor", 1)
             execv(executable, &arguments)
             _exit(127)
@@ -98,6 +147,135 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
         closed = false
         lock.unlock()
         startReadLoop(fd: master, childPID: pid, fdGeneration: fdGeneration)
+    }
+
+    /// Resume side of the exec-in-place handoff: adopt a PTY master fd and its child
+    /// pid that this process already owns (the fd survived `execv` with `FD_CLOEXEC`
+    /// cleared; the child stays our child, so `waitpid`/exit statuses keep working).
+    /// No `forkpty`, no new child, and no `termios`/`TIOCSWINSZ`: the kernel PTY
+    /// object kept its window size across exec, and the session core re-asserts the
+    /// grid separately during resume. After this returns the driver behaves exactly
+    /// like a forked one — input via `sendRawBytes`, resize via `resizeCellGrid`,
+    /// `terminate()` escalation, reap-on-exit, and the closed handler all apply.
+    func adopt(masterFD: Int32, childPID: Int32) {
+        lock.lock()
+        // Adoption is only valid on a driver in its never-started state; reusing the
+        // fd-generation discipline keeps a would-be stale read loop from ever acting
+        // on this descriptor.
+        precondition(self.masterFD < 0 && childPIDValue == nil && !closed, "adopt requires a driver in its never-started state")
+        masterFDGeneration &+= 1
+        let fdGeneration = masterFDGeneration
+        self.masterFD = masterFD
+        childPIDValue = childPID
+        closed = false
+        lock.unlock()
+        startReadLoop(fd: masterFD, childPID: childPID, fdGeneration: fdGeneration)
+    }
+
+    /// The live PTY master fd and child pid to carry across the handoff, or nil when
+    /// there is nothing to hand off — the session never started, already closed, or
+    /// its child was already reaped. Callers clear `FD_CLOEXEC` on the returned fd
+    /// (via `DaemonHandoffStore.prepareDescriptorForHandoff`) before `execv`.
+    func handoffDescriptorSnapshot() -> (masterFD: Int32, childPID: Int32)? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !closed, masterFD >= 0, let pid = childPIDValue else { return nil }
+        return (masterFD, pid)
+    }
+
+    /// First handoff step: swap output delivery from the handler to an in-memory
+    /// buffer so PTY bytes keep being drained (the read loop must never block) while
+    /// the daemon quiesces and closes the durable output handle. Nothing is lost —
+    /// buffered bytes are flushed by `finishHandoffOutputBuffering`.
+    func beginHandoffOutputBuffering() async {
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            handoffWriteErrorCode = nil
+            outputSink = .buffer
+            guard handlerDeliveriesInFlight > 0 else {
+                lock.unlock()
+                continuation.resume()
+                return
+            }
+            handlerDeliveryWaiters.append(continuation)
+            lock.unlock()
+        }
+    }
+
+    /// Second handoff step: open `path` for append and take over delivery. Opens with
+    /// a raw `open(2)` (not `FileHandle`) so `O_CLOEXEC` is set at open time and the
+    /// fd vanishes at `execv` without renumbering anything. Flushes the accumulated
+    /// buffer with a full-write loop, then installs a direct-to-fd writer so every
+    /// subsequent read lands in the file synchronously and in order until exec.
+    /// Crash-clean: if the open fails the throw leaves in-memory buffering active; if
+    /// the flush write fails the buffer is restored and buffering stays active.
+    func finishHandoffOutputBuffering(appendingTo path: String) throws {
+        let fd = open(path, O_WRONLY | O_APPEND | O_CLOEXEC)
+        guard fd >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+
+        lock.lock()
+        let pending = handoffBuffer
+        handoffBuffer = Data()
+        let result = handoffWriteAction(fd, pending)
+        guard result.errorCode == nil, result.bytesWritten == pending.count else {
+            // No delivery can run under the lock. Preserve only the unwritten suffix:
+            // a short write's prefix is already durable and replaying it would duplicate output.
+            handoffBuffer = Data(pending.dropFirst(min(max(result.bytesWritten, 0), pending.count)))
+            lock.unlock()
+            close(fd)
+            throw POSIXError(POSIXErrorCode(rawValue: result.errorCode ?? EIO) ?? .EIO)
+        }
+        outputSink = .file(fd: fd)
+        lock.unlock()
+    }
+
+    /// Holds the sink lock from the final persistence check through `operation`.
+    /// PTY reads therefore cannot begin another direct write between validation and
+    /// `execv`; a returned exec unwinds the lock and takes the normal fallback path.
+    func withValidatedHandoffOutputForExec<T>(_ operation: () throws -> T) throws -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        if let handoffWriteErrorCode { throw POSIXError(POSIXErrorCode(rawValue: handoffWriteErrorCode) ?? .EIO) }
+        guard case .file(let fd) = outputSink else { throw POSIXError(.EIO) }
+        guard fsync(fd) == 0 else {
+            let code = errno
+            handoffWriteErrorCode = code
+            outputSink = .buffer
+            close(fd)
+            throw POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)
+        }
+        return try operation()
+    }
+
+    /// First failed-handoff fallback step: atomically stop direct transcript appends and
+    /// return to buffering. The core can then replay the already-persisted handoff range
+    /// into its renderer and position its normal transcript handle without either action
+    /// racing another append from this driver.
+    func pauseHandoffOutputForFallback() {
+        lock.lock()
+        if case .file(let fd) = outputSink { close(fd) }
+        outputSink = .buffer
+        lock.unlock()
+    }
+
+    /// Final failed-handoff fallback step: reinstate normal handler delivery and replay
+    /// bytes accumulated after the direct writer was stopped. The core must first replay
+    /// the persisted handoff range into its renderer and reopen its normal output handle;
+    /// these pending bytes then take the ordinary render-and-persist path exactly once.
+    func endHandoffOutputBuffering() {
+        lock.lock()
+        if case .file(let fd) = outputSink { close(fd) }
+        let pending = handoffBuffer
+        let handler = outputHandler
+        handoffBuffer = Data()
+
+        // Deliver the older buffered batch before exposing `.handler`. Holding the sink
+        // lock briefly backpressures the PTY read loop, so a concurrently read byte cannot
+        // overtake this batch and continuous output cannot keep fallback in a drain loop.
+        if !pending.isEmpty { handler?(pending) }
+        handoffWriteErrorCode = nil
+        outputSink = .handler
+        lock.unlock()
     }
 
     func terminate() {
@@ -236,9 +414,42 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
 
     private func dispatchOutput(_ data: Data) {
         lock.lock()
-        let handler = outputHandler
-        lock.unlock()
-        handler?(data)
+        switch outputSink {
+        case .handler:
+            let handler = outputHandler
+            if handler != nil { handlerDeliveriesInFlight += 1 }
+            lock.unlock()
+            guard let handler else { return }
+            handler(data)
+
+            let waiters: [CheckedContinuation<Void, Never>]
+            lock.lock()
+            handlerDeliveriesInFlight -= 1
+            if handlerDeliveriesInFlight == 0 {
+                waiters = handlerDeliveryWaiters
+                handlerDeliveryWaiters.removeAll()
+            } else {
+                waiters = []
+            }
+            lock.unlock()
+            for waiter in waiters { waiter.resume() }
+        case .buffer:
+            handoffBuffer.append(data)
+            lock.unlock()
+        case .file(let fd):
+            // Write synchronously while holding the lock so the read loop cannot
+            // interleave a later chunk ahead of this one and a concurrent sink swap
+            // cannot slip in mid-write. Writes target a regular file, not a pipe, so
+            // this does not block on a reader.
+            let result = handoffWriteAction(fd, data)
+            if result.errorCode != nil || result.bytesWritten != data.count {
+                handoffBuffer.append(data.dropFirst(min(max(result.bytesWritten, 0), data.count)))
+                handoffWriteErrorCode = result.errorCode ?? EIO
+                outputSink = .buffer
+                close(fd)
+            }
+            lock.unlock()
+        }
     }
 
     private func finishAfterReadLoop(fd: Int32, childPID: Int32, fdGeneration: UInt64) {
@@ -324,6 +535,15 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
         return (shell, [shellName, "-l", "-c", resolvedCommand])
     }
 
+    #if os(macOS)
+        private static func resolvedTerminfoDirectoryPath() throws -> String {
+            switch GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath) {
+            case .available(let paths): paths.terminfoDirectoryPath
+            case .unavailable(let reason): throw GhosttyEmbeddedAppServiceError.configuration(reason)
+            }
+        }
+    #endif
+
     private static func forkPTY(master: inout Int32, windowSize: inout winsize) -> Int32 {
         #if os(Linux)
             return spaces_forkpty(&master, nil, nil, &windowSize)
@@ -361,6 +581,25 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
     }
 
     private static func writeStandardError(_ message: String) { FileHandle.standardError.write(Data(message.utf8)) }
+
+    /// Full-write loop for the handoff file sink. The result identifies the durable
+    /// prefix so a failed handoff can replay only the unwritten suffix without loss or duplication.
+    private static func writeAll(fd: Int32, data: Data) -> HandoffWriteResult {
+        guard !data.isEmpty else { return .success(byteCount: 0) }
+        return data.withUnsafeBytes { rawBuffer -> HandoffWriteResult in
+            guard let baseAddress = rawBuffer.bindMemory(to: UInt8.self).baseAddress else { return .failure(bytesWritten: 0, errorCode: EIO) }
+            var sent = 0
+            while sent < data.count {
+                let written = write(fd, baseAddress.advanced(by: sent), data.count - sent)
+                if written <= 0 {
+                    if written < 0, errno == EINTR { continue }
+                    return .failure(bytesWritten: sent, errorCode: written < 0 ? errno : EIO)
+                }
+                sent += written
+            }
+            return .success(byteCount: sent)
+        }
+    }
 
     private static func defaultShellPath() -> String {
         #if os(Linux)

@@ -99,6 +99,14 @@ import Testing
         #expect(chip.frame.width >= 26, "Expected ≥26pt min width, got \(chip.frame.width)")
     }
 
+    @Test func sidebarShortcutHintRendersPlainMonospaceText() {
+        let hint = RowPrimitives.sidebarShortcutHint("⌘1")
+        #expect(hint.stringValue == "⌘1")
+        #expect(hint.font?.fontDescriptor.symbolicTraits.contains(.monoSpace) == true)
+        #expect(hint.drawsBackground == false)
+        #expect(hint.subviews.isEmpty)
+    }
+
     @Test func projectChipRendersProjectName() {
         let chip = RowPrimitives.projectChip("Spaces")
         let label = chip.subviews.compactMap { $0 as? NSTextField }.first

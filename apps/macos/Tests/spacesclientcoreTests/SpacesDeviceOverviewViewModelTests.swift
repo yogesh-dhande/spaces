@@ -22,6 +22,8 @@ final class SpacesDeviceOverviewViewModelTests: XCTestCase {
             SpacesDeviceClient.requestTimeoutSeconds(
                 for: .restartCodingAgent(.init(workspaceID: "workspace-1", agentID: nil, agentName: "Codex", agentLauncherID: nil))),
             SpacesDeviceClient.longRunningMutationTimeoutSeconds)
+        XCTAssertEqual(SpacesDeviceClient.requestTimeoutSeconds(for: .agentHooksStatus), SpacesDeviceClient.agentHooksStatusRequestTimeoutSeconds)
+        XCTAssertGreaterThan(SpacesDeviceClient.agentHooksStatusRequestTimeoutSeconds, SpacesDeviceClient.defaultRequestTimeoutSeconds)
     }
 
     func testOverviewRefreshesLocalBootstrapAfterTransientConnectionFailure() throws {
@@ -255,7 +257,7 @@ final class SpacesDeviceOverviewViewModelTests: XCTestCase {
 
     private static func status() -> TerminalServiceDaemonStatus {
         TerminalServiceDaemonStatus(
-            version: "1.0.0", artifactVersion: nil, certificateFingerprint: nil, activeSessionCount: 0, protocolVersion: SpacesWireProtocol.version)
+            version: "1.0.0", installedVersion: nil, certificateFingerprint: nil, activeSessionCount: 0, protocolVersion: SpacesWireProtocol.version)
     }
 }
 

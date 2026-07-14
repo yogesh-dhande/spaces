@@ -3,9 +3,9 @@ import Testing
 import spacesclientcore
 import spacesdeviceapi
 import spacesdevicecore
-import spacesterminalcore
 import workspacecore
 
+@testable import spacesterminalcore
 @testable import spacesui
 
 @Suite struct AppKitControllerDeviceParityTests {
@@ -80,6 +80,14 @@ import workspacecore
                 responseMessage: SpacesDeviceAPIControlClient.deviceAPINotRunningMessage, isRelaunching: true))
     }
 
+    @Test func localDaemonCompatibilityBlockShowsUpdateGuidanceWhenClientIsTooOld() {
+        let incompatibility = TerminalServiceDaemonWireIncompatibility(
+            verdict: .clientTooOld, status: nil, message: "The running spacesd daemon is newer than this Spaces build.")
+        let error = TerminalServiceError.daemonWireIncompatible(incompatibility)
+
+        #expect(AppKitController.shouldShowLocalDaemonCompatibilityBlock(for: error))
+    }
+
     @Test func remoteWorkspacePathActionsKeepControlsButUseSSHDependentErrorText() {
         let editorMessage = AppKitController.remoteWorkspacePathActionErrorMessage(action: .openEditor, deviceName: "Build Host")
         let revealMessage = AppKitController.remoteWorkspacePathActionErrorMessage(action: .revealInFinder, deviceName: "Build Host")
@@ -88,6 +96,38 @@ import workspacecore
         #expect(revealMessage.contains("Reveal in Finder"))
         #expect(editorMessage.contains("Build Host"))
         #expect(revealMessage.contains("SSH-capable workflow"))
+    }
+
+    @Test func terminalLinkWorkingDirectoryPrefersLiveForegroundProcessCWD() throws {
+        let staleDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("stale-\(UUID().uuidString)", isDirectory: true)
+        let liveDirectory = URL(fileURLWithPath: "/private/tmp", isDirectory: true).appendingPathComponent(
+            "spaces-ui-live-cwd-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: staleDirectory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: liveDirectory, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: staleDirectory)
+            try? FileManager.default.removeItem(at: liveDirectory)
+        }
+
+        let foreground = Process()
+        foreground.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        foreground.arguments = ["30"]
+        foreground.currentDirectoryURL = liveDirectory
+        try foreground.run()
+        defer {
+            if foreground.isRunning { foreground.terminate() }
+            foreground.waitUntilExit()
+        }
+
+        let runtimeState = TerminalSessionRuntimeState(
+            sessionID: "session-live-cwd", backend: .ghosttyEmbedded, servicePID: Int32(ProcessInfo.processInfo.processIdentifier),
+            childPID: foreground.processIdentifier, state: .running, updatedAt: "2026-06-09T12:00:00Z", title: "shell",
+            workingDirectory: staleDirectory.path, foregroundPID: foreground.processIdentifier)
+
+        #expect(
+            AppKitController.terminalLinkWorkingDirectory(
+                runtimeState: runtimeState, streamedWorkingDirectory: staleDirectory.path, launchWorkingDirectory: staleDirectory.path,
+                requestWorkingDirectory: staleDirectory.path) == liveDirectory.path)
     }
 
     @Test func deviceOverviewMappingPreservesProjectWorkspaceAndRuntimeControls() {
@@ -385,6 +425,18 @@ import workspacecore
                     createdAt: "2026-06-22T12:00:00Z", updatedAt: "2026-06-22T12:00:01Z"))
     }
 
+    @Test func terminalOpenRequestColdResolutionIsSkippedForExistingPane() {
+        let fallbackRequest = AppKitController.DeviceTerminalOpenRequest(
+            workspaceID: "workspace-1", sessionID: "session-1", title: "shell-1", workingDirectory: "/device/project-feature", kind: .shell)
+        let resolvedRequest = AppKitController.DeviceTerminalOpenRequest(
+            workspaceID: "workspace-1", sessionID: "session-1", title: "shell-1", workingDirectory: "/device/project-feature", kind: .shell,
+            shell: "/bin/zsh")
+
+        #expect(AppKitController.terminalOpenRequestNeedsColdResolution(fallbackRequest, hasExistingPane: false))
+        #expect(!AppKitController.terminalOpenRequestNeedsColdResolution(fallbackRequest, hasExistingPane: true))
+        #expect(!AppKitController.terminalOpenRequestNeedsColdResolution(resolvedRequest, hasExistingPane: false))
+    }
+
     @Test func deviceShortcutResolvesStartingTerminalRowWithSessionMetadata() {
         let session = startingSessionSummary(id: "session-starting-shell", title: "shell-1", rowKind: .liveSession)
         let overview = SpacesDeviceOverviewPayload(
@@ -480,6 +532,19 @@ import workspacecore
         #expect(request.rows == 40)
         #expect(request.ownerEpoch == 7)
         #expect(request.resizeSerial == 3)
+    }
+
+    @Test func deviceTerminalControlRequestPreservesPasteIntent() throws {
+        let control = TerminalControlRequest(
+            command: .send(
+                TerminalControlSendPayload(
+                    text: "line one\nline two", bytes: nil, clientID: "mac-client", ownerEpoch: 7, appendNewline: false, asPaste: true)))
+
+        let request = try AppKitController.deviceTerminalControlRequest(sessionID: "session-web", controlRequest: control)
+
+        #expect(request.action == .send)
+        #expect(request.text == "line one\nline two")
+        #expect(request.asPaste)
     }
 
     @Test func deviceTerminalControlRequestCarriesAttachAppearanceToTheDaemon() throws {

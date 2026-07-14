@@ -15,7 +15,6 @@ struct ConnectionSettingsView: View {
     @State private var isShowingScanner = false
     @State private var isPairing = false
     @State private var errorMessage: String?
-    @AppStorage(AppAppearanceStorage.key) private var appearanceMode: AppAppearanceMode = .default
     private let initialPairingLink: SpacesDevicePairingLink?
     let pairedDevices: [SpacesMobilePairedDeviceRecord]
     let activeDeviceID: String?
@@ -51,98 +50,92 @@ struct ConnectionSettingsView: View {
     }
 
     var body: some View {
-        NavigationStack {
-            Form {
-                if !pairedDevices.isEmpty {
-                    Section("Connected Devices") {
-                        ForEach(pairedDevices) { device in
-                            deviceRow(device)
-                        }
+        Form {
+            if !pairedDevices.isEmpty {
+                Section("Connected Devices") {
+                    ForEach(pairedDevices) { device in
+                        deviceRow(device)
                     }
+                }
+            }
+
+            Section {
+                Button {
+                    isShowingScanner = true
+                } label: {
+                    if isPairing {
+                        HStack(spacing: 10) {
+                            ProgressView().controlSize(.small)
+                            Text("Pairing…")
+                        }
+                    } else {
+                        Label(
+                            "Scan QR Code to Pair",
+                            systemImage: "qrcode.viewfinder"
+                        )
+                    }
+                }
+                .disabled(isPairing)
+
+                if let noticeMessage {
+                    Text(noticeMessage)
+                        .font(.footnote)
+                        .foregroundStyle(.orange)
+                }
+                if let errorMessage {
+                    Text(errorMessage)
+                        .font(.footnote)
+                        .foregroundStyle(.red)
                 }
 
-                Section {
-                    Button {
-                        isShowingScanner = true
-                    } label: {
-                        if isPairing {
-                            HStack(spacing: 10) {
-                                ProgressView().controlSize(.small)
-                                Text("Pairing…")
-                            }
-                        } else {
-                            Label(
-                                "Scan QR Code to Pair",
-                                systemImage: "qrcode.viewfinder"
-                            )
+                #if DEBUG
+                    Section("Debug") {
+                        NavigationLink("Browser Proxy Smoke Test") {
+                            BrowserProxySmokeTestView()
                         }
                     }
-                    .disabled(isPairing)
-
-                    if let noticeMessage {
-                        Text(noticeMessage)
-                            .font(.footnote)
-                            .foregroundStyle(.orange)
-                    }
-                    if let errorMessage {
-                        Text(errorMessage)
-                            .font(.footnote)
-                            .foregroundStyle(.red)
-                    }
-                }
-
-                Section("Appearance") {
-                    Picker("Theme", selection: $appearanceMode) {
-                        ForEach(AppAppearanceMode.allCases, id: \.self) { mode in
-                            Text(mode.displayName).tag(mode)
-                        }
-                    }
-                }
+                #endif
             }
-            .navigationTitle("Devices")
-            .tint(Theme.accent)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
-                }
+        }
+        .navigationTitle("Paired Devices")
+        .navigationBarTitleDisplayMode(.inline)
+        .tint(Theme.accent)
+        .alert(
+            pendingPairingLink.map { "Pair with \($0.name)?" } ?? "Pair Device?",
+            isPresented: $isConfirmingPairing
+        ) {
+            Button("Pair") {
+                guard let pendingPairingLink else { return }
+                Task { await pairDevice(using: pendingPairingLink) }
             }
-            .alert(
-                pendingPairingLink.map { "Pair with \($0.name)?" } ?? "Pair Device?",
-                isPresented: $isConfirmingPairing
-            ) {
-                Button("Pair") {
-                    guard let pendingPairingLink else { return }
-                    Task { await pairDevice(using: pendingPairingLink) }
-                }
-                Button("Cancel", role: .cancel) { pendingPairingLink = nil }
-            } message: {
-                if let pendingPairingLink {
-                    Text("\(pendingPairingLink.host):\(pendingPairingLink.port)")
-                }
+            Button("Cancel", role: .cancel) { pendingPairingLink = nil }
+        } message: {
+            if let pendingPairingLink {
+                Text("\(pendingPairingLink.host):\(pendingPairingLink.port)")
             }
-            .confirmationDialog(
-                devicePendingRemoval.map { "Remove \($0.name)?" } ?? "Remove Device?",
-                isPresented: removalConfirmationBinding,
-                titleVisibility: .visible,
-                presenting: devicePendingRemoval
-            ) { device in
-                Button("Remove Device", role: .destructive) {
-                    onRemoveDevice(device.id)
-                    devicePendingRemoval = nil
-                }
-                Button("Cancel", role: .cancel) { devicePendingRemoval = nil }
+        }
+        .confirmationDialog(
+            devicePendingRemoval.map { "Remove \($0.name)?" } ?? "Remove Device?",
+            isPresented: removalConfirmationBinding,
+            titleVisibility: .visible,
+            presenting: devicePendingRemoval
+        ) { device in
+            Button("Remove Device", role: .destructive) {
+                onRemoveDevice(device.id)
+                devicePendingRemoval = nil
             }
-            .fullScreenCover(isPresented: $isShowingScanner) {
-                QRCodeScannerView { payload in
-                    handleScannedPayload(payload)
-                }
+            Button("Cancel", role: .cancel) { devicePendingRemoval = nil }
+        }
+        .fullScreenCover(isPresented: $isShowingScanner) {
+            QRCodeScannerView { payload in
+                handleScannedPayload(payload)
             }
-            .task {
-                applyIncomingPairingLink(initialPairingLink)
-            }
-            .onChange(of: initialPairingLink) { _, newValue in
-                applyIncomingPairingLink(newValue)
-            }
+        }
+        .task {
+            applyIncomingPairingLink(initialPairingLink)
+        }
+        .onChange(of: initialPairingLink) { _, newValue in
+            applyIncomingPairingLink(newValue)
         }
     }
 

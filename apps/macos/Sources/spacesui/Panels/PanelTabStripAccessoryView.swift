@@ -30,6 +30,20 @@ import AppKit
 
     @available(*, unavailable) required init?(coder: NSCoder) { nil }
 
+    /// Drops the visible workspace's ownership of the shared titlebar strip. Detail panes
+    /// without a visible workspace panel call this so a later background render from the
+    /// previously selected workspace cannot re-show stale tabs over that pane.
+    func releaseTabBar() {
+        tabBar.hostingOwner = nil
+        tabBar.onSelectTab = nil
+        tabBar.onCloseTab = nil
+        tabBar.onNewTab = nil
+        tabBar.onRenameTab = nil
+        tabBar.onSplitFocusedPane = nil
+        tabBar.clear()
+        tabBar.isHidden = true
+    }
+
     override func layout() {
         installClipSpanningConstraintsIfNeeded()
         super.layout()

@@ -40,11 +40,55 @@ private enum TerminalLinkPreviewRequestError: Error {
     case stale
 }
 
+/// What a resolved terminal link previews as. Every case carries the on-device URL the sheet renders:
+/// a local cache file for `quickLook`/`text`/`markdown`/`htmlFile`, or the original remote URL for
+/// `webPage`. `TerminalLinkPreviewSheet` switches on this to pick the viewer.
+enum TerminalLinkPreviewContent: Equatable {
+    case quickLook(URL)
+    case text(URL)
+    case markdown(URL)
+    case htmlFile(URL)
+    case webPage(URL)
+
+    var url: URL {
+        switch self {
+        case .quickLook(let url), .text(let url), .markdown(let url), .htmlFile(let url), .webPage(let url):
+            return url
+        }
+    }
+
+    /// Stable case name for the e2e render dump; not user-facing.
+    var caseName: String {
+        switch self {
+        case .quickLook: return "quickLook"
+        case .text: return "text"
+        case .markdown: return "markdown"
+        case .htmlFile: return "htmlFile"
+        case .webPage: return "webPage"
+        }
+    }
+}
+
 struct TerminalLinkPreview: Identifiable, Equatable {
     let id: String
-    let url: URL
     let title: String
-    let mediaKind: SpacesDeviceTerminalLinkMediaKind
+    /// `nil` only for `.webPage`: a plain web URL has no device-previewable artifact kind.
+    let kind: SpacesDeviceTerminalLinkArtifactKind?
+    let content: TerminalLinkPreviewContent
+}
+
+extension SpacesDeviceTerminalLinkArtifactKind {
+    /// User-facing noun for error copy, e.g. "The media link did not return \(previewNoun) content."
+    fileprivate var previewNoun: String {
+        switch self {
+        case .image: return "image"
+        case .video: return "video"
+        case .pdf: return "PDF"
+        case .markdown: return "Markdown"
+        case .text: return "text"
+        case .html: return "HTML"
+        }
+    }
 }
 
 @MainActor @Observable final class TerminalViewerModel {
@@ -83,15 +127,29 @@ struct TerminalLinkPreview: Identifiable, Equatable {
     var isPreparingLinkPreview = false
     var linkPreviewErrorMessage: String?
     var linkPreview: TerminalLinkPreview?
+    /// Set when a tapped terminal link resolves to a loopback host (e.g. `http://localhost:3000`):
+    /// that address only makes sense on the session's host Mac, so this shows an explanatory banner
+    /// instead of attempting a resolve round trip or a preview. Cleared at the start of the next link
+    /// open attempt and on stop/auth-failure resets, alongside `linkPreviewErrorMessage`.
+    var linkNotice: String?
+
+    /// Rich-composer draft. The draft text is a two-way binding for the composer's text field; the
+    /// attachments and sending/error flags are mutated only through the composer API below. The draft
+    /// survives the composer sheet being dismissed and reopened because the model outlives the sheet
+    /// (it is `@State` on the detail view), so a partially composed message is not lost on dismiss.
+    var composerDraftText = ""
+    private(set) var composerAttachments: [TerminalComposerAttachment] = []
+    private(set) var isSendingComposedMessage = false
+    var composerErrorMessage: String?
     private var linkPreviewRequestGeneration: UInt64 = 0
     @ObservationIgnored private var externalLinkPreviewDownloadTask: Task<URL, Error>?
+    @ObservationIgnored private var localLinkPreviewDownloadTask: Task<Int64, Error>?
 
     private let bridgeClient: SpacesDeviceAPIClient
     private var commandChannel: SpacesDeviceAPICommandChannel
-    @ObservationIgnored private let openExternalURL: @MainActor (URL) -> Void
-    @ObservationIgnored private let remoteMediaDownloader: @Sendable (URL) async throws -> URL
+    @ObservationIgnored private let remoteMediaDownloader: @Sendable (URL, SpacesDeviceTerminalLinkArtifactKind) async throws -> URL
     @ObservationIgnored private let linkPreviewCacheDirectory: URL
-    private let remoteClient: TerminalClient
+    private var remoteClient: TerminalClient
     private var e2eConfig: SpacesMobileE2EConfig { .shared }
     private var streamHandle: SpacesDeviceAPIStreamHandle?
     private var reconnectTask: Task<Void, Never>?
@@ -135,6 +193,9 @@ struct TerminalLinkPreview: Identifiable, Equatable {
     private static let inputBatchDelay: Duration = .milliseconds(35)
     private static let scrollCoalescingInterval: Duration = .milliseconds(16)
     private static let inputRequestTimeout: Duration = .seconds(6)
+    /// Pasting a multi-MiB image takes meaningfully longer to transmit than interactive text/key input,
+    /// so composer image steps use a larger timeout than `inputRequestTimeout`.
+    private static let pasteImageRequestTimeout: Duration = .seconds(30)
     private static let stateRequestTimeout: Duration = .seconds(12)
     private static let ownerRecoveryGraceInterval: TimeInterval = 2
     private static let silentReconnectDelay: Duration = .milliseconds(150)
@@ -144,15 +205,29 @@ struct TerminalLinkPreview: Identifiable, Equatable {
     private static let postResizeStateSettleStep: Duration = .milliseconds(50)
     private static let postResizeStateSettleIterations = 6
     private static let dismissalDetachTimeout: Duration = .seconds(3)
-    private static let linkPreviewChunkLimit = 256 * 1024
+    /// Text-family previews (text/markdown/html) download the whole file into memory-adjacent local
+    /// storage before rendering, unlike image/video/PDF which QuickLook streams from disk; this caps
+    /// that download so an oversized log file can't stall the preview or balloon device storage.
+    private static let textPreviewByteCountLimit: Int64 = 4 * 1024 * 1024
+    private static let loopbackLinkNoticeMessage =
+        "This address runs on the session's host machine and isn't reachable from this device yet."
+
+    /// Which step of the composed-send burst (see `enqueueComposedInputSend`) a failure occurred in, so
+    /// `finishComposedSend` can surface a message that matches what actually happened rather than always
+    /// describing an image failure.
+    private enum ComposedSendStep {
+        case text
+        case image
+        case enter
+    }
 
     init(
         session: SpacesDeviceTerminalSessionSummary,
         settings: SpacesMobileConnectionSettings,
         onAuthenticationRequired: @escaping @MainActor @Sendable (String) -> Void,
         bridgeClient: SpacesDeviceAPIClient? = nil,
-        openExternalURL: @escaping @MainActor (URL) -> Void = { UIApplication.shared.open($0) },
-        remoteMediaDownloader: @escaping @Sendable (URL) async throws -> URL = TerminalViewerModel.defaultRemoteMediaDownloader,
+        remoteMediaDownloader: @escaping @Sendable (URL, SpacesDeviceTerminalLinkArtifactKind) async throws -> URL = TerminalViewerModel
+            .defaultRemoteMediaDownloader,
         linkPreviewCacheDirectory: URL? = nil
     ) {
         self.session = session
@@ -161,12 +236,15 @@ struct TerminalLinkPreview: Identifiable, Equatable {
         let resolvedBridgeClient = bridgeClient ?? SpacesDeviceAPIClient(settings: settings)
         self.bridgeClient = resolvedBridgeClient
         commandChannel = resolvedBridgeClient.makeCommandChannel()
-        self.openExternalURL = openExternalURL
         self.remoteMediaDownloader = remoteMediaDownloader
         self.linkPreviewCacheDirectory =
             linkPreviewCacheDirectory
             ?? FileManager.default.temporaryDirectory.appendingPathComponent("SpacesTerminalLinkPreviews", isDirectory: true)
-        remoteClient = TerminalClient(
+        remoteClient = Self.makeRemoteClient(settings: settings)
+    }
+
+    private static func makeRemoteClient(settings: SpacesMobileConnectionSettings) -> TerminalClient {
+        TerminalClient(
             kind: .remoteViewer,
             identity: TerminalClientIdentity(
                 label: UIDevice.current.name,
@@ -178,17 +256,34 @@ struct TerminalLinkPreview: Identifiable, Equatable {
         )
     }
 
-    nonisolated static func defaultRemoteMediaDownloader(_ url: URL) async throws -> URL {
+    nonisolated static func defaultRemoteMediaDownloader(_ url: URL, expectedArtifactKind: SpacesDeviceTerminalLinkArtifactKind) async throws -> URL {
         let (downloadedURL, response) = try await URLSession.shared.download(from: url)
         do {
-            return try validatedRemoteMediaDownloadURL(downloadedURL, response: response)
+            return try validatedRemoteMediaDownloadURL(
+                downloadedURL,
+                response: response,
+                expectedArtifactKind: expectedArtifactKind,
+                sourceURL: url)
         } catch {
             try? FileManager.default.removeItem(at: downloadedURL)
             throw error
         }
     }
 
-    nonisolated static func validatedRemoteMediaDownloadURL(_ downloadedURL: URL, response: URLResponse) throws -> URL {
+    /// Validates that a downloaded external link actually returned the artifact kind the daemon's resolve
+    /// step promised, rather than merely returning some previewable kind. Without this, a URL that
+    /// resolved as (say) `.image` but that actually redirects to an HTML sign-in page would pass a looser
+    /// "is this any previewable kind" check — text/HTML is itself a previewable kind now that the
+    /// classifier covers documents, not just media — and get cached and shown as if it were the image.
+    /// If the server reports a generic or plain-text type, the resolved/final URL extension is allowed
+    /// to confirm the promised artifact kind; a conflicting specific type such as an HTML sign-in page
+    /// still fails before caching.
+    nonisolated static func validatedRemoteMediaDownloadURL(
+        _ downloadedURL: URL,
+        response: URLResponse,
+        expectedArtifactKind: SpacesDeviceTerminalLinkArtifactKind,
+        sourceURL: URL? = nil
+    ) throws -> URL {
         guard response.url?.scheme?.lowercased() == "https" else {
             throw SpacesDeviceAPIClientError.requestFailed("The media link redirected to a non-HTTPS URL.")
         }
@@ -198,12 +293,61 @@ struct TerminalLinkPreview: Identifiable, Equatable {
         guard (200..<300).contains(httpResponse.statusCode) else {
             throw SpacesDeviceAPIClientError.requestFailed("The media link returned HTTP status \(httpResponse.statusCode).")
         }
-        guard let mimeType = httpResponse.mimeType?.trimmingCharacters(in: .whitespacesAndNewlines), !mimeType.isEmpty,
-            SpacesDeviceTerminalLinkClassifier.mediaKind(contentType: mimeType, pathExtension: nil) != nil
-        else {
-            throw SpacesDeviceAPIClientError.requestFailed("The media link did not return image or video content.")
+        let mimeType = httpResponse.mimeType?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard downloadedArtifactKindMatches(
+            contentType: mimeType?.isEmpty == false ? mimeType : nil,
+            responseURL: response.url,
+            sourceURL: sourceURL,
+            expectedArtifactKind: expectedArtifactKind
+        ) else {
+            throw SpacesDeviceAPIClientError.requestFailed("The media link did not return \(expectedArtifactKind.previewNoun) content.")
         }
         return downloadedURL
+    }
+
+    private nonisolated static func downloadedArtifactKindMatches(
+        contentType: String?,
+        responseURL: URL?,
+        sourceURL: URL?,
+        expectedArtifactKind: SpacesDeviceTerminalLinkArtifactKind
+    ) -> Bool {
+        let responseKind = contentType.flatMap {
+            SpacesDeviceTerminalLinkClassifier.artifactKind(contentType: $0, pathExtension: nil)
+        }
+        if responseKind == expectedArtifactKind { return true }
+        guard resolvedExtensionMatchesExpectedArtifactKind(
+            responseURL: responseURL,
+            sourceURL: sourceURL,
+            expectedArtifactKind: expectedArtifactKind)
+        else {
+            return false
+        }
+        guard let responseKind else {
+            return contentType.map(isGenericDownloadContentType) ?? true
+        }
+        return responseKind == .text && Self.isTextFamilyArtifact(expectedArtifactKind)
+    }
+
+    private nonisolated static func isGenericDownloadContentType(_ contentType: String) -> Bool {
+        let lowercased = contentType.lowercased()
+        let baseType = lowercased.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? lowercased
+        switch baseType.trimmingCharacters(in: .whitespacesAndNewlines) {
+        case "application/octet-stream", "binary/octet-stream", "application/x-download", "application/force-download":
+            return true
+        default:
+            return false
+        }
+    }
+
+    private nonisolated static func resolvedExtensionMatchesExpectedArtifactKind(
+        responseURL: URL?,
+        sourceURL: URL?,
+        expectedArtifactKind: SpacesDeviceTerminalLinkArtifactKind
+    ) -> Bool {
+        [responseURL, sourceURL].contains { url in
+            guard let url else { return false }
+            return SpacesDeviceTerminalLinkClassifier.artifactKind(contentType: nil, pathExtension: url.pathExtension) == expectedArtifactKind
+        }
     }
 
     var title: String { latestState?.title ?? session.title }
@@ -291,6 +435,14 @@ struct TerminalLinkPreview: Identifiable, Equatable {
 
     func start() {
         guard streamHandle == nil, reconnectTask == nil else { return }
+        if hasSentStopDetach {
+            // A retained navigation destination can disappear with its tab and later reappear. Give
+            // that new lifecycle its own channel and client identity so the prior stop task cannot
+            // close or detach the new stream.
+            commandChannel = bridgeClient.makeCommandChannel()
+            remoteClient = Self.makeRemoteClient(settings: settings)
+            hasSentStopDetach = false
+        }
         isStopping = false
         isSessionUnavailable = false
         hasAttemptedAutomaticTakeover = false
@@ -339,7 +491,7 @@ struct TerminalLinkPreview: Identifiable, Equatable {
         bufferedInputFlushTask?.cancel()
         bufferedInputFlushTask = nil
         scrollCoalescer.cancel()
-        inputSendQueue.cancelAll()
+        cancelQueuedInputSends()
         ownershipSynchronizationTask?.cancel()
         ownershipSynchronizationTask = nil
         bufferedInputText = ""
@@ -353,6 +505,7 @@ struct TerminalLinkPreview: Identifiable, Equatable {
         isPreparingLinkPreview = false
         linkPreviewErrorMessage = nil
         linkPreview = nil
+        linkNotice = nil
         ownerRecoveryGraceDeadline = nil
         reportedOwnerReadyEpochID = nil
         reportedOwnerNonblankEpochID = nil
@@ -458,7 +611,7 @@ struct TerminalLinkPreview: Identifiable, Equatable {
         }
     }
 
-    func sendText(_ text: String, appendNewline: Bool = false) async {
+    func sendText(_ text: String, appendNewline: Bool = false, asPaste: Bool = false) async {
         guard isOwner else { return }
         guard acceptsInput, hasConfirmedOwnerInputReadiness else { return }
         guard !text.isEmpty else { return }
@@ -467,7 +620,15 @@ struct TerminalLinkPreview: Identifiable, Equatable {
             flushBufferedInputText()
             enqueueInputSend(kind: "send_text", detail: "\(text)\\n") { [weak self, text] in
                 guard let self else { return }
-                try await self.performSendTextRequest(text, appendNewline: true)
+                try await self.performSendTextRequest(text, appendNewline: true, asPaste: asPaste)
+            }
+            return
+        }
+        if asPaste {
+            flushBufferedInputText()
+            enqueueInputSend(kind: "send_text", detail: text) { [weak self, text] in
+                guard let self else { return }
+                try await self.performSendTextRequest(text, asPaste: true)
             }
             return
         }
@@ -482,6 +643,162 @@ struct TerminalLinkPreview: Identifiable, Equatable {
         enqueueInputSend(kind: "send_key", detail: key) { [weak self, key] in
             guard let self else { return }
             try await self.performSendKeyRequest(key)
+        }
+    }
+
+    func attachComposerImage(_ attachment: TerminalComposerAttachment) {
+        guard !isSendingComposedMessage else { return }
+        composerAttachments.append(attachment)
+        composerErrorMessage = nil
+    }
+
+    func removeComposerAttachment(id: UUID) {
+        guard !isSendingComposedMessage else { return }
+        composerAttachments.removeAll { $0.id == id }
+    }
+
+    /// The composer can send when the session accepts owner input (same gating as typing) and the draft
+    /// has content — either non-whitespace text or at least one attachment — and no send is in flight.
+    var canSendComposedMessage: Bool {
+        guard acceptsInput, hasConfirmedOwnerInputReadiness, !isSendingComposedMessage else { return false }
+        let hasText = !composerDraftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        return hasText || !composerAttachments.isEmpty
+    }
+
+    /// Sends the composed message as a single ordered burst: the typed text, then each image, then Enter.
+    /// The whole sequence runs inside one serial-queue closure so it stays ordered relative to any other
+    /// input and never interleaves. Enter is only sent after every prior step succeeds, so a partial
+    /// failure leaves the draft intact and nothing is submitted.
+    func sendComposedMessage() async {
+        guard canSendComposedMessage, isOwner else { return }
+        flushPendingScroll()
+        flushBufferedInputText()
+        let draftText = composerDraftText
+        // Capture only the Sendable payloads (not the attachments, whose UIImage thumbnails are not
+        // Sendable) for the detached serial-queue closure.
+        let attachments = composerAttachments
+        let payloads = attachments.map(\.payload)
+        let attachmentIDs = attachments.map(\.id)
+        isSendingComposedMessage = true
+        composerErrorMessage = nil
+        enqueueComposedInputSend(text: draftText, payloads: payloads, attachmentIDs: attachmentIDs)
+    }
+
+    private func enqueueComposedInputSend(text: String, payloads: [TerminalImageAttachmentPayload], attachmentIDs: [UUID]) {
+        let detail = "text_bytes=\(text.utf8.count) attachments=\(payloads.count)"
+        logPerformanceEvent(name: "input_command_enqueue", count: detail.utf8.count, attributes: inputCommandAttributes(kind: "composer_send", detail: detail))
+        // A dedicated enqueue (rather than the generic `enqueueInputSend`) because the composer owns its
+        // own completion: a partial failure must surface via `composerErrorMessage` and preserve the draft
+        // rather than the generic `errorMessage` path, and success must clear the draft — while still
+        // sharing `inputSendQueue` so it stays ordered with any buffered text/keys.
+        inputSendQueue.enqueue(priority: .userInitiated) { [weak self] in
+            guard let self else { return }
+            if Task.isCancelled {
+                await MainActor.run { self.finishCanceledComposedSend() }
+                return
+            }
+            await MainActor.run { self.writeE2EEventIfNeeded(kind: "composer_send_begin", detail: detail) }
+            let hasText = !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            // Ordering rationale: text first, then image paths, then Enter. Trailing paths read as
+            // arguments to the typed text, and the risky large upload happens after the cheap text
+            // send. A separator space follows the text (when images follow) and separates images.
+            if hasText {
+                do {
+                    try await self.performSendTextRequest(text + (payloads.isEmpty ? "" : " "), asPaste: true)
+                } catch {
+                    await MainActor.run { self.finishComposedSend(with: error, failedStep: .text) }
+                    return
+                }
+            }
+            for (index, payload) in payloads.enumerated() {
+                if index > 0 {
+                    do {
+                        try await self.performSendTextRequest(" ", asPaste: true)
+                    } catch {
+                        await MainActor.run { self.finishComposedSend(with: error, failedStep: .image) }
+                        return
+                    }
+                }
+                do {
+                    try await self.performPasteImageRequest(payload)
+                } catch {
+                    await MainActor.run { self.finishComposedSend(with: error, failedStep: .image) }
+                    return
+                }
+            }
+            do {
+                try await self.performSendKeyRequest("enter")
+            } catch {
+                await MainActor.run { self.finishComposedSend(with: error, failedStep: .enter) }
+                return
+            }
+            await MainActor.run { self.finishComposedSend(with: nil, sentDraftText: text, sentAttachmentIDs: attachmentIDs) }
+        }
+    }
+
+    private func finishComposedSend(
+        with error: Error?,
+        failedStep: ComposedSendStep? = nil,
+        sentDraftText: String? = nil,
+        sentAttachmentIDs: [UUID] = []
+    ) {
+        isSendingComposedMessage = false
+        guard let error else {
+            writeE2EEventIfNeeded(kind: "composer_send_success", detail: nil)
+            if composerDraftText == sentDraftText {
+                composerDraftText = ""
+            }
+            let sentAttachmentIDs = Set(sentAttachmentIDs)
+            composerAttachments.removeAll { sentAttachmentIDs.contains($0.id) }
+            composerErrorMessage = nil
+            if isOwner {
+                hasConfirmedOwnerInputReadiness = true
+                isInputSurfaceReady = true
+            }
+            return
+        }
+        writeE2EEventIfNeeded(kind: "composer_send_failure", detail: error.localizedDescription)
+        // Keep the entire draft (text + all attachments) so the user can retry without recomposing.
+        if routeInputSendRecovery(error) {
+            composerErrorMessage = nil
+            return
+        }
+        switch failedStep {
+        case .text:
+            composerErrorMessage = "Couldn't send the message. Nothing was submitted."
+        case .enter:
+            composerErrorMessage = "The message was sent but couldn't be submitted. Retrying will send the whole message again."
+        case .image, nil:
+            composerErrorMessage = "Couldn't send an image. Nothing was submitted — the terminal line may contain partial text."
+        }
+    }
+
+    private func finishCanceledComposedSend() {
+        guard isSendingComposedMessage else { return }
+        isSendingComposedMessage = false
+        composerErrorMessage = nil
+    }
+
+    private func cancelQueuedInputSends() {
+        inputSendQueue.cancelAll()
+        finishCanceledComposedSend()
+    }
+
+    private func performPasteImageRequest(_ payload: TerminalImageAttachmentPayload) async throws {
+        guard let ownerEpoch = currentOwnerEpoch else {
+            throw SpacesDeviceAPIClientError.requestFailed("The terminal is not ready to receive an image.")
+        }
+        try await performRequestUsingInputChannel {
+            [bridgeClient, sessionID = session.id, clientID = remoteClient.id, ownerEpoch, payload] commandChannel in
+            try await bridgeClient.pasteImage(
+                sessionID: sessionID,
+                clientID: clientID,
+                ownerEpoch: ownerEpoch,
+                fileExtension: payload.fileExtension,
+                imageData: payload.imageData,
+                timeout: Self.pasteImageRequestTimeout,
+                commandChannel: commandChannel
+            )
         }
     }
 
@@ -522,6 +839,24 @@ struct TerminalLinkPreview: Identifiable, Equatable {
     func openTerminalLink(_ link: String) async {
         let normalizedLink = link.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedLink.isEmpty else { return }
+        // Route on the raw link text before touching the daemon: an unrecognized scheme (e.g.
+        // `mailto:`) needs no round trip at all, and a loopback host (e.g. `http://localhost:3000`)
+        // only makes sense on the session's host Mac, so both short-circuit without a resolve call or
+        // preview sheet. `.webURL` and `.fileLink` still go through `resolveTerminalLink` below because
+        // the daemon may classify an https URL as a previewable artifact (image/pdf/markdown/etc.)
+        // rather than a plain web page.
+        guard let route = SpacesDeviceTerminalLinkClassifier.route(for: normalizedLink) else {
+            cancelAndClearLinkPreviewState()
+            linkNotice = nil
+            return
+        }
+        if case .loopbackURL = route {
+            cancelAndClearLinkPreviewState()
+            linkNotice = Self.loopbackLinkNoticeMessage
+            return
+        }
+        linkNotice = nil
+
         let requestGeneration = beginLinkPreviewRequest()
         isPreparingLinkPreview = true
         linkPreviewErrorMessage = nil
@@ -598,16 +933,17 @@ struct TerminalLinkPreview: Identifiable, Equatable {
         }
     }
 
-    private func performSendTextRequest(_ text: String, appendNewline: Bool = false) async throws {
+    private func performSendTextRequest(_ text: String, appendNewline: Bool = false, asPaste: Bool = false) async throws {
         let ownerEpoch = currentOwnerEpoch
         try await performRequestUsingInputChannel {
-            [bridgeClient, sessionID = session.id, clientID = remoteClient.id, ownerEpoch, appendNewline] commandChannel in
+            [bridgeClient, sessionID = session.id, clientID = remoteClient.id, ownerEpoch, appendNewline, asPaste] commandChannel in
             try await bridgeClient.sendText(
                 sessionID: sessionID,
                 clientID: clientID,
                 text: text,
                 ownerEpoch: ownerEpoch,
                 appendNewline: appendNewline,
+                asPaste: asPaste,
                 timeout: Self.inputRequestTimeout,
                 commandChannel: commandChannel
             )
@@ -736,14 +1072,19 @@ struct TerminalLinkPreview: Identifiable, Equatable {
 
     private func handleInputSendError(_ error: Error) {
         guard !Self.isTransientInputTransportError(error) else { return }
-        if handleAuthenticationFailure(error) { return }
+        if routeInputSendRecovery(error) { return }
+        errorMessage = error.localizedDescription
+    }
+
+    private func routeInputSendRecovery(_ error: Error) -> Bool {
+        if handleAuthenticationFailure(error) { return true }
         if Self.isTerminalNoLongerLiveError(error) {
             Task { [weak self] in
                 await self?.recoverEndedStateAfterTerminalStopped(error, reason: "input_terminal_stopped")
             }
-            return
+            return true
         }
-        errorMessage = error.localizedDescription
+        return false
     }
 
     private func handleResolvedTerminalLink(
@@ -757,18 +1098,32 @@ struct TerminalLinkPreview: Identifiable, Equatable {
             guard let externalURLValue = metadata.externalURL, let url = URL(string: externalURLValue) else {
                 throw SpacesDeviceAPIClientError.requestFailed("The terminal link URL is invalid.")
             }
-            guard let mediaKind = metadata.mediaKind else {
+            guard let artifactKind = metadata.artifactKind else {
+                // No previewable artifact kind: this is a plain web page, so it renders in-app rather
+                // than handing off to Safari.
                 try ensureCurrentLinkPreviewRequest(requestGeneration)
-                openExternalURL(url)
+                linkPreviewErrorMessage = nil
+                linkPreview = TerminalLinkPreview(id: metadata.id, title: metadata.displayName, kind: nil, content: .webPage(url))
                 return
             }
-            let localURL = try await downloadExternalPreview(metadata: metadata, url: url, requestGeneration: requestGeneration)
+            guard !exceedsTextPreviewSizeCap(artifactKind: artifactKind, metadata: metadata) else {
+                linkPreviewErrorMessage = "\(metadata.displayName) is too large to preview on this device."
+                return
+            }
+            let localURL = try await downloadExternalPreview(
+                metadata: metadata, url: url, artifactKind: artifactKind, requestGeneration: requestGeneration)
             try ensureCurrentLinkPreviewRequest(requestGeneration)
             linkPreviewErrorMessage = nil
-            linkPreview = TerminalLinkPreview(id: metadata.id, url: localURL, title: metadata.displayName, mediaKind: mediaKind)
+            linkPreview = TerminalLinkPreview(
+                id: metadata.id, title: metadata.displayName, kind: artifactKind,
+                content: Self.previewContent(for: artifactKind, fileURL: localURL))
         case .localFile:
-            guard let mediaKind = metadata.mediaKind else {
-                throw SpacesDeviceAPIClientError.requestFailed("Only image and video files can be previewed on iOS.")
+            guard let artifactKind = metadata.artifactKind else {
+                throw SpacesDeviceAPIClientError.requestFailed("Only image, video, PDF, Markdown, text, and HTML files can be previewed on iOS.")
+            }
+            guard !exceedsTextPreviewSizeCap(artifactKind: artifactKind, metadata: metadata) else {
+                linkPreviewErrorMessage = "\(metadata.displayName) is too large to preview on this device."
+                return
             }
             let localURL = try await downloadLocalPreview(
                 metadata: metadata,
@@ -776,17 +1131,52 @@ struct TerminalLinkPreview: Identifiable, Equatable {
                 requestGeneration: requestGeneration)
             try ensureCurrentLinkPreviewRequest(requestGeneration)
             linkPreviewErrorMessage = nil
-            linkPreview = TerminalLinkPreview(id: metadata.id, url: localURL, title: metadata.displayName, mediaKind: mediaKind)
+            linkPreview = TerminalLinkPreview(
+                id: metadata.id, title: metadata.displayName, kind: artifactKind,
+                content: Self.previewContent(for: artifactKind, fileURL: localURL))
+        }
+    }
+
+    /// Maps a resolved artifact kind to the preview content case: image/video/pdf preview through
+    /// QuickLook; text/markdown/html get dedicated renderers instead of QuickLook's generic file
+    /// preview. Applies identically to local-file and downloaded-external artifacts.
+    private static func previewContent(for artifactKind: SpacesDeviceTerminalLinkArtifactKind, fileURL: URL) -> TerminalLinkPreviewContent {
+        switch artifactKind {
+        case .image, .video, .pdf: return .quickLook(fileURL)
+        case .text: return .text(fileURL)
+        case .markdown: return .markdown(fileURL)
+        case .html: return .htmlFile(fileURL)
+        }
+    }
+
+    /// Metadata byte counts reject oversized text-family local files before transfer. External text
+    /// files are measured after download and before they move into the preview cache.
+    private func exceedsTextPreviewSizeCap(artifactKind: SpacesDeviceTerminalLinkArtifactKind, metadata: SpacesDeviceTerminalLinkMetadata) -> Bool {
+        guard Self.isTextFamilyArtifact(artifactKind), let byteCount = metadata.byteCount else { return false }
+        return byteCount > Self.textPreviewByteCountLimit
+    }
+
+    private func exceedsTextPreviewSizeCap(artifactKind: SpacesDeviceTerminalLinkArtifactKind, fileURL: URL) throws -> Bool {
+        guard Self.isTextFamilyArtifact(artifactKind) else { return false }
+        guard let byteCount = try fileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize else { return false }
+        return Int64(byteCount) > Self.textPreviewByteCountLimit
+    }
+
+    private nonisolated static func isTextFamilyArtifact(_ kind: SpacesDeviceTerminalLinkArtifactKind) -> Bool {
+        switch kind {
+        case .text, .markdown, .html: return true
+        case .image, .video, .pdf: return false
         }
     }
 
     private func downloadExternalPreview(
         metadata: SpacesDeviceTerminalLinkMetadata,
         url: URL,
+        artifactKind: SpacesDeviceTerminalLinkArtifactKind,
         requestGeneration: UInt64
     ) async throws -> URL {
         try ensureCurrentLinkPreviewRequest(requestGeneration)
-        let downloadTask = Task { try await remoteMediaDownloader(url) }
+        let downloadTask = Task { try await remoteMediaDownloader(url, artifactKind) }
         externalLinkPreviewDownloadTask = downloadTask
         defer {
             if isCurrentLinkPreviewRequest(requestGeneration) {
@@ -808,6 +1198,10 @@ struct TerminalLinkPreview: Identifiable, Equatable {
             }
         }
         try ensureCurrentLinkPreviewRequest(requestGeneration)
+        if try exceedsTextPreviewSizeCap(artifactKind: artifactKind, fileURL: downloadedURL) {
+            throw SpacesDeviceAPIClientError.requestFailed("\(metadata.displayName) is too large to preview on this device.")
+        }
+        try ensureCurrentLinkPreviewRequest(requestGeneration)
         let localURL = try previewCacheURL(for: metadata)
         try ensureCurrentLinkPreviewRequest(requestGeneration)
         try? FileManager.default.removeItem(at: localURL)
@@ -819,6 +1213,13 @@ struct TerminalLinkPreview: Identifiable, Equatable {
         return localURL
     }
 
+    /// Downloads a local-file terminal link's contents into the preview cache using the shared chunked
+    /// transfer helper. The hand-rolled loop this replaced re-checked the request generation before and
+    /// after every chunk; that per-chunk check is now `Task.checkCancellation()` inside the helper, driven
+    /// by running the download as its own cancellable `Task` that `invalidateLinkPreviewRequests()`
+    /// interrupts mid-transfer, the same way it already interrupts an in-flight external download. The
+    /// generation check after the transfer completes stays as an explicit guard so a request superseded in
+    /// the instant between the last chunk and this function returning still can't publish a stale preview.
     private func downloadLocalPreview(
         metadata: SpacesDeviceTerminalLinkMetadata,
         commandChannel: SpacesDeviceAPICommandChannel?,
@@ -826,51 +1227,44 @@ struct TerminalLinkPreview: Identifiable, Equatable {
     ) async throws -> URL {
         try ensureCurrentLinkPreviewRequest(requestGeneration)
         let localURL = try previewCacheURL(for: metadata)
-        try Data().write(to: localURL, options: .atomic)
-        let handle = try FileHandle(forWritingTo: localURL)
-        var didCompleteTransfer = false
+        let temporaryURL = temporaryPreviewDownloadURL(for: localURL)
+        var didMoveTemporaryFile = false
         defer {
-            if !didCompleteTransfer {
-                try? FileManager.default.removeItem(at: localURL)
+            if !didMoveTemporaryFile {
+                try? FileManager.default.removeItem(at: temporaryURL)
             }
         }
-        defer { try? handle.close() }
 
-        var offset: Int64 = 0
-        while true {
-            try ensureCurrentLinkPreviewRequest(requestGeneration)
-            let chunk = try await readTerminalLinkChunk(
+        let downloadTask = Task { [bridgeClient, sessionID = session.id] in
+            try await SpacesDeviceTerminalLinkChunkTransfer.download(
                 linkID: metadata.id,
-                offset: offset,
-                limit: Self.linkPreviewChunkLimit,
-                commandChannel: commandChannel)
-            try ensureCurrentLinkPreviewRequest(requestGeneration)
-            guard chunk.offset == offset, let data = Data(base64Encoded: chunk.base64Data) else {
-                throw SpacesDeviceAPIClientError.requestFailed("The terminal link transfer returned invalid data.")
+                expectedByteCount: metadata.byteCount,
+                to: temporaryURL
+            ) { offset, limit in
+                try await bridgeClient.readTerminalLinkChunk(
+                    sessionID: sessionID, linkID: metadata.id, offset: offset, limit: limit, commandChannel: commandChannel)
             }
-            guard data.count == chunk.byteCount else {
-                throw SpacesDeviceAPIClientError.requestFailed("The terminal link transfer returned an invalid chunk size.")
+        }
+        localLinkPreviewDownloadTask = downloadTask
+        defer {
+            if isCurrentLinkPreviewRequest(requestGeneration) {
+                localLinkPreviewDownloadTask = nil
             }
-            try handle.seekToEnd()
-            try handle.write(contentsOf: data)
-            offset += Int64(chunk.byteCount)
-            if chunk.isFinal { break }
+        }
+
+        do {
+            _ = try await downloadTask.value
+        } catch {
+            if error is CancellationError { throw TerminalLinkPreviewRequestError.stale }
+            throw error
         }
 
         try ensureCurrentLinkPreviewRequest(requestGeneration)
+        try? FileManager.default.removeItem(at: localURL)
+        try FileManager.default.moveItem(at: temporaryURL, to: localURL)
+        didMoveTemporaryFile = true
         cleanupStalePreviewCache()
-        didCompleteTransfer = true
         return localURL
-    }
-
-    private func readTerminalLinkChunk(
-        linkID: String,
-        offset: Int64,
-        limit: Int,
-        commandChannel: SpacesDeviceAPICommandChannel?
-    ) async throws -> SpacesDeviceTerminalLinkChunk {
-        try await bridgeClient.readTerminalLinkChunk(
-            sessionID: session.id, linkID: linkID, offset: offset, limit: limit, commandChannel: commandChannel)
     }
 
     private func previewCacheURL(for metadata: SpacesDeviceTerminalLinkMetadata) throws -> URL {
@@ -884,20 +1278,33 @@ struct TerminalLinkPreview: Identifiable, Equatable {
         return linkPreviewCacheDirectory.appendingPathComponent("\(digest).\(fileExtension)")
     }
 
+    private func temporaryPreviewDownloadURL(for cacheURL: URL) -> URL {
+        cacheURL.deletingLastPathComponent().appendingPathComponent(".\(cacheURL.lastPathComponent).\(UUID().uuidString).download")
+    }
+
     private func beginLinkPreviewRequest() -> UInt64 {
         linkPreviewRequestGeneration &+= 1
-        cancelExternalLinkPreviewDownload()
+        cancelLinkPreviewDownloads()
         return linkPreviewRequestGeneration
     }
 
     private func invalidateLinkPreviewRequests() {
         linkPreviewRequestGeneration &+= 1
-        cancelExternalLinkPreviewDownload()
+        cancelLinkPreviewDownloads()
     }
 
-    private func cancelExternalLinkPreviewDownload() {
+    private func cancelAndClearLinkPreviewState() {
+        invalidateLinkPreviewRequests()
+        isPreparingLinkPreview = false
+        linkPreviewErrorMessage = nil
+        linkPreview = nil
+    }
+
+    private func cancelLinkPreviewDownloads() {
         externalLinkPreviewDownloadTask?.cancel()
         externalLinkPreviewDownloadTask = nil
+        localLinkPreviewDownloadTask?.cancel()
+        localLinkPreviewDownloadTask = nil
     }
 
     private func completeLinkPreviewRequest(_ requestGeneration: UInt64) {
@@ -1500,7 +1907,7 @@ struct TerminalLinkPreview: Identifiable, Equatable {
         streamHandle = nil
         bufferedInputFlushTask?.cancel()
         bufferedInputFlushTask = nil
-        inputSendQueue.cancelAll()
+        cancelQueuedInputSends()
         ownershipSynchronizationTask?.cancel()
         ownershipSynchronizationTask = nil
         bufferedInputText = ""
@@ -1513,6 +1920,7 @@ struct TerminalLinkPreview: Identifiable, Equatable {
         isPreparingLinkPreview = false
         linkPreviewErrorMessage = nil
         linkPreview = nil
+        linkNotice = nil
         isOwnershipSynchronizationScheduled = false
         isSynchronizingOwnership = false
         errorMessage = nil
@@ -1662,7 +2070,7 @@ struct TerminalLinkPreview: Identifiable, Equatable {
             bufferedInputFlushTask?.cancel()
             bufferedInputFlushTask = nil
             scrollCoalescer.cancel()
-            inputSendQueue.cancelAll()
+            cancelQueuedInputSends()
             ownershipSynchronizationTask?.cancel()
             ownershipSynchronizationTask = nil
             bufferedInputText = ""
@@ -1916,5 +2324,37 @@ struct TerminalLinkPreview: Identifiable, Equatable {
     private func endedRenderID(for snapshot: GhosttyTerminalSnapshot) -> String {
         let screenRevision = latestState?.screenStateRevision ?? 0
         return "ended|\(screenRevision)|\(snapshot.columns)x\(snapshot.rows)|\(latestState?.emittedAt ?? "unknown")"
+    }
+
+    /// Injects an owner-interactive state so composer/input send sequencing can be exercised without a
+    /// live subscribe stream (whose owner-bootstrap render update the unit tests cannot synthesize).
+    /// Sets the same preconditions the real owner-bootstrap path establishes: this client owns the
+    /// session, input readiness is confirmed, and an owner render epoch carries `ownerEpoch`.
+    func configureOwnerInteractiveForTesting(ownerEpoch: UInt64) {
+        let ownerAttachment = TerminalAttachment(
+            sessionID: session.id, clientID: remoteClient.id, mode: .owner, attachedAt: "2026-01-01T00:00:00Z")
+        let runtime = TerminalSessionRuntimeState(
+            sessionID: session.id, servicePID: 100, childPID: 200, state: .running, updatedAt: "2026-01-01T00:00:00Z")
+        latestState = GhosttyRemoteSessionStatePayload(
+            sessionID: session.id,
+            reason: TerminalRemoteSessionStateReason.initial,
+            emittedAt: "2026-01-01T00:00:00Z",
+            sessionStateRevision: nil,
+            sessionStateFlags: nil,
+            screenStateRevision: nil,
+            runtimeState: runtime,
+            attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [remoteClient], attachments: [ownerAttachment]),
+            title: session.title,
+            workingDirectory: session.workingDirectory,
+            outputByteCount: 0)
+        let bootstrapSnapshot = GhosttyTerminalSnapshot(
+            columns: 80, rows: 24, cursorColumn: 0, cursorRow: 0, cursorVisible: true,
+            defaultForegroundRGB: 0xFFFF_FFFF, defaultBackgroundRGB: 0, cells: [])
+        ownerRenderEpochState = GhosttyRemoteTerminalOwnerEpoch(
+            sessionID: session.id, id: "owner|test", ownerEpoch: ownerEpoch, bootstrapSnapshot: bootstrapSnapshot)
+        hasAttachedToSession = true
+        hasAttemptedAutomaticTakeover = true
+        hasConfirmedOwnerInputReadiness = true
+        isInputSurfaceReady = true
     }
 }

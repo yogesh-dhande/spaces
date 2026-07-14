@@ -189,6 +189,7 @@ publish_packaged_artifacts() {
         gh release create "$RELEASE_TAG" "${assets[@]}" \
             --repo "$ARTIFACT_REPO" \
             --title "$release_title" \
+            --prerelease \
             --notes "Prebuilt Ghostty artifacts for $GHOSTTY_SHA." 2>&1
     )"; then
         return

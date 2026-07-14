@@ -5,12 +5,21 @@ root="$(cd "$(dirname "$0")/.." && pwd)"
 repo_root="$(cd "$root/../.." && pwd)"
 source "$repo_root/scripts/spaces-profile-helpers.sh"
 
-# A healthy full verify (build + SwiftPM coverage + iOS tests) completes well under this
-# ceiling; a run that exceeds it is hung — typically a flaky test that deadlocks under the
-# parallel coverage run — and must fail fast instead of blocking a commit indefinitely.
-# Override with SPACES_VERIFY_TIMEOUT_SECONDS (0 disables, e.g. when attaching a debugger).
+# The watchdog fires on silence, not on total elapsed time. Total elapsed time cannot tell a hung
+# run from a healthy one: a cold verify spends most of its wall clock compiling — the SwiftPM
+# coverage step rebuilds every test target under instrumentation — so any ceiling loose enough to
+# survive a cold build is far too loose to catch a test that deadlocks on a warm one. What actually
+# separates the two is output. Every phase here streams progress (per-target compile lines, per-test
+# lines, xcodebuild activity); a deadlocked test or a wedged build streams nothing. So the gate is
+# the gap since the last byte of output, which catches a hang anywhere in the run — including in a
+# build — while never penalising a slow-but-healthy one.
+#
+# The threshold must clear the longest legitimately silent stretch, which is a link or an
+# `llvm-cov export` over the full test binary, not any single compile.
+# Override with SPACES_VERIFY_STALL_SECONDS (0 disables, e.g. when attaching a debugger).
 # The watchdog is armed at the end of this script; see run_verify_steps below.
-verify_timeout_seconds="${SPACES_VERIFY_TIMEOUT_SECONDS:-900}"
+verify_stall_seconds="${SPACES_VERIFY_STALL_SECONDS:-600}"
+verify_stall_poll_seconds=5
 
 # Recursively SIGKILL a process and all of its descendants. macOS has no `timeout(1)` and
 # ships bash 3.2 (no $BASHPID), so the watchdog runs the real work as a separate child and
@@ -134,22 +143,49 @@ run_verify_steps() {
   run_ios_tests
 }
 
-if [ "$verify_timeout_seconds" -le 0 ]; then
+if [ "$verify_stall_seconds" -le 0 ]; then
   run_verify_steps
   exit 0
 fi
+
+# The run's output is mirrored to a log whose modification time is the liveness signal the
+# watchdog polls. A FIFO plus an explicit `tee` child, rather than `> >(tee ...)`: bash 3.2 does
+# not set `$!` for a process substitution, and the tee PID is needed to wait for its flush before
+# exiting — otherwise a failing run could lose the very output that explains the failure.
+verify_output_dir="$(mktemp -d -t spaces-verify)"
+verify_fifo="$verify_output_dir/output"
+verify_log="$verify_output_dir/output.log"
+mkfifo "$verify_fifo"
+: >"$verify_log"
+trap 'rm -rf "$verify_output_dir"' EXIT
+
+# Start the reader first: opening a FIFO for writing blocks until a reader has it open.
+tee "$verify_log" <"$verify_fifo" &
+verify_tee_pid=$!
 
 # Run the real work as a child so the watchdog — a sibling of that child, not part of its
 # process tree — can force-kill the whole tree (swift-test/xcodebuild workers included) on
 # timeout without needing to identify or exclude itself. A SIGKILLed child makes `wait`
 # return non-zero, so the run exits with a failing status that aborts the commit.
-run_verify_steps &
+run_verify_steps >"$verify_fifo" 2>&1 &
 verify_work_pid=$!
 
 (
-  sleep "$verify_timeout_seconds"
-  echo "verify.sh: exceeded ${verify_timeout_seconds}s ceiling; killing the run (likely a hung/flaky test)." >&2
-  kill_process_tree "$verify_work_pid"
+  while :; do
+    sleep "$verify_stall_poll_seconds"
+    kill -0 "$verify_work_pid" 2>/dev/null || exit 0
+    last_output_epoch="$(stat -f %m "$verify_log" 2>/dev/null || true)"
+    # An unreadable log is not evidence of a stall; wait for the next poll rather than kill a
+    # healthy run over a failed stat.
+    case "$last_output_epoch" in
+      '' | *[!0-9]*) continue ;;
+    esac
+    if [ "$(($(date +%s) - last_output_epoch))" -ge "$verify_stall_seconds" ]; then
+      echo "verify.sh: no output for ${verify_stall_seconds}s; killing the run (likely a hung/flaky test)." >&2
+      kill_process_tree "$verify_work_pid"
+      exit 0
+    fi
+  done
 ) &
 verify_watchdog_pid=$!
 
@@ -161,8 +197,12 @@ wait "$verify_work_pid" || verify_status=$?
 
 # Work finished (cleanly or via the watchdog's kill): disarm the now-idle watchdog. Kill its
 # whole tree, not just the subshell — bash does not forward the signal to its foreground
-# `sleep`, so signalling the subshell alone would orphan that sleep until the ceiling expires.
+# `sleep`, so signalling the subshell alone would orphan that sleep until the next poll.
 kill_process_tree "$verify_watchdog_pid" 2>/dev/null
 wait "$verify_watchdog_pid" 2>/dev/null || true
+
+# The work child closed the FIFO's write end, so `tee` sees EOF and exits once it has flushed
+# every buffered line to the terminal.
+wait "$verify_tee_pid" 2>/dev/null || true
 
 exit "$verify_status"

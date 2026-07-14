@@ -213,10 +213,10 @@ final class CommandPalettePanel: NSPanel {
     func toggleCommandPaletteFromHotkey() {
         let perfContext = host.captureHotkeyPerfContext()
         host.logHotkeyDebug("toggle_palette begin \(host.hotkeyWindowStateSummary())")
-        // The Chrome Automation permission screen blocks the main UI; the command palette must not
-        // surface workspace actions behind it, so the palette hotkey only shows/hides the window
-        // until the gate completes.
-        guard host.chromeAutomationSetupController == nil else {
+        // The launch setup flow occupies the main window; the command palette must not surface
+        // workspace actions behind it, so the palette hotkey only shows/hides the window until the
+        // flow completes.
+        guard host.setupFlowController == nil else {
             host.logHotkeyDebug("toggle_palette reroute_permission_setup")
             host.toggleWindowFromHotkey()
             return

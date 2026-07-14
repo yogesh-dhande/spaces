@@ -246,7 +246,7 @@ def wait_for_terminal_state(args: argparse.Namespace, app: dict, session_id: str
 
 
 def terminal_control_payload(action: str, session_id: str, **values: object) -> dict:
-    payload: dict[str, object] = {"action": action, "sessionID": session_id, "appendNewline": False}
+    payload: dict[str, object] = {"action": action, "sessionID": session_id, "appendNewline": False, "asPaste": False}
     payload.update({key: value for key, value in values.items() if value is not None})
     return payload
 

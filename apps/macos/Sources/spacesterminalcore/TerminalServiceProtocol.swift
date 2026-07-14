@@ -124,6 +124,12 @@ public enum TerminalServiceCommand: Sendable, Equatable {
     case ping
     case shutdownIfIdle
     case shutdown
+    /// FROZEN — this case must never be renamed or removed, and only optional fields may ever be
+    /// added to its (currently empty) payload. It is sent by a same-or-older bundled CLI/installer to
+    /// any future daemon to trigger an exec-in-place staged-update handoff, so a newer daemon must
+    /// keep decoding exactly this shape forever. Carries no payload: the daemon re-execs its own
+    /// staged binary; the sender names nothing.
+    case applyStagedUpdate
     case create(TerminalServiceCreateRequest)
     case prepareWorkspace(TerminalServicePrepareWorkspaceRequest)
     case runWorkspaceCommand(TerminalServiceRunWorkspaceCommandRequest)
@@ -143,6 +149,7 @@ public enum TerminalServiceCommand: Sendable, Equatable {
         case .ping: "ping"
         case .shutdownIfIdle: "shutdownIfIdle"
         case .shutdown: "shutdown"
+        case .applyStagedUpdate: "applyStagedUpdate"
         case .create: "create"
         case .prepareWorkspace: "prepareWorkspace"
         case .runWorkspaceCommand: "runWorkspaceCommand"
@@ -182,6 +189,7 @@ extension TerminalServiceCommand: Codable {
         case ping
         case shutdownIfIdle
         case shutdown
+        case applyStagedUpdate
         case create
         case prepareWorkspace
         case runWorkspaceCommand
@@ -213,6 +221,9 @@ extension TerminalServiceCommand: Codable {
         case .shutdown:
             _ = try container.decode(TerminalServiceEmptyPayload.self, forKey: key)
             self = .shutdown
+        case .applyStagedUpdate:
+            _ = try container.decode(TerminalServiceEmptyPayload.self, forKey: key)
+            self = .applyStagedUpdate
         case .create: self = .create(try container.decode(TerminalServiceCreateRequest.self, forKey: key))
         case .prepareWorkspace: self = .prepareWorkspace(try container.decode(TerminalServicePrepareWorkspaceRequest.self, forKey: key))
         case .runWorkspaceCommand: self = .runWorkspaceCommand(try container.decode(TerminalServiceRunWorkspaceCommandRequest.self, forKey: key))
@@ -237,6 +248,7 @@ extension TerminalServiceCommand: Codable {
         case .ping: try container.encode(TerminalServiceEmptyPayload(), forKey: .ping)
         case .shutdownIfIdle: try container.encode(TerminalServiceEmptyPayload(), forKey: .shutdownIfIdle)
         case .shutdown: try container.encode(TerminalServiceEmptyPayload(), forKey: .shutdown)
+        case .applyStagedUpdate: try container.encode(TerminalServiceEmptyPayload(), forKey: .applyStagedUpdate)
         case .create(let payload): try container.encode(payload, forKey: .create)
         case .prepareWorkspace(let payload): try container.encode(payload, forKey: .prepareWorkspace)
         case .runWorkspaceCommand(let payload): try container.encode(payload, forKey: .runWorkspaceCommand)
@@ -455,12 +467,12 @@ public struct TerminalServiceTerminalLinkMetadata: Codable, Sendable, Equatable,
     public let originalLink: String
     public let displayName: String
     public let contentType: String?
-    public let mediaKind: String?
+    public let artifactKind: String?
     public let byteCount: Int64?
     public let externalURL: String?
 
     public init(
-        id: String, source: String, originalLink: String, displayName: String, contentType: String?, mediaKind: String?, byteCount: Int64?,
+        id: String, source: String, originalLink: String, displayName: String, contentType: String?, artifactKind: String?, byteCount: Int64?,
         externalURL: String?
     ) {
         self.id = id
@@ -468,7 +480,7 @@ public struct TerminalServiceTerminalLinkMetadata: Codable, Sendable, Equatable,
         self.originalLink = originalLink
         self.displayName = displayName
         self.contentType = contentType
-        self.mediaKind = mediaKind
+        self.artifactKind = artifactKind
         self.byteCount = byteCount
         self.externalURL = externalURL
     }
@@ -530,8 +542,14 @@ public struct TerminalServiceSessionSummary: Codable, Sendable, Equatable, Ident
 }
 
 public struct TerminalServiceDaemonStatus: Codable, Sendable, Equatable {
+    /// Version of the build this daemon process is *running* — compiled in at build time, so it is
+    /// fixed for the life of the process.
     public let version: String
-    public let artifactVersion: String?
+    /// Version of the Spaces build currently *installed* on the daemon's device, read from disk each
+    /// time a status is built. It moves ahead of `version` when an update lands while the daemon keeps
+    /// running the older build, and it is `nil` when no installed build can be identified (a daemon
+    /// launched straight from a development build directory).
+    public let installedVersion: String?
     public let certificateFingerprint: String?
     public let activeSessionCount: Int
     /// Wire-contract version the daemon speaks. Client and daemon must match exactly.
@@ -553,12 +571,12 @@ public struct TerminalServiceDaemonStatus: Codable, Sendable, Equatable {
     public static let unknownProtocolVersion = 0
 
     public init(
-        version: String, artifactVersion: String?, certificateFingerprint: String?, activeSessionCount: Int,
+        version: String, installedVersion: String?, certificateFingerprint: String?, activeSessionCount: Int,
         protocolVersion: Int = SpacesWireProtocol.version, runningProcesses: Int = 0, activeAgents: Int = 0, waitingAgents: Int = 0,
         operatingSystem: String = TerminalServiceDaemonStatus.currentOperatingSystem
     ) {
         self.version = version
-        self.artifactVersion = artifactVersion
+        self.installedVersion = installedVersion
         self.certificateFingerprint = certificateFingerprint
         self.activeSessionCount = activeSessionCount
         self.protocolVersion = protocolVersion
@@ -570,7 +588,7 @@ public struct TerminalServiceDaemonStatus: Codable, Sendable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case version
-        case artifactVersion
+        case installedVersion
         case certificateFingerprint
         case activeSessionCount
         case protocolVersion
@@ -589,7 +607,7 @@ public struct TerminalServiceDaemonStatus: Codable, Sendable, Equatable {
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         version = try container.decodeIfPresent(String.self, forKey: .version) ?? ""
-        artifactVersion = try container.decodeIfPresent(String.self, forKey: .artifactVersion)
+        installedVersion = try container.decodeIfPresent(String.self, forKey: .installedVersion)
         certificateFingerprint = try container.decodeIfPresent(String.self, forKey: .certificateFingerprint)
         activeSessionCount = try container.decodeIfPresent(Int.self, forKey: .activeSessionCount) ?? 0
         protocolVersion = try container.decodeIfPresent(Int.self, forKey: .protocolVersion) ?? Self.unknownProtocolVersion
@@ -609,6 +627,18 @@ public struct TerminalServiceDaemonStatus: Codable, Sendable, Equatable {
     }
 
     public var isLinuxDaemon: Bool { operatingSystem == "Linux" }
+
+    /// A newer Spaces is installed on the daemon's device than the build the daemon is running, so an
+    /// update is staged and applies on its next restart.
+    ///
+    /// This is a fact about one device, answered by that device, so every client — Mac, iPhone, CLI —
+    /// reads the same value. A client must never derive it by comparing the daemon's version against
+    /// its *own* build: the iPhone app and the Linux daemon ship on unrelated release trains, so that
+    /// comparison says nothing about whether an update is waiting on the other end.
+    public var isUpdatePending: Bool {
+        guard let installedVersion else { return false }
+        return SpacesWireProtocol.isVersion(version, olderThan: installedVersion)
+    }
 }
 
 public struct TerminalServiceResponse: Codable, Sendable, Equatable {

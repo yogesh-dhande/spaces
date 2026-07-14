@@ -65,7 +65,7 @@ public struct SpacesClientMigrationStep: Sendable {
 
 public final class SpacesClientDatabase {
     public static let databasePathEnvironmentVariable = "SPACES_CLIENT_DB_PATH"
-    public static let currentVersion = 1
+    public static let currentVersion = 2
     private static let defaultDatabaseStorage = DefaultDatabaseStorage()
     private static let timestampFormatter = TimestampFormatterStorage()
 
@@ -284,6 +284,28 @@ public final class SpacesClientDatabase {
 
     public func clearBrowserSessionWindowIDs(deviceID: String, workspaceID: String) throws {
         try execute(sql: "DELETE FROM browser_session_window_ids WHERE device_id = ? AND workspace_id = ?", bindings: [deviceID, workspaceID])
+    }
+
+    // MARK: - Terminal owner client ids
+
+    /// Records the `TerminalClient` id this device used to attach to a terminal session as OWNER, so a
+    /// relaunch of this Mac reuses the same id and the daemon's still-live `localWindow` owner
+    /// attachment matches — letting the pane silently reclaim ownership instead of attaching as a
+    /// viewer. Keyed by (device id, session id); session ids are globally unique.
+    public func setTerminalOwnerClientID(deviceID: String, sessionID: String, clientID: String) throws {
+        try execute(
+            sql: """
+                INSERT INTO terminal_owner_client_ids(device_id, session_id, client_id, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(device_id, session_id) DO UPDATE SET
+                  client_id = excluded.client_id,
+                  updated_at = excluded.updated_at
+                """, bindings: [deviceID, sessionID, clientID, Self.timestamp()])
+    }
+
+    public func terminalOwnerClientID(deviceID: String, sessionID: String) throws -> String? {
+        try queryRow(sql: "SELECT client_id FROM terminal_owner_client_ids WHERE device_id = ? AND session_id = ?", bindings: [deviceID, sessionID])?
+            .first.flatMap(normalized)
     }
 
     // MARK: - Panel layouts
@@ -585,6 +607,8 @@ public final class SpacesClientDatabase {
 
             \(browserSessionWindowIDsSchemaSQL)
 
+            \(terminalOwnerClientIDsSchemaSQL)
+
             \(panelLayoutsSchemaSQL)
 
             CREATE TABLE IF NOT EXISTS migration_state (
@@ -624,6 +648,21 @@ public final class SpacesClientDatabase {
             );
         """
 
+    // Terminal owner client ids are client/device-local: the `TerminalClient` id this Mac last used
+    // to attach to a session as OWNER. Reusing it across app relaunches lets the pane reclaim the
+    // daemon's orphaned, never-expiring `localWindow` owner attachment silently (see
+    // `setTerminalOwnerClientID`). The stored UUID exists only on this Mac, so it can only ever match
+    // THIS device's own prior attachment.
+    private static let terminalOwnerClientIDsSchemaSQL = """
+            CREATE TABLE IF NOT EXISTS terminal_owner_client_ids (
+              device_id TEXT NOT NULL,
+              session_id TEXT NOT NULL,
+              client_id TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              PRIMARY KEY (device_id, session_id)
+            );
+        """
+
     // Panel layouts are client-local UI state: which sessions are open in which
     // tabs/panes per workspace, plus extra panel windows, as a versioned JSON document
     // per panel (see `PanelLayout` in spacesui).
@@ -647,10 +686,14 @@ public final class SpacesClientDatabase {
             );
         """
 
-    // Schema resets to version 1; there is no upgrade path from an older on-disk database (see
-    // `initializeSchema` — a database without a current `migration_state` marker fails closed
-    // instead of migrating or resetting). This stays empty until a version-2 step is introduced.
-    public static let defaultMigrationSteps: [SpacesClientMigrationStep] = []
+    // A database without a current `migration_state` marker fails closed instead of migrating or
+    // resetting (see `initializeSchema`). Databases already carrying a marker upgrade serially: each
+    // step moves exactly one version forward and carries existing data forward untouched.
+    public static let defaultMigrationSteps: [SpacesClientMigrationStep] = [
+        SpacesClientMigrationStep(
+            fromVersion: 1, toVersion: 2, description: "Add terminal_owner_client_ids for stable per-device terminal owner client ids"
+        ) { db in try executeClientBatch(database: db, sql: terminalOwnerClientIDsSchemaSQL) }
+    ]
 
     private static func timestamp() -> String { timestampFormatter.string(from: Date()) }
 }

@@ -30,6 +30,44 @@
         }
     }
 
+    /// Counts Ghostty data callbacks that have entered Spaces persistence. Handoff
+    /// first stops new callbacks at the Ghostty session, then awaits this fence before
+    /// the core drains its coalescing buffer and closes output.log.
+    final class GhosttyEmbeddedHandoffOutputDeliveryFence: @unchecked Sendable {
+        private let lock = NSLock()
+        private var deliveryCount = 0
+        private var drainWaiters: [CheckedContinuation<Void, Never>] = []
+
+        func beginDelivery() {
+            lock.lock()
+            deliveryCount += 1
+            lock.unlock()
+        }
+
+        func finishDelivery() {
+            lock.lock()
+            precondition(deliveryCount > 0, "finishing an output delivery that was never registered")
+            deliveryCount -= 1
+            let waiters = deliveryCount == 0 ? drainWaiters : []
+            if deliveryCount == 0 { drainWaiters.removeAll() }
+            lock.unlock()
+            for waiter in waiters { waiter.resume() }
+        }
+
+        func waitUntilDrained() async {
+            await withCheckedContinuation { continuation in
+                lock.lock()
+                guard deliveryCount > 0 else {
+                    lock.unlock()
+                    continuation.resume()
+                    return
+                }
+                drainWaiters.append(continuation)
+                lock.unlock()
+            }
+        }
+    }
+
     @MainActor final class GhosttyEmbeddedTerminalSessionDriver {
         private let launchConfiguration: TerminalSessionLaunchConfiguration
 
@@ -38,6 +76,10 @@
         private var headlessHostView: GhosttyHeadlessSessionHostView?
         private var surfaceUserData: GhosttyEmbeddedSurfaceUserData?
         private let outputPipe = GhosttyHostManagedOutputPipe()
+        private let handoffOutputDeliveryFence = GhosttyEmbeddedHandoffOutputDeliveryFence()
+        /// Serial queue that runs the blocking `output.log` replay off the main actor
+        /// during a handoff resume (see `replayOutputLogOffMainActor`).
+        private let handoffReplayQueue = DispatchQueue(label: "spaces.terminal.session.handoff-replay")
         private nonisolated(unsafe) var outputHandler: (@Sendable (Data) -> Void)?
         private var didHandleSurfaceClose = false
         private var lastKnownSurfaceSize: (columns: Int, rows: Int)?
@@ -68,6 +110,77 @@
         func startIfNeeded() throws {
             guard session == nil, hostPTY == nil else { return }
 
+            let (createdSession, hostPTY) = try configureNewSession()
+
+            do { try hostPTY.startIfNeeded() } catch {
+                rollbackSessionConfiguration(createdSession)
+                throw error
+            }
+
+            finalizeSessionAdoption(createdSession, hostPTY: hostPTY, initialSize: lastKnownSurfaceSize ?? hostPTY.surfaceCellSize())
+        }
+
+        /// Resume side of the exec-in-place handoff: rebuild the headless GhosttyKit
+        /// session for a PTY this process already owns (its master fd survived `execv`
+        /// with `FD_CLOEXEC` cleared and the child stayed our child), replay the
+        /// persisted `output.log` to reconstruct the screen, and only then adopt the
+        /// PTY. Ordering is the reflow-correctness invariant: the grid MUST be resized
+        /// to the persisted `(columns, rows)` before any byte is replayed (replaying at
+        /// the wrong width reflows line wrapping incorrectly), and the PTY read loop
+        /// (which `adopt` starts) must not deliver a live byte into the session until
+        /// the replay has finished. Hence: create session → resize → replay → adopt.
+        ///
+        /// This is `async` because `ghostty_session_process_output` is a BLOCKING call
+        /// that waits for the session's IO to drain, and that IO is pumped by
+        /// `ghostty_app_tick` on the main actor. Running the replay on the main actor
+        /// would deadlock (the main actor would be blocked inside `process_output`,
+        /// unable to tick). Instead the replay runs on a background queue — exactly as
+        /// the live PTY read loop already does — while the awaiting main actor stays
+        /// free to service the app's wakeup ticks.
+        func adoptFromHandoff(masterFD: Int32, childPID: Int32, columns: Int, rows: Int, outputLogPath: String) async throws {
+            guard session == nil, hostPTY == nil else { return }
+
+            let (createdSession, hostPTY) = try configureNewSession()
+
+            // The session is created parked/occluded like a fresh one; the read loop is
+            // not running yet (adopt below starts it), so nothing can race the replay.
+            ghostty_session_set_focus(createdSession, false)
+            ghostty_session_set_occlusion(createdSession, true)
+
+            // 1. Converge the grid to the persisted size BEFORE replay so wrapping/reflow
+            //    of the replayed scrollback matches what the pre-handoff daemon rendered.
+            _ = resizeCellGrid(columns: columns, rows: rows)
+
+            // 2. Replay the durable output.log through the exact path a live PTY byte
+            //    takes (`outputPipe.process` → `ghostty_session_process_output`).
+            //
+            //    Suppress the surface data-callback sink for the duration of the replay:
+            //    `process_output` re-emits every processed byte to the data callback
+            //    (that callback is the host's persistence/broadcast tee, which is how
+            //    output.log gets written in the first place), so leaving it wired would
+            //    append the entire transcript to output.log a second time. The screen is
+            //    still fully reconstructed — the callback only tees, it does not parse.
+            let restoreOutputHandler = outputHandler
+            outputHandler = nil
+            await replayOutputLogOffMainActor(at: outputLogPath, startingAt: 0)
+            outputHandler = restoreOutputHandler
+            ghostty_session_refresh(createdSession)
+            GhosttyEmbeddedAppService.shared.tick()
+
+            finalizeSessionAdoption(createdSession, hostPTY: hostPTY, initialSize: (columns: columns, rows: rows), startReadLoop: false)
+
+            // 3. Adopt the PTY LAST: `adopt` starts the read loop, so from here on live
+            //    bytes flow into the already-reconstructed session.
+            hostPTY.adopt(masterFD: masterFD, childPID: childPID)
+        }
+
+        /// Shared construction body for `startIfNeeded` and `adoptFromHandoff`: creates
+        /// the headless GhosttyKit session, wires the surface data/state callbacks and
+        /// the host-managed PTY receive callbacks identically, and installs the host
+        /// PTY output/closed handlers. It does NOT start or adopt the PTY — the caller
+        /// decides whether to fork a fresh child (`hostPTY.startIfNeeded()`) or adopt an
+        /// inherited one (`hostPTY.adopt(...)`).
+        private func configureNewSession() throws -> (session: ghostty_session_t, hostPTY: HostManagedPTYTerminalSessionDriver) {
             try GhosttyEmbeddedAppService.shared.startIfNeeded()
             guard let app = GhosttyEmbeddedAppService.shared.app else { throw GhosttyEmbeddedAppServiceError.configuration("ghostty app missing") }
 
@@ -120,28 +233,123 @@
                 }
             }
             hostPTY.setSessionClosedHandler { [weak self] in self?.handleHostPTYClosed() }
+            return (createdSession, hostPTY)
+        }
 
-            do { try hostPTY.startIfNeeded() } catch {
-                hostPTY.setOutputHandler(nil)
-                hostPTY.setSessionClosedHandler(nil)
-                self.hostPTY = nil
-                outputPipe.setSession(nil)
-                ghostty_session_set_data_callback(createdSession, nil, nil)
-                ghostty_session_set_state_callback(createdSession, nil, nil)
-                if let surface = surface { GhosttyEmbeddedAppService.shared.unregisterActionHandler(for: surface) }
-                session = nil
-                self.surfaceUserData = nil
-                ghostty_session_free(createdSession)
-                throw error
+        /// Undoes `configureNewSession` when the host PTY fails to start: mirror the
+        /// teardown the old inline `startIfNeeded` catch performed.
+        private func rollbackSessionConfiguration(_ createdSession: ghostty_session_t) {
+            hostPTY?.setOutputHandler(nil)
+            hostPTY?.setSessionClosedHandler(nil)
+            hostPTY = nil
+            outputPipe.setSession(nil)
+            ghostty_session_set_data_callback(createdSession, nil, nil)
+            ghostty_session_set_state_callback(createdSession, nil, nil)
+            if let surface = surface { GhosttyEmbeddedAppService.shared.unregisterActionHandler(for: surface) }
+            session = nil
+            surfaceUserData = nil
+            ghostty_session_free(createdSession)
+        }
+
+        /// Post-construction bring-up shared by fresh starts and handoff resumes. When
+        /// `startReadLoop` is false the caller has already converged the grid and driven
+        /// the PTY setup (handoff replay path), so this only refreshes and publishes.
+        private func finalizeSessionAdoption(
+            _ createdSession: ghostty_session_t, hostPTY: HostManagedPTYTerminalSessionDriver, initialSize: (columns: Int, rows: Int),
+            startReadLoop: Bool = true
+        ) {
+            if startReadLoop {
+                ghostty_session_set_focus(createdSession, false)
+                ghostty_session_set_occlusion(createdSession, true)
+                _ = resizeCellGrid(columns: initialSize.columns, rows: initialSize.rows)
             }
-
-            ghostty_session_set_focus(createdSession, false)
-            ghostty_session_set_occlusion(createdSession, true)
-            let initialSize = lastKnownSurfaceSize ?? hostPTY.surfaceCellSize()
-            _ = resizeCellGrid(columns: initialSize.columns, rows: initialSize.rows)
             ghostty_session_refresh(createdSession)
             deliverSessionStateChange(forcedFlags: .allKnown)
             notifySurfaceCellSizeIfChanged()
+        }
+
+        /// Streams the persisted transcript back into the freshly created session in
+        /// bounded chunks so a multi-gigabyte log never materializes as one `Data`. Each
+        /// chunk goes through `outputPipe.process` — the same call the live PTY read loop
+        /// uses — so the reconstructed screen matches what the original daemon had.
+        ///
+        /// The `process` call is dispatched to a background queue and awaited, never run
+        /// inline on the main actor: `ghostty_session_process_output` blocks until the
+        /// session IO drains, and that IO is driven by `ghostty_app_tick` on the main
+        /// actor. Awaiting a background dispatch keeps the main actor free to service the
+        /// app's wakeup ticks so the blocking process call can complete (mirrors how the
+        /// live read loop calls `process` off the main actor while main pumps ticks).
+        private func replayOutputLogOffMainActor(at path: String, startingAt offset: UInt64) async {
+            guard let handle = FileHandle(forReadingAtPath: path) else { return }
+            defer { try? handle.close() }
+            guard (try? handle.seek(toOffset: offset)) != nil else { return }
+            let chunkByteCount = 1024 * 1024
+            let pipe = outputPipe
+            let queue = handoffReplayQueue
+            while true {
+                let chunk = handle.readData(ofLength: chunkByteCount)
+                if chunk.isEmpty { break }
+                await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                    queue.async {
+                        pipe.process(chunk)
+                        continuation.resume()
+                    }
+                }
+            }
+        }
+
+        // MARK: - Exec-in-place handoff (quiesce side)
+
+        /// The live PTY master fd + child pid to carry across the handoff, or nil when
+        /// there is nothing to hand off. Forwarded from the host PTY driver.
+        func handoffDescriptorSnapshot() -> (masterFD: Int32, childPID: Int32)? { hostPTY?.handoffDescriptorSnapshot() }
+
+        /// Swap PTY output delivery to an in-memory buffer so the read loop keeps
+        /// draining while the daemon quiesces and closes its durable output handle.
+        func beginHandoffOutputBuffering() async {
+            if let hostPTY { await hostPTY.beginHandoffOutputBuffering() }
+            // The PTY barrier above waits for every processOutput call selected before
+            // its sink swap. Removing the callback then closes Ghostty's delivery source;
+            // the second fence proves callbacks already inside Spaces have returned.
+            if let session { ghostty_session_set_data_callback(session, nil, nil) }
+            await handoffOutputDeliveryFence.waitUntilDrained()
+        }
+
+        /// Flush the buffered PTY bytes to `path` and install a direct-to-file writer
+        /// that keeps appending until `execv`.
+        func finishHandoffOutputBuffering(appendingTo path: String) throws { try hostPTY?.finishHandoffOutputBuffering(appendingTo: path) }
+
+        func withValidatedHandoffOutputForExec<T>(_ operation: () throws -> T) throws -> T {
+            guard let hostPTY else { throw POSIXError(.EIO) }
+            return try hostPTY.withValidatedHandoffOutputForExec(operation)
+        }
+
+        /// Stop direct transcript appends before the core reads the persisted handoff
+        /// range or seeks its normal output handle. New PTY bytes remain buffered.
+        func pauseHandoffOutputForFallback() { hostPTY?.pauseHandoffOutputForFallback() }
+
+        /// Replays only the bytes persisted while the renderer was disconnected. The
+        /// Ghostty data callback remains disabled, so replay updates the renderer without
+        /// appending those bytes to the transcript a second time.
+        func replayPersistedHandoffOutput(at path: String, startingAt offset: UInt64) async {
+            await replayOutputLogOffMainActor(at: path, startingAt: offset)
+            if let session { ghostty_session_refresh(session) }
+            GhosttyEmbeddedAppService.shared.tick()
+        }
+
+        /// Final failed-`execv` fallback step: restore the data callback and normal PTY
+        /// delivery, replaying only bytes that accumulated after the direct writer stopped.
+        func endHandoffOutputBuffering() async {
+            if let session { ghostty_session_set_data_callback(session, Self.surfaceDataCallback, Unmanaged.passUnretained(self).toOpaque()) }
+            guard let hostPTY else { return }
+            let queue = handoffReplayQueue
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                queue.async {
+                    hostPTY.endHandoffOutputBuffering()
+                    continuation.resume()
+                }
+            }
+            await handoffOutputDeliveryFence.waitUntilDrained()
         }
 
         func terminate() {
@@ -178,6 +386,18 @@
             data.withUnsafeBytes { rawBuffer in
                 guard let baseAddress = rawBuffer.bindMemory(to: UInt8.self).baseAddress else { return }
                 ghostty_session_send_input_raw(session, baseAddress, UInt(data.count))
+            }
+            GhosttyEmbeddedAppService.shared.tick()
+            requestSurfaceRefresh()
+            GhosttyEmbeddedAppService.shared.tick()
+        }
+
+        func sendTextAsPaste(_ text: String) {
+            guard let surface = surface, !text.isEmpty else { return }
+            let data = Data(text.utf8)
+            data.withUnsafeBytes { rawBuffer in
+                guard let baseAddress = rawBuffer.bindMemory(to: UInt8.self).baseAddress else { return }
+                ghostty_surface_text(surface, baseAddress, UInt(data.count))
             }
             GhosttyEmbeddedAppService.shared.tick()
             requestSurfaceRefresh()
@@ -352,6 +572,8 @@
         private nonisolated static let surfaceDataCallback: ghostty_surface_data_cb = { userdata, bytes, len in
             guard let userdata, let bytes, len > 0 else { return }
             let runtime = Unmanaged<GhosttyEmbeddedTerminalSessionDriver>.fromOpaque(userdata).takeUnretainedValue()
+            runtime.handoffOutputDeliveryFence.beginDelivery()
+            defer { runtime.handoffOutputDeliveryFence.finishDelivery() }
             if runtime.outputHandler == nil { return }
             let data = Data(bytes: bytes, count: Int(len))
             runtime.outputHandler?(data)

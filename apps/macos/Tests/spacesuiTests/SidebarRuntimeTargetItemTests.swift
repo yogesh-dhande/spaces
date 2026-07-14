@@ -14,8 +14,7 @@ import workspacecore
             processes: [
                 SpacesDeviceProcessTemplate(id: "tpl-web", name: "web", command: "npm run dev"),
                 SpacesDeviceProcessTemplate(id: "tpl-api", name: "api", command: "npm run api"),
-            ],
-            browserSessions: [SpacesDeviceBrowserSession(name: "App", url: "http://localhost:$PORT")],
+            ], browserSessions: [SpacesDeviceBrowserSession(name: "App", url: "http://localhost:$PORT")],
             resolvedBrowserSessions: [SpacesDeviceBrowserSession(name: "App", url: "http://localhost:3000")],
             agentLaunchers: [
                 SpacesDeviceAgentLauncher(id: "launcher-claude", name: "claude", command: "claude"),
@@ -34,9 +33,9 @@ import workspacecore
             ],
             codingAgentRows: [
                 SpacesDeviceWorkspaceCodingAgentRow(
-                    id: "row-agent", workspaceID: "workspace", name: "claude", command: "claude", launcherID: "launcher-claude",
-                    agentID: "agent-1", sessionID: "sess-agent", isConfigured: true, runState: .running, activityState: .idle, canRun: false,
-                    canStop: true, canRestart: true)
+                    id: "row-agent", workspaceID: "workspace", name: "claude", command: "claude", launcherID: "launcher-claude", agentID: "agent-1",
+                    sessionID: "sess-agent", isConfigured: true, runState: .running, activityState: .idle, canRun: false, canStop: true,
+                    canRestart: true)
             ],
             terminalRows: [
                 SpacesDeviceWorkspaceTerminalRow(
@@ -51,14 +50,16 @@ import workspacecore
             detail: fixtureDetail(), browserSessions: [BrowserSession(name: "App", url: "http://localhost:3000")])
     }
 
+    /// Runtime rows group by family: browser sessions, configured processes, coding agents, then ad hoc
+    /// terminals. Shortcut numbering follows the same order, so ⌘1…⌘0 and the sidebar rows never disagree.
     @Test func itemsFollowShortcutTargetOrderWithStableKeys() {
         let items = fixtureItems()
         #expect(
             items.map(\.key) == [
-                "browser:http://localhost:3000", "process:proc-web", "missing:api", "terminal:sess-term", "agent:agent-1", "launcher:codex",
+                "browser:http://localhost:3000", "process:proc-web", "missing:api", "agent:agent-1", "launcher:codex", "terminal:sess-term",
             ])
         #expect(items.map(\.shortcutIndex) == [1, 2, 3, 4, 5, 6])
-        #expect(items.map(\.title) == ["App", "web", "api", "zsh", "claude", "codex"])
+        #expect(items.map(\.title) == ["App", "web", "api", "claude", "codex", "zsh"])
     }
 
     @Test func itemsCarryRunStateAndCapabilities() {
@@ -122,8 +123,8 @@ import workspacecore
     @Test func shortcutIndexStopsAfterTen() {
         let terminalRows = (0..<12).map { index in
             SpacesDeviceWorkspaceTerminalRow(
-                id: "term-\(index)", workspaceID: "workspace", title: "zsh \(index)", workingDirectory: "/tmp/workspace",
-                sessionID: "sess-\(index)", runState: .running, canOpenTerminal: true, canStop: true)
+                id: "term-\(index)", workspaceID: "workspace", title: "zsh \(index)", workingDirectory: "/tmp/workspace", sessionID: "sess-\(index)",
+                runState: .running, canOpenTerminal: true, canStop: true)
         }
         let summary = SpacesDeviceWorkspaceSummary(
             id: "workspace", projectID: "project", projectName: "project", branch: "main", baseBranch: nil, dir: "/tmp/workspace", isRunning: true,

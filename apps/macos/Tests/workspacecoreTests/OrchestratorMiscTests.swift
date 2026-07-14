@@ -164,14 +164,28 @@ extension OrchestratorTests {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let releaseBackgroundChildPath = root.appendingPathComponent("release-background-child").path
 
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)
         let project = try orchestrator.addProject(dir: projectDir.path)
         try orchestrator.updateProjectConfig(projectID: project.id) { config in
-            config.setupScript = "echo setup start; (sleep 2; echo background finished) & echo setup end"
+            config.setupScript = """
+                release_background_child=\(shellQuotedForSetupTest(releaseBackgroundChildPath))
+                echo setup start
+                (
+                  attempts=0
+                  while [ ! -e "$release_background_child" ] && [ "$attempts" -lt 80 ]; do
+                    attempts=$((attempts + 1))
+                    sleep 0.1
+                  done
+                  echo background finished
+                ) &
+                echo setup end
+                """
         }
         let workspace = try orchestrator.createWorkspace(projectID: project.id, runSetupScript: false)
+        defer { _ = FileManager.default.createFile(atPath: releaseBackgroundChildPath, contents: Data()) }
 
         let startedAt = Date()
         try orchestrator.runWorkspaceSetup(workspaceID: workspace.id)
@@ -179,11 +193,12 @@ extension OrchestratorTests {
 
         let state = try orchestrator.workspaceSetupState(workspaceID: workspace.id)
         XCTAssertEqual(state.status, .succeeded)
-        XCTAssertLessThan(elapsed, 1.5)
+        XCTAssertLessThan(elapsed, 4.0, "Setup should finish before the gated background child times out.")
         let logPath = try XCTUnwrap(state.logPath)
         let log = try String(contentsOfFile: logPath, encoding: .utf8)
         XCTAssertTrue(log.contains("setup start"))
         XCTAssertTrue(log.contains("setup end"))
+        XCTAssertFalse(log.contains("background finished"))
     }
 
     // Tests list workspaces includes branch metadata by arranging representative inputs and asserting the expected result.
@@ -879,3 +894,5 @@ extension OrchestratorTests {
         XCTAssertNil(fetched.notes)
     }
 }
+
+private func shellQuotedForSetupTest(_ value: String) -> String { "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'" }

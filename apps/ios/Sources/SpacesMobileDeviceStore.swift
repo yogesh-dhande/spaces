@@ -185,6 +185,13 @@ enum SpacesMobileDeviceStore {
         return load(fallbackSettings: fallback)
     }
 
+    /// Reads a paired device's Device API auth token from the Keychain, keyed by the same device ID
+    /// the browser routing table carries. The browser proxy dialer authenticates its raw-byte service
+    /// tunnel with this token, so it needs to look the secret up out of band from the settings flow.
+    static func authToken(deviceID: String) -> String? {
+        secret(deviceID: deviceID, kind: .authToken)
+    }
+
     private static func loadDevices() -> [SpacesMobilePairedDeviceRecord] {
         guard let data = UserDefaults.standard.data(forKey: devicesKey),
               let decoded = try? JSONDecoder().decode([SpacesMobilePairedDeviceRecord].self, from: data)

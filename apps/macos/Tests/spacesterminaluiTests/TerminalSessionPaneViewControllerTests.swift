@@ -146,6 +146,10 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
             pastedClipboard = true
             return true
         }
+        @discardableResult func sendTextAsPaste(_ text: String) -> Bool {
+            pastedClipboard = !text.isEmpty
+            return !text.isEmpty
+        }
         @discardableResult func performBindingAction(_ action: String) -> Bool {
             recordedBindingActions.append(action)
             switch action {
@@ -270,7 +274,8 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
 
     @MainActor private func makeGhosttyController(
         sessionID: String, paths: TerminalSessionPaths, preferredAttachmentMode: TerminalAttachmentMode = .owner, host: FakeGhosttySessionHost? = nil,
-        performInitialRefresh: Bool = true, attachClientAction: (@Sendable (TerminalClient, TerminalAttachmentMode) throws -> Void)? = nil,
+        performInitialRefresh: Bool = true, reusableOwnerClientID: String? = nil,
+        attachClientAction: (@Sendable (TerminalClient, TerminalAttachmentMode) throws -> Void)? = nil,
         takeoverAction: (@Sendable (String) throws -> TerminalControlResponse)? = nil, detachClientAction: (@Sendable (String) throws -> Void)? = nil,
         copySelectionAction: (@MainActor () -> Bool)? = nil, detachClientSynchronouslyOnClose: Bool = true,
         pasteClipboardAction: (@MainActor () -> Bool)? = nil,
@@ -290,9 +295,9 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
             }()
         return TerminalSessionPaneViewController(
             sessionID: sessionID, paths: paths, stateProvider: PersistenceBackedTerminalSessionStateProvider(paths: paths),
-            preferredAttachmentMode: preferredAttachmentMode, performInitialRefresh: performInitialRefresh, pasteImageAction: pasteImageAction,
-            pasteboardImageReadAction: pasteboardImageReadAction, takeoverAction: takeoverAction,
-            attachClientAction: attachClientAction ?? persistenceBackedAttachAction(paths),
+            preferredAttachmentMode: preferredAttachmentMode, performInitialRefresh: performInitialRefresh,
+            reusableOwnerClientID: reusableOwnerClientID, pasteImageAction: pasteImageAction, pasteboardImageReadAction: pasteboardImageReadAction,
+            takeoverAction: takeoverAction, attachClientAction: attachClientAction ?? persistenceBackedAttachAction(paths),
             detachClientAction: detachClientAction ?? persistenceBackedDetachAction(paths), copySelectionAction: copySelectionAction,
             detachClientSynchronouslyOnClose: detachClientSynchronouslyOnClose, defersInitialOwnerClientAttach: attachClientAction == nil,
             pasteClipboardAction: pasteClipboardAction, ownerWindowFocusAction: ownerWindowFocusAction,
@@ -972,6 +977,146 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         XCTAssertEqual(controller.debugRendererSummary, "Renderer: ghostty-mirror")
     }
 
+    @MainActor func testRequestOwnershipDoesNotAttachAgainWhenAlreadyActiveOwner() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        let sessionID = "session-already-owner"
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: sessionID, backend: .ghosttyEmbedded, title: "already-owner", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+                command: "cat", createdAt: "2026-05-20T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running, updatedAt: "2026-05-20T00:00:01Z"),
+            paths: paths)
+
+        let capture = ClientCapture()
+        let fakeHost = FakeGhosttySessionHost()
+        fakeHost.hasSurface = true
+        fakeHost.snapshotValue = ghosttySnapshot(text: "owned")
+        let controller = makeGhosttyController(
+            sessionID: sessionID, paths: paths, host: fakeHost, performInitialRefresh: false,
+            attachClientAction: { client, mode in
+                capture.attachedClientID = client.id
+                capture.attachedMode = mode
+                capture.attachedModes.append(mode)
+                try TerminalSessionPersistence.attachClient(
+                    sessionID: sessionID, client: client, mode: mode, paths: paths, attachedAt: "2026-05-20T00:00:0\(capture.attachedModes.count)Z")
+            }, detachClientAction: { _ in })
+
+        controller.showEmbedded(focus: true)
+        XCTAssertEqual(capture.attachedModes, [.owner])
+        XCTAssertEqual(try TerminalSessionPersistence.activeAttachments(paths: paths).first { $0.clientID == controller.clientID }?.mode, .owner)
+
+        controller.requestOwnershipIfNeeded()
+
+        XCTAssertEqual(capture.attachedModes, [.owner])
+        XCTAssertEqual(controller.attachmentMode, .owner)
+        XCTAssertEqual(fakeHost.attachedModes.last, .owner)
+    }
+
+    /// Relaunch reclaim: a pane built with the owner client id this device stored on its prior launch
+    /// matches the daemon's orphaned, never-expiring `localWindow` owner attachment left behind by the
+    /// killed instance. `currentOwnerClient?.id == client.id` so the pane silently adopts that owner
+    /// attachment — no daemon re-attach, no viewer/takeover UI.
+    @MainActor func testReusedOwnerClientIDReclaimsOrphanedOwnerAttachmentSilently() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        let sessionID = "session-relaunch-reclaim"
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: sessionID, backend: .ghosttyEmbedded, title: "relaunch", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
+                createdAt: "2026-05-20T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running, updatedAt: "2026-05-20T00:00:01Z"),
+            paths: paths)
+
+        // The dead instance's owner attachment: a local window client that still owns the session.
+        let reusedClientID = "reused-local-owner"
+        let orphanedOwner = TerminalClient(
+            id: reusedClientID, kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Studio Mac"),
+            connectedAt: "2026-05-20T00:00:00Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: sessionID, client: orphanedOwner, mode: .owner, paths: paths, attachedAt: "2026-05-20T00:00:00Z")
+
+        let capture = ClientCapture()
+        let fakeHost = FakeGhosttySessionHost()
+        fakeHost.snapshotValue = ghosttySnapshot(text: "owned")
+        let controller = makeGhosttyController(
+            sessionID: sessionID, paths: paths, host: fakeHost, reusableOwnerClientID: reusedClientID,
+            attachClientAction: { client, mode in
+                capture.attachedModes.append(mode)
+                try TerminalSessionPersistence.attachClient(
+                    sessionID: sessionID, client: client, mode: mode, paths: paths, attachedAt: "2026-05-20T00:00:02Z")
+            }, detachClientAction: { _ in })
+
+        controller.showEmbedded(focus: true)
+
+        let activeAttachments = try TerminalSessionPersistence.activeAttachments(paths: paths)
+        XCTAssertEqual(controller.clientID, reusedClientID)
+        // No daemon re-attach: the pane recognized itself as the existing owner attachment.
+        XCTAssertTrue(capture.attachedModes.isEmpty)
+        XCTAssertEqual(controller.attachmentMode, .owner)
+        XCTAssertEqual(activeAttachments.first { $0.mode == .owner }?.clientID, reusedClientID)
+        XCTAssertNil(activeAttachments.first { $0.mode == .owner && $0.clientID != reusedClientID })
+        XCTAssertEqual(fakeHost.attachedModes.last, .owner)
+        XCTAssertTrue(controller.debugShowsTerminalSurface)
+        XCTAssertFalse(controller.debugShowsTakeoverButton)
+    }
+
+    /// Cross-device safety: a stored owner client id that does NOT match the session's current owner
+    /// (another device owns it) never reclaims ownership. The pane attaches as a viewer and leaves the
+    /// current owner and the manual takeover UI unchanged — a stale local mapping is inert.
+    @MainActor func testStoredOwnerClientIDForForeignOwnerStillAttachesAsViewer() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        let sessionID = "session-foreign-owner"
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: sessionID, backend: .ghosttyEmbedded, title: "foreign", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
+                createdAt: "2026-05-20T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running, updatedAt: "2026-05-20T00:00:01Z"),
+            paths: paths)
+
+        let foreignOwner = TerminalClient(
+            id: "other-device-owner", kind: .remoteViewer, identity: .init(label: "iPad", hostName: "ipad", deviceName: "iPad Pro 13-inch (M5)"),
+            connectedAt: "2026-05-20T00:00:00Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: sessionID, client: foreignOwner, mode: .owner, paths: paths, attachedAt: "2026-05-20T00:00:00Z")
+
+        let capture = ClientCapture()
+        let fakeHost = FakeGhosttySessionHost()
+        fakeHost.hasSurface = false
+        // A stale stored id from a prior local attachment; it differs from the foreign current owner.
+        let staleStoredClientID = "stale-local-id"
+        let controller = makeGhosttyController(
+            sessionID: sessionID, paths: paths, host: fakeHost, reusableOwnerClientID: staleStoredClientID,
+            attachClientAction: { client, mode in
+                capture.attachedClientID = client.id
+                capture.attachedMode = mode
+                try TerminalSessionPersistence.attachClient(
+                    sessionID: sessionID, client: client, mode: mode, paths: paths, attachedAt: "2026-05-20T00:00:02Z")
+            }, detachClientAction: { _ in })
+
+        controller.showEmbedded(focus: true)
+
+        let activeAttachments = try TerminalSessionPersistence.activeAttachments(paths: paths)
+        XCTAssertEqual(controller.clientID, staleStoredClientID)
+        XCTAssertEqual(capture.attachedMode, .viewer)
+        XCTAssertEqual(activeAttachments.first { $0.mode == .owner }?.clientID, foreignOwner.id)
+        XCTAssertEqual(activeAttachments.first { $0.clientID == staleStoredClientID }?.mode, .viewer)
+        XCTAssertEqual(controller.attachmentMode, .viewer)
+    }
+
     @MainActor func testOwnerSeekingPanePromotesWhenBlockingOwnerDetachesAfterViewerAttach() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -1173,11 +1318,14 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         XCTAssertEqual(try TerminalSessionPersistence.activeAttachments(paths: paths).first { $0.clientID == controller.clientID }?.mode, .viewer)
 
         controller.requestOwnershipIfNeeded()
+        XCTAssertTrue(controller.debugTakeoverPending)
+        XCTAssertFalse(controller.debugShowsTakeoverButton)
+        XCTAssertFalse(controller.debugShowsTakeoverMessage)
 
         let deadline = Date().addingTimeInterval(1)
         while Date() < deadline {
             controller.debugForceRefresh()
-            if controller.attachmentMode == .owner { break }
+            if controller.attachmentMode == .owner && !controller.debugTakeoverPending { break }
             try? await Task.sleep(for: .milliseconds(25))
         }
 
@@ -1191,6 +1339,58 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         XCTAssertFalse(controller.debugShowsTextRenderer)
         XCTAssertEqual(controller.debugRendererSummary, "Renderer: ghostty-mirror")
         XCTAssertEqual(fakeHost.attachedModes.last, .owner)
+    }
+
+    @MainActor func testOwnerSeekingPaneRestoresTakeoverControlsAfterFailedOwnerRequest() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        let sessionID = "session-owner-seeking-failed-takeover"
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: sessionID, backend: .ghosttyEmbedded, title: "owner-seeking", workingDirectory: "/tmp/work", shell: "/bin/zsh",
+                command: "cat", createdAt: "2026-05-20T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running, updatedAt: "2026-05-20T00:00:01Z"),
+            paths: paths)
+
+        let remoteOwner = TerminalClient(
+            id: "remote-owner", kind: .remoteViewer, identity: .init(label: "iPad", hostName: "ipad", deviceName: "iPad Pro 13-inch (M5)"),
+            connectedAt: "2026-05-20T00:00:00Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: sessionID, client: remoteOwner, mode: .owner, paths: paths, attachedAt: "2026-05-20T00:00:00Z")
+
+        let fakeHost = FakeGhosttySessionHost()
+        fakeHost.hasSurface = false
+        let controller = makeGhosttyController(
+            sessionID: sessionID, paths: paths, host: fakeHost,
+            takeoverAction: { _ in TerminalControlResponse(ok: false, message: "Takeover denied.") }, detachClientAction: { _ in })
+
+        controller.showEmbedded(focus: true)
+
+        XCTAssertEqual(controller.attachmentMode, .viewer)
+        XCTAssertTrue(controller.debugShowsTakeoverButton)
+        XCTAssertTrue(controller.debugTakeoverEnabled)
+
+        controller.requestOwnershipIfNeeded()
+        XCTAssertTrue(controller.debugTakeoverPending)
+        XCTAssertFalse(controller.debugShowsTakeoverButton)
+
+        let deadline = Date().addingTimeInterval(1)
+        while Date() < deadline {
+            if !controller.debugTakeoverPending { break }
+            try? await Task.sleep(for: .milliseconds(25))
+        }
+
+        XCTAssertFalse(controller.debugTakeoverPending)
+        XCTAssertEqual(controller.attachmentMode, .viewer)
+        XCTAssertTrue(controller.debugShowsTakeoverMessage)
+        XCTAssertTrue(controller.debugShowsTakeoverButton)
+        XCTAssertTrue(controller.debugTakeoverEnabled)
+        XCTAssertEqual(controller.debugInputStatus, "Takeover denied.")
+        XCTAssertEqual(controller.debugRendererSummary, "Renderer: takeover status")
     }
 
     @MainActor func testTakeoverRetrySupersedesStalePendingAttempt() async throws {

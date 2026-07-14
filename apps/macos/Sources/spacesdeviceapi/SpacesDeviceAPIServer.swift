@@ -57,7 +57,19 @@ private func deviceAPIStreamRelayAttributes(for data: Data) -> [String: String] 
     return attributes
 }
 
+extension SpacesDeviceAPICommand {
+    fileprivate var isAgentHookCommand: Bool {
+        switch self {
+        case .agentHooksStatus, .installAgentHooks: true
+        default: false
+        }
+    }
+}
+
 public final class SpacesDeviceAPIServer: @unchecked Sendable {
+    typealias AgentHookStatusLoader = @Sendable () -> [AgentHookStatus]
+    typealias AgentHookInstallHandler = @Sendable ([SupportedCodingAgentHook]) throws -> AgentHookInstallOutcome
+
     private static let streamRelayReadBufferSize = 256 * 1024
     private static let defaultTerminalLinkTransferAuthorizationTTL: TimeInterval = 10 * 60
     static let terminalPasteImageMaxBytes = 10 * 1024 * 1024
@@ -233,7 +245,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             private let server: SpacesDeviceAPIServer
             private let peerID: String
             private var buffer = Data()
-            private var didSubscribe = false
+            /// Set once a subscription or service tunnel takes the connection over, stopping the
+            /// newline-delimited JSON read loop so the hijacking path owns all further bytes.
+            private var didHijackConnection = false
             private var didReceiveEOF = false
 
             init(connection: NWConnection, server: SpacesDeviceAPIServer) {
@@ -262,7 +276,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             }
 
             private func receiveNext() {
-                guard !didSubscribe else { return }
+                guard !didHijackConnection else { return }
                 connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { [weak self] content, _, isComplete, error in
                     guard let self else { return }
                     if let content, !content.isEmpty { self.buffer.append(content) }
@@ -281,7 +295,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             }
 
             private func processBufferedLines() {
-                guard !didSubscribe else { return }
+                guard !didHijackConnection else { return }
                 guard server.acceptingRequests else {
                     connection.cancel()
                     return
@@ -309,12 +323,31 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                         "request_received peer=\(peerID) command=\(request.commandName) session=\(request.sessionID ?? "-") client=\(request.clientID ?? request.clientApp?.installationID ?? "-")"
                     )
                     try server.authorize(request)
-                    guard !request.command.isSubscriptionCommand else {
-                        didSubscribe = true
-                        try server.handleSubscribeRequest(request, connection: connection)
+                    guard !request.command.hijacksConnection else {
+                        didHijackConnection = true
+                        if request.command.isTunnelCommand {
+                            // Whatever remains buffered after the request line is pipelined tunnel data;
+                            // hand it to the tunnel so those bytes reach the service.
+                            server.handleTunnelRequest(request, connection: connection, residual: buffer)
+                        } else {
+                            try server.handleSubscribeRequest(request, connection: connection)
+                        }
                         return
                     }
-                    let response = try server.handleRequest(request, peerID: peerID)
+                    if request.command.isAgentHookCommand {
+                        server.handleAgentHookRequestAsync(request) { [weak self] result in self?.finishRequest(result) }
+                    } else {
+                        finishRequest(Result { try server.handleRequest(request, peerID: peerID) })
+                    }
+                } catch { finishRequest(.failure(error)) }
+            }
+
+            /// Sends one request result, then either resumes the reusable request session or closes it
+            /// after a thrown request error. Called only on the Device API queue, including completions
+            /// from the separate agent-hook worker queue.
+            private func finishRequest(_ result: Result<SpacesDeviceAPIResponse, any Error>) {
+                switch result {
+                case .success(let response):
                     server.sendResponse(response, to: connection) { [weak self] error in
                         guard let self else { return }
                         if let error {
@@ -324,10 +357,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                         }
                         self.processBufferedLines()
                     }
-                } catch {
+                case .failure(let error):
                     server.trace("request_error peer=\(peerID) error=\(String(describing: error).replacingOccurrences(of: "\n", with: "\\n"))")
-                    let message = (error as? LocalizedError)?.errorDescription ?? String(describing: error)
-                    let response = SpacesDeviceAPIResponse(ok: false, message: message, errorCode: SpacesDeviceAPIServer.errorCode(for: error))
+                    let response = SpacesDeviceAPIServer.failureResponse(for: error)
                     server.sendResponse(response, to: connection) { [weak self] _ in self?.connection.cancel() }
                 }
             }
@@ -487,16 +519,42 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                         return
                     }
 
+                    if request.command.isTunnelCommand {
+                        guard case .openServiceTunnel(let tunnelRequest) = request.command else { return }
+                        let outcome = server.prepareServiceTunnel(request, tunnelRequest: tunnelRequest)
+                        switch outcome {
+                        case .reject(let response): try Self.writeTLSResponse(try SpacesDeviceAPICodec.encodeResponseLine(response), ssl: ssl)
+                        case .ready(let loopbackFD):
+                            defer {
+                                close(loopbackFD)
+                                server.finishServiceTunnel()
+                            }
+                            try Self.writeTLSResponse(
+                                try SpacesDeviceAPICodec.encodeResponseLine(SpacesDeviceAPIResponse(ok: true, message: "Tunnel open.")), ssl: ssl)
+                            // Register the client fd so pairing revoke / server stop shut the tunnel down.
+                            registerActiveConnection(fileDescriptor, installationID: request.clientApp?.installationID ?? "")
+                            // Bytes already buffered past the request line are the pipelining client's
+                            // first tunnel bytes; hand them to the splice so they reach the service.
+                            let residual = requestBuffer
+                            requestBuffer.removeAll(keepingCapacity: false)
+                            try SpacesDeviceServiceTunnelSplicer.splice(
+                                ssl: ssl, clientFD: fileDescriptor, loopbackFD: loopbackFD, residual: residual)
+                        }
+                        return
+                    }
+
                     let response: SpacesDeviceAPIResponse
                     do {
-                        response = try server.syncOnQueue {
-                            try server.authorize(request)
-                            return try server.handleRequest(request, peerID: "linux:\(fileDescriptor)")
+                        if request.command.isAgentHookCommand {
+                            try server.syncOnQueue { try server.authorize(request) }
+                            response = try server.handleAgentHookRequestOnWorkerQueue(request)
+                        } else {
+                            response = try server.syncOnQueue {
+                                try server.authorize(request)
+                                return try server.handleRequest(request, peerID: "linux:\(fileDescriptor)")
+                            }
                         }
-                    } catch {
-                        let message = (error as? LocalizedError)?.errorDescription ?? String(describing: error)
-                        response = SpacesDeviceAPIResponse(ok: false, message: message, errorCode: SpacesDeviceAPIServer.errorCode(for: error))
-                    }
+                    } catch { response = SpacesDeviceAPIServer.failureResponse(for: error) }
                     let responseLine = try SpacesDeviceAPICodec.encodeResponseLine(response)
                     try writeLoggedTLSResponse(responseLine, ssl: ssl, request: request, responseOK: response.ok, fileDescriptor: fileDescriptor)
                     if !response.ok, response.errorCode == .unauthorized { return }
@@ -710,11 +768,18 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     private let onPairingSucceeded: (@Sendable (SpacesDeviceClientApp) -> Void)?
     private let builtInTerminalSessionTerminator: WorkspaceOrchestrator.BuiltInTerminalSessionTerminator?
     private let builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher?
-    /// Frozen-core restart hook. Invoked for `.requestDaemonRestart`; the daemon process exits and
-    /// is respawned by launchd `KeepAlive` / systemd `Restart=always` from the updated binary.
+    /// Frozen-core restart hook. Invoked for `.requestDaemonRestart`; the daemon performs its
+    /// exec-in-place handoff so running terminals, processes, and agents survive the update.
     private let onRestartRequested: (@Sendable () -> Void)?
     private let overviewLoaderForTesting: (@Sendable (SpacesDeviceClientApp?) throws -> SpacesDeviceOverviewPayload)?
-    private let queue: DispatchQueue
+    private let agentHookStatusLoader: AgentHookStatusLoader
+    private let agentHookInstallHandler: AgentHookInstallHandler
+    /// Login-shell probing and config writes can take seconds. Serialize them independently so they
+    /// cannot stall terminal controls, overview requests, or the rest of the Device API state queue.
+    private let agentHookQueue = DispatchQueue(label: "spaces.device.api.agent-hooks", qos: .userInitiated)
+    /// Serial queue that confines all request dispatch and relay-registry mutation. Internal so the
+    /// service-tunnel relay methods (in `SpacesDeviceServiceTunnel.swift`) run on the same queue.
+    let queue: DispatchQueue
     private let queueKey = DispatchSpecificKey<Void>()
     private let stateLock = NSLock()
     private let terminalLinkTransferAuthorizationTTL: TimeInterval
@@ -736,8 +801,19 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         private var requestConnections: [ObjectIdentifier: RequestConnection] = [:]
         private var streamRelays: [ObjectIdentifier: StreamRelay] = [:]
         private var streamRelaysClosingAfterFinalSend: Set<ObjectIdentifier> = []
+        /// Active service tunnels keyed by request connection. Mutated only on `queue`; the relay methods
+        /// live in `SpacesDeviceServiceTunnel.swift` (same module) which is why this is internal.
+        var tunnelRelays: [ObjectIdentifier: SpacesDeviceServiceTunnelRelay] = [:]
+        /// Tunnel dials currently running on their relay queues. Each pending dial holds a
+        /// `maxConcurrentServiceTunnels` cap slot so a burst of opens cannot overshoot the cap while
+        /// dials are off-queue. Mutated only on `queue`.
+        var pendingTunnelDialCount = 0
     #elseif os(Linux) && canImport(OpenSSL)
         private var linuxServer: LinuxServer?
+        /// Count of in-flight service tunnels for the concurrent-tunnel cap. Each Linux tunnel owns a
+        /// blocking `handleClient` thread rather than a registry entry, so the cap is a counter mutated on
+        /// `queue`.
+        private var activeServiceTunnelCount = 0
     #endif
     private var terminalLinkTransferAuthorizations: [String: TerminalLinkTransferAuthorization] = [:]
     private var running = false
@@ -759,6 +835,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         self.builtInTerminalSessionLauncher = builtInTerminalSessionLauncher
         self.onRestartRequested = onRestartRequested
         overviewLoaderForTesting = nil
+        agentHookStatusLoader = { AgentHookInstaller.status() }
+        agentHookInstallHandler = { try AgentHookInstaller.install($0) }
         if let pairingStore { self.pairingStore = pairingStore } else { self.pairingStore = try SpacesDevicePairingStore() }
         #if canImport(Network) && canImport(Security)
             networkShaper = NetworkShaper()
@@ -777,7 +855,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher? = nil,
         onRestartRequested: (@Sendable () -> Void)? = nil,
         terminalLinkTransferAuthorizationTTL: TimeInterval = SpacesDeviceAPIServer.defaultTerminalLinkTransferAuthorizationTTL,
-        overviewLoaderForTesting: (@Sendable (SpacesDeviceClientApp?) throws -> SpacesDeviceOverviewPayload)? = nil
+        overviewLoaderForTesting: (@Sendable (SpacesDeviceClientApp?) throws -> SpacesDeviceOverviewPayload)? = nil,
+        agentHookStatusLoader: @escaping AgentHookStatusLoader = { AgentHookInstaller.status() },
+        agentHookInstallHandler: @escaping AgentHookInstallHandler = { try AgentHookInstaller.install($0) }
     ) {
         self.host = host
         self.port = port
@@ -789,6 +869,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         self.builtInTerminalSessionLauncher = builtInTerminalSessionLauncher
         self.onRestartRequested = onRestartRequested
         self.overviewLoaderForTesting = overviewLoaderForTesting
+        self.agentHookStatusLoader = agentHookStatusLoader
+        self.agentHookInstallHandler = agentHookInstallHandler
         #if canImport(Network) && canImport(Security)
             networkShaper = NetworkShaper(environment: networkEnvironment)
         #endif
@@ -1121,7 +1203,57 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         case .readTerminalLinkChunk(let payload): return try handleReadTerminalLinkChunkRequest(payload)
         case .subscribe, .subscribeDeviceOverview:
             return SpacesDeviceAPIResponse(ok: false, message: "Subscription requests must use the stream path.", errorCode: .misroutedRequest)
+        case .agentHooksStatus, .installAgentHooks: return try handleAgentHookRequest(request)
+        case .openServiceTunnel:
+            // Hijacks the connection into a raw byte pipe after this response, like a subscription;
+            // it cannot be answered on the request/response path handled here.
+            return SpacesDeviceAPIResponse(ok: false, message: "Tunnel requests must use the tunnel path.", errorCode: .misroutedRequest)
         }
+    }
+
+    private func handleAgentHookRequest(_ request: SpacesDeviceAPIRequest) throws -> SpacesDeviceAPIResponse {
+        switch request.command {
+        case .agentHooksStatus:
+            return SpacesDeviceAPIResponse(
+                ok: true, message: "Loaded agent hook status.", result: .agentHooksStatus(.init(agents: agentHookStatusLoader())))
+        case .installAgentHooks(let payload): return try handleInstallAgentHooksRequest(payload)
+        default: preconditionFailure("Only agent-hook commands run on the agent-hook queue.")
+        }
+    }
+
+    #if canImport(Network) && canImport(Security)
+        private func handleAgentHookRequestAsync(
+            _ request: SpacesDeviceAPIRequest, completion: @escaping @Sendable (Result<SpacesDeviceAPIResponse, any Error>) -> Void
+        ) {
+            agentHookQueue.async { [weak self] in
+                guard let self else { return }
+                let result = Result { try self.handleAgentHookRequest(request) }
+                self.queue.async { completion(result) }
+            }
+        }
+    #endif
+
+    #if os(Linux) && canImport(OpenSSL)
+        private func handleAgentHookRequestOnWorkerQueue(_ request: SpacesDeviceAPIRequest) throws -> SpacesDeviceAPIResponse {
+            try agentHookQueue.sync { try handleAgentHookRequest(request) }
+        }
+    #endif
+
+    /// Idempotently installs Spaces lifecycle hooks for the requested agents into this daemon's home
+    /// directory, then returns fresh status for every supported agent. Rejects an empty request.
+    ///
+    /// A per-agent failure is reported inside the payload rather than as a rejected request: agents are
+    /// installed independently, and the caller has to learn which ones landed so it can record them and
+    /// retry only the rest. Only a missing `spaces` CLI, which makes every hook unwritable, throws.
+    private func handleInstallAgentHooksRequest(_ payload: SpacesDeviceInstallAgentHooksRequest) throws -> SpacesDeviceAPIResponse {
+        guard !payload.kinds.isEmpty else {
+            return SpacesDeviceAPIResponse(ok: false, message: "No coding agents specified.", errorCode: .invalidArgument)
+        }
+        let outcome = try agentHookInstallHandler(payload.kinds)
+        let message =
+            outcome.failures.isEmpty
+            ? "Installed agent hooks." : "Installed agent hooks, except: \(outcome.failures.map(\.message).joined(separator: " "))"
+        return SpacesDeviceAPIResponse(ok: true, message: message, result: .agentHooksInstall(outcome))
     }
 
     private func authorize(_ request: SpacesDeviceAPIRequest) throws {
@@ -1154,8 +1286,16 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             case .gitCommandFailed, .dependencyMissing, .configError, .databaseMigrationFailed: return .internalError
             }
         }
+        // The daemon's host is missing the Spaces CLI every hook command needs; the request was well
+        // formed, so this is the host lacking a capability rather than a client mistake.
+        if error is AgentHookInstallerError { return .capabilityMissing }
         if error is DecodingError { return .invalidArgument }
         return .internalError
+    }
+
+    static func failureResponse(for error: any Error) -> SpacesDeviceAPIResponse {
+        let message = (error as? LocalizedError)?.errorDescription ?? String(describing: error)
+        return SpacesDeviceAPIResponse(ok: false, message: message, errorCode: errorCode(for: error))
     }
 
     private func handleTerminalControlRequest(_ payload: SpacesDeviceTerminalControlRequest) throws -> SpacesDeviceAPIResponse {
@@ -1212,7 +1352,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         case .send:
             .send(
                 TerminalControlSendPayload(
-                    text: payload.text, bytes: nil, clientID: clientID, ownerEpoch: payload.ownerEpoch, appendNewline: payload.appendNewline))
+                    text: payload.text, bytes: nil, clientID: clientID, ownerEpoch: payload.ownerEpoch, appendNewline: payload.appendNewline,
+                    asPaste: payload.asPaste))
         case .key: .key(TerminalControlKeyPayload(key: payload.key, clientID: clientID, ownerEpoch: payload.ownerEpoch))
         case .clearScreen: .clearScreen(TerminalControlOwnerPayload(clientID: clientID, ownerEpoch: payload.ownerEpoch))
         case .resize:
@@ -1312,7 +1453,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         try Self.writeUserOnlyPasteImage(payload.imageData, toPath: remotePath)
         let terminalRequest = TerminalControlRequest(
             command: .send(
-                TerminalControlSendPayload(text: remotePath, bytes: nil, clientID: clientID, ownerEpoch: payload.ownerEpoch, appendNewline: false)))
+                TerminalControlSendPayload(
+                    text: remotePath, bytes: nil, clientID: clientID, ownerEpoch: payload.ownerEpoch, appendNewline: false, asPaste: true)))
         let response: TerminalControlResponse
         do { response = try TerminalControlClient.send(request: terminalRequest, socketPath: paths.controlSocketPath) } catch {
             try? FileManager.default.removeItem(atPath: remotePath)
@@ -1409,10 +1551,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
 
     private static func makeDaemonStatus(activeSessionCount: Int, impact: RestartImpactCounts) -> TerminalServiceDaemonStatus {
         TerminalServiceDaemonStatus(
-            version: AppVersion.current,
-            artifactVersion: ProcessInfo.processInfo.environment["SPACESD_ARTIFACT_VERSION"].flatMap { $0.isEmpty ? nil : $0 },
-            certificateFingerprint: nil, activeSessionCount: activeSessionCount, runningProcesses: impact.runningProcesses,
-            activeAgents: impact.activeAgents, waitingAgents: impact.waitingAgents)
+            version: AppVersion.current, installedVersion: InstalledSpacesVersion.current(), certificateFingerprint: nil,
+            activeSessionCount: activeSessionCount, runningProcesses: impact.runningProcesses, activeAgents: impact.activeAgents,
+            waitingAgents: impact.waitingAgents)
     }
 
     /// Builds the device overview. Request handlers pass their shared per-request `store` so a
@@ -2132,9 +2273,14 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 sessionID: sessionID, link: request.terminalLink, workingDirectory: nil, workspaceRoots: [])
         } else {
             let workspaceRoots = try loadWorkspaceRoots(store: context.store())
+            // Absolute, tilde, and file:// links never anchor against a working directory, so only look
+            // one up (which requires reading the session's launch/runtime state) when the resolver could
+            // actually need it. Otherwise those links keep resolving even if that state is unavailable.
+            let workingDirectory =
+                try SpacesDeviceTerminalLinkResolver.requiresWorkingDirectory(link: request.terminalLink)
+                ? terminalWorkingDirectory(sessionID: sessionID) : nil
             metadata = try SpacesDeviceTerminalLinkResolver.resolve(
-                sessionID: sessionID, link: request.terminalLink, workingDirectory: terminalWorkingDirectory(sessionID: sessionID),
-                workspaceRoots: workspaceRoots)
+                sessionID: sessionID, link: request.terminalLink, workingDirectory: workingDirectory, workspaceRoots: workspaceRoots)
         }
         if metadata.source == .localFile {
             let resolvedPath = try SpacesDeviceTerminalLinkResolver.resolvedLocalFilePath(linkID: metadata.id)
@@ -2178,10 +2324,24 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
 
     private func terminalWorkingDirectory(sessionID: String) throws -> String {
         let paths = try TerminalSessionPaths.forSession(id: sessionID)
-        if let workingDirectory = normalizedString((try? TerminalSessionPersistence.readRuntimeState(paths: paths))?.workingDirectory) {
-            return workingDirectory
-        }
+        let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths)
+        // Prefer the live cwd of the session's foreground process (falling back to its child shell).
+        // The tracked runtime-state working directory only advances when the shell reports a new PWD
+        // through Ghostty shell integration (OSC 7), which many shells never emit — so it is stale
+        // after a plain `cd`. The owning process's real cwd is always current, anchoring relative
+        // links (e.g. `./statement.pdf`) in the directory the shell is actually sitting in.
+        if let liveWorkingDirectory = normalizedString(Self.liveTerminalWorkingDirectory(runtimeState: runtimeState)) { return liveWorkingDirectory }
+        if let workingDirectory = normalizedString(runtimeState?.workingDirectory) { return workingDirectory }
         return try TerminalSessionPersistence.readLaunchConfiguration(paths: paths).workingDirectory
+    }
+
+    private static func liveTerminalWorkingDirectory(runtimeState: TerminalSessionRuntimeState?) -> String? {
+        guard let runtimeState else { return nil }
+        if let foregroundPID = runtimeState.foregroundPID, let cwd = TerminalForegroundProcessInspector.workingDirectory(pid: foregroundPID) {
+            return cwd
+        }
+        if let childPID = runtimeState.childPID, let cwd = TerminalForegroundProcessInspector.workingDirectory(pid: childPID) { return cwd }
+        return nil
     }
 
     private func loadWorkspaceRoots(store: SQLiteStore) throws -> [String] {
@@ -2288,6 +2448,61 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 "device_api_subscribe", target: "session=\(subscription.sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
                 success: true)
         }
+
+        enum LinuxServiceTunnelOutcome {
+            case reject(SpacesDeviceAPIResponse)
+            case ready(loopbackFD: Int32)
+        }
+
+        /// Authorizes and reserves a concurrent-tunnel cap slot on the server queue (mirroring the
+        /// subscription prepare path), then resolves and dials on the calling per-client thread so the
+        /// dial's connect timeout (up to 2 seconds for a configured-but-dead service) never stalls the
+        /// shared server queue. A rejection after the reservation releases the slot internally; the
+        /// caller must pair `.ready` with `finishServiceTunnel()` once the splice returns.
+        func prepareServiceTunnel(_ request: SpacesDeviceAPIRequest, tunnelRequest: SpacesDeviceServiceTunnelRequest) -> LinuxServiceTunnelOutcome {
+            // nil means the cap slot was reserved; non-nil is an early rejection issued before reserving.
+            let earlyRejection: LinuxServiceTunnelOutcome?
+            do {
+                earlyRejection = try syncOnQueue { () -> LinuxServiceTunnelOutcome? in
+                    try self.authorize(request)
+                    guard let installationID = request.clientApp?.installationID.trimmingCharacters(in: .whitespacesAndNewlines),
+                        !installationID.isEmpty
+                    else {
+                        return LinuxServiceTunnelOutcome.reject(
+                            SpacesDeviceAPIResponse(ok: false, message: "Missing client installation ID.", errorCode: .invalidArgument))
+                    }
+                    guard self.activeServiceTunnelCount < Self.maxConcurrentServiceTunnels else {
+                        return LinuxServiceTunnelOutcome.reject(
+                            SpacesDeviceAPIResponse(ok: false, message: "Too many concurrent service tunnels.", errorCode: .busy))
+                    }
+                    self.activeServiceTunnelCount += 1
+                    return nil
+                }
+            } catch { return .reject(Self.failureResponse(for: error)) }
+            if let earlyRejection { return earlyRejection }
+
+            do {
+                switch try SpacesDeviceServiceTunnelResolver.resolve(tunnelRequest) {
+                case .failure(let message, let errorCode):
+                    finishServiceTunnel()
+                    return .reject(SpacesDeviceAPIResponse(ok: false, message: message, errorCode: errorCode))
+                case .port(let port):
+                    do { return .ready(loopbackFD: try SpacesDeviceServiceTunnelDialer.dialLoopback(port: port, blocking: false)) } catch {
+                        trace("tunnel_dial_failed service=\(tunnelRequest.serviceName) port=\(port) error=\(error)")
+                        finishServiceTunnel()
+                        return .reject(
+                            SpacesDeviceAPIResponse(
+                                ok: false, message: "Service '\(tunnelRequest.serviceName)' is not accepting connections.",
+                                errorCode: .serviceNotRunning))
+                    }
+                }
+            } catch {
+                finishServiceTunnel()
+                return .reject(Self.failureResponse(for: error))
+            }
+        }
+
+        func finishServiceTunnel() { performOnQueue { self.activeServiceTunnelCount = max(0, self.activeServiceTunnelCount - 1) } }
 
     #endif
 
@@ -2559,6 +2774,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         private func closeRequestConnectionAfterNetworkUpdate(connection: NWConnection, cancelNetworkConnection: Bool) {
             performOnQueue {
                 self.closeStreamRelay(connection: connection, cancelNetworkConnection: cancelNetworkConnection)
+                self.teardownTunnel(connection: connection, cancelConnection: cancelNetworkConnection)
                 self.closeRequestConnection(connection: connection)
             }
         }
@@ -2568,6 +2784,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             guard !normalizedID.isEmpty else { return }
             let connections = streamRelays.values.filter { $0.installationID == normalizedID }.map(\.connection)
             for connection in connections { closeStreamRelay(connection: connection) }
+            // A revoked installation loses its service tunnels along with its subscriptions.
+            teardownTunnels(forInstallationID: normalizedID)
         }
     #elseif os(Linux) && canImport(OpenSSL)
         private func closeStreamRelaysOnQueue(forInstallationID installationID: String) {
@@ -2581,6 +2799,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         acceptingRequests = false
         stopOverviewStreamServer()
         #if canImport(Network) && canImport(Security)
+            teardownAllTunnels()
             for relay in Array(streamRelays.values) { closeStreamRelay(connection: relay.connection) }
             for connection in Array(requestConnections.values.map(\.connection)) { connection.cancel() }
             requestConnections.removeAll()
@@ -2601,7 +2820,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         return try queue.sync(execute: work)
     }
 
-    private func performOnQueue(_ work: @escaping @Sendable () -> Void) {
+    func performOnQueue(_ work: @escaping @Sendable () -> Void) {
         if DispatchQueue.getSpecific(key: queueKey) != nil { work() } else { queue.async(execute: work) }
     }
 
@@ -2747,7 +2966,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         #endif
     }
 
-    private func trace(_ message: String) {
+    func trace(_ message: String) {
         guard traceEnabled else { return }
         FileHandle.standardOutput.write(Data("spaces-device-api-trace \(message)\n".utf8))
     }
