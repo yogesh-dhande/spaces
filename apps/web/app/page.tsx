@@ -718,8 +718,9 @@ export default function HomePage() {
                 processes — from your phone.
               </p>
               <p className="mt-4 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
-                Sessions keep running even if the Mac app quits; acting from your
-                phone brings it back automatically.
+                Sessions run in the Spaces daemon, so they keep running even if
+                the Mac app quits — and your phone works whether or not the app
+                is open.
               </p>
               <Link
                 href="/docs/ios"
