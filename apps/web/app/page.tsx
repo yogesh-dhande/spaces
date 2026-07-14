@@ -405,6 +405,13 @@ export default function HomePage() {
             <h1 className="mt-5 text-[clamp(2rem,4vw,3.5rem)] font-semibold leading-[1.04] tracking-[-0.01em]">
               Manage <span className="text-accent">parallel coding sessions</span>
             </h1>
+            <h2 className="mt-4 flex items-center gap-2 font-mono text-[clamp(1rem,1.6vw,1.2rem)] text-accent-2">
+              <span className="font-bold text-accent" aria-hidden>
+                ❯
+              </span>
+              from anywhere, on any machine
+              <span className="hero-caret" aria-hidden />
+            </h2>
 
             {/* Scope marquee — infinite left scroll between two hairlines, edges faded. */}
             <div className="marquee relative mt-6 overflow-hidden border-y border-line/70 py-3">
