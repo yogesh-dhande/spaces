@@ -9,7 +9,7 @@ private enum SpacesMobileSettingsStore {
     static func load(environment: [String: String] = ProcessInfo.processInfo.environment) -> SpacesMobileConnectionSettings {
         let storedSettings: SpacesMobileConnectionSettings
         if let data = UserDefaults.standard.data(forKey: settingsKey),
-           let decoded = try? JSONDecoder().decode(SpacesMobileConnectionSettings.self, from: data)
+            let decoded = try? JSONDecoder().decode(SpacesMobileConnectionSettings.self, from: data)
         {
             storedSettings = decoded
         } else {
@@ -26,27 +26,18 @@ private enum SpacesMobileSettingsStore {
         UserDefaults.standard.set(data, forKey: settingsKey)
     }
 
-    private static func appliedTestOverrides(
-        to settings: SpacesMobileConnectionSettings,
-        environment: [String: String]
-    ) -> SpacesMobileConnectionSettings {
+    private static func appliedTestOverrides(to settings: SpacesMobileConnectionSettings, environment: [String: String])
+        -> SpacesMobileConnectionSettings
+    {
         var resolved = settings
 
-        if let host = trimmed(environment["SPACES_MOBILE_TEST_HOST"]) {
-            resolved.host = host
-        }
-        if let port = trimmed(environment["SPACES_MOBILE_TEST_PORT"]).flatMap(Int.init), (1...65535).contains(port) {
-            resolved.port = port
-        }
-        if let authToken = trimmed(environment["SPACES_MOBILE_TEST_AUTH_TOKEN"]) {
-            resolved.authToken = authToken
-        }
+        if let host = trimmed(environment["SPACES_MOBILE_TEST_HOST"]) { resolved.host = host }
+        if let port = trimmed(environment["SPACES_MOBILE_TEST_PORT"]).flatMap(Int.init), (1...65535).contains(port) { resolved.port = port }
+        if let authToken = trimmed(environment["SPACES_MOBILE_TEST_AUTH_TOKEN"]) { resolved.authToken = authToken }
         if let certificateFingerprint = trimmed(environment["SPACES_MOBILE_TEST_CERTIFICATE_FINGERPRINT"]) {
             resolved.certificateFingerprint = certificateFingerprint
         }
-        if let installationID = trimmed(environment["SPACES_MOBILE_TEST_INSTALLATION_ID"]) {
-            resolved.installationID = installationID
-        }
+        if let installationID = trimmed(environment["SPACES_MOBILE_TEST_INSTALLATION_ID"]) { resolved.installationID = installationID }
 
         return resolved
     }
@@ -94,9 +85,7 @@ struct SpacesMobileE2EConfig {
     }
 
     private static func uiTestConfigPath(environment: [String: String]) -> String? {
-        if let explicitPath = trimmed(environment["SPACES_MOBILE_UI_TEST_CONFIG_PATH"]) {
-            return explicitPath
-        }
+        if let explicitPath = trimmed(environment["SPACES_MOBILE_UI_TEST_CONFIG_PATH"]) { return explicitPath }
         let defaultPath = "/tmp/spaces-mobile-ui-test-config.json"
         return FileManager.default.fileExists(atPath: defaultPath) ? defaultPath : nil
     }
@@ -386,27 +375,19 @@ struct SpacesMobileWorkspaceRuntimeRow: Identifiable, Sendable {
 
     var canStopFromTerminalDetail: Bool {
         switch source {
-        case .process(let row):
-            row.processID != nil && row.sessionID != nil
-        case .codingAgent(let row):
-            row.agentID != nil && row.sessionID != nil
-        case .terminal(let row):
-            row.canStop
-        case .browserSession:
-            false
+        case .process(let row): row.processID != nil && row.sessionID != nil
+        case .codingAgent(let row): row.agentID != nil && row.sessionID != nil
+        case .terminal(let row): row.canStop
+        case .browserSession: false
         }
     }
 
     var canRestartFromTerminalDetail: Bool {
         switch source {
-        case .process(let row):
-            row.processID != nil && row.templateID != nil && row.sessionID != nil
-        case .codingAgent(let row):
-            row.agentID != nil && (row.isConfigured || row.launcherID != nil) && row.sessionID != nil
-        case .terminal:
-            false
-        case .browserSession:
-            false
+        case .process(let row): row.processID != nil && row.templateID != nil && row.sessionID != nil
+        case .codingAgent(let row): row.agentID != nil && (row.isConfigured || row.launcherID != nil) && row.sessionID != nil
+        case .terminal: false
+        case .browserSession: false
         }
     }
 
@@ -442,10 +423,8 @@ private enum SpacesMobileMutationTimeoutRecovery {
     func acceptsFreshSession(_ session: SpacesDeviceTerminalSessionSummary?) -> SpacesDeviceTerminalSessionSummary? {
         guard let session else { return nil }
         switch self {
-        case .acceptCachedOverview:
-            return session
-        case .requireFreshOverview(let previousSessionID):
-            return session.id == previousSessionID ? nil : session
+        case .acceptCachedOverview: return session
+        case .requireFreshOverview(let previousSessionID): return session.id == previousSessionID ? nil : session
         }
     }
 }
@@ -507,11 +486,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         SpacesMobileSettingsStore.save(deviceState.settings)
     }
 
-    init(
-        settings: SpacesMobileConnectionSettings,
-        bridgeClient: SpacesDeviceAPIClient,
-        browserProxy: SpacesMobileBrowserProxy? = nil
-    ) {
+    init(settings: SpacesMobileConnectionSettings, bridgeClient: SpacesDeviceAPIClient, browserProxy: SpacesMobileBrowserProxy? = nil) {
         self.settings = settings
         pairedDevices = []
         activeDeviceID = nil
@@ -523,14 +498,11 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// The workspaces this client lists: neither archived nor hidden, matching the Mac sidebar's
     /// `isVisibleWorkspace` rule. `isHidden` is daemon-owned workspace state, so a workspace hidden
     /// from the Mac's Workspace Visibility dialog is hidden here too.
-    private var visibleWorkspaces: [SpacesDeviceWorkspaceSummary] {
-        (overview?.workspaces ?? []).filter { !$0.isArchived && !$0.isHidden }
-    }
+    private var visibleWorkspaces: [SpacesDeviceWorkspaceSummary] { (overview?.workspaces ?? []).filter { !$0.isArchived && !$0.isHidden } }
 
     var workspaceGroups: [SpacesMobileWorkspaceGroup] {
         let allFiltersSelected =
-            visibleRowTypes.count == SpacesMobileWorkspaceRowType.allCases.count
-            && visibleRunStates.count == 3
+            visibleRowTypes.count == SpacesMobileWorkspaceRowType.allCases.count && visibleRunStates.count == 3
             && searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         return visibleWorkspaces.compactMap { workspace in
@@ -568,14 +540,9 @@ private enum SpacesMobileMutationTimeoutRecovery {
             let orderedSessions = sessions.sorted(by: sessionSort)
 
             return SpacesMobileTerminalWorkspaceGroup(
-                id: firstSession.workspaceID,
-                projectName: projectName,
-                workspaceTitle: workspaceTitle,
-                workspaceDirectory: workspaceDirectory,
-                sessions: orderedSessions
-            )
-        }
-        .sorted(by: groupSort)
+                id: firstSession.workspaceID, projectName: projectName, workspaceTitle: workspaceTitle, workspaceDirectory: workspaceDirectory,
+                sessions: orderedSessions)
+        }.sorted(by: groupSort)
     }
 
     /// Attention-event groups for the Alerts tab, derived client-side from the overview payload
@@ -586,9 +553,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
     }
 
     /// Undismissed attention-event count, shown as the Alerts tab badge.
-    var undismissedAlertCount: Int {
-        attentionGroups.reduce(0) { $0 + $1.events.count }
-    }
+    var undismissedAlertCount: Int { attentionGroups.reduce(0) { $0 + $1.events.count } }
 
     /// Marks every currently derived attention event dismissed.
     func clearAlerts() {
@@ -615,20 +580,6 @@ private enum SpacesMobileMutationTimeoutRecovery {
     func session(forSessionID sessionID: String) -> SpacesDeviceTerminalSessionSummary? {
         if let session = overview?.sessions.first(where: { $0.id == sessionID }) { return session }
         return runtimeRow(forSessionID: sessionID).flatMap(terminalSession(for:))
-    }
-
-    /// Impact summary shown before a daemon restart is confirmed.
-    var daemonRestartImpactMessage: String {
-        guard let status = daemonStatus else {
-            return "Running terminals, processes, and coding agents on this device will stop."
-        }
-        let agents = status.activeAgents + status.waitingAgents
-        var parts: [String] = []
-        if status.activeSessionCount > 0 { parts.append("\(status.activeSessionCount) terminal\(status.activeSessionCount == 1 ? "" : "s")") }
-        if status.runningProcesses > 0 { parts.append("\(status.runningProcesses) process\(status.runningProcesses == 1 ? "" : "es")") }
-        if agents > 0 { parts.append("\(agents) coding agent\(agents == 1 ? "" : "s")") }
-        guard !parts.isEmpty else { return "No running work will be interrupted." }
-        return "This will stop " + parts.joined(separator: ", ") + "."
     }
 
     /// The active device cannot be used until its daemon is restarted/updated or this app updates.
@@ -678,14 +629,10 @@ private enum SpacesMobileMutationTimeoutRecovery {
     var browserProxyStatus: BrowserProxyStatus { browserProxy.runtimeState.status }
 
     /// Starts the loopback browser proxy. Idempotent; call when the app becomes active.
-    func browserProxyStart() {
-        Task { await browserProxy.start() }
-    }
+    func browserProxyStart() { Task { await browserProxy.start() } }
 
     /// Stops the loopback browser proxy and all live tunnels. Call when the app enters the background.
-    func browserProxyStop() {
-        Task { await browserProxy.stop() }
-    }
+    func browserProxyStop() { Task { await browserProxy.stop() } }
 
     /// The URL a `WKWebView` should load for a browser session row, rebuilt against the proxy's fixed
     /// loopback port. `nil` only if the route's identity host somehow fails to form a valid URL.
@@ -697,9 +644,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// carry the route's in-memory cookie, so local loopback clients cannot dial daemon service tunnels
     /// just by guessing a routed `.localhost` host.
     func browserSessionProxyRequest(for row: SpacesMobileBrowserSessionRow) -> BrowserProxyRequest? {
-        guard let target = browserRoutingTable.target(forHost: row.route.identityHost),
-              let url = browserSessionProxyURL(for: row)
-        else { return nil }
+        guard let target = browserRoutingTable.target(forHost: row.route.identityHost), let url = browserSessionProxyURL(for: row) else { return nil }
         return BrowserProxyRequest(url: url, authToken: target.proxyAuthToken)
     }
 
@@ -711,13 +656,8 @@ private enum SpacesMobileMutationTimeoutRecovery {
     private func updateBrowserRoutes(overview: SpacesDeviceOverviewPayload) async {
         guard let activeDeviceID else { return }
         browserRoutingTable.merge(
-            deviceID: activeDeviceID,
-            deviceName: activeDeviceName ?? settings.trimmedHost,
-            host: settings.trimmedHost,
-            port: settings.port,
-            certificateFingerprint: settings.certificateFingerprint,
-            overview: overview
-        )
+            deviceID: activeDeviceID, deviceName: activeDeviceName ?? settings.trimmedHost, host: settings.trimmedHost, port: settings.port,
+            certificateFingerprint: settings.certificateFingerprint, overview: overview)
         let table = browserRoutingTable
         await browserProxy.updateRoutes(table)
     }
@@ -735,15 +675,11 @@ private enum SpacesMobileMutationTimeoutRecovery {
             // A decodable overview whose daemon nonetheless reports an incompatible protocol is blocked;
             // show the restart/update block, not its stale workspace data.
             let acceptedOverview = isActiveDeviceBlocked ? nil : overview
-            if let acceptedOverview {
-                await updateBrowserRoutes(overview: acceptedOverview)
-            }
+            if let acceptedOverview { await updateBrowserRoutes(overview: acceptedOverview) }
             self.overview = acceptedOverview
             connectionNotice = nil
             errorMessage = nil
-        } catch is CancellationError {
-            return
-        } catch {
+        } catch is CancellationError { return } catch {
             // The overview did not decode (a wire-incompatible daemon) or the device is unreachable. The
             // frozen-core handshake stays decodable across versions, so use it to tell those apart: an
             // incompatible verdict shows the block; otherwise surface the original connection error.
@@ -762,8 +698,9 @@ private enum SpacesMobileMutationTimeoutRecovery {
         }
     }
 
-    /// Requests a restart of the active device's daemon. The caller should already have confirmed the
-    /// restart impact with the user. After the daemon respawns, the next refresh re-runs the handshake.
+    /// Requests the active device's daemon exec-in-place handoff: it quiesces sessions, applies any
+    /// staged update, and re-execs at the same pid, so running terminals, agents, and processes survive.
+    /// After the daemon comes back up, the next refresh re-runs the handshake.
     func requestDaemonRestart() async {
         guard !isMutating else { return }
         isMutating = true
@@ -771,11 +708,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         do {
             try await bridgeClient.requestDaemonRestart(commandChannel: commandChannel)
             connectionNotice = "Restarting the daemon…"
-        } catch is CancellationError {
-            return
-        } catch {
-            errorMessage = error.localizedDescription
-        }
+        } catch is CancellationError { return } catch { errorMessage = error.localizedDescription }
     }
 
     private func applyCompatibility(_ status: TerminalServiceDaemonStatus) {
@@ -789,9 +722,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         do {
             let status = try await bridgeClient.fetchDaemonStatus(commandChannel: commandChannel)
             applyCompatibility(status)
-        } catch is CancellationError {
-            return
-        } catch {
+        } catch is CancellationError { return } catch {
             // Could not read the handshake; leave compatibility unknown rather than blocking.
             daemonStatus = nil
             compatibility = nil
@@ -887,26 +818,15 @@ private enum SpacesMobileMutationTimeoutRecovery {
             connectionNotice = nil
             errorMessage = nil
             isShowingConnectionSettings = true
-        } catch {
-            errorMessage = error.localizedDescription
-        }
+        } catch { errorMessage = error.localizedDescription }
     }
 
     func loadWorkspaceCreateOptions(projectID: String? = nil) async {
-        do {
-            workspaceCreateOptions = try await bridgeClient.fetchWorkspaceCreateOptions(projectID: projectID, commandChannel: commandChannel)
-        } catch {
-            handleBridgeError(error)
-        }
+        do { workspaceCreateOptions = try await bridgeClient.fetchWorkspaceCreateOptions(projectID: projectID, commandChannel: commandChannel) } catch
+        { handleBridgeError(error) }
     }
 
-    func createWorkspace(
-        projectID: String,
-        branch: String?,
-        baseBranch: String?,
-        directoryName: String?,
-        allowExistingBranchReuse: Bool
-    ) async {
+    func createWorkspace(projectID: String, branch: String?, baseBranch: String?, directoryName: String?, allowExistingBranchReuse: Bool) async {
         guard !isMutating else { return }
         isMutating = true
         defer { isMutating = false }
@@ -916,9 +836,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
                 allowExistingBranchReuse: allowExistingBranchReuse, commandChannel: commandChannel)
             await applyMutationResponse(response)
             isShowingWorkspaceCreateSheet = false
-        } catch {
-            handleBridgeError(error)
-        }
+        } catch { handleBridgeError(error) }
     }
 
     func openWorkspaceTerminal(workspaceID: String) async -> SpacesDeviceTerminalSessionSummary? {
@@ -943,8 +861,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
                 try await bridgeClient.runCodingAgent(
                     workspaceID: agent.workspaceID, agentName: agent.name, agentLauncherID: agent.launcherID, commandChannel: commandChannel)
             }
-        case .terminal, .browserSession:
-            return nil
+        case .terminal, .browserSession: return nil
         }
     }
 
@@ -972,13 +889,10 @@ private enum SpacesMobileMutationTimeoutRecovery {
                 guard let sessionID = terminal.sessionID else { return }
                 response = try await bridgeClient.stopWorkspaceTerminal(
                     workspaceID: terminal.workspaceID, sessionID: sessionID, commandChannel: commandChannel)
-            case .browserSession:
-                return
+            case .browserSession: return
             }
             await applyMutationResponse(response)
-        } catch {
-            handleBridgeError(error)
-        }
+        } catch { handleBridgeError(error) }
     }
 
     func restart(row: SpacesMobileWorkspaceRuntimeRow) async -> SpacesDeviceTerminalSessionSummary? {
@@ -996,8 +910,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
                 try await bridgeClient.restartCodingAgent(
                     workspaceID: agent.workspaceID, agentID: agentID, agentName: agent.name, commandChannel: commandChannel)
             }
-        case .terminal, .browserSession:
-            return nil
+        case .terminal, .browserSession: return nil
         }
     }
 
@@ -1006,21 +919,15 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// Starts the whole workspace: every configured process and coding agent. The daemon opens no browser
     /// session or ad hoc terminal, so those rows are untouched.
     func launchWorkspace(_ workspace: SpacesDeviceWorkspaceSummary) async {
-        await performWorkspaceMutation {
-            try await bridgeClient.launchWorkspace(workspaceID: workspace.id, commandChannel: commandChannel)
-        }
+        await performWorkspaceMutation { try await bridgeClient.launchWorkspace(workspaceID: workspace.id, commandChannel: commandChannel) }
     }
 
     func stopWorkspace(_ workspace: SpacesDeviceWorkspaceSummary) async {
-        await performWorkspaceMutation {
-            try await bridgeClient.stopWorkspace(workspaceID: workspace.id, commandChannel: commandChannel)
-        }
+        await performWorkspaceMutation { try await bridgeClient.stopWorkspace(workspaceID: workspace.id, commandChannel: commandChannel) }
     }
 
     func restartWorkspace(_ workspace: SpacesDeviceWorkspaceSummary) async {
-        await performWorkspaceMutation {
-            try await bridgeClient.restartWorkspace(workspaceID: workspace.id, commandChannel: commandChannel)
-        }
+        await performWorkspaceMutation { try await bridgeClient.restartWorkspace(workspaceID: workspace.id, commandChannel: commandChannel) }
     }
 
     /// Hides the workspace, stopping it first when it is running — matching the Mac's Hide, which never
@@ -1031,9 +938,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
             guard let currentWorkspace = currentOverview.workspaces.first(where: { $0.id == workspace.id }) else {
                 throw SpacesDeviceAPIClientError.requestFailed("This workspace is no longer available.")
             }
-            if currentWorkspace.isRunning {
-                _ = try await bridgeClient.stopWorkspace(workspaceID: workspace.id, commandChannel: commandChannel)
-            }
+            if currentWorkspace.isRunning { _ = try await bridgeClient.stopWorkspace(workspaceID: workspace.id, commandChannel: commandChannel) }
             return try await bridgeClient.setWorkspaceHidden(workspaceID: workspace.id, isHidden: true, commandChannel: commandChannel)
         }
     }
@@ -1042,11 +947,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         guard !isMutating else { return }
         isMutating = true
         defer { isMutating = false }
-        do {
-            await applyMutationResponse(try await operation())
-        } catch {
-            handleBridgeError(error)
-        }
+        do { await applyMutationResponse(try await operation()) } catch { handleBridgeError(error) }
     }
 
     // MARK: - Renaming runtime rows
@@ -1069,9 +970,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// Whether the row has a name the daemon can rename. A process or coding agent running without a
     /// configured entry has no name to edit — its name comes from the running process — and a terminal row
     /// whose session has ended has no session to rename, so those rows offer no Rename.
-    func canRename(row: SpacesMobileWorkspaceRuntimeRow) -> Bool {
-        renameTarget(for: row) != nil
-    }
+    func canRename(row: SpacesMobileWorkspaceRuntimeRow) -> Bool { renameTarget(for: row) != nil }
 
     /// Renames a runtime row. Renaming a configured process, coding agent, or browser session edits its
     /// workspace-config entry, so a running process keeps its current name until it is restarted — the same
@@ -1123,9 +1022,9 @@ private enum SpacesMobileMutationTimeoutRecovery {
 
     /// A copy of `config` with one entry renamed. Config fields are immutable and the daemon replaces the
     /// workspace's whole config, so a rename echoes every other field back unchanged.
-    private func renamedConfig(
-        _ config: SpacesDeviceWorkspaceConfig, entry: RuntimeRowRename.ConfigEntry, to name: String
-    ) throws -> SpacesDeviceWorkspaceConfig {
+    private func renamedConfig(_ config: SpacesDeviceWorkspaceConfig, entry: RuntimeRowRename.ConfigEntry, to name: String) throws
+        -> SpacesDeviceWorkspaceConfig
+    {
         var processes = config.processes
         var agentLaunchers = config.agentLaunchers
         var browserSessions = config.browserSessions
@@ -1166,12 +1065,8 @@ private enum SpacesMobileMutationTimeoutRecovery {
     }
 
     private func sessionSort(_ lhs: SpacesDeviceTerminalSessionSummary, _ rhs: SpacesDeviceTerminalSessionSummary) -> Bool {
-        if lhs.state != rhs.state {
-            return lhs.state == .running && rhs.state != .running
-        }
-        if lhs.title.localizedStandardCompare(rhs.title) != .orderedSame {
-            return lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending
-        }
+        if lhs.state != rhs.state { return lhs.state == .running && rhs.state != .running }
+        if lhs.title.localizedStandardCompare(rhs.title) != .orderedSame { return lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending }
         return lhs.createdAt < rhs.createdAt
     }
 
@@ -1182,9 +1077,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
             resolvedBrowserSessions: workspace.config.resolvedBrowserSessions, assignedPorts: workspace.assignedPorts)
         return browserRoutes.enumerated().map { index, route in
             .init(source: .browserSession(SpacesMobileBrowserSessionRow(workspaceID: workspace.id, index: index, route: route)))
-        }
-            + workspace.processRows.map { .init(source: .process($0)) }
-            + workspace.codingAgentRows.map { .init(source: .codingAgent($0)) }
+        } + workspace.processRows.map { .init(source: .process($0)) } + workspace.codingAgentRows.map { .init(source: .codingAgent($0)) }
             + workspace.terminalRows.map { .init(source: .terminal($0)) }
     }
 
@@ -1192,9 +1085,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         guard visibleRowTypes.contains(row.type) else { return false }
         // Browser session rows carry no run state (see `SpacesMobileWorkspaceRuntimeRow.runState`), so
         // the run-state filter only applies to rows that actually have one.
-        if !row.isBrowserSession {
-            guard visibleRunStates.contains(row.runState) else { return false }
-        }
+        if !row.isBrowserSession { guard visibleRunStates.contains(row.runState) else { return false } }
         guard !query.isEmpty else { return true }
         return [workspace.projectName, workspace.displayName, workspace.dir, row.title, row.detail].contains { value in
             value.localizedStandardContains(query)
@@ -1242,29 +1133,12 @@ private enum SpacesMobileMutationTimeoutRecovery {
         let workspace = overview?.workspaces.first { $0.id == row.workspaceID }
         let timestamp = ISO8601DateFormatter().string(from: Date())
         return SpacesDeviceTerminalSessionSummary(
-            id: sessionID,
-            title: row.title,
-            workingDirectory: row.workingDirectory,
-            shell: "",
-            command: nil,
-            state: terminalSessionState(for: row.runState),
-            backend: .ghosttyEmbedded,
-            lifetimePolicy: .persistent,
-            servicePID: 0,
-            childPID: nil,
-            workspaceID: row.workspaceID,
-            workspaceTitle: workspace?.displayName,
-            projectID: workspace?.projectID,
-            projectName: workspace?.projectName,
-            createdAt: timestamp,
-            updatedAt: timestamp,
-            isControlAvailable: row.runState == .running,
-            isSubscriptionAvailable: row.runState == .running,
-            attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
-            rowKind: .liveSession,
-            rowSourceID: row.id,
-            hasFinalRender: false
-        )
+            id: sessionID, title: row.title, workingDirectory: row.workingDirectory, shell: "", command: nil,
+            state: terminalSessionState(for: row.runState), backend: .ghosttyEmbedded, lifetimePolicy: .persistent, servicePID: 0, childPID: nil,
+            workspaceID: row.workspaceID, workspaceTitle: workspace?.displayName, projectID: workspace?.projectID,
+            projectName: workspace?.projectName, createdAt: timestamp, updatedAt: timestamp, isControlAvailable: row.runState == .running,
+            isSubscriptionAvailable: row.runState == .running, attachmentSnapshot: TerminalSessionAttachmentSnapshot(), rowKind: .liveSession,
+            rowSourceID: row.id, hasFinalRender: false)
     }
 
     private func terminalSessionState(for runState: SpacesDeviceRunState) -> TerminalSessionState {
@@ -1276,8 +1150,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
     }
 
     private func performMutationReturningSession(
-        fallbackRowID: String? = nil,
-        timeoutRecovery: SpacesMobileMutationTimeoutRecovery = .acceptCachedOverview,
+        fallbackRowID: String? = nil, timeoutRecovery: SpacesMobileMutationTimeoutRecovery = .acceptCachedOverview,
         _ operation: () async throws -> SpacesDeviceAPIResponse
     ) async -> SpacesDeviceTerminalSessionSummary? {
         guard !isMutating else { return nil }
@@ -1286,16 +1159,11 @@ private enum SpacesMobileMutationTimeoutRecovery {
         do {
             let response = try await operation()
             await applyMutationResponse(response)
-            if let sessionID = response.sessionID {
-                return overview?.sessions.first(where: { $0.id == sessionID })
-            }
-            if let fallbackRowID {
-                return refreshedSession(forRowID: fallbackRowID)
-            }
+            if let sessionID = response.sessionID { return overview?.sessions.first(where: { $0.id == sessionID }) }
+            if let fallbackRowID { return refreshedSession(forRowID: fallbackRowID) }
             return nil
         } catch {
-            if let fallbackRowID,
-                isMutationTimeout(error),
+            if let fallbackRowID, isMutationTimeout(error),
                 let session = await reconciledSessionAfterMutationTimeout(rowID: fallbackRowID, timeoutRecovery: timeoutRecovery)
             {
                 return session
@@ -1315,9 +1183,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
     }
 
     private func handleBridgeError(_ error: Error) {
-        if error is CancellationError {
-            return
-        }
+        if error is CancellationError { return }
         if let recoveryMessage = SpacesDeviceAPIAuthentication.recoveryMessage(for: error) {
             handleAuthenticationFailure(message: recoveryMessage)
             return
@@ -1325,10 +1191,9 @@ private enum SpacesMobileMutationTimeoutRecovery {
         errorMessage = error.localizedDescription
     }
 
-    private func reconciledSessionAfterMutationTimeout(
-        rowID: String,
-        timeoutRecovery: SpacesMobileMutationTimeoutRecovery
-    ) async -> SpacesDeviceTerminalSessionSummary? {
+    private func reconciledSessionAfterMutationTimeout(rowID: String, timeoutRecovery: SpacesMobileMutationTimeoutRecovery) async
+        -> SpacesDeviceTerminalSessionSummary?
+    {
         if timeoutRecovery.acceptsCachedOverview, let session = refreshedSession(forRowID: rowID) {
             errorMessage = nil
             connectionNotice = nil
@@ -1341,20 +1206,15 @@ private enum SpacesMobileMutationTimeoutRecovery {
             errorMessage = nil
             connectionNotice = nil
             return timeoutRecovery.acceptsFreshSession(refreshedSession(forRowID: rowID))
-        } catch {
-            return nil
-        }
+        } catch { return nil }
     }
 
     private func isMutationTimeout(_ error: Error) -> Bool {
         switch error {
-        case SpacesDeviceAPIClientError.requestTimedOut:
-            return true
-        case SpacesDeviceAPIClientError.requestFailed(let message, _),
-            SpacesDeviceAPIClientError.streamFailed(let message, _):
+        case SpacesDeviceAPIClientError.requestTimedOut: return true
+        case SpacesDeviceAPIClientError.requestFailed(let message, _), SpacesDeviceAPIClientError.streamFailed(let message, _):
             return message.localizedStandardContains("timed out")
-        default:
-            return false
+        default: return false
         }
     }
 }

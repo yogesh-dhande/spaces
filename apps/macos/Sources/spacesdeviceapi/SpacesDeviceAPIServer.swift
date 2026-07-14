@@ -335,9 +335,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 } catch {
                     server.trace("request_error peer=\(peerID) error=\(String(describing: error).replacingOccurrences(of: "\n", with: "\\n"))")
                     let response = SpacesDeviceAPIServer.failureResponse(for: error)
-                    server.sendResponse(response, to: connection) { [weak self] _ in
-                        self?.connection.cancel()
-                    }
+                    server.sendResponse(response, to: connection) { [weak self] _ in self?.connection.cancel() }
                 }
             }
         }
@@ -468,7 +466,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                     do { request = try SpacesDeviceAPICodec.decodeRequest(requestData) } catch {
                         try Self.writeTLSResponse(
                             try SpacesDeviceAPICodec.encodeResponseLine(
-                                .init(ok: false, message: String(describing: error), errorCode: SpacesDeviceAPIServer.errorCode(for: error))), ssl: ssl)
+                                .init(ok: false, message: String(describing: error), errorCode: SpacesDeviceAPIServer.errorCode(for: error))),
+                            ssl: ssl)
                         return
                     }
                     logRequestPerformance(
@@ -499,8 +498,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                         guard case .openServiceTunnel(let tunnelRequest) = request.command else { return }
                         let outcome = server.prepareServiceTunnel(request, tunnelRequest: tunnelRequest)
                         switch outcome {
-                        case .reject(let response):
-                            try Self.writeTLSResponse(try SpacesDeviceAPICodec.encodeResponseLine(response), ssl: ssl)
+                        case .reject(let response): try Self.writeTLSResponse(try SpacesDeviceAPICodec.encodeResponseLine(response), ssl: ssl)
                         case .ready(let loopbackFD):
                             defer {
                                 close(loopbackFD)
@@ -526,9 +524,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                             try server.authorize(request)
                             return try server.handleRequest(request, peerID: "linux:\(fileDescriptor)")
                         }
-                    } catch {
-                        response = SpacesDeviceAPIServer.failureResponse(for: error)
-                    }
+                    } catch { response = SpacesDeviceAPIServer.failureResponse(for: error) }
                     let responseLine = try SpacesDeviceAPICodec.encodeResponseLine(response)
                     try writeLoggedTLSResponse(responseLine, ssl: ssl, request: request, responseOK: response.ok, fileDescriptor: fileDescriptor)
                     if !response.ok, response.errorCode == .unauthorized { return }
@@ -1219,7 +1215,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             "terminal_control_request source_session=\(sessionID) target_session=\(sessionID) client=\(clientID ?? payload.client?.id ?? "-") command=\(payload.action.rawValue)"
         )
         let terminalCommand = Self.terminalControlCommand(from: payload, clientID: clientID)
-        if terminalCommand.requiresOwnerClientID, clientID == nil { return SpacesDeviceAPIResponse(ok: false, message: "Missing device client ID.", errorCode: .invalidArgument) }
+        if terminalCommand.requiresOwnerClientID, clientID == nil {
+            return SpacesDeviceAPIResponse(ok: false, message: "Missing device client ID.", errorCode: .invalidArgument)
+        }
 
         let startedAt = Date()
         let paths = try TerminalSessionPaths.forSession(id: sessionID)
@@ -1289,7 +1287,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         let sessionID = payload.sessionID
         let hasText = payload.text != nil
         let hasBytes = payload.bytes != nil
-        guard hasText || hasBytes else { return SpacesDeviceAPIResponse(ok: false, message: "text or bytes is required.", errorCode: .invalidArgument) }
+        guard hasText || hasBytes else {
+            return SpacesDeviceAPIResponse(ok: false, message: "text or bytes is required.", errorCode: .invalidArgument)
+        }
         guard !(hasText && hasBytes) else {
             return SpacesDeviceAPIResponse(ok: false, message: "Provide text or bytes, not both.", errorCode: .invalidArgument)
         }
@@ -1461,9 +1461,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
 
     private static func makeDaemonStatus(activeSessionCount: Int, impact: RestartImpactCounts) -> TerminalServiceDaemonStatus {
         TerminalServiceDaemonStatus(
-            version: AppVersion.current, installedVersion: InstalledSpacesVersion.current(),
-            certificateFingerprint: nil, activeSessionCount: activeSessionCount, runningProcesses: impact.runningProcesses,
-            activeAgents: impact.activeAgents, waitingAgents: impact.waitingAgents)
+            version: AppVersion.current, installedVersion: InstalledSpacesVersion.current(), certificateFingerprint: nil,
+            activeSessionCount: activeSessionCount, runningProcesses: impact.runningProcesses, activeAgents: impact.activeAgents,
+            waitingAgents: impact.waitingAgents)
     }
 
     /// Builds the device overview. Request handlers pass their shared per-request `store` so a
@@ -1553,8 +1553,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             for process in processesBySlot.values.compactMap(preferredProcessRecord).sorted(by: {
                 $0.templateName.localizedStandardCompare($1.templateName) == .orderedAscending
             }) {
-                guard process.terminalApp == TerminalHost.spaces.appName,
-                    let sessionID = normalizedTerminalSessionID(process.terminalTrackingID)
+                guard process.terminalApp == TerminalHost.spaces.appName, let sessionID = normalizedTerminalSessionID(process.terminalTrackingID)
                 else { continue }
                 guard representedSessionIDs.insert(sessionID).inserted else { continue }
                 guard let entry = sessionsByID[sessionID] ?? terminalCatalogEntry(sessionID: sessionID) else { continue }
@@ -1568,8 +1567,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             for agent in agentsBySlot.values.compactMap(preferredAgentRecord).sorted(by: {
                 ($0.label ?? "").localizedStandardCompare($1.label ?? "") == .orderedAscending
             }) {
-                guard agent.provider == .spaces, let sessionID = normalizedTerminalSessionID(agent.terminalTrackingID)
-                else { continue }
+                guard agent.provider == .spaces, let sessionID = normalizedTerminalSessionID(agent.terminalTrackingID) else { continue }
                 guard representedSessionIDs.insert(sessionID).inserted else { continue }
                 guard let entry = sessionsByID[sessionID] ?? terminalCatalogEntry(sessionID: sessionID) else { continue }
                 rows.append(
@@ -1961,7 +1959,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 if request.updatesNotes {
                     try orchestrator.updateWorkspaceNotes(workspaceID: request.workspaceID, notes: normalizedOptionalString(request.notes))
                 }
-                if request.updatesHidden { try orchestrator.updateWorkspaceHidden(workspaceID: request.workspaceID, isHidden: request.isHidden == true) }
+                if request.updatesHidden {
+                    try orchestrator.updateWorkspaceHidden(workspaceID: request.workspaceID, isHidden: request.isHidden == true)
+                }
             }
         }
         return try refreshedMutationResponse(context: context, message: "Updated workspace metadata.", workspaceID: request.workspaceID)
@@ -2078,8 +2078,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         }
         let record = try context.orchestrator().restartCodingAgent(workspaceID: workspaceID, agentID: agentID)
         return try refreshedMutationResponse(
-            context: context, message: "Restarted coding agent.", workspaceID: workspaceID,
-            sessionID: normalizedString(record.terminalTrackingID))
+            context: context, message: "Restarted coding agent.", workspaceID: workspaceID, sessionID: normalizedString(record.terminalTrackingID))
     }
 
     private func refreshedMutationResponse(
@@ -2187,7 +2186,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             // Absolute, tilde, and file:// links never anchor against a working directory, so only look
             // one up (which requires reading the session's launch/runtime state) when the resolver could
             // actually need it. Otherwise those links keep resolving even if that state is unavailable.
-            let workingDirectory = try SpacesDeviceTerminalLinkResolver.requiresWorkingDirectory(link: request.terminalLink)
+            let workingDirectory =
+                try SpacesDeviceTerminalLinkResolver.requiresWorkingDirectory(link: request.terminalLink)
                 ? terminalWorkingDirectory(sessionID: sessionID) : nil
             metadata = try SpacesDeviceTerminalLinkResolver.resolve(
                 sessionID: sessionID, link: request.terminalLink, workingDirectory: workingDirectory, workspaceRoots: workspaceRoots)
@@ -2240,12 +2240,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         // through Ghostty shell integration (OSC 7), which many shells never emit — so it is stale
         // after a plain `cd`. The owning process's real cwd is always current, anchoring relative
         // links (e.g. `./statement.pdf`) in the directory the shell is actually sitting in.
-        if let liveWorkingDirectory = normalizedString(Self.liveTerminalWorkingDirectory(runtimeState: runtimeState)) {
-            return liveWorkingDirectory
-        }
-        if let workingDirectory = normalizedString(runtimeState?.workingDirectory) {
-            return workingDirectory
-        }
+        if let liveWorkingDirectory = normalizedString(Self.liveTerminalWorkingDirectory(runtimeState: runtimeState)) { return liveWorkingDirectory }
+        if let workingDirectory = normalizedString(runtimeState?.workingDirectory) { return workingDirectory }
         return try TerminalSessionPersistence.readLaunchConfiguration(paths: paths).workingDirectory
     }
 
@@ -2254,9 +2250,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         if let foregroundPID = runtimeState.foregroundPID, let cwd = TerminalForegroundProcessInspector.workingDirectory(pid: foregroundPID) {
             return cwd
         }
-        if let childPID = runtimeState.childPID, let cwd = TerminalForegroundProcessInspector.workingDirectory(pid: childPID) {
-            return cwd
-        }
+        if let childPID = runtimeState.childPID, let cwd = TerminalForegroundProcessInspector.workingDirectory(pid: childPID) { return cwd }
         return nil
     }
 
@@ -2281,7 +2275,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                         sessionID: "device-overview", installationID: request.clientApp?.installationID ?? "",
                         subscriptionSocketPath: try TerminalServicePaths.deviceOverviewSocketPath(), controlSocketPath: "", clientID: nil))
             }
-            guard let sessionID = request.sessionID else { return .response(SpacesDeviceAPIResponse(ok: false, message: "Missing session ID.", errorCode: .invalidArgument)) }
+            guard let sessionID = request.sessionID else {
+                return .response(SpacesDeviceAPIResponse(ok: false, message: "Missing session ID.", errorCode: .invalidArgument))
+            }
             guard let installationID = request.clientApp?.installationID.trimmingCharacters(in: .whitespacesAndNewlines), !installationID.isEmpty
             else { return .response(SpacesDeviceAPIResponse(ok: false, message: "Missing client installation ID.", errorCode: .invalidArgument)) }
             let paths = try TerminalSessionPaths.forSession(id: sessionID)
@@ -2290,10 +2286,14 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                     (try? TerminalSessionPersistence.readRemoteSessionState(paths: paths))
                     ?? (try? endedStatePayload(sessionID: sessionID, paths: paths, runtimeState: runtimeState))
                 if let payload { return .finalPayload(payload) }
-                return .response(SpacesDeviceAPIResponse(ok: false, message: "Terminal session '\(sessionID)' has no final state.", errorCode: .sessionNotAvailable))
+                return .response(
+                    SpacesDeviceAPIResponse(
+                        ok: false, message: "Terminal session '\(sessionID)' has no final state.", errorCode: .sessionNotAvailable))
             }
             guard FileManager.default.fileExists(atPath: paths.subscriptionSocketPath) else {
-                return .response(SpacesDeviceAPIResponse(ok: false, message: "Terminal session '\(sessionID)' has no live state stream.", errorCode: .sessionNotAvailable))
+                return .response(
+                    SpacesDeviceAPIResponse(
+                        ok: false, message: "Terminal session '\(sessionID)' has no live state stream.", errorCode: .sessionNotAvailable))
             }
             return .relay(
                 LinuxSubscription(
@@ -2369,15 +2369,14 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         /// dial's connect timeout (up to 2 seconds for a configured-but-dead service) never stalls the
         /// shared server queue. A rejection after the reservation releases the slot internally; the
         /// caller must pair `.ready` with `finishServiceTunnel()` once the splice returns.
-        func prepareServiceTunnel(_ request: SpacesDeviceAPIRequest, tunnelRequest: SpacesDeviceServiceTunnelRequest)
-            -> LinuxServiceTunnelOutcome
-        {
+        func prepareServiceTunnel(_ request: SpacesDeviceAPIRequest, tunnelRequest: SpacesDeviceServiceTunnelRequest) -> LinuxServiceTunnelOutcome {
             // nil means the cap slot was reserved; non-nil is an early rejection issued before reserving.
             let earlyRejection: LinuxServiceTunnelOutcome?
             do {
                 earlyRejection = try syncOnQueue { () -> LinuxServiceTunnelOutcome? in
                     try self.authorize(request)
-                    guard let installationID = request.clientApp?.installationID.trimmingCharacters(in: .whitespacesAndNewlines), !installationID.isEmpty
+                    guard let installationID = request.clientApp?.installationID.trimmingCharacters(in: .whitespacesAndNewlines),
+                        !installationID.isEmpty
                     else {
                         return LinuxServiceTunnelOutcome.reject(
                             SpacesDeviceAPIResponse(ok: false, message: "Missing client installation ID.", errorCode: .invalidArgument))
@@ -2389,9 +2388,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                     self.activeServiceTunnelCount += 1
                     return nil
                 }
-            } catch {
-                return .reject(Self.failureResponse(for: error))
-            }
+            } catch { return .reject(Self.failureResponse(for: error)) }
             if let earlyRejection { return earlyRejection }
 
             do {
@@ -2400,9 +2397,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                     finishServiceTunnel()
                     return .reject(SpacesDeviceAPIResponse(ok: false, message: message, errorCode: errorCode))
                 case .port(let port):
-                    do {
-                        return .ready(loopbackFD: try SpacesDeviceServiceTunnelDialer.dialLoopback(port: port, blocking: false))
-                    } catch {
+                    do { return .ready(loopbackFD: try SpacesDeviceServiceTunnelDialer.dialLoopback(port: port, blocking: false)) } catch {
                         trace("tunnel_dial_failed service=\(tunnelRequest.serviceName) port=\(port) error=\(error)")
                         finishServiceTunnel()
                         return .reject(
@@ -2417,9 +2412,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             }
         }
 
-        func finishServiceTunnel() {
-            performOnQueue { self.activeServiceTunnelCount = max(0, self.activeServiceTunnelCount - 1) }
-        }
+        func finishServiceTunnel() { performOnQueue { self.activeServiceTunnelCount = max(0, self.activeServiceTunnelCount - 1) } }
 
     #endif
 
@@ -2430,14 +2423,16 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 return
             }
             guard let sessionID = request.sessionID else {
-                sendResponse(SpacesDeviceAPIResponse(ok: false, message: "Missing session ID.", errorCode: .invalidArgument), to: connection) { _ in connection.cancel() }
+                sendResponse(SpacesDeviceAPIResponse(ok: false, message: "Missing session ID.", errorCode: .invalidArgument), to: connection) { _ in
+                    connection.cancel()
+                }
                 return
             }
             guard let installationID = request.clientApp?.installationID.trimmingCharacters(in: .whitespacesAndNewlines), !installationID.isEmpty
             else {
-                sendResponse(SpacesDeviceAPIResponse(ok: false, message: "Missing client installation ID.", errorCode: .invalidArgument), to: connection) { _ in
-                    connection.cancel()
-                }
+                sendResponse(
+                    SpacesDeviceAPIResponse(ok: false, message: "Missing client installation ID.", errorCode: .invalidArgument), to: connection
+                ) { _ in connection.cancel() }
                 return
             }
             let paths = try TerminalSessionPaths.forSession(id: sessionID)
@@ -2448,15 +2443,20 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 if let payload {
                     sendStreamPayloadAndComplete(payload, sessionID: sessionID, to: connection)
                 } else {
-                    sendResponse(SpacesDeviceAPIResponse(ok: false, message: "Terminal session '\(sessionID)' has no final state.", errorCode: .sessionNotAvailable), to: connection) {
-                        _ in connection.cancel()
-                    }
+                    sendResponse(
+                        SpacesDeviceAPIResponse(
+                            ok: false, message: "Terminal session '\(sessionID)' has no final state.", errorCode: .sessionNotAvailable),
+                        to: connection
+                    ) { _ in connection.cancel() }
                 }
                 return
             }
             guard FileManager.default.fileExists(atPath: paths.subscriptionSocketPath) else {
-                sendResponse(SpacesDeviceAPIResponse(ok: false, message: "Terminal session '\(sessionID)' has no live state stream.", errorCode: .sessionNotAvailable), to: connection)
-                { _ in connection.cancel() }
+                sendResponse(
+                    SpacesDeviceAPIResponse(
+                        ok: false, message: "Terminal session '\(sessionID)' has no live state stream.", errorCode: .sessionNotAvailable),
+                    to: connection
+                ) { _ in connection.cancel() }
                 return
             }
 

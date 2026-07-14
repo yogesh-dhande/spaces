@@ -275,6 +275,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         } else {
             host.deviceSections.insert(localSection, at: 0)
         }
+        host.maybeRequestSilentDaemonHandoff(deviceID: snapshot.localDeviceID, status: snapshot.localDaemonStatus)
         host.localDeviceID = snapshot.localDeviceID
         host.localDeviceName = snapshot.localDeviceName
         host.localPairedDevice = snapshot.localPairedDevice
@@ -541,6 +542,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
                 host.deviceSections[index].compatibility == load.compatibility && host.deviceSections[index].daemonStatus == load.daemonStatus
             host.deviceSections[index].daemonStatus = load.daemonStatus
             host.deviceSections[index].compatibility = load.compatibility
+            host.maybeRequestSilentDaemonHandoff(deviceID: deviceID, status: load.daemonStatus)
             // If this device's block was showing and it is now compatible, drop the obsolete block.
             host.clearCompatibilityBlockIfResolved(deviceID: deviceID)
             guard let overview = load.overview else {
@@ -1290,9 +1292,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         return cell
     }
 
-    private func isLastRuntimeTarget(workspaceID: String, key: String) -> Bool {
-        runtimeTargetItems(workspaceID: workspaceID).last?.key == key
-    }
+    private func isLastRuntimeTarget(workspaceID: String, key: String) -> Bool { runtimeTargetItems(workspaceID: workspaceID).last?.key == key }
 
     /// Context payload carried on runtime-target menu items so the action selectors can
     /// recover the clicked target without re-deriving it from the outline row.
@@ -1693,10 +1693,8 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
                 firstRow = row
                 lastRow = row
                 leadingInset = 0
-            case .runtimeTarget(_, let workspace, _) where workspace.id == selectedWorkspaceID && firstRow != nil:
-                lastRow = row
-            default:
-                if firstRow != nil { break }
+            case .runtimeTarget(_, let workspace, _) where workspace.id == selectedWorkspaceID && firstRow != nil: lastRow = row
+            default: if firstRow != nil { break }
             }
         }
 

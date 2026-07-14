@@ -124,6 +124,12 @@ public enum TerminalServiceCommand: Sendable, Equatable {
     case ping
     case shutdownIfIdle
     case shutdown
+    /// FROZEN — this case must never be renamed or removed, and only optional fields may ever be
+    /// added to its (currently empty) payload. It is sent by a same-or-older bundled CLI/installer to
+    /// any future daemon to trigger an exec-in-place staged-update handoff, so a newer daemon must
+    /// keep decoding exactly this shape forever. Carries no payload: the daemon re-execs its own
+    /// staged binary; the sender names nothing.
+    case applyStagedUpdate
     case create(TerminalServiceCreateRequest)
     case prepareWorkspace(TerminalServicePrepareWorkspaceRequest)
     case runWorkspaceCommand(TerminalServiceRunWorkspaceCommandRequest)
@@ -143,6 +149,7 @@ public enum TerminalServiceCommand: Sendable, Equatable {
         case .ping: "ping"
         case .shutdownIfIdle: "shutdownIfIdle"
         case .shutdown: "shutdown"
+        case .applyStagedUpdate: "applyStagedUpdate"
         case .create: "create"
         case .prepareWorkspace: "prepareWorkspace"
         case .runWorkspaceCommand: "runWorkspaceCommand"
@@ -182,6 +189,7 @@ extension TerminalServiceCommand: Codable {
         case ping
         case shutdownIfIdle
         case shutdown
+        case applyStagedUpdate
         case create
         case prepareWorkspace
         case runWorkspaceCommand
@@ -213,6 +221,9 @@ extension TerminalServiceCommand: Codable {
         case .shutdown:
             _ = try container.decode(TerminalServiceEmptyPayload.self, forKey: key)
             self = .shutdown
+        case .applyStagedUpdate:
+            _ = try container.decode(TerminalServiceEmptyPayload.self, forKey: key)
+            self = .applyStagedUpdate
         case .create: self = .create(try container.decode(TerminalServiceCreateRequest.self, forKey: key))
         case .prepareWorkspace: self = .prepareWorkspace(try container.decode(TerminalServicePrepareWorkspaceRequest.self, forKey: key))
         case .runWorkspaceCommand: self = .runWorkspaceCommand(try container.decode(TerminalServiceRunWorkspaceCommandRequest.self, forKey: key))
@@ -237,6 +248,7 @@ extension TerminalServiceCommand: Codable {
         case .ping: try container.encode(TerminalServiceEmptyPayload(), forKey: .ping)
         case .shutdownIfIdle: try container.encode(TerminalServiceEmptyPayload(), forKey: .shutdownIfIdle)
         case .shutdown: try container.encode(TerminalServiceEmptyPayload(), forKey: .shutdown)
+        case .applyStagedUpdate: try container.encode(TerminalServiceEmptyPayload(), forKey: .applyStagedUpdate)
         case .create(let payload): try container.encode(payload, forKey: .create)
         case .prepareWorkspace(let payload): try container.encode(payload, forKey: .prepareWorkspace)
         case .runWorkspaceCommand(let payload): try container.encode(payload, forKey: .runWorkspaceCommand)
@@ -285,8 +297,8 @@ public struct TerminalServiceProfileWorkspaceRecord: Codable, Sendable, Equatabl
     public let notes: String?
 
     public init(
-        id: String, projectID: String, dir: String, dirname: String?, branch: String?, baseBranch: String?, isDefault: Bool,
-        isArchived: Bool, isHidden: Bool, isRunning: Bool, lastLaunchedAt: String?, notes: String?
+        id: String, projectID: String, dir: String, dirname: String?, branch: String?, baseBranch: String?, isDefault: Bool, isArchived: Bool,
+        isHidden: Bool, isRunning: Bool, lastLaunchedAt: String?, notes: String?
     ) {
         self.id = id
         self.projectID = projectID
@@ -434,8 +446,7 @@ public struct TerminalServiceAgentSignalEvent: Codable, Sendable, Equatable, Ide
 
     public init(
         id: String, sessionID: String, workspaceID: String?, workspacePath: String?, type: String, provider: String = "spaces", label: String? = nil,
-        terminalTrackingID: String? = nil, environmentKeys: [String] = [],
-        createdAt: String
+        terminalTrackingID: String? = nil, environmentKeys: [String] = [], createdAt: String
     ) {
         self.id = id
         self.sessionID = sessionID

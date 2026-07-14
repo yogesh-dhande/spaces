@@ -56,10 +56,14 @@
 
     @MainActor public final class GhosttyHeadlessRendererHost: TerminalGhosttyRendererHosting {
         private let sessionDriver: GhosttyEmbeddedTerminalSessionDriver
+        private let clearScreenAndScrollbackAction: @MainActor () -> Bool
         private var isOwnerClient: (@MainActor (String) -> Bool)?
         private var inputActivityHandler: (@MainActor (Int) -> Void)?
 
-        init(sessionDriver: GhosttyEmbeddedTerminalSessionDriver) { self.sessionDriver = sessionDriver }
+        init(sessionDriver: GhosttyEmbeddedTerminalSessionDriver, clearScreenAndScrollbackAction: @escaping @MainActor () -> Bool) {
+            self.sessionDriver = sessionDriver
+            self.clearScreenAndScrollbackAction = clearScreenAndScrollbackAction
+        }
 
         func setOwnerClientResolver(_ resolver: @escaping @MainActor (String) -> Bool) { isOwnerClient = resolver }
 
@@ -154,13 +158,16 @@
             return sendTextAsPaste(text)
         }
 
-        @discardableResult public func performBindingAction(_ action: String) -> Bool { sessionDriver.performBindingAction(action) }
+        @discardableResult public func performBindingAction(_ action: String) -> Bool {
+            if action == "clear_screen" { return clearScreenAndScrollback() }
+            return sessionDriver.performBindingAction(action)
+        }
 
         @discardableResult public func sendScroll(horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32) -> Bool {
             sessionDriver.sendScroll(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods)
         }
 
-        @discardableResult public func clearScreenAndScrollback() -> Bool { sessionDriver.clearScreenAndScrollback() }
+        @discardableResult public func clearScreenAndScrollback() -> Bool { clearScreenAndScrollbackAction() }
 
         public var debugSearchState: GhosttyTerminalSearchDebugState { .init(isVisible: false, query: "", total: nil, selected: nil) }
 
@@ -254,7 +261,8 @@
         private let controlQueue: DispatchQueue
         private let stateStreamQueue: DispatchQueue
         private let sessionDriver: GhosttyEmbeddedTerminalSessionDriver
-        private lazy var rendererHostStorage = GhosttyHeadlessRendererHost(sessionDriver: sessionDriver)
+        private lazy var rendererHostStorage = GhosttyHeadlessRendererHost(
+            sessionDriver: sessionDriver, clearScreenAndScrollbackAction: { [weak self] in self?.clearScreenAndScrollback() ?? false })
         private let requestSurfaceRefreshAction: @MainActor () -> Void
         private var runtimeStateTimer: Timer?
         private var controlServer: TerminalControlServer?
@@ -292,6 +300,15 @@
         }
         private let interactiveOutputGate = InteractiveOutputGate()
         private var ownerEpoch: UInt64 = 0
+        /// Set for the brief exec-in-place quiesce window so no late timer/coalescer
+        /// turn broadcasts a frame while the session is being handed to the staged
+        /// daemon. Cleared on resume (`resumeFromHandoff`) or on the failed-exec
+        /// fallback (`resumeInPlaceAfterFailedExec`).
+        private var suppressBroadcastsForHandoff = false
+        /// Byte offset where renderer-disconnected output begins. On failed handoff the
+        /// persisted suffix is streamed back into the existing renderer without being
+        /// appended to the transcript again.
+        private var handoffTranscriptReplayOffset: UInt64?
         private var lastResizeSerialByClientID: [String: UInt64] = [:]
         private let onSessionClosed: (@MainActor (GhosttyEmbeddedSessionCore) -> Void)?
 
@@ -456,6 +473,154 @@
             onSessionClosed?(self)
         }
 
+        // MARK: - Exec-in-place handoff
+
+        /// Quiesce this session for the exec-in-place daemon handoff: stop the
+        /// per-session timers, suppress broadcasts, and stop the control + state-stream
+        /// servers (removing their socket files exactly as `terminate()` does) WITHOUT
+        /// detaching clients, killing the child, or freeing the GhosttyKit session. The
+        /// PTY read loop keeps draining — first into an in-memory buffer, then straight
+        /// to `output.log` — so not a byte is lost across the exec. Returns the handoff
+        /// record the staged daemon needs to adopt this session, or nil when there is
+        /// nothing live to hand off (the child already exited/closed), in which case the
+        /// caller terminates the session normally.
+        public func quiesceForHandoff() async throws -> DaemonHandoffSessionRecord? {
+            handoffTranscriptReplayOffset = nil
+            suppressBroadcastsForHandoff = true
+            runtimeStateTimer?.invalidate()
+            runtimeStateTimer = nil
+            inputOutputResyncScheduler.cancelForTermination()
+
+            controlServer?.stop()
+            controlServer = nil
+            TerminalControlServer.removeSocketFileIfPresent(at: paths.controlSocketPath)
+            stateStreamServer?.stop()
+            stateStreamServer = nil
+            GhosttyRemoteSessionStateStreamServer.removeSocketFileIfPresent(at: paths.subscriptionSocketPath)
+
+            // Nothing live to hand off (child dead/closed): caller terminates normally.
+            guard let descriptor = sessionDriver.handoffDescriptorSnapshot() else { return nil }
+
+            // Route further PTY bytes into an in-memory buffer so the read loop never
+            // blocks while we drain the main actor and close the durable output handle.
+            await sessionDriver.beginHandoffOutputBuffering()
+
+            // The driver has disabled Ghostty's data callback and awaited both the PTY
+            // handler boundary and every callback already inside Spaces. All callback
+            // bytes are therefore registered in this locked buffer; drain it directly.
+            flushPendingIncomingOutputForStateExport()
+
+            if let outputHandle {
+                do {
+                    try outputHandle.synchronize()
+                    try outputHandle.close()
+                    self.outputHandle = nil
+                } catch {
+                    try? outputHandle.close()
+                    self.outputHandle = nil
+                    throw error
+                }
+            }
+            handoffTranscriptReplayOffset = try transcriptByteCount()
+
+            // Flush the buffered bytes to output.log and install the direct-to-file writer
+            // that keeps appending until execv.
+            try sessionDriver.finishHandoffOutputBuffering(appendingTo: paths.outputPath)
+
+            let size = observedSurfaceSize() ?? lastKnownSurfaceSize ?? (columns: 80, rows: 24)
+            return DaemonHandoffSessionRecord(
+                sessionID: launchConfiguration.sessionID, masterFD: descriptor.masterFD, childPID: descriptor.childPID, columns: size.columns,
+                rows: size.rows, ownerEpoch: ownerEpoch, screenStateRevision: lastScreenStateRevision ?? 0,
+                appearance: GhosttyEmbeddedAppService.shared.currentAppearance.rawValue)
+        }
+
+        /// Holds the PTY sink boundary while the daemon performs its final persistence
+        /// validation and `execv`, preventing a direct write from racing after the check.
+        public func withValidatedHandoffOutputForExec<T>(_ operation: () throws -> T) throws -> T {
+            try sessionDriver.withValidatedHandoffOutputForExec(operation)
+        }
+
+        /// Failed-`execv` fallback: `execv` returned, so this same image keeps running and
+        /// nothing was freed. Stop the direct-to-file writer, reopen the output handle for
+        /// append, restart the per-session servers, and resume timers/broadcasts. This
+        /// rebinds the still-live session; it never rebuilds it.
+        public func resumeInPlaceAfterFailedExec() async {
+            // Freeze the direct writer before reading its persisted range or seeking the
+            // replacement FileHandle. PTY output arriving during replay stays buffered.
+            sessionDriver.pauseHandoffOutputForFallback()
+            if let handoffTranscriptReplayOffset {
+                await sessionDriver.replayPersistedHandoffOutput(at: paths.outputPath, startingAt: handoffTranscriptReplayOffset)
+            }
+            do {
+                try openOutputHandlePreservingTranscript()
+            } catch { fputs("spaces: ghostty handoff transcript reopen failed: \(error)\n", stderr) }
+            await sessionDriver.endHandoffOutputBuffering()
+            flushPendingIncomingOutputForStateExport()
+            self.handoffTranscriptReplayOffset = nil
+            suppressBroadcastsForHandoff = false
+            do {
+                try startControlServer()
+                try startStateStreamServer()
+            } catch { fputs("spaces: ghostty handoff resume-in-place failed: \(error)\n", stderr) }
+            startRuntimeStateTimer()
+            refreshRuntimeState(force: true)
+            broadcastCurrentState(reason: TerminalRemoteSessionStateReason.initial)
+        }
+
+        /// Resume side of the exec-in-place handoff, run on a freshly built core in the
+        /// staged daemon image for a session that survived the exec. Rebuilds the session
+        /// by adopting the inherited PTY and replaying output.log at the persisted grid
+        /// size, then restarts the servers and republishes a full frame so reconnecting
+        /// clients get a self-contained baseline. The process-wide GhosttyKit app runtime
+        /// must already be started (its per-process `ghostty_init` guard was wiped by
+        /// exec); this ensures it before rebuilding a session.
+        public func resumeFromHandoff(_ record: DaemonHandoffSessionRecord) async throws {
+            try GhosttyEmbeddedAppService.shared.startIfNeeded()
+            try paths.ensureDirectories()
+            try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+            // Preserve output.log: adoptFromHandoff replays it to rebuild the screen.
+            try openOutputHandlePreservingTranscript()
+
+            // Apply the recorded appearance BEFORE replay so the rebuilt frames carry the
+            // right colors. Appearance is an app-wide (one ghostty_app_t) last-writer-wins
+            // setting, applied the same way an attaching client applies it.
+            if let appearanceRaw = record.appearance, let appearance = ThemeAppearance(rawValue: appearanceRaw) {
+                GhosttyEmbeddedAppService.shared.applyColorScheme(appearance)
+            }
+
+            rendererHostStorage.setOutputHandler { [weak self] data in self?.enqueueIncomingOutput(data) }
+            rendererHostStorage.setInputActivityHandler { [weak self] byteCount in self?.handleOwnerInputActivity(byteCount: byteCount) }
+            didTerminateCurrentRun = false
+            started = true
+            suppressBroadcastsForHandoff = false
+
+            do {
+                try await sessionDriver.adoptFromHandoff(
+                    masterFD: record.masterFD, childPID: record.childPID, columns: record.columns, rows: record.rows, outputLogPath: paths.outputPath)
+            } catch {
+                started = false
+                throw error
+            }
+
+            ownerEpoch = record.ownerEpoch
+            // Advance past the recorded revision and force the first broadcast to a full
+            // render update so reconnecting clients rebuild from a self-contained baseline.
+            lastScreenStateRevision = record.screenStateRevision &+ 1
+            lastRenderUpdateBaseline = nil
+            forceNextBroadcastFullRenderUpdate = true
+            lastKnownSurfaceSize = (columns: record.columns, rows: record.rows)
+
+            try startControlServer()
+            try startStateStreamServer()
+            startRuntimeStateTimer()
+            sessionStartedAt = Date()
+            didLogFirstOutput = false
+            refreshRuntimeState(force: true)
+            broadcastCurrentState(reason: TerminalRemoteSessionStateReason.initial)
+        }
+
+        var debugOwnerEpoch: UInt64 { ownerEpoch }
+
         public func childPID() -> Int32? { observedChildPID() }
         public var effectiveTitle: String { currentTitle ?? launchConfiguration.title }
         // Prefer the live cwd observed from the foreground/child process (cached by refreshRuntimeState)
@@ -568,7 +733,9 @@
 
         private func controlResponseForAttachRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
             let startedAt = Date()
-            guard isRuntimeInteractiveForControl() else { return TerminalControlResponse(ok: false, message: "Terminal session is not running.", errorCode: .sessionNotRunning) }
+            guard isRuntimeInteractiveForControl() else {
+                return TerminalControlResponse(ok: false, message: "Terminal session is not running.", errorCode: .sessionNotRunning)
+            }
             guard let client = request.client else {
                 TerminalPerformance.logMetric(
                     "terminal_control_attach", target: "session=\(launchConfiguration.sessionID)",
@@ -640,9 +807,11 @@
             if appearanceChanged { forceNextBroadcastFullRenderUpdate = true }
             TerminalPerformance.logMetric(
                 "terminal_control_set_appearance", target: "session=\(launchConfiguration.sessionID)",
-                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true, detail: "appearance=\(appearance.rawValue) changed=\(appearanceChanged ? 1 : 0)")
+                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true,
+                detail: "appearance=\(appearance.rawValue) changed=\(appearanceChanged ? 1 : 0)")
             return TerminalControlResponse(
-                ok: true, message: appearanceChanged ? "Applied \(appearance.rawValue) appearance." : "Terminal already matches the requested appearance.")
+                ok: true,
+                message: appearanceChanged ? "Applied \(appearance.rawValue) appearance." : "Terminal already matches the requested appearance.")
         }
 
         private func controlResponseForDetachRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
@@ -692,7 +861,9 @@
 
         private func controlResponseForSendRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
             let startedAt = Date()
-            guard isRuntimeInteractiveForControl() else { return TerminalControlResponse(ok: false, message: "Terminal session is not running.", errorCode: .sessionNotRunning) }
+            guard isRuntimeInteractiveForControl() else {
+                return TerminalControlResponse(ok: false, message: "Terminal session is not running.", errorCode: .sessionNotRunning)
+            }
             if let clientID = request.clientID { try? TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: nowISO8601()) }
             if let rejection = ownerRequestRejection(for: request, commandName: "send", startedAt: startedAt) { return rejection }
             if request.asPaste {
@@ -724,7 +895,9 @@
 
         private func controlResponseForKeyRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
             let startedAt = Date()
-            guard isRuntimeInteractiveForControl() else { return TerminalControlResponse(ok: false, message: "Terminal session is not running.", errorCode: .sessionNotRunning) }
+            guard isRuntimeInteractiveForControl() else {
+                return TerminalControlResponse(ok: false, message: "Terminal session is not running.", errorCode: .sessionNotRunning)
+            }
             if let clientID = request.clientID { try? TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: nowISO8601()) }
             if let rejection = ownerRequestRejection(for: request, commandName: "key", startedAt: startedAt) { return rejection }
             if let key = request.key, TerminalKeyInput.hostAction(for: key) == .clearScreenAndScrollback {
@@ -747,7 +920,9 @@
         private func controlResponseForClearScreenRequest(_ request: TerminalControlRequest, startedAt: Date = Date(), touchClient: Bool = true)
             -> TerminalControlResponse
         {
-            guard isRuntimeInteractiveForControl() else { return TerminalControlResponse(ok: false, message: "Terminal session is not running.", errorCode: .sessionNotRunning) }
+            guard isRuntimeInteractiveForControl() else {
+                return TerminalControlResponse(ok: false, message: "Terminal session is not running.", errorCode: .sessionNotRunning)
+            }
             if touchClient, let clientID = request.clientID {
                 try? TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: nowISO8601())
             }
@@ -763,7 +938,9 @@
 
         private func controlResponseForScrollRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
             let startedAt = Date()
-            guard isRuntimeInteractiveForControl() else { return TerminalControlResponse(ok: false, message: "Terminal session is not running.", errorCode: .sessionNotRunning) }
+            guard isRuntimeInteractiveForControl() else {
+                return TerminalControlResponse(ok: false, message: "Terminal session is not running.", errorCode: .sessionNotRunning)
+            }
             if let clientID = request.clientID { try? TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: nowISO8601()) }
             if let rejection = ownerRequestRejection(for: request, commandName: "scroll", startedAt: startedAt) { return rejection }
             let horizontal = CGFloat(request.scrollHorizontal ?? 0)
@@ -787,8 +964,12 @@
 
         private func controlResponseForTakeoverRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
             let startedAt = Date()
-            guard isRuntimeInteractiveForControl() else { return TerminalControlResponse(ok: false, message: "Terminal session is not running.", errorCode: .sessionNotRunning) }
-            guard let clientID = request.clientID else { return TerminalControlResponse(ok: false, message: "Missing client ID.", errorCode: .invalidArgument) }
+            guard isRuntimeInteractiveForControl() else {
+                return TerminalControlResponse(ok: false, message: "Terminal session is not running.", errorCode: .sessionNotRunning)
+            }
+            guard let clientID = request.clientID else {
+                return TerminalControlResponse(ok: false, message: "Missing client ID.", errorCode: .invalidArgument)
+            }
             do {
                 try? TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: nowISO8601())
                 flushPendingIncomingOutputForStateExport()
@@ -816,7 +997,9 @@
 
         private func controlResponseForResizeRequest(_ request: TerminalControlRequest) -> TerminalControlResponse {
             let startedAt = Date()
-            guard isRuntimeInteractiveForControl() else { return TerminalControlResponse(ok: false, message: "Terminal session is not running.", errorCode: .sessionNotRunning) }
+            guard isRuntimeInteractiveForControl() else {
+                return TerminalControlResponse(ok: false, message: "Terminal session is not running.", errorCode: .sessionNotRunning)
+            }
             if let clientID = request.clientID { try? TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: nowISO8601()) }
             if let rejection = ownerRequestRejection(for: request, commandName: "resize", startedAt: startedAt) { return rejection }
             if let rejection = staleResizeSerialRejection(for: request, startedAt: startedAt) { return rejection }
@@ -884,9 +1067,9 @@
             }
             let state = TerminalSessionRuntimeState(
                 sessionID: launchConfiguration.sessionID, backend: launchConfiguration.backend, servicePID: getpid(),
-                childPID: childPID ?? lastKnownChildPID, state: .running, updatedAt: TerminalSessionTimestamp.string(from: now), title: effectiveTitle,
-                workingDirectory: effectiveWorkingDirectory, columns: observedSurfaceSize()?.columns, rows: observedSurfaceSize()?.rows,
-                foregroundPID: foregroundProcess?.pid, foregroundExecutablePath: foregroundProcess?.executablePath,
+                childPID: childPID ?? lastKnownChildPID, state: .running, updatedAt: TerminalSessionTimestamp.string(from: now),
+                title: effectiveTitle, workingDirectory: effectiveWorkingDirectory, columns: observedSurfaceSize()?.columns,
+                rows: observedSurfaceSize()?.rows, foregroundPID: foregroundProcess?.pid, foregroundExecutablePath: foregroundProcess?.executablePath,
                 foregroundExecutableName: foregroundProcess?.executableName, foregroundArgv: foregroundProcess?.argv,
                 foregroundDetectedAgentKind: foregroundAgent?.detectedAgentKind, foregroundDisplayLabel: foregroundAgent?.displayLabel,
                 foregroundDisplayCommand: foregroundAgent?.displayCommand)
@@ -932,8 +1115,8 @@
             return staleClientIDs
         }
 
-        private func appendOutput(_ data: Data, interactiveResync: Bool = false, shouldBroadcastState: Bool = true) {
-            guard !didTerminateCurrentRun else { return }
+        @discardableResult private func appendOutput(_ data: Data, interactiveResync: Bool = false, shouldBroadcastState: Bool = true) -> Bool {
+            guard !didTerminateCurrentRun else { return false }
             let startedAt = Date()
             do {
                 let outputHandle = try ensureOutputHandle()
@@ -955,12 +1138,24 @@
                             elapsedMS: TerminalPerformance.elapsedMS(since: sessionStartedAt), success: true, detail: "bytes=\(data.count)")
                     }
                 }
+                return true
             } catch {
                 TerminalPerformance.logMetric(
                     "terminal_output_write", target: "session=\(launchConfiguration.sessionID)",
                     elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false, detail: "bytes=\(data.count)")
                 fputs("spaces: ghostty output write failed: \(error)\n", stderr)
+                return false
             }
+        }
+
+        /// Keeps the renderer mutation replayable. The marker enters the same locked
+        /// coalescing buffer as PTY callbacks, preserving its byte order with concurrent
+        /// output before the buffer is drained synchronously.
+        private func clearScreenAndScrollback() -> Bool {
+            guard sessionDriver.clearScreenAndScrollback() else { return false }
+            _ = incomingOutputBuffer.append(GhosttyTerminalTranscriptMutation.clearScreenAndScrollback, interactive: false)
+            let outputThroughClear = incomingOutputBuffer.drain()
+            return appendOutput(outputThroughClear.data, interactiveResync: outputThroughClear.isInteractive, shouldBroadcastState: false)
         }
 
         @discardableResult private func ensureOutputHandle() throws -> FileHandle {
@@ -971,6 +1166,31 @@
             try createdHandle.seekToEnd()
             outputHandle = createdHandle
             return createdHandle
+        }
+
+        /// Opens the durable output handle for append WITHOUT truncating any existing
+        /// transcript, for the handoff resume paths. `resumeFromHandoff` replays output.log
+        /// to rebuild the screen and `resumeInPlaceAfterFailedExec` continues the same
+        /// transcript, so both must keep the existing bytes — unlike `ensureOutputHandle`,
+        /// whose `createFile(contents: nil)` recreates (and thus empties) the log for a
+        /// fresh start. Creating the file only when absent leaves any existing history in
+        /// place; `seekToEnd` positions the handle to append and re-derive the byte count.
+        private func openOutputHandlePreservingTranscript() throws {
+            guard outputHandle == nil else { return }
+            if !FileManager.default.fileExists(atPath: paths.outputPath) { FileManager.default.createFile(atPath: paths.outputPath, contents: nil) }
+            if !FileManager.default.fileExists(atPath: paths.serviceLogPath) {
+                FileManager.default.createFile(atPath: paths.serviceLogPath, contents: nil)
+            }
+            let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: paths.outputPath))
+            try handle.seekToEnd()
+            outputHandle = handle
+        }
+
+        private func transcriptByteCount() throws -> UInt64 {
+            guard FileManager.default.fileExists(atPath: paths.outputPath) else { return 0 }
+            let attributes = try FileManager.default.attributesOfItem(atPath: paths.outputPath)
+            guard let size = attributes[.size] as? NSNumber else { throw POSIXError(.EIO) }
+            return size.uint64Value
         }
 
         func applyActionEvent(_ event: GhosttyActionEvent) {
@@ -1181,7 +1401,7 @@
                 guard let self else { return }
                 let drainedOutput = incomingOutputBuffer.drain()
                 guard !drainedOutput.data.isEmpty else { return }
-                await MainActor.run { self.appendOutput(drainedOutput.data, interactiveResync: drainedOutput.isInteractive) }
+                _ = await MainActor.run { self.appendOutput(drainedOutput.data, interactiveResync: drainedOutput.isInteractive) }
             }
         }
 
@@ -1198,6 +1418,7 @@
         }
 
         private func broadcastCurrentState(reason: String, outputByteCount: Int? = nil, outputEndByteOffset: Int? = nil) {
+            guard !suppressBroadcastsForHandoff else { return }
             let startedAt = Date()
             let ownerClient = activeOwnerClient()
             let includeScreenState = Self.remoteStateShouldIncludeScreenState(reason: reason, ownerKind: ownerClient?.kind)

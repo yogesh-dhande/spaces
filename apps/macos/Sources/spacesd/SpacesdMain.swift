@@ -31,6 +31,18 @@ import workspacecore
     }
 
     private let socketPath: String
+    /// Stable public path this daemon re-execs on an exec-in-place handoff — the raw invoked
+    /// `argv[0]` absolutized at `main()` start (symlinks deliberately unresolved so the target stays
+    /// the versioned-agnostic `~/.spaces/bin/spacesd`). Captured before anything can chdir.
+    private let launchExecutablePath: String
+    /// Consecutive-handoff counter carried across execs via the handoff table (0 on a fresh boot).
+    /// Feeds the exec-loop generation guard together with `lastHandoffSourceVersion`.
+    private var handoffGeneration = 0
+    /// The `sourceVersion` of the daemon image that handed off to this one (nil on a fresh boot).
+    /// The generation guard refuses another same-target handoff only while this keeps equalling `AppVersion.current`.
+    private var lastHandoffSourceVersion: String?
+    /// True while `performExecHandoff()` is between its first await and exec; see its reentrancy guard.
+    private var handoffInProgress = false
     private let instanceLock: TerminalServiceInstanceLock
     private let serverQueue = DispatchQueue(label: "spaces.terminal.service")
     private lazy var server = TerminalServiceServer(socketPath: socketPath, queue: serverQueue) { [weak self] request in
@@ -72,13 +84,27 @@ import workspacecore
         }, onRestartRequested: { [weak self] in Task { @MainActor in self?.requestDaemonRestart() } })
     private let git = RemoteWorkspaceGitClient()
 
-    init() throws {
+    init(launchExecutablePath: String) throws {
+        self.launchExecutablePath = launchExecutablePath
         instanceLock = try TerminalServiceInstanceLock.acquire(path: try TerminalServicePaths.instanceLockPath())
         socketPath = try TerminalServicePaths.socketPath()
     }
 
-    func start() throws {
+    /// Startup entry point. Async so the exec-in-place resume prologue can `await` each session core's
+    /// `resumeFromHandoff` from a main-actor context while the main run loop stays free to pump the
+    /// GhosttyKit ticks that replay depends on — a blocking synchronous resume on the main thread
+    /// deadlocks inside replay. `main()` kicks this as a `Task { @MainActor }` and then runs the app
+    /// run loop; shared services (the request-accepting socket server, device runtime services) start
+    /// only after the resume completes, so a client can never observe a half-resumed daemon.
+    func start() async throws {
+        try await resumeSessionsFromHandoffIfNeeded()
         try recoverStaleSessions()
+        try startSharedServices()
+    }
+
+    /// Starts the shared (non-per-session) services. Shared by the normal `start()` tail and the
+    /// failed-`execv` fallback, which stopped them in `stopSharedServices()` before quiescing.
+    private func startSharedServices() throws {
         try server.start()
         deviceAPISupervisor.start()
         startLifecycleTimer()
@@ -179,6 +205,15 @@ import workspacecore
     }
 
     func shutdown() {
+        stopSharedServices()
+        terminateAllSessions()
+    }
+
+    /// Stops everything except the per-session cores: the lifecycle timer, database-change
+    /// observers/receivers, device-runtime services, the Device API supervisor, and the main
+    /// request-accepting socket server. Shared by `shutdown()` and the exec-in-place handoff, which
+    /// stops intake here and then quiesces (rather than terminates) the session cores.
+    private func stopSharedServices() {
         lifecycleTimer?.invalidate()
         lifecycleTimer = nil
         if let databaseChangeObserver {
@@ -210,11 +245,19 @@ import workspacecore
             caddyRouterService = nil
         #endif
         deviceAPISupervisor.stop()
-        for sessionID in Array(sessionCores.keys) { _ = terminateSession(id: sessionID) }
         server.stop()
     }
 
+    private func terminateAllSessions() { for sessionID in Array(sessionCores.keys) { _ = terminateSession(id: sessionID) } }
+
     private func handle(_ request: TerminalServiceRequest) -> TerminalServiceResponse {
+        // Socket shutdown is asynchronous, so a request accepted just before cancellation
+        // can reach the main actor after handoff starts. Reject it here, at the mutation
+        // boundary, so the session snapshot cannot gain or lose a core while quiescing.
+        guard !handoffInProgress else {
+            return TerminalServiceResponse(
+                ok: false, message: "spacesd is handing off to an updated daemon.", errorCode: .shuttingDown, servicePID: getpid())
+        }
         switch request.command {
         case .ping: return TerminalServiceResponse(ok: true, message: "pong", servicePID: getpid(), daemonStatus: daemonStatus())
         case .shutdownIfIdle: return shutdownIfIdle()
@@ -225,6 +268,13 @@ import workspacecore
                 self.shutdownAndExit()
             }
             return TerminalServiceResponse(ok: true, message: "spacesd is shutting down.", servicePID: getpid())
+        case .applyStagedUpdate:
+            // Respond-then-act, mirroring `.shutdown`: acknowledge on the request path, then trigger the
+            // exec-in-place handoff. `requestDaemonRestart()` is the single handoff trigger — if its
+            // preflight or generation guard refuses, it logs and the daemon keeps running untouched (the
+            // ok response was already sent, matching the frozen command's synchronous ok/error contract).
+            requestDaemonRestart()
+            return TerminalServiceResponse(ok: true, message: "spacesd is applying the staged update.", servicePID: getpid())
         case .create(let payload): return createSession(payload)
         case .prepareWorkspace(let payload):
             do {
@@ -235,7 +285,9 @@ import workspacecore
             } catch { return Self.failureResponse(error) }
         case .runWorkspaceCommand(let payload): return runWorkspaceCommand(payload)
         case .terminate(let payload):
-            guard !payload.sessionID.isEmpty else { return TerminalServiceResponse(ok: false, message: "Missing session ID.", errorCode: .invalidArgument) }
+            guard !payload.sessionID.isEmpty else {
+                return TerminalServiceResponse(ok: false, message: "Missing session ID.", errorCode: .invalidArgument)
+            }
             return terminateSession(id: payload.sessionID)
         case .list: return listSessions()
         case .state(let payload): return loadTerminalState(sessionID: payload.sessionID)
@@ -251,17 +303,20 @@ import workspacecore
 
     private func daemonStatus() -> TerminalServiceDaemonStatus {
         TerminalServiceDaemonStatus(
-            version: AppVersion.current, installedVersion: InstalledSpacesVersion.current(),
-            certificateFingerprint: daemonIdentityFingerprint, activeSessionCount: sessionCores.count)
+            version: AppVersion.current, installedVersion: InstalledSpacesVersion.current(), certificateFingerprint: daemonIdentityFingerprint,
+            activeSessionCount: sessionCores.count)
     }
 
-    // Frozen-core restart: terminate gracefully after a short grace so the Device API response can
-    // flush, then let launchd `KeepAlive` / systemd `Restart=always` respawn the updated binary.
+    // Exec-in-place update trigger: after a short grace so the already-sent RPC response can flush,
+    // quiesce every live session, write the handoff table, and `execv` the staged binary at the same
+    // pid so children (shells, agents, workspace processes) stay running and supervisors never notice.
+    // On preflight/guard refusal or a returned `execv`, `performExecHandoff` logs and leaves the daemon
+    // running; the RPC response was already sent (respond-then-act).
     func requestDaemonRestart() {
         writeStandardError("spacesd: daemon restart requested\n")
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(150))
-            shutdownAndExit()
+            await performExecHandoff()
         }
     }
 
@@ -289,7 +344,184 @@ import workspacecore
         exit(0)
     }
 
+    // MARK: - Exec-in-place handoff
+
+    /// Quiesce every live session and `execv` the staged binary at the same pid, keeping shells,
+    /// agents, and workspace processes running across the daemon update. Every failure lands on "the
+    /// old daemon keeps running": a refused generation guard or a failed preflight returns before
+    /// anything is stopped; a failed table write or a returned `execv` resumes the quiesced sessions
+    /// in place and restarts shared services. Runs on the main actor and awaits each core's quiesce so
+    /// the main thread stays free to pump the ticks quiesce's output-fence drain depends on.
+    private func performExecHandoff() async {
+        // Reentrancy guard: the quiesce below suspends at await points, so a second trigger (another
+        // paired device, or installer + app racing) could otherwise interleave a double-quiesce. The
+        // flag is cleared only on the keep-running failure paths; on success execv replaces the image.
+        guard !handoffInProgress else {
+            writeStandardError("spacesd handoff_refused reason=already_in_progress\n")
+            return
+        }
+        handoffInProgress = true
+        defer { handoffInProgress = false }
+
+        if DaemonHandoffDecision.refusesExecByGenerationGuard(
+            generation: handoffGeneration, lastSourceVersion: lastHandoffSourceVersion, currentVersion: AppVersion.current,
+            stagedVersion: InstalledSpacesVersion.current())
+        {
+            writeStandardError(
+                "spacesd handoff_refused reason=generation_guard generation=\(handoffGeneration) source=\(lastHandoffSourceVersion ?? "")\n")
+            return
+        }
+
+        do { try DaemonHandoffPreflight.run(executablePath: launchExecutablePath, formatVersion: DaemonHandoffTable.currentFormatVersion) } catch {
+            writeStandardError("spacesd handoff_preflight_failed error=\(error)\n")
+            return
+        }
+        writeStandardError("spacesd handoff_preflight_ok\n")
+
+        stopSharedServices()
+        writeStandardError("spacesd handoff_intake_stopped\n")
+
+        // Quiesce each live core. A nil return means the child already exited — finalize that session
+        // through the normal dead-session teardown before exec so it lands `.exited`, not resumed.
+        var records: [DaemonHandoffSessionRecord] = []
+        var quiescedCores: [GhosttyEmbeddedSessionCore] = []
+        // Snapshot the cores first: the nil-quiesce branch calls terminateSession, which mutates
+        // sessionCores.
+        do {
+            for (sessionID, core) in Array(sessionCores) {
+                // Add the core before quiescing so a transcript-persistence failure resumes the
+                // core whose driver is still buffering, as well as every earlier quiesced core.
+                quiescedCores.append(core)
+                if let record = try await core.quiesceForHandoff() {
+                    records.append(record)
+                } else {
+                    quiescedCores.removeLast()
+                    _ = terminateSession(id: sessionID)
+                }
+            }
+        } catch {
+            writeStandardError("spacesd handoff_quiesce_failed error=\(error)\n")
+            await resumeInPlaceAfterFailedHandoff(quiescedCores: quiescedCores)
+            return
+        }
+        writeStandardError("spacesd handoff_quiesced sessions=\(records.count)\n")
+
+        for record in records {
+            do { try DaemonHandoffStore.prepareDescriptorForHandoff(record.masterFD) } catch {
+                writeStandardError("spacesd handoff_prepare_descriptor_failed session=\(record.sessionID) error=\(error)\n")
+                await resumeInPlaceAfterFailedHandoff(quiescedCores: quiescedCores)
+                return
+            }
+        }
+
+        let nextGeneration = handoffGeneration + 1
+        let table = DaemonHandoffTable(generation: nextGeneration, pid: getpid(), sourceVersion: AppVersion.current, sessions: records)
+        do { try DaemonHandoffStore.write(table) } catch {
+            writeStandardError("spacesd handoff_table_write_failed error=\(error)\n")
+            await resumeInPlaceAfterFailedHandoff(quiescedCores: quiescedCores)
+            return
+        }
+
+        writeStandardError("spacesd handoff_exec path=\(launchExecutablePath) generation=\(nextGeneration) sessions=\(records.count)\n")
+        var execErrno = Int32(0)
+        do {
+            try withValidatedHandoffOutputsForExec(ArraySlice(quiescedCores)) {
+                execStagedBinary(path: launchExecutablePath)
+                execErrno = errno
+            }
+        } catch {
+            writeStandardError("spacesd handoff_output_persistence_failed error=\(error)\n")
+            DaemonHandoffStore.deleteTable()
+            await resumeInPlaceAfterFailedHandoff(quiescedCores: quiescedCores)
+            return
+        }
+
+        // `execv` only returns on failure. The written table describes a handoff that never happened,
+        // so delete it (a leftover would be adopted by a later respawn of this same pid), then rebind
+        // the still-live sessions and restart shared services so the daemon is fully functional again.
+        writeStandardError("spacesd handoff_exec_failed errno=\(execErrno)\n")
+        DaemonHandoffStore.deleteTable()
+        await resumeInPlaceAfterFailedHandoff(quiescedCores: quiescedCores)
+    }
+
+    /// Nests each session driver's sink lock around the final validation and exec.
+    /// A PTY read can neither fail nor begin a transcript write after its session has
+    /// validated; successful exec replaces the process, while a returned exec unwinds
+    /// every lock before the in-place resume path runs.
+    private func withValidatedHandoffOutputsForExec(_ cores: ArraySlice<GhosttyEmbeddedSessionCore>, operation: () throws -> Void) throws {
+        guard let core = cores.first else {
+            try operation()
+            return
+        }
+        try core.withValidatedHandoffOutputForExec { try withValidatedHandoffOutputsForExec(cores.dropFirst(), operation: operation) }
+    }
+
+    /// Failed-`execv` fallback: rebind every quiesced core to its still-live PTY (nothing was freed —
+    /// masters were never CLOEXEC, so no descriptor restore is needed) and restart shared services.
+    private func resumeInPlaceAfterFailedHandoff(quiescedCores: [GhosttyEmbeddedSessionCore]) async {
+        for core in quiescedCores { await core.resumeInPlaceAfterFailedExec() }
+        do { try startSharedServices() } catch { writeStandardError("spacesd handoff_resume_in_place_failed error=\(error)\n") }
+    }
+
+    /// `execv`s `path` with this process's original argv verbatim. Original argv matters: the new
+    /// image's `ghostty_init` consumes it. `execv` either replaces this image (never returning) or
+    /// returns -1 on failure; the strdup'd argv is only freed on the failure path (a leak on the
+    /// success path is irrelevant — the image is gone).
+    private func execStagedBinary(path: String) {
+        var argv: [UnsafeMutablePointer<CChar>?] = CommandLine.arguments.map { strdup($0) }
+        argv.append(nil)
+        path.withCString { pathPointer in _ = execv(pathPointer, &argv) }
+        for pointer in argv where pointer != nil { free(pointer) }
+    }
+
+    /// Resume prologue for the staged image, run before `recoverStaleSessions()`. Consumes the handoff
+    /// table (nil = fresh boot, unchanged startup) and adopts each surviving session. Awaited from the
+    /// main actor so replay can pump ticks.
+    private func resumeSessionsFromHandoffIfNeeded() async throws {
+        guard let table = DaemonHandoffStore.consume() else { return }
+        handoffGeneration = table.generation
+        lastHandoffSourceVersion = table.sourceVersion
+        writeStandardError("spacesd handoff_resume generation=\(table.generation) sessions=\(table.sessions.count)\n")
+        for record in table.sessions { await resumeHandoffSession(record) }
+    }
+
+    /// Adopts a single handoff record. Validates the inherited descriptor is still a PTY master and
+    /// reaps/probes the child, then acts on the pure `DaemonHandoffResumeAction` decision: live
+    /// sessions are rebuilt through the normal session-core factory and `resumeFromHandoff`; dead or
+    /// unusable ones are finalized `.exited` (via the normal teardown path) so one bad session can
+    /// never abort the resume of the rest.
+    private func resumeHandoffSession(_ record: DaemonHandoffSessionRecord) async {
+        let descriptorValid = DaemonHandoffStore.descriptorLooksLikePTYMaster(record.masterFD)
+        // Reap-pass first so an already-exited child is collected before the liveness probe.
+        var status: Int32 = 0
+        _ = waitpid(record.childPID, &status, WNOHANG)
+        let childAlive = Self.isProcessAlive(pid: Int(record.childPID))
+        let action = DaemonHandoffDecision.resumeAction(descriptorLooksLikePTYMaster: descriptorValid, childIsAlive: childAlive)
+        switch action {
+        case .adopt:
+            do {
+                let paths = try TerminalSessionPaths.forSession(id: record.sessionID)
+                let launchConfiguration = try TerminalSessionPersistence.readLaunchConfiguration(paths: paths)
+                let core = try sessionCore(for: launchConfiguration)
+                try await core.resumeFromHandoff(record)
+            } catch {
+                writeStandardError("spacesd handoff_resume_session_failed session=\(record.sessionID) error=\(error)\n")
+                sessionCores.removeValue(forKey: record.sessionID)
+                close(record.masterFD)
+                _ = terminateSession(id: record.sessionID)
+            }
+        case .finalizeExited:
+            close(record.masterFD)
+            _ = terminateSession(id: record.sessionID)
+        case .discardInvalidDescriptor: _ = terminateSession(id: record.sessionID)
+        }
+    }
+
     private func createSession(_ request: TerminalServiceCreateRequest) -> TerminalServiceResponse {
+        guard !handoffInProgress else {
+            return TerminalServiceResponse(
+                ok: false, message: "spacesd is handing off to an updated daemon.", errorCode: .shuttingDown, servicePID: getpid())
+        }
         let launchConfiguration = request.launchConfiguration
         do {
             try prepareWorkspace(
@@ -446,7 +678,9 @@ import workspacecore
     }
 
     private func acknowledgeAgentSignals(_ request: TerminalServiceAgentSignalAcknowledgementRequest) -> TerminalServiceResponse {
-        guard !request.sessionID.isEmpty else { return TerminalServiceResponse(ok: false, message: "Missing session ID.", errorCode: .invalidArgument) }
+        guard !request.sessionID.isEmpty else {
+            return TerminalServiceResponse(ok: false, message: "Missing session ID.", errorCode: .invalidArgument)
+        }
         do {
             try TerminalSessionPersistence.acknowledgeAgentSignals(
                 ids: request.eventIDs, sessionID: request.sessionID, paths: try TerminalSessionPaths.forSession(id: request.sessionID),
@@ -601,7 +835,10 @@ import workspacecore
         return orchestrator
     }
 
-    private func terminateBuiltInTerminalSession(id sessionID: String) { _ = terminateSession(id: sessionID) }
+    private func terminateBuiltInTerminalSession(id sessionID: String) {
+        guard !handoffInProgress else { return }
+        _ = terminateSession(id: sessionID)
+    }
 
     private func launchBuiltInTerminalSession(_ launchConfiguration: TerminalSessionLaunchConfiguration) throws -> TerminalServiceSessionSummary {
         let response = createSession(TerminalServiceCreateRequest(launchConfiguration: launchConfiguration))
@@ -621,9 +858,9 @@ import workspacecore
 
     private func profileWorkspaceRecord(_ value: WorkspaceRecord) -> TerminalServiceProfileWorkspaceRecord {
         TerminalServiceProfileWorkspaceRecord(
-            id: value.id, projectID: value.projectID, dir: value.dir, dirname: value.dirname, branch: value.branch,
-            baseBranch: value.baseBranch, isDefault: value.isDefault, isArchived: value.isArchived, isHidden: value.isHidden,
-            isRunning: value.isRunning, lastLaunchedAt: value.lastLaunchedAt, notes: value.notes)
+            id: value.id, projectID: value.projectID, dir: value.dir, dirname: value.dirname, branch: value.branch, baseBranch: value.baseBranch,
+            isDefault: value.isDefault, isArchived: value.isArchived, isHidden: value.isHidden, isRunning: value.isRunning,
+            lastLaunchedAt: value.lastLaunchedAt, notes: value.notes)
     }
 
     private func requiredProfileWorkspace(id: String, orchestrator: WorkspaceOrchestrator) throws -> WorkspaceRecord {
@@ -687,25 +924,19 @@ import workspacecore
             )
         case .working, .blocked, .done:
             try orchestrator.updateAgentWindowStatus(
-                workspaceID: workspaceID, provider: .spaces, terminalTrackingID: sessionID,
-                label: signalLabel, status: type.status, eventType: type.rawValue, eventSource: "spaces_agent_signal",
-                environmentKeys: environmentKeys)
+                workspaceID: workspaceID, provider: .spaces, terminalTrackingID: sessionID, label: signalLabel, status: type.status,
+                eventType: type.rawValue, eventSource: "spaces_agent_signal", environmentKeys: environmentKeys)
         case .exit:
             guard let existingAgent else { return TerminalServiceProfileCommandResponse(message: "Agent exit ignored.") }
             try orchestrator.handleAgentExit(
-                existingAgent, eventType: type.rawValue, eventSource: "spaces_agent_signal",
-                environmentKeys: environmentKeys)
+                existingAgent, eventType: type.rawValue, eventSource: "spaces_agent_signal", environmentKeys: environmentKeys)
         }
         postAgentEventNotification()
         return TerminalServiceProfileCommandResponse(message: "Agent \(type.rawValue) recorded.")
     }
 
     private func matchingProfileAgentWindow(workspaceID: String, sessionID: String, orchestrator: WorkspaceOrchestrator) throws -> AgentWindowRecord?
-    {
-        try orchestrator.agentWindows(workspaceID: workspaceID).first {
-            $0.provider == .spaces && $0.terminalTrackingID == sessionID
-        }
-    }
+    { try orchestrator.agentWindows(workspaceID: workspaceID).first { $0.provider == .spaces && $0.terminalTrackingID == sessionID } }
 
     private func profileAgentRuntimeLabel(sessionID: String) -> String? {
         guard let paths = try? TerminalSessionPaths.forSession(id: sessionID) else { return nil }
@@ -742,7 +973,8 @@ import workspacecore
                 return TerminalServiceResponse(ok: false, message: "Terminal session '\(sessionID)' is not running.", errorCode: .sessionNotRunning)
             }
             guard FileManager.default.fileExists(atPath: paths.controlSocketPath) else {
-                return TerminalServiceResponse(ok: false, message: "Terminal session '\(sessionID)' is not available.", errorCode: .sessionNotAvailable)
+                return TerminalServiceResponse(
+                    ok: false, message: "Terminal session '\(sessionID)' is not available.", errorCode: .sessionNotAvailable)
             }
             let response = try TerminalControlClient.send(request: controlRequest, socketPath: paths.controlSocketPath)
             return terminalControlResponse(
@@ -782,8 +1014,7 @@ import workspacecore
                     workingDirectory = nil
                 }
                 metadata = try SpacesDeviceTerminalLinkResolver.resolve(
-                    sessionID: sessionID, link: link, workingDirectory: workingDirectory,
-                    workspaceRoots: workingDirectory.map { [$0] } ?? [])
+                    sessionID: sessionID, link: link, workingDirectory: workingDirectory, workspaceRoots: workingDirectory.map { [$0] } ?? [])
             }
             if metadata.source == .localFile {
                 let resolvedPath = try SpacesDeviceTerminalLinkResolver.resolvedLocalFilePath(linkID: metadata.id)
@@ -1058,12 +1289,8 @@ import workspacecore
         // through Ghostty shell integration (OSC 7), which many shells never emit — so it is stale
         // after a plain `cd`. The owning process's real cwd is always current, anchoring relative
         // links (e.g. `./statement.pdf`) in the directory the shell is actually sitting in.
-        if let liveWorkingDirectory = normalizedString(Self.liveTerminalWorkingDirectory(runtimeState: runtimeState)) {
-            return liveWorkingDirectory
-        }
-        if let workingDirectory = normalizedString(runtimeState?.workingDirectory) {
-            return workingDirectory
-        }
+        if let liveWorkingDirectory = normalizedString(Self.liveTerminalWorkingDirectory(runtimeState: runtimeState)) { return liveWorkingDirectory }
+        if let workingDirectory = normalizedString(runtimeState?.workingDirectory) { return workingDirectory }
         return try TerminalSessionPersistence.readLaunchConfiguration(paths: paths).workingDirectory
     }
 
@@ -1072,9 +1299,7 @@ import workspacecore
         if let foregroundPID = runtimeState.foregroundPID, let cwd = TerminalForegroundProcessInspector.workingDirectory(pid: foregroundPID) {
             return cwd
         }
-        if let childPID = runtimeState.childPID, let cwd = TerminalForegroundProcessInspector.workingDirectory(pid: childPID) {
-            return cwd
-        }
+        if let childPID = runtimeState.childPID, let cwd = TerminalForegroundProcessInspector.workingDirectory(pid: childPID) { return cwd }
         return nil
     }
 
@@ -1232,6 +1457,14 @@ private final class MainActorSyncBox<T>: @unchecked Sendable { var value: T? }
 
 @main struct SpacesDaemonMain {
     static func main() {
+        // Capture the exec target from raw argv[0] before anything can chdir; this is the path we
+        // re-exec on an exec-in-place handoff.
+        let launchExecutablePath = absoluteLaunchExecutablePath()
+
+        // The old daemon runs the staged binary once as `spacesd --handoff-check <formatVersion>` to
+        // confirm it can read the table about to be written. Answer that here before any startup work.
+        if let code = DaemonHandoffPreflight.respondsToCheck(arguments: CommandLine.arguments) { exit(code) }
+
         configureProcessSignals()
         configureCLISearchPath()
 
@@ -1250,10 +1483,18 @@ private final class MainActorSyncBox<T>: @unchecked Sendable { var value: T? }
             app.setActivationPolicy(.prohibited)
 
             do {
-                let controller = try MainActor.assumeIsolated { try SpacesDaemonController() }
+                let controller = try MainActor.assumeIsolated { try SpacesDaemonController(launchExecutablePath: launchExecutablePath) }
                 let delegate = SpacesDaemonAppDelegate(controller: controller)
                 app.delegate = delegate
-                try MainActor.assumeIsolated { try controller.start() }
+                // Kick startup as a main-actor Task and then run the app run loop: `start()` awaits the
+                // exec-in-place resume, which needs the run loop pumping ticks, and the request-accepting
+                // server starts only after the resume completes.
+                Task { @MainActor in
+                    do { try await controller.start() } catch {
+                        writeStandardError("spacesd: \(error)\n")
+                        exit(1)
+                    }
+                }
                 app.run()
             } catch {
                 writeStandardError("spacesd: \(error)\n")
@@ -1261,9 +1502,14 @@ private final class MainActorSyncBox<T>: @unchecked Sendable { var value: T? }
             }
         #else
             do {
-                let controller = try MainActor.assumeIsolated { try SpacesDaemonController() }
+                let controller = try MainActor.assumeIsolated { try SpacesDaemonController(launchExecutablePath: launchExecutablePath) }
                 let signalSources = installTerminationSignalHandlers(controller: controller)
-                try MainActor.assumeIsolated { try controller.start() }
+                Task { @MainActor in
+                    do { try await controller.start() } catch {
+                        writeStandardError("spacesd: \(error)\n")
+                        exit(1)
+                    }
+                }
                 withExtendedLifetime(signalSources) { RunLoop.main.run() }
                 MainActor.assumeIsolated { controller.shutdown() }
             } catch {
@@ -1271,6 +1517,16 @@ private final class MainActorSyncBox<T>: @unchecked Sendable { var value: T? }
                 exit(1)
             }
         #endif
+    }
+
+    /// Absolutizes the raw invoked `argv[0]` against the current directory when relative, WITHOUT
+    /// resolving symlinks — the exec target must stay the stable public `~/.spaces/bin/spacesd`
+    /// symlink, not the versioned real binary `SpacesProfile.currentExecutablePath` would resolve to.
+    /// Must be called at `main()` start, before anything can change the working directory.
+    private static func absoluteLaunchExecutablePath() -> String {
+        let argv0 = CommandLine.arguments.first ?? ""
+        if argv0.hasPrefix("/") { return argv0 }
+        return URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent(argv0).standardizedFileURL.path
     }
 
     private static func configureProcessSignals() {

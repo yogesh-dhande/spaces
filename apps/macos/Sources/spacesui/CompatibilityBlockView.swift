@@ -4,8 +4,8 @@ import spacesterminalcore
 import workspacecore
 
 /// Full-pane block shown when a device's daemon is wire-incompatible with this app. Mirrors the iOS
-/// `CompatibilityBannerView`: title, explanation, restart-impact counts, and a restart action (absent
-/// when the fix is a client update rather than a daemon restart).
+/// `CompatibilityBannerView`: title, explanation, and a restart action (absent when the fix is a client
+/// update rather than a daemon restart).
 ///
 /// A too-old **Linux** daemon is a special case: a restart respawns the same old binary, so instead of
 /// the Restart button it shows the version-pinned installer one-liner the user runs on the Linux device
@@ -43,8 +43,9 @@ final class CompatibilityBlockView: NSView {
 
         let detailText =
             showsLinuxInstaller
-            ? "The daemon on \(deviceName) is older than this app, and a restart won't update it. Run the command below on the Linux device, "
-                + "then reconnect. Other paired devices remain available." : Self.detail(for: verdict, deviceName: deviceName)
+            ? "The daemon on \(deviceName) is older than this app, and a restart won't update it. Run the command below on the Linux device — "
+                + "running terminals, agents, and processes on it are preserved — then reconnect. Other paired devices remain available."
+            : Self.detail(for: verdict, deviceName: deviceName)
         let detail = NSTextField(wrappingLabelWithString: detailText)
         detail.font = .systemFont(ofSize: 13)
         detail.textColor = .secondaryLabelColor
@@ -59,14 +60,6 @@ final class CompatibilityBlockView: NSView {
             command.lineBreakMode = .byCharWrapping
             command.maximumNumberOfLines = 0
             stack.addArrangedSubview(command)
-        }
-
-        if !showsLinuxInstaller, onRestart != nil, let impact = Self.impactSummary(status: status) {
-            let impactLabel = NSTextField(wrappingLabelWithString: impact)
-            impactLabel.font = .systemFont(ofSize: 12)
-            impactLabel.textColor = .secondaryLabelColor
-            impactLabel.alignment = .center
-            stack.addArrangedSubview(impactLabel)
         }
 
         if !showsLinuxInstaller, onRestart != nil {
@@ -116,24 +109,9 @@ final class CompatibilityBlockView: NSView {
         switch verdict {
         case .clientTooOld: "\(deviceName) runs a newer version than this app. Please update this client to reconnect to it."
         case .daemonTooOld:
-            "The daemon on \(deviceName) is older than this app needs. Restart it to apply the update and reconnect. "
-                + "Other paired devices remain available."
+            "The daemon on \(deviceName) is older than this app needs. Restart it to apply the update — running terminals, agents, and "
+                + "processes keep running. Other paired devices remain available."
         case .compatible: "A newer Spaces is installed; the daemon keeps running the older build until it restarts."
         }
-    }
-
-    private static func impactSummary(status: TerminalServiceDaemonStatus?) -> String? {
-        guard let status else { return nil }
-        var parts: [String] = []
-        if status.activeSessionCount > 0 { parts.append(count(status.activeSessionCount, "terminal")) }
-        if status.runningProcesses > 0 { parts.append(count(status.runningProcesses, "process", plural: "processes")) }
-        let agents = status.activeAgents + status.waitingAgents
-        if agents > 0 { parts.append(count(agents, "coding agent")) }
-        guard !parts.isEmpty else { return "Restarting won't interrupt any running work." }
-        return "Restarting will stop " + parts.joined(separator: ", ") + "."
-    }
-
-    private static func count(_ value: Int, _ singular: String, plural: String? = nil) -> String {
-        "\(value) \(value == 1 ? singular : (plural ?? singular + "s"))"
     }
 }

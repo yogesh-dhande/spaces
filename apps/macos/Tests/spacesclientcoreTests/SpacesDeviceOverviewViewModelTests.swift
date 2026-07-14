@@ -249,7 +249,8 @@ final class SpacesDeviceOverviewViewModelTests: XCTestCase {
     }
 
     private static func emptyOverviewResponse() -> SpacesDeviceAPIResponse {
-        SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(SpacesDeviceOverviewPayload(workspaces: [], sessions: [], daemonStatus: status())))
+        SpacesDeviceAPIResponse(
+            ok: true, message: "ok", result: .overview(SpacesDeviceOverviewPayload(workspaces: [], sessions: [], daemonStatus: status())))
     }
 
     private static func status() -> TerminalServiceDaemonStatus {

@@ -14,8 +14,7 @@ import workspacecore
             processes: [
                 SpacesDeviceProcessTemplate(id: "tpl-web", name: "web", command: "npm run dev"),
                 SpacesDeviceProcessTemplate(id: "tpl-api", name: "api", command: "npm run api"),
-            ],
-            browserSessions: [SpacesDeviceBrowserSession(name: "App", url: "http://localhost:$PORT")],
+            ], browserSessions: [SpacesDeviceBrowserSession(name: "App", url: "http://localhost:$PORT")],
             resolvedBrowserSessions: [SpacesDeviceBrowserSession(name: "App", url: "http://localhost:3000")],
             agentLaunchers: [
                 SpacesDeviceAgentLauncher(id: "launcher-claude", name: "claude", command: "claude"),
@@ -34,9 +33,9 @@ import workspacecore
             ],
             codingAgentRows: [
                 SpacesDeviceWorkspaceCodingAgentRow(
-                    id: "row-agent", workspaceID: "workspace", name: "claude", command: "claude", launcherID: "launcher-claude",
-                    agentID: "agent-1", sessionID: "sess-agent", isConfigured: true, runState: .running, activityState: .idle, canRun: false,
-                    canStop: true, canRestart: true)
+                    id: "row-agent", workspaceID: "workspace", name: "claude", command: "claude", launcherID: "launcher-claude", agentID: "agent-1",
+                    sessionID: "sess-agent", isConfigured: true, runState: .running, activityState: .idle, canRun: false, canStop: true,
+                    canRestart: true)
             ],
             terminalRows: [
                 SpacesDeviceWorkspaceTerminalRow(
@@ -124,8 +123,8 @@ import workspacecore
     @Test func shortcutIndexStopsAfterTen() {
         let terminalRows = (0..<12).map { index in
             SpacesDeviceWorkspaceTerminalRow(
-                id: "term-\(index)", workspaceID: "workspace", title: "zsh \(index)", workingDirectory: "/tmp/workspace",
-                sessionID: "sess-\(index)", runState: .running, canOpenTerminal: true, canStop: true)
+                id: "term-\(index)", workspaceID: "workspace", title: "zsh \(index)", workingDirectory: "/tmp/workspace", sessionID: "sess-\(index)",
+                runState: .running, canOpenTerminal: true, canStop: true)
         }
         let summary = SpacesDeviceWorkspaceSummary(
             id: "workspace", projectID: "project", projectName: "project", branch: "main", baseBranch: nil, dir: "/tmp/workspace", isRunning: true,

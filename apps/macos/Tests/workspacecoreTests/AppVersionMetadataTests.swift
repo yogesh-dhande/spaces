@@ -10,9 +10,8 @@ struct AppVersionMetadataTests {
     private let infoPlist = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         .appendingPathComponent("Sources/SpacesApp/Info.plist")
 
-    private let iOSInfoPlist = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
-        .deletingLastPathComponent().deletingLastPathComponent()
-        .appendingPathComponent("ios/Info.plist")
+    private let iOSInfoPlist = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        .deletingLastPathComponent().appendingPathComponent("ios/Info.plist")
 
     @Test func sharedSwiftVersionMatchesSourceMetadata() throws {
         let metadata = try readPlist(at: sourcePlist)

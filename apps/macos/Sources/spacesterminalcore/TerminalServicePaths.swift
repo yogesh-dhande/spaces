@@ -40,6 +40,13 @@ public enum TerminalServicePaths {
         return root.appendingPathComponent("service.log", isDirectory: false).path
     }
 
+    /// Profile-scoped handoff table the daemon writes just before an exec-in-place
+    /// update and consumes on the next startup. See `DaemonHandoffStore`.
+    public static func daemonHandoffTablePath(fileManager: FileManager = .default) throws -> String {
+        let root = try terminalRootDirectory(fileManager: fileManager)
+        return root.appendingPathComponent("daemon-handoff.json", isDirectory: false).path
+    }
+
     public static func terminalRootDirectory(fileManager: FileManager = .default) throws -> URL {
         let sessionsRoot = URL(fileURLWithPath: try TerminalSessionPaths.sessionsRootDirectory(fileManager: fileManager), isDirectory: true)
             .resolvingSymlinksInPath().standardizedFileURL

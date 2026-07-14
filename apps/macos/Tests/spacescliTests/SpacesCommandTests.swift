@@ -251,7 +251,31 @@ final class SpacesCommandTests: XCTestCase {
 
     func testSpacesCommandListsGroupedPublicVerbs() {
         let subcommands = SpacesCommand.configuration.subcommands.map { String(describing: $0) }
-        XCTAssertEqual(subcommands, ["ProjectCommand", "WorkspaceCommand", "AgentCommand", "TerminalCommand", "DeviceCommand", "MCPCommand"])
+        XCTAssertEqual(
+            subcommands, ["ProjectCommand", "WorkspaceCommand", "AgentCommand", "TerminalCommand", "DeviceCommand", "DaemonCommand", "MCPCommand"])
+    }
+
+    func testDaemonApplyUpdateParses() throws { XCTAssertNoThrow(try DaemonApplyUpdateCommand.parse([])) }
+
+    func testDaemonApplyUpdateFailsClearlyWhenDaemonNotRunning() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let originalRuntimeDir = ProcessInfo.processInfo.environment[SpacesProfile.runtimeDirectoryEnvironmentVariable]
+        setenv(SpacesProfile.runtimeDirectoryEnvironmentVariable, root.path, 1)
+        defer {
+            if let originalRuntimeDir {
+                setenv(SpacesProfile.runtimeDirectoryEnvironmentVariable, originalRuntimeDir, 1)
+            } else {
+                unsetenv(SpacesProfile.runtimeDirectoryEnvironmentVariable)
+            }
+        }
+
+        var command = try DaemonApplyUpdateCommand.parse([])
+        XCTAssertThrowsError(try command.run()) { error in
+            XCTAssertTrue("\(error)".contains("spacesd is not running"), "expected a not-running error, got \(error)")
+        }
     }
 
     func testMCPToolDefinitionsExposeExplicitSpacesOperations() throws {

@@ -172,7 +172,7 @@ private final class NotificationObserverBag: @unchecked Sendable {
 
     public init(
         sessionID: String, paths: TerminalSessionPaths, stateProvider: any TerminalSessionStateProviding,
-        preferredAttachmentMode: TerminalAttachmentMode = .owner, performInitialRefresh: Bool = true,
+        preferredAttachmentMode: TerminalAttachmentMode = .owner, performInitialRefresh: Bool = true, reusableOwnerClientID: String? = nil,
         sendInputAction: (@Sendable (String, Bool) throws -> TerminalControlResponse)? = nil,
         sendKeyAction: (@Sendable (String) throws -> TerminalControlResponse)? = nil,
         pasteImageAction: (@MainActor (TerminalPasteboardImage) async throws -> TerminalControlResponse)? = nil,
@@ -197,8 +197,16 @@ private final class NotificationObserverBag: @unchecked Sendable {
         backend = resolvedBackend
         rendererMode = TerminalRendererResolver.resolveGhosttyEmbeddedMode(backend: resolvedBackend)
         let now = TerminalSessionTimestamp.string(from: Date())
+        // Reuse the owner client id this device stored on its last successful owner attach/takeover
+        // for this session, when the caller supplies one; otherwise mint a fresh id. A relaunched
+        // window (e.g. after an app upgrade) then presents the SAME id to the daemon, so its
+        // orphaned `localWindow` owner attachment — which never expires — matches and the pane
+        // silently reclaims ownership instead of attaching as a viewer behind the manual takeover UI.
+        // Safety: the stored UUID exists only on this Mac, so it can only ever match THIS device's own
+        // prior attachment. If another device owns the session, the ids differ and the pane attaches
+        // as a viewer with the takeover UI unchanged.
         client = TerminalClient(
-            kind: .localWindow,
+            id: reusableOwnerClientID ?? UUID().uuidString, kind: .localWindow,
             identity: TerminalClientIdentity(label: "Spaces window", hostName: Host.current().name, deviceName: Host.current().localizedName),
             connectedAt: now)
         self.sendInputAction =

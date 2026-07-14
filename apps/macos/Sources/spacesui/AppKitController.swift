@@ -191,6 +191,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     var localPairedDevice: SpacesPairedDeviceRecord?
     var localDeviceOverview: SpacesDeviceOverviewPayload?
     var deviceSections: [DeviceSection] = []
+    /// `"deviceID|targetVersion"` keys for silent daemon-handoff requests already fired this app run
+    /// (see `maybeRequestSilentDaemonHandoff`), so a status refresh never re-requests a handoff that is
+    /// already staged or that failed/was refused — a failed handoff surfaces via the still-pending
+    /// caption and the daemon log rather than a retry loop.
+    private var silentDaemonHandoffRequestedKeys: Set<String> = []
     var alertsGroups: [AlertsGroup] = []
     /// The single content the detail pane is showing. Mutually exclusive by construction, so presenting
     /// one content replaces the previous one. Written only through `presentDetailPane`.
@@ -1747,6 +1752,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 return self.applyRemoteAgentSignals(events)
             }
             let remoteClientStore = RemoteTerminalWindowClientStore()
+            // Reuse the owner client id this device stored on its last successful owner attach/takeover
+            // for this session so a relaunch of this Mac (e.g. after an app upgrade) presents the same id
+            // and silently reclaims the still-running session's orphaned `localWindow` owner attachment.
+            // Keyed by the local device id; a stale mapping is inert since it matches no current owner.
+            let ownerClientIDStore = ClientTerminalOwnerClientIDStore()
+            let reusableOwnerClientID = try? ownerClientIDStore.clientID(sessionID: sessionID)
             // Resolved once here (this runs on the main actor); the attach closure is @Sendable and may
             // run off-main, so it cannot read NSApp. Seeds the shared appearance store, which the attach
             // reads when it fires and the broadcast path advances on a mid-session appearance change
@@ -1764,6 +1775,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                             TerminalControlAttachPayload(client: client, attachmentMode: attachmentMode, appearance: appearanceStore.current()))),
                     requestSender: requestSender, refreshStateAfterControl: true, applyState: applyControlState)
                 guard response.ok else { throw WorkspaceError.invalidArgument(message: response.message) }
+                // Persist the owner client id only once the daemon confirms this client attached as
+                // OWNER, so a relaunch of this Mac reuses it and silently reclaims the still-running
+                // session's orphaned owner attachment. Not optimistic: response.ok means the daemon
+                // recorded this client as the owner attachment.
+                if attachmentMode == .owner { try? ownerClientIDStore.setClientID(sessionID: sessionID, clientID: client.id) }
             }
             let detachClientAction: @Sendable (String) throws -> Void = { clientID in
                 if remoteClientStore.current() == clientID { remoteClientStore.set(nil) }
@@ -1800,9 +1816,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 return try await stateModel.pasteImage(image, clientID: clientID, ownerEpoch: ownerEpoch)
             }
             let takeoverAction: @Sendable (String) throws -> TerminalControlResponse = { clientID in
-                try Self.sendDeviceTerminalControl(
+                let response = try Self.sendDeviceTerminalControl(
                     sessionID: sessionID, request: TerminalControlRequest(command: .takeover(TerminalControlClientPayload(clientID: clientID))),
                     requestSender: requestSender, refreshStateAfterControl: true, applyState: applyControlState)
+                // A successful takeover transfers ownership to this client on the daemon via
+                // `transferOwnership` (not a re-attach through `attachClientAction`), so persist the
+                // owner id here too — otherwise the reclaimed-after-takeover id would not survive a
+                // relaunch.
+                if response.ok { try? ownerClientIDStore.setClientID(sessionID: sessionID, clientID: clientID) }
+                return response
             }
             // Re-themes this session to a new app appearance mid-session (see `applyAppearanceToLiveSession`).
             // Reuses the pane's captured request sender and `remoteClientStore` clientID, mirroring the input
@@ -1821,8 +1843,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             let linkOpenBox = TerminalLinkOpenHandlerBox()
             let pane = TerminalSessionPaneViewController(
                 sessionID: sessionID, paths: paths, stateProvider: stateModel, preferredAttachmentMode: .owner, performInitialRefresh: false,
-                sendInputAction: sendInputAction, sendKeyAction: sendKeyAction, pasteImageAction: pasteImageAction, takeoverAction: takeoverAction,
-                attachClientAction: attachClientAction, detachClientAction: detachClientAction, detachClientSynchronouslyOnClose: false,
+                reusableOwnerClientID: reusableOwnerClientID, sendInputAction: sendInputAction, sendKeyAction: sendKeyAction,
+                pasteImageAction: pasteImageAction, takeoverAction: takeoverAction, attachClientAction: attachClientAction,
+                detachClientAction: detachClientAction, detachClientSynchronouslyOnClose: false,
                 onCloseClientDetached: { [weak self] in self?.terminateUnattachedAdHocBuiltInTerminalSessionIfNeeded(sessionID: sessionID) },
                 sessionHostProvider: { launchConfiguration, paths in
                     Self.terminalSessionHost(
@@ -3466,8 +3489,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                     WorkspaceRunShortcutTarget(
                         kind: .missingConfiguredProcess, processID: nil, windowListIndex: nil, targetURL: nil, processKey: processKey,
                         launcherName: nil, agentWindow: nil))
-            case .window:
-                continue
+            case .window: continue
             }
         }
 
@@ -4422,7 +4444,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let status = deviceDaemonStatus(forDeviceID: deviceID)
         let card = CompatibilityBlockView(
             verdict: verdict, deviceName: deviceSection(id: deviceID)?.deviceName ?? deviceID, status: status,
-            onRestart: verdict == .clientTooOld ? nil : { [weak self] in self?.confirmDaemonRestart(deviceID: deviceID) })
+            onRestart: verdict == .clientTooOld ? nil : { [weak self] in self?.requestDaemonRestart(deviceID: deviceID) })
         card.translatesAutoresizingMaskIntoConstraints = false
         detailContainer.addSubview(card)
         NSLayoutConstraint.activate([
@@ -4434,47 +4456,66 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         ])
     }
 
-    /// Confirms the restart-impact with the user, then restarts the device's daemon through the
-    /// `requestDaemonRestart` RPC, after which launchd/systemd respawns it (applying any update already
-    /// staged on disk). A remote Linux daemon that is too old for this app is not updated over SSH: the
-    /// user re-runs the version-pinned installer on the Linux device — surfaced in the compatibility
-    /// block — which replaces the binary and restarts the service.
-    private func confirmDaemonRestart(deviceID: String) {
-        let status = deviceDaemonStatus(forDeviceID: deviceID)
-        let alert = NSAlert()
-        alert.messageText = "Restart this device's daemon?"
-        alert.informativeText = Self.restartImpactMessage(status: status)
-        alert.addButton(withTitle: "Restart")
-        alert.addButton(withTitle: "Defer")
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        guard let device = deviceRecord(forDeviceID: deviceID) else {
-            showDeviceNotLoadedError()
-            return
-        }
+    /// Requests the device's daemon exec-in-place handoff through the `requestDaemonRestart` RPC (the
+    /// daemon quiesces sessions, applies any update staged on disk, and re-execs at the same pid, so
+    /// running terminals, agents, and processes survive), then reloads the sidebar after a short delay
+    /// so the app re-handshakes against the new build. Shared by the compatibility block's Restart
+    /// button, which reports RPC failures, and `maybeRequestSilentDaemonHandoff`, which stays silent —
+    /// the only two daemon-restart entry points. A remote
+    /// Linux daemon that is too old for this app is not updated over SSH: the user re-runs the
+    /// version-pinned installer on the Linux device — surfaced in the compatibility block — which
+    /// replaces the binary and restarts the service.
+    private func fireDaemonRestartRequest(device: SpacesPairedDeviceRecord, reportsFailure: Bool) {
         Task { @MainActor [weak self] in
-            let result: Result<Void, Error> = await Task.detached(priority: .userInitiated) {
-                do {
-                    try SpacesDeviceClient.requestDaemonRestart(device: device)
-                    return .success(())
-                } catch { return .failure(error) }
-            }.value
+            do { _ = try await Task.detached(priority: .userInitiated) { try SpacesDeviceClient.requestDaemonRestart(device: device) }.value } catch {
+                guard let self else { return }
+                if reportsFailure { self.showError(error) }
+                return
+            }
             guard let self else { return }
-            if case .failure(let error) = result { self.showError(error) }
-            // Give the daemon a moment to exit and respawn, then re-handshake.
+            // Give the daemon a moment to complete the handoff, then re-handshake.
             try? await Task.sleep(for: .seconds(2))
             self.requestSidebarReload(forceRemoteRefresh: true)
         }
     }
 
-    static func restartImpactMessage(status: TerminalServiceDaemonStatus?) -> String {
-        guard let status else { return "Running terminals, processes, and coding agents on this device will stop." }
-        let agents = status.activeAgents + status.waitingAgents
-        var parts: [String] = []
-        if status.activeSessionCount > 0 { parts.append("\(status.activeSessionCount) terminal\(status.activeSessionCount == 1 ? "" : "s")") }
-        if status.runningProcesses > 0 { parts.append("\(status.runningProcesses) process\(status.runningProcesses == 1 ? "" : "es")") }
-        if agents > 0 { parts.append("\(agents) coding agent\(agents == 1 ? "" : "s")") }
-        guard !parts.isEmpty else { return "No running work will be interrupted." }
-        return "This will stop " + parts.joined(separator: ", ") + ". Defer if you need them to finish first."
+    /// The compatibility block's explicit Restart button: user-initiated, so an unresolved device
+    /// record or a failed RPC is a visible error rather than a silent no-op.
+    private func requestDaemonRestart(deviceID: String) {
+        guard let device = deviceRecord(forDeviceID: deviceID) else {
+            showDeviceNotLoadedError()
+            return
+        }
+        fireDaemonRestartRequest(device: device, reportsFailure: true)
+    }
+
+    /// Pure fire/skip decision for the silent daemon-handoff trigger, factored out so it is testable
+    /// without a device record or the RPC: fire only when the daemon reports a staged update, the
+    /// daemon speaks a wire protocol this app can talk to (an incompatible daemon is handled by the
+    /// compatibility block, not a silent restart), and this exact device/staged-version pair has not
+    /// already been requested.
+    nonisolated static func shouldFireSilentDaemonHandoff(updatePending: Bool, compatibilityIsCompatible: Bool, alreadyRequestedKey: Bool) -> Bool {
+        updatePending && compatibilityIsCompatible && !alreadyRequestedKey
+    }
+
+    /// Silently requests a daemon exec-in-place handoff when a compatible daemon reports a staged
+    /// update (`isUpdatePending` — the daemon's own installed-vs-running comparison; never this app's
+    /// build version), instead of waiting for the daemon's own next restart. Called from every path
+    /// where a fresh `TerminalServiceDaemonStatus` lands for a device (local snapshot apply, remote
+    /// pull, remote push subscription). Deduped per (deviceID, staged version) for the app's lifetime
+    /// so a failed or refused handoff is not retried on every subsequent status refresh; the "update
+    /// pending" sidebar caption stays visible until the daemon actually comes back on the new build.
+    func maybeRequestSilentDaemonHandoff(deviceID: String, status: TerminalServiceDaemonStatus?) {
+        guard let status, let stagedVersion = status.installedVersion else { return }
+        let key = "\(deviceID)|\(stagedVersion)"
+        guard
+            Self.shouldFireSilentDaemonHandoff(
+                updatePending: status.isUpdatePending, compatibilityIsCompatible: SpacesWireCompatibility.evaluate(daemonStatus: status).isCompatible,
+                alreadyRequestedKey: silentDaemonHandoffRequestedKeys.contains(key))
+        else { return }
+        silentDaemonHandoffRequestedKeys.insert(key)
+        guard let device = deviceRecord(forDeviceID: deviceID) else { return }
+        fireDaemonRestartRequest(device: device, reportsFailure: false)
     }
 
     private func showLoadingPlaceholder(message: String, detail: String?) {
