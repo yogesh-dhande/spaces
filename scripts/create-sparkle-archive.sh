@@ -14,8 +14,6 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RELEASES_DIR="$REPO_ROOT/dist/releases/$VERSION"
 ARCHIVE_NAME="Spaces-${VERSION}.zip"
 ARCHIVE_PATH="$RELEASES_DIR/$ARCHIVE_NAME"
-IDENTITY="${CODESIGN_IDENTITY:--}"
-ENTITLEMENTS="$REPO_ROOT/scripts/entitlements.plist"
 
 mkdir -p "$RELEASES_DIR"
 
@@ -25,9 +23,7 @@ app_bundle="$staging/Spaces.app"
 
 "$REPO_ROOT/scripts/create-app-bundle.sh" "$SPACES_APP" "$SPACES_CLI" "$SPACESD" "$app_bundle"
 
-echo "Signing Sparkle app bundle with identity: $IDENTITY"
-codesign --force --deep --timestamp --options runtime --entitlements "$ENTITLEMENTS" --sign "$IDENTITY" "$app_bundle"
-codesign --verify --verbose=2 "$app_bundle"
+"$REPO_ROOT/scripts/codesign-spaces-app.sh" "$app_bundle"
 
 rm -f "$ARCHIVE_PATH"
 ditto -c -k --keepParent --norsrc "$app_bundle" "$ARCHIVE_PATH"
