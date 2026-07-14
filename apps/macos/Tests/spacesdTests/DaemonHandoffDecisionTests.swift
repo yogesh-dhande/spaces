@@ -48,6 +48,29 @@ final class DaemonHandoffDecisionTests: XCTestCase {
                 generation: 5, lastSourceVersion: "0.2.0", currentVersion: "0.2.0", stagedVersion: "0.3.0"))
     }
 
+    func testGenerationGuardRefusesRapidFourthSameVersionHandoff() {
+        XCTAssertNil(
+            DaemonHandoffDecision.nextHandoffGeneration(
+                generation: 3, lastSourceVersion: "0.2.0", currentVersion: "0.2.0", stagedVersion: "0.2.0",
+                elapsedSinceLastHandoff: DaemonHandoffDecision.generationGuardResetInterval - 1))
+    }
+
+    func testGenerationGuardStartsFreshChainAfterStableInterval() {
+        XCTAssertEqual(
+            DaemonHandoffDecision.nextHandoffGeneration(
+                generation: 3, lastSourceVersion: "0.2.0", currentVersion: "0.2.0", stagedVersion: "0.2.0",
+                elapsedSinceLastHandoff: DaemonHandoffDecision.generationGuardResetInterval), 1)
+    }
+
+    func testGenerationGuardStartsFreshChainForDifferentVersion() {
+        XCTAssertEqual(
+            DaemonHandoffDecision.nextHandoffGeneration(
+                generation: 5, lastSourceVersion: "0.1.0", currentVersion: "0.2.0", stagedVersion: "0.2.0", elapsedSinceLastHandoff: 1), 1)
+        XCTAssertEqual(
+            DaemonHandoffDecision.nextHandoffGeneration(
+                generation: 5, lastSourceVersion: "0.2.0", currentVersion: "0.2.0", stagedVersion: "0.3.0", elapsedSinceLastHandoff: 1), 1)
+    }
+
     // MARK: - Resume-record selection
 
     func testResumeAdoptsLiveSessionWithValidDescriptor() {
