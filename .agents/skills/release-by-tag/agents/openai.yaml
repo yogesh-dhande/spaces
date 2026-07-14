@@ -1,0 +1,4 @@
+interface:
+  display_name: "Release by Tag"
+  short_description: "Safely publish a curated tagged release"
+  default_prompt: "Use $release-by-tag to prepare and publish the next Spaces release."
