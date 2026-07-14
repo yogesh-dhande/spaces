@@ -4,6 +4,7 @@ set -eu
 root="$(cd "$(dirname "$0")/.." && pwd)"
 repo_root="$(cd "$root/../.." && pwd)"
 source "$repo_root/scripts/spaces-profile-helpers.sh"
+. "$root/scripts/silence-watchdog.sh"
 start_epoch="$(date +%s)"
 cache_dir="$root/.build/clang-module-cache"
 coverage_dir="$root/.build/coverage"
@@ -84,8 +85,11 @@ raise SystemExit(0 if swift_testing_passed and not xctest_failed else 1)
 PY
 }
 
-echo "Running swift test with coverage..."
-set -- test --enable-code-coverage --disable-sandbox
+echo "Building SwiftPM tests with coverage..."
+"$root/scripts/swiftpm.sh" build --build-tests --enable-code-coverage
+
+echo "Running SwiftPM coverage tests..."
+set -- test --skip-build --enable-code-coverage --disable-sandbox
 if [ "${SPACES_TEST_PARALLEL:-1}" = "1" ]; then
     workers="${SPACES_TEST_WORKERS:-}"
     max_auto_workers="${SPACES_TEST_MAX_AUTO_WORKERS:-8}"
@@ -124,7 +128,7 @@ fi
 
 set +e
 (
-    "$root/scripts/swiftpm.sh" "$@"
+    run_with_silence_watchdog "${SPACES_VERIFY_STALL_SECONDS:-600}" "$root/scripts/swiftpm.sh" "$@"
     printf '%s\n' "$?" >"$test_status_path"
 ) 2>&1 | tee "$test_log_path"
 tee_status="$?"
