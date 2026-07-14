@@ -430,6 +430,31 @@ import Testing
         #expect(outcome.agents.first { $0.kind == .codex }?.installState == .outdated)
     }
 
+    @Test func codexInstallFailsWhenEnableCommandLeavesTheFeatureDisabled() throws {
+        let home = try makeHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        try makeSpacesCLIAvailable(home: home)
+        try makeExecutable(
+            name: "codex", directory: home.appendingPathComponent(".local/bin", isDirectory: true),
+            contents: #"""
+                #!/bin/sh
+                if [ "$1 $2 $3" = "features enable hooks" ]; then
+                  exit 0
+                fi
+                if [ "$1 $2" = "features list" ]; then
+                  printf 'hooks stable false\n'
+                  exit 0
+                fi
+                exit 64
+                """#)
+
+        let outcome = try install([.codex], home: home)
+
+        #expect(outcome.failures.map(\.kind) == [.codex])
+        #expect(outcome.failures.first?.message.localizedStandardContains("remain disabled") == true)
+        #expect(outcome.agents.first { $0.kind == .codex }?.installState == .outdated)
+    }
+
     @Test func codexFeatureCommandTimeoutKillsTheWrapperAndItsChild() throws {
         let home = try makeHome()
         defer { try? FileManager.default.removeItem(at: home) }
@@ -767,5 +792,29 @@ import Testing
                 """)
 
         #expect(AgentHookInstaller.resolvedLoginShellPATH(shellPath: failingShell.path, home: home, environment: [:]) == nil)
+    }
+
+    @Test func loginShellPATHTimeoutKillsTheShellAndItsChild() throws {
+        let home = try makeHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let hangingShell = try makeExecutable(
+            name: "hanging-shell", directory: home,
+            contents: #"""
+                #!/bin/sh
+                sh -c 'trap "" HUP TERM; sleep 30' &
+                child=$!
+                printf '%s\n' "$child" > "$HOME/shell-child.pid"
+                wait "$child"
+                """#)
+
+        let startedAt = Date()
+        #expect(AgentHookInstaller.resolvedLoginShellPATH(shellPath: hangingShell.path, home: home, environment: [:], timeoutSeconds: 2) == nil)
+
+        #expect(Date().timeIntervalSince(startedAt) < 6)
+        let childPID = try #require(pid_t(read(home.appendingPathComponent("shell-child.pid")).trimmingCharacters(in: .whitespacesAndNewlines)))
+        defer { if processExists(childPID) { kill(childPID, SIGKILL) } }
+        let processExitDeadline = Date().addingTimeInterval(1)
+        while processExists(childPID) && Date() < processExitDeadline { usleep(10_000) }
+        #expect(!processExists(childPID))
     }
 }

@@ -338,7 +338,7 @@ public enum AgentHookInstaller {
         /// job-control signals that stop the probe until it times out. Both callers can have a terminal on
         /// stdin (the `spaces` CLI always does), so stdin is redirected to /dev/null: nothing is ever
         /// written to the shell, only read back from it.
-        static func resolvedLoginShellPATH(shellPath: String, home: URL, environment: [String: String]) -> String? {
+        static func resolvedLoginShellPATH(shellPath: String, home: URL, environment: [String: String], timeoutSeconds: TimeInterval = 5) -> String? {
             let process = Process()
             process.executableURL = URL(fileURLWithPath: shellPath)
             process.arguments = ["-l", "-i", "-c", "printf '\\n\(pathMarkerPrefix)%s\\n' \"$PATH\""]
@@ -349,7 +349,7 @@ public enum AgentHookInstaller {
             process.standardInput = FileHandle.nullDevice
 
             let outputPipe = Pipe()
-            let outputBuffer = PipeOutputBuffer()
+            let outputBuffer = AgentHookPipeOutputBuffer()
             let endOfOutput = DispatchSemaphore(value: 0)
             outputPipe.fileHandleForReading.readabilityHandler = { handle in
                 let data = handle.availableData
@@ -371,12 +371,8 @@ public enum AgentHookInstaller {
                 return nil
             }
 
-            if completion.wait(timeout: .now() + 5) == .timedOut {
-                process.terminate()
-                if completion.wait(timeout: .now() + 1) == .timedOut {
-                    kill(process.processIdentifier, SIGKILL)
-                    completion.wait()
-                }
+            if completion.wait(timeout: .now() + timeoutSeconds) == .timedOut {
+                AgentHookProcessTree.terminate(rootProcessID: process.processIdentifier, completion: completion)
             }
             process.waitUntilExit()
             // The shell has exited, so EOF is imminent; bound the wait anyway rather than hang the daemon
@@ -387,23 +383,6 @@ public enum AgentHookInstaller {
             guard process.terminationStatus == 0, let output = String(data: outputBuffer.snapshot(), encoding: .utf8) else { return nil }
             return output.components(separatedBy: .newlines).last { $0.hasPrefix(pathMarkerPrefix) }.map {
                 String($0.dropFirst(pathMarkerPrefix.count))
-            }
-        }
-
-        private final class PipeOutputBuffer: @unchecked Sendable {
-            private let lock = NSLock()
-            private var data = Data()
-
-            func append(_ chunk: Data) {
-                lock.lock()
-                data.append(chunk)
-                lock.unlock()
-            }
-
-            func snapshot() -> Data {
-                lock.lock()
-                defer { lock.unlock() }
-                return data
             }
         }
     #else
