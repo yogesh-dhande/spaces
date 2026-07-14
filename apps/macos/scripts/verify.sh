@@ -130,6 +130,7 @@ run_verify_steps() {
   "$root/Tests/setup_ghostty_cache_restore.sh"
   "$root/scripts/lint.sh"
   "$root/scripts/swiftpm.sh" build
+  "$root/Tests/release_bundle_signing.sh"
   spaces_profile_eval_shell_env "$root/.build/debug/spaces"
   stop_current_profile_runtime_for_tests
   unset SPACES_DEVICE_API_PORT

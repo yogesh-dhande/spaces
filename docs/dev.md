@@ -653,7 +653,7 @@ Local release runs the Ubuntu remote daemon artifact builds inside Docker for `l
 This workflow:
 - syncs the checked-in version metadata used by the CLI, app menu, and bundle plist
 - builds universal `arm64` + `x86_64` release binaries for the app, CLI, and `spacesd`
-- code-signs the app, CLI, and spacesd daemon
+- code-signs the app, CLI, spacesd daemon, and bundled Caddy executable
 - builds and smoke-tests Ubuntu 24.04 `x86_64` and `arm64` remote daemon artifacts, including a reinstall leg that pokes the running daemon (`apply-update`) and asserts the exec-in-place handoff preserves the daemon pid and its live session
 - signs `spaces-remote-artifacts.json` with the remote artifact Ed25519 key that the Linux installer uses to verify the Linux artifact download
 - creates a signed manual-download DMG
