@@ -92,14 +92,20 @@ final class HostManagedPTYAdoptTests: XCTestCase {
         XCTAssertGreaterThan(snapshot.childPID, 0)
 
         // Stand in for execv destroying driver A's read thread while the master fd
-        // survives: dup the master so driver B gets an independent fd on the same PTY,
-        // drop driver A (its orphaned read loop's weak self becomes nil, so it never
-        // reaps or closes the still-shared child), then close A's fd to end its loop.
-        // The real handoff never deallocates A pre-exec; exec atomically removes it.
+        // survives. Closing A's descriptor from this thread does not reliably interrupt
+        // its blocking read while the duplicate keeps the PTY open. Make the shared open
+        // file description nonblocking, wake the reader through the child, and wait for
+        // A's loop to retire before restoring blocking mode for B. The real handoff does
+        // not need this coordination because exec atomically removes the source thread.
         let adoptedFD = dup(snapshot.masterFD)
         XCTAssertGreaterThanOrEqual(adoptedFD, 0)
+        let descriptorFlags = fcntl(snapshot.masterFD, F_GETFL)
+        XCTAssertGreaterThanOrEqual(descriptorFlags, 0)
+        XCTAssertEqual(fcntl(snapshot.masterFD, F_SETFL, descriptorFlags | O_NONBLOCK), 0)
+        driverA?.sendRawBytes(Data("handoff-wake\n".utf8))
+        XCTAssertTrue(waitUntil { driverA?.handoffDescriptorSnapshot() == nil }, "driver A's read loop did not retire for adoption")
+        XCTAssertEqual(fcntl(adoptedFD, F_SETFL, descriptorFlags), 0)
         driverA = nil
-        close(snapshot.masterFD)
 
         // The child must still be alive for driver B to adopt it.
         XCTAssertEqual(kill(snapshot.childPID, 0), 0, "dropping driver A killed the child before adoption")
