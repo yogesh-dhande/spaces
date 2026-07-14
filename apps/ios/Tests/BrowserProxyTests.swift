@@ -616,6 +616,7 @@
         private let requestTerminator: Data
         private let lock = NSLock()
         private var receivedBytes = Data()
+        private var connections: [UUID: NWConnection] = [:]
 
         init(responseBody: String, requestTerminator: Data = Data("\r\n\r\n".utf8)) throws {
             self.responseBody = responseBody
@@ -650,14 +651,25 @@
             return port
         }
 
-        func stop() { listener.cancel() }
-
-        private func handle(_ connection: NWConnection) {
-            connection.start(queue: queue)
-            receiveLoop(connection, accumulated: Data())
+        func stop() {
+            listener.cancel()
+            lock.lock()
+            let activeConnections = Array(connections.values)
+            connections.removeAll()
+            lock.unlock()
+            for connection in activeConnections { connection.cancel() }
         }
 
-        private func receiveLoop(_ connection: NWConnection, accumulated: Data) {
+        private func handle(_ connection: NWConnection) {
+            let id = UUID()
+            lock.lock()
+            connections[id] = connection
+            lock.unlock()
+            connection.start(queue: queue)
+            receiveLoop(connection, id: id, accumulated: Data())
+        }
+
+        private func receiveLoop(_ connection: NWConnection, id: UUID, accumulated: Data) {
             connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { [weak self] content, _, isComplete, error in
                 guard let self else { return }
                 var next = accumulated
@@ -670,12 +682,23 @@
                         "HTTP/1.1 200 OK\r\nContent-Length: \(responseBody.utf8.count)\r\nConnection: close\r\n\r\n\(responseBody)"
                     // `.finalMessage` sends a TCP FIN after the response so the relay observes EOF.
                     connection.send(
-                        content: Data(response.utf8), contentContext: .finalMessage, isComplete: true, completion: .contentProcessed { _ in })
+                        content: Data(response.utf8), contentContext: .finalMessage, isComplete: true,
+                        completion: .contentProcessed { [weak self] _ in self?.releaseConnection(id) })
                     return
                 }
-                if isComplete || error != nil { return }
-                receiveLoop(connection, accumulated: next)
+                if isComplete || error != nil {
+                    releaseConnection(id)
+                    return
+                }
+                receiveLoop(connection, id: id, accumulated: next)
             }
+        }
+
+        private func releaseConnection(_ id: UUID) {
+            lock.lock()
+            let connection = connections.removeValue(forKey: id)
+            lock.unlock()
+            connection?.cancel()
         }
     }
 #endif
