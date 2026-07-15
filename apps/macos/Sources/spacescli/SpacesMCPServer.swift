@@ -1,5 +1,6 @@
 import Foundation
 import spacesclientcore
+import spacesdevicecore
 import spacesterminalcore
 import workspacecore
 
@@ -150,19 +151,36 @@ final class SpacesMCPStdioServer {
             },
             MCPToolDescriptor(
                 name: "spaces_agent_list",
-                description: "List coding-agent sessions on this device with status, note, project/workspace, and a spaces://terminal deep link.",
-                properties: ["workspace": stringSchema("Workspace ID filter. When omitted, lists agents across every workspace.")], required: []
+                description: "List coding-agent sessions on this or a paired device with status, note, project/workspace, and a spaces://terminal deep link.",
+                properties: [
+                    "workspace": stringSchema("Workspace ID filter. When omitted, lists agents across every workspace."),
+                    "device": stringSchema("Paired device name or ID. Defaults to this machine."),
+                ], required: []
             ) { server, arguments in
-                try TerminalService.sendProfileCommand(.agentList(.init(workspaceID: server.optionalString(arguments["workspace"]))))
+                if let device = try server.resolvedDevice(arguments) {
+                    let rows = try SpacesDeviceClient.listAgentSessions(
+                        workspaceID: server.optionalString(arguments["workspace"]), device: device, clientApp: cliDeviceClientApp())
+                    return TerminalServiceProfileCommandResponse(
+                        message: "Listed agent sessions.", agentSessions: rows.map(Self.profileAgentRow))
+                }
+                return try TerminalService.sendProfileCommand(.agentList(.init(workspaceID: server.optionalString(arguments["workspace"]))))
             },
             MCPToolDescriptor(
                 name: "spaces_agent_status",
                 description: "Show one coding-agent session's status, note, project/workspace, and deep link.",
                 properties: [
-                    "session": stringSchema("Spaces terminal session ID. Defaults to SPACES_TERMINAL_TRACKING_ID.")
+                    "session": stringSchema("Spaces terminal session ID. Defaults to SPACES_TERMINAL_TRACKING_ID."),
+                    "device": stringSchema("Paired device name or ID. Defaults to this machine."),
                 ], required: []
             ) { server, arguments in
                 let sessionID = try server.resolvedAgentSessionID(arguments)
+                if let device = try server.resolvedDevice(arguments) {
+                    let rows = try SpacesDeviceClient.listAgentSessions(sessionID: sessionID, device: device, clientApp: cliDeviceClientApp())
+                    guard let row = rows.first else {
+                        throw MCPError.invalidArguments("No agent session for terminal \(sessionID) on \(device.name).")
+                    }
+                    return TerminalServiceProfileCommandResponse(message: "Listed agent sessions.", agentSessions: [Self.profileAgentRow(row)])
+                }
                 let response = try TerminalService.sendProfileCommand(.agentList(.init(sessionID: sessionID)))
                 guard (response.agentSessions ?? []).first != nil else { throw MCPError.invalidArguments("No agent session for terminal \(sessionID).") }
                 return response
@@ -173,10 +191,18 @@ final class SpacesMCPStdioServer {
                 properties: [
                     "note": stringSchema("Note text. Pass an empty string to clear the note."),
                     "session": stringSchema("Spaces terminal session ID. Defaults to SPACES_TERMINAL_TRACKING_ID."),
+                    "device": stringSchema("Paired device name or ID. Defaults to this machine."),
                 ], required: ["note"]
             ) { server, arguments in
                 let note = try server.requiredRawString(arguments["note"], field: "note")
                 let sessionID = try server.resolvedAgentSessionID(arguments)
+                if let device = try server.resolvedDevice(arguments) {
+                    let rows = try SpacesDeviceClient.annotateAgentSession(
+                        sessionID: sessionID, note: note, device: device, clientApp: cliDeviceClientApp())
+                    return TerminalServiceProfileCommandResponse(
+                        message: rows.first?.note == nil ? "Cleared agent note." : "Annotated agent session.",
+                        agentSessions: rows.map(Self.profileAgentRow))
+                }
                 return try TerminalService.sendProfileCommand(.agentAnnotate(.init(sessionID: sessionID, note: note)))
             },
             MCPToolDescriptor(
@@ -184,13 +210,26 @@ final class SpacesMCPStdioServer {
                 description: "Start a coding agent in a new Spaces terminal and wait until it is ready to receive a prompt.",
                 properties: [
                     "command": stringSchema("Command that launches a supported coding agent (claude, codex, or opencode)."),
-                    "workspace": stringSchema("Workspace ID. Defaults to the workspace containing the current directory."),
+                    "workspace": stringSchema("Workspace ID. Defaults to the workspace containing the current directory. Required with device."),
                     "title": stringSchema("Window or session title. Defaults to the coding agent's name."),
                     "prompt": stringSchema("Prompt to send once the agent is ready."),
                     "timeout": intSchema("Seconds to wait for the agent's first lifecycle signal. Defaults to 90."),
+                    "device": stringSchema("Paired device name or ID. Spawns on that device and requires workspace. Defaults to this machine."),
                 ], required: ["command"]
             ) { server, arguments in
                 let command = try server.requiredString(arguments["command"], field: "command")
+                if let device = try server.resolvedDevice(arguments) {
+                    guard let workspace = server.optionalString(arguments["workspace"]) else {
+                        throw MCPError.invalidArguments("workspace is required with device: a remote spawn cannot infer the workspace.")
+                    }
+                    let row = try performRemoteAgentSpawn(
+                        device: device, workspace: workspace, command: command, title: server.optionalString(arguments["title"]),
+                        prompt: server.optionalString(arguments["prompt"]), timeoutSeconds: server.optionalInt(arguments["timeout"]) ?? 90)
+                    return TerminalServiceProfileCommandResponse(
+                        message:
+                            "Started agent session \(row.terminalSessionID ?? row.id) on \(device.name). Auto-subscribe is skipped for remote children; watch it with spaces_agent_list device=\(device.name).",
+                        agentSessions: [Self.profileAgentRow(row)])
+                }
                 let subscriber = ProcessInfo.processInfo.environment[WorkspaceOrchestrator.terminalTrackingIDEnvVar]?
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 let row = try performAgentSpawn(
@@ -202,17 +241,43 @@ final class SpacesMCPStdioServer {
             },
             MCPToolDescriptor(
                 name: "spaces_agent_interrupt", description: "Interrupt a coding-agent session by sending ESC to its terminal.",
-                properties: ["session": stringSchema("Child terminal session ID to interrupt.")], required: ["session"]
+                properties: [
+                    "session": stringSchema("Child terminal session ID to interrupt."),
+                    "device": stringSchema("Paired device name or ID. Defaults to this machine."),
+                ], required: ["session"]
             ) { server, arguments in
                 let sessionID = try server.requiredString(arguments["session"], field: "session")
+                if let device = try server.resolvedDevice(arguments) {
+                    let response = try SpacesDeviceClient.sendTerminalInput(
+                        sessionID: sessionID, bytes: Data([27]), appendNewline: false, device: device, clientApp: cliDeviceClientApp())
+                    return TerminalServiceProfileCommandResponse(message: response.message)
+                }
                 return try TerminalService.sendProfileCommand(
                     .terminalSend(.init(sessionID: sessionID, input: .bytes(Data([27])), appendNewline: false)), timeout: 5)
             },
             MCPToolDescriptor(
                 name: "spaces_agent_kill", description: "Terminate a coding-agent session and its terminal.",
-                properties: ["session": stringSchema("Child terminal session ID to terminate.")], required: ["session"]
+                properties: [
+                    "session": stringSchema("Child terminal session ID to terminate."),
+                    "device": stringSchema("Paired device name or ID. Defaults to this machine."),
+                ], required: ["session"]
             ) { server, arguments in
                 let sessionID = try server.requiredString(arguments["session"], field: "session")
+                if let device = try server.resolvedDevice(arguments) {
+                    // No remote ad-hoc terminal-terminate command exists; resolve the child's agent row
+                    // (present only after its first signal) and stop it. A not-yet-signaled remote
+                    // session cannot be killed in v1.
+                    guard let row = try SpacesDeviceClient.listAgentSessions(sessionID: sessionID, device: device, clientApp: cliDeviceClientApp()).first
+                    else {
+                        throw MCPError.invalidArguments(
+                            "No agent session for terminal \(sessionID) on \(device.name). A remote session can only be killed after its first lifecycle signal."
+                        )
+                    }
+                    let response = try SpacesDeviceClient.stopCodingAgent(
+                        workspaceID: row.workspaceID, agentID: row.id, agentName: nil, agentLauncherID: nil, device: device,
+                        clientApp: cliDeviceClientApp())
+                    return TerminalServiceProfileCommandResponse(message: response.message)
+                }
                 return try TerminalService.sendProfileCommand(.agentKill(.init(sessionID: sessionID)))
             },
             MCPToolDescriptor(
@@ -333,6 +398,15 @@ final class SpacesMCPStdioServer {
     private func resolvedDevice(_ arguments: [String: Any]) throws -> SpacesPairedDeviceRecord? {
         guard let selector = optionalString(arguments["device"]) else { return nil }
         return try SpacesPairedDeviceSelection.resolve(selector)
+    }
+
+    /// Maps a paired-device agent row to the profile row shape so remote and local `agent_*` tool
+    /// results share one JSON shape (the two structs mirror each other field-for-field).
+    private static func profileAgentRow(_ row: SpacesDeviceAgentSessionRow) -> TerminalServiceAgentSessionRow {
+        TerminalServiceAgentSessionRow(
+            id: row.id, terminalSessionID: row.terminalSessionID, agent: row.agent, label: row.label, status: row.status, note: row.note,
+            projectID: row.projectID, projectName: row.projectName, workspaceID: row.workspaceID, workspaceName: row.workspaceName,
+            branch: row.branch, updatedAt: row.updatedAt, lastSignalAt: row.lastSignalAt)
     }
 
     /// Resolves the agent's terminal session id for `status`/`annotate`, defaulting to the current

@@ -139,6 +139,33 @@ final class AgentOrchestrationCLITests: XCTestCase {
         XCTAssertNil(unsubscribe.subscriber)
     }
 
+    func testOrchestrationCommandsAcceptDeviceOption() throws {
+        XCTAssertEqual(try AgentListCommand.parse(["--device", "phone"]).device, "phone")
+        XCTAssertEqual(try AgentStatusCommand.parse(["--device", "phone"]).device, "phone")
+        XCTAssertEqual(try AgentAnnotateCommand.parse(["note", "--device", "phone"]).device, "phone")
+        XCTAssertEqual(
+            try AgentSpawnCommand.parse(["--command", "claude", "--workspace", "workspace-1", "--device", "phone"]).device, "phone")
+        XCTAssertEqual(try AgentInterruptCommand.parse(["session-1", "--device", "phone"]).device, "phone")
+        XCTAssertEqual(try AgentKillCommand.parse(["session-1", "--device", "phone"]).device, "phone")
+    }
+
+    func testAgentSpawnWithDeviceRequiresWorkspace() throws {
+        // The workspace guard runs before device resolution, so it fails deterministically without a
+        // paired device.
+        let spawn = try AgentSpawnCommand.parse(["--command", "claude", "--device", "phone"])
+        XCTAssertThrowsError(try spawn.run()) { error in
+            XCTAssertTrue("\(error)".contains("--workspace is required"), "\(error)")
+        }
+    }
+
+    func testAgentSubscribeAndUnsubscribeRejectDeviceLoudly() throws {
+        let subscribe = try AgentSubscribeCommand.parse(["child-session", "--device", "phone"])
+        XCTAssertThrowsError(try subscribe.run()) { error in XCTAssertTrue("\(error)".contains("per-device"), "\(error)") }
+
+        let unsubscribe = try AgentUnsubscribeCommand.parse(["child-session", "--device", "phone"])
+        XCTAssertThrowsError(try unsubscribe.run()) { error in XCTAssertTrue("\(error)".contains("per-device"), "\(error)") }
+    }
+
     // MARK: - Subscriber resolution
 
     func testResolvedSubscriberSessionIDPrefersExplicitThenEnvironment() throws {

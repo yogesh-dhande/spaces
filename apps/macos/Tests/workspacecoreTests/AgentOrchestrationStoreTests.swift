@@ -128,6 +128,64 @@ final class AgentOrchestrationStoreTests: XCTestCase {
         XCTAssertTrue(try store.agentSubscriptions(agentSessionID: "agent-1").isEmpty)
     }
 
+    // MARK: - Shared orchestration rows (profile command + Device API)
+
+    func testAgentSessionRowsCarryNoteProjectContextAndReadiness() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let (project, workspace) = try makeProjectAndWorkspace(store: store)
+        let agent = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Claude Code CLI", terminalTrackingID: "agent-session", status: .waiting)
+        try store.setAgentSessionNote(id: agent.id, note: "review auth", updatedAt: "2026-07-14T00:00:00Z")
+
+        // No hook signal yet: the row carries its note and context but is not ready.
+        let beforeSignal = try XCTUnwrap(orchestrator.agentSessionRows(sessionID: "agent-session").first)
+        XCTAssertEqual(beforeSignal.terminalSessionID, "agent-session")
+        XCTAssertEqual(beforeSignal.note, "review auth")
+        XCTAssertEqual(beforeSignal.status, "waiting")
+        XCTAssertEqual(beforeSignal.projectID, project.id)
+        XCTAssertEqual(beforeSignal.workspaceID, workspace.id)
+        XCTAssertNil(beforeSignal.lastSignalAt)
+
+        try store.appendAgentSessionEvent(
+            agentSessionID: agent.id, eventType: "working", source: "spaces_agent_signal", message: nil, createdAt: "2026-07-14T10:00:00Z")
+        let afterSignal = try XCTUnwrap(orchestrator.agentSessionRows(sessionID: "agent-session").first)
+        XCTAssertEqual(afterSignal.lastSignalAt, "2026-07-14T10:00:00Z")
+    }
+
+    func testAnnotateAgentSessionSanitizesControlCharacters() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        _ = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "agent-session", status: .idle)
+
+        let updated = try orchestrator.annotateAgentSession(terminalSessionID: "agent-session", note: "line one\nline two\u{07}")
+
+        // Embedded newlines and control characters are stripped so the note stays a single safe line.
+        XCTAssertEqual(updated.note, "line oneline two")
+        XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).first?.note, "line oneline two")
+    }
+
+    func testAnnotateAgentSessionWithEmptyNoteClearsAndReportsNilNote() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        _ = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "agent-session", status: .idle)
+
+        _ = try orchestrator.annotateAgentSession(terminalSessionID: "agent-session", note: "temporary")
+        let cleared = try orchestrator.annotateAgentSession(terminalSessionID: "agent-session", note: "  ")
+        XCTAssertNil(cleared.note)
+    }
+
+    func testAnnotateAgentSessionThrowsWhenNoAgentRow() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        _ = try makeProjectAndWorkspace(store: store)
+        XCTAssertThrowsError(try orchestrator.annotateAgentSession(terminalSessionID: "missing-session", note: "note"))
+    }
+
     // MARK: - Fixtures
 
     private func makeProjectAndWorkspace(store: SQLiteStore) throws -> (ProjectRecord, WorkspaceRecord) {

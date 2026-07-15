@@ -70,6 +70,48 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
         XCTAssertNil(try SpacesDeviceAPICodec.decodeResponse(jsonWithoutErrorCode).errorCode)
     }
 
+    func testSpawnAgentSessionRequestRoundTripsAndIsNotReplaySafe() throws {
+        let request = SpacesDeviceAPIRequest(
+            command: .spawnAgentSession(.init(workspaceID: "workspace-1", command: "codex --yolo", title: "Reviewer")), authToken: "SECRET")
+
+        XCTAssertEqual(request.commandName, "spawnAgentSession")
+        // A spawn creates a session; a replayed spawn after an ambiguous failure could start two.
+        XCTAssertFalse(request.isSafeToReplayAfterConnectionFailure)
+        XCTAssertEqual(try SpacesDeviceAPICodec.decodeRequest(SpacesDeviceAPICodec.encodeRequest(request)), request)
+    }
+
+    func testListAgentSessionsRequestRoundTripsAndIsReplaySafe() throws {
+        let request = SpacesDeviceAPIRequest(command: .listAgentSessions(.init(sessionID: "agent-session")), authToken: "SECRET")
+
+        XCTAssertEqual(request.commandName, "listAgentSessions")
+        // A read-only listing (also the remote readiness poll) is safe to replay.
+        XCTAssertTrue(request.isSafeToReplayAfterConnectionFailure)
+        XCTAssertEqual(try SpacesDeviceAPICodec.decodeRequest(SpacesDeviceAPICodec.encodeRequest(request)), request)
+    }
+
+    func testAnnotateAgentSessionRequestRoundTripsAndIsNotReplaySafe() throws {
+        let request = SpacesDeviceAPIRequest(command: .annotateAgentSession(.init(sessionID: "agent-session", note: "review auth")), authToken: "SECRET")
+
+        XCTAssertEqual(request.commandName, "annotateAgentSession")
+        XCTAssertFalse(request.isSafeToReplayAfterConnectionFailure)
+        XCTAssertEqual(try SpacesDeviceAPICodec.decodeRequest(SpacesDeviceAPICodec.encodeRequest(request)), request)
+    }
+
+    func testAgentSessionsResultRoundTripsThroughResponse() throws {
+        let row = SpacesDeviceAgentSessionRow(
+            id: "agent-1", terminalSessionID: "session-1", agent: "Claude Code CLI", label: "Claude Code CLI", status: "waiting", note: "review auth",
+            projectID: "project-1", projectName: "Spaces", workspaceID: "workspace-1", workspaceName: "feature", branch: "feature",
+            updatedAt: "2026-07-14T00:00:00Z", lastSignalAt: "2026-07-14T00:00:01Z")
+        let response = SpacesDeviceAPIResponse(ok: true, message: "Listed agent sessions.", result: .agentSessions(.init(rows: [row])))
+
+        let decoded = try SpacesDeviceAPICodec.decodeResponse(SpacesDeviceAPICodec.encodeResponse(response))
+
+        XCTAssertEqual(decoded, response)
+        XCTAssertEqual(decoded.agentSessions?.first, row)
+        XCTAssertEqual(decoded.agentSessions?.first?.note, "review auth")
+        XCTAssertEqual(decoded.agentSessions?.first?.lastSignalAt, "2026-07-14T00:00:01Z")
+    }
+
     func testDeviceOverviewStreamCodecRoundTripsPayload() throws {
         let payload = SpacesDeviceOverviewPayload(workspaces: [], sessions: [])
         let line = try SpacesDeviceOverviewStreamCodec.encodeLine(payload)

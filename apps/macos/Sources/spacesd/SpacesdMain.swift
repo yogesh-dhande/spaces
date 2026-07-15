@@ -752,9 +752,8 @@ import workspacecore
             return try recordProfileAgentSignal(payload, orchestrator: orchestrator)
         case .agentList(let payload):
             let orchestrator = try makeProfileOrchestrator()
-            let rows = try profileAgentSessionRows(
-                orchestrator: orchestrator, workspaceID: normalizedProfileArgument(payload.workspaceID),
-                sessionID: normalizedProfileArgument(payload.sessionID))
+            let rows = try orchestrator.agentSessionRows(
+                workspaceID: normalizedProfileArgument(payload.workspaceID), sessionID: normalizedProfileArgument(payload.sessionID))
             return TerminalServiceProfileCommandResponse(message: "Listed agent sessions.", agentSessions: rows)
         case .agentAnnotate(let payload):
             let orchestrator = try makeProfileOrchestrator()
@@ -977,48 +976,12 @@ import workspacecore
         return normalizedProfileArgument(runtimeState.foregroundDisplayLabel) ?? kind.displayLabel
     }
 
-    /// Builds the orchestration view of coding-agent sessions: every Spaces agent row across the
-    /// requested scope, joined to its project/workspace context and its readiness marker. `workspaceID`
-    /// narrows to one workspace; `sessionID` narrows to the agent bound to that terminal tracking id.
-    private func profileAgentSessionRows(orchestrator: WorkspaceOrchestrator, workspaceID: String?, sessionID: String?) throws
-        -> [TerminalServiceAgentSessionRow]
-    {
-        let projects = try orchestrator.store.projects()
-        var rows: [TerminalServiceAgentSessionRow] = []
-        for project in projects {
-            for workspace in try orchestrator.store.workspaces(projectID: project.id, includeArchived: true) {
-                if let workspaceID, workspace.id != workspaceID { continue }
-                for agent in try orchestrator.agentWindows(workspaceID: workspace.id) where agent.provider == .spaces {
-                    let terminalSessionID = normalizedProfileArgument(agent.terminalTrackingID)
-                    if let sessionID, terminalSessionID != sessionID { continue }
-                    let runtimeLabel = terminalSessionID.flatMap { profileAgentRuntimeLabel(sessionID: $0) }
-                    rows.append(
-                        TerminalServiceAgentSessionRow(
-                            id: agent.id, terminalSessionID: terminalSessionID, agent: runtimeLabel ?? normalizedProfileArgument(agent.label),
-                            label: normalizedProfileArgument(agent.label), status: agent.status.rawValue, note: normalizedProfileArgument(agent.note),
-                            projectID: project.id, projectName: project.name, workspaceID: workspace.id, workspaceName: workspace.displayName,
-                            branch: normalizedProfileArgument(workspace.branch), updatedAt: agent.updatedAt,
-                            lastSignalAt: try orchestrator.store.lastAgentSignalAt(agentSessionID: agent.id)))
-                }
-            }
-        }
-        return rows
-    }
-
     private func annotateProfileAgentSession(_ payload: TerminalServiceAgentAnnotatePayload, orchestrator: WorkspaceOrchestrator) throws
         -> TerminalServiceProfileCommandResponse
     {
-        let sessionID = payload.sessionID
-        let rows = try profileAgentSessionRows(orchestrator: orchestrator, workspaceID: nil, sessionID: sessionID)
-        guard let target = rows.first else {
-            throw SpacesRuntimeError.invalidArgument(
-                message: "No agent session for terminal \(sessionID). Annotate requires an active coding-agent session (hook-signaled).")
-        }
-        let sanitized = sanitizedAgentNote(payload.note)
-        try orchestrator.store.setAgentSessionNote(id: target.id, note: sanitized.isEmpty ? nil : sanitized, updatedAt: nowISO8601())
-        let updated = try profileAgentSessionRows(orchestrator: orchestrator, workspaceID: nil, sessionID: sessionID)
+        let updated = try orchestrator.annotateAgentSession(terminalSessionID: payload.sessionID, note: payload.note)
         return TerminalServiceProfileCommandResponse(
-            message: sanitized.isEmpty ? "Cleared agent note." : "Annotated agent session.", agentSessions: updated)
+            message: updated.note == nil ? "Cleared agent note." : "Annotated agent session.", agentSessions: [updated])
     }
 
     /// Spawns a coding-agent terminal session after gating the command against the supported-agent hook
@@ -1073,14 +1036,6 @@ import workspacecore
         try orchestrator.store.insertAgentSubscription(
             subscriberTerminalSessionID: payload.subscriberTerminalSessionID, agentSessionID: payload.agentSessionID, createdAt: nowISO8601())
         return TerminalServiceProfileCommandResponse(message: "Subscribed to agent session.")
-    }
-
-    /// Notes are single-line, bounded, plain text: control characters (including any embedded newlines)
-    /// are removed so an annotation can never inject terminal control sequences or break the one-line
-    /// injection format, then the result is trimmed and capped.
-    private func sanitizedAgentNote(_ note: String) -> String {
-        let stripped = String(note.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) })
-        return String(stripped.trimmingCharacters(in: .whitespacesAndNewlines).prefix(500))
     }
 
     private func postAgentEventNotification() {

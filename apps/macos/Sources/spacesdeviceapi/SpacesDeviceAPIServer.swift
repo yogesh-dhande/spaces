@@ -1204,6 +1204,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         case .subscribe, .subscribeDeviceOverview:
             return SpacesDeviceAPIResponse(ok: false, message: "Subscription requests must use the stream path.", errorCode: .misroutedRequest)
         case .agentHooksStatus, .installAgentHooks: return try handleAgentHookRequest(request)
+        case .spawnAgentSession(let payload): return try handleSpawnAgentSessionRequest(payload, context: context)
+        case .listAgentSessions(let payload): return try handleListAgentSessionsRequest(payload, context: context)
+        case .annotateAgentSession(let payload): return try handleAnnotateAgentSessionRequest(payload, context: context)
         case .openServiceTunnel:
             // Hijacks the connection into a raw byte pipe after this response, like a subscription;
             // it cannot be answered on the request/response path handled here.
@@ -2169,6 +2172,60 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         let record = try context.orchestrator().restartCodingAgent(workspaceID: workspaceID, agentID: agentID)
         return try refreshedMutationResponse(
             context: context, message: "Restarted coding agent.", workspaceID: workspaceID, sessionID: normalizedString(record.terminalTrackingID))
+    }
+
+    /// Spawns a coding-agent terminal session on the daemon host. Runs the same hook gate as the local
+    /// `spaces agent spawn` — the command must launch a supported coding agent whose hooks are current,
+    /// or the spawned session would never report the readiness signal the client polls for. Unlike the
+    /// local path there is no cwd to infer the workspace from, so `workspaceID` is required. Returns the
+    /// created session id (as a mutation) so the client polls readiness with `listAgentSessions`.
+    private func handleSpawnAgentSessionRequest(_ request: SpacesDeviceSpawnAgentSessionRequest, context: RequestContext) throws
+        -> SpacesDeviceAPIResponse
+    {
+        guard let workspaceID = normalizedString(request.workspaceID) else {
+            return SpacesDeviceAPIResponse(ok: false, message: "workspaceID is required.", errorCode: .invalidArgument)
+        }
+        guard let command = normalizedString(request.command) else {
+            return SpacesDeviceAPIResponse(ok: false, message: "command is required.", errorCode: .invalidArgument)
+        }
+        do {
+            _ = try AgentSpawnCommandGate.resolveSpawnableAgent(command: command, statuses: agentHookStatusLoader())
+        } catch let error as AgentSpawnCommandGate.GateError {
+            return SpacesDeviceAPIResponse(
+                ok: false, message: error.errorDescription ?? "Agent spawn command is not supported.", errorCode: .invalidArgument)
+        }
+        let session = try context.orchestrator().createWorkspaceAgentSession(
+            workspaceID: workspaceID, command: command, title: normalizedString(request.title))
+        return try refreshedMutationResponse(context: context, message: "Started agent session.", workspaceID: workspaceID, sessionID: session.id)
+    }
+
+    private func handleListAgentSessionsRequest(_ request: SpacesDeviceListAgentSessionsRequest, context: RequestContext) throws
+        -> SpacesDeviceAPIResponse
+    {
+        let rows = try context.orchestrator().agentSessionRows(
+            workspaceID: normalizedString(request.workspaceID), sessionID: normalizedString(request.sessionID))
+        return SpacesDeviceAPIResponse(
+            ok: true, message: "Listed agent sessions.", result: .agentSessions(.init(rows: rows.map(Self.deviceAgentSessionRow))))
+    }
+
+    private func handleAnnotateAgentSessionRequest(_ request: SpacesDeviceAnnotateAgentSessionRequest, context: RequestContext) throws
+        -> SpacesDeviceAPIResponse
+    {
+        guard let sessionID = normalizedString(request.sessionID) else {
+            return SpacesDeviceAPIResponse(ok: false, message: "sessionID is required.", errorCode: .invalidArgument)
+        }
+        let row = try context.orchestrator().annotateAgentSession(terminalSessionID: sessionID, note: request.note)
+        return SpacesDeviceAPIResponse(
+            ok: true, message: row.note == nil ? "Cleared agent note." : "Annotated agent session.",
+            result: .agentSessions(.init(rows: [Self.deviceAgentSessionRow(row)])))
+    }
+
+    /// Maps the neutral orchestration row the daemon builds to its Device API wire shape.
+    static func deviceAgentSessionRow(_ row: TerminalServiceAgentSessionRow) -> SpacesDeviceAgentSessionRow {
+        SpacesDeviceAgentSessionRow(
+            id: row.id, terminalSessionID: row.terminalSessionID, agent: row.agent, label: row.label, status: row.status, note: row.note,
+            projectID: row.projectID, projectName: row.projectName, workspaceID: row.workspaceID, workspaceName: row.workspaceName,
+            branch: row.branch, updatedAt: row.updatedAt, lastSignalAt: row.lastSignalAt)
     }
 
     private func refreshedMutationResponse(

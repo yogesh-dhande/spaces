@@ -663,4 +663,80 @@ extension WorkspaceOrchestrator {
         }
     }
 
+    // MARK: - Orchestration rows (shared by the profile command surface and the Device API)
+
+    /// Trims an optional string to nil when empty, matching the daemon's `normalizedProfileArgument`
+    /// normalization so the shared orchestration rows carry exactly the values the profile surface did.
+    private func trimmedOrNilAgentField(_ value: String?) -> String? {
+        guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else { return nil }
+        return value
+    }
+
+    /// The coding agent's runtime display label for a terminal session: an explicit `.agent`-launch
+    /// title, otherwise a foreground-detected agent's label (or its kind default), otherwise nil. Reads
+    /// only the session's persisted launch/runtime state, so it works on the daemon host that owns those
+    /// files. Parallels `SpacesdMain.profileAgentRuntimeLabel`, which serves the stage-4-owned signal
+    /// chokepoint; the two can be unified once that path is refactored.
+    func agentRuntimeLabel(terminalSessionID: String) -> String? {
+        guard let paths = try? TerminalSessionPaths.forSession(id: terminalSessionID) else { return nil }
+        if let launchConfiguration = try? TerminalSessionPersistence.readLaunchConfiguration(paths: paths), launchConfiguration.kind == .agent {
+            return trimmedOrNilAgentField(launchConfiguration.title)
+        }
+        guard let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths), let kind = runtimeState.foregroundDetectedAgentKind
+        else { return nil }
+        return trimmedOrNilAgentField(runtimeState.foregroundDisplayLabel) ?? kind.displayLabel
+    }
+
+    /// Builds the orchestration view of coding-agent sessions shared by the local `agent list`/`status`
+    /// profile command and the Device API `listAgentSessions` handler, so both surfaces report identical
+    /// rows. `workspaceID` narrows to one workspace; `sessionID` narrows to the agent bound to that
+    /// terminal tracking id (single-agent `status` and readiness polling). `lastSignalAt` is the
+    /// readiness marker: nil until the agent's hooks emit their first lifecycle signal.
+    public func agentSessionRows(workspaceID: String? = nil, sessionID: String? = nil) throws -> [TerminalServiceAgentSessionRow] {
+        var rows: [TerminalServiceAgentSessionRow] = []
+        for project in try store.projects() {
+            for workspace in try store.workspaces(projectID: project.id, includeArchived: true) {
+                if let workspaceID, workspace.id != workspaceID { continue }
+                for agent in try store.agentWindows(workspaceID: workspace.id) where agent.provider == .spaces {
+                    let terminalSessionID = trimmedOrNilAgentField(agent.terminalTrackingID)
+                    if let sessionID, terminalSessionID != sessionID { continue }
+                    let runtimeLabel = terminalSessionID.flatMap { agentRuntimeLabel(terminalSessionID: $0) }
+                    rows.append(
+                        TerminalServiceAgentSessionRow(
+                            id: agent.id, terminalSessionID: terminalSessionID, agent: runtimeLabel ?? trimmedOrNilAgentField(agent.label),
+                            label: trimmedOrNilAgentField(agent.label), status: agent.status.rawValue, note: trimmedOrNilAgentField(agent.note),
+                            projectID: project.id, projectName: project.name, workspaceID: workspace.id, workspaceName: workspace.displayName,
+                            branch: trimmedOrNilAgentField(workspace.branch), updatedAt: agent.updatedAt,
+                            lastSignalAt: try store.lastAgentSignalAt(agentSessionID: agent.id)))
+                }
+            }
+        }
+        return rows
+    }
+
+    /// Sets (or clears, with an empty note) a coding-agent session's explicit note, addressed by its
+    /// terminal session id, and returns the updated row. Shared by the profile `agentAnnotate` command
+    /// and the Device API `annotateAgentSession` handler so both sanitize identically. Errors loudly
+    /// when no agent row is bound to the session yet (annotation requires a hook-signaled agent).
+    @discardableResult public func annotateAgentSession(terminalSessionID: String, note: String) throws -> TerminalServiceAgentSessionRow {
+        guard let target = try agentSessionRows(sessionID: terminalSessionID).first else {
+            throw WorkspaceError.invalidArgument(
+                message: "No agent session for terminal \(terminalSessionID). Annotate requires an active coding-agent session (hook-signaled).")
+        }
+        let sanitized = Self.sanitizedAgentNote(note)
+        try store.setAgentSessionNote(id: target.id, note: sanitized.isEmpty ? nil : sanitized, updatedAt: nowISO8601())
+        guard let updated = try agentSessionRows(sessionID: terminalSessionID).first else {
+            throw WorkspaceError.invalidArgument(message: "No agent session for terminal \(terminalSessionID).")
+        }
+        return updated
+    }
+
+    /// Notes are single-line, bounded, plain text: control characters (including any embedded newlines)
+    /// are removed so an annotation can never inject terminal control sequences or break the one-line
+    /// injection format, then the result is trimmed and capped.
+    public static func sanitizedAgentNote(_ note: String) -> String {
+        let stripped = String(note.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) })
+        return String(stripped.trimmingCharacters(in: .whitespacesAndNewlines).prefix(500))
+    }
+
 }
