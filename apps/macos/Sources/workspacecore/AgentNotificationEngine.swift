@@ -2,7 +2,7 @@ import Foundation
 import spacesdevicecore
 import spacesterminalcore
 
-/// Turns a watched child agent's lifecycle transition into a one-line notification delivered into the
+/// Turns a watched child agent's lifecycle transition into a multi-line notification block delivered into the
 /// subscribing terminal — immediately when that subscriber is idle, or queued and flushed the moment it
 /// next goes idle. Pure logic over the store plus an injected delivery closure, so the daemon wires it
 /// to the real terminal-send path and tests drive it with a recorder.
@@ -13,6 +13,12 @@ public struct AgentNotificationEngine {
     /// Delivers a rendered line into a terminal session. Throwing signals an undeliverable subscriber
     /// (a dead/absent session), which the engine treats as the subscriber having vanished.
     public typealias DeliverLine = (_ subscriberTerminalSessionID: String, _ line: String) throws -> Void
+
+    /// Resolves the coding-agent kind label (claude/codex/opencode, or a launch title) for a local watched
+    /// agent, used for the `(<kind>)` parenthetical. The daemon wires this to the same runtime-label
+    /// resolution `agent list` uses; a `nil` result renders as `coding agent`. Defaults to `nil` so tests
+    /// and non-daemon callers do not have to supply session-file access.
+    public typealias ResolveAgentKind = (_ agent: AgentWindowRecord) -> String?
 
     /// The lifecycle transitions that produce a notification. `working`/`init` never do.
     public enum ChildTransition: Sendable {
@@ -32,21 +38,24 @@ public struct AgentNotificationEngine {
 
     private let store: SQLiteStore
     private let deliver: DeliverLine
+    private let resolveAgentKind: ResolveAgentKind
     private let logError: (String) -> Void
     private let now: () -> String
 
     public init(
-        store: SQLiteStore, deliver: @escaping DeliverLine, logError: @escaping (String) -> Void = { FileHandle.standardError.write(Data($0.utf8)) },
+        store: SQLiteStore, deliver: @escaping DeliverLine, resolveAgentKind: @escaping ResolveAgentKind = { _ in nil },
+        logError: @escaping (String) -> Void = { FileHandle.standardError.write(Data($0.utf8)) },
         now: @escaping () -> String = { TerminalSessionTimestamp.string(from: Date()) }
     ) {
         self.store = store
         self.deliver = deliver
+        self.resolveAgentKind = resolveAgentKind
         self.logError = logError
         self.now = now
     }
 
     /// A watched child agent transitioned to blocked/done/exited. For every subscriber of that agent,
-    /// render one line and deliver it now if the subscriber is idle, else coalesce it into that
+    /// render one notification block and deliver it now if the subscriber is idle, else coalesce it into that
     /// subscriber's pending queue. For an `exited` child the caller MUST invoke this before deleting the
     /// agent row, since row deletion cascades the subscription edges away; the rendered pending line has
     /// no FK and survives that deletion.
@@ -141,59 +150,64 @@ public struct AgentNotificationEngine {
         }
     }
 
-    /// The single injected line for a local watched agent. Gathers the enriched context — project name,
-    /// workspace display name and branch, terminal session id — from the store, then defers to the shared
-    /// formatter; the deep link targets the local child's terminal session (no `?device=`). Reads the
-    /// workspace and its project from the store, so it can throw. A workspace or project that no longer
-    /// exists (deleted out from under a still-running agent) falls back to the id string for that field
-    /// rather than failing delivery — a single clean path with no layered fallbacks.
+    /// The single injected block for a local watched agent. Gathers the enriched context — project name,
+    /// workspace directory name and branch, terminal session id, agent kind — from the store, then defers
+    /// to the shared formatter; the deep link targets the local child's terminal session (no `?device=`).
+    /// Reads the workspace and its project from the store, so it can throw. A workspace or project that no
+    /// longer exists (deleted out from under a still-running agent) falls back to the id string for that
+    /// field rather than failing delivery — a single clean path with no layered fallbacks. The `workspace`
+    /// field is the workspace's directory name (`dirname`) when set, else its display name, so the branch
+    /// is not duplicated into it.
     func renderLine(agent: AgentWindowRecord, transition: ChildTransition) throws -> String {
         let workspace = try store.workspace(id: agent.workspaceID)
         let project = try workspace.flatMap { try store.project(id: $0.projectID) }
-        // Workspace display name matches `spaces workspace list`: branch when set, else the dir's
-        // last path component (`WorkspaceRecord.displayName`), so notification names align with the CLI.
-        return renderLine(
-            label: agent.label ?? agent.provider.rawValue, provider: agent.provider.rawValue, transition: transition,
-            project: project?.name ?? workspace?.projectID ?? agent.workspaceID, workspace: workspace?.displayName ?? agent.workspaceID,
+        let kind = resolveAgentKind(agent) ?? "coding agent"
+        return renderBlock(
+            label: agent.label ?? kind, kind: kind, transition: transition,
+            project: project?.name ?? workspace?.projectID ?? agent.workspaceID,
+            workspace: workspace.map { $0.dirname ?? $0.displayName } ?? agent.workspaceID,
             branch: workspace?.branch, sessionID: agent.terminalTrackingID ?? agent.id, note: agent.note, deviceID: nil)
     }
 
-    /// The single injected line for a watched agent on a paired device. Reuses the shared format; the
+    /// The single injected block for a watched agent on a paired device. Reuses the shared format; the
     /// deep link is device-qualified (`?device=<id>`) and targets the remote child's terminal session
     /// (the watched key). Project/workspace/branch/label/note all come straight off the `listAgentSessions`
-    /// row — the remote device already resolved them, so this path does no store lookups. The provider
-    /// parenthetical is `spaces`: `listAgentSessions` only ever returns Spaces-provider coding-agent rows.
+    /// row — the remote device already resolved them, so this path does no store lookups. The kind is the
+    /// row's `agent` field (the remote daemon's resolved agent label), falling back to `coding agent`.
     func renderRemoteLine(terminalSessionID: String, row: SpacesDeviceAgentSessionRow, deviceID: String, transition: ChildTransition) -> String {
-        renderLine(
-            label: row.label ?? row.agent ?? "coding agent", provider: "spaces", transition: transition, project: row.projectName,
+        let kind = row.agent ?? "coding agent"
+        return renderBlock(
+            label: row.label ?? kind, kind: kind, transition: transition, project: row.projectName,
             workspace: row.workspaceName, branch: row.branch, sessionID: terminalSessionID, note: row.note, deviceID: deviceID)
     }
 
-    /// The single injected line shared by the local and cross-device paths — a pure formatter over
-    /// explicit fields, so both paths produce an identical shape. `project`, `workspace`, and `session`
-    /// are always present so an orchestrating agent can parse fields rather than the deep link's URL;
-    /// `(<branch>)` is omitted when the branch is empty/nil and `— note:` when the note is. The `[spaces]`
-    /// prefix guarantees the line never starts with `#`, `/`, or `!` (leading characters some agent TUIs
-    /// treat as slash/command syntax). The note and label are rendered verbatim: notes are already
-    /// stripped of control characters at annotate time and labels come from launch-config titles, so there
-    /// is no second sanitization pass to add. `session` and the deep link both target the child's terminal
-    /// session id.
-    func renderLine(
-        label: String, provider: String, transition: ChildTransition, project: String, workspace: String, branch: String?, sessionID: String,
+    /// The single injected block shared by the local and cross-device paths — a pure formatter over
+    /// explicit fields, so both paths produce an identical shape. It is one multi-line string: a sentence
+    /// first line (`[spaces] <label> (<kind>) is <word>`) followed by two-space-indented `key: value`
+    /// continuation lines in the order project, workspace, branch, session, note, link. The `branch` line
+    /// is omitted when the branch is empty/nil and the `note` line when the note is; the rest are always
+    /// present so an orchestrating agent can parse fields rather than the deep link's URL. Multi-line YAML
+    /// is markedly more readable in agent transcripts than a packed single line; the deep link stays
+    /// clickable because Ghostty's URL matcher charset stops at end-of-line and excludes quotes, and the
+    /// indented continuation lines — like the `[spaces]` first line, which never starts with `#`, `/`, or
+    /// `!` — are safe from the slash/command syntax some agent TUIs apply to a leading character. The cost
+    /// is that a plain-shell subscriber echoes one junk line per continuation, which is acceptable since
+    /// subscribers are agent TUIs first. Values render verbatim: notes are stripped of control characters
+    /// (including newlines) at annotate time and labels come from launch-config titles, so no continuation
+    /// line can be forged and there is no second sanitization pass to add. `session` and the deep link
+    /// both target the child's terminal session id.
+    func renderBlock(
+        label: String, kind: String, transition: ChildTransition, project: String, workspace: String, branch: String?, sessionID: String,
         note: String?, deviceID: String?
     ) -> String {
         let deepLink = SpacesTerminalDeepLink(sessionID: sessionID, deviceID: deviceID).absoluteString
-        var line = "[spaces] \(label) (\(provider)) is \(transition.word)"
-        line += " — project: \(project)"
-        line += " — workspace: \(workspace)"
-        if let branch, !branch.isEmpty { line += " (\(branch))" }
-        line += " — session: \(sessionID)"
-        if let note, !note.isEmpty { line += " — note: \(note)" }
-        // A neutral event notification: it states what happened and carries the session's deep link as a
-        // bare reference, never an instruction. The subscriber is always an agent, and an imperative like
-        // "open: <link>" makes the agent act on it (e.g. run `open <url>`); neutral wording lets the agent
-        // or the human decide from context whether and how to respond.
-        line += " — \(deepLink)"
-        return line
+        var lines = ["[spaces] \(label) (\(kind)) is \(transition.word)"]
+        lines.append("  project: \(project)")
+        lines.append("  workspace: \(workspace)")
+        if let branch, !branch.isEmpty { lines.append("  branch: \(branch)") }
+        lines.append("  session: \(sessionID)")
+        if let note, !note.isEmpty { lines.append("  note: \(note)") }
+        lines.append("  link: \(deepLink)")
+        return lines.joined(separator: "\n")
     }
 }

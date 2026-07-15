@@ -106,6 +106,27 @@ final class TerminalServiceProtocolTests: XCTestCase {
         XCTAssertNil(try TerminalServiceCodec.decodeResponse(successData).errorCode)
     }
 
+    func testProfileCommandResponseCarriesStructuredAgentSpawnResult() throws {
+        // The spawn command response carries the structured outcome (the MCP tool encodes this response
+        // as its result), so a client reads the session id / detected agent / subscribed flag from fields
+        // instead of parsing the prose message.
+        let response = TerminalServiceProfileCommandResponse(
+            message: "Started agent session term-9 (detected codex).",
+            agentSpawn: TerminalServiceAgentSpawnResult(
+                terminalSessionID: "term-9", workspaceID: "workspace-1", detectedAgent: "codex", deviceID: nil, subscribed: false))
+        let encoded = try TerminalServiceCodec.encodeResponse(TerminalServiceResponse(ok: true, message: "ok", profile: response))
+        let json = String(decoding: encoded, as: UTF8.self)
+        XCTAssertTrue(json.contains(#""terminalSessionID":"term-9""#))
+        XCTAssertTrue(json.contains(#""detectedAgent":"codex""#))
+        XCTAssertTrue(json.contains(#""subscribed":false"#))
+        XCTAssertEqual(try TerminalServiceCodec.decodeResponse(encoded).profile, response)
+
+        // A response without a spawn outcome omits the field entirely.
+        let plain = try TerminalServiceCodec.encodeResponse(
+            TerminalServiceResponse(ok: true, message: "ok", profile: TerminalServiceProfileCommandResponse(message: "Listed.")))
+        XCTAssertFalse(String(decoding: plain, as: UTF8.self).contains("agentSpawn"))
+    }
+
     func testResponseDecodesNilErrorCodeWhenAbsentFromJSON() throws {
         let json = #"{"ok":false,"message":"Terminal session 'abc' is not running."}"#.data(using: .utf8)!
         XCTAssertNil(try TerminalServiceCodec.decodeResponse(json).errorCode)

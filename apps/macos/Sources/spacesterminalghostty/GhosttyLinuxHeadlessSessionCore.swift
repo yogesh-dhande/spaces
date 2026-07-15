@@ -524,14 +524,37 @@
                 ptyDriver.sendRawBytes(payload)
                 return TerminalControlResponse(ok: true, message: "Sent input.")
             }
-            guard var payload = request.inputPayload else {
+            guard let payload = request.inputPayload else {
                 return TerminalControlResponse(ok: false, message: "Missing input payload.", errorCode: .invalidArgument)
             }
-            // Enter is a carriage return (0x0D); see GhosttyEmbeddedSessionHost for the TUI rationale.
-            if request.appendNewline { payload.append(0x0D) }
             markLocalOwnerCommandInputOutputResyncPending()
-            ptyDriver.sendRawBytes(payload)
+            // Submit-safe two-write split for text payloads; see GhosttyEmbeddedSessionHost for the
+            // paste-heuristic rationale and why the CR is deferred onto the per-session control queue. A
+            // bare Enter (empty text) and opaque byte payloads keep the single inline write.
+            let isTextPayload = request.bytes == nil
+            if request.appendNewline, isTextPayload, !payload.isEmpty {
+                ptyDriver.sendRawBytes(payload)
+                scheduleAgentSubmitCarriageReturn()
+            } else {
+                var bytes = payload
+                if request.appendNewline { bytes.append(0x0D) }
+                ptyDriver.sendRawBytes(bytes)
+            }
             return TerminalControlResponse(ok: true, message: "Sent input.")
+        }
+
+        /// The gap between the text write and the carriage-return write of a submit-style send; see
+        /// `GhosttyEmbeddedSessionHost` for the agent-TUI paste-heuristic rationale.
+        private static let agentSubmitCarriageReturnDelay: DispatchTimeInterval = .milliseconds(100)
+
+        /// Schedules the trailing carriage return of a submit-style text send on this session's serial
+        /// control queue, deferred so the agent TUI reads it as a distinct Enter keystroke rather than the
+        /// tail of a paste. Staying on `controlQueue` keeps it ordered after the text for this session; the
+        /// write hops back to the main actor where the PTY driver lives.
+        private func scheduleAgentSubmitCarriageReturn() {
+            controlQueue.asyncAfter(deadline: .now() + Self.agentSubmitCarriageReturnDelay) { [weak self] in
+                Self.runOnMainActorSynchronously { self?.ptyDriver.sendRawBytes(Data([0x0D])) }
+            }
         }
 
         private func encodePastePayload(_ text: String) -> Data? {

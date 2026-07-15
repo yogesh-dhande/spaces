@@ -361,6 +361,30 @@ public struct TerminalServiceAgentSessionRow: Codable, Sendable, Equatable {
     }
 }
 
+/// The structured outcome of an agent spawn, carried on a spawn command response so a client (the MCP
+/// tool, the CLI) can read the spawned terminal session id, detected agent, target device, and whether
+/// the spawning terminal was auto-subscribed directly, instead of parsing them back out of the prose
+/// guidance message. Mirrors the CLI's `AgentSpawnResult`; that type lives in the CLI target, so this is
+/// the wire struct both the CLI and MCP populate.
+public struct TerminalServiceAgentSpawnResult: Codable, Sendable, Equatable {
+    public let terminalSessionID: String
+    public let workspaceID: String?
+    public let detectedAgent: String
+    /// nil for a local spawn; the paired device's id for a remote one (it qualifies the deep link).
+    public let deviceID: String?
+    /// False when the child had no agent row yet at spawn return (rows appear on the first hook signal),
+    /// so no watch edge was recorded; the caller subscribes explicitly once the agent signals.
+    public let subscribed: Bool
+
+    public init(terminalSessionID: String, workspaceID: String?, detectedAgent: String, deviceID: String?, subscribed: Bool) {
+        self.terminalSessionID = terminalSessionID
+        self.workspaceID = workspaceID
+        self.detectedAgent = detectedAgent
+        self.deviceID = deviceID
+        self.subscribed = subscribed
+    }
+}
+
 public struct TerminalServiceProfileCommandResponse: Codable, Sendable, Equatable {
     public let message: String
     public let projects: [TerminalServiceProfileProjectSummary]?
@@ -370,11 +394,13 @@ public struct TerminalServiceProfileCommandResponse: Codable, Sendable, Equatabl
     public let terminalSession: TerminalServiceSessionSummary?
     public let terminalOutput: String?
     public let agentSessions: [TerminalServiceAgentSessionRow]?
+    public let agentSpawn: TerminalServiceAgentSpawnResult?
 
     public init(
         message: String, projects: [TerminalServiceProfileProjectSummary]? = nil, workspaces: [TerminalServiceProfileWorkspaceRecord]? = nil,
         workspace: TerminalServiceProfileWorkspaceRecord? = nil, terminalSessions: [TerminalServiceSessionSummary]? = nil,
-        terminalSession: TerminalServiceSessionSummary? = nil, terminalOutput: String? = nil, agentSessions: [TerminalServiceAgentSessionRow]? = nil
+        terminalSession: TerminalServiceSessionSummary? = nil, terminalOutput: String? = nil, agentSessions: [TerminalServiceAgentSessionRow]? = nil,
+        agentSpawn: TerminalServiceAgentSpawnResult? = nil
     ) {
         self.message = message
         self.projects = projects
@@ -384,6 +410,7 @@ public struct TerminalServiceProfileCommandResponse: Codable, Sendable, Equatabl
         self.terminalSession = terminalSession
         self.terminalOutput = terminalOutput
         self.agentSessions = agentSessions
+        self.agentSpawn = agentSpawn
     }
 }
 

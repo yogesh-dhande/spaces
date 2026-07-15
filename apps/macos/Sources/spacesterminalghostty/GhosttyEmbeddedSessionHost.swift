@@ -878,18 +878,49 @@
                     elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true, detail: "bytes=\(text.utf8.count)")
                 return TerminalControlResponse(ok: true, message: "Sent input.")
             } else {
-                guard var payload = request.inputPayload else {
+                guard let payload = request.inputPayload else {
                     return TerminalControlResponse(ok: false, message: "Missing input payload.", errorCode: .invalidArgument)
                 }
-                // Enter is a carriage return (0x0D): shells and Claude Code accept LF or CR, but
-                // Codex's TUI submits only on CR, so LF would leave a prompt sitting in its composer.
-                if request.appendNewline { payload.append(0x0D) }
                 markLocalOwnerCommandInputOutputResyncPending()
-                rendererHostStorage.sendRawBytes(payload)
+                // Submit-safe send: a text payload with appendNewline is a "submit" (type this, press Enter).
+                // Agent TUIs (Claude Code, Codex) treat text bytes immediately followed by the carriage
+                // return, arriving in one PTY read burst, as a pasted block and leave it unsubmitted in the
+                // composer. So the text (which may itself contain newlines, e.g. a multi-line notification)
+                // is written first, and the CR (0x0D) is written as a separate burst after a short delay so
+                // the TUI reads it as a distinct Enter keystroke that submits. Enter is a CR because shells
+                // and Claude Code accept LF or CR while Codex submits only on CR. An empty text with
+                // appendNewline is a bare Enter (e.g. answering a TUI dialog): send the CR immediately, there
+                // is nothing to separate. Byte payloads are opaque input rather than composer text, so they
+                // keep the single inline write.
+                let isTextPayload = request.bytes == nil
+                if request.appendNewline, isTextPayload, !payload.isEmpty {
+                    rendererHostStorage.sendRawBytes(payload)
+                    scheduleAgentSubmitCarriageReturn()
+                } else {
+                    var bytes = payload
+                    if request.appendNewline { bytes.append(0x0D) }
+                    rendererHostStorage.sendRawBytes(bytes)
+                }
                 TerminalPerformance.logMetric(
                     "terminal_control_send", target: "session=\(launchConfiguration.sessionID)",
                     elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true, detail: "bytes=\(payload.count)")
                 return TerminalControlResponse(ok: true, message: "Sent input.")
+            }
+        }
+
+        /// The gap between the text write and the carriage-return write of a submit-style send. Agent TUIs
+        /// group a burst of bytes into a paste; separating the CR by this interval makes it register as a
+        /// distinct Enter keystroke that submits the composer.
+        private static let agentSubmitCarriageReturnDelay: DispatchTimeInterval = .milliseconds(100)
+
+        /// Schedules the trailing carriage return of a submit-style text send on this session's serial
+        /// control queue. The handler runs on the shared main actor (every session's byte write funnels
+        /// through it), so a blocking sleep here would stall UI rendering and unrelated sessions; instead
+        /// the CR is deferred onto `controlQueue`, which keeps it ordered after the text for this session,
+        /// and the byte write hops back to the main actor where the renderer host lives.
+        private func scheduleAgentSubmitCarriageReturn() {
+            controlQueue.asyncAfter(deadline: .now() + Self.agentSubmitCarriageReturnDelay) { [weak self] in
+                Self.runOnMainActorSynchronously { self?.rendererHostStorage.sendRawBytes(Data([0x0D])) }
             }
         }
 

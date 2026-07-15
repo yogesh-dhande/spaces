@@ -1031,22 +1031,28 @@ import workspacecore
             deliver: { [weak self] sessionID, line in
                 guard let self else { throw Self.requestFailedError("spacesd is shutting down.") }
                 try self.submitAgentNotificationLine(sessionID: sessionID, line: line)
-            }, logError: { writeStandardError($0) })
+            },
+            // The `(<kind>)` label is the same runtime agent label `agent list` shows (claude/codex/opencode
+            // for a detected agent, else the launch title), resolved from the child's persisted session
+            // state. Reads disk, so it works at exit time too (the row is rendered before deletion).
+            resolveAgentKind: { [weak self] agent in
+                guard let self, let terminalSessionID = agent.terminalTrackingID else { return nil }
+                return self.profileAgentRuntimeLabel(sessionID: terminalSessionID)
+            },
+            logError: { writeStandardError($0) })
     }
 
-    /// Delivers a rendered notification line into a subscriber terminal and submits it. An agent TUI
-    /// (Codex) treats a single text+carriage-return write as an unsubmitted paste — the line lands in the
-    /// composer but never runs — so the submit is split into two writes: first the text with no trailing
-    /// return, then a bare carriage return as a separate submit keystroke. `appendNewline` maps to a CR
-    /// (0x0D) in the terminal send path (`GhosttyEmbeddedSessionHost`/`GhosttyLinuxHeadlessSessionCore`),
-    /// which shells, Claude Code, and Codex all accept as submit. Shared by the local chokepoint engine
-    /// and the cross-device `RemoteAgentWatchService` so both submit identically. A send failure throws,
-    /// signalling the caller that the subscriber has vanished.
+    /// Delivers a rendered notification line into a subscriber terminal and submits it with a single
+    /// `appendNewline: true` send. Submit-safety lives at the session-host send chokepoint
+    /// (`GhosttyEmbeddedSessionHost`/`GhosttyLinuxHeadlessSessionCore`): for a text payload with
+    /// `appendNewline` it writes the text and the carriage return as separate spaced writes, so an agent
+    /// TUI reads the CR as a distinct Enter keystroke and submits the line rather than treating the whole
+    /// burst as an unsubmitted paste. This helper is the shared chokepoint used by the local notification
+    /// engine wiring and the cross-device `RemoteAgentWatchService` so both submit identically. A send
+    /// failure throws, signalling the caller that the subscriber has vanished.
     private func submitAgentNotificationLine(sessionID: String, line: String) throws {
         _ = try sendProfileTerminalInput(
-            TerminalServiceTerminalSendPayload(sessionID: sessionID, input: .text(line), appendNewline: false))
-        _ = try sendProfileTerminalInput(
-            TerminalServiceTerminalSendPayload(sessionID: sessionID, input: .text(""), appendNewline: true))
+            TerminalServiceTerminalSendPayload(sessionID: sessionID, input: .text(line), appendNewline: true))
     }
 
     private func profileAgentRuntimeLabel(sessionID: String) -> String? {

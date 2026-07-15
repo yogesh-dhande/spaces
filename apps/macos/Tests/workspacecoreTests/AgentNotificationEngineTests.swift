@@ -32,7 +32,7 @@ final class AgentNotificationEngineTests: XCTestCase {
         let orchestrator = WorkspaceOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         let recorder = DeliveryRecorder()
-        let engine = makeEngine(store: store, recorder: recorder)
+        let engine = makeEngine(store: store, recorder: recorder, kind: "claude")
 
         let child = try orchestrator.registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, label: "Claude Code CLI", terminalTrackingID: "child-session", status: .waiting)
@@ -44,8 +44,44 @@ final class AgentNotificationEngineTests: XCTestCase {
         XCTAssertEqual(recorder.delivered.map(\.sessionID), ["orchestrator-session"])
         XCTAssertEqual(
             recorder.delivered.map(\.line),
-            ["[spaces] Claude Code CLI (spaces) is blocked — project: Project — workspace: ws — session: child-session — spaces://terminal/child-session"])
+            [
+                """
+                [spaces] Claude Code CLI (claude) is blocked
+                  project: Project
+                  workspace: ws
+                  session: child-session
+                  link: spaces://terminal/child-session
+                """
+            ])
         XCTAssertTrue(try store.pendingAgentNotifications(subscriberTerminalSessionID: "orchestrator-session").isEmpty)
+    }
+
+    /// When the kind resolver yields nothing (no session files to classify), the `(<kind>)` parenthetical
+    /// falls back to `coding agent`, and the label falls back to that same value when the agent has none.
+    func testImmediateInjectionFallsBackToCodingAgentKindWhenUnresolved() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        let recorder = DeliveryRecorder()
+        let engine = makeEngine(store: store, recorder: recorder, kind: nil)
+
+        let child = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "child-session", status: .waiting)
+        try store.insertAgentSubscription(subscriberTerminalSessionID: "orchestrator-session", agentSessionID: child.id, createdAt: "t")
+
+        try engine.childDidTransition(agent: child, transition: .blocked)
+
+        XCTAssertEqual(
+            recorder.delivered.map(\.line),
+            [
+                """
+                [spaces] coding agent (coding agent) is blocked
+                  project: Project
+                  workspace: ws
+                  session: child-session
+                  link: spaces://terminal/child-session
+                """
+            ])
     }
 
     func testImmediateInjectionRendersNoteWhenSet() throws {
@@ -53,7 +89,7 @@ final class AgentNotificationEngineTests: XCTestCase {
         let orchestrator = WorkspaceOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         let recorder = DeliveryRecorder()
-        let engine = makeEngine(store: store, recorder: recorder)
+        let engine = makeEngine(store: store, recorder: recorder, kind: "codex")
 
         let child = try orchestrator.registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, label: "Codex CLI", terminalTrackingID: "child-session", status: .done)
@@ -66,23 +102,33 @@ final class AgentNotificationEngineTests: XCTestCase {
         XCTAssertEqual(
             recorder.delivered.map(\.line),
             [
-                "[spaces] Codex CLI (spaces) is done — project: Project — workspace: ws — session: child-session — note: review the auth flow — spaces://terminal/child-session"
+                """
+                [spaces] Codex CLI (codex) is done
+                  project: Project
+                  workspace: ws
+                  session: child-session
+                  note: review the auth flow
+                  link: spaces://terminal/child-session
+                """
             ])
     }
 
-    /// A git workspace carries a branch: the line shows the workspace display name (which is the branch)
-    /// followed by the branch parenthetical, so `project`/`workspace`/`session` fields are all present and
-    /// the branch is rendered. Non-git workspaces (branch nil, covered by the other cases) omit the paren.
-    func testImmediateInjectionRendersWorkspaceBranchWhenSet() throws {
+    /// A git workspace carries a branch: the `workspace` line is the workspace's directory name (not the
+    /// branch-derived display name), the `branch` line carries the branch verbatim including slashes, and
+    /// both are distinct so the branch is never duplicated into the workspace field. Non-git workspaces
+    /// (branch nil, covered by the other cases) omit the `branch` line.
+    func testImmediateInjectionRendersWorkspaceDirnameAndSlashedBranch() throws {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
         let project = makeProjectRecord(dir: dir)
         try store.upsert(project: project)
-        let workspace = makeWorkspaceRecord(projectID: project.id, dir: dir + "/ws", branch: "feature-x")
+        let workspace = WorkspaceRecord(
+            id: UUID().uuidString, projectID: project.id, dir: dir + "/hello", dirname: "hello", branch: "smoke/hello",
+            isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
         try store.upsert(workspace: workspace)
         let recorder = DeliveryRecorder()
-        let engine = makeEngine(store: store, recorder: recorder)
+        let engine = makeEngine(store: store, recorder: recorder, kind: "claude")
 
         let child = try orchestrator.registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, label: "Claude Code CLI", terminalTrackingID: "child-session", status: .waiting)
@@ -93,7 +139,14 @@ final class AgentNotificationEngineTests: XCTestCase {
         XCTAssertEqual(
             recorder.delivered.map(\.line),
             [
-                "[spaces] Claude Code CLI (spaces) is blocked — project: Project — workspace: feature-x (feature-x) — session: child-session — spaces://terminal/child-session"
+                """
+                [spaces] Claude Code CLI (claude) is blocked
+                  project: Project
+                  workspace: hello
+                  branch: smoke/hello
+                  session: child-session
+                  link: spaces://terminal/child-session
+                """
             ])
     }
 
@@ -105,7 +158,7 @@ final class AgentNotificationEngineTests: XCTestCase {
         let orchestrator = WorkspaceOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         let recorder = DeliveryRecorder()
-        let engine = makeEngine(store: store, recorder: recorder)
+        let engine = makeEngine(store: store, recorder: recorder, kind: "claude")
 
         let child = try orchestrator.registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, label: "Claude Code CLI", terminalTrackingID: "child-session", status: .idle)
@@ -119,7 +172,14 @@ final class AgentNotificationEngineTests: XCTestCase {
         XCTAssertEqual(
             recorder.delivered.map(\.line),
             [
-                "[spaces] Claude Code CLI (spaces) is blocked — project: Project — workspace: ws — session: child-session — note: fix the flaky tests — spaces://terminal/child-session"
+                """
+                [spaces] Claude Code CLI (claude) is blocked
+                  project: Project
+                  workspace: ws
+                  session: child-session
+                  note: fix the flaky tests
+                  link: spaces://terminal/child-session
+                """
             ])
     }
 
@@ -128,7 +188,7 @@ final class AgentNotificationEngineTests: XCTestCase {
         let orchestrator = WorkspaceOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         let recorder = DeliveryRecorder()
-        let engine = makeEngine(store: store, recorder: recorder)
+        let engine = makeEngine(store: store, recorder: recorder, kind: "claude")
 
         _ = try orchestrator.registerAgentWindow(workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "sub-session", status: .spinning)
         let childA = try orchestrator.registerAgentWindow(
@@ -149,8 +209,20 @@ final class AgentNotificationEngineTests: XCTestCase {
         XCTAssertEqual(
             recorder.delivered.map(\.line),
             [
-                "[spaces] A (spaces) is blocked — project: Project — workspace: ws — session: childA — spaces://terminal/childA",
-                "[spaces] B (spaces) is done — project: Project — workspace: ws — session: childB — spaces://terminal/childB",
+                """
+                [spaces] A (claude) is blocked
+                  project: Project
+                  workspace: ws
+                  session: childA
+                  link: spaces://terminal/childA
+                """,
+                """
+                [spaces] B (claude) is done
+                  project: Project
+                  workspace: ws
+                  session: childB
+                  link: spaces://terminal/childB
+                """,
             ])
         XCTAssertTrue(try store.pendingAgentNotifications(subscriberTerminalSessionID: "sub-session").isEmpty)
 
@@ -163,7 +235,7 @@ final class AgentNotificationEngineTests: XCTestCase {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
-        let engine = makeEngine(store: store, recorder: DeliveryRecorder())
+        let engine = makeEngine(store: store, recorder: DeliveryRecorder(), kind: "claude")
 
         _ = try orchestrator.registerAgentWindow(workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "sub-session", status: .spinning)
         let child = try orchestrator.registerAgentWindow(
@@ -178,7 +250,13 @@ final class AgentNotificationEngineTests: XCTestCase {
         XCTAssertEqual(pending.count, 1, "The unique index must coalesce repeated transitions of one child to a single pending line.")
         XCTAssertEqual(
             pending.first?.message,
-            "[spaces] Claude Code CLI (spaces) is done — project: Project — workspace: ws — session: child-session — spaces://terminal/child-session")
+            """
+            [spaces] Claude Code CLI (claude) is done
+              project: Project
+              workspace: ws
+              session: child-session
+              link: spaces://terminal/child-session
+            """)
     }
 
     func testExitNotificationSurvivesAgentRowDeletionAndCascadedEdge() throws {
@@ -186,7 +264,7 @@ final class AgentNotificationEngineTests: XCTestCase {
         let orchestrator = WorkspaceOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         let recorder = DeliveryRecorder()
-        let engine = makeEngine(store: store, recorder: recorder)
+        let engine = makeEngine(store: store, recorder: recorder, kind: "codex")
 
         _ = try orchestrator.registerAgentWindow(workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "sub-session", status: .spinning)
         let child = try orchestrator.registerAgentWindow(
@@ -201,16 +279,17 @@ final class AgentNotificationEngineTests: XCTestCase {
         XCTAssertTrue(try store.agentSubscriptions(agentSessionID: child.id).isEmpty, "The subscription edge cascades away with the row.")
         let pending = try store.pendingAgentNotifications(subscriberTerminalSessionID: "sub-session")
         XCTAssertEqual(pending.count, 1, "The pending line has no FK, so it outlives the deleted agent row.")
-        XCTAssertEqual(
-            pending.first?.message,
-            "[spaces] Codex CLI (spaces) is exited — project: Project — workspace: ws — session: child-session — spaces://terminal/child-session")
+        let expectedExitBlock = """
+            [spaces] Codex CLI (codex) is exited
+              project: Project
+              workspace: ws
+              session: child-session
+              link: spaces://terminal/child-session
+            """
+        XCTAssertEqual(pending.first?.message, expectedExitBlock)
 
         try engine.subscriberDidBecomeIdle(subscriberTerminalSessionID: "sub-session")
-        XCTAssertEqual(
-            recorder.delivered.map(\.line),
-            [
-                "[spaces] Codex CLI (spaces) is exited — project: Project — workspace: ws — session: child-session — spaces://terminal/child-session"
-            ])
+        XCTAssertEqual(recorder.delivered.map(\.line), [expectedExitBlock])
     }
 
     func testNoAgentRowSubscriberIsTreatedAsIdle() throws {
@@ -323,7 +402,7 @@ final class AgentNotificationEngineTests: XCTestCase {
         // A plain local terminal (no agent row of its own) counts as idle.
         try store.insertAgentRemoteSubscription(
             subscriberTerminalSessionID: "local-orch", deviceID: "dev-1", agentSessionID: "remote-term", createdAt: "t")
-        let row = makeRemoteRow(terminalSessionID: "remote-term", label: "Codex CLI", note: "ship the fix", status: "waiting")
+        let row = makeRemoteRow(terminalSessionID: "remote-term", agent: "codex", label: "Codex CLI", note: "ship the fix", status: "waiting")
 
         try engine.remoteChildDidTransition(deviceID: "dev-1", terminalSessionID: "remote-term", row: row, transition: .blocked)
 
@@ -331,7 +410,14 @@ final class AgentNotificationEngineTests: XCTestCase {
         XCTAssertEqual(
             recorder.delivered.map(\.line),
             [
-                "[spaces] Codex CLI (spaces) is blocked — project: P — workspace: W — session: remote-term — note: ship the fix — spaces://terminal/remote-term?device=dev-1"
+                """
+                [spaces] Codex CLI (codex) is blocked
+                  project: P
+                  workspace: W
+                  session: remote-term
+                  note: ship the fix
+                  link: spaces://terminal/remote-term?device=dev-1
+                """
             ])
         XCTAssertTrue(try store.pendingAgentNotifications(subscriberTerminalSessionID: "local-orch").isEmpty)
     }
@@ -341,7 +427,7 @@ final class AgentNotificationEngineTests: XCTestCase {
         let orchestrator = WorkspaceOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         let recorder = DeliveryRecorder()
-        let engine = makeEngine(store: store, recorder: recorder)
+        let engine = makeEngine(store: store, recorder: recorder, kind: "claude")
 
         // The subscriber terminal runs its own agent that is spinning, i.e. busy: everything queues.
         _ = try orchestrator.registerAgentWindow(workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "orch", status: .spinning)
@@ -351,7 +437,7 @@ final class AgentNotificationEngineTests: XCTestCase {
         try store.insertAgentRemoteSubscription(subscriberTerminalSessionID: "orch", deviceID: "dev-1", agentSessionID: "remote-term", createdAt: "t")
 
         try engine.childDidTransition(agent: localChild, transition: .blocked)
-        let remoteRow = makeRemoteRow(terminalSessionID: "remote-term", label: "Remote CLI", note: nil, status: "done")
+        let remoteRow = makeRemoteRow(terminalSessionID: "remote-term", agent: "codex", label: "Remote CLI", note: nil, status: "done")
         try engine.remoteChildDidTransition(deviceID: "dev-1", terminalSessionID: "remote-term", row: remoteRow, transition: .done)
 
         // Both queued while busy — nothing delivered yet.
@@ -363,8 +449,20 @@ final class AgentNotificationEngineTests: XCTestCase {
         XCTAssertEqual(
             recorder.delivered.map(\.line),
             [
-                "[spaces] Local CLI (spaces) is blocked — project: Project — workspace: ws — session: local-child — spaces://terminal/local-child",
-                "[spaces] Remote CLI (spaces) is done — project: P — workspace: W — session: remote-term — spaces://terminal/remote-term?device=dev-1",
+                """
+                [spaces] Local CLI (claude) is blocked
+                  project: Project
+                  workspace: ws
+                  session: local-child
+                  link: spaces://terminal/local-child
+                """,
+                """
+                [spaces] Remote CLI (codex) is done
+                  project: P
+                  workspace: W
+                  session: remote-term
+                  link: spaces://terminal/remote-term?device=dev-1
+                """,
             ])
         XCTAssertTrue(try store.pendingAgentNotifications(subscriberTerminalSessionID: "orch").isEmpty)
     }
@@ -387,19 +485,24 @@ final class AgentNotificationEngineTests: XCTestCase {
 
     // MARK: - Fixtures
 
-    private func makeRemoteRow(terminalSessionID: String?, label: String?, note: String?, status: String) -> SpacesDeviceAgentSessionRow {
+    private func makeRemoteRow(terminalSessionID: String?, agent: String? = nil, label: String?, note: String?, status: String)
+        -> SpacesDeviceAgentSessionRow
+    {
         SpacesDeviceAgentSessionRow(
-            id: "row-\(terminalSessionID ?? "none")", terminalSessionID: terminalSessionID, agent: label, label: label, status: status, note: note,
-            projectID: "p", projectName: "P", workspaceID: "w", workspaceName: "W", branch: nil, updatedAt: "now", lastSignalAt: "now")
+            id: "row-\(terminalSessionID ?? "none")", terminalSessionID: terminalSessionID, agent: agent ?? label, label: label, status: status,
+            note: note, projectID: "p", projectName: "P", workspaceID: "w", workspaceName: "W", branch: nil, updatedAt: "now", lastSignalAt: "now")
     }
 
     // MARK: - Shared engine fixtures
 
     /// An engine whose delivery is the recorder and whose clock advances one second per pending write so
-    /// queue order is deterministic in tests. Logging is silenced.
-    private func makeEngine(store: SQLiteStore, recorder: DeliveryRecorder) -> AgentNotificationEngine {
+    /// queue order is deterministic in tests. Logging is silenced. `kind` stands in for the daemon's
+    /// runtime agent-kind resolution (which reads session files unavailable in a unit test); a `nil` kind
+    /// exercises the `coding agent` fallback.
+    private func makeEngine(store: SQLiteStore, recorder: DeliveryRecorder, kind: String? = nil) -> AgentNotificationEngine {
         let clock = ClockBox()
-        return AgentNotificationEngine(store: store, deliver: recorder.deliver, logError: { _ in }, now: { clock.next() })
+        return AgentNotificationEngine(
+            store: store, deliver: recorder.deliver, resolveAgentKind: { _ in kind }, logError: { _ in }, now: { clock.next() })
     }
 
     private final class ClockBox: @unchecked Sendable {

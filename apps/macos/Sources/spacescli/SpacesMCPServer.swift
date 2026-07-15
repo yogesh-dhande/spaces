@@ -84,9 +84,11 @@ final class SpacesMCPStdioServer {
                             includeArchived: server.optionalBool(arguments["includeArchived"]) ?? false)))
             },
             MCPToolDescriptor(
-                name: "spaces_workspace_create", description: "Create a workspace on this or a paired device.",
+                name: "spaces_workspace_create",
+                description:
+                    "Create a workspace. For a git project this creates a git worktree on a new branch (set existingBranch to reuse an existing branch instead) and runs the project's setup; for a non-git project it uses the project directory. The workspace is created but NOT started — call spaces_workspace_start to launch it. On the local path the result carries the created workspace record (id, dir, branch). Project IDs come from spaces_project_list.",
                 properties: [
-                    "project": stringSchema("Project ID."), "branch": stringSchema("Workspace branch."),
+                    "project": stringSchema("Project ID from spaces_project_list."), "branch": stringSchema("Workspace branch."),
                     "baseBranch": stringSchema("Base branch for new branch creation."),
                     "existingBranch": boolSchema("Use an existing branch instead of creating a new branch."),
                     "device": stringSchema("Paired device name or ID. Defaults to this machine."),
@@ -164,12 +166,14 @@ final class SpacesMCPStdioServer {
                     .terminalTail(.init(sessionID: sessionID, lineCount: server.optionalInt(arguments["lines"]))), timeout: 5)
             },
             MCPToolDescriptor(
-                name: "spaces_terminal_send", description: "Send text or raw bytes to an explicit Spaces terminal session.",
+                name: "spaces_terminal_send",
+                description:
+                    "Send text or raw bytes to an explicit Spaces terminal session. Text with appendNewline=true reliably submits: the session host writes the text and the Enter keystroke as separate spaced writes so agent TUIs (Claude Code, Codex) run the line instead of leaving it as an unsubmitted paste — one call is enough, submit-safety is server-side. An empty text with appendNewline presses Enter alone (e.g. to answer a TUI dialog).",
                 properties: [
                     "session": stringSchema("Spaces terminal session ID."),
-                    "text": stringSchema("Text to send. Use an empty string with appendNewline to press Enter."),
+                    "text": stringSchema("Text to send. Use an empty string with appendNewline to press Enter alone."),
                     "bytes": byteArraySchema("Raw byte values to send. Each value must be an integer from 0 through 255."),
-                    "appendNewline": boolSchema("Append a newline after the payload."),
+                    "appendNewline": boolSchema("Append an Enter keystroke after the payload; with text this submits the line."),
                     "device": stringSchema("Paired device name or ID. Defaults to this machine."),
                 ], required: ["session"], oneOf: [["required": ["text"]], ["required": ["bytes"]]]
             ) { server, arguments in
@@ -212,7 +216,8 @@ final class SpacesMCPStdioServer {
             },
             MCPToolDescriptor(
                 name: "spaces_agent_status",
-                description: "Show one coding-agent session's status, note, project/workspace, and deep link.",
+                description:
+                    "Show one coding-agent session's status, note, project/workspace, and deep link. Fails until the agent has emitted its first hook signal (no agent row exists before then) — retry after the child starts working.",
                 properties: [
                     "session": stringSchema("Spaces terminal session ID. Defaults to SPACES_TERMINAL_TRACKING_ID."),
                     "device": stringSchema("Paired device name or ID. Defaults to this machine."),
@@ -232,7 +237,8 @@ final class SpacesMCPStdioServer {
             },
             MCPToolDescriptor(
                 name: "spaces_agent_annotate",
-                description: "Set (or clear, with an empty note) a coding-agent session's explicit note.",
+                description:
+                    "Set (or clear, with an empty note) a coding-agent session's explicit note. Fails until the agent has emitted its first hook signal (no agent row exists before then) — retry after the child starts working.",
                 properties: [
                     "note": stringSchema("Note text. Pass an empty string to clear the note."),
                     "session": stringSchema("Spaces terminal session ID. Defaults to SPACES_TERMINAL_TRACKING_ID."),
@@ -253,7 +259,7 @@ final class SpacesMCPStdioServer {
             MCPToolDescriptor(
                 name: "spaces_agent_spawn",
                 description:
-                    "Start a coding agent (claude, codex, or opencode) in a new Spaces terminal and return once the daemon detects the agent running in that terminal (foreground classification) — not when it emits a hook signal. Spawn delivers no prompt: to give the agent work, send input with spaces_terminal_send on the returned terminal session id, then poll spaces_agent_status or spaces_terminal_tail to confirm work started (and to see and answer any first-run trust/onboarding/auth dialog). Hooks enrich status but are not required to spawn. The result's subscribed field reports whether the spawning terminal was auto-subscribed; when false (the child's agent row appears only on its first hook signal), call spaces_agent_subscribe once the agent has signaled to receive blocked/done notifications.",
+                    "Start a coding agent (claude, codex, or opencode) in a new Spaces terminal and return once the daemon detects the agent running in that terminal (foreground classification) — not when it emits a hook signal. The result carries a structured agentSpawn object: terminalSessionID, workspaceID, detectedAgent, deviceID, and subscribed. Spawn delivers no prompt: to give the agent work, send input with spaces_terminal_send on agentSpawn.terminalSessionID, then poll spaces_agent_status or spaces_terminal_tail to confirm work started (and to see and answer any first-run trust/onboarding/auth dialog). Hooks enrich status but are not required to spawn. agentSpawn.subscribed reports whether the spawning terminal was auto-subscribed; when false (the child's agent row appears only on its first hook signal), call spaces_agent_subscribe once the agent has signaled to receive blocked/done notifications.",
                 properties: [
                     "command": stringSchema("Command that launches a supported coding agent (claude, codex, or opencode)."),
                     "workspace": stringSchema("Workspace ID. Defaults to the workspace containing the current directory. Required with device."),
@@ -283,8 +289,10 @@ final class SpacesMCPStdioServer {
                 let deviceNote = result.deviceID.map { " on device \($0)" } ?? ""
                 return TerminalServiceProfileCommandResponse(
                     message:
-                        "Started agent session \(result.terminalSessionID) (detected \(result.detectedAgent))\(deviceNote). Send its prompt with spaces_terminal_send, then poll spaces_agent_status or spaces_terminal_tail to confirm work started."
-                )
+                        "Started agent session \(result.terminalSessionID) (detected \(result.detectedAgent))\(deviceNote). Send its prompt with spaces_terminal_send, then poll spaces_agent_status or spaces_terminal_tail to confirm work started.",
+                    agentSpawn: TerminalServiceAgentSpawnResult(
+                        terminalSessionID: result.terminalSessionID, workspaceID: result.workspaceID, detectedAgent: result.detectedAgent,
+                        deviceID: result.deviceID, subscribed: result.subscribed))
             },
             MCPToolDescriptor(
                 name: "spaces_agent_interrupt", description: "Interrupt a coding-agent session by sending ESC to its terminal.",
@@ -327,7 +335,9 @@ final class SpacesMCPStdioServer {
                 return try TerminalService.sendProfileCommand(.agentKill(.init(sessionID: sessionID)))
             },
             MCPToolDescriptor(
-                name: "spaces_agent_subscribe", description: "Watch a child coding-agent session from the current (or an explicit) terminal.",
+                name: "spaces_agent_subscribe",
+                description:
+                    "Watch a child coding-agent session from the current (or an explicit) terminal. While watching, each time the child goes blocked/done/exited the subscriber terminal receives one injected event block — a `[spaces] <label> (<kind>) is <blocked|done|exited>` line followed by indented project/workspace/branch/session/note/link fields — delivered only while the subscriber is idle (queued and flushed once it next goes idle). Fails until the child has emitted its first hook signal (there is no agent row to watch before then) — retry after the child starts working.",
                 properties: [
                     "session": stringSchema("Child terminal session ID to watch."),
                     "subscriber": stringSchema("Subscriber terminal session ID. Defaults to SPACES_TERMINAL_TRACKING_ID."),
