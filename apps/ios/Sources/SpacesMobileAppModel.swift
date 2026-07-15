@@ -444,6 +444,10 @@ private enum SpacesMobileMutationTimeoutRecovery {
     var isShowingWorkspaceCreateSheet = false
     var connectionNotice: String?
     var pendingPairingLink: SpacesDevicePairingLink?
+    /// A terminal session a `spaces://terminal/…` deep link asks to focus. The Spaces tab observes
+    /// this, pushes the session's detail route, and clears it. Model-driven (rather than a tab-local
+    /// binding) so a link handled at the app shell can navigate whichever tab is on screen.
+    var pendingTerminalDeepLinkSession: SpacesDeviceTerminalSessionSummary?
     var errorMessage: String?
     var searchText = ""
     var visibleRowTypes: Set<SpacesMobileWorkspaceRowType> = Set(SpacesMobileWorkspaceRowType.allCases)
@@ -819,6 +823,30 @@ private enum SpacesMobileMutationTimeoutRecovery {
             errorMessage = nil
             isShowingConnectionSettings = true
         } catch { errorMessage = error.localizedDescription }
+    }
+
+    /// Focuses the terminal session named by a `spaces://terminal/…` deep link. When the link is
+    /// device-qualified for a different paired device, switches to that device and refreshes its
+    /// overview so the session is resolvable; a device that isn't paired, or a session that can't be
+    /// found, surfaces a user-visible error. On success it selects the Spaces tab and stages the
+    /// session for that tab to navigate to.
+    func openTerminalDeepLink(_ link: SpacesTerminalDeepLink) async {
+        if let deviceID = link.deviceID, deviceID != activeDeviceID {
+            guard pairedDevices.contains(where: { $0.id == deviceID }) else {
+                errorMessage = "This link points to a device that isn't paired with this app."
+                return
+            }
+            selectDevice(id: deviceID)
+            await refresh()
+        } else if overview == nil {
+            await refresh()
+        }
+        guard let session = session(forSessionID: link.sessionID) else {
+            errorMessage = "Couldn't find terminal session “\(link.sessionID)” on \(connectionSummary)."
+            return
+        }
+        selectedTab = .spaces
+        pendingTerminalDeepLinkSession = session
     }
 
     func loadWorkspaceCreateOptions(projectID: String? = nil) async {

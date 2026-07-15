@@ -436,6 +436,19 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
         XCTAssertNil(SpacesDeviceTerminalLinkClassifier.route(for: "   "))
     }
 
+    func testTerminalLinkRouteClassifiesSpacesTerminalDeepLinks() {
+        XCTAssertEqual(
+            SpacesDeviceTerminalLinkClassifier.route(for: "spaces://terminal/session-1"),
+            .spacesTerminal(SpacesTerminalDeepLink(sessionID: "session-1")))
+        XCTAssertEqual(
+            SpacesDeviceTerminalLinkClassifier.route(for: "spaces://terminal/session-1?device=device-9"),
+            .spacesTerminal(SpacesTerminalDeepLink(sessionID: "session-1", deviceID: "device-9")))
+        // Malformed `spaces://` links (pairing host, missing or multi-segment path) are not routable.
+        XCTAssertNil(SpacesDeviceTerminalLinkClassifier.route(for: "spaces://pair?code=abc"))
+        XCTAssertNil(SpacesDeviceTerminalLinkClassifier.route(for: "spaces://terminal"))
+        XCTAssertNil(SpacesDeviceTerminalLinkClassifier.route(for: "spaces://terminal/session-1/extra"))
+    }
+
     func testTerminalLinkClassifierIsLoopbackHost() {
         XCTAssertTrue(SpacesDeviceTerminalLinkClassifier.isLoopbackHost("localhost"))
         XCTAssertTrue(SpacesDeviceTerminalLinkClassifier.isLoopbackHost("LOCALHOST"))

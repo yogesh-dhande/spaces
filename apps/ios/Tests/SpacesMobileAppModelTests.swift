@@ -389,6 +389,38 @@
             XCTAssertEqual(model.runtimeRow(forSessionID: "session-api")?.title, "api")
         }
 
+        func testOpenTerminalDeepLinkStagesSessionAndSelectsSpacesTab() async {
+            let model = makeModel()
+            model.overview = makeOverview(sessions: [makeSession(id: "session-orphan")])
+            model.selectedTab = .alerts
+
+            await model.openTerminalDeepLink(SpacesTerminalDeepLink(sessionID: "session-orphan"))
+
+            XCTAssertEqual(model.pendingTerminalDeepLinkSession?.id, "session-orphan")
+            XCTAssertEqual(model.selectedTab, .spaces)
+            XCTAssertNil(model.errorMessage)
+        }
+
+        func testOpenTerminalDeepLinkForMissingSessionSurfacesError() async {
+            let model = makeModel()
+            model.overview = makeOverview(sessions: [makeSession(id: "session-orphan")])
+
+            await model.openTerminalDeepLink(SpacesTerminalDeepLink(sessionID: "session-missing"))
+
+            XCTAssertNil(model.pendingTerminalDeepLinkSession)
+            XCTAssertNotNil(model.errorMessage)
+        }
+
+        func testOpenTerminalDeepLinkForUnpairedDeviceSurfacesError() async {
+            let model = makeModel()
+            model.overview = makeOverview(sessions: [makeSession(id: "session-orphan")])
+
+            await model.openTerminalDeepLink(SpacesTerminalDeepLink(sessionID: "session-orphan", deviceID: "device-not-paired"))
+
+            XCTAssertNil(model.pendingTerminalDeepLinkSession)
+            XCTAssertNotNil(model.errorMessage)
+        }
+
         func testTerminalGroupsExcludeSessionsRepresentedByWorkspaceRows() {
             let model = makeModel()
             model.overview = makeOverview(sessions: [makeSession(id: "session-api"), makeSession(id: "session-orphan")])

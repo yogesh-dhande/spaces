@@ -1,4 +1,5 @@
 import SwiftUI
+import spacesdevicecore
 
 /// The app shell: a native bottom tab bar with one NavigationStack per tab. Tab selection
 /// lives on the model so pairing links, auth recovery, and the not-paired state can switch
@@ -36,7 +37,16 @@ struct RootTabView: View {
             if isShowing { model.selectedTab = .settings }
         }
         .onOpenURL { url in
-            model.preparePairingLink(url)
+            // Both link kinds share the `spaces` scheme; distinguish by shape. A pairing link starts
+            // the pairing flow; a terminal deep link focuses the named session; anything else is logged
+            // and ignored rather than misrouted.
+            if (try? SpacesDevicePairingLink.parse(url)) != nil {
+                model.preparePairingLink(url)
+            } else if let link = SpacesTerminalDeepLink.parse(url) {
+                Task { await model.openTerminalDeepLink(link) }
+            } else {
+                NSLog("Ignoring unrecognized spaces link: %@", url.absoluteString)
+            }
         }
         // The browser proxy serves the whole app, so its lifetime follows the app shell rather than the
         // Spaces tab: backgrounding closes its tunnels, and foregrounding restores them.

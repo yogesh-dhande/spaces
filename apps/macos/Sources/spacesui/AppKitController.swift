@@ -1380,6 +1380,74 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
+    // MARK: - Spaces URL scheme (`spaces://`)
+
+    /// System entry point for the registered `spaces` URL scheme (declared in `CFBundleURLTypes`).
+    /// Terminal deep links focus a session; a pairing link (iOS-only flow) is redirected loudly
+    /// instead of being silently dropped; anything else is an unrecognized link.
+    public func application(_ application: NSApplication, open urls: [URL]) {
+        for url in urls { handleIncomingSpacesURL(url) }
+    }
+
+    private func handleIncomingSpacesURL(_ url: URL) {
+        if let link = SpacesTerminalDeepLink.parse(url) {
+            handleTerminalDeepLink(link)
+            return
+        }
+        if url.scheme == SpacesDevicePairingLink.scheme, url.host == SpacesDevicePairingLink.host {
+            presentSpacesLinkAlert(
+                title: "Pair from your phone",
+                message: "Pairing links open in the Spaces app on your iPhone or iPad, not on this Mac. Scan or tap the link there to pair a device.")
+            return
+        }
+        presentSpacesLinkAlert(
+            title: "Unrecognized Spaces link", message: "Spaces didn't recognize “\(url.absoluteString)”.")
+    }
+
+    /// Focuses the terminal session named by a `spaces://terminal/…` deep link. Shared by the OS URL
+    /// handler and in-terminal `spaces://` clicks so both take one path. A link with no `device` (or
+    /// the local device id) opens the pane here on the exact route `terminal show` uses (owner mode);
+    /// a device-qualified link for another device explains where the session lives (v1: no
+    /// remote-pane open); an unknown session is surfaced loudly.
+    func handleTerminalDeepLink(_ link: SpacesTerminalDeepLink) {
+        if let deviceID = link.deviceID, deviceID != SpacesPairedDeviceRecord.localDeviceID {
+            presentTerminalDeepLinkOtherDeviceAlert(deviceID: deviceID)
+            return
+        }
+        let focusRequestID = UUID().uuidString
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let opened = await self.openTerminalSessionPane(sessionID: link.sessionID, mode: .owner, requestID: focusRequestID)
+            if !opened { self.presentTerminalDeepLinkUnknownSessionAlert(sessionID: link.sessionID) }
+        }
+    }
+
+    private func presentTerminalDeepLinkOtherDeviceAlert(deviceID: String) {
+        let pairedDevice = try? clientDatabase().pairedDevice(id: deviceID)
+        if let pairedDevice {
+            presentSpacesLinkAlert(
+                title: "Session is on another device",
+                message: "This terminal runs on “\(pairedDevice.name)”. Open it from that device — Spaces can't focus another device's terminal here yet.")
+        } else {
+            presentSpacesLinkAlert(
+                title: "Unknown device", message: "This link points to a device (\(deviceID)) that isn't paired with this Mac.")
+        }
+    }
+
+    private func presentTerminalDeepLinkUnknownSessionAlert(sessionID: String) {
+        presentSpacesLinkAlert(
+            title: "Terminal session not found",
+            message: "Spaces couldn't find a terminal session with id “\(sessionID)” on this Mac. It may have already exited.")
+    }
+
+    private func presentSpacesLinkAlert(title: String, message: String) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+    }
+
     @objc private nonisolated func handleCloseTerminalSessionWindowIPC(_ notification: Notification) {
         let object = notification.object as? String
         guard let sessionID = notification.userInfo?[IPCNotification.terminalSessionIDUserInfoKey] as? String else { return }
@@ -1861,7 +1929,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                         runtimeState: stateModel?.currentRuntimeState ?? payload?.runtimeState, streamedWorkingDirectory: payload?.workingDirectory,
                         launchWorkingDirectory: stateModel?.currentLaunchConfiguration?.workingDirectory,
                         requestWorkingDirectory: request.workingDirectory)
-                }, requestSender: requestSender, banner: TerminalLinkActivityBanner(hostView: pane.view))
+                }, requestSender: requestSender, banner: TerminalLinkActivityBanner(hostView: pane.view),
+                openSpacesTerminalLink: { [weak self] link in self?.handleTerminalDeepLink(link) })
             linkOpenBox.coordinator = linkOpenCoordinator
             return TerminalPaneContentController(
                 descriptor: .terminalSession(deviceID: resolvedDeviceID, sessionID: sessionID), workspaceID: request.workspaceID,

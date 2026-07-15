@@ -28,6 +28,12 @@ struct SpacesTabView: View {
                     stagedScreenshots: model.stagedScreenshots
                 ) { selectedBrowserSession = nil }.id(route.id)
             }
+        }.onChange(of: model.pendingTerminalDeepLinkSession) { _, session in
+            // A `spaces://terminal/…` deep link resolves to a session on the model; consume it here so
+            // the Spaces tab (the deep link's landing tab) pushes its detail route.
+            guard let session else { return }
+            selectedSession = SelectedTerminalSessionRoute(session: session)
+            model.pendingTerminalDeepLinkSession = nil
         }.accessibilityIdentifier("tab.spaces").overviewPolling(
             model: model, tab: .spaces, activeDetailRouteID: activeDetailRouteID, refreshGeneration: terminalListRefreshGeneration
         ).sheet(isPresented: workspaceCreateSheetBinding) { WorkspaceCreateSheet(model: model) }.confirmationDialog(

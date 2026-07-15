@@ -29,6 +29,8 @@
     ///   type/path restrictions, deliberately preserving macOS "open anything local" semantics.
     /// - file link on a remote device: resolved and fetched over the Device API into a temp cache, then
     ///   opened by artifact category. A second click supersedes an in-flight fetch.
+    /// - `spaces://terminal/…` deep link: focused in-app through the host's shared handler (same path as
+    ///   the OS URL handler), so a click never leaves the app.
     @MainActor final class TerminalLinkOpenCoordinator {
         private struct LinkOpenError: LocalizedError {
             let message: String
@@ -44,6 +46,10 @@
         private let requestSender: RemoteGhosttyTerminalServiceRequestSender
         private let registry: TerminalArtifactHandlerRegistry
         private let banner: any TerminalLinkActivityBannerPresenting
+        /// Focuses a clicked `spaces://terminal/…` session in-app (no OS round trip). The host
+        /// (`AppKitController`) owns the same device-resolution + focus path the URL handler uses, so
+        /// both entry points share one behavior and one other-device alert.
+        private let openSpacesTerminalLink: @MainActor (SpacesTerminalDeepLink) -> Void
 
         /// Bumped on every click. An async fetch captures the value at its start and abandons its result
         /// if a newer click has since superseded it, so a stale resolve/download never opens a file or
@@ -61,7 +67,7 @@
         init(
             sessionID: String, deviceID: String, isLocalDevice: Bool, workingDirectoryProvider: @escaping @MainActor () -> String?,
             requestSender: @escaping RemoteGhosttyTerminalServiceRequestSender, registry: TerminalArtifactHandlerRegistry = .defaultRegistry(),
-            banner: any TerminalLinkActivityBannerPresenting
+            banner: any TerminalLinkActivityBannerPresenting, openSpacesTerminalLink: @escaping @MainActor (SpacesTerminalDeepLink) -> Void
         ) {
             self.sessionID = sessionID
             self.deviceID = deviceID
@@ -70,6 +76,7 @@
             self.requestSender = requestSender
             self.registry = registry
             self.banner = banner
+            self.openSpacesTerminalLink = openSpacesTerminalLink
         }
 
         deinit { MainActor.assumeIsolated { activeTask?.cancel() } }
@@ -84,6 +91,7 @@
             case .webURL(let url): _ = registry.open(url, as: .webURL)
             case .loopbackURL(let url): if isLocalDevice { _ = registry.open(url, as: .webURL) } else { banner.showNotice(Self.loopbackRemoteNotice) }
             case .fileLink(let raw): if isLocalDevice { openLocalFileLink(raw) } else { startRemoteFileOpen(raw) }
+            case .spacesTerminal(let link): openSpacesTerminalLink(link)
             }
         }
 

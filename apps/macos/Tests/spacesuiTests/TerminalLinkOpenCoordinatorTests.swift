@@ -104,12 +104,13 @@ import spacesterminalghostty
 
     private func makeCoordinator(
         isLocalDevice: Bool, workingDirectory: String? = nil, sender: FakeLinkSender = FakeLinkSender(), banner: RecordingBanner,
-        recorder: OpenRecorder, sessionID: String = "session-\(UUID().uuidString)", deviceID: String? = nil
+        recorder: OpenRecorder, sessionID: String = "session-\(UUID().uuidString)", deviceID: String? = nil,
+        onSpacesTerminalLink: @escaping @MainActor (SpacesTerminalDeepLink) -> Void = { _ in }
     ) -> TerminalLinkOpenCoordinator {
         TerminalLinkOpenCoordinator(
             sessionID: sessionID, deviceID: deviceID ?? (isLocalDevice ? "local" : "remote-\(UUID().uuidString)"), isLocalDevice: isLocalDevice,
             workingDirectoryProvider: { workingDirectory }, requestSender: { [sender] request in try sender.send(request) },
-            registry: recorder.makeRegistry(), banner: banner)
+            registry: recorder.makeRegistry(), banner: banner, openSpacesTerminalLink: onSpacesTerminalLink)
     }
 
     private func metadata(
@@ -168,6 +169,21 @@ import spacesterminalghostty
 
         #expect(recorder.opens.isEmpty)
         #expect(banner.noticeMessages == [TerminalLinkOpenCoordinator.loopbackRemoteNotice])
+    }
+
+    @Test func spacesTerminalDeepLinkRoutesToInAppHandlerWithoutOpeningArtifact() {
+        let banner = RecordingBanner()
+        let recorder = OpenRecorder()
+        var routed: [SpacesTerminalDeepLink] = []
+        let coordinator = makeCoordinator(
+            isLocalDevice: true, banner: banner, recorder: recorder, onSpacesTerminalLink: { routed.append($0) })
+
+        coordinator.openLink("spaces://terminal/session-1?device=device-9")
+
+        #expect(routed == [SpacesTerminalDeepLink(sessionID: "session-1", deviceID: "device-9")])
+        #expect(recorder.opens.isEmpty)
+        #expect(banner.errorMessages.isEmpty)
+        #expect(banner.noticeMessages.isEmpty)
     }
 
     @Test func localFileLinkResolvesRelativePathAndOpens() throws {
