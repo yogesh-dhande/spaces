@@ -216,6 +216,20 @@ extension WorkspaceOrchestrator {
 
     public func agentWindows(workspaceID: String) throws -> [AgentWindowRecord] { try store.agentWindows(workspaceID: workspaceID) }
 
+    /// Locates the Spaces coding-agent session bound to a terminal tracking id, scanning every
+    /// workspace. Orchestration commands (`agent kill`) address agents by terminal session id without
+    /// knowing the owning workspace, so this resolves the `(workspaceID, record)` pair for the caller.
+    /// Returns `nil` when no Spaces agent row is bound to that terminal session yet — agent rows only
+    /// appear on the first hook signal, so a just-spawned agent has none.
+    public func resolveSpacesAgentSession(terminalSessionID: String) throws -> (workspaceID: String, record: AgentWindowRecord)? {
+        for (workspaceID, agents) in try store.agentWindowsByWorkspace() {
+            if let record = agents.first(where: { $0.provider == .spaces && $0.terminalTrackingID == terminalSessionID }) {
+                return (workspaceID, record)
+            }
+        }
+        return nil
+    }
+
     @discardableResult public func recordRemoteAgentSignal(_ event: TerminalServiceAgentSignalEvent) throws -> Bool {
         guard let type = RemoteAgentSignalType(rawValue: event.type), let provider = AgentProvider(rawValue: event.provider) else { return false }
         guard let workspaceID = try remoteAgentSignalWorkspaceID(event) else { return false }

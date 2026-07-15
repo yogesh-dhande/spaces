@@ -143,6 +143,11 @@ final class TerminalServiceProtocolTests: XCTestCase {
             .agentList(.init(workspaceID: "workspace-1", sessionID: "session-1")), .agentList(.init()),
             .agentAnnotate(.init(sessionID: "session-1", note: "review the auth flow")),
             .agentAnnotate(.init(sessionID: "session-1", note: "")),
+            .agentSpawn(.init(cwd: "/tmp/work", workspaceID: "workspace-1", command: "claude", title: "Claude Code")),
+            .agentSpawn(.init(cwd: "/tmp/work", command: "codex --yolo")),
+            .agentKill(.init(sessionID: "session-1")),
+            .agentSubscribe(.init(subscriberTerminalSessionID: "orchestrator-session", agentSessionID: "agent-1")),
+            .agentUnsubscribe(.init(subscriberTerminalSessionID: "orchestrator-session", agentSessionID: "agent-1")),
             .terminalSend(.init(sessionID: "session-1", input: .text("hello"), appendNewline: true)),
             .terminalSend(.init(sessionID: "session-1", input: .bytes(Data([0, 10, 255])))),
             .terminalTail(.init(sessionID: "session-1", lineCount: 40)), .terminalTail(.init(sessionID: "session-1")),
@@ -182,6 +187,28 @@ final class TerminalServiceProtocolTests: XCTestCase {
             .agentAnnotate(.init(sessionID: "session-1", note: "")))
         XCTAssertThrowsError(
             try decoder.decode(TerminalServiceProfileCommand.self, from: Data(#"{"agentAnnotate":{"sessionID":"  ","note":"hi"}}"#.utf8)))
+    }
+
+    func testAgentSpawnPayloadRequiresCwdAndCommand() throws {
+        let decoder = JSONDecoder()
+        XCTAssertEqual(
+            try decoder.decode(TerminalServiceProfileCommand.self, from: Data(#"{"agentSpawn":{"cwd":"/tmp","command":"claude"}}"#.utf8)),
+            .agentSpawn(.init(cwd: "/tmp", command: "claude")))
+        // A blank command is not a spawnable agent command.
+        XCTAssertThrowsError(
+            try decoder.decode(TerminalServiceProfileCommand.self, from: Data(#"{"agentSpawn":{"cwd":"/tmp","command":"  "}}"#.utf8)))
+        XCTAssertThrowsError(
+            try decoder.decode(TerminalServiceProfileCommand.self, from: Data(#"{"agentSpawn":{"cwd":"","command":"claude"}}"#.utf8)))
+    }
+
+    func testAgentSubscriptionPayloadRequiresBothEndpoints() throws {
+        let decoder = JSONDecoder()
+        XCTAssertThrowsError(
+            try decoder.decode(
+                TerminalServiceProfileCommand.self, from: Data(#"{"agentSubscribe":{"subscriberTerminalSessionID":"sub","agentSessionID":""}}"#.utf8)))
+        XCTAssertThrowsError(
+            try decoder.decode(
+                TerminalServiceProfileCommand.self, from: Data(#"{"agentSubscribe":{"subscriberTerminalSessionID":"","agentSessionID":"agent-1"}}"#.utf8)))
     }
 
     func testProfileCommandDecodeNormalizesRequiredStringsAndRejectsEmpty() throws {

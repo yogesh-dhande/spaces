@@ -180,6 +180,69 @@ final class SpacesMCPStdioServer {
                 return try TerminalService.sendProfileCommand(.agentAnnotate(.init(sessionID: sessionID, note: note)))
             },
             MCPToolDescriptor(
+                name: "spaces_agent_spawn",
+                description: "Start a coding agent in a new Spaces terminal and wait until it is ready to receive a prompt.",
+                properties: [
+                    "command": stringSchema("Command that launches a supported coding agent (claude, codex, or opencode)."),
+                    "workspace": stringSchema("Workspace ID. Defaults to the workspace containing the current directory."),
+                    "title": stringSchema("Window or session title. Defaults to the coding agent's name."),
+                    "prompt": stringSchema("Prompt to send once the agent is ready."),
+                    "timeout": intSchema("Seconds to wait for the agent's first lifecycle signal. Defaults to 90."),
+                ], required: ["command"]
+            ) { server, arguments in
+                let command = try server.requiredString(arguments["command"], field: "command")
+                let subscriber = ProcessInfo.processInfo.environment[WorkspaceOrchestrator.terminalTrackingIDEnvVar]?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                let row = try performAgentSpawn(
+                    cwd: FileManager.default.currentDirectoryPath, workspace: server.optionalString(arguments["workspace"]), command: command,
+                    title: server.optionalString(arguments["title"]), prompt: server.optionalString(arguments["prompt"]),
+                    timeoutSeconds: server.optionalInt(arguments["timeout"]) ?? 90,
+                    subscriberSessionID: (subscriber?.isEmpty == false) ? subscriber : nil)
+                return TerminalServiceProfileCommandResponse(message: "Started agent session \(row.terminalSessionID ?? row.id).", agentSessions: [row])
+            },
+            MCPToolDescriptor(
+                name: "spaces_agent_interrupt", description: "Interrupt a coding-agent session by sending ESC to its terminal.",
+                properties: ["session": stringSchema("Child terminal session ID to interrupt.")], required: ["session"]
+            ) { server, arguments in
+                let sessionID = try server.requiredString(arguments["session"], field: "session")
+                return try TerminalService.sendProfileCommand(
+                    .terminalSend(.init(sessionID: sessionID, input: .bytes(Data([27])), appendNewline: false)), timeout: 5)
+            },
+            MCPToolDescriptor(
+                name: "spaces_agent_kill", description: "Terminate a coding-agent session and its terminal.",
+                properties: ["session": stringSchema("Child terminal session ID to terminate.")], required: ["session"]
+            ) { server, arguments in
+                let sessionID = try server.requiredString(arguments["session"], field: "session")
+                return try TerminalService.sendProfileCommand(.agentKill(.init(sessionID: sessionID)))
+            },
+            MCPToolDescriptor(
+                name: "spaces_agent_subscribe", description: "Watch a child coding-agent session from the current (or an explicit) terminal.",
+                properties: [
+                    "session": stringSchema("Child terminal session ID to watch."),
+                    "subscriber": stringSchema("Subscriber terminal session ID. Defaults to SPACES_TERMINAL_TRACKING_ID."),
+                ], required: ["session"]
+            ) { server, arguments in
+                let sessionID = try server.requiredString(arguments["session"], field: "session")
+                let subscriberSessionID = try server.resolvedSubscriberSessionID(arguments)
+                let agentRowID = try resolvedAgentRowID(forChildTerminalSessionID: sessionID)
+                return try TerminalService.sendProfileCommand(
+                    .agentSubscribe(.init(subscriberTerminalSessionID: subscriberSessionID, agentSessionID: agentRowID)), timeout: 5)
+            },
+            MCPToolDescriptor(
+                name: "spaces_agent_unsubscribe",
+                description: "Stop watching a child coding-agent session from the current (or an explicit) terminal.",
+                properties: [
+                    "session": stringSchema("Child terminal session ID to stop watching."),
+                    "subscriber": stringSchema("Subscriber terminal session ID. Defaults to SPACES_TERMINAL_TRACKING_ID."),
+                ], required: ["session"]
+            ) { server, arguments in
+                let sessionID = try server.requiredString(arguments["session"], field: "session")
+                let subscriberSessionID = try server.resolvedSubscriberSessionID(arguments)
+                let agentRowID = try resolvedAgentRowID(forChildTerminalSessionID: sessionID)
+                return try TerminalService.sendProfileCommand(
+                    .agentUnsubscribe(.init(subscriberTerminalSessionID: subscriberSessionID, agentSessionID: agentRowID)), timeout: 5)
+            },
+            MCPToolDescriptor(
                 name: "spaces_device_list", description: "List paired devices reachable from this machine.", properties: [:], required: []
             ) { _, _ in
                 let devices = try SpacesClientDatabase.defaultDatabase().pairedDevices()
@@ -281,6 +344,17 @@ final class SpacesMCPStdioServer {
         if let envValue, !envValue.isEmpty { return envValue }
         throw MCPError.invalidArguments(
             "session is required, or run inside a Spaces terminal so \(WorkspaceOrchestrator.terminalTrackingIDEnvVar) is set.")
+    }
+
+    /// Resolves the subscriber terminal session id for `subscribe`/`unsubscribe`, defaulting to the
+    /// current Spaces terminal's `SPACES_TERMINAL_TRACKING_ID`. Internal so it is unit-testable.
+    func resolvedSubscriberSessionID(_ arguments: [String: Any]) throws -> String {
+        if let subscriber = optionalString(arguments["subscriber"]) { return subscriber }
+        let envValue = ProcessInfo.processInfo.environment[WorkspaceOrchestrator.terminalTrackingIDEnvVar]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if let envValue, !envValue.isEmpty { return envValue }
+        throw MCPError.invalidArguments(
+            "subscriber is required, or run inside a Spaces terminal so \(WorkspaceOrchestrator.terminalTrackingIDEnvVar) is set.")
     }
 
     private func optionalString(_ value: Any?) -> String? {

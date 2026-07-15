@@ -102,4 +102,58 @@ final class AgentOrchestrationCLITests: XCTestCase {
         XCTAssertEqual(annotate.note, "review the auth flow")
         XCTAssertEqual(annotate.session, "session-1")
     }
+
+    func testAgentSpawnParsesAllOptions() throws {
+        let spawn = try AgentSpawnCommand.parse([
+            "--command", "codex --yolo", "--workspace", "workspace-1", "--title", "Reviewer", "--prompt", "reply pong", "--timeout", "30", "--json",
+        ])
+        XCTAssertEqual(spawn.command, "codex --yolo")
+        XCTAssertEqual(spawn.workspace, "workspace-1")
+        XCTAssertEqual(spawn.title, "Reviewer")
+        XCTAssertEqual(spawn.prompt, "reply pong")
+        XCTAssertEqual(spawn.timeout, 30)
+        XCTAssertTrue(spawn.json)
+    }
+
+    func testAgentSpawnRequiresCommandAndDefaultsTimeout() throws {
+        XCTAssertThrowsError(try AgentSpawnCommand.parse([]))
+        let spawn = try AgentSpawnCommand.parse(["--command", "claude"])
+        XCTAssertEqual(spawn.timeout, 90)
+        XCTAssertFalse(spawn.json)
+    }
+
+    func testAgentInterruptAndKillTakeRequiredPositionalSession() throws {
+        XCTAssertEqual(try AgentInterruptCommand.parse(["session-1"]).session, "session-1")
+        XCTAssertEqual(try AgentKillCommand.parse(["session-1"]).session, "session-1")
+        XCTAssertThrowsError(try AgentInterruptCommand.parse([]))
+        XCTAssertThrowsError(try AgentKillCommand.parse([]))
+    }
+
+    func testAgentSubscribeParsesSessionAndSubscriber() throws {
+        let subscribe = try AgentSubscribeCommand.parse(["child-session", "--subscriber", "orchestrator-session"])
+        XCTAssertEqual(subscribe.session, "child-session")
+        XCTAssertEqual(subscribe.subscriber, "orchestrator-session")
+
+        let unsubscribe = try AgentUnsubscribeCommand.parse(["child-session"])
+        XCTAssertEqual(unsubscribe.session, "child-session")
+        XCTAssertNil(unsubscribe.subscriber)
+    }
+
+    // MARK: - Subscriber resolution
+
+    func testResolvedSubscriberSessionIDPrefersExplicitThenEnvironment() throws {
+        XCTAssertEqual(
+            try resolvedSubscriberSessionID("explicit", environment: [WorkspaceOrchestrator.terminalTrackingIDEnvVar: "env-session"]), "explicit")
+        XCTAssertEqual(
+            try resolvedSubscriberSessionID(nil, environment: [WorkspaceOrchestrator.terminalTrackingIDEnvVar: "env-session"]), "env-session")
+        XCTAssertThrowsError(try resolvedSubscriberSessionID(nil, environment: [:]))
+    }
+
+    func testAgentSpawnReadinessTimeoutErrorMessagePointsAtHooksAndTail() {
+        let message = AgentSpawnReadinessTimeoutError(sessionID: "session-1", timeoutSeconds: 90).errorDescription
+        XCTAssertEqual(
+            message,
+            "Agent session session-1 produced no lifecycle signal within 90s. Verify coding-agent hooks are installed and inspect with: spaces terminal tail session-1"
+        )
+    }
 }

@@ -165,6 +165,13 @@ extension SQLiteStore {
         try execute(sql: "UPDATE agent_sessions SET note = NULLIF(?, ''), updated_at = ? WHERE id = ?", bindings: [note ?? "", updatedAt, id])
     }
 
+    /// Whether an agent session row with this id exists in any workspace. Used to validate a
+    /// subscription target before persisting the edge, since the subscriber references an agent row by
+    /// id rather than by a workspace-scoped lookup.
+    public func agentWindowExists(id: String) throws -> Bool {
+        try queryRow(sql: "SELECT 1 FROM agent_sessions WHERE id = ? LIMIT 1", bindings: [id]) != nil
+    }
+
     public func insertAgentSubscription(subscriberTerminalSessionID: String, agentSessionID: String, createdAt: String) throws {
         try execute(
             sql: """

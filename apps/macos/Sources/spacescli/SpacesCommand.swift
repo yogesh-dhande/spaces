@@ -21,6 +21,7 @@ public struct SpacesCommand: ParsableCommand {
               - `workspace restart` forces a full stop and relaunch for a workspace.
               - Agent events stay explicit. Workspace runtime commands do not imply agent lifecycle. `agent signal <event>` records those lifecycle transitions for the current Spaces terminal session, or no-ops outside one.
               - `agent list`/`agent status` report coding-agent sessions with status, note, project/workspace context, and a spaces://terminal deep link. `agent annotate` sets an explicit note (empty clears it). `status`/`annotate` default the session to SPACES_TERMINAL_TRACKING_ID.
+              - `agent spawn --command <cmd>` starts a supported coding agent (claude, codex, opencode) in a new terminal and blocks until it reports its first lifecycle signal, then optionally injects `--prompt`; it auto-subscribes the current terminal. `agent interrupt <session>` sends ESC, `agent kill <session>` terminates the session, and `agent subscribe`/`unsubscribe <session>` record a watch edge (subscriber defaults to SPACES_TERMINAL_TRACKING_ID).
             """, version: AppVersion.current,
         subcommands: [
             ProjectCommand.self, WorkspaceCommand.self, AgentCommand.self, TerminalCommand.self, DeviceCommand.self, DaemonCommand.self,
@@ -110,7 +111,10 @@ struct WorkspaceRestartCommand: ParsableCommand {
 struct AgentCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "agent", abstract: "Manage and orchestrate coding-agent sessions.",
-        subcommands: [AgentSignalCommand.self, AgentListCommand.self, AgentStatusCommand.self, AgentAnnotateCommand.self])
+        subcommands: [
+            AgentSignalCommand.self, AgentListCommand.self, AgentStatusCommand.self, AgentAnnotateCommand.self, AgentSpawnCommand.self,
+            AgentInterruptCommand.self, AgentKillCommand.self, AgentSubscribeCommand.self, AgentUnsubscribeCommand.self,
+        ])
 }
 
 /// Renders one agent session as a tab-separated `key=value` row, matching the terminal-list convention.
@@ -188,6 +192,165 @@ struct AgentAnnotateCommand: ParsableCommand {
         let context = CLIContext()
         let sessionID = try resolvedAgentSessionID(session)
         let response = try TerminalService.sendProfileCommand(.agentAnnotate(.init(sessionID: sessionID, note: note)))
+        context.output.emit(response.message)
+    }
+}
+
+/// Raised when a spawned agent never reports a lifecycle signal within the readiness budget. The
+/// session is left running; the message points at the likely cause (missing hooks) and how to inspect.
+struct AgentSpawnReadinessTimeoutError: LocalizedError {
+    let sessionID: String
+    let timeoutSeconds: Int
+
+    var errorDescription: String? {
+        "Agent session \(sessionID) produced no lifecycle signal within \(timeoutSeconds)s. Verify coding-agent hooks are installed and inspect with: spaces terminal tail \(sessionID)"
+    }
+}
+
+/// Spawns a coding agent, blocks until its hooks report readiness (first lifecycle signal of any
+/// type), then optionally records the current terminal's subscription and injects a prompt. Shared by
+/// `agent spawn` and the `spaces_agent_spawn` MCP tool so both block identically. Returns the ready
+/// agent row.
+func performAgentSpawn(
+    cwd: String, workspace: String?, command: String, title: String?, prompt: String?, timeoutSeconds: Int, subscriberSessionID: String?,
+    pollInterval: TimeInterval = 0.5
+) throws -> TerminalServiceAgentSessionRow {
+    let spawnResponse = try TerminalService.sendProfileCommand(
+        .agentSpawn(.init(cwd: cwd, workspaceID: workspace, command: command, title: title)), timeout: TerminalService.createSessionRequestTimeout())
+    guard let session = spawnResponse.terminalSession else {
+        throw WorkspaceError.invalidArgument(message: "spacesd did not return an agent session.")
+    }
+    let childSessionID = session.id
+    let row = try awaitAgentReadiness(childSessionID: childSessionID, timeoutSeconds: timeoutSeconds, pollInterval: pollInterval)
+    // Auto-subscribe the spawning terminal only once the agent row exists (rows appear on first
+    // signal); the daemon validates the row and persists the edge.
+    if let subscriberSessionID, subscriberSessionID != childSessionID {
+        _ = try TerminalService.sendProfileCommand(
+            .agentSubscribe(.init(subscriberTerminalSessionID: subscriberSessionID, agentSessionID: row.id)), timeout: 5)
+    }
+    if let prompt, !prompt.isEmpty {
+        _ = try TerminalService.sendProfileCommand(.terminalSend(.init(sessionID: childSessionID, input: .text(prompt), appendNewline: true)), timeout: 5)
+    }
+    return row
+}
+
+/// Polls the daemon every `pollInterval` seconds until the spawned agent's terminal session has an
+/// agent row whose hooks have signaled at least once (`lastSignalAt != nil`). Polling lives on the CLI
+/// side because the daemon handles profile commands serially: a blocking readiness RPC would deadlock
+/// against the very signal it waits for. Throws `AgentSpawnReadinessTimeoutError` after the budget.
+func awaitAgentReadiness(childSessionID: String, timeoutSeconds: Int, pollInterval: TimeInterval = 0.5) throws -> TerminalServiceAgentSessionRow {
+    let deadline = Date().addingTimeInterval(TimeInterval(timeoutSeconds))
+    while true {
+        let rows = try TerminalService.sendProfileCommand(.agentList(.init(sessionID: childSessionID)), timeout: 5).agentSessions ?? []
+        if let row = rows.first, row.lastSignalAt != nil { return row }
+        if Date() >= deadline { throw AgentSpawnReadinessTimeoutError(sessionID: childSessionID, timeoutSeconds: timeoutSeconds) }
+        Thread.sleep(forTimeInterval: pollInterval)
+    }
+}
+
+/// Resolves the agent-session row id watched by a subscription, given the child's terminal session id.
+/// Subscriptions target the agent **row** id, but users address the child by its terminal session id,
+/// so this bridges the two through the daemon's agent listing. Errors loudly when the child has no
+/// agent row (it has not signaled its hooks yet).
+func resolvedAgentRowID(forChildTerminalSessionID childSessionID: String) throws -> String {
+    let rows = try TerminalService.sendProfileCommand(.agentList(.init(sessionID: childSessionID)), timeout: 5).agentSessions ?? []
+    guard let row = rows.first else {
+        throw ValidationError("No agent session for terminal \(childSessionID). The child must have reported a lifecycle signal before it can be watched.")
+    }
+    return row.id
+}
+
+/// Resolves the subscriber terminal session id for `agent subscribe`/`unsubscribe`, defaulting to the
+/// current Spaces terminal's `SPACES_TERMINAL_TRACKING_ID`. Errors when neither is available.
+func resolvedSubscriberSessionID(_ subscriber: String?, environment: [String: String] = ProcessInfo.processInfo.environment) throws -> String {
+    if let subscriber = subscriber?.trimmingCharacters(in: .whitespacesAndNewlines), !subscriber.isEmpty { return subscriber }
+    let envValue = environment[WorkspaceOrchestrator.terminalTrackingIDEnvVar]?.trimmingCharacters(in: .whitespacesAndNewlines)
+    if let envValue, !envValue.isEmpty { return envValue }
+    throw ValidationError("--subscriber is required, or run inside a Spaces terminal so \(WorkspaceOrchestrator.terminalTrackingIDEnvVar) is set.")
+}
+
+struct AgentSpawnCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "spawn",
+        abstract: "Start a coding agent in a new Spaces terminal and block until it is ready to receive a prompt.")
+
+    @Option(name: .long, help: "Command that launches a supported coding agent (claude, codex, or opencode).") var command: String
+    @Option(name: .long, help: "Workspace ID. Defaults to the workspace containing the current directory.") var workspace: String?
+    @Option(name: .long, help: "Window or session title. Defaults to the coding agent's name.") var title: String?
+    @Option(name: .long, help: "Prompt to send once the agent is ready.") var prompt: String?
+    @Option(name: .long, help: "Seconds to wait for the agent's first lifecycle signal before giving up.") var timeout: Int = 90
+    @Flag(name: .long, help: "Emit machine-readable JSON.") var json = false
+
+    func run() throws {
+        let context = CLIContext()
+        let subscriber = ProcessInfo.processInfo.environment[WorkspaceOrchestrator.terminalTrackingIDEnvVar]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let row = try performAgentSpawn(
+            cwd: context.currentDirectoryPath(), workspace: workspace, command: command, title: title, prompt: prompt, timeoutSeconds: timeout,
+            subscriberSessionID: (subscriber?.isEmpty == false) ? subscriber : nil)
+        if json {
+            try context.output.emitJSON(row)
+            return
+        }
+        context.output.emit(agentSessionRow(row))
+    }
+}
+
+struct AgentInterruptCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "interrupt", abstract: "Interrupt a coding-agent session by sending ESC to its terminal.")
+
+    @Argument(help: "Child terminal session ID to interrupt.") var session: String
+
+    func run() throws {
+        let context = CLIContext()
+        _ = try TerminalService.sendProfileCommand(.terminalSend(.init(sessionID: session, input: .bytes(Data([27])), appendNewline: false)), timeout: 5)
+        context.output.emit("Interrupted agent session \(session).")
+    }
+}
+
+struct AgentKillCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "kill", abstract: "Terminate a coding-agent session and its terminal.")
+
+    @Argument(help: "Child terminal session ID to terminate.") var session: String
+
+    func run() throws {
+        let context = CLIContext()
+        let response = try TerminalService.sendProfileCommand(.agentKill(.init(sessionID: session)))
+        context.output.emit(response.message)
+    }
+}
+
+struct AgentSubscribeCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "subscribe", abstract: "Watch a child coding-agent session from the current (or an explicit) terminal.")
+
+    @Argument(help: "Child terminal session ID to watch.") var session: String
+    @Option(name: .long, help: "Subscriber terminal session ID. Defaults to SPACES_TERMINAL_TRACKING_ID.") var subscriber: String?
+
+    func run() throws {
+        let context = CLIContext()
+        let subscriberSessionID = try resolvedSubscriberSessionID(subscriber)
+        let agentRowID = try resolvedAgentRowID(forChildTerminalSessionID: session)
+        let response = try TerminalService.sendProfileCommand(
+            .agentSubscribe(.init(subscriberTerminalSessionID: subscriberSessionID, agentSessionID: agentRowID)), timeout: 5)
+        context.output.emit(response.message)
+    }
+}
+
+struct AgentUnsubscribeCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "unsubscribe", abstract: "Stop watching a child coding-agent session from the current (or an explicit) terminal.")
+
+    @Argument(help: "Child terminal session ID to stop watching.") var session: String
+    @Option(name: .long, help: "Subscriber terminal session ID. Defaults to SPACES_TERMINAL_TRACKING_ID.") var subscriber: String?
+
+    func run() throws {
+        let context = CLIContext()
+        let subscriberSessionID = try resolvedSubscriberSessionID(subscriber)
+        let agentRowID = try resolvedAgentRowID(forChildTerminalSessionID: session)
+        let response = try TerminalService.sendProfileCommand(
+            .agentUnsubscribe(.init(subscriberTerminalSessionID: subscriberSessionID, agentSessionID: agentRowID)), timeout: 5)
         context.output.emit(response.message)
     }
 }

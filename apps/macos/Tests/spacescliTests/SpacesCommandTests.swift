@@ -98,7 +98,12 @@ final class SpacesCommandTests: XCTestCase {
     /// the app and the daemon, never the CLI or MCP.
     func testAgentCommandExposesSignalAndOrchestrationCommands() {
         let subcommands = AgentCommand.configuration.subcommands.map { String(describing: $0) }
-        XCTAssertEqual(subcommands, ["AgentSignalCommand", "AgentListCommand", "AgentStatusCommand", "AgentAnnotateCommand"])
+        XCTAssertEqual(
+            subcommands,
+            [
+                "AgentSignalCommand", "AgentListCommand", "AgentStatusCommand", "AgentAnnotateCommand", "AgentSpawnCommand",
+                "AgentInterruptCommand", "AgentKillCommand", "AgentSubscribeCommand", "AgentUnsubscribeCommand",
+            ])
         XCTAssertThrowsError(try AgentCommand.parseAsRoot(["hooks", "status"]))
     }
 
@@ -340,7 +345,8 @@ final class SpacesCommandTests: XCTestCase {
             [
                 "spaces_project_list", "spaces_workspace_list", "spaces_workspace_create", "spaces_workspace_start", "spaces_workspace_restart",
                 "spaces_terminal_list", "spaces_terminal_tail", "spaces_terminal_send", "spaces_agent_list", "spaces_agent_status",
-                "spaces_agent_annotate", "spaces_device_list",
+                "spaces_agent_annotate", "spaces_agent_spawn", "spaces_agent_interrupt", "spaces_agent_kill", "spaces_agent_subscribe",
+                "spaces_agent_unsubscribe", "spaces_device_list",
             ])
         // `agent signal` is CLI-only forever: an orchestrating agent may read peers' status but must not forge it.
         XCTAssertFalse(names.contains("spaces_agent_signal"))

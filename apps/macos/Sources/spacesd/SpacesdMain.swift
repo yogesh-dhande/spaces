@@ -759,6 +759,20 @@ import workspacecore
         case .agentAnnotate(let payload):
             let orchestrator = try makeProfileOrchestrator()
             return try annotateProfileAgentSession(payload, orchestrator: orchestrator)
+        case .agentSpawn(let payload):
+            let orchestrator = try makeProfileOrchestrator()
+            return try spawnProfileAgentSession(payload, orchestrator: orchestrator)
+        case .agentKill(let payload):
+            let orchestrator = try makeProfileOrchestrator()
+            return try killProfileAgentSession(payload.sessionID, orchestrator: orchestrator)
+        case .agentSubscribe(let payload):
+            let orchestrator = try makeProfileOrchestrator()
+            return try subscribeProfileAgentSession(payload, orchestrator: orchestrator)
+        case .agentUnsubscribe(let payload):
+            let orchestrator = try makeProfileOrchestrator()
+            try orchestrator.store.deleteAgentSubscription(
+                subscriberTerminalSessionID: payload.subscriberTerminalSessionID, agentSessionID: payload.agentSessionID)
+            return TerminalServiceProfileCommandResponse(message: "Unsubscribed from agent session.")
         case .terminalCommand(let payload):
             let orchestrator = try makeProfileOrchestrator()
             let workspaceID = try orchestrator.resolveWorkspaceIDForTerminalCommand(explicitWorkspaceID: payload.workspaceID, cwd: payload.cwd)
@@ -1005,6 +1019,60 @@ import workspacecore
         let updated = try profileAgentSessionRows(orchestrator: orchestrator, workspaceID: nil, sessionID: sessionID)
         return TerminalServiceProfileCommandResponse(
             message: sanitized.isEmpty ? "Cleared agent note." : "Annotated agent session.", agentSessions: updated)
+    }
+
+    /// Spawns a coding-agent terminal session after gating the command against the supported-agent hook
+    /// set: the command must launch a supported coding agent whose hooks are installed and current,
+    /// otherwise the spawned session would never report the lifecycle signal `spaces agent spawn` blocks
+    /// on. The session summary is returned so the CLI can poll readiness against its terminal id.
+    private func spawnProfileAgentSession(_ payload: TerminalServiceAgentSpawnPayload, orchestrator: WorkspaceOrchestrator) throws
+        -> TerminalServiceProfileCommandResponse
+    {
+        do {
+            _ = try AgentSpawnCommandGate.resolveSpawnableAgent(command: payload.command, statuses: AgentHookInstaller.status())
+        } catch let error as AgentSpawnCommandGate.GateError {
+            throw SpacesRuntimeError.invalidArgument(message: error.errorDescription ?? "Agent spawn command is not supported.")
+        }
+        let workspaceID = try orchestrator.resolveWorkspaceIDForTerminalCommand(explicitWorkspaceID: payload.workspaceID, cwd: payload.cwd)
+        let session = try orchestrator.createWorkspaceAgentSession(workspaceID: workspaceID, command: payload.command, title: payload.title)
+        return TerminalServiceProfileCommandResponse(message: "Started agent session.", terminalSession: session)
+    }
+
+    /// Terminates a coding-agent session addressed by its terminal session id. When a Spaces agent row
+    /// is bound to the session, the coding-agent stop path terminates the terminal and deletes the row;
+    /// before the first hook signal no agent row exists yet, so the terminal session itself is
+    /// terminated. A session that is neither an agent row nor a live terminal is a loud error.
+    private func killProfileAgentSession(_ sessionID: String, orchestrator: WorkspaceOrchestrator) throws
+        -> TerminalServiceProfileCommandResponse
+    {
+        if let match = try orchestrator.resolveSpacesAgentSession(terminalSessionID: sessionID) {
+            try orchestrator.stopCodingAgent(workspaceID: match.workspaceID, agentID: match.record.id)
+            return TerminalServiceProfileCommandResponse(message: "Killed agent session \(sessionID).")
+        }
+        guard sessionCores[sessionID] != nil || profileTerminalSessionExists(sessionID) else {
+            throw SpacesRuntimeError.invalidArgument(message: "No agent session for terminal \(sessionID).")
+        }
+        _ = terminateSession(id: sessionID)
+        return TerminalServiceProfileCommandResponse(message: "Killed agent session \(sessionID).")
+    }
+
+    private func profileTerminalSessionExists(_ sessionID: String) -> Bool {
+        guard let paths = try? TerminalSessionPaths.forSession(id: sessionID) else { return false }
+        return (try? TerminalSessionPersistence.readLaunchConfiguration(paths: paths)) != nil
+    }
+
+    /// Persists a subscription edge after validating the watched agent session row exists. The
+    /// injection engine that consumes these edges arrives in a later stage; this stage only records the
+    /// relationship. A subscribe against an agent session that does not exist is a loud error.
+    private func subscribeProfileAgentSession(_ payload: TerminalServiceAgentSubscriptionPayload, orchestrator: WorkspaceOrchestrator) throws
+        -> TerminalServiceProfileCommandResponse
+    {
+        guard try orchestrator.store.agentWindowExists(id: payload.agentSessionID) else {
+            throw SpacesRuntimeError.invalidArgument(message: "No agent session \(payload.agentSessionID) to subscribe to.")
+        }
+        try orchestrator.store.insertAgentSubscription(
+            subscriberTerminalSessionID: payload.subscriberTerminalSessionID, agentSessionID: payload.agentSessionID, createdAt: nowISO8601())
+        return TerminalServiceProfileCommandResponse(message: "Subscribed to agent session.")
     }
 
     /// Notes are single-line, bounded, plain text: control characters (including any embedded newlines)

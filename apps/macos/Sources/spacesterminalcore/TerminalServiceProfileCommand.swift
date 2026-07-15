@@ -172,6 +172,77 @@ public struct TerminalServiceAgentAnnotatePayload: Codable, Sendable, Equatable 
     }
 }
 
+public struct TerminalServiceAgentSpawnPayload: Codable, Sendable, Equatable {
+    /// Working directory used to derive the owning workspace when `workspaceID` is omitted (the
+    /// deepest workspace whose directory contains it), same rule as `terminalCommand`.
+    public let cwd: String
+    public let workspaceID: String?
+    /// Shell command that launches the coding agent. Required and validated non-empty at decode; the
+    /// daemon gates it against the supported-agent hook set (and their install state) before spawning.
+    public let command: String
+    public let title: String?
+
+    public init(cwd: String, workspaceID: String? = nil, command: String, title: String? = nil) {
+        self.cwd = cwd
+        self.workspaceID = workspaceID
+        self.command = command
+        self.title = title
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case cwd
+        case workspaceID
+        case command
+        case title
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        cwd = try container.decodeRequiredNonEmpty(forKey: .cwd)
+        workspaceID = try container.decodeIfPresent(String.self, forKey: .workspaceID)
+        command = try container.decodeRequiredNonEmpty(forKey: .command)
+        title = try container.decodeIfPresent(String.self, forKey: .title)
+    }
+}
+
+public struct TerminalServiceAgentKillPayload: Codable, Sendable, Equatable {
+    /// Terminal session / tracking id of the agent to terminate.
+    public let sessionID: String
+
+    public init(sessionID: String) { self.sessionID = sessionID }
+
+    private enum CodingKeys: String, CodingKey { case sessionID }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        sessionID = try container.decodeRequiredNonEmpty(forKey: .sessionID)
+    }
+}
+
+/// Persist-only subscription edge carried by `.agentSubscribe`/`.agentUnsubscribe`. `subscriberTerminalSessionID`
+/// is the watching terminal; `agentSessionID` is the watched agent session **row** id (the CLI resolves
+/// the child's terminal session to its agent row before sending this).
+public struct TerminalServiceAgentSubscriptionPayload: Codable, Sendable, Equatable {
+    public let subscriberTerminalSessionID: String
+    public let agentSessionID: String
+
+    public init(subscriberTerminalSessionID: String, agentSessionID: String) {
+        self.subscriberTerminalSessionID = subscriberTerminalSessionID
+        self.agentSessionID = agentSessionID
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case subscriberTerminalSessionID
+        case agentSessionID
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        subscriberTerminalSessionID = try container.decodeRequiredNonEmpty(forKey: .subscriberTerminalSessionID)
+        agentSessionID = try container.decodeRequiredNonEmpty(forKey: .agentSessionID)
+    }
+}
+
 public struct TerminalServiceTerminalSendPayload: Codable, Sendable, Equatable {
     public let sessionID: String
     public let input: TerminalProfileInput
@@ -264,6 +335,10 @@ public enum TerminalServiceProfileCommand: Sendable, Equatable {
     case agentSignal(TerminalServiceProfileAgentSignalPayload)
     case agentList(TerminalServiceAgentListPayload)
     case agentAnnotate(TerminalServiceAgentAnnotatePayload)
+    case agentSpawn(TerminalServiceAgentSpawnPayload)
+    case agentKill(TerminalServiceAgentKillPayload)
+    case agentSubscribe(TerminalServiceAgentSubscriptionPayload)
+    case agentUnsubscribe(TerminalServiceAgentSubscriptionPayload)
     case terminalSend(TerminalServiceTerminalSendPayload)
     case terminalTail(TerminalServiceTerminalTailPayload)
     case terminalCommand(TerminalServiceTerminalCommandPayload)
@@ -280,6 +355,10 @@ extension TerminalServiceProfileCommand: Codable {
         case agentSignal
         case agentList
         case agentAnnotate
+        case agentSpawn
+        case agentKill
+        case agentSubscribe
+        case agentUnsubscribe
         case terminalSend
         case terminalTail
         case terminalCommand
@@ -305,6 +384,10 @@ extension TerminalServiceProfileCommand: Codable {
         case .agentSignal: self = .agentSignal(try container.decode(TerminalServiceProfileAgentSignalPayload.self, forKey: key))
         case .agentList: self = .agentList(try container.decode(TerminalServiceAgentListPayload.self, forKey: key))
         case .agentAnnotate: self = .agentAnnotate(try container.decode(TerminalServiceAgentAnnotatePayload.self, forKey: key))
+        case .agentSpawn: self = .agentSpawn(try container.decode(TerminalServiceAgentSpawnPayload.self, forKey: key))
+        case .agentKill: self = .agentKill(try container.decode(TerminalServiceAgentKillPayload.self, forKey: key))
+        case .agentSubscribe: self = .agentSubscribe(try container.decode(TerminalServiceAgentSubscriptionPayload.self, forKey: key))
+        case .agentUnsubscribe: self = .agentUnsubscribe(try container.decode(TerminalServiceAgentSubscriptionPayload.self, forKey: key))
         case .terminalSend: self = .terminalSend(try container.decode(TerminalServiceTerminalSendPayload.self, forKey: key))
         case .terminalTail: self = .terminalTail(try container.decode(TerminalServiceTerminalTailPayload.self, forKey: key))
         case .terminalCommand: self = .terminalCommand(try container.decode(TerminalServiceTerminalCommandPayload.self, forKey: key))
@@ -323,6 +406,10 @@ extension TerminalServiceProfileCommand: Codable {
         case .agentSignal(let payload): try container.encode(payload, forKey: .agentSignal)
         case .agentList(let payload): try container.encode(payload, forKey: .agentList)
         case .agentAnnotate(let payload): try container.encode(payload, forKey: .agentAnnotate)
+        case .agentSpawn(let payload): try container.encode(payload, forKey: .agentSpawn)
+        case .agentKill(let payload): try container.encode(payload, forKey: .agentKill)
+        case .agentSubscribe(let payload): try container.encode(payload, forKey: .agentSubscribe)
+        case .agentUnsubscribe(let payload): try container.encode(payload, forKey: .agentUnsubscribe)
         case .terminalSend(let payload): try container.encode(payload, forKey: .terminalSend)
         case .terminalTail(let payload): try container.encode(payload, forKey: .terminalTail)
         case .terminalCommand(let payload): try container.encode(payload, forKey: .terminalCommand)
