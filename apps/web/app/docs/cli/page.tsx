@@ -118,6 +118,24 @@ spaces agent signal exit`}</CodeBlock>
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Agent Orchestration</h2>
+        <p className="mt-3 text-sm leading-7 text-foreground-soft">
+          Beyond reporting state, the CLI lets one terminal drive other coding agents. <Cmd>spaces agent list</Cmd> and <Cmd>spaces agent status</Cmd> show tracked agents (add <Cmd>--json</Cmd> for machine output); <Cmd>spaces agent annotate</Cmd> leaves a note. <Cmd>spaces agent spawn</Cmd> starts a supported agent in a new workspace terminal and blocks until it is ready, so a <Cmd>--prompt</Cmd> lands reliably; it only starts agents whose hooks are installed. <Cmd>spaces agent subscribe</Cmd> watches a child and injects a one-line, clickable notice into your terminal when it goes blocked, done, or exits. <Cmd>spaces agent interrupt</Cmd> and <Cmd>spaces agent kill</Cmd> steer or stop a child. Every command except <Cmd>subscribe</Cmd>/<Cmd>unsubscribe</Cmd> and <Cmd>signal</Cmd> accepts <Cmd>--device</Cmd> to target a paired device.
+        </p>
+        <CodeBlock>{`spaces agent list [--workspace <id>] [--json]
+spaces agent status [--session <id>] [--json]
+spaces agent annotate "waiting on review" [--session <id>]
+spaces agent spawn --command claude [--workspace <id>] [--prompt <text>] [--timeout <s>]
+spaces agent subscribe <child-session> [--subscriber <id>]
+spaces agent unsubscribe <child-session> [--subscriber <id>]
+spaces agent interrupt <session>
+spaces agent kill <session>`}</CodeBlock>
+        <p className="mt-3 text-sm leading-7 text-foreground-soft">
+          Subscriptions are same-device and are delivered only while the subscriber is idle, so a notice never lands mid-task; a subscription that would form a watch cycle is rejected. The same actions are available to an MCP client, but <code>spaces agent signal</code> is deliberately never an MCP tool.
+        </p>
+      </article>
+
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Pairing</h2>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           <Cmd>spaces device pair</Cmd> with no source opens a short-lived pairing window on the same-machine daemon and prints a <code>spaces://pair</code> link for connecting an iOS client from the terminal. Add <Cmd>--json</Cmd> for machine-readable output. Pass <Cmd>--link</Cmd> to redeem a link from another device, or <Cmd>--ssh user@host</Cmd> to pair with a remote daemon over SSH. Use <Cmd>--ssh-port</Cmd> for SSH ports other than 22.

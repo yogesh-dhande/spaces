@@ -65,6 +65,30 @@ final class AgentNotificationEngineTests: XCTestCase {
             ["[spaces] Codex CLI (spaces) is done — note: review the auth flow — open: spaces://terminal/child-session"])
     }
 
+    /// Mirrors the daemon chokepoint exactly: the engine receives the record RETURNED by
+    /// `updateAgentWindowStatus`, not a fresh store load, so that record must carry the stored note. A
+    /// status transition after an annotate must still render the note in the injected line.
+    func testNoteSurvivesStatusTransitionRecordThroughTheLivePath() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        let recorder = DeliveryRecorder()
+        let engine = makeEngine(store: store, recorder: recorder)
+
+        let child = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Claude Code CLI", terminalTrackingID: "child-session", status: .idle)
+        try store.setAgentSessionNote(id: child.id, note: "fix the flaky tests", updatedAt: "t")
+        try store.insertAgentSubscription(subscriberTerminalSessionID: "orchestrator-session", agentSessionID: child.id, createdAt: "t")
+
+        let transitioned = try orchestrator.updateAgentWindowStatus(
+            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "child-session", status: .waiting)
+        try engine.childDidTransition(agent: transitioned, transition: .blocked)
+
+        XCTAssertEqual(
+            recorder.delivered.map(\.line),
+            ["[spaces] Claude Code CLI (spaces) is blocked — note: fix the flaky tests — open: spaces://terminal/child-session"])
+    }
+
     func testBusySubscriberQueuesThenFlushesOnIdleInOrderExactlyOnce() throws {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)
