@@ -399,12 +399,17 @@ public struct TerminalServiceProfileCommandResponse: Codable, Sendable, Equatabl
     public let terminalOutput: String?
     public let agentSessions: [TerminalServiceAgentSessionRow]?
     public let agentSpawn: TerminalServiceAgentSpawnResult?
+    /// Rendered notification blocks a watched child queued for this terminal while it was busy, drained
+    /// and attached to the response of the orchestrator's next `spaces_*` MCP tool call (the busy-time
+    /// counterpart to idle injection). Nil/omitted unless the piggyback path drained at least one row;
+    /// carried only on the MCP piggyback path, so every other command leaves it nil.
+    public let pendingAgentEvents: [String]?
 
     public init(
         message: String, projects: [TerminalServiceProfileProjectSummary]? = nil, workspaces: [TerminalServiceProfileWorkspaceRecord]? = nil,
         workspace: TerminalServiceProfileWorkspaceRecord? = nil, terminalSessions: [TerminalServiceSessionSummary]? = nil,
         terminalSession: TerminalServiceSessionSummary? = nil, terminalOutput: String? = nil, agentSessions: [TerminalServiceAgentSessionRow]? = nil,
-        agentSpawn: TerminalServiceAgentSpawnResult? = nil
+        agentSpawn: TerminalServiceAgentSpawnResult? = nil, pendingAgentEvents: [String]? = nil
     ) {
         self.message = message
         self.projects = projects
@@ -415,6 +420,18 @@ public struct TerminalServiceProfileCommandResponse: Codable, Sendable, Equatabl
         self.terminalOutput = terminalOutput
         self.agentSessions = agentSessions
         self.agentSpawn = agentSpawn
+        self.pendingAgentEvents = pendingAgentEvents
+    }
+
+    /// Returns a copy with `pendingAgentEvents` attached, or `self` unchanged when there is nothing to
+    /// attach. Used at the MCP tools/call chokepoint so a successful tool response can carry a busy
+    /// orchestrator's drained child events without the caller reconstructing every field.
+    public func addingPendingAgentEvents(_ events: [String]?) -> TerminalServiceProfileCommandResponse {
+        guard let events, !events.isEmpty else { return self }
+        return TerminalServiceProfileCommandResponse(
+            message: message, projects: projects, workspaces: workspaces, workspace: workspace, terminalSessions: terminalSessions,
+            terminalSession: terminalSession, terminalOutput: terminalOutput, agentSessions: agentSessions, agentSpawn: agentSpawn,
+            pendingAgentEvents: events)
     }
 }
 

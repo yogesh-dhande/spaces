@@ -349,6 +349,11 @@ public enum TerminalServiceProfileCommand: Sendable, Equatable {
     case agentKill(TerminalServiceAgentKillPayload)
     case agentSubscribe(TerminalServiceAgentSubscriptionPayload)
     case agentUnsubscribe(TerminalServiceAgentSubscriptionPayload)
+    /// Atomically reads and deletes the pending child-agent notifications held for a subscriber terminal,
+    /// returning the rendered blocks on the response's `pendingAgentEvents`. The MCP server issues this at
+    /// its tools/call chokepoint so a busy orchestrator receives its watched children's held events; the
+    /// idle-time injection path is unchanged.
+    case agentConsumePendingEvents(subscriberTerminalSessionID: String)
     case terminalSend(TerminalServiceTerminalSendPayload)
     case terminalTail(TerminalServiceTerminalTailPayload)
     case terminalCommand(TerminalServiceTerminalCommandPayload)
@@ -369,6 +374,7 @@ extension TerminalServiceProfileCommand: Codable {
         case agentKill
         case agentSubscribe
         case agentUnsubscribe
+        case agentConsumePendingEvents
         case terminalSend
         case terminalTail
         case terminalCommand
@@ -398,6 +404,7 @@ extension TerminalServiceProfileCommand: Codable {
         case .agentKill: self = .agentKill(try container.decode(TerminalServiceAgentKillPayload.self, forKey: key))
         case .agentSubscribe: self = .agentSubscribe(try container.decode(TerminalServiceAgentSubscriptionPayload.self, forKey: key))
         case .agentUnsubscribe: self = .agentUnsubscribe(try container.decode(TerminalServiceAgentSubscriptionPayload.self, forKey: key))
+        case .agentConsumePendingEvents: self = .agentConsumePendingEvents(subscriberTerminalSessionID: try container.decodeRequiredNonEmpty(forKey: key))
         case .terminalSend: self = .terminalSend(try container.decode(TerminalServiceTerminalSendPayload.self, forKey: key))
         case .terminalTail: self = .terminalTail(try container.decode(TerminalServiceTerminalTailPayload.self, forKey: key))
         case .terminalCommand: self = .terminalCommand(try container.decode(TerminalServiceTerminalCommandPayload.self, forKey: key))
@@ -420,6 +427,8 @@ extension TerminalServiceProfileCommand: Codable {
         case .agentKill(let payload): try container.encode(payload, forKey: .agentKill)
         case .agentSubscribe(let payload): try container.encode(payload, forKey: .agentSubscribe)
         case .agentUnsubscribe(let payload): try container.encode(payload, forKey: .agentUnsubscribe)
+        case .agentConsumePendingEvents(let subscriberTerminalSessionID):
+            try container.encode(subscriberTerminalSessionID, forKey: .agentConsumePendingEvents)
         case .terminalSend(let payload): try container.encode(payload, forKey: .terminalSend)
         case .terminalTail(let payload): try container.encode(payload, forKey: .terminalTail)
         case .terminalCommand(let payload): try container.encode(payload, forKey: .terminalCommand)

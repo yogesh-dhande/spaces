@@ -794,6 +794,14 @@ import workspacecore
             try orchestrator.store.deleteAgentSubscription(
                 subscriberTerminalSessionID: payload.subscriberTerminalSessionID, agentSessionID: payload.agentSessionID)
             return TerminalServiceProfileCommandResponse(message: "Unsubscribed from agent session.")
+        case .agentConsumePendingEvents(let subscriberTerminalSessionID):
+            // The MCP piggyback drain: atomically read-and-delete this subscriber's held notifications so a
+            // busy orchestrator receives them on its next tool result. Injection (the idle path) is untouched.
+            let orchestrator = try makeProfileOrchestrator()
+            let events = try orchestrator.store.consumePendingAgentNotifications(subscriberTerminalSessionID: subscriberTerminalSessionID)
+            return TerminalServiceProfileCommandResponse(
+                message: events.isEmpty ? "No pending agent events." : "Consumed \(events.count) pending agent event(s).",
+                pendingAgentEvents: events.isEmpty ? nil : events)
         case .terminalCommand(let payload):
             let orchestrator = try makeProfileOrchestrator()
             let workspaceID = try orchestrator.resolveWorkspaceIDForTerminalCommand(explicitWorkspaceID: payload.workspaceID, cwd: payload.cwd)

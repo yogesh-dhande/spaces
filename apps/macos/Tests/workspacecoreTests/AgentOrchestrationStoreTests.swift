@@ -84,6 +84,33 @@ final class AgentOrchestrationStoreTests: XCTestCase {
         XCTAssertEqual(try store.agentSubscriptions(subscriberTerminalSessionID: "sub").map(\.agentSessionID), [second.id])
     }
 
+    /// The MCP piggyback drain returns a subscriber's held notifications in enqueue order and removes them
+    /// atomically, so a busy orchestrator receives each held child event exactly once on its next tool
+    /// result. A second drain (or a subscriber that never queued anything) returns nothing, and another
+    /// subscriber's rows are untouched.
+    func testConsumePendingAgentNotificationsReturnsInOrderAndClears() throws {
+        let store = try makeTemporaryStore()
+        try store.upsertPendingAgentNotification(
+            subscriberTerminalSessionID: "orch", agentSessionID: "childA", transition: "blocked", message: "A is blocked",
+            createdAt: "2026-07-14T00:00:01Z")
+        try store.upsertPendingAgentNotification(
+            subscriberTerminalSessionID: "orch", agentSessionID: "childB", transition: "done", message: "B is done",
+            createdAt: "2026-07-14T00:00:02Z")
+        try store.upsertPendingAgentNotification(
+            subscriberTerminalSessionID: "other", agentSessionID: "childC", transition: "exited", message: "C is exited",
+            createdAt: "2026-07-14T00:00:03Z")
+
+        let drained = try store.consumePendingAgentNotifications(subscriberTerminalSessionID: "orch")
+        XCTAssertEqual(drained, ["A is blocked", "B is done"])
+        XCTAssertTrue(try store.pendingAgentNotifications(subscriberTerminalSessionID: "orch").isEmpty)
+        // Delivered-once: a second drain returns nothing.
+        XCTAssertEqual(try store.consumePendingAgentNotifications(subscriberTerminalSessionID: "orch"), [])
+        // An unrelated subscriber's row is not consumed.
+        XCTAssertEqual(try store.pendingAgentNotifications(subscriberTerminalSessionID: "other").map(\.message), ["C is exited"])
+        // A subscriber that never queued anything drains empty.
+        XCTAssertEqual(try store.consumePendingAgentNotifications(subscriberTerminalSessionID: "nobody"), [])
+    }
+
     /// Per-tool hooks make an active agent signal `working` on every tool call. Repeat `working`
     /// signals while the row already spins are suppressed — the event log records state transitions,
     /// not tool calls — while a real blocked→working resume records a fresh transition event.

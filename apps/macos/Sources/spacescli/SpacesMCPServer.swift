@@ -337,7 +337,7 @@ final class SpacesMCPStdioServer {
             MCPToolDescriptor(
                 name: "spaces_agent_subscribe",
                 description:
-                    "Watch a child coding-agent session from the current (or an explicit) terminal. While watching, each time the child goes blocked/done/exited the subscriber terminal receives one injected event block — a `[spaces] <label> (<kind>) is <blocked|done|exited>` line followed by indented project/workspace/branch/session/note/link fields — delivered only while the subscriber is idle (queued and flushed once it next goes idle). Fails until the child has emitted its first hook signal (there is no agent row to watch before then) — retry after the child starts working.",
+                    "Watch a child coding-agent session from the current (or an explicit) terminal. While watching, each time the child goes blocked/done/exited you get one event block — a `[spaces] <label> (<kind>) is <blocked|done|exited>` line followed by indented project/workspace/branch/session/note/link fields. When you are idle it is injected into your terminal; when you are busy it is attached as `pendingAgentEvents` on the result of your next spaces_* tool call, so you learn a child is blocked without waiting for your own turn boundary. Fails until the child has emitted its first hook signal (there is no agent row to watch before then) — retry after the child starts working.",
                 properties: [
                     "session": stringSchema("Child terminal session ID to watch."),
                     "subscriber": stringSchema("Subscriber terminal session ID. Defaults to SPACES_TERMINAL_TRACKING_ID."),
@@ -440,8 +440,25 @@ final class SpacesMCPStdioServer {
             let name = try requiredString(params["name"], field: "name")
             let arguments = params["arguments"] as? [String: Any] ?? [:]
             let profileResponse = try callTool(name: name, arguments: arguments)
-            try sendToolResult(id: id, text: try encodedText(profileResponse), isError: false)
+            let withPendingEvents = try attachingPendingAgentEvents(to: profileResponse)
+            try sendToolResult(id: id, text: try encodedText(withPendingEvents), isError: false)
         } catch { try sendToolResult(id: id, text: error.localizedDescription, isError: true) }
+    }
+
+    /// After a tool handler returns successfully, drains and attaches any events a watched child queued
+    /// while this orchestrator terminal was busy. The MCP server runs inside the orchestrator's Spaces
+    /// terminal, so it inherits `SPACES_TERMINAL_TRACKING_ID` (the same var subscribe/status resolve from);
+    /// that terminal is the subscriber whose held notifications the idle-flush path has not yet delivered.
+    /// The consume command always targets the local daemon — a subscriber is always local even for a
+    /// remote-device tool call. Draining only rows that already exist at tool-call time is the busy-time
+    /// counterpart to idle injection: no polling, no timers. A no-op outside a Spaces terminal (env unset)
+    /// or when nothing is queued. Reached only on the success path, so an errored tool call never consumes.
+    private func attachingPendingAgentEvents(to response: TerminalServiceProfileCommandResponse) throws -> TerminalServiceProfileCommandResponse {
+        let subscriber = ProcessInfo.processInfo.environment[WorkspaceOrchestrator.terminalTrackingIDEnvVar]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let subscriber, !subscriber.isEmpty else { return response }
+        let consumed = try TerminalService.sendProfileCommand(.agentConsumePendingEvents(subscriberTerminalSessionID: subscriber), timeout: 5)
+        return response.addingPendingAgentEvents(consumed.pendingAgentEvents)
     }
 
     private func callTool(name: String, arguments: [String: Any]) throws -> TerminalServiceProfileCommandResponse {

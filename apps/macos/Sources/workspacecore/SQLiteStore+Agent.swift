@@ -371,6 +371,23 @@ extension SQLiteStore {
         try execute(sql: "DELETE FROM agent_pending_notifications WHERE id = ?", bindings: [id])
     }
 
+    /// Atomically drains a subscriber terminal's held notifications: reads its pending rows in `created_at`
+    /// order and deletes them in one `BEGIN IMMEDIATE` transaction, returning the rendered messages. This is
+    /// the MCP piggyback path — a busy orchestrator (whose idle-flush has therefore not run) picks its
+    /// watched children's held events up on the response of its next tool call. Reusing the same
+    /// `pendingAgentNotifications` SELECT the idle-flush path (`AgentNotificationEngine.subscriberDidBecomeIdle`)
+    /// reads, then deleting the whole set inside the transaction on the store's single connection, is what
+    /// keeps the two delivery paths from ever handing out the same row twice: whichever runs first removes
+    /// the rows atomically before the other can observe them, and both delete as they deliver.
+    public func consumePendingAgentNotifications(subscriberTerminalSessionID: String) throws -> [String] {
+        try withTransaction {
+            let pending = try pendingAgentNotifications(subscriberTerminalSessionID: subscriberTerminalSessionID)
+            guard !pending.isEmpty else { return [] }
+            try deletePendingAgentNotifications(subscriberTerminalSessionID: subscriberTerminalSessionID)
+            return pending.map(\.message)
+        }
+    }
+
     public func deletePendingAgentNotifications(subscriberTerminalSessionID: String) throws {
         try execute(sql: "DELETE FROM agent_pending_notifications WHERE subscriber_terminal_session_id = ?", bindings: [subscriberTerminalSessionID])
     }

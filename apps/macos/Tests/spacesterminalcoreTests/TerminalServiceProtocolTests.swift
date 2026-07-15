@@ -127,6 +127,25 @@ final class TerminalServiceProtocolTests: XCTestCase {
         XCTAssertFalse(String(decoding: plain, as: UTF8.self).contains("agentSpawn"))
     }
 
+    func testProfileCommandResponseCarriesPendingAgentEvents() throws {
+        // The MCP tools/call chokepoint attaches a busy orchestrator's drained child events to the tool
+        // result, so a client reads them from `pendingAgentEvents` — the busy-time counterpart to idle
+        // injection. The field is present only when the piggyback drained a row, and omitted otherwise.
+        let response = TerminalServiceProfileCommandResponse(message: "Listed agent sessions.")
+            .addingPendingAgentEvents(["[spaces] A (claude) is blocked", "[spaces] B (codex) is done"])
+        let encoded = try JSONEncoder().encode(response)
+        let json = String(decoding: encoded, as: UTF8.self)
+        XCTAssertTrue(json.contains(#""pendingAgentEvents""#))
+        XCTAssertTrue(json.contains(#""[spaces] A (claude) is blocked""#))
+        XCTAssertEqual(try JSONDecoder().decode(TerminalServiceProfileCommandResponse.self, from: encoded), response)
+
+        // Nothing to attach leaves the response unchanged and the field omitted (nil or empty alike).
+        for events: [String]? in [nil, []] {
+            let plain = try JSONEncoder().encode(TerminalServiceProfileCommandResponse(message: "Listed.").addingPendingAgentEvents(events))
+            XCTAssertFalse(String(decoding: plain, as: UTF8.self).contains("pendingAgentEvents"))
+        }
+    }
+
     func testResponseDecodesNilErrorCodeWhenAbsentFromJSON() throws {
         let json = #"{"ok":false,"message":"Terminal session 'abc' is not running."}"#.data(using: .utf8)!
         XCTAssertNil(try TerminalServiceCodec.decodeResponse(json).errorCode)
@@ -169,6 +188,7 @@ final class TerminalServiceProtocolTests: XCTestCase {
             .agentKill(.init(sessionID: "session-1")),
             .agentSubscribe(.init(subscriberTerminalSessionID: "orchestrator-session", agentSessionID: "agent-1")),
             .agentUnsubscribe(.init(subscriberTerminalSessionID: "orchestrator-session", agentSessionID: "agent-1")),
+            .agentConsumePendingEvents(subscriberTerminalSessionID: "orchestrator-session"),
             .terminalSend(.init(sessionID: "session-1", input: .text("hello"), appendNewline: true)),
             .terminalSend(.init(sessionID: "session-1", input: .bytes(Data([0, 10, 255])))),
             .terminalTail(.init(sessionID: "session-1", lineCount: 40)), .terminalTail(.init(sessionID: "session-1")),

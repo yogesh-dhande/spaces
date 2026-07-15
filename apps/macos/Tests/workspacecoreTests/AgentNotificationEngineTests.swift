@@ -231,6 +231,33 @@ final class AgentNotificationEngineTests: XCTestCase {
         XCTAssertEqual(recorder.delivered.count, 2)
     }
 
+    /// A row drained by the MCP piggyback path (`consumePendingAgentNotifications`) while the subscriber is
+    /// still busy is gone from the queue, so the later idle flush re-delivers nothing: the busy-time drain
+    /// and the idle-time flush share the same rows, and each row is delivered by exactly one path.
+    func testPiggybackConsumeRemovesRowSoIdleFlushDoesNotRedeliver() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        let recorder = DeliveryRecorder()
+        let engine = makeEngine(store: store, recorder: recorder, kind: "claude")
+
+        _ = try orchestrator.registerAgentWindow(workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "sub-session", status: .spinning)
+        let child = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "A", terminalTrackingID: "childA", status: .waiting)
+        try store.insertAgentSubscription(subscriberTerminalSessionID: "sub-session", agentSessionID: child.id, createdAt: "t0")
+
+        // Busy subscriber: the transition queues rather than delivering immediately.
+        try engine.childDidTransition(agent: child, transition: .blocked)
+        XCTAssertTrue(recorder.delivered.isEmpty)
+
+        // The MCP piggyback drains the held row while the subscriber is still busy.
+        XCTAssertEqual(try store.consumePendingAgentNotifications(subscriberTerminalSessionID: "sub-session").count, 1)
+
+        // When the subscriber later goes idle, the flush finds nothing to re-deliver.
+        try engine.subscriberDidBecomeIdle(subscriberTerminalSessionID: "sub-session")
+        XCTAssertTrue(recorder.delivered.isEmpty, "A row consumed by the piggyback path must not be re-delivered by the idle flush.")
+    }
+
     func testBlockedThenDoneWhileBusyCoalescesToSingleDoneLine() throws {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)
