@@ -208,7 +208,7 @@ public enum SpacesDeviceTerminalLinkRoute: Equatable, Sendable {
     /// `~` and relative paths against the session's home and working directory.
     case fileLink(String)
     /// A `spaces://terminal/<session-id>[?device=<id>]` deep link to a Spaces terminal session. The
-    /// client focuses the session's pane in-app (no OS round trip); a device-qualified link for a
-    /// different device explains where the session lives (v1: no remote-pane open).
+    /// client focuses the session's pane in-app (no OS round trip); a device-qualified link opens the
+    /// session in a remote-attached pane on the device that owns it.
     case spacesTerminal(SpacesTerminalDeepLink)
 }
