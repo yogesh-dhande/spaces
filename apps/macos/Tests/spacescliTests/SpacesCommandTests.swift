@@ -416,6 +416,46 @@ final class SpacesCommandTests: XCTestCase {
         XCTAssertEqual(sendSchema["oneOf"] as? [[String: [String]]], [["required": ["text"]], ["required": ["bytes"]]])
     }
 
+    func testMCPStdioFramingIsNewlineDelimited() throws {
+        // Drive the server with the MCP stdio handshake: initialize, the client's post-initialize
+        // notification (no id, no response expected), then tools/list — all newline-delimited.
+        let requests = [
+            #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}"#,
+            #"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+            #"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+        ]
+
+        let inputPipe = Pipe()
+        let outputPipe = Pipe()
+        inputPipe.fileHandleForWriting.write(Data((requests.joined(separator: "\n") + "\n").utf8))
+        try inputPipe.fileHandleForWriting.close()
+
+        let server = SpacesMCPStdioServer(input: inputPipe.fileHandleForReading, output: outputPipe.fileHandleForWriting)
+        try server.run()
+        try outputPipe.fileHandleForWriting.close()
+
+        let outputText = String(decoding: outputPipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        // The notification draws no reply, so initialize + tools/list produce exactly two lines, each a
+        // single compact JSON message with no embedded newline.
+        let lines = outputText.split(separator: "\n", omittingEmptySubsequences: false).filter { !$0.isEmpty }
+        XCTAssertEqual(lines.count, 2)
+
+        let initialize = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(lines[0].utf8)) as? [String: Any])
+        XCTAssertEqual(initialize["id"] as? Int, 1)
+        let initializeResult = try XCTUnwrap(initialize["result"] as? [String: Any])
+        XCTAssertEqual((initializeResult["serverInfo"] as? [String: Any])?["name"] as? String, "spaces")
+
+        let toolsList = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(lines[1].utf8)) as? [String: Any])
+        XCTAssertEqual(toolsList["id"] as? Int, 2)
+        let tools = try XCTUnwrap((toolsList["result"] as? [String: Any])?["tools"] as? [[String: Any]])
+        let names = Set(tools.compactMap { $0["name"] as? String })
+        let agentTools = [
+            "spaces_agent_list", "spaces_agent_status", "spaces_agent_annotate", "spaces_agent_spawn", "spaces_agent_interrupt",
+            "spaces_agent_kill", "spaces_agent_subscribe", "spaces_agent_unsubscribe",
+        ]
+        XCTAssertTrue(agentTools.allSatisfy(names.contains), "expected all agent tools, got \(names.sorted())")
+    }
+
     func testMCPTerminalInputMapsTextAndBytesToTypedInput() throws {
         let server = SpacesMCPStdioServer()
         XCTAssertEqual(try server.terminalInputPayload(from: ["text": ""]), .text(""))

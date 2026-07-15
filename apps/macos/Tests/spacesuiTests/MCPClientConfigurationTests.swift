@@ -45,10 +45,10 @@ import Testing
         #expect(resolved == "/Users/test/.spaces/bin/spaces")
     }
 
-    @Test func buildsClaudeCodeAddCommand() {
+    @Test func buildsClaudeCodeAddCommandUserScoped() {
         #expect(
             MCPClientConfiguration.claudeCodeAddCommand(cliPath: "/usr/local/bin/spaces")
-                == "claude mcp add spaces -- /usr/local/bin/spaces mcp")
+                == "claude mcp add spaces -s user -- /usr/local/bin/spaces mcp")
     }
 
     @Test func buildsCodexConfigTOML() {
@@ -60,8 +60,21 @@ import Testing
         #expect(MCPClientConfiguration.codexConfigTOML(cliPath: "/usr/local/bin/spaces") == expected)
     }
 
+    @Test func buildsOpencodeConfigJSON() throws {
+        let snippet = MCPClientConfiguration.opencodeConfigJSON(cliPath: "/usr/local/bin/spaces")
+        let object = try #require(
+            try JSONSerialization.jsonObject(with: Data(snippet.utf8)) as? [String: Any])
+        let mcp = try #require(object["mcp"] as? [String: Any])
+        let spaces = try #require(mcp["spaces"] as? [String: Any])
+        #expect(spaces["type"] as? String == "local")
+        #expect(spaces["command"] as? [String] == ["/usr/local/bin/spaces", "mcp"])
+        #expect(spaces["enabled"] as? Bool == true)
+    }
+
     @Test func clientSnippetsMatchConfiguration() {
-        #expect(MCPClient.claudeCode.configSnippet(cliPath: "/usr/local/bin/spaces") == "claude mcp add spaces -- /usr/local/bin/spaces mcp")
+        #expect(MCPClient.allCases == [.claudeCode, .codexCLI, .opencode])
+        #expect(MCPClient.claudeCode.configSnippet(cliPath: "/usr/local/bin/spaces") == "claude mcp add spaces -s user -- /usr/local/bin/spaces mcp")
         #expect(MCPClient.codexCLI.configSnippet(cliPath: "/usr/local/bin/spaces").hasPrefix("[mcp_servers.spaces]"))
+        #expect(MCPClient.opencode.configSnippet(cliPath: "/usr/local/bin/spaces").contains("\"type\": \"local\""))
     }
 }

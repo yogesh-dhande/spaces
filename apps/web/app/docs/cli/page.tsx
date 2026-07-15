@@ -27,7 +27,7 @@ export default function CliReferencePage() {
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Overview</h2>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Use <Cmd>spaces</Cmd> when automation needs to inspect projects or workspaces, create host-scoped workspaces, launch workspace runtime, report coding-agent lifecycle state, or control Spaces terminal sessions. To expose these actions to an MCP client such as Claude Code, see the <a className="text-accent hover:underline" href="/docs/mcp">Model Context Protocol</a> reference.
+          Use <Cmd>spaces</Cmd> when automation needs to inspect projects or workspaces, create host-scoped workspaces, launch workspace runtime, report coding-agent lifecycle state, or control Spaces terminal sessions. To expose these actions to an MCP client such as Claude Code, Codex, or opencode, see the <a className="text-accent hover:underline" href="/docs/mcp">Model Context Protocol</a> reference.
         </p>
         <CodeBlock>{`spaces --version
 spaces project list

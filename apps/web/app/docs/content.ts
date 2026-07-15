@@ -92,7 +92,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/mcp",
     title: "Model Context Protocol",
     summary:
-      "Connect an MCP client such as Claude Code or Codex to the spaces mcp server so it can list and drive your projects, workspaces, and Spaces terminals.",
+      "Connect an MCP client such as Claude Code, Codex, or opencode to the spaces mcp server so it can list and drive your projects, workspaces, and Spaces terminals.",
   },
   {
     href: "/docs/ios",

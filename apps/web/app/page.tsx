@@ -212,7 +212,7 @@ const faqItems: FaqItem[] = [
     ),
   },
   {
-    question: "Can I use it with CLI coding agents like Claude Code or Codex CLI?",
+    question: "Can I use it with CLI coding agents like Claude Code, Codex, or opencode?",
     answer: (
       <>
         Yes. Open a terminal inside any workspace with <Key>⌘⌥T</Key> and start

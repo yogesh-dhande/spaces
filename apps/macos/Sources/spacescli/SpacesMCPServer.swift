@@ -33,6 +33,8 @@ final class SpacesMCPStdioServer {
     private let input: FileHandle
     private let output: FileHandle
     private let encoder: JSONEncoder
+    /// Bytes read from `input` that have not yet been split into a complete newline-delimited message.
+    private var readBuffer = Data()
 
     init(input: FileHandle = .standardInput, output: FileHandle = .standardOutput) {
         self.input = input
@@ -42,7 +44,7 @@ final class SpacesMCPStdioServer {
         self.encoder = encoder
     }
 
-    func run() throws { while let data = try readMessage() { try handleMessage(data) } }
+    func run() throws { while let data = readMessage() { try handleMessage(data) } }
 
     private static func toolDescriptors() -> [MCPToolDescriptor] {
         [
@@ -583,54 +585,54 @@ final class SpacesMCPStdioServer {
         try writeJSONObject(response)
     }
 
+    /// Writes one JSON-RPC message as a single newline-delimited line, the MCP stdio framing: compact
+    /// JSON (no embedded newlines) followed by a single `\n`. `JSONSerialization` without
+    /// `.prettyPrinted` never emits literal newlines, so the message occupies exactly one line.
     private func writeJSONObject(_ object: [String: Any]) throws {
-        let data = try JSONSerialization.data(withJSONObject: object)
-        let header = "Content-Length: \(data.count)\r\n\r\n"
-        output.write(Data(header.utf8))
+        var data = try JSONSerialization.data(withJSONObject: object)
+        data.append(0x0A)
         output.write(data)
     }
 
-    private func readMessage() throws -> Data? {
-        var header = Data()
-        let crlfTerminator = Data("\r\n\r\n".utf8)
-        let lfTerminator = Data("\n\n".utf8)
-        while !data(header, hasSuffix: crlfTerminator), !data(header, hasSuffix: lfTerminator) {
-            let byte = input.readData(ofLength: 1)
-            if byte.isEmpty {
-                if header.isEmpty { return nil }
-                throw MCPError.invalidMessage("Unexpected EOF while reading MCP headers.")
+    /// Reads one newline-delimited JSON-RPC message from `input`. Accumulates bytes across reads until a
+    /// `\n`, returns the line trimmed of its `\r\n` terminator, and skips blank lines between messages.
+    /// Returns nil on clean EOF with nothing buffered.
+    private func readMessage() -> Data? {
+        while true {
+            if let newlineIndex = readBuffer.firstIndex(of: 0x0A) {
+                let line = Data(readBuffer[readBuffer.startIndex..<newlineIndex])
+                readBuffer = Data(readBuffer[readBuffer.index(after: newlineIndex)...])
+                let trimmed = trimTrailingCarriageReturn(line)
+                if trimmed.isEmpty { continue }
+                return trimmed
             }
-            header.append(byte)
+            // `availableData` returns as soon as any bytes arrive (or empty on EOF); `readData(ofLength:)`
+            // would block filling the whole buffer until EOF, hanging the interactive initialize handshake
+            // where the client waits for our response before sending its next line.
+            let chunk = input.availableData
+            if chunk.isEmpty {
+                // Clean EOF: surface any final unterminated line, otherwise signal end of stream.
+                let trimmed = trimTrailingCarriageReturn(readBuffer)
+                readBuffer.removeAll()
+                return trimmed.isEmpty ? nil : trimmed
+            }
+            readBuffer.append(chunk)
         }
-        guard let headerText = String(data: header, encoding: .utf8) else { throw MCPError.invalidMessage("MCP headers were not UTF-8.") }
-        let length = try contentLength(from: headerText)
-        let body = input.readData(ofLength: length)
-        guard body.count == length else { throw MCPError.invalidMessage("Unexpected EOF while reading MCP body.") }
-        return body
     }
 
-    private func data(_ data: Data, hasSuffix suffix: Data) -> Bool {
-        guard data.count >= suffix.count else { return false }
-        return data.suffix(suffix.count).elementsEqual(suffix)
-    }
-
-    private func contentLength(from headerText: String) throws -> Int {
-        for line in headerText.split(whereSeparator: \.isNewline) {
-            let parts = line.split(separator: ":", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            guard parts.count == 2, parts[0].lowercased() == "content-length" else { continue }
-            if let length = Int(parts[1]), length >= 0 { return length }
-        }
-        throw MCPError.invalidMessage("Missing MCP Content-Length header.")
+    /// Drops a single trailing `\r` so a `\r\n`-terminated line yields the bare JSON payload.
+    private func trimTrailingCarriageReturn(_ data: Data) -> Data {
+        guard data.last == 0x0D else { return data }
+        return data.dropLast()
     }
 }
 
 private enum MCPError: LocalizedError {
-    case invalidMessage(String)
     case invalidArguments(String)
 
     var errorDescription: String? {
         switch self {
-        case .invalidMessage(let message), .invalidArguments(let message): message
+        case .invalidArguments(let message): message
         }
     }
 }

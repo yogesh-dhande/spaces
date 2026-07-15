@@ -5,7 +5,7 @@ import { DocsShell } from "../components/docs-shell";
 export const metadata: Metadata = {
   title: "Model Context Protocol",
   description:
-    "Connect an MCP client such as Claude Code or Codex to the spaces mcp server to list and drive projects, workspaces, and Spaces terminals.",
+    "Connect an MCP client such as Claude Code, Codex, or opencode to the spaces mcp server to list and drive projects, workspaces, and Spaces terminals.",
 };
 
 function Tool({ name, description }: { name: string; description: string }) {
@@ -37,9 +37,9 @@ export default function McpReferencePage() {
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Claude Code</h2>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Register the server once. Claude Code then spawns <Cmd>spaces mcp</Cmd> when it needs the tools.
+          Register the server once at user scope so the tools are available in every directory. Claude Code then spawns <Cmd>spaces mcp</Cmd> when it needs the tools.
         </p>
-        <CodeBlock>{`claude mcp add spaces -- spaces mcp`}</CodeBlock>
+        <CodeBlock>{`claude mcp add spaces -s user -- spaces mcp`}</CodeBlock>
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
@@ -50,6 +50,22 @@ export default function McpReferencePage() {
         <CodeBlock>{`[mcp_servers.spaces]
 command = "spaces"
 args = ["mcp"]`}</CodeBlock>
+      </article>
+
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">opencode</h2>
+        <p className="mt-3 text-sm leading-7 text-foreground-soft">
+          Add a <Cmd>spaces</Cmd> entry to the <Cmd>mcp</Cmd> block in <Cmd>~/.config/opencode/opencode.json</Cmd>.
+        </p>
+        <CodeBlock>{`{
+  "mcp": {
+    "spaces": {
+      "type": "local",
+      "command": ["spaces", "mcp"],
+      "enabled": true
+    }
+  }
+}`}</CodeBlock>
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
