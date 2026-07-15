@@ -42,7 +42,7 @@ final class AgentNotificationEngineTests: XCTestCase {
         try engine.childDidTransition(agent: child, transition: .blocked)
 
         XCTAssertEqual(recorder.delivered.map(\.sessionID), ["orchestrator-session"])
-        XCTAssertEqual(recorder.delivered.map(\.line), ["[spaces] Claude Code CLI (spaces) is blocked — open: spaces://terminal/child-session"])
+        XCTAssertEqual(recorder.delivered.map(\.line), ["[spaces] Claude Code CLI (spaces) is blocked — spaces://terminal/child-session"])
         XCTAssertTrue(try store.pendingAgentNotifications(subscriberTerminalSessionID: "orchestrator-session").isEmpty)
     }
 
@@ -63,7 +63,7 @@ final class AgentNotificationEngineTests: XCTestCase {
 
         XCTAssertEqual(
             recorder.delivered.map(\.line),
-            ["[spaces] Codex CLI (spaces) is done — note: review the auth flow — open: spaces://terminal/child-session"])
+            ["[spaces] Codex CLI (spaces) is done — note: review the auth flow — spaces://terminal/child-session"])
     }
 
     /// Mirrors the daemon chokepoint exactly: the engine receives the record RETURNED by
@@ -87,7 +87,7 @@ final class AgentNotificationEngineTests: XCTestCase {
 
         XCTAssertEqual(
             recorder.delivered.map(\.line),
-            ["[spaces] Claude Code CLI (spaces) is blocked — note: fix the flaky tests — open: spaces://terminal/child-session"])
+            ["[spaces] Claude Code CLI (spaces) is blocked — note: fix the flaky tests — spaces://terminal/child-session"])
     }
 
     func testBusySubscriberQueuesThenFlushesOnIdleInOrderExactlyOnce() throws {
@@ -115,7 +115,7 @@ final class AgentNotificationEngineTests: XCTestCase {
 
         XCTAssertEqual(
             recorder.delivered.map(\.line),
-            ["[spaces] A (spaces) is blocked — open: spaces://terminal/childA", "[spaces] B (spaces) is done — open: spaces://terminal/childB"])
+            ["[spaces] A (spaces) is blocked — spaces://terminal/childA", "[spaces] B (spaces) is done — spaces://terminal/childB"])
         XCTAssertTrue(try store.pendingAgentNotifications(subscriberTerminalSessionID: "sub-session").isEmpty)
 
         // Flushing again delivers nothing: pending is delivered-once.
@@ -140,7 +140,7 @@ final class AgentNotificationEngineTests: XCTestCase {
 
         let pending = try store.pendingAgentNotifications(subscriberTerminalSessionID: "sub-session")
         XCTAssertEqual(pending.count, 1, "The unique index must coalesce repeated transitions of one child to a single pending line.")
-        XCTAssertEqual(pending.first?.message, "[spaces] Claude Code CLI (spaces) is done — open: spaces://terminal/child-session")
+        XCTAssertEqual(pending.first?.message, "[spaces] Claude Code CLI (spaces) is done — spaces://terminal/child-session")
     }
 
     func testExitNotificationSurvivesAgentRowDeletionAndCascadedEdge() throws {
@@ -163,10 +163,10 @@ final class AgentNotificationEngineTests: XCTestCase {
         XCTAssertTrue(try store.agentSubscriptions(agentSessionID: child.id).isEmpty, "The subscription edge cascades away with the row.")
         let pending = try store.pendingAgentNotifications(subscriberTerminalSessionID: "sub-session")
         XCTAssertEqual(pending.count, 1, "The pending line has no FK, so it outlives the deleted agent row.")
-        XCTAssertEqual(pending.first?.message, "[spaces] Codex CLI (spaces) is exited — open: spaces://terminal/child-session")
+        XCTAssertEqual(pending.first?.message, "[spaces] Codex CLI (spaces) is exited — spaces://terminal/child-session")
 
         try engine.subscriberDidBecomeIdle(subscriberTerminalSessionID: "sub-session")
-        XCTAssertEqual(recorder.delivered.map(\.line), ["[spaces] Codex CLI (spaces) is exited — open: spaces://terminal/child-session"])
+        XCTAssertEqual(recorder.delivered.map(\.line), ["[spaces] Codex CLI (spaces) is exited — spaces://terminal/child-session"])
     }
 
     func testNoAgentRowSubscriberIsTreatedAsIdle() throws {
@@ -259,15 +259,15 @@ final class AgentNotificationEngineTests: XCTestCase {
 
         try store.upsertPendingAgentNotification(
             subscriberTerminalSessionID: "sub", agentSessionID: "agent-1",
-            message: "[spaces] X (spaces) is blocked — open: spaces://terminal/child-session", createdAt: "t0")
+            message: "[spaces] X (spaces) is blocked — spaces://terminal/child-session", createdAt: "t0")
         // A second write for the same (subscriber, agent) coalesces onto one latest-state row.
         try store.upsertPendingAgentNotification(
             subscriberTerminalSessionID: "sub", agentSessionID: "agent-1",
-            message: "[spaces] X (spaces) is done — open: spaces://terminal/child-session", createdAt: "t1")
+            message: "[spaces] X (spaces) is done — spaces://terminal/child-session", createdAt: "t1")
 
         let pending = try store.pendingAgentNotifications(subscriberTerminalSessionID: "sub")
         XCTAssertEqual(pending.count, 1)
-        XCTAssertEqual(pending.first?.message, "[spaces] X (spaces) is done — open: spaces://terminal/child-session")
+        XCTAssertEqual(pending.first?.message, "[spaces] X (spaces) is done — spaces://terminal/child-session")
     }
 
     // MARK: - Cross-device (remote) watch delivery
@@ -286,7 +286,7 @@ final class AgentNotificationEngineTests: XCTestCase {
         XCTAssertEqual(recorder.delivered.map(\.sessionID), ["local-orch"])
         XCTAssertEqual(
             recorder.delivered.map(\.line),
-            ["[spaces] Codex CLI (spaces) is blocked — note: ship the fix — open: spaces://terminal/remote-term?device=dev-1"])
+            ["[spaces] Codex CLI (spaces) is blocked — note: ship the fix — spaces://terminal/remote-term?device=dev-1"])
         XCTAssertTrue(try store.pendingAgentNotifications(subscriberTerminalSessionID: "local-orch").isEmpty)
     }
 
@@ -317,8 +317,8 @@ final class AgentNotificationEngineTests: XCTestCase {
         XCTAssertEqual(
             recorder.delivered.map(\.line),
             [
-                "[spaces] Local CLI (spaces) is blocked — open: spaces://terminal/local-child",
-                "[spaces] Remote CLI (spaces) is done — open: spaces://terminal/remote-term?device=dev-1",
+                "[spaces] Local CLI (spaces) is blocked — spaces://terminal/local-child",
+                "[spaces] Remote CLI (spaces) is done — spaces://terminal/remote-term?device=dev-1",
             ])
         XCTAssertTrue(try store.pendingAgentNotifications(subscriberTerminalSessionID: "orch").isEmpty)
     }

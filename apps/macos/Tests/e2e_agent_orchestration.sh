@@ -199,7 +199,7 @@ part_a() {
   [[ "$status" == "spinning" ]] || fail "expected O busy (spinning) before queue test, got: $status"
   # The needle pins the full line shape including the note set in step 1b: a status transition must
   # not drop the annotation from the injected notification.
-  local done_needle="is done — note: investigating flaky test — open: spaces://terminal/$C"
+  local done_needle="is done — note: investigating flaky test — spaces://terminal/$C"
   local before_done
   before_done="$(tail_count "$O" "$done_needle")"
   signal "$C" "done"

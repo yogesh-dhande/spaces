@@ -167,10 +167,14 @@ public struct AgentNotificationEngine {
     func renderLine(label: String, provider: String, note: String?, deepLinkSessionID: String, deviceID: String?, transition: ChildTransition)
         -> String
     {
+        // A neutral event notification: it states what happened and carries the session's deep link as a
+        // bare reference, never an instruction. The subscriber is always an agent, and an imperative like
+        // "open: <link>" makes the agent act on it (e.g. run `open <url>`); neutral wording lets the agent
+        // or the human decide from context whether and how to respond.
         let deepLink = SpacesTerminalDeepLink(sessionID: deepLinkSessionID, deviceID: deviceID).absoluteString
         var line = "[spaces] \(label) (\(provider)) is \(transition.word)"
         if let note, !note.isEmpty { line += " — note: \(note)" }
-        line += " — open: \(deepLink)"
+        line += " — \(deepLink)"
         return line
     }
 }
