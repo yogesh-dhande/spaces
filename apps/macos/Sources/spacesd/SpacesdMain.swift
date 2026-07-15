@@ -1054,16 +1054,16 @@ import workspacecore
             message: updated.note == nil ? "Cleared agent note." : "Annotated agent session.", agentSessions: [updated])
     }
 
-    /// Spawns a coding-agent terminal session after gating the command against the supported-agent hook
-    /// set: the command must launch a supported coding agent whose hooks are installed and current,
-    /// otherwise the spawned session would never report the lifecycle signal `spaces agent spawn` blocks
-    /// on. The session summary is returned so the CLI can poll readiness against its terminal id.
+    /// Spawns a coding-agent terminal session after gating the command against the supported-agent set:
+    /// the command must launch a supported coding agent (claude, codex, or opencode) so spawn readiness
+    /// knows which foreground kind to await. Hooks are not a prerequisite — readiness is
+    /// foreground-detection-based, polled CLI-side against the session's terminal id.
     private func spawnProfileAgentSession(_ payload: TerminalServiceAgentSpawnPayload, orchestrator: WorkspaceOrchestrator) throws
         -> TerminalServiceProfileCommandResponse
     {
-        do { _ = try AgentSpawnCommandGate.resolveSpawnableAgent(command: payload.command, statuses: AgentHookInstaller.status()) } catch let error
-            as AgentSpawnCommandGate.GateError
-        { throw SpacesRuntimeError.invalidArgument(message: error.errorDescription ?? "Agent spawn command is not supported.") }
+        do { _ = try AgentSpawnCommandGate.resolveSpawnableAgent(command: payload.command) } catch let error as AgentSpawnCommandGate.GateError {
+            throw SpacesRuntimeError.invalidArgument(message: error.errorDescription ?? "Agent spawn command is not supported.")
+        }
         let workspaceID = try orchestrator.resolveWorkspaceIDForTerminalCommand(explicitWorkspaceID: payload.workspaceID, cwd: payload.cwd)
         let session = try orchestrator.createWorkspaceAgentSession(workspaceID: workspaceID, command: payload.command, title: payload.title)
         return TerminalServiceProfileCommandResponse(message: "Started agent session.", terminalSession: session)

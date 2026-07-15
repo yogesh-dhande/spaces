@@ -127,7 +127,8 @@ struct SpacesDeviceOverviewBuilder {
             projectID: matchedWorkspace?.project.id, projectName: matchedWorkspace?.project.name, createdAt: session.launchConfiguration.createdAt,
             updatedAt: session.runtimeState.updatedAt, isControlAvailable: isInteractive && session.isControlAvailable,
             isSubscriptionAvailable: isInteractive && session.isSubscriptionAvailable, attachmentSnapshot: session.attachmentSnapshot,
-            rowKind: rowKind, rowSourceID: rowSourceID, hasFinalRender: hasFinalRender)
+            rowKind: rowKind, rowSourceID: rowSourceID, hasFinalRender: hasFinalRender,
+            foregroundDetectedAgentKind: session.runtimeState.foregroundDetectedAgentKind?.rawValue)
     }
 
     private static func projectSummaries(from projects: [ProjectRecord]) -> [SpacesDeviceProjectSummary] {

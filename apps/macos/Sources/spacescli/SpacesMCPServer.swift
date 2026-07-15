@@ -250,45 +250,39 @@ final class SpacesMCPStdioServer {
             },
             MCPToolDescriptor(
                 name: "spaces_agent_spawn",
-                description: "Start a coding agent in a new Spaces terminal and wait until it is ready to receive a prompt.",
+                description:
+                    "Start a coding agent (claude, codex, or opencode) in a new Spaces terminal and return once the daemon detects the agent running in that terminal (foreground classification) — not when it emits a hook signal. Spawn delivers no prompt: to give the agent work, send input with spaces_terminal_send on the returned terminal session id, then poll spaces_agent_status or spaces_terminal_tail to confirm work started (and to see and answer any first-run trust/onboarding/auth dialog). Hooks enrich status but are not required to spawn. The result's subscribed field reports whether the spawning terminal was auto-subscribed; when false (the child's agent row appears only on its first hook signal), call spaces_agent_subscribe once the agent has signaled to receive blocked/done notifications.",
                 properties: [
                     "command": stringSchema("Command that launches a supported coding agent (claude, codex, or opencode)."),
                     "workspace": stringSchema("Workspace ID. Defaults to the workspace containing the current directory. Required with device."),
                     "title": stringSchema("Window or session title. Defaults to the coding agent's name."),
-                    "prompt": stringSchema("Prompt to send once the agent is ready."),
-                    "timeout": intSchema("Seconds to wait for the agent's first lifecycle signal. Defaults to 90."),
+                    "timeout": intSchema("Seconds to wait for detection. Defaults to 90."),
                     "device": stringSchema("Paired device name or ID. Spawns on that device and requires workspace. Defaults to this machine."),
                 ], required: ["command"]
             ) { server, arguments in
                 let command = try server.requiredString(arguments["command"], field: "command")
+                let subscriber = ProcessInfo.processInfo.environment[WorkspaceOrchestrator.terminalTrackingIDEnvVar]?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                let subscriberSessionID = (subscriber?.isEmpty == false) ? subscriber : nil
+                let result: AgentSpawnResult
                 if let device = try server.resolvedDevice(arguments) {
                     guard let workspace = server.optionalString(arguments["workspace"]) else {
                         throw MCPError.invalidArguments("workspace is required with device: a remote spawn cannot infer the workspace.")
                     }
-                    let row = try performRemoteAgentSpawn(
+                    result = try performRemoteAgentSpawn(
                         device: device, workspace: workspace, command: command, title: server.optionalString(arguments["title"]),
-                        prompt: server.optionalString(arguments["prompt"]), timeoutSeconds: server.optionalInt(arguments["timeout"]) ?? 90)
-                    // Auto-subscribe the current terminal to the remote child as a cross-device watch on the
-                    // local daemon (which owns this terminal). Skipped when not run inside a Spaces terminal.
-                    let remoteSubscriber = ProcessInfo.processInfo.environment[WorkspaceOrchestrator.terminalTrackingIDEnvVar]?
-                        .trimmingCharacters(in: .whitespacesAndNewlines)
-                    if let remoteSubscriber, !remoteSubscriber.isEmpty, let childSessionID = row.terminalSessionID {
-                        _ = try TerminalService.sendProfileCommand(
-                            .agentSubscribe(.init(subscriberTerminalSessionID: remoteSubscriber, agentSessionID: childSessionID, deviceID: device.id)),
-                            timeout: 30)
-                    }
-                    return TerminalServiceProfileCommandResponse(
-                        message: "Started agent session \(row.terminalSessionID ?? row.id) on \(device.name).",
-                        agentSessions: [Self.profileAgentRow(row)])
+                        timeoutSeconds: server.optionalInt(arguments["timeout"]) ?? 90, subscriberSessionID: subscriberSessionID)
+                } else {
+                    result = try performAgentSpawn(
+                        cwd: FileManager.default.currentDirectoryPath, workspace: server.optionalString(arguments["workspace"]), command: command,
+                        title: server.optionalString(arguments["title"]), timeoutSeconds: server.optionalInt(arguments["timeout"]) ?? 90,
+                        subscriberSessionID: subscriberSessionID)
                 }
-                let subscriber = ProcessInfo.processInfo.environment[WorkspaceOrchestrator.terminalTrackingIDEnvVar]?
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                let row = try performAgentSpawn(
-                    cwd: FileManager.default.currentDirectoryPath, workspace: server.optionalString(arguments["workspace"]), command: command,
-                    title: server.optionalString(arguments["title"]), prompt: server.optionalString(arguments["prompt"]),
-                    timeoutSeconds: server.optionalInt(arguments["timeout"]) ?? 90,
-                    subscriberSessionID: (subscriber?.isEmpty == false) ? subscriber : nil)
-                return TerminalServiceProfileCommandResponse(message: "Started agent session \(row.terminalSessionID ?? row.id).", agentSessions: [row])
+                let deviceNote = result.deviceID.map { " on device \($0)" } ?? ""
+                return TerminalServiceProfileCommandResponse(
+                    message:
+                        "Started agent session \(result.terminalSessionID) (detected \(result.detectedAgent))\(deviceNote). Send its prompt with spaces_terminal_send, then poll spaces_agent_status or spaces_terminal_tail to confirm work started."
+                )
             },
             MCPToolDescriptor(
                 name: "spaces_agent_interrupt", description: "Interrupt a coding-agent session by sending ESC to its terminal.",

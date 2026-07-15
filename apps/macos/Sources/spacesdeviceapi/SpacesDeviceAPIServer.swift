@@ -2175,11 +2175,16 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             context: context, message: "Restarted coding agent.", workspaceID: workspaceID, sessionID: normalizedString(record.terminalTrackingID))
     }
 
-    /// Spawns a coding-agent terminal session on the daemon host. Runs the same hook gate as the local
-    /// `spaces agent spawn` — the command must launch a supported coding agent whose hooks are current,
-    /// or the spawned session would never report the readiness signal the client polls for. Unlike the
-    /// local path there is no cwd to infer the workspace from, so `workspaceID` is required. Returns the
-    /// created session id (as a mutation) so the client polls readiness with `listAgentSessions`.
+    /// Spawns a coding-agent terminal session on the daemon host. Runs the same command gate as the
+    /// local `spaces agent spawn` — the command must launch a supported coding agent (claude, codex, or
+    /// opencode). Hooks are not required. Unlike the local path there is no cwd to infer the workspace
+    /// from, so `workspaceID` is required. Returns the created session id (as a mutation).
+    ///
+    /// Remote spawn readiness is detection-based, matching the local path: the client polls the device
+    /// overview's terminal session summary for `foregroundDetectedAgentKind`, which the overview builder
+    /// populates from the session's live runtime state. That field reports a detected kind before the
+    /// session's first hook signal, when no agent-orchestration row exists yet, so `listAgentSessions`
+    /// (which enumerates only signaled agent rows) cannot serve remote readiness.
     private func handleSpawnAgentSessionRequest(_ request: SpacesDeviceSpawnAgentSessionRequest, context: RequestContext) throws
         -> SpacesDeviceAPIResponse
     {
@@ -2190,7 +2195,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             return SpacesDeviceAPIResponse(ok: false, message: "command is required.", errorCode: .invalidArgument)
         }
         do {
-            _ = try AgentSpawnCommandGate.resolveSpawnableAgent(command: command, statuses: agentHookStatusLoader())
+            _ = try AgentSpawnCommandGate.resolveSpawnableAgent(command: command)
         } catch let error as AgentSpawnCommandGate.GateError {
             return SpacesDeviceAPIResponse(
                 ok: false, message: error.errorDescription ?? "Agent spawn command is not supported.", errorCode: .invalidArgument)

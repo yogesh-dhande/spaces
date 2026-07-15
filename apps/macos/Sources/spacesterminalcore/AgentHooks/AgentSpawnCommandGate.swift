@@ -35,32 +35,29 @@ extension SupportedCodingAgentHook {
     }
 }
 
-/// Gate for `spaces agent spawn`: the command must launch a supported coding agent whose Spaces hooks
-/// are fully installed (`.current`), otherwise the spawned agent would never report the lifecycle
-/// signal spawn blocks on. Kept pure over a supplied `[AgentHookStatus]` so the caller owns the
-/// filesystem read (`AgentHookInstaller.status()`) and tests can supply synthetic statuses.
+/// Gate for `spaces agent spawn`: the command must launch a supported coding agent (claude, codex, or
+/// opencode). This is only a command-shape gate — it identifies *which* coding agent the command
+/// launches so spawn readiness knows which foreground kind to await. Hooks are deliberately NOT a
+/// prerequisite: spawn readiness is foreground-detection-based (the daemon's foreground classification
+/// identifies the running agent), and a promptless Codex never emits `SessionStart`, so requiring a
+/// hook signal to spawn would time out. Hook signals still power live status once they arrive; they
+/// just don't gate the spawn.
 public enum AgentSpawnCommandGate {
     public enum GateError: Error, LocalizedError, Equatable {
         case unsupportedCommand
-        case hooksNotInstalled(SupportedCodingAgentHook, AgentHookInstallState)
 
         public var errorDescription: String? {
             switch self {
             case .unsupportedCommand:
                 return "Agent spawn requires a supported coding agent command (claude, codex, or opencode)."
-            case .hooksNotInstalled(let hook, _):
-                return
-                    "\(hook.displayName) hooks are not installed on this device, so a spawned session would never report readiness. Install coding-agent hooks from the Spaces app (Settings → Coding Agents or device setup), then retry."
             }
         }
     }
 
-    /// Resolves the supported agent a spawn command launches, requiring its hooks to be `.current`.
-    /// Throws `GateError` otherwise.
-    public static func resolveSpawnableAgent(command: String, statuses: [AgentHookStatus]) throws -> SupportedCodingAgentHook {
+    /// Resolves the supported agent a spawn command launches, throwing `GateError.unsupportedCommand`
+    /// when the command does not launch one. Pure over the command string.
+    public static func resolveSpawnableAgent(command: String) throws -> SupportedCodingAgentHook {
         guard let hook = SupportedCodingAgentHook.matching(command: command) else { throw GateError.unsupportedCommand }
-        let state = statuses.first { $0.kind == hook }?.installState ?? .notInstalled
-        guard state == .current else { throw GateError.hooksNotInstalled(hook, state) }
         return hook
     }
 }

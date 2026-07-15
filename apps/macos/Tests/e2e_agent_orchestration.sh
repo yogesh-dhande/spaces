@@ -8,15 +8,21 @@
 # profile's daemon or app.
 #
 # Part A (always runnable, no real coding agents): the orchestration lifecycle is driven with explicit
-# `spaces agent signal` events against two ordinary shell sessions (orchestrator O and child C) because
-# `agent spawn` gates on installed hooks. It exercises init/annotate/status/list, subscribe +
-# notification injection, the busy-subscriber queue/flush, cycle rejection, interrupt, and kill.
+# `spaces agent signal` events against two ordinary shell sessions (orchestrator O and child C). It does
+# not use `agent spawn` — spawn readiness is foreground detection of a real coding agent, which is not
+# hermetic, and these flows (list/annotate/status, subscribe + notification injection, busy-subscriber
+# queue/flush, cycle rejection, interrupt, kill) need deterministic signal control that real agents
+# cannot give. Spawn's detection readiness is covered by unit tests and the opt-in Part B matrix.
 #
 # Part B (opt-in, real coding agents; SPACES_E2E_AGENT_MATRIX=1): for each provider whose binary is on
-# PATH and whose hooks are current, spawn the agent, record its first-signal + status sequence and
-# readiness latency, submit a trivial prompt, best-effort interrupt, and kill. This section installs
-# nothing and leaves the user's real agent configs untouched: a provider without current hooks is
-# skipped via the loud spawn hook-gate error.
+# PATH, spawn the agent (detection-only — spawn delivers no prompt), then drive the real orchestrator
+# flow itself: `terminal send` the prompt text plus a carriage return, poll `terminal tail` for the
+# reply, and record the hook signal sequence via `agent status` polling. A non-zero spawn (detection
+# failure) or a row surviving kill is a per-provider FAIL; a missing reply is only recorded, because it
+# depends on the environment (an auth-gated or trust/onboarding-dialog-blocked provider answers nothing
+# until a human clears the dialog, which is exactly the state spawn no longer tries to handle). Hooks are
+# not a spawn prerequisite, so no provider is skipped for hook state; only a missing binary skips. This
+# section installs nothing and leaves the user's real agent configs untouched.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -260,8 +266,9 @@ matrix_provider() {
     return 0
   fi
 
-  # Spawn gates on current hooks; a provider without them fails fast with the hook-gate error, which we
-  # treat as SKIP (never install hooks from here). Measure readiness latency around the blocking spawn.
+  # Spawn is detection-only now: it blocks until the daemon's foreground classifier identifies the agent
+  # and delivers no prompt. A non-zero spawn is a detection failure and a real per-provider FAIL. Measure
+  # how long the blocking spawn took.
   local spawn_out spawn_status start_ms end_ms child
   start_ms="$(now_ms)"
   set +e
@@ -270,33 +277,39 @@ matrix_provider() {
   set -e
   end_ms="$(now_ms)"
   if (( spawn_status != 0 )); then
-    if printf '%s' "$spawn_out" | grep -Fqi "hooks are not installed"; then
-      printf 'provider=%s SKIP reason=hooks-not-current\n' "$binary"
-      return 0
-    fi
-    printf 'provider=%s FAIL reason=spawn-error detail=%s\n' "$binary" "$(printf '%s' "$spawn_out" | tr '\n' ' ')"
+    printf 'provider=%s FAIL reason=spawn-detection-error detail=%s\n' "$binary" "$(printf '%s' "$spawn_out" | tr '\n' ' ')"
     MATRIX_FAILURES=$((MATRIX_FAILURES + 1))
     return 0
   fi
 
-  child="$(json_field "$spawn_out" 'd.get("terminalSessionID") or d.get("id")')"
+  child="$(json_field "$spawn_out" 'd.get("terminalSessionID")')"
   CREATED_SESSIONS+=("$child")
-  local ready_ms first_signal
-  ready_ms=$((end_ms - start_ms))
-  first_signal="$(json_field "$spawn_out" 'd.get("status") or "?"')"
+  local spawn_ms detected
+  spawn_ms=$((end_ms - start_ms))
+  detected="$(json_field "$spawn_out" 'd.get("detectedAgent") or "?"')"
 
-  # Poll the status sequence: distinct consecutive statuses until done/idle or a cap.
-  local sequence="$first_signal" seq_start last="$first_signal"
-  seq_start="$(now_ms)"
-  # Submit a trivial prompt as two sends (text then CR) so submission is TUI-agnostic.
+  # This is the real orchestrator flow spawn no longer does: send the prompt text, then a carriage return
+  # (byte 13, which every supported TUI accepts as submit). If a trust/onboarding/auth dialog is holding
+  # input, the send lands in the dialog and no reply comes — recorded, not failed.
   "$SPACES_CLI" terminal send text "$child" 'reply with exactly: pong' >/dev/null 2>&1 || true
   "$SPACES_CLI" terminal send bytes "$child" 13 >/dev/null 2>&1 || true
-  local interrupted=0 saw_pong=0 reached_done=0
+
+  # Poll the hook status sequence (distinct consecutive statuses), the first-signal marker (lastSignalAt
+  # becomes set on the agent's first hook signal), best-effort interrupt once during a working phase, and
+  # watch the tail for the reply. Signals enrich this record but are not required — spawn already
+  # unblocked on detection alone.
+  local sequence="" seq_start last=""
+  seq_start="$(now_ms)"
+  local interrupted=0 saw_reply=0 first_signal=no
   while true; do
-    local st
-    st="$(json_field "$("$SPACES_CLI" agent status --session "$child" --json 2>/dev/null || echo '{}')" 'd.get("status") or "?"')"
+    local status_json st
+    status_json="$("$SPACES_CLI" agent status --session "$child" --json 2>/dev/null || echo '{}')"
+    st="$(json_field "$status_json" 'd.get("status") or "?"')"
+    if [[ "$first_signal" == "no" ]]; then
+      first_signal="$(json_field "$status_json" '"yes" if d.get("lastSignalAt") else "no"')"
+    fi
     if [[ "$st" != "$last" && "$st" != "?" ]]; then
-      sequence="$sequence,$st"
+      sequence="${sequence:+$sequence,}$st"
       last="$st"
     fi
     # Best-effort interrupt during a working phase; only attempt once.
@@ -305,10 +318,9 @@ matrix_provider() {
       interrupted=1
     fi
     if "$SPACES_CLI" terminal tail "$child" --lines 120 2>/dev/null | grep -Fqi "pong"; then
-      saw_pong=1
+      saw_reply=1
     fi
     if [[ "$st" == "done" ]]; then
-      reached_done=1
       break
     fi
     if (( "$(now_ms)" - seq_start >= 90000 )); then
@@ -317,8 +329,8 @@ matrix_provider() {
     sleep 0.5
   done
 
-  printf 'provider=%s first_signal_observed=%s ready_ms=%s sequence=%s pong=%s reached_done=%s interrupted=%s\n' \
-    "$binary" "$first_signal" "$ready_ms" "$sequence" "$saw_pong" "$reached_done" "$interrupted"
+  printf 'provider=%s detected=%s spawn_ms=%s first_signal=%s signal_sequence=%s saw_reply=%s interrupted=%s\n' \
+    "$binary" "$detected" "$spawn_ms" "$first_signal" "${sequence:-none}" "$saw_reply" "$interrupted"
 
   "$SPACES_CLI" agent kill "$child" >/dev/null 2>&1 || true
   sleep 1
@@ -329,12 +341,11 @@ matrix_provider() {
     MATRIX_FAILURES=$((MATRIX_FAILURES + 1))
     return 0
   fi
-  if (( reached_done == 0 || saw_pong == 0 )); then
-    printf 'provider=%s FAIL reason=no-prompt-response reached_done=%s pong=%s\n' "$binary" "$reached_done" "$saw_pong"
-    MATRIX_FAILURES=$((MATRIX_FAILURES + 1))
-    return 0
-  fi
-  printf 'provider=%s OK\n' "$binary"
+  # The per-provider pass criterion is spawn detection + clean kill. saw_reply is reported but NOT
+  # required: whether the agent answers depends on the environment (auth-gated or dialog-blocked
+  # providers reply nothing until a human intervenes), and driving the prompt is the orchestrator's job,
+  # which this script only exercises opportunistically.
+  printf 'provider=%s OK saw_reply=%s\n' "$binary" "$saw_reply"
 }
 
 part_b() {

@@ -48,7 +48,7 @@ final class AgentOrchestrationCLITests: XCTestCase {
         XCTAssertTrue(row.hasPrefix("session-1\t"))
         XCTAssertTrue(row.contains("agent=Claude Code CLI"))
         XCTAssertTrue(row.contains("status=waiting"))
-        XCTAssertTrue(row.contains("ready=true"))
+        XCTAssertTrue(row.contains("signaled=true"))
         XCTAssertTrue(row.contains("note=review auth"))
         XCTAssertTrue(row.contains("project=Spaces"))
         XCTAssertTrue(row.contains("workspace=feature"))
@@ -65,7 +65,7 @@ final class AgentOrchestrationCLITests: XCTestCase {
         XCTAssertTrue(row.contains("agent=-"))
         XCTAssertTrue(row.contains("note=-"))
         XCTAssertTrue(row.contains("branch=-"))
-        XCTAssertTrue(row.contains("ready=false"))
+        XCTAssertTrue(row.contains("signaled=false"))
     }
 
     // MARK: - Session resolution
@@ -105,12 +105,11 @@ final class AgentOrchestrationCLITests: XCTestCase {
 
     func testAgentSpawnParsesAllOptions() throws {
         let spawn = try AgentSpawnCommand.parse([
-            "--command", "codex --yolo", "--workspace", "workspace-1", "--title", "Reviewer", "--prompt", "reply pong", "--timeout", "30", "--json",
+            "--command", "codex --yolo", "--workspace", "workspace-1", "--title", "Reviewer", "--timeout", "30", "--json",
         ])
         XCTAssertEqual(spawn.command, "codex --yolo")
         XCTAssertEqual(spawn.workspace, "workspace-1")
         XCTAssertEqual(spawn.title, "Reviewer")
-        XCTAssertEqual(spawn.prompt, "reply pong")
         XCTAssertEqual(spawn.timeout, 30)
         XCTAssertTrue(spawn.json)
     }
@@ -179,11 +178,81 @@ final class AgentOrchestrationCLITests: XCTestCase {
         XCTAssertThrowsError(try resolvedSubscriberSessionID(nil, environment: [:]))
     }
 
-    func testAgentSpawnReadinessTimeoutErrorMessagePointsAtHooksAndTail() {
-        let message = AgentSpawnReadinessTimeoutError(sessionID: "session-1", timeoutSeconds: 90).errorDescription
+    func testAgentSpawnDetectionTimeoutErrorNamesCommandAndTail() {
+        let message = AgentSpawnDetectionTimeoutError(sessionID: "session-1", command: "codex", timeoutSeconds: 90).errorDescription
         XCTAssertEqual(
             message,
-            "Agent session session-1 produced no lifecycle signal within 90s. Verify coding-agent hooks are installed and inspect with: spaces terminal tail session-1"
+            "Agent session session-1 was not detected as a running coding agent within 90s (foreground classification never identified `codex`). The session is left running; inspect with: spaces terminal tail session-1"
         )
+    }
+
+    func testAgentSpawnRemoteDetectionTimeoutErrorNamesCommandAndRemoteTail() {
+        let message = AgentSpawnRemoteDetectionTimeoutError(sessionID: "session-1", command: "codex", timeoutSeconds: 90).errorDescription
+        XCTAssertEqual(
+            message,
+            "Remote agent session session-1 was not detected as a running coding agent within 90s (foreground classification never identified `codex`). The session is left running; inspect with: spaces terminal tail session-1 --device <name>"
+        )
+    }
+
+    func testAgentSpawnResultLineLeadsWithSessionAndReportsDetection() {
+        let line = agentSpawnResultLine(
+            AgentSpawnResult(terminalSessionID: "session-1", workspaceID: "workspace-1", detectedAgent: "codex", deviceID: nil, subscribed: true))
+        XCTAssertTrue(line.hasPrefix("session-1\t"))
+        XCTAssertTrue(line.contains("detected=codex"))
+        XCTAssertTrue(line.contains("workspace=workspace-1"))
+        XCTAssertFalse(line.contains("prompt_submitted"))
+        XCTAssertTrue(line.contains("subscribed=true"))
+        XCTAssertTrue(line.contains("open=spaces://terminal/session-1"))
+    }
+
+    func testAgentSpawnResultLineRendersDashForMissingWorkspace() {
+        let line = agentSpawnResultLine(
+            AgentSpawnResult(terminalSessionID: "session-2", workspaceID: nil, detectedAgent: "claude", deviceID: nil, subscribed: false))
+        XCTAssertTrue(line.contains("workspace=-"))
+        XCTAssertTrue(line.contains("subscribed=false"))
+    }
+
+    func testAgentSpawnResultLineDeviceQualifiesDeepLinkForRemoteSpawn() {
+        let line = agentSpawnResultLine(
+            AgentSpawnResult(terminalSessionID: "session-3", workspaceID: "workspace-2", detectedAgent: "opencode", deviceID: "device-9", subscribed: false))
+        XCTAssertTrue(line.contains("open=\(SpacesTerminalDeepLink(sessionID: "session-3", deviceID: "device-9").absoluteString)"))
+    }
+
+    // MARK: - Readiness phases
+
+    /// A deterministic clock: `now()` advances one `step` per read so bounded polls terminate without
+    /// real time. Paired with a no-op sleep so tests never block.
+    private final class FakeClock {
+        private var current: Date
+        private let step: TimeInterval
+        init(start: Date = Date(timeIntervalSince1970: 0), step: TimeInterval = 0.5) {
+            current = start
+            self.step = step
+        }
+        func now() -> Date {
+            defer { current = current.addingTimeInterval(step) }
+            return current
+        }
+    }
+
+    func testAwaitForegroundDetectionReturnsKindOncePresent() throws {
+        let clock = FakeClock()
+        var reads = 0
+        let detected = try AgentSpawnReadiness.awaitForegroundDetection(
+            deadline: Date(timeIntervalSince1970: 100), pollInterval: 0.5, now: clock.now, sleep: { _ in }
+        ) {
+            reads += 1
+            return reads >= 3 ? .codex : nil
+        }
+        XCTAssertEqual(detected, .codex)
+        XCTAssertEqual(reads, 3)
+    }
+
+    func testAwaitForegroundDetectionTimesOutToNil() throws {
+        let clock = FakeClock(step: 40)
+        let detected = try AgentSpawnReadiness.awaitForegroundDetection(
+            deadline: Date(timeIntervalSince1970: 90), pollInterval: 0.5, now: clock.now, sleep: { _ in }
+        ) { nil }
+        XCTAssertNil(detected)
     }
 }

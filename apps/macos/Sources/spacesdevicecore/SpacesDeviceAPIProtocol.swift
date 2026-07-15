@@ -528,13 +528,20 @@ public struct SpacesDeviceTerminalSessionSummary: Codable, Sendable, Equatable, 
     public let rowKind: SpacesDeviceTerminalSessionRowKind
     public let rowSourceID: String?
     public let hasFinalRender: Bool
+    /// Raw value of the coding-agent kind the daemon's foreground classifier reports for this session's
+    /// live runtime state, or nil when none is detected. Carries the daemon's foreground detection over
+    /// the wire so a remote `spaces agent spawn` can poll detection-based readiness (the local CLI reads
+    /// the same detection from `.terminalList`); it reports a detected kind even before the session's
+    /// first hook signal, when no agent-orchestration row exists yet.
+    public let foregroundDetectedAgentKind: String?
 
     public init(
         id: String, title: String, workingDirectory: String, shell: String, command: String?, state: TerminalSessionState,
         backend: TerminalSessionBackendKind, lifetimePolicy: TerminalSessionLifetimePolicy, servicePID: Int32, childPID: Int32?, workspaceID: String,
         workspaceTitle: String?, projectID: String?, projectName: String?, createdAt: String, updatedAt: String, isControlAvailable: Bool,
         isSubscriptionAvailable: Bool, attachmentSnapshot: TerminalSessionAttachmentSnapshot,
-        rowKind: SpacesDeviceTerminalSessionRowKind = .liveSession, rowSourceID: String? = nil, hasFinalRender: Bool = false
+        rowKind: SpacesDeviceTerminalSessionRowKind = .liveSession, rowSourceID: String? = nil, hasFinalRender: Bool = false,
+        foregroundDetectedAgentKind: String? = nil
     ) {
         self.id = id
         self.title = title
@@ -558,6 +565,7 @@ public struct SpacesDeviceTerminalSessionSummary: Codable, Sendable, Equatable, 
         self.rowKind = rowKind
         self.rowSourceID = rowSourceID
         self.hasFinalRender = hasFinalRender
+        self.foregroundDetectedAgentKind = foregroundDetectedAgentKind
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -583,6 +591,7 @@ public struct SpacesDeviceTerminalSessionSummary: Codable, Sendable, Equatable, 
         case rowKind
         case rowSourceID
         case hasFinalRender
+        case foregroundDetectedAgentKind
     }
 
     public init(from decoder: any Decoder) throws {
@@ -610,6 +619,7 @@ public struct SpacesDeviceTerminalSessionSummary: Codable, Sendable, Equatable, 
         rowKind = try container.decodeIfPresent(SpacesDeviceTerminalSessionRowKind.self, forKey: .rowKind) ?? .liveSession
         rowSourceID = try container.decodeIfPresent(String.self, forKey: .rowSourceID)
         hasFinalRender = try container.decodeIfPresent(Bool.self, forKey: .hasFinalRender) ?? false
+        foregroundDetectedAgentKind = try container.decodeIfPresent(String.self, forKey: .foregroundDetectedAgentKind)
     }
 }
 

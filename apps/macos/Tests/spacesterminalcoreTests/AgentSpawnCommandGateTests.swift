@@ -26,33 +26,21 @@ final class AgentSpawnCommandGateTests: XCTestCase {
 
     // MARK: - Spawn gate
 
-    private func status(_ kind: SupportedCodingAgentHook, _ state: AgentHookInstallState) -> AgentHookStatus {
-        AgentHookStatus(kind: kind, displayName: kind.displayName, available: true, installState: state)
-    }
-
-    func testResolveSpawnableAgentAcceptsCurrentHooks() throws {
-        let hook = try AgentSpawnCommandGate.resolveSpawnableAgent(
-            command: "claude", statuses: [status(.claudeCode, .current), status(.codex, .notInstalled)])
-        XCTAssertEqual(hook, .claudeCode)
+    /// The gate is command-shape only: it resolves which supported agent the command launches so spawn
+    /// readiness knows which foreground kind to await. It does NOT require installed hooks — readiness is
+    /// foreground-detection-based, so a supported command spawns regardless of hook state.
+    func testResolveSpawnableAgentResolvesSupportedCommandWithoutHookState() throws {
+        XCTAssertEqual(try AgentSpawnCommandGate.resolveSpawnableAgent(command: "claude"), .claudeCode)
+        XCTAssertEqual(try AgentSpawnCommandGate.resolveSpawnableAgent(command: "codex --yolo"), .codex)
+        XCTAssertEqual(try AgentSpawnCommandGate.resolveSpawnableAgent(command: "env FOO=1 opencode"), .opencode)
     }
 
     func testResolveSpawnableAgentRejectsUnsupportedCommand() {
-        XCTAssertThrowsError(try AgentSpawnCommandGate.resolveSpawnableAgent(command: "vim", statuses: [status(.claudeCode, .current)])) { error in
+        XCTAssertThrowsError(try AgentSpawnCommandGate.resolveSpawnableAgent(command: "vim")) { error in
             XCTAssertEqual(error as? AgentSpawnCommandGate.GateError, .unsupportedCommand)
         }
-    }
-
-    func testResolveSpawnableAgentRejectsUninstalledHooks() {
-        XCTAssertThrowsError(
-            try AgentSpawnCommandGate.resolveSpawnableAgent(command: "codex", statuses: [status(.codex, .outdated)])
-        ) { error in
-            XCTAssertEqual(error as? AgentSpawnCommandGate.GateError, .hooksNotInstalled(.codex, .outdated))
-        }
-        // No status entry for the matched agent reads as not-installed.
-        XCTAssertThrowsError(
-            try AgentSpawnCommandGate.resolveSpawnableAgent(command: "codex", statuses: [status(.claudeCode, .current)])
-        ) { error in
-            XCTAssertEqual(error as? AgentSpawnCommandGate.GateError, .hooksNotInstalled(.codex, .notInstalled))
+        XCTAssertThrowsError(try AgentSpawnCommandGate.resolveSpawnableAgent(command: "")) { error in
+            XCTAssertEqual(error as? AgentSpawnCommandGate.GateError, .unsupportedCommand)
         }
     }
 }
