@@ -737,7 +737,7 @@ extension WorkspaceOrchestrator {
                             id: agent.id, terminalSessionID: terminalSessionID, agent: runtimeLabel ?? trimmedOrNilAgentField(agent.label),
                             label: trimmedOrNilAgentField(agent.label), status: agent.status.rawValue, note: trimmedOrNilAgentField(agent.note),
                             projectID: project.id, projectName: project.name, workspaceID: workspace.id, workspaceName: workspace.displayName,
-                            branch: trimmedOrNilAgentField(workspace.branch), updatedAt: agent.updatedAt,
+                            workspaceDir: workspace.dir, branch: trimmedOrNilAgentField(workspace.branch), updatedAt: agent.updatedAt,
                             lastSignalAt: try store.lastAgentSignalAt(agentSessionID: agent.id)))
                 }
             }

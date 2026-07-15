@@ -44,7 +44,8 @@ final class AgentOrchestrationCLITests: XCTestCase {
             TerminalServiceAgentSessionRow(
                 id: "agent-1", terminalSessionID: "session-1", agent: "Claude Code CLI", label: "Claude Code CLI", status: "waiting",
                 note: "review auth", projectID: "project-1", projectName: "Spaces", workspaceID: "workspace-1", workspaceName: "feature",
-                branch: "feature", updatedAt: "2026-07-14T00:00:00Z", lastSignalAt: "2026-07-14T00:00:00Z"))
+                workspaceDir: "/repo/workspaces/feature", branch: "feature", updatedAt: "2026-07-14T00:00:00Z",
+                lastSignalAt: "2026-07-14T00:00:00Z"))
         XCTAssertTrue(row.hasPrefix("session-1\t"))
         XCTAssertTrue(row.contains("agent=Claude Code CLI"))
         XCTAssertTrue(row.contains("status=waiting"))
@@ -60,8 +61,8 @@ final class AgentOrchestrationCLITests: XCTestCase {
         let row = agentSessionRow(
             TerminalServiceAgentSessionRow(
                 id: "agent-2", terminalSessionID: "session-2", agent: nil, label: nil, status: "idle", note: nil, projectID: "project-1",
-                projectName: "Spaces", workspaceID: "workspace-1", workspaceName: "feature", branch: nil, updatedAt: "2026-07-14T00:00:00Z",
-                lastSignalAt: nil))
+                projectName: "Spaces", workspaceID: "workspace-1", workspaceName: "feature", workspaceDir: "/repo/workspaces/feature", branch: nil,
+                updatedAt: "2026-07-14T00:00:00Z", lastSignalAt: nil))
         XCTAssertTrue(row.contains("agent=-"))
         XCTAssertTrue(row.contains("note=-"))
         XCTAssertTrue(row.contains("branch=-"))

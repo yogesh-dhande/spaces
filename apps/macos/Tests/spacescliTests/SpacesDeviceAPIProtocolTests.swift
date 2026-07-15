@@ -110,8 +110,8 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
     func testAgentSessionsResultRoundTripsThroughResponse() throws {
         let row = SpacesDeviceAgentSessionRow(
             id: "agent-1", terminalSessionID: "session-1", agent: "Claude Code CLI", label: "Claude Code CLI", status: "waiting", note: "review auth",
-            projectID: "project-1", projectName: "Spaces", workspaceID: "workspace-1", workspaceName: "feature", branch: "feature",
-            updatedAt: "2026-07-14T00:00:00Z", lastSignalAt: "2026-07-14T00:00:01Z")
+            projectID: "project-1", projectName: "Spaces", workspaceID: "workspace-1", workspaceName: "feature",
+            workspaceDir: "/repo/workspaces/feature", branch: "feature", updatedAt: "2026-07-14T00:00:00Z", lastSignalAt: "2026-07-14T00:00:01Z")
         let response = SpacesDeviceAPIResponse(ok: true, message: "Listed agent sessions.", result: .agentSessions(.init(rows: [row])))
 
         let decoded = try SpacesDeviceAPICodec.decodeResponse(SpacesDeviceAPICodec.encodeResponse(response))

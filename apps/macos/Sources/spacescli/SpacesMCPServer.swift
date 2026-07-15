@@ -495,7 +495,7 @@ final class SpacesMCPStdioServer {
         TerminalServiceAgentSessionRow(
             id: row.id, terminalSessionID: row.terminalSessionID, agent: row.agent, label: row.label, status: row.status, note: row.note,
             projectID: row.projectID, projectName: row.projectName, workspaceID: row.workspaceID, workspaceName: row.workspaceName,
-            branch: row.branch, updatedAt: row.updatedAt, lastSignalAt: row.lastSignalAt)
+            workspaceDir: row.workspaceDir, branch: row.branch, updatedAt: row.updatedAt, lastSignalAt: row.lastSignalAt)
     }
 
     /// Resolves the agent's terminal session id for `status`/`annotate`, defaulting to the current

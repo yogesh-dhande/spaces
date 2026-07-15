@@ -48,7 +48,7 @@ final class AgentNotificationEngineTests: XCTestCase {
                 """
                 [spaces] Claude Code CLI (claude) is blocked
                   project: Project
-                  workspace: ws
+                  workspace: \(workspace.dir)
                   session: child-session
                   link: spaces://terminal/child-session
                 """
@@ -77,7 +77,7 @@ final class AgentNotificationEngineTests: XCTestCase {
                 """
                 [spaces] coding agent (coding agent) is blocked
                   project: Project
-                  workspace: ws
+                  workspace: \(workspace.dir)
                   session: child-session
                   link: spaces://terminal/child-session
                 """
@@ -105,7 +105,7 @@ final class AgentNotificationEngineTests: XCTestCase {
                 """
                 [spaces] Codex CLI (codex) is done
                   project: Project
-                  workspace: ws
+                  workspace: \(workspace.dir)
                   session: child-session
                   note: review the auth flow
                   link: spaces://terminal/child-session
@@ -113,11 +113,11 @@ final class AgentNotificationEngineTests: XCTestCase {
             ])
     }
 
-    /// A git workspace carries a branch: the `workspace` line is the workspace's directory name (not the
-    /// branch-derived display name), the `branch` line carries the branch verbatim including slashes, and
-    /// both are distinct so the branch is never duplicated into the workspace field. Non-git workspaces
+    /// A git workspace carries a branch: the `workspace` line is the workspace's full directory path (not
+    /// the branch-derived display name), the `branch` line carries the branch verbatim including slashes,
+    /// and both are distinct so the branch is never duplicated into the workspace field. Non-git workspaces
     /// (branch nil, covered by the other cases) omit the `branch` line.
-    func testImmediateInjectionRendersWorkspaceDirnameAndSlashedBranch() throws {
+    func testImmediateInjectionRendersWorkspaceDirPathAndSlashedBranch() throws {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
@@ -142,7 +142,7 @@ final class AgentNotificationEngineTests: XCTestCase {
                 """
                 [spaces] Claude Code CLI (claude) is blocked
                   project: Project
-                  workspace: hello
+                  workspace: \(workspace.dir)
                   branch: smoke/hello
                   session: child-session
                   link: spaces://terminal/child-session
@@ -175,7 +175,7 @@ final class AgentNotificationEngineTests: XCTestCase {
                 """
                 [spaces] Claude Code CLI (claude) is blocked
                   project: Project
-                  workspace: ws
+                  workspace: \(workspace.dir)
                   session: child-session
                   note: fix the flaky tests
                   link: spaces://terminal/child-session
@@ -212,14 +212,14 @@ final class AgentNotificationEngineTests: XCTestCase {
                 """
                 [spaces] A (claude) is blocked
                   project: Project
-                  workspace: ws
+                  workspace: \(workspace.dir)
                   session: childA
                   link: spaces://terminal/childA
                 """,
                 """
                 [spaces] B (claude) is done
                   project: Project
-                  workspace: ws
+                  workspace: \(workspace.dir)
                   session: childB
                   link: spaces://terminal/childB
                 """,
@@ -253,7 +253,7 @@ final class AgentNotificationEngineTests: XCTestCase {
             """
             [spaces] Claude Code CLI (claude) is done
               project: Project
-              workspace: ws
+              workspace: \(workspace.dir)
               session: child-session
               link: spaces://terminal/child-session
             """)
@@ -282,7 +282,7 @@ final class AgentNotificationEngineTests: XCTestCase {
         let expectedExitBlock = """
             [spaces] Codex CLI (codex) is exited
               project: Project
-              workspace: ws
+              workspace: \(workspace.dir)
               session: child-session
               link: spaces://terminal/child-session
             """
@@ -413,7 +413,7 @@ final class AgentNotificationEngineTests: XCTestCase {
                 """
                 [spaces] Codex CLI (codex) is blocked
                   project: P
-                  workspace: W
+                  workspace: /remote/workspaces/W
                   session: remote-term
                   note: ship the fix
                   link: spaces://terminal/remote-term?device=dev-1
@@ -452,14 +452,14 @@ final class AgentNotificationEngineTests: XCTestCase {
                 """
                 [spaces] Local CLI (claude) is blocked
                   project: Project
-                  workspace: ws
+                  workspace: \(workspace.dir)
                   session: local-child
                   link: spaces://terminal/local-child
                 """,
                 """
                 [spaces] Remote CLI (codex) is done
                   project: P
-                  workspace: W
+                  workspace: /remote/workspaces/W
                   session: remote-term
                   link: spaces://terminal/remote-term?device=dev-1
                 """,
@@ -490,7 +490,8 @@ final class AgentNotificationEngineTests: XCTestCase {
     {
         SpacesDeviceAgentSessionRow(
             id: "row-\(terminalSessionID ?? "none")", terminalSessionID: terminalSessionID, agent: agent ?? label, label: label, status: status,
-            note: note, projectID: "p", projectName: "P", workspaceID: "w", workspaceName: "W", branch: nil, updatedAt: "now", lastSignalAt: "now")
+            note: note, projectID: "p", projectName: "P", workspaceID: "w", workspaceName: "W", workspaceDir: "/remote/workspaces/W", branch: nil,
+            updatedAt: "now", lastSignalAt: "now")
     }
 
     // MARK: - Shared engine fixtures

@@ -151,13 +151,12 @@ public struct AgentNotificationEngine {
     }
 
     /// The single injected block for a local watched agent. Gathers the enriched context — project name,
-    /// workspace directory name and branch, terminal session id, agent kind — from the store, then defers
+    /// workspace directory path and branch, terminal session id, agent kind — from the store, then defers
     /// to the shared formatter; the deep link targets the local child's terminal session (no `?device=`).
     /// Reads the workspace and its project from the store, so it can throw. A workspace or project that no
     /// longer exists (deleted out from under a still-running agent) falls back to the id string for that
     /// field rather than failing delivery — a single clean path with no layered fallbacks. The `workspace`
-    /// field is the workspace's directory name (`dirname`) when set, else its display name, so the branch
-    /// is not duplicated into it.
+    /// field is the workspace's full directory path (`dir`) so an orchestrator can locate the worktree.
     func renderLine(agent: AgentWindowRecord, transition: ChildTransition) throws -> String {
         let workspace = try store.workspace(id: agent.workspaceID)
         let project = try workspace.flatMap { try store.project(id: $0.projectID) }
@@ -165,7 +164,7 @@ public struct AgentNotificationEngine {
         return renderBlock(
             label: agent.label ?? kind, kind: kind, transition: transition,
             project: project?.name ?? workspace?.projectID ?? agent.workspaceID,
-            workspace: workspace.map { $0.dirname ?? $0.displayName } ?? agent.workspaceID,
+            workspace: workspace?.dir ?? agent.workspaceID,
             branch: workspace?.branch, sessionID: agent.terminalTrackingID ?? agent.id, note: agent.note, deviceID: nil)
     }
 
@@ -178,7 +177,7 @@ public struct AgentNotificationEngine {
         let kind = row.agent ?? "coding agent"
         return renderBlock(
             label: row.label ?? kind, kind: kind, transition: transition, project: row.projectName,
-            workspace: row.workspaceName, branch: row.branch, sessionID: terminalSessionID, note: row.note, deviceID: deviceID)
+            workspace: row.workspaceDir, branch: row.branch, sessionID: terminalSessionID, note: row.note, deviceID: deviceID)
     }
 
     /// The single injected block shared by the local and cross-device paths — a pure formatter over

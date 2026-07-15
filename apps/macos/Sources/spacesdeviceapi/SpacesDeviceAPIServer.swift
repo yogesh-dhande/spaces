@@ -2250,7 +2250,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         SpacesDeviceAgentSessionRow(
             id: row.id, terminalSessionID: row.terminalSessionID, agent: row.agent, label: row.label, status: row.status, note: row.note,
             projectID: row.projectID, projectName: row.projectName, workspaceID: row.workspaceID, workspaceName: row.workspaceName,
-            branch: row.branch, updatedAt: row.updatedAt, lastSignalAt: row.lastSignalAt)
+            workspaceDir: row.workspaceDir, branch: row.branch, updatedAt: row.updatedAt, lastSignalAt: row.lastSignalAt)
     }
 
     private func refreshedMutationResponse(

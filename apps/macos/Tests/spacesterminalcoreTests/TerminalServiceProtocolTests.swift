@@ -190,11 +190,12 @@ final class TerminalServiceProtocolTests: XCTestCase {
                 TerminalServiceAgentSessionRow(
                     id: "agent-1", terminalSessionID: "session-1", agent: "Claude Code CLI", label: "Claude Code CLI", status: "waiting",
                     note: "review the auth flow", projectID: "project-1", projectName: "Spaces", workspaceID: "workspace-1", workspaceName: "feature",
-                    branch: "feature", updatedAt: "2026-07-14T00:00:00Z", lastSignalAt: "2026-07-14T00:00:00Z"),
+                    workspaceDir: "/repo/workspaces/feature", branch: "feature", updatedAt: "2026-07-14T00:00:00Z",
+                    lastSignalAt: "2026-07-14T00:00:00Z"),
                 TerminalServiceAgentSessionRow(
                     id: "agent-2", terminalSessionID: "session-2", agent: nil, label: nil, status: "idle", note: nil, projectID: "project-1",
-                    projectName: "Spaces", workspaceID: "workspace-1", workspaceName: "feature", branch: nil, updatedAt: "2026-07-14T00:00:00Z",
-                    lastSignalAt: nil),
+                    projectName: "Spaces", workspaceID: "workspace-1", workspaceName: "feature", workspaceDir: "/repo/workspaces/feature",
+                    branch: nil, updatedAt: "2026-07-14T00:00:00Z", lastSignalAt: nil),
             ])
         let decoded = try JSONDecoder().decode(TerminalServiceProfileCommandResponse.self, from: JSONEncoder().encode(response))
         XCTAssertEqual(decoded, response)

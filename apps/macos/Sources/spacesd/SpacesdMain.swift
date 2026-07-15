@@ -1032,12 +1032,15 @@ import workspacecore
                 guard let self else { throw Self.requestFailedError("spacesd is shutting down.") }
                 try self.submitAgentNotificationLine(sessionID: sessionID, line: line)
             },
-            // The `(<kind>)` label is the same runtime agent label `agent list` shows (claude/codex/opencode
-            // for a detected agent, else the launch title), resolved from the child's persisted session
-            // state. Reads disk, so it works at exit time too (the row is rendered before deletion).
-            resolveAgentKind: { [weak self] agent in
-                guard let self, let terminalSessionID = agent.terminalTrackingID else { return nil }
-                return self.profileAgentRuntimeLabel(sessionID: terminalSessionID)
+            // The `(<kind>)` parenthetical is the detected agent kind (claude/codex/opencode) from the
+            // child's persisted runtime state — NOT `profileAgentRuntimeLabel`, which prefers the launch
+            // title for `.agent` sessions and would duplicate the label (`smoke-hello (smoke-hello)`).
+            // Reads disk, so it works at exit time too (the row is rendered before deletion).
+            resolveAgentKind: { agent in
+                guard let terminalSessionID = agent.terminalTrackingID, let paths = try? TerminalSessionPaths.forSession(id: terminalSessionID),
+                    let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths)
+                else { return nil }
+                return runtimeState.foregroundDetectedAgentKind?.displayLabel
             },
             logError: { writeStandardError($0) })
     }

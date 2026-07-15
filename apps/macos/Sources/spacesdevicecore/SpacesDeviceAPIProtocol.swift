@@ -1284,13 +1284,16 @@ public struct SpacesDeviceAgentSessionRow: Codable, Sendable, Equatable {
     public let projectName: String
     public let workspaceID: String
     public let workspaceName: String
+    /// Absolute path to the workspace's directory (worktree), so an orchestrator can locate it on disk.
+    public let workspaceDir: String
     public let branch: String?
     public let updatedAt: String
     public let lastSignalAt: String?
 
     public init(
         id: String, terminalSessionID: String?, agent: String?, label: String?, status: String, note: String?, projectID: String,
-        projectName: String, workspaceID: String, workspaceName: String, branch: String?, updatedAt: String, lastSignalAt: String?
+        projectName: String, workspaceID: String, workspaceName: String, workspaceDir: String, branch: String?, updatedAt: String,
+        lastSignalAt: String?
     ) {
         self.id = id
         self.terminalSessionID = terminalSessionID
@@ -1302,6 +1305,7 @@ public struct SpacesDeviceAgentSessionRow: Codable, Sendable, Equatable {
         self.projectName = projectName
         self.workspaceID = workspaceID
         self.workspaceName = workspaceName
+        self.workspaceDir = workspaceDir
         self.branch = branch
         self.updatedAt = updatedAt
         self.lastSignalAt = lastSignalAt
