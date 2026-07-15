@@ -197,15 +197,33 @@ extension WorkspaceOrchestrator {
         return updatedProject
     }
 
+    /// Removes the project identified by its stable id. This is the deletion entry point for
+    /// callers that already hold the project's identity (the Device API delete handler resolves
+    /// the record by id before deleting). Deleting by id — the `projects` primary key — instead of
+    /// re-resolving by directory removes the dependency on the stored `dir` round-tripping through
+    /// `normalizePath`: a project whose recorded directory no longer canonicalizes to itself (for
+    /// example a directory that gained a Git repository or moved on disk) is still reliably deleted
+    /// rather than leaving `removeProject(dir:)` to silently match nothing.
+    public func removeProject(id: String) throws {
+        guard let project = try store.project(id: id) else { throw WorkspaceError.missingProject(dir: id) }
+        try removeProject(project)
+    }
+
+    /// Removes the project registered at `dir`, when one is registered there. Kept for callers that
+    /// only know a directory (fixture cleanup and directory-scoped harnesses); id-based deletion is
+    /// the path the product's delete action uses.
     public func removeProject(dir: String) throws {
         let normalizedDir = normalizePath(dir)
-        if let project = try store.project(dir: normalizedDir) {
-            let workspaces = try store.workspaces(projectID: project.id, includeArchived: true)
-            try removeManagedGitWorktreesIfNeeded(project: project, workspaces: workspaces)
-            try store.deleteProject(id: project.id)
-            try removeManagedGitWorkspaceDirectoriesIfNeeded(project: project)
-            try removeManagedProjectDirectoryIfNeeded(project: project)
-        }
+        guard let project = try store.project(dir: normalizedDir) else { return }
+        try removeProject(project)
+    }
+
+    private func removeProject(_ project: ProjectRecord) throws {
+        let workspaces = try store.workspaces(projectID: project.id, includeArchived: true)
+        try removeManagedGitWorktreesIfNeeded(project: project, workspaces: workspaces)
+        try store.deleteProject(id: project.id)
+        try removeManagedGitWorkspaceDirectoriesIfNeeded(project: project)
+        try removeManagedProjectDirectoryIfNeeded(project: project)
     }
 
     func configuredProjectRecord(baseRecord: ProjectRecord, update: (inout ProjectRecord) -> Void) throws -> ProjectRecord {

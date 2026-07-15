@@ -425,6 +425,69 @@ extension OrchestratorTests {
         XCTAssertEqual(try store.projects().count, 1)
     }
 
+    // A non-git project whose directory later gains a Git repository (`git init`) must stay deletable.
+    // Deletion runs through the id the Device API delete handler already resolved, so it does not depend
+    // on the recorded directory round-tripping through `normalizePath`; the project and its single
+    // workspace are removed.
+    func testRemoveProjectByIDDeletesNonGitProjectAfterGitInit() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("plain-then-git", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        XCTAssertFalse(project.isGitRepo)
+        XCTAssertEqual(try store.workspaces(projectID: project.id, includeArchived: true).count, 1)
+
+        // The user runs `git init` in the folder after adding it as a plain project.
+        try runGit(["init"], cwd: projectDir.path)
+
+        try orchestrator.removeProject(id: project.id)
+
+        XCTAssertNil(try store.project(id: project.id))
+        XCTAssertNil(try store.project(dir: projectDir.path))
+        XCTAssertTrue(try store.workspaces(projectID: project.id, includeArchived: true).isEmpty)
+        XCTAssertTrue(try orchestrator.listProjects().isEmpty)
+    }
+
+    // Deleting by id removes a project even when its recorded directory would not be found by the
+    // directory lookup (`removeProject(dir:)` matches on the normalized directory and otherwise does
+    // nothing). This guards the delete action against silently matching no project.
+    func testRemoveProjectByIDDeletesWhenRecordedDirectoryDoesNotRoundTrip() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+
+        // A recorded directory that does not survive normalization (here, a trailing slash), so the
+        // directory lookup used by `removeProject(dir:)` cannot find it.
+        let recordedDir = projectDir.path + "/"
+        let project = ProjectRecord(id: UUID().uuidString, name: "project", dir: recordedDir, isGitRepo: false, defaultBranch: nil)
+        try store.upsert(project: project)
+        try orchestrator.ensureDefaultWorkspace(for: project)
+        XCTAssertEqual(try store.workspaces(projectID: project.id, includeArchived: true).count, 1)
+
+        // The directory-based path silently matches nothing and leaves the project in place.
+        try orchestrator.removeProject(dir: recordedDir)
+        XCTAssertNotNil(try store.project(id: project.id))
+
+        // The id-based path used by the delete action removes it reliably.
+        try orchestrator.removeProject(id: project.id)
+        XCTAssertNil(try store.project(id: project.id))
+        XCTAssertTrue(try store.workspaces(projectID: project.id, includeArchived: true).isEmpty)
+    }
+
+    // Deleting an unknown project id fails loudly rather than reporting success for a no-op.
+    func testRemoveProjectByIDThrowsWhenProjectMissing() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        XCTAssertThrowsError(try orchestrator.removeProject(id: UUID().uuidString)) { error in
+            guard case WorkspaceError.missingProject = error else { return XCTFail("Expected missingProject, got \(error)") }
+        }
+    }
+
     // Tests remove project deletes from db by arranging representative inputs and asserting the expected result.
     func testRemoveProjectDeletesFromDB() throws {
         let root = try makeTempDirectory()

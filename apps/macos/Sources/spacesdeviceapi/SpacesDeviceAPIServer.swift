@@ -1912,7 +1912,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         guard let project = try store.project(id: request.projectID) else {
             return SpacesDeviceAPIResponse(ok: false, message: "Project not found.", errorCode: .notFound)
         }
-        try orchestrator.removeProject(dir: project.dir)
+        try orchestrator.removeProject(id: project.id)
         return try refreshedMutationResponse(context: context, message: "Deleted project '\(project.name)'.")
     }
 
