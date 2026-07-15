@@ -230,6 +230,35 @@ extension WorkspaceOrchestrator {
         return nil
     }
 
+    /// Validates that subscribing `subscriberTerminalSessionID` to the agent row `agentSessionID` is a
+    /// legal watch edge before it is persisted: the agent must exist, must not run in the subscriber's
+    /// own terminal (a self-edge), and must not close a cycle in the subscription graph. The graph's
+    /// nodes are terminal session ids; each edge points subscriber → the watched agent's terminal. A
+    /// cycle would let injected notifications chase each other around a loop, so this walks existing
+    /// edges outward from the target's terminal (following each terminal's own subscriptions) and errors
+    /// if the walk reaches the subscriber. Deterministic and total: the walk visits each terminal once.
+    public func validateAgentSubscription(subscriberTerminalSessionID: String, agentSessionID: String) throws {
+        guard let target = try store.agentWindow(id: agentSessionID) else {
+            throw WorkspaceError.invalidArgument(message: "No agent session \(agentSessionID) to subscribe to.")
+        }
+        guard let targetTerminalSessionID = target.terminalTrackingID else { return }
+        if targetTerminalSessionID == subscriberTerminalSessionID {
+            throw WorkspaceError.invalidArgument(message: "A terminal cannot subscribe to a coding agent running in itself.")
+        }
+        var visited: Set<String> = []
+        var frontier = [targetTerminalSessionID]
+        while let terminal = frontier.popLast() {
+            guard visited.insert(terminal).inserted else { continue }
+            for edge in try store.agentSubscriptions(subscriberTerminalSessionID: terminal) {
+                guard let nextTerminal = try store.agentWindow(id: edge.agentSessionID)?.terminalTrackingID else { continue }
+                if nextTerminal == subscriberTerminalSessionID {
+                    throw WorkspaceError.invalidArgument(message: "Subscribing would create a notification cycle between these terminals.")
+                }
+                frontier.append(nextTerminal)
+            }
+        }
+    }
+
     @discardableResult public func recordRemoteAgentSignal(_ event: TerminalServiceAgentSignalEvent) throws -> Bool {
         guard let type = RemoteAgentSignalType(rawValue: event.type), let provider = AgentProvider(rawValue: event.provider) else { return false }
         guard let workspaceID = try remoteAgentSignalWorkspaceID(event) else { return false }

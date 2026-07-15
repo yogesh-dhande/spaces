@@ -926,6 +926,26 @@ import workspacecore
             case .`init`, .exit: false
             }
         }
+
+        /// The subscriber notification this transition produces, or `nil` when it produces none. Only
+        /// blocked/done/exit wake a watcher; init and working are silent.
+        var childNotificationTransition: AgentNotificationEngine.ChildTransition? {
+            switch self {
+            case .blocked: .blocked
+            case .done: .done
+            case .exit: .exited
+            case .`init`, .working: nil
+            }
+        }
+
+        /// Whether this transition leaves the signaling terminal's own agent row idle/done, which is the
+        /// cue to flush any notifications that queued while it was busy. Mirrors `status ∈ {idle, done}`.
+        var leavesSubscriberIdle: Bool {
+            switch self {
+            case .`init`, .done, .exit: true
+            case .working, .blocked: false
+            }
+        }
     }
 
     private func recordProfileAgentSignal(_ payload: TerminalServiceProfileAgentSignalPayload, orchestrator: WorkspaceOrchestrator) throws
@@ -944,27 +964,54 @@ import workspacecore
         if !canRecordSignal { return TerminalServiceProfileCommandResponse(message: "Agent \(type.rawValue) ignored.") }
 
         let environmentKeys = [WorkspaceOrchestrator.terminalTrackingIDEnvVar]
+        let engine = makeAgentNotificationEngine(orchestrator: orchestrator)
         switch type {
         case .`init`:
             try orchestrator.registerAgentWindow(
                 workspaceID: workspaceID, provider: .spaces, label: signalLabel, terminalTrackingID: sessionID,
                 status: existingAgent?.status ?? .idle, eventType: type.rawValue, eventSource: "spaces_agent_signal", environmentKeys: environmentKeys
             )
-        case .working, .blocked, .done:
+        case .working:
             try orchestrator.updateAgentWindowStatus(
                 workspaceID: workspaceID, provider: .spaces, terminalTrackingID: sessionID, label: signalLabel, status: type.status,
                 eventType: type.rawValue, eventSource: "spaces_agent_signal", environmentKeys: environmentKeys)
+        case .blocked, .done:
+            let updated = try orchestrator.updateAgentWindowStatus(
+                workspaceID: workspaceID, provider: .spaces, terminalTrackingID: sessionID, label: signalLabel, status: type.status,
+                eventType: type.rawValue, eventSource: "spaces_agent_signal", environmentKeys: environmentKeys)
+            if let transition = type.childNotificationTransition { try engine.childDidTransition(agent: updated, transition: transition) }
         case .exit:
             guard let existingAgent else { return TerminalServiceProfileCommandResponse(message: "Agent exit ignored.") }
+            // Render and enqueue/deliver the exit notification before handleAgentExit deletes an ad-hoc
+            // agent row: that deletion cascades the subscription edges away, and the pending row (no FK)
+            // is what carries the notice past it.
+            try engine.childDidTransition(agent: existingAgent, transition: .exited)
             try orchestrator.handleAgentExit(
                 existingAgent, eventType: type.rawValue, eventSource: "spaces_agent_signal", environmentKeys: environmentKeys)
         }
+        // A signal that leaves this terminal's own agent row idle/done is the cue to flush notifications
+        // that queued while it was busy (including, on exit, cleaning up its now-undeliverable queue).
+        if type.leavesSubscriberIdle { try engine.subscriberDidBecomeIdle(subscriberTerminalSessionID: sessionID) }
         postAgentEventNotification()
         return TerminalServiceProfileCommandResponse(message: "Agent \(type.rawValue) recorded.")
     }
 
     private func matchingProfileAgentWindow(workspaceID: String, sessionID: String, orchestrator: WorkspaceOrchestrator) throws -> AgentWindowRecord?
     { try orchestrator.agentWindows(workspaceID: workspaceID).first { $0.provider == .spaces && $0.terminalTrackingID == sessionID } }
+
+    /// Builds the notification engine bound to the real terminal-send path: delivery is the same
+    /// `sendProfileTerminalInput` plumbing a `terminal send` uses, appending a newline so the injected
+    /// line is submitted. A send failure throws, which the engine reads as the subscriber having
+    /// vanished (dead session) and tears the watch edge down.
+    private func makeAgentNotificationEngine(orchestrator: WorkspaceOrchestrator) -> AgentNotificationEngine {
+        AgentNotificationEngine(
+            store: orchestrator.store,
+            deliver: { [weak self] sessionID, line in
+                guard let self else { throw Self.requestFailedError("spacesd is shutting down.") }
+                _ = try self.sendProfileTerminalInput(
+                    TerminalServiceTerminalSendPayload(sessionID: sessionID, input: .text(line), appendNewline: true))
+            }, logError: { writeStandardError($0) })
+    }
 
     private func profileAgentRuntimeLabel(sessionID: String) -> String? {
         guard let paths = try? TerminalSessionPaths.forSession(id: sessionID) else { return nil }
@@ -991,11 +1038,9 @@ import workspacecore
     private func spawnProfileAgentSession(_ payload: TerminalServiceAgentSpawnPayload, orchestrator: WorkspaceOrchestrator) throws
         -> TerminalServiceProfileCommandResponse
     {
-        do {
-            _ = try AgentSpawnCommandGate.resolveSpawnableAgent(command: payload.command, statuses: AgentHookInstaller.status())
-        } catch let error as AgentSpawnCommandGate.GateError {
-            throw SpacesRuntimeError.invalidArgument(message: error.errorDescription ?? "Agent spawn command is not supported.")
-        }
+        do { _ = try AgentSpawnCommandGate.resolveSpawnableAgent(command: payload.command, statuses: AgentHookInstaller.status()) } catch let error
+            as AgentSpawnCommandGate.GateError
+        { throw SpacesRuntimeError.invalidArgument(message: error.errorDescription ?? "Agent spawn command is not supported.") }
         let workspaceID = try orchestrator.resolveWorkspaceIDForTerminalCommand(explicitWorkspaceID: payload.workspaceID, cwd: payload.cwd)
         let session = try orchestrator.createWorkspaceAgentSession(workspaceID: workspaceID, command: payload.command, title: payload.title)
         return TerminalServiceProfileCommandResponse(message: "Started agent session.", terminalSession: session)
@@ -1005,9 +1050,7 @@ import workspacecore
     /// is bound to the session, the coding-agent stop path terminates the terminal and deletes the row;
     /// before the first hook signal no agent row exists yet, so the terminal session itself is
     /// terminated. A session that is neither an agent row nor a live terminal is a loud error.
-    private func killProfileAgentSession(_ sessionID: String, orchestrator: WorkspaceOrchestrator) throws
-        -> TerminalServiceProfileCommandResponse
-    {
+    private func killProfileAgentSession(_ sessionID: String, orchestrator: WorkspaceOrchestrator) throws -> TerminalServiceProfileCommandResponse {
         if let match = try orchestrator.resolveSpacesAgentSession(terminalSessionID: sessionID) {
             try orchestrator.stopCodingAgent(workspaceID: match.workspaceID, agentID: match.record.id)
             return TerminalServiceProfileCommandResponse(message: "Killed agent session \(sessionID).")
@@ -1024,15 +1067,14 @@ import workspacecore
         return (try? TerminalSessionPersistence.readLaunchConfiguration(paths: paths)) != nil
     }
 
-    /// Persists a subscription edge after validating the watched agent session row exists. The
-    /// injection engine that consumes these edges arrives in a later stage; this stage only records the
-    /// relationship. A subscribe against an agent session that does not exist is a loud error.
+    /// Persists a subscription edge after validating (in the orchestrator) that the watched agent exists
+    /// and the edge keeps the subscription graph acyclic — a self-edge or any cycle-closing edge is a
+    /// loud error, since a cycle would let injected notifications chase each other around a loop.
     private func subscribeProfileAgentSession(_ payload: TerminalServiceAgentSubscriptionPayload, orchestrator: WorkspaceOrchestrator) throws
         -> TerminalServiceProfileCommandResponse
     {
-        guard try orchestrator.store.agentWindowExists(id: payload.agentSessionID) else {
-            throw SpacesRuntimeError.invalidArgument(message: "No agent session \(payload.agentSessionID) to subscribe to.")
-        }
+        try orchestrator.validateAgentSubscription(
+            subscriberTerminalSessionID: payload.subscriberTerminalSessionID, agentSessionID: payload.agentSessionID)
         try orchestrator.store.insertAgentSubscription(
             subscriberTerminalSessionID: payload.subscriberTerminalSessionID, agentSessionID: payload.agentSessionID, createdAt: nowISO8601())
         return TerminalServiceProfileCommandResponse(message: "Subscribed to agent session.")

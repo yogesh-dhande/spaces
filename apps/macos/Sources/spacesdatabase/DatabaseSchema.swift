@@ -7,7 +7,7 @@ import Foundation
 #endif
 
 public enum DatabaseSchema {
-    public static let currentVersion = 2
+    public static let currentVersion = 3
 
     /// Adds the coding-agent orchestration surface: an explicit `note` on each agent session and the
     /// `agent_subscriptions` graph. The subscriber key is a terminal session id (a subscriber may be a
@@ -24,17 +24,39 @@ public enum DatabaseSchema {
             );
         """
 
+    /// Queue of coalesced notification lines held for a busy subscriber until it goes idle: one row per
+    /// (subscriber terminal, watched agent). Deliberately has NO foreign key to `agent_sessions` — an
+    /// exit notification must outlive the agent row (`handleAgentExit` deletes ad-hoc rows before the
+    /// subscriber ever reads it), and the `message` is fully rendered at enqueue time, so the row needs
+    /// nothing from the agent table after insert. The unique index makes `INSERT OR REPLACE` coalesce
+    /// repeated transitions of the same child down to a single latest-state line. Named separately so
+    /// this step and the fresh-schema SQL share one definition and can never drift apart.
+    static let agentPendingNotificationsSQL = """
+            CREATE TABLE IF NOT EXISTS agent_pending_notifications (
+              id TEXT PRIMARY KEY,
+              subscriber_terminal_session_id TEXT NOT NULL,
+              agent_session_id TEXT NOT NULL,
+              message TEXT NOT NULL,
+              created_at TEXT NOT NULL
+            );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_pending_per_target
+              ON agent_pending_notifications(subscriber_terminal_session_id, agent_session_id);
+        """
+
     public static let migrationSteps: [DatabaseMigrationStep] = [
-        DatabaseMigrationStep(
-            fromVersion: 1, toVersion: 2, description: "Add agent_sessions.note and agent_subscriptions", requiresBackup: true
-        ) { handle in
+        DatabaseMigrationStep(fromVersion: 1, toVersion: 2, description: "Add agent_sessions.note and agent_subscriptions", requiresBackup: true) {
+            handle in
             try migrationExecuteBatch(
                 handle,
                 sql: """
                     ALTER TABLE agent_sessions ADD COLUMN note TEXT;
                     \(agentSubscriptionsSQL)
                     """)
-        }
+        },
+        DatabaseMigrationStep(fromVersion: 2, toVersion: 3, description: "Add agent_pending_notifications", requiresBackup: true) { handle in
+            try migrationExecuteBatch(handle, sql: agentPendingNotificationsSQL)
+        },
     ]
 
     static let terminalRemoteSessionStateSQL = """
@@ -345,6 +367,8 @@ public enum DatabaseSchema {
             );
 
             \(agentSubscriptionsSQL)
+
+            \(agentPendingNotificationsSQL)
 
             CREATE TABLE IF NOT EXISTS agent_session_events (
               id TEXT PRIMARY KEY,

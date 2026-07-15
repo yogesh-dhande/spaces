@@ -228,6 +228,81 @@ extension SQLiteStore {
         return AgentSubscriptionRecord(subscriberTerminalSessionID: row[0], agentSessionID: row[1], createdAt: row[2])
     }
 
+    /// The Spaces agent row bound to a terminal session id, searched across every workspace. Returns
+    /// `nil` when the terminal has no agent row — a plain shell terminal, which the notification engine
+    /// treats as idle. Orchestration reaches an agent by terminal session id (subscriptions key on it)
+    /// without knowing the owning workspace, hence the unscoped lookup.
+    public func agentWindowByTerminalSession(terminalSessionID: String) throws -> AgentWindowRecord? {
+        guard
+            let row = try queryRow(
+                sql: """
+                    SELECT
+                      \(Self.agentWindowColumns)
+                    FROM agent_sessions
+                    LEFT JOIN runtime_targets ON runtime_targets.id = agent_sessions.runtime_target_id
+                    WHERE agent_sessions.terminal_session_id = ? OR runtime_targets.tracking_id = ?
+                    LIMIT 1
+                    """, bindings: [terminalSessionID, terminalSessionID])
+        else { return nil }
+        return decodeAgentWindow(row: row)
+    }
+
+    /// The agent row with this id (across every workspace), or `nil` when absent. Subscription
+    /// validation resolves the watched agent by its row id to read the terminal it is bound to.
+    public func agentWindow(id: String) throws -> AgentWindowRecord? {
+        guard
+            let row = try queryRow(
+                sql: """
+                    SELECT
+                      \(Self.agentWindowColumns)
+                    FROM agent_sessions
+                    LEFT JOIN runtime_targets ON runtime_targets.id = agent_sessions.runtime_target_id
+                    WHERE agent_sessions.id = ?
+                    LIMIT 1
+                    """, bindings: [id])
+        else { return nil }
+        return decodeAgentWindow(row: row)
+    }
+
+    /// Enqueues (or coalesces onto) the pending notification for a (subscriber, agent) pair. `INSERT OR
+    /// REPLACE` on the unique index replaces any existing pending line for the same pair, so a child that
+    /// goes blocked then done while its subscriber is busy leaves exactly one row rendering the latest
+    /// state. A fresh `id` is generated on every write like the other event stores.
+    public func upsertPendingAgentNotification(subscriberTerminalSessionID: String, agentSessionID: String, message: String, createdAt: String) throws
+    {
+        try execute(
+            sql: """
+                INSERT OR REPLACE INTO agent_pending_notifications(id, subscriber_terminal_session_id, agent_session_id, message, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """, bindings: [UUID().uuidString, subscriberTerminalSessionID, agentSessionID, message, createdAt])
+    }
+
+    /// Pending notifications for a subscriber terminal in enqueue order, flushed when it goes idle.
+    public func pendingAgentNotifications(subscriberTerminalSessionID: String) throws -> [AgentPendingNotificationRecord] {
+        try queryRows(
+            sql: """
+                SELECT id, subscriber_terminal_session_id, agent_session_id, message, created_at
+                FROM agent_pending_notifications
+                WHERE subscriber_terminal_session_id = ?
+                ORDER BY created_at, rowid
+                """, bindings: [subscriberTerminalSessionID]
+        ).compactMap(decodePendingAgentNotification)
+    }
+
+    public func deletePendingAgentNotification(id: String) throws {
+        try execute(sql: "DELETE FROM agent_pending_notifications WHERE id = ?", bindings: [id])
+    }
+
+    public func deletePendingAgentNotifications(subscriberTerminalSessionID: String) throws {
+        try execute(sql: "DELETE FROM agent_pending_notifications WHERE subscriber_terminal_session_id = ?", bindings: [subscriberTerminalSessionID])
+    }
+
+    private func decodePendingAgentNotification(row: [String]) -> AgentPendingNotificationRecord? {
+        guard row.count >= 5 else { return nil }
+        return AgentPendingNotificationRecord(
+            id: row[0], subscriberTerminalSessionID: row[1], agentSessionID: row[2], message: row[3], createdAt: row[4])
+    }
+
     public func deleteAgentWindowsByProvider(workspaceID: String, provider: AgentProvider) throws {
         try execute(sql: "DELETE FROM agent_sessions WHERE workspace_id = ? AND provider = ?", bindings: [workspaceID, provider.rawValue])
     }
