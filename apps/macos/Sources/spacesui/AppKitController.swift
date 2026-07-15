@@ -78,7 +78,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
-    enum AlertsIconTint: Sendable {
+    enum AlertsIconTint: Sendable, Equatable {
         case browser
         case terminal
         case code
@@ -2768,10 +2768,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             }
             for agent in workspace.codingAgentRows where agent.activityState == .waiting || agent.activityState == .done {
                 let eventDate = agent.updatedAt.flatMap { iso8601Formatter.date(from: $0) }
+                // Both states keep the cpu.fill agent identity; the tint alone carries the state —
+                // `waiting` (blocked on the user) is the warning orange, `done` the success green
+                // matching the status dots — so a finished agent doesn't read as still needing attention.
+                let iconTint: AlertsIconTint = agent.activityState == .done ? .success : .warning
                 items.append(
                     AlertsAttentionEntry(
                         attentionID: "alert:\(deviceID):agent:\(agent.agentID ?? agent.id):\(agent.activityState.rawValue):\(agent.updatedAt ?? "")",
-                        icon: "cpu.fill", iconTint: .warning, label: agent.name, detail: nil, shortcut: "", processStatus: nil,
+                        icon: "cpu.fill", iconTint: iconTint, label: agent.name, detail: nil, shortcut: "", processStatus: nil,
                         agentStatus: AgentWindowStatus(rawValue: agent.activityState.rawValue), countsTowardBadge: true, eventDate: eventDate,
                         // The alert is for an existing waiting/done agent, so activating it must focus that
                         // agent's session — not `.workspaceAgentLauncher`, which resolves to a fresh launch and
