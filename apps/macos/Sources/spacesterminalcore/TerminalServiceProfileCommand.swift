@@ -220,26 +220,36 @@ public struct TerminalServiceAgentKillPayload: Codable, Sendable, Equatable {
 }
 
 /// Persist-only subscription edge carried by `.agentSubscribe`/`.agentUnsubscribe`. `subscriberTerminalSessionID`
-/// is the watching terminal; `agentSessionID` is the watched agent session **row** id (the CLI resolves
-/// the child's terminal session to its agent row before sending this).
+/// is the watching terminal. When `deviceID` is nil this is a same-device edge and `agentSessionID` is the
+/// watched agent session **row** id (the CLI resolves the child's terminal session to its agent row before
+/// sending). When `deviceID` is set this is a cross-device edge and `agentSessionID` is the child's
+/// terminal session id on that device, which the daemon resolves to the remote agent row id (and validates
+/// exists) via one `listAgentSessions` call before persisting the watch.
 public struct TerminalServiceAgentSubscriptionPayload: Codable, Sendable, Equatable {
     public let subscriberTerminalSessionID: String
     public let agentSessionID: String
+    public let deviceID: String?
 
-    public init(subscriberTerminalSessionID: String, agentSessionID: String) {
+    public init(subscriberTerminalSessionID: String, agentSessionID: String, deviceID: String? = nil) {
         self.subscriberTerminalSessionID = subscriberTerminalSessionID
         self.agentSessionID = agentSessionID
+        self.deviceID = deviceID
     }
 
     private enum CodingKeys: String, CodingKey {
         case subscriberTerminalSessionID
         case agentSessionID
+        case deviceID
     }
 
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         subscriberTerminalSessionID = try container.decodeRequiredNonEmpty(forKey: .subscriberTerminalSessionID)
         agentSessionID = try container.decodeRequiredNonEmpty(forKey: .agentSessionID)
+        deviceID = try container.decodeIfPresent(String.self, forKey: .deviceID).flatMap { value in
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
     }
 }
 

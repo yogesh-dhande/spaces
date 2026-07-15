@@ -128,6 +128,69 @@ final class AgentOrchestrationStoreTests: XCTestCase {
         XCTAssertTrue(try store.agentSubscriptions(agentSessionID: "agent-1").isEmpty)
     }
 
+    // MARK: - Cross-device watch edges (agent_remote_subscriptions)
+
+    func testRemoteSubscriptionInsertListBySubscriberAndDevice() throws {
+        let store = try makeTemporaryStore()
+
+        try store.insertAgentRemoteSubscription(
+            subscriberTerminalSessionID: "local-A", deviceID: "dev-1", agentSessionID: "child-1", createdAt: "2026-07-14T00:00:00Z")
+        try store.insertAgentRemoteSubscription(
+            subscriberTerminalSessionID: "local-A", deviceID: "dev-2", agentSessionID: "child-2", createdAt: "2026-07-14T00:00:01Z")
+        try store.insertAgentRemoteSubscription(
+            subscriberTerminalSessionID: "local-B", deviceID: "dev-1", agentSessionID: "child-1", createdAt: "2026-07-14T00:00:02Z")
+        // Duplicate insert is a no-op (composite PRIMARY KEY conflict ignored).
+        try store.insertAgentRemoteSubscription(
+            subscriberTerminalSessionID: "local-A", deviceID: "dev-1", agentSessionID: "child-1", createdAt: "2026-07-14T00:00:03Z")
+
+        XCTAssertEqual(
+            try store.agentRemoteSubscriptions(subscriberTerminalSessionID: "local-A").map(\.agentSessionID), ["child-1", "child-2"])
+        XCTAssertEqual(Set(try store.agentRemoteSubscriptions(deviceID: "dev-1").map(\.subscriberTerminalSessionID)), ["local-A", "local-B"])
+        XCTAssertEqual(try store.agentRemoteSubscribers(deviceID: "dev-1", agentSessionID: "child-1"), ["local-A", "local-B"])
+        XCTAssertEqual(try store.agentRemoteSubscriptionDeviceIDs(), ["dev-1", "dev-2"])
+    }
+
+    func testRemoteSubscriptionDeleteOneEdgeAndDeleteAllForDeviceAgent() throws {
+        let store = try makeTemporaryStore()
+        try store.insertAgentRemoteSubscription(
+            subscriberTerminalSessionID: "local-A", deviceID: "dev-1", agentSessionID: "child-1", createdAt: "t0")
+        try store.insertAgentRemoteSubscription(
+            subscriberTerminalSessionID: "local-B", deviceID: "dev-1", agentSessionID: "child-1", createdAt: "t1")
+        try store.insertAgentRemoteSubscription(
+            subscriberTerminalSessionID: "local-A", deviceID: "dev-1", agentSessionID: "child-2", createdAt: "t2")
+
+        // Deleting one edge leaves the others.
+        try store.deleteAgentRemoteSubscription(subscriberTerminalSessionID: "local-A", deviceID: "dev-1", agentSessionID: "child-1")
+        XCTAssertEqual(try store.agentRemoteSubscribers(deviceID: "dev-1", agentSessionID: "child-1"), ["local-B"])
+        XCTAssertEqual(try store.agentRemoteSubscribers(deviceID: "dev-1", agentSessionID: "child-2"), ["local-A"])
+
+        // Deleting all edges for a (device, agent) — the exit path — drops every subscriber of that child.
+        try store.deleteAgentRemoteSubscriptions(deviceID: "dev-1", agentSessionID: "child-1")
+        XCTAssertTrue(try store.agentRemoteSubscribers(deviceID: "dev-1", agentSessionID: "child-1").isEmpty)
+        XCTAssertEqual(try store.agentRemoteSubscribers(deviceID: "dev-1", agentSessionID: "child-2"), ["local-A"])
+        XCTAssertEqual(try store.agentRemoteSubscriptionDeviceIDs(), ["dev-1"])
+    }
+
+    func testMigrationFromV3CarriesAgentRowForwardAndEnablesRemoteWatches() throws {
+        let dir = try makeTempDirectory()
+        let dbPath = dir.appendingPathComponent("v3.db").path
+        try createV3Database(at: dbPath, workspaceID: "workspace-1", agentID: "agent-1", terminalSessionID: "agent-session")
+
+        // Opening the store runs the v3→v4 migration in place.
+        let store = try SQLiteStore(path: dbPath)
+
+        // Existing agent, note, and pending-notification data survive the migration.
+        let migrated = try XCTUnwrap(store.agentWindows(workspaceID: "workspace-1").first)
+        XCTAssertEqual(migrated.id, "agent-1")
+        XCTAssertEqual(migrated.note, "carried")
+        XCTAssertEqual(try store.pendingAgentNotifications(subscriberTerminalSessionID: "sub").count, 1)
+
+        // The new cross-device watch table exists post-migration and accepts a remote-agent id.
+        try store.insertAgentRemoteSubscription(
+            subscriberTerminalSessionID: "local-A", deviceID: "dev-1", agentSessionID: "remote-child", createdAt: "t")
+        XCTAssertEqual(try store.agentRemoteSubscribers(deviceID: "dev-1", agentSessionID: "remote-child"), ["local-A"])
+    }
+
     // MARK: - Shared orchestration rows (profile command + Device API)
 
     func testAgentSessionRowsCarryNoteProjectContextAndReadiness() throws {
@@ -237,6 +300,54 @@ final class AgentOrchestrationStoreTests: XCTestCase {
             let message = errorMessage.map { String(cString: $0) } ?? "unknown sqlite error"
             if let errorMessage { sqlite3_free(errorMessage) }
             XCTFail("Failed seeding v1 fixture: \(message)")
+            return
+        }
+    }
+
+    /// Writes a minimal schema-v3 database (`migration_state` at 3, the note-bearing `agent_sessions`, the
+    /// `agent_subscriptions` graph, and `agent_pending_notifications`) with one annotated agent row and one
+    /// pending notification. The migrator upgrades this fixture to v4 (adding `agent_remote_subscriptions`)
+    /// on open; the test asserts the pre-existing rows survive.
+    private func createV3Database(at path: String, workspaceID: String, agentID: String, terminalSessionID: String) throws {
+        var handle: OpaquePointer?
+        guard sqlite3_open(path, &handle) == SQLITE_OK, let db = handle else {
+            XCTFail("Failed opening fixture database at \(path)")
+            return
+        }
+        defer { sqlite3_close(db) }
+        let sql = """
+            CREATE TABLE migration_state (current_version INTEGER NOT NULL);
+            INSERT INTO migration_state(current_version) VALUES (3);
+            CREATE TABLE runtime_targets (
+              id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, type TEXT NOT NULL, name TEXT, detail TEXT,
+              app TEXT NOT NULL, tracking_id TEXT, order_index INTEGER NOT NULL, updated_at TEXT NOT NULL
+            );
+            CREATE TABLE agent_sessions (
+              id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, provider TEXT NOT NULL, label TEXT,
+              status TEXT NOT NULL DEFAULT 'idle', runtime_target_id TEXT, terminal_session_id TEXT, session_key TEXT,
+              claimed_launcher_id TEXT, claimed_launcher_name TEXT, note TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            );
+            CREATE TABLE agent_subscriptions (
+              subscriber_terminal_session_id TEXT NOT NULL, agent_session_id TEXT NOT NULL, created_at TEXT NOT NULL,
+              PRIMARY KEY (subscriber_terminal_session_id, agent_session_id),
+              FOREIGN KEY (agent_session_id) REFERENCES agent_sessions(id) ON DELETE CASCADE
+            );
+            CREATE TABLE agent_pending_notifications (
+              id TEXT PRIMARY KEY, subscriber_terminal_session_id TEXT NOT NULL, agent_session_id TEXT NOT NULL,
+              message TEXT NOT NULL, created_at TEXT NOT NULL
+            );
+            CREATE UNIQUE INDEX idx_agent_pending_per_target
+              ON agent_pending_notifications(subscriber_terminal_session_id, agent_session_id);
+            INSERT INTO agent_sessions(id, workspace_id, provider, label, status, terminal_session_id, note, created_at, updated_at)
+            VALUES ('\(agentID)', '\(workspaceID)', 'spaces', 'X', 'spinning', '\(terminalSessionID)', 'carried', 'now', 'now');
+            INSERT INTO agent_pending_notifications(id, subscriber_terminal_session_id, agent_session_id, message, created_at)
+            VALUES ('pending-1', 'sub', '\(agentID)', '[spaces] X (spaces) is blocked — open: spaces://terminal/\(terminalSessionID)', 't0');
+            """
+        var errorMessage: UnsafeMutablePointer<CChar>?
+        guard sqlite3_exec(db, sql, nil, nil, &errorMessage) == SQLITE_OK else {
+            let message = errorMessage.map { String(cString: $0) } ?? "unknown sqlite error"
+            if let errorMessage { sqlite3_free(errorMessage) }
+            XCTFail("Failed seeding v3 fixture: \(message)")
             return
         }
     }

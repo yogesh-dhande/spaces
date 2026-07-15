@@ -1,0 +1,85 @@
+import spacesdevicecore
+
+/// Pure, testable diff over successive `listAgentSessions` snapshots for one paired device. The remote
+/// watch service feeds it the previous snapshot (watched terminal session id → last-seen row), the fresh
+/// rows, and the set of currently-watched child terminal session ids; it returns the lifecycle
+/// transitions to deliver plus the next snapshot to remember. Watches key on the child's terminal session
+/// id — the stable cross-device handle the user addresses and the deep link targets — so a row is watched
+/// when its `terminalSessionID` is in `watchedTerminalSessionIDs`.
+///
+/// Emission is gated per-agent on having a prior observation of that agent, which gives two properties
+/// for free:
+///  - the first snapshot after a (re)connect (empty `previous`) emits nothing and only seeds a baseline,
+///    so a dropped-then-restored stream never replays the state it already reported;
+///  - a newly-watched agent seen for the first time seeds silently, so subscribing never replays the
+///    state the agent was already in at subscribe time.
+///
+/// Transitions: a status change to `waiting` is `blocked`, to `done` is `done`, and a previously-seen
+/// watched agent that is absent from the new listing has `exited`.
+public enum RemoteAgentSnapshotDiff {
+    public enum TransitionKind: Equatable {
+        case blocked
+        case done
+        case exited
+
+        public var childTransition: AgentNotificationEngine.ChildTransition {
+            switch self {
+            case .blocked: .blocked
+            case .done: .done
+            case .exited: .exited
+            }
+        }
+    }
+
+    public struct Transition: Equatable {
+        /// The watched child's terminal session id (the edge key), which also targets the deep link.
+        public let terminalSessionID: String
+        public let kind: TransitionKind
+        /// The row the notification renders from. For `exited` this is the last-seen row (the agent is
+        /// absent from the new listing), so its label/note survive the disappearance.
+        public let row: SpacesDeviceAgentSessionRow
+
+        public init(terminalSessionID: String, kind: TransitionKind, row: SpacesDeviceAgentSessionRow) {
+            self.terminalSessionID = terminalSessionID
+            self.kind = kind
+            self.row = row
+        }
+    }
+
+    public static func diff(
+        previous: [String: SpacesDeviceAgentSessionRow], newRows: [SpacesDeviceAgentSessionRow], watchedTerminalSessionIDs: Set<String>
+    ) -> (transitions: [Transition], snapshot: [String: SpacesDeviceAgentSessionRow]) {
+        let newByTerminal = Dictionary(
+            newRows.compactMap { row in row.terminalSessionID.flatMap { watchedTerminalSessionIDs.contains($0) ? ($0, row) : nil } },
+            uniquingKeysWith: { first, _ in first })
+        var transitions: [Transition] = []
+        var snapshot: [String: SpacesDeviceAgentSessionRow] = [:]
+        // Sorted iteration keeps transition (and therefore delivery) order deterministic.
+        for terminalSessionID in watchedTerminalSessionIDs.sorted() {
+            let prev = previous[terminalSessionID]
+            if let new = newByTerminal[terminalSessionID] {
+                snapshot[terminalSessionID] = new
+                guard let prev else { continue }  // first observation of this agent: seed silently
+                if let kind = statusTransition(from: prev.status, to: new.status) {
+                    transitions.append(Transition(terminalSessionID: terminalSessionID, kind: kind, row: new))
+                }
+            } else if let prev {
+                // Previously observed, now gone from the listing: the agent exited. Render from the
+                // last-seen row and leave it out of the next snapshot — the caller drops the edge.
+                transitions.append(Transition(terminalSessionID: terminalSessionID, kind: .exited, row: prev))
+            }
+        }
+        return (transitions, snapshot)
+    }
+
+    /// A status transition worth a notification. `working`/`idle` targets never notify, and an unchanged
+    /// status never re-notifies (so a child that stays `waiting` across pushes yields one `blocked` line).
+    private static func statusTransition(from previous: String, to current: String) -> TransitionKind? {
+        guard previous != current else { return nil }
+        switch current {
+        case AgentWindowStatus.waiting.rawValue: return .blocked
+        case AgentWindowStatus.done.rawValue: return .done
+        default: return nil
+        }
+    }
+}

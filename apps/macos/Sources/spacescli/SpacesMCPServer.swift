@@ -225,9 +225,17 @@ final class SpacesMCPStdioServer {
                     let row = try performRemoteAgentSpawn(
                         device: device, workspace: workspace, command: command, title: server.optionalString(arguments["title"]),
                         prompt: server.optionalString(arguments["prompt"]), timeoutSeconds: server.optionalInt(arguments["timeout"]) ?? 90)
+                    // Auto-subscribe the current terminal to the remote child as a cross-device watch on the
+                    // local daemon (which owns this terminal). Skipped when not run inside a Spaces terminal.
+                    let remoteSubscriber = ProcessInfo.processInfo.environment[WorkspaceOrchestrator.terminalTrackingIDEnvVar]?
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    if let remoteSubscriber, !remoteSubscriber.isEmpty, let childSessionID = row.terminalSessionID {
+                        _ = try TerminalService.sendProfileCommand(
+                            .agentSubscribe(.init(subscriberTerminalSessionID: remoteSubscriber, agentSessionID: childSessionID, deviceID: device.id)),
+                            timeout: 30)
+                    }
                     return TerminalServiceProfileCommandResponse(
-                        message:
-                            "Started agent session \(row.terminalSessionID ?? row.id) on \(device.name). Auto-subscribe is skipped for remote children; watch it with spaces_agent_list device=\(device.name).",
+                        message: "Started agent session \(row.terminalSessionID ?? row.id) on \(device.name).",
                         agentSessions: [Self.profileAgentRow(row)])
                 }
                 let subscriber = ProcessInfo.processInfo.environment[WorkspaceOrchestrator.terminalTrackingIDEnvVar]?
@@ -285,10 +293,19 @@ final class SpacesMCPStdioServer {
                 properties: [
                     "session": stringSchema("Child terminal session ID to watch."),
                     "subscriber": stringSchema("Subscriber terminal session ID. Defaults to SPACES_TERMINAL_TRACKING_ID."),
+                    "device": stringSchema("Paired device name or ID the child runs on. Records a cross-device watch. Defaults to this machine."),
                 ], required: ["session"]
             ) { server, arguments in
                 let sessionID = try server.requiredString(arguments["session"], field: "session")
                 let subscriberSessionID = try server.resolvedSubscriberSessionID(arguments)
+                // The subscriber is always a local terminal (this daemon owns it and does the watching); a
+                // cross-device watch passes the child's terminal session id and the device to the local
+                // daemon, which validates it against the remote and records the edge.
+                if let device = try server.resolvedDevice(arguments) {
+                    return try TerminalService.sendProfileCommand(
+                        .agentSubscribe(.init(subscriberTerminalSessionID: subscriberSessionID, agentSessionID: sessionID, deviceID: device.id)),
+                        timeout: 30)
+                }
                 let agentRowID = try resolvedAgentRowID(forChildTerminalSessionID: sessionID)
                 return try TerminalService.sendProfileCommand(
                     .agentSubscribe(.init(subscriberTerminalSessionID: subscriberSessionID, agentSessionID: agentRowID)), timeout: 5)
@@ -299,10 +316,16 @@ final class SpacesMCPStdioServer {
                 properties: [
                     "session": stringSchema("Child terminal session ID to stop watching."),
                     "subscriber": stringSchema("Subscriber terminal session ID. Defaults to SPACES_TERMINAL_TRACKING_ID."),
+                    "device": stringSchema("Paired device name or ID the child runs on (for a cross-device watch). Defaults to this machine."),
                 ], required: ["session"]
             ) { server, arguments in
                 let sessionID = try server.requiredString(arguments["session"], field: "session")
                 let subscriberSessionID = try server.resolvedSubscriberSessionID(arguments)
+                if let device = try server.resolvedDevice(arguments) {
+                    return try TerminalService.sendProfileCommand(
+                        .agentUnsubscribe(.init(subscriberTerminalSessionID: subscriberSessionID, agentSessionID: sessionID, deviceID: device.id)),
+                        timeout: 5)
+                }
                 let agentRowID = try resolvedAgentRowID(forChildTerminalSessionID: sessionID)
                 return try TerminalService.sendProfileCommand(
                     .agentUnsubscribe(.init(subscriberTerminalSessionID: subscriberSessionID, agentSessionID: agentRowID)), timeout: 5)

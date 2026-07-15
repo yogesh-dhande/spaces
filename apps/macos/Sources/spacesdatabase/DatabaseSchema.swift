@@ -7,7 +7,7 @@ import Foundation
 #endif
 
 public enum DatabaseSchema {
-    public static let currentVersion = 3
+    public static let currentVersion = 4
 
     /// Adds the coding-agent orchestration surface: an explicit `note` on each agent session and the
     /// `agent_subscriptions` graph. The subscriber key is a terminal session id (a subscriber may be a
@@ -44,6 +44,24 @@ public enum DatabaseSchema {
               ON agent_pending_notifications(subscriber_terminal_session_id, agent_session_id);
         """
 
+    /// Cross-device watch edges: a local subscriber terminal watches a coding-agent session that lives on
+    /// a paired device (`device_id`). `agent_session_id` holds the watched child's terminal session id on
+    /// that device (the stable cross-device handle, not a local row id). Deliberately has NO foreign key —
+    /// the watched agent lives on another device's database, so there is nothing local to reference. The
+    /// watch service on this device drives the lifecycle: when the watched agent exits (its row leaves the
+    /// remote listing) the notification line is delivered and the edge is dropped. Keyed on (subscriber,
+    /// device, agent) so a terminal watches the same remote agent through exactly one edge. Named
+    /// separately so this step and the fresh-schema SQL share one definition and can never drift apart.
+    static let agentRemoteSubscriptionsSQL = """
+            CREATE TABLE IF NOT EXISTS agent_remote_subscriptions (
+              subscriber_terminal_session_id TEXT NOT NULL,
+              device_id TEXT NOT NULL,
+              agent_session_id TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              PRIMARY KEY (subscriber_terminal_session_id, device_id, agent_session_id)
+            );
+        """
+
     public static let migrationSteps: [DatabaseMigrationStep] = [
         DatabaseMigrationStep(fromVersion: 1, toVersion: 2, description: "Add agent_sessions.note and agent_subscriptions", requiresBackup: true) {
             handle in
@@ -56,6 +74,9 @@ public enum DatabaseSchema {
         },
         DatabaseMigrationStep(fromVersion: 2, toVersion: 3, description: "Add agent_pending_notifications", requiresBackup: true) { handle in
             try migrationExecuteBatch(handle, sql: agentPendingNotificationsSQL)
+        },
+        DatabaseMigrationStep(fromVersion: 3, toVersion: 4, description: "Add agent_remote_subscriptions", requiresBackup: true) { handle in
+            try migrationExecuteBatch(handle, sql: agentRemoteSubscriptionsSQL)
         },
     ]
 
@@ -369,6 +390,8 @@ public enum DatabaseSchema {
             \(agentSubscriptionsSQL)
 
             \(agentPendingNotificationsSQL)
+
+            \(agentRemoteSubscriptionsSQL)
 
             CREATE TABLE IF NOT EXISTS agent_session_events (
               id TEXT PRIMARY KEY,

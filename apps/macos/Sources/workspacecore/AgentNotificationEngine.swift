@@ -56,12 +56,47 @@ public struct AgentNotificationEngine {
         let line = renderLine(agent: agent, transition: transition)
         for subscription in subscriptions {
             let subscriberID = subscription.subscriberTerminalSessionID
-            if try subscriberIsIdle(terminalSessionID: subscriberID) {
-                _ = attemptDelivery(subscriberTerminalSessionID: subscriberID, agentSessionID: agent.id, line: line)
-            } else {
-                try store.upsertPendingAgentNotification(
-                    subscriberTerminalSessionID: subscriberID, agentSessionID: agent.id, message: line, createdAt: now())
+            try deliverOrQueue(subscriberTerminalSessionID: subscriberID, agentSessionID: agent.id, line: line) {
+                try? self.store.deleteAgentSubscription(subscriberTerminalSessionID: subscriberID, agentSessionID: agent.id)
             }
+        }
+    }
+
+    /// A watched coding-agent session on the paired device `deviceID` transitioned to blocked/done/exited,
+    /// as observed by the remote watch service diffing successive `listAgentSessions` snapshots. Shares
+    /// the exact idle-gating, queueing, and render logic with the local `childDidTransition` — the only
+    /// differences are that subscribers come from the cross-device edge table and the deep link is
+    /// device-qualified (`?device=<id>`). The watch edge keys on the child's terminal session id, which
+    /// also targets the deep link. For an `exited` transition the caller drops the edges after this
+    /// returns; the rendered pending line (no FK) survives that, matching the local exit path.
+    public func remoteChildDidTransition(
+        deviceID: String, terminalSessionID: String, row: SpacesDeviceAgentSessionRow, transition: ChildTransition
+    ) throws {
+        let subscribers = try store.agentRemoteSubscribers(deviceID: deviceID, agentSessionID: terminalSessionID)
+        guard !subscribers.isEmpty else { return }
+        let line = renderRemoteLine(terminalSessionID: terminalSessionID, row: row, deviceID: deviceID, transition: transition)
+        for subscriberID in subscribers {
+            try deliverOrQueue(subscriberTerminalSessionID: subscriberID, agentSessionID: terminalSessionID, line: line) {
+                try? self.store.deleteAgentRemoteSubscription(
+                    subscriberTerminalSessionID: subscriberID, deviceID: deviceID, agentSessionID: terminalSessionID)
+            }
+        }
+    }
+
+    /// Delivers a rendered line now when the subscriber is idle, otherwise coalesces it onto the
+    /// subscriber's pending queue. On a failed immediate delivery the subscriber has vanished, so the
+    /// caller-supplied `dropEdge` tears down the originating watch edge (local or cross-device). Shared by
+    /// the local and remote transition paths so both gate and queue identically.
+    private func deliverOrQueue(subscriberTerminalSessionID subscriberID: String, agentSessionID: String, line: String, dropEdge: () -> Void) throws {
+        if try subscriberIsIdle(terminalSessionID: subscriberID) {
+            do { try deliver(subscriberID, line) } catch {
+                logError(
+                    "spaces: agent notification delivery failed subscriber=\(subscriberID) agent=\(agentSessionID) error=\(error.localizedDescription)\n")
+                dropEdge()
+            }
+        } else {
+            try store.upsertPendingAgentNotification(
+                subscriberTerminalSessionID: subscriberID, agentSessionID: agentSessionID, message: line, createdAt: now())
         }
     }
 
@@ -87,9 +122,12 @@ public struct AgentNotificationEngine {
         }
     }
 
-    /// Delivers a line, dropping the subscription edge and logging on failure. Returns whether delivery
-    /// succeeded. A failed delivery means the subscriber session is gone, so the watch edge is torn down
-    /// — the queued pending row (if any) is dropped separately by the caller.
+    /// Flush-path delivery: delivers a queued line, logging and dropping the same-device subscription edge
+    /// on failure. Returns whether delivery succeeded; the pending row itself is deleted by the caller
+    /// regardless. A failed delivery means the subscriber session is gone. A flushed row may have a
+    /// cross-device origin (its `agentSessionID` is then a remote child's terminal session id); dropping a
+    /// local edge for it is a harmless no-op, and the remote edge is torn down by the watch service on its
+    /// next failed delivery — the flush path has no `deviceID` to identify the remote edge here.
     @discardableResult private func attemptDelivery(subscriberTerminalSessionID: String, agentSessionID: String, line: String) -> Bool {
         do {
             try deliver(subscriberTerminalSessionID, line)
@@ -103,17 +141,35 @@ public struct AgentNotificationEngine {
         }
     }
 
-    /// The single injected line. The `[spaces]` prefix guarantees the line never starts with `#`, `/`,
-    /// or `!` (leading characters some agent TUIs treat as slash/command syntax). The note and label are
-    /// rendered verbatim: notes are already stripped of control characters at annotate time, and labels
-    /// come from launch-config titles, so there is no second sanitization pass to add. The deep link
-    /// targets the child's terminal session so a human can jump straight to its pane.
+    /// The single injected line for a local watched agent. See `renderLine(label:provider:note:...)` for
+    /// the shared format; the deep link targets the local child's terminal session (no `?device=`).
     func renderLine(agent: AgentWindowRecord, transition: ChildTransition) -> String {
-        let label = agent.label ?? agent.provider.rawValue
-        let deepLinkSessionID = agent.terminalTrackingID ?? agent.id
-        let deepLink = SpacesTerminalDeepLink(sessionID: deepLinkSessionID).absoluteString
-        var line = "[spaces] \(label) (\(agent.provider.rawValue)) is \(transition.word)"
-        if let note = agent.note, !note.isEmpty { line += " — note: \(note)" }
+        renderLine(
+            label: agent.label ?? agent.provider.rawValue, provider: agent.provider.rawValue, note: agent.note,
+            deepLinkSessionID: agent.terminalTrackingID ?? agent.id, deviceID: nil, transition: transition)
+    }
+
+    /// The single injected line for a watched agent on a paired device. Reuses the shared format; the
+    /// deep link is device-qualified (`?device=<id>`) and targets the remote child's terminal session
+    /// (the watched key), and label/note come straight off the `listAgentSessions` row. The provider
+    /// parenthetical is `spaces`: `listAgentSessions` only ever returns Spaces-provider coding-agent rows.
+    func renderRemoteLine(terminalSessionID: String, row: SpacesDeviceAgentSessionRow, deviceID: String, transition: ChildTransition) -> String {
+        renderLine(
+            label: row.label ?? row.agent ?? "coding agent", provider: "spaces", note: row.note, deepLinkSessionID: terminalSessionID, deviceID: deviceID,
+            transition: transition)
+    }
+
+    /// The single injected line shared by the local and cross-device paths. The `[spaces]` prefix
+    /// guarantees the line never starts with `#`, `/`, or `!` (leading characters some agent TUIs treat as
+    /// slash/command syntax). The note and label are rendered verbatim: notes are already stripped of
+    /// control characters at annotate time and labels come from launch-config titles, so there is no
+    /// second sanitization pass to add. The deep link lets a human jump straight to the child's pane.
+    func renderLine(label: String, provider: String, note: String?, deepLinkSessionID: String, deviceID: String?, transition: ChildTransition)
+        -> String
+    {
+        let deepLink = SpacesTerminalDeepLink(sessionID: deepLinkSessionID, deviceID: deviceID).absoluteString
+        var line = "[spaces] \(label) (\(provider)) is \(transition.word)"
+        if let note, !note.isEmpty { line += " — note: \(note)" }
         line += " — open: \(deepLink)"
         return line
     }

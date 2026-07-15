@@ -158,12 +158,15 @@ final class AgentOrchestrationCLITests: XCTestCase {
         }
     }
 
-    func testAgentSubscribeAndUnsubscribeRejectDeviceLoudly() throws {
-        let subscribe = try AgentSubscribeCommand.parse(["child-session", "--device", "phone"])
-        XCTAssertThrowsError(try subscribe.run()) { error in XCTAssertTrue("\(error)".contains("per-device"), "\(error)") }
+    func testAgentSubscribeAndUnsubscribeAcceptDeviceForCrossDeviceWatch() throws {
+        let subscribe = try AgentSubscribeCommand.parse(["child-session", "--subscriber", "orch-session", "--device", "phone"])
+        XCTAssertEqual(subscribe.session, "child-session")
+        XCTAssertEqual(subscribe.subscriber, "orch-session")
+        XCTAssertEqual(subscribe.device, "phone")
 
         let unsubscribe = try AgentUnsubscribeCommand.parse(["child-session", "--device", "phone"])
-        XCTAssertThrowsError(try unsubscribe.run()) { error in XCTAssertTrue("\(error)".contains("per-device"), "\(error)") }
+        XCTAssertEqual(unsubscribe.session, "child-session")
+        XCTAssertEqual(unsubscribe.device, "phone")
     }
 
     // MARK: - Subscriber resolution

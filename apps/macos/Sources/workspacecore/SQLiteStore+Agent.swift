@@ -228,6 +228,81 @@ extension SQLiteStore {
         return AgentSubscriptionRecord(subscriberTerminalSessionID: row[0], agentSessionID: row[1], createdAt: row[2])
     }
 
+    // MARK: - Cross-device watch edges (agent_remote_subscriptions)
+
+    public func insertAgentRemoteSubscription(subscriberTerminalSessionID: String, deviceID: String, agentSessionID: String, createdAt: String) throws {
+        try execute(
+            sql: """
+                INSERT INTO agent_remote_subscriptions(subscriber_terminal_session_id, device_id, agent_session_id, created_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(subscriber_terminal_session_id, device_id, agent_session_id) DO NOTHING
+                """, bindings: [subscriberTerminalSessionID, deviceID, agentSessionID, createdAt])
+    }
+
+    public func deleteAgentRemoteSubscription(subscriberTerminalSessionID: String, deviceID: String, agentSessionID: String) throws {
+        try execute(
+            sql: """
+                DELETE FROM agent_remote_subscriptions
+                WHERE subscriber_terminal_session_id = ? AND device_id = ? AND agent_session_id = ?
+                """, bindings: [subscriberTerminalSessionID, deviceID, agentSessionID])
+    }
+
+    /// Drops every subscriber's edge to one remote agent — used when the watch service sees that agent
+    /// exit (its row left the remote listing), after the terminating line has been delivered.
+    public func deleteAgentRemoteSubscriptions(deviceID: String, agentSessionID: String) throws {
+        try execute(
+            sql: "DELETE FROM agent_remote_subscriptions WHERE device_id = ? AND agent_session_id = ?", bindings: [deviceID, agentSessionID])
+    }
+
+    /// Remote agents a given local terminal is watching (used when that subscriber goes idle to flush its
+    /// queue — the flush path is shared with local subscriptions and keys only on the subscriber).
+    public func agentRemoteSubscriptions(subscriberTerminalSessionID: String) throws -> [AgentRemoteSubscriptionRecord] {
+        try queryRows(
+            sql: """
+                SELECT subscriber_terminal_session_id, device_id, agent_session_id, created_at
+                FROM agent_remote_subscriptions
+                WHERE subscriber_terminal_session_id = ?
+                ORDER BY created_at
+                """, bindings: [subscriberTerminalSessionID]
+        ).compactMap(decodeAgentRemoteSubscription)
+    }
+
+    /// Every watch edge pointed at a given device (used by the watch service to compute the set of remote
+    /// agents to diff for that device's overview stream).
+    public func agentRemoteSubscriptions(deviceID: String) throws -> [AgentRemoteSubscriptionRecord] {
+        try queryRows(
+            sql: """
+                SELECT subscriber_terminal_session_id, device_id, agent_session_id, created_at
+                FROM agent_remote_subscriptions
+                WHERE device_id = ?
+                ORDER BY created_at
+                """, bindings: [deviceID]
+        ).compactMap(decodeAgentRemoteSubscription)
+    }
+
+    /// The subscriber terminal ids watching one remote agent (used to fan a transition out to watchers).
+    public func agentRemoteSubscribers(deviceID: String, agentSessionID: String) throws -> [String] {
+        try queryRows(
+            sql: """
+                SELECT subscriber_terminal_session_id
+                FROM agent_remote_subscriptions
+                WHERE device_id = ? AND agent_session_id = ?
+                ORDER BY created_at
+                """, bindings: [deviceID, agentSessionID]
+        ).compactMap { $0.first }
+    }
+
+    /// Distinct device ids with at least one watch edge — the set of paired devices the watch service
+    /// keeps an overview stream open to.
+    public func agentRemoteSubscriptionDeviceIDs() throws -> [String] {
+        try queryRows(sql: "SELECT DISTINCT device_id FROM agent_remote_subscriptions ORDER BY device_id").compactMap { $0.first }
+    }
+
+    private func decodeAgentRemoteSubscription(row: [String]) -> AgentRemoteSubscriptionRecord? {
+        guard row.count >= 4 else { return nil }
+        return AgentRemoteSubscriptionRecord(subscriberTerminalSessionID: row[0], deviceID: row[1], agentSessionID: row[2], createdAt: row[3])
+    }
+
     /// The Spaces agent row bound to a terminal session id, searched across every workspace. Returns
     /// `nil` when the terminal has no agent row — a plain shell terminal, which the notification engine
     /// treats as idle. Orchestration reaches an agent by terminal session id (subscriptions key on it)

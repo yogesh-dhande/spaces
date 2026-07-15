@@ -1,0 +1,119 @@
+import XCTest
+import spacesdevicecore
+
+@testable import workspacecore
+
+/// Behavior coverage for the pure remote watch diff and the cross-device subscribe validation. The diff
+/// recovers blocked/done/exited transitions from successive `listAgentSessions` snapshots; the validation
+/// gates a subscribe on a paired device and an existing remote child, both with injected closures.
+final class RemoteAgentSnapshotDiffTests: XCTestCase {
+    // MARK: - Snapshot diff
+
+    func testFirstSnapshotSeedsBaselineWithoutEmitting() throws {
+        let watched: Set<String> = ["term-1", "term-2"]
+        let rows = [row(terminal: "term-1", status: "waiting"), row(terminal: "term-2", status: "spinning")]
+
+        let result = RemoteAgentSnapshotDiff.diff(previous: [:], newRows: rows, watchedTerminalSessionIDs: watched)
+
+        // No prior observation for either agent: baseline seeds, nothing fires (no reconnect replay storm).
+        XCTAssertTrue(result.transitions.isEmpty)
+        XCTAssertEqual(Set(result.snapshot.keys), watched)
+    }
+
+    func testTransitionToWaitingIsBlockedAndToDoneIsDone() throws {
+        let baseline = RemoteAgentSnapshotDiff.diff(
+            previous: [:], newRows: [row(terminal: "term-1", status: "spinning"), row(terminal: "term-2", status: "spinning")],
+            watchedTerminalSessionIDs: ["term-1", "term-2"])
+
+        let result = RemoteAgentSnapshotDiff.diff(
+            previous: baseline.snapshot, newRows: [row(terminal: "term-1", status: "waiting"), row(terminal: "term-2", status: "done")],
+            watchedTerminalSessionIDs: ["term-1", "term-2"])
+
+        // Deterministic sorted order: term-1 (blocked) before term-2 (done).
+        XCTAssertEqual(result.transitions.map(\.terminalSessionID), ["term-1", "term-2"])
+        XCTAssertEqual(result.transitions.map(\.kind), [.blocked, .done])
+    }
+
+    func testUnchangedStatusDoesNotReEmit() throws {
+        let baseline = RemoteAgentSnapshotDiff.diff(
+            previous: [:], newRows: [row(terminal: "term-1", status: "waiting")], watchedTerminalSessionIDs: ["term-1"])
+        // Still waiting across a second push: no repeat blocked line.
+        let result = RemoteAgentSnapshotDiff.diff(
+            previous: baseline.snapshot, newRows: [row(terminal: "term-1", status: "waiting")], watchedTerminalSessionIDs: ["term-1"])
+        XCTAssertTrue(result.transitions.isEmpty)
+    }
+
+    func testWatchedAgentAbsentFromListingIsExitedAndLeavesSnapshot() throws {
+        let baseline = RemoteAgentSnapshotDiff.diff(
+            previous: [:], newRows: [row(terminal: "term-1", status: "done")], watchedTerminalSessionIDs: ["term-1"])
+
+        let result = RemoteAgentSnapshotDiff.diff(previous: baseline.snapshot, newRows: [], watchedTerminalSessionIDs: ["term-1"])
+
+        XCTAssertEqual(result.transitions.map(\.kind), [.exited])
+        // The exit renders from the last-seen row and the agent leaves the next snapshot.
+        XCTAssertEqual(result.transitions.first?.row.status, "done")
+        XCTAssertTrue(result.snapshot.isEmpty)
+    }
+
+    func testNewlyWatchedAgentSeedsSilentlyEvenWithPopulatedBaseline() throws {
+        // term-1 already has a baseline; term-2 is watched for the first time this push.
+        let baseline = RemoteAgentSnapshotDiff.diff(
+            previous: [:], newRows: [row(terminal: "term-1", status: "spinning")], watchedTerminalSessionIDs: ["term-1"])
+
+        let result = RemoteAgentSnapshotDiff.diff(
+            previous: baseline.snapshot, newRows: [row(terminal: "term-1", status: "spinning"), row(terminal: "term-2", status: "waiting")],
+            watchedTerminalSessionIDs: ["term-1", "term-2"])
+
+        // term-2's first observation seeds silently — subscribing never replays its current state.
+        XCTAssertTrue(result.transitions.isEmpty)
+        XCTAssertEqual(Set(result.snapshot.keys), ["term-1", "term-2"])
+    }
+
+    func testRowsWithoutTerminalSessionIDAreIgnored() throws {
+        let baseline = RemoteAgentSnapshotDiff.diff(
+            previous: [:], newRows: [row(terminal: "term-1", status: "spinning")], watchedTerminalSessionIDs: ["term-1"])
+        // A row with no terminal session id cannot be a watch target and never matches.
+        let result = RemoteAgentSnapshotDiff.diff(
+            previous: baseline.snapshot, newRows: [row(terminal: nil, status: "waiting")], watchedTerminalSessionIDs: ["term-1"])
+        // term-1 is now absent from the listing = exited; the nil-terminal row is simply ignored.
+        XCTAssertEqual(result.transitions.map(\.kind), [.exited])
+    }
+
+    // MARK: - Subscribe validation
+
+    private struct FakeDevice { let name: String }
+
+    func testValidateThrowsForUnknownDevice() {
+        XCTAssertThrowsError(
+            try RemoteAgentSubscriptionValidation.validate(
+                deviceID: "dev-missing", childTerminalSessionID: "term-1", resolveDevice: { _ in Optional<FakeDevice>.none },
+                deviceName: { $0.name }, fetchRows: { _ in [] })
+        ) { error in
+            XCTAssertTrue("\(error)".contains("No paired device dev-missing"))
+        }
+    }
+
+    func testValidateThrowsForUnknownRemoteSession() {
+        XCTAssertThrowsError(
+            try RemoteAgentSubscriptionValidation.validate(
+                deviceID: "dev-1", childTerminalSessionID: "term-1", resolveDevice: { _ in FakeDevice(name: "Studio") }, deviceName: { $0.name },
+                fetchRows: { _ in [self.row(terminal: "other-term", status: "waiting")] })
+        ) { error in
+            XCTAssertTrue("\(error)".contains("No agent session for terminal term-1 on Studio"))
+        }
+    }
+
+    func testValidatePassesForPairedDeviceWithMatchingChild() throws {
+        try RemoteAgentSubscriptionValidation.validate(
+            deviceID: "dev-1", childTerminalSessionID: "term-1", resolveDevice: { _ in FakeDevice(name: "Studio") }, deviceName: { $0.name },
+            fetchRows: { _ in [self.row(terminal: "term-1", status: "waiting")] })
+    }
+
+    // MARK: - Fixtures
+
+    private func row(terminal: String?, status: String) -> SpacesDeviceAgentSessionRow {
+        SpacesDeviceAgentSessionRow(
+            id: "row-\(terminal ?? "none")", terminalSessionID: terminal, agent: "CLI", label: "CLI", status: status, note: nil, projectID: "p",
+            projectName: "P", workspaceID: "w", workspaceName: "W", branch: nil, updatedAt: "now", lastSignalAt: "now")
+    }
+}

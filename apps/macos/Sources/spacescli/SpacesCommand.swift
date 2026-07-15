@@ -22,7 +22,7 @@ public struct SpacesCommand: ParsableCommand {
               - Agent events stay explicit. Workspace runtime commands do not imply agent lifecycle. `agent signal <event>` records those lifecycle transitions for the current Spaces terminal session, or no-ops outside one.
               - `agent list`/`agent status` report coding-agent sessions with status, note, project/workspace context, and a spaces://terminal deep link. `agent annotate` sets an explicit note (empty clears it). `status`/`annotate` default the session to SPACES_TERMINAL_TRACKING_ID.
               - `agent spawn --command <cmd>` starts a supported coding agent (claude, codex, opencode) in a new terminal and blocks until it reports its first lifecycle signal, then optionally injects `--prompt`; it auto-subscribes the current terminal. `agent interrupt <session>` sends ESC, `agent kill <session>` terminates the session, and `agent subscribe`/`unsubscribe <session>` record a watch edge (subscriber defaults to SPACES_TERMINAL_TRACKING_ID).
-              - `agent spawn`/`list`/`status`/`annotate`/`interrupt`/`kill` accept `--device <name-or-id>` to act on a paired device; remote `spawn` requires `--workspace`, skips auto-subscribe (subscriptions are same-device), and remote `kill` needs the child to have signaled. `agent subscribe`/`unsubscribe` are same-device only and reject `--device`.
+              - `agent spawn`/`list`/`status`/`annotate`/`interrupt`/`kill`/`subscribe`/`unsubscribe` accept `--device <name-or-id>` to act on a paired device; remote `spawn` requires `--workspace`, auto-subscribes the current terminal to the remote child, and remote `kill` needs the child to have signaled. `agent subscribe --device` records a cross-device watch: the current terminal receives the same blocked/done/exited notification lines for the remote child, delivered by this machine's daemon (device-qualified deep links). Cross-device subscription cycles cannot be detected (the remote's own subscriptions are not queryable locally).
             """, version: AppVersion.current,
         subcommands: [
             ProjectCommand.self, WorkspaceCommand.self, AgentCommand.self, TerminalCommand.self, DeviceCommand.self, DaemonCommand.self,
@@ -294,9 +294,9 @@ func performAgentSpawn(
 }
 
 /// Spawns a coding agent on a paired device and blocks until it reports readiness, polling the device's
-/// `listAgentSessions` on the same schedule as the local path. Auto-subscribe is intentionally skipped:
-/// subscriptions are same-device in v1, so a remote child cannot be wired to this terminal. `--prompt`
-/// is sent through the device terminal-input path once ready. Returns the ready device agent row.
+/// `listAgentSessions` on the same schedule as the local path. `--prompt` is sent through the device
+/// terminal-input path once ready. Returns the ready device agent row; the caller auto-subscribes the
+/// spawning terminal to it as a cross-device watch edge.
 func performRemoteAgentSpawn(
     device: SpacesPairedDeviceRecord, workspace: String, command: String, title: String?, prompt: String?, timeoutSeconds: Int,
     pollInterval: TimeInterval = 0.5
@@ -383,16 +383,21 @@ struct AgentSpawnCommand: ParsableCommand {
             let record = try SpacesPairedDeviceSelection.resolve(device)
             let row = try performRemoteAgentSpawn(
                 device: record, workspace: workspace, command: command, title: title, prompt: prompt, timeoutSeconds: timeout)
+            // Auto-subscribe the spawning terminal to the remote child (a cross-device edge on the local
+            // daemon, which owns this terminal and does the watching). Skipped only when not run inside a
+            // Spaces terminal, or when the ready row has no addressable terminal session id.
+            let remoteSubscriber = ProcessInfo.processInfo.environment[WorkspaceOrchestrator.terminalTrackingIDEnvVar]?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if let remoteSubscriber, !remoteSubscriber.isEmpty, let childSessionID = row.terminalSessionID {
+                _ = try TerminalService.sendProfileCommand(
+                    .agentSubscribe(.init(subscriberTerminalSessionID: remoteSubscriber, agentSessionID: childSessionID, deviceID: record.id)),
+                    timeout: 30)
+            }
             if json {
                 try context.output.emitJSON(row)
                 return
             }
             context.output.emit(agentSessionRow(row, deviceID: record.id))
-            // Subscriptions are same-device in v1, so the spawning terminal is not auto-subscribed to a
-            // remote child. Point the user at the per-device ways to watch it.
-            context.output.emit(
-                "Auto-subscribe is skipped for remote children: subscriptions are per-device. Watch this agent by polling `spaces agent list --device \(record.name)`, or run `spaces agent subscribe \(row.terminalSessionID ?? row.id)` from a terminal on \(record.name)."
-            )
             return
         }
         let subscriber = ProcessInfo.processInfo.environment[WorkspaceOrchestrator.terminalTrackingIDEnvVar]?
@@ -458,28 +463,28 @@ struct AgentKillCommand: ParsableCommand {
     }
 }
 
-/// Rejects an explicit `--device` on `subscribe`/`unsubscribe`. Subscriptions are same-device in v1 —
-/// the injection engine that consumes them lives on the daemon that owns the subscriber terminal — so
-/// there is no meaningful cross-device edge to record. Surfaced loudly rather than silently ignored.
-private func rejectDeviceForSubscription(_ device: String?, verb: String) throws {
-    guard let device, !device.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-    throw ValidationError(
-        "\(verb) is per-device: subscriptions are delivered on the device that owns the subscriber terminal. Run `spaces agent \(verb)` from a terminal on \(device), or poll the child with `spaces agent list --device \(device)`."
-    )
-}
-
 struct AgentSubscribeCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "subscribe", abstract: "Watch a child coding-agent session from the current (or an explicit) terminal.")
 
     @Argument(help: "Child terminal session ID to watch.") var session: String
     @Option(name: .long, help: "Subscriber terminal session ID. Defaults to SPACES_TERMINAL_TRACKING_ID.") var subscriber: String?
-    @Option(name: .long, help: "Rejected: subscriptions are per-device. Run subscribe on the child's device.") var device: String?
+    @Option(name: .long, help: "Paired device name or ID the child runs on. Records a cross-device watch. Defaults to this machine.")
+    var device: String?
 
     func run() throws {
-        try rejectDeviceForSubscription(device, verb: "subscribe")
         let context = CLIContext()
         let subscriberSessionID = try resolvedSubscriberSessionID(subscriber)
+        if let device {
+            // The subscriber is always a local terminal: the watching daemon (this machine) owns it and
+            // does the watching. The child's terminal session id is passed as-is; the local daemon
+            // validates it against the remote device and records the cross-device edge.
+            let record = try SpacesPairedDeviceSelection.resolve(device)
+            let response = try TerminalService.sendProfileCommand(
+                .agentSubscribe(.init(subscriberTerminalSessionID: subscriberSessionID, agentSessionID: session, deviceID: record.id)), timeout: 30)
+            context.output.emit(response.message)
+            return
+        }
         let agentRowID = try resolvedAgentRowID(forChildTerminalSessionID: session)
         let response = try TerminalService.sendProfileCommand(
             .agentSubscribe(.init(subscriberTerminalSessionID: subscriberSessionID, agentSessionID: agentRowID)), timeout: 5)
@@ -493,12 +498,21 @@ struct AgentUnsubscribeCommand: ParsableCommand {
 
     @Argument(help: "Child terminal session ID to stop watching.") var session: String
     @Option(name: .long, help: "Subscriber terminal session ID. Defaults to SPACES_TERMINAL_TRACKING_ID.") var subscriber: String?
-    @Option(name: .long, help: "Rejected: subscriptions are per-device. Run unsubscribe on the child's device.") var device: String?
+    @Option(name: .long, help: "Paired device name or ID the child runs on (for a cross-device watch). Defaults to this machine.")
+    var device: String?
 
     func run() throws {
-        try rejectDeviceForSubscription(device, verb: "unsubscribe")
         let context = CLIContext()
         let subscriberSessionID = try resolvedSubscriberSessionID(subscriber)
+        if let device {
+            // A cross-device edge keys on the child's terminal session id, so unsubscribe needs no remote
+            // call and works even when the device is offline.
+            let record = try SpacesPairedDeviceSelection.resolve(device)
+            let response = try TerminalService.sendProfileCommand(
+                .agentUnsubscribe(.init(subscriberTerminalSessionID: subscriberSessionID, agentSessionID: session, deviceID: record.id)), timeout: 5)
+            context.output.emit(response.message)
+            return
+        }
         let agentRowID = try resolvedAgentRowID(forChildTerminalSessionID: session)
         let response = try TerminalService.sendProfileCommand(
             .agentUnsubscribe(.init(subscriberTerminalSessionID: subscriberSessionID, agentSessionID: agentRowID)), timeout: 5)

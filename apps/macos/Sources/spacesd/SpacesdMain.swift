@@ -1,5 +1,6 @@
 import Dispatch
 import Foundation
+import spacesclientcore
 import spacesdevicecore
 import spacesruntimecore
 import spacesterminalcore
@@ -63,6 +64,7 @@ import workspacecore
     #endif
     private var worktreeDiscoveryService: WorktreeDiscoveryService?
     private var terminalForegroundAgentReconciler: TerminalForegroundAgentReconciler?
+    private var remoteAgentWatchService: RemoteAgentWatchService?
     private var databaseChangeObserver: NSObjectProtocol?
     #if os(Linux)
         private var databaseChangeSignalReceiver: DatabaseChangeSignalReceiver?
@@ -135,6 +137,15 @@ import workspacecore
         }
         foregroundAgentReconciler.start()
         terminalForegroundAgentReconciler = foregroundAgentReconciler
+        let remoteAgentWatch = RemoteAgentWatchService(
+            databasePath: databasePath, clientApp: Self.daemonDeviceClientApp(),
+            deliver: { [weak self] sessionID, line in
+                guard let self else { throw Self.requestFailedError("spacesd is shutting down.") }
+                _ = try self.sendProfileTerminalInput(
+                    TerminalServiceTerminalSendPayload(sessionID: sessionID, input: .text(line), appendNewline: true))
+            }, logError: { writeStandardError($0) })
+        remoteAgentWatch.start()
+        remoteAgentWatchService = remoteAgentWatch
         #if os(macOS)
             // The router port is a Mac-only concept: only the macOS client runs Caddy, so only it
             // pins/consumes a real listening port. Seed it alongside the router service and never on
@@ -176,6 +187,7 @@ import workspacecore
 
     private func handleDatabaseDidChangeForDeviceRuntime() {
         worktreeDiscoveryService?.refreshWatchers()
+        remoteAgentWatchService?.reconcile()
         #if os(macOS)
             processExitMonitor?.refreshObservers()
             caddyRouterService?.reconcile()
@@ -241,6 +253,8 @@ import workspacecore
         worktreeDiscoveryService = nil
         terminalForegroundAgentReconciler?.stop()
         terminalForegroundAgentReconciler = nil
+        remoteAgentWatchService?.stop()
+        remoteAgentWatchService = nil
         #if os(macOS)
             processExitMonitor?.stop()
             processExitMonitor = nil
@@ -769,6 +783,15 @@ import workspacecore
             return try subscribeProfileAgentSession(payload, orchestrator: orchestrator)
         case .agentUnsubscribe(let payload):
             let orchestrator = try makeProfileOrchestrator()
+            if let deviceID = payload.deviceID {
+                // A cross-device edge keys on the child's terminal session id, so it drops without a remote
+                // call — unsubscribing works even when the device is offline.
+                try orchestrator.store.deleteAgentRemoteSubscription(
+                    subscriberTerminalSessionID: payload.subscriberTerminalSessionID, deviceID: deviceID, agentSessionID: payload.agentSessionID)
+                remoteAgentWatchService?.reconcile()
+                return TerminalServiceProfileCommandResponse(
+                    message: "Unsubscribed from agent session \(payload.agentSessionID) on device \(deviceID).")
+            }
             try orchestrator.store.deleteAgentSubscription(
                 subscriberTerminalSessionID: payload.subscriberTerminalSessionID, agentSessionID: payload.agentSessionID)
             return TerminalServiceProfileCommandResponse(message: "Unsubscribed from agent session.")
@@ -1067,18 +1090,39 @@ import workspacecore
         return (try? TerminalSessionPersistence.readLaunchConfiguration(paths: paths)) != nil
     }
 
-    /// Persists a subscription edge after validating (in the orchestrator) that the watched agent exists
-    /// and the edge keeps the subscription graph acyclic — a self-edge or any cycle-closing edge is a
-    /// loud error, since a cycle would let injected notifications chase each other around a loop.
+    /// Persists a subscription edge. Same-device: validate (in the orchestrator) that the watched agent
+    /// exists and the edge keeps the subscription graph acyclic — a self-edge or any cycle-closing edge is
+    /// a loud error, since a cycle would let injected notifications chase each other around a loop.
+    /// Cross-device (`deviceID` set): validate the device is paired and the child has an agent session on
+    /// it (one `listAgentSessions` call), then record a cross-device edge keyed on the child's terminal
+    /// session id and nudge the watch service to open/refresh that device's stream. Cross-device cycle
+    /// detection is impossible locally — the remote's own subscription graph is not queryable — so only
+    /// the same-device acyclic invariant is enforced.
     private func subscribeProfileAgentSession(_ payload: TerminalServiceAgentSubscriptionPayload, orchestrator: WorkspaceOrchestrator) throws
         -> TerminalServiceProfileCommandResponse
     {
+        if let deviceID = payload.deviceID {
+            let clientApp = Self.daemonDeviceClientApp()
+            try RemoteAgentSubscriptionValidation.validate(
+                deviceID: deviceID, childTerminalSessionID: payload.agentSessionID,
+                resolveDevice: { try SpacesClientDatabase.defaultDatabase().pairedDevice(id: $0) }, deviceName: { $0.name },
+                fetchRows: { try SpacesDeviceClient.listAgentSessions(sessionID: payload.agentSessionID, device: $0, clientApp: clientApp) })
+            try orchestrator.store.insertAgentRemoteSubscription(
+                subscriberTerminalSessionID: payload.subscriberTerminalSessionID, deviceID: deviceID, agentSessionID: payload.agentSessionID,
+                createdAt: nowISO8601())
+            remoteAgentWatchService?.reconcile()
+            return TerminalServiceProfileCommandResponse(message: "Subscribed to agent session \(payload.agentSessionID) on device \(deviceID).")
+        }
         try orchestrator.validateAgentSubscription(
             subscriberTerminalSessionID: payload.subscriberTerminalSessionID, agentSessionID: payload.agentSessionID)
         try orchestrator.store.insertAgentSubscription(
             subscriberTerminalSessionID: payload.subscriberTerminalSessionID, agentSessionID: payload.agentSessionID, createdAt: nowISO8601())
         return TerminalServiceProfileCommandResponse(message: "Subscribed to agent session.")
     }
+
+    /// The daemon's own Device API client identity when it acts as a device client (subscribe validation
+    /// and the watch service). Reads paired-device credentials the same way the CLI and Mac app do.
+    private static func daemonDeviceClientApp() -> SpacesDeviceClientApp { SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short) }
 
     private func postAgentEventNotification() {
         #if os(macOS)

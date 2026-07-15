@@ -1,5 +1,6 @@
 import Foundation
 import XCTest
+import spacesdevicecore
 import spacesterminalcore
 
 @testable import workspacecore
@@ -269,7 +270,84 @@ final class AgentNotificationEngineTests: XCTestCase {
         XCTAssertEqual(pending.first?.message, "[spaces] X (spaces) is done — open: spaces://terminal/child-session")
     }
 
+    // MARK: - Cross-device (remote) watch delivery
+
+    func testRemoteChildIdleSubscriberReceivesDeviceQualifiedLineWithNote() throws {
+        let store = try makeTemporaryStore()
+        let recorder = DeliveryRecorder()
+        let engine = makeEngine(store: store, recorder: recorder)
+        // A plain local terminal (no agent row of its own) counts as idle.
+        try store.insertAgentRemoteSubscription(
+            subscriberTerminalSessionID: "local-orch", deviceID: "dev-1", agentSessionID: "remote-term", createdAt: "t")
+        let row = makeRemoteRow(terminalSessionID: "remote-term", label: "Codex CLI", note: "ship the fix", status: "waiting")
+
+        try engine.remoteChildDidTransition(deviceID: "dev-1", terminalSessionID: "remote-term", row: row, transition: .blocked)
+
+        XCTAssertEqual(recorder.delivered.map(\.sessionID), ["local-orch"])
+        XCTAssertEqual(
+            recorder.delivered.map(\.line),
+            ["[spaces] Codex CLI (spaces) is blocked — note: ship the fix — open: spaces://terminal/remote-term?device=dev-1"])
+        XCTAssertTrue(try store.pendingAgentNotifications(subscriberTerminalSessionID: "local-orch").isEmpty)
+    }
+
+    func testBusySubscriberQueuesLocalAndRemoteThenFlushesBothInOrder() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        let recorder = DeliveryRecorder()
+        let engine = makeEngine(store: store, recorder: recorder)
+
+        // The subscriber terminal runs its own agent that is spinning, i.e. busy: everything queues.
+        _ = try orchestrator.registerAgentWindow(workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "orch", status: .spinning)
+        let localChild = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Local CLI", terminalTrackingID: "local-child", status: .waiting)
+        try store.insertAgentSubscription(subscriberTerminalSessionID: "orch", agentSessionID: localChild.id, createdAt: "t")
+        try store.insertAgentRemoteSubscription(subscriberTerminalSessionID: "orch", deviceID: "dev-1", agentSessionID: "remote-term", createdAt: "t")
+
+        try engine.childDidTransition(agent: localChild, transition: .blocked)
+        let remoteRow = makeRemoteRow(terminalSessionID: "remote-term", label: "Remote CLI", note: nil, status: "done")
+        try engine.remoteChildDidTransition(deviceID: "dev-1", terminalSessionID: "remote-term", row: remoteRow, transition: .done)
+
+        // Both queued while busy — nothing delivered yet.
+        XCTAssertTrue(recorder.delivered.isEmpty)
+        XCTAssertEqual(try store.pendingAgentNotifications(subscriberTerminalSessionID: "orch").count, 2)
+
+        // Idle flush delivers the local and remote pending lines once, in enqueue order.
+        try engine.subscriberDidBecomeIdle(subscriberTerminalSessionID: "orch")
+        XCTAssertEqual(
+            recorder.delivered.map(\.line),
+            [
+                "[spaces] Local CLI (spaces) is blocked — open: spaces://terminal/local-child",
+                "[spaces] Remote CLI (spaces) is done — open: spaces://terminal/remote-term?device=dev-1",
+            ])
+        XCTAssertTrue(try store.pendingAgentNotifications(subscriberTerminalSessionID: "orch").isEmpty)
+    }
+
+    func testRemoteExitDeliveredLineReadsExitedAndFailedDeliveryDropsRemoteEdge() throws {
+        let store = try makeTemporaryStore()
+        let recorder = DeliveryRecorder()
+        recorder.failingSessionIDs = ["dead-orch"]
+        let engine = makeEngine(store: store, recorder: recorder)
+        try store.insertAgentRemoteSubscription(
+            subscriberTerminalSessionID: "dead-orch", deviceID: "dev-1", agentSessionID: "remote-term", createdAt: "t")
+        let row = makeRemoteRow(terminalSessionID: "remote-term", label: "Remote CLI", note: nil, status: "done")
+
+        // The subscriber session is gone: a failed immediate delivery drops the cross-device edge.
+        try engine.remoteChildDidTransition(deviceID: "dev-1", terminalSessionID: "remote-term", row: row, transition: .exited)
+
+        XCTAssertTrue(recorder.delivered.isEmpty)
+        XCTAssertTrue(try store.agentRemoteSubscribers(deviceID: "dev-1", agentSessionID: "remote-term").isEmpty)
+    }
+
     // MARK: - Fixtures
+
+    private func makeRemoteRow(terminalSessionID: String?, label: String?, note: String?, status: String) -> SpacesDeviceAgentSessionRow {
+        SpacesDeviceAgentSessionRow(
+            id: "row-\(terminalSessionID ?? "none")", terminalSessionID: terminalSessionID, agent: label, label: label, status: status, note: note,
+            projectID: "p", projectName: "P", workspaceID: "w", workspaceName: "W", branch: nil, updatedAt: "now", lastSignalAt: "now")
+    }
+
+    // MARK: - Shared engine fixtures
 
     /// An engine whose delivery is the recorder and whose clock advances one second per pending write so
     /// queue order is deterministic in tests. Logging is silenced.
