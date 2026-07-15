@@ -527,7 +527,8 @@
             guard var payload = request.inputPayload else {
                 return TerminalControlResponse(ok: false, message: "Missing input payload.", errorCode: .invalidArgument)
             }
-            if request.appendNewline { payload.append(0x0A) }
+            // Enter is a carriage return (0x0D); see GhosttyEmbeddedSessionHost for the TUI rationale.
+            if request.appendNewline { payload.append(0x0D) }
             markLocalOwnerCommandInputOutputResyncPending()
             ptyDriver.sendRawBytes(payload)
             return TerminalControlResponse(ok: true, message: "Sent input.")

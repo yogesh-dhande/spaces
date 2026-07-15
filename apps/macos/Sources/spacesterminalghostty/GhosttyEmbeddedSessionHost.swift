@@ -881,7 +881,9 @@
                 guard var payload = request.inputPayload else {
                     return TerminalControlResponse(ok: false, message: "Missing input payload.", errorCode: .invalidArgument)
                 }
-                if request.appendNewline { payload.append(0x0A) }
+                // Enter is a carriage return (0x0D): shells and Claude Code accept LF or CR, but
+                // Codex's TUI submits only on CR, so LF would leave a prompt sitting in its composer.
+                if request.appendNewline { payload.append(0x0D) }
                 markLocalOwnerCommandInputOutputResyncPending()
                 rendererHostStorage.sendRawBytes(payload)
                 TerminalPerformance.logMetric(
