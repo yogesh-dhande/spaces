@@ -14,19 +14,25 @@ import spacesdevicecore
 ///  - a newly-watched agent seen for the first time seeds silently, so subscribing never replays the
 ///    state the agent was already in at subscribe time.
 ///
-/// Transitions: a status change to `waiting` is `blocked`, to `done` is `done`, and a previously-seen
-/// watched agent that is absent from the new listing has `exited`.
+/// Transitions: a status change to `waiting` is `blocked`, to `done` is `done`, a previously-seen
+/// watched agent that is absent from the new listing has `exited`, and `waiting` → `spinning` is
+/// `resumedWorking` — the child resumed after an approval, which never notifies but withdraws that
+/// child's held `blocked` line.
 public enum RemoteAgentSnapshotDiff {
     public enum TransitionKind: Equatable {
         case blocked
         case done
         case exited
+        case resumedWorking
 
-        public var childTransition: AgentNotificationEngine.ChildTransition {
+        /// The notifying transition this kind delivers, or `nil` for `resumedWorking`, whose only
+        /// effect is the engine's held-blocked-line withdrawal.
+        public var childTransition: AgentNotificationEngine.ChildTransition? {
             switch self {
             case .blocked: .blocked
             case .done: .done
             case .exited: .exited
+            case .resumedWorking: nil
             }
         }
     }
@@ -72,13 +78,16 @@ public enum RemoteAgentSnapshotDiff {
         return (transitions, snapshot)
     }
 
-    /// A status transition worth a notification. `working`/`idle` targets never notify, and an unchanged
-    /// status never re-notifies (so a child that stays `waiting` across pushes yields one `blocked` line).
+    /// A status transition worth acting on. `working`/`idle` targets never notify, and an unchanged
+    /// status never re-emits (so a child that stays `waiting` across pushes yields one `blocked` line).
+    /// The one working target that matters is `waiting` → `spinning`: the child resumed after an
+    /// approval, which must withdraw its held `blocked` line even though it delivers nothing.
     private static func statusTransition(from previous: String, to current: String) -> TransitionKind? {
         guard previous != current else { return nil }
         switch current {
         case AgentWindowStatus.waiting.rawValue: return .blocked
         case AgentWindowStatus.done.rawValue: return .done
+        case AgentWindowStatus.spinning.rawValue: return previous == AgentWindowStatus.waiting.rawValue ? .resumedWorking : nil
         default: return nil
         }
     }

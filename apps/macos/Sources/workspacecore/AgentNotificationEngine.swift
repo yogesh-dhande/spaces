@@ -65,10 +65,20 @@ public struct AgentNotificationEngine {
         let line = try renderLine(agent: agent, transition: transition)
         for subscription in subscriptions {
             let subscriberID = subscription.subscriberTerminalSessionID
-            try deliverOrQueue(subscriberTerminalSessionID: subscriberID, agentSessionID: agent.id, line: line) {
+            try deliverOrQueue(subscriberTerminalSessionID: subscriberID, agentSessionID: agent.id, transition: transition, line: line) {
                 try? self.store.deleteAgentSubscription(subscriberTerminalSessionID: subscriberID, agentSessionID: agent.id)
             }
         }
+    }
+
+    /// A watched child resumed working after being blocked (the daemon chokepoint calls this on a real
+    /// blocked→working transition, and the remote watch on a waiting→spinning diff). The resume itself
+    /// never notifies, but any HELD pending line still rendering `blocked` for this child is withdrawn —
+    /// an "is blocked" notice delivered after the child resumed is misinformation. Held `done`/`exited`
+    /// lines are terminal facts and stay. `agentSessionID` is the same key the queue rows carry: the
+    /// local agent row id, or the child's terminal session id for a cross-device watch.
+    public func childDidResumeWorking(agentSessionID: String) throws {
+        try store.deletePendingAgentNotifications(agentSessionID: agentSessionID, transition: ChildTransition.blocked.word)
     }
 
     /// A watched coding-agent session on the paired device `deviceID` transitioned to blocked/done/exited,
@@ -85,7 +95,7 @@ public struct AgentNotificationEngine {
         guard !subscribers.isEmpty else { return }
         let line = renderRemoteLine(terminalSessionID: terminalSessionID, row: row, deviceID: deviceID, transition: transition)
         for subscriberID in subscribers {
-            try deliverOrQueue(subscriberTerminalSessionID: subscriberID, agentSessionID: terminalSessionID, line: line) {
+            try deliverOrQueue(subscriberTerminalSessionID: subscriberID, agentSessionID: terminalSessionID, transition: transition, line: line) {
                 try? self.store.deleteAgentRemoteSubscription(
                     subscriberTerminalSessionID: subscriberID, deviceID: deviceID, agentSessionID: terminalSessionID)
             }
@@ -96,7 +106,9 @@ public struct AgentNotificationEngine {
     /// subscriber's pending queue. On a failed immediate delivery the subscriber has vanished, so the
     /// caller-supplied `dropEdge` tears down the originating watch edge (local or cross-device). Shared by
     /// the local and remote transition paths so both gate and queue identically.
-    private func deliverOrQueue(subscriberTerminalSessionID subscriberID: String, agentSessionID: String, line: String, dropEdge: () -> Void) throws {
+    private func deliverOrQueue(
+        subscriberTerminalSessionID subscriberID: String, agentSessionID: String, transition: ChildTransition, line: String, dropEdge: () -> Void
+    ) throws {
         if try subscriberIsIdle(terminalSessionID: subscriberID) {
             do { try deliver(subscriberID, line) } catch {
                 logError(
@@ -105,7 +117,8 @@ public struct AgentNotificationEngine {
             }
         } else {
             try store.upsertPendingAgentNotification(
-                subscriberTerminalSessionID: subscriberID, agentSessionID: agentSessionID, message: line, createdAt: now())
+                subscriberTerminalSessionID: subscriberID, agentSessionID: agentSessionID, transition: transition.word, message: line,
+                createdAt: now())
         }
     }
 

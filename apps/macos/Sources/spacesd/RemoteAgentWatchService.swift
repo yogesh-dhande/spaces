@@ -189,9 +189,13 @@ final class RemoteAgentWatchService {
         let engine = AgentNotificationEngine(store: store, deliver: deliver, logError: logError)
         for transition in result.transitions {
             do {
-                try engine.remoteChildDidTransition(
-                    deviceID: deviceID, terminalSessionID: transition.terminalSessionID, row: transition.row,
-                    transition: transition.kind.childTransition)
+                if let childTransition = transition.kind.childTransition {
+                    try engine.remoteChildDidTransition(
+                        deviceID: deviceID, terminalSessionID: transition.terminalSessionID, row: transition.row, transition: childTransition)
+                } else {
+                    // resumedWorking: nothing to deliver — withdraw the child's held blocked line.
+                    try engine.childDidResumeWorking(agentSessionID: transition.terminalSessionID)
+                }
             } catch {
                 logError("spacesd remote_agent_watch device=\(deviceID) deliver_failed agent=\(transition.terminalSessionID) error=\(error)\n")
             }

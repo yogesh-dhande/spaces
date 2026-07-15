@@ -259,6 +259,88 @@ final class AgentNotificationEngineTests: XCTestCase {
             """)
     }
 
+    /// A child that resumes working after an approval must withdraw its held "is blocked" line — the
+    /// subscriber never receives stale misinformation, and going idle later delivers nothing.
+    func testResumeAfterBlockedWithdrawsHeldBlockedLine() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        let recorder = DeliveryRecorder()
+        let engine = makeEngine(store: store, recorder: recorder, kind: "claude")
+
+        _ = try orchestrator.registerAgentWindow(workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "sub-session", status: .spinning)
+        let child = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Claude Code CLI", terminalTrackingID: "child-session", status: .waiting)
+        try store.insertAgentSubscription(subscriberTerminalSessionID: "sub-session", agentSessionID: child.id, createdAt: "t")
+
+        try engine.childDidTransition(agent: child, transition: .blocked)
+        XCTAssertEqual(try store.pendingAgentNotifications(subscriberTerminalSessionID: "sub-session").count, 1)
+
+        try engine.childDidResumeWorking(agentSessionID: child.id)
+
+        XCTAssertTrue(try store.pendingAgentNotifications(subscriberTerminalSessionID: "sub-session").isEmpty)
+        try engine.subscriberDidBecomeIdle(subscriberTerminalSessionID: "sub-session")
+        XCTAssertTrue(recorder.delivered.isEmpty, "A withdrawn blocked line must never be delivered.")
+    }
+
+    /// The withdrawal keys on the transition the held row renders, not the child alone: a held `done`
+    /// line is a terminal fact and survives a resume call, while a sibling's blocked line is dropped.
+    func testResumeWithdrawsOnlyBlockedLinesHeldDoneLineSurvives() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        let recorder = DeliveryRecorder()
+        let engine = makeEngine(store: store, recorder: recorder, kind: "claude")
+
+        _ = try orchestrator.registerAgentWindow(workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "sub-session", status: .spinning)
+        let blockedChild = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "A", terminalTrackingID: "childA", status: .waiting)
+        let doneChild = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "B", terminalTrackingID: "childB", status: .done)
+        try store.insertAgentSubscription(subscriberTerminalSessionID: "sub-session", agentSessionID: blockedChild.id, createdAt: "t0")
+        try store.insertAgentSubscription(subscriberTerminalSessionID: "sub-session", agentSessionID: doneChild.id, createdAt: "t1")
+
+        try engine.childDidTransition(agent: blockedChild, transition: .blocked)
+        try engine.childDidTransition(agent: doneChild, transition: .done)
+
+        try engine.childDidResumeWorking(agentSessionID: blockedChild.id)
+        // A resume call against the done child's id must not withdraw its terminal-fact line.
+        try engine.childDidResumeWorking(agentSessionID: doneChild.id)
+
+        try engine.subscriberDidBecomeIdle(subscriberTerminalSessionID: "sub-session")
+        XCTAssertEqual(
+            recorder.delivered.map(\.line),
+            [
+                """
+                [spaces] B (claude) is done
+                  project: Project
+                  workspace: \(workspace.dir)
+                  session: childB
+                  link: spaces://terminal/childB
+                """
+            ])
+    }
+
+    /// The cross-device queue keys held rows on the remote child's terminal session id, so a remote
+    /// resume (waiting→spinning in the device listing) withdraws through the same engine entry point.
+    func testRemoteResumeWithdrawsHeldBlockedLine() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        let recorder = DeliveryRecorder()
+        let engine = makeEngine(store: store, recorder: recorder)
+
+        _ = try orchestrator.registerAgentWindow(workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "orch", status: .spinning)
+        try store.insertAgentRemoteSubscription(subscriberTerminalSessionID: "orch", deviceID: "dev-1", agentSessionID: "remote-term", createdAt: "t")
+        let row = makeRemoteRow(terminalSessionID: "remote-term", agent: "codex", label: "Remote CLI", note: nil, status: "waiting")
+        try engine.remoteChildDidTransition(deviceID: "dev-1", terminalSessionID: "remote-term", row: row, transition: .blocked)
+        XCTAssertEqual(try store.pendingAgentNotifications(subscriberTerminalSessionID: "orch").count, 1)
+
+        try engine.childDidResumeWorking(agentSessionID: "remote-term")
+
+        XCTAssertTrue(try store.pendingAgentNotifications(subscriberTerminalSessionID: "orch").isEmpty)
+    }
+
     func testExitNotificationSurvivesAgentRowDeletionAndCascadedEdge() throws {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)
@@ -377,15 +459,15 @@ final class AgentNotificationEngineTests: XCTestCase {
         let dbPath = dir.appendingPathComponent("v2.db").path
         try createV2Database(at: dbPath, workspaceID: "workspace-1", agentID: "agent-1", terminalSessionID: "child-session")
 
-        // Opening the store runs the v2→v3 migration in place.
+        // Opening the store runs the v2→v3 (and onward to current) migrations in place.
         let store = try SQLiteStore(path: dbPath)
 
         try store.upsertPendingAgentNotification(
-            subscriberTerminalSessionID: "sub", agentSessionID: "agent-1",
+            subscriberTerminalSessionID: "sub", agentSessionID: "agent-1", transition: "blocked",
             message: "[spaces] X (spaces) is blocked — spaces://terminal/child-session", createdAt: "t0")
         // A second write for the same (subscriber, agent) coalesces onto one latest-state row.
         try store.upsertPendingAgentNotification(
-            subscriberTerminalSessionID: "sub", agentSessionID: "agent-1",
+            subscriberTerminalSessionID: "sub", agentSessionID: "agent-1", transition: "done",
             message: "[spaces] X (spaces) is done — spaces://terminal/child-session", createdAt: "t1")
 
         let pending = try store.pendingAgentNotifications(subscriberTerminalSessionID: "sub")

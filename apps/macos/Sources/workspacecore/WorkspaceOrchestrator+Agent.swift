@@ -462,11 +462,16 @@ extension WorkspaceOrchestrator {
         status: AgentWindowStatus, claimedLauncherName: String? = nil, eventType: String? = nil, eventSource: String = "orchestrator",
         environmentKeys: [String]? = nil
     ) throws -> AgentWindowRecord {
+        let existing = try matchingAgentWindow(workspaceID: workspaceID, terminalTrackingID: terminalTrackingID, sessionKey: sessionKey)
+        // Per-tool hooks make an active agent signal `working` on every tool call. A signal that would
+        // keep the row spinning is a pure no-op: no `agent_session_events` row (the event log records
+        // state transitions, not tool calls) and no row rewrite — `updated_at` deliberately stays the
+        // time the agent *entered* working, so it reads as the transition time, not tool-call recency.
+        if let existing, status == .spinning, existing.status == .spinning { return existing }
         let now = nowISO8601()
         let allAgentWindows = try store.agentWindows(workspaceID: workspaceID)
         let trackedWindow = try ensureTrackedWindowExistsForAgent(
             workspaceID: workspaceID, provider: provider, label: label, terminalTrackingID: terminalTrackingID)
-        let existing = try matchingAgentWindow(workspaceID: workspaceID, terminalTrackingID: terminalTrackingID, sessionKey: sessionKey)
         if let existing {
             let resolvedClaimedLauncherName = claimedLauncherName ?? existing.claimedLauncherName
             let resolvedLabel = try uniqueAgentFocusLabel(

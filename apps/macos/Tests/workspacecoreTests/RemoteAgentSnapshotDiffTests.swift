@@ -34,6 +34,23 @@ final class RemoteAgentSnapshotDiffTests: XCTestCase {
         XCTAssertEqual(result.transitions.map(\.kind), [.blocked, .done])
     }
 
+    /// waiting → spinning is the child resuming after an approval: a non-notifying `resumedWorking`
+    /// transition (it maps to no ChildTransition) whose only effect is withdrawing the held blocked
+    /// line. Any other path into `spinning` stays silent — there is nothing to withdraw.
+    func testWaitingToSpinningEmitsNonNotifyingResumedWorking() throws {
+        let baseline = RemoteAgentSnapshotDiff.diff(
+            previous: [:], newRows: [row(terminal: "term-1", status: "waiting"), row(terminal: "term-2", status: "idle")],
+            watchedTerminalSessionIDs: ["term-1", "term-2"])
+
+        let result = RemoteAgentSnapshotDiff.diff(
+            previous: baseline.snapshot, newRows: [row(terminal: "term-1", status: "spinning"), row(terminal: "term-2", status: "spinning")],
+            watchedTerminalSessionIDs: ["term-1", "term-2"])
+
+        XCTAssertEqual(result.transitions.map(\.terminalSessionID), ["term-1"])
+        XCTAssertEqual(result.transitions.map(\.kind), [.resumedWorking])
+        XCTAssertNil(result.transitions.first?.kind.childTransition)
+    }
+
     func testUnchangedStatusDoesNotReEmit() throws {
         let baseline = RemoteAgentSnapshotDiff.diff(
             previous: [:], newRows: [row(terminal: "term-1", status: "waiting")], watchedTerminalSessionIDs: ["term-1"])

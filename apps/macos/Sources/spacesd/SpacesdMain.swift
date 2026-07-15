@@ -985,6 +985,14 @@ import workspacecore
         let canRecordSignal = existingAgent != nil || type == .`init` || (type.establishesAgentFromEvidence && signalLabel != nil)
         if !canRecordSignal { return TerminalServiceProfileCommandResponse(message: "Agent \(type.rawValue) ignored.") }
 
+        // Per-tool hooks (PreToolUse / tool.execute.before) fire `working` on every tool call. When the
+        // agent is already working the signal changes nothing, so return before building the engine or
+        // posting the GUI-refresh notification; the orchestrator enforces the same duplicate-working
+        // suppression at the store layer for every other signal surface.
+        if type == .working, existingAgent?.status == type.status {
+            return TerminalServiceProfileCommandResponse(message: "Agent \(type.rawValue) recorded.")
+        }
+
         let environmentKeys = [WorkspaceOrchestrator.terminalTrackingIDEnvVar]
         let engine = makeAgentNotificationEngine(orchestrator: orchestrator)
         switch type {
@@ -994,9 +1002,14 @@ import workspacecore
                 status: existingAgent?.status ?? .idle, eventType: type.rawValue, eventSource: "spaces_agent_signal", environmentKeys: environmentKeys
             )
         case .working:
-            try orchestrator.updateAgentWindowStatus(
+            // The first `working` after `blocked` is the resume that follows a permission approval —
+            // approvals fire no hook of their own, so this transition is also what withdraws any held
+            // "is blocked" line for this child before a subscriber can receive stale misinformation.
+            let resumedFromBlocked = existingAgent?.status == .waiting
+            let updated = try orchestrator.updateAgentWindowStatus(
                 workspaceID: workspaceID, provider: .spaces, terminalTrackingID: sessionID, label: signalLabel, status: type.status,
                 eventType: type.rawValue, eventSource: "spaces_agent_signal", environmentKeys: environmentKeys)
+            if resumedFromBlocked { try engine.childDidResumeWorking(agentSessionID: updated.id) }
         case .blocked, .done:
             let updated = try orchestrator.updateAgentWindowStatus(
                 workspaceID: workspaceID, provider: .spaces, terminalTrackingID: sessionID, label: signalLabel, status: type.status,

@@ -7,7 +7,7 @@ import Foundation
 #endif
 
 public enum DatabaseSchema {
-    public static let currentVersion = 4
+    public static let currentVersion = 5
 
     /// Adds the coding-agent orchestration surface: an explicit `note` on each agent session and the
     /// `agent_subscriptions` graph. The subscriber key is a terminal session id (a subscriber may be a
@@ -29,15 +29,19 @@ public enum DatabaseSchema {
     /// exit notification must outlive the agent row (`handleAgentExit` deletes ad-hoc rows before the
     /// subscriber ever reads it), and the `message` is fully rendered at enqueue time, so the row needs
     /// nothing from the agent table after insert. The unique index makes `INSERT OR REPLACE` coalesce
-    /// repeated transitions of the same child down to a single latest-state line. Named separately so
-    /// this step and the fresh-schema SQL share one definition and can never drift apart.
+    /// repeated transitions of the same child down to a single latest-state line. `transition` records
+    /// the transition word the rendered message carries (`blocked`/`done`/`exited`) so a child that
+    /// resumes working can have exactly its held `blocked` line withdrawn structurally, never by
+    /// matching message text. This is the latest shape, shared by the fresh schema and the v4→v5 step's
+    /// ALTER target; the v2→v3 step keeps its own frozen historical snapshot.
     static let agentPendingNotificationsSQL = """
             CREATE TABLE IF NOT EXISTS agent_pending_notifications (
               id TEXT PRIMARY KEY,
               subscriber_terminal_session_id TEXT NOT NULL,
               agent_session_id TEXT NOT NULL,
               message TEXT NOT NULL,
-              created_at TEXT NOT NULL
+              created_at TEXT NOT NULL,
+              transition TEXT NOT NULL DEFAULT ''
             );
 
             CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_pending_per_target
@@ -72,11 +76,33 @@ public enum DatabaseSchema {
                     \(agentSubscriptionsSQL)
                     """)
         },
+        // Frozen snapshot of the table as v3 defined it (no `transition` column). A migration step
+        // creates the shape of its target version, never the latest one — sharing the latest SQL here
+        // would make the later v4→v5 ALTER fail with a duplicate column on databases upgrading from v2.
         DatabaseMigrationStep(fromVersion: 2, toVersion: 3, description: "Add agent_pending_notifications", requiresBackup: true) { handle in
-            try migrationExecuteBatch(handle, sql: agentPendingNotificationsSQL)
+            try migrationExecuteBatch(
+                handle,
+                sql: """
+                    CREATE TABLE IF NOT EXISTS agent_pending_notifications (
+                      id TEXT PRIMARY KEY,
+                      subscriber_terminal_session_id TEXT NOT NULL,
+                      agent_session_id TEXT NOT NULL,
+                      message TEXT NOT NULL,
+                      created_at TEXT NOT NULL
+                    );
+
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_pending_per_target
+                      ON agent_pending_notifications(subscriber_terminal_session_id, agent_session_id);
+                    """)
         },
         DatabaseMigrationStep(fromVersion: 3, toVersion: 4, description: "Add agent_remote_subscriptions", requiresBackup: true) { handle in
             try migrationExecuteBatch(handle, sql: agentRemoteSubscriptionsSQL)
+        },
+        // Pre-v5 held rows carry the empty-string default: they are never matched by the
+        // blocked-targeted withdrawal and simply flush as before, so no data is lost or reinterpreted.
+        DatabaseMigrationStep(fromVersion: 4, toVersion: 5, description: "Add agent_pending_notifications.transition", requiresBackup: true) {
+            handle in
+            try migrationExecuteBatch(handle, sql: "ALTER TABLE agent_pending_notifications ADD COLUMN transition TEXT NOT NULL DEFAULT '';")
         },
     ]
 

@@ -342,14 +342,17 @@ extension SQLiteStore {
     /// Enqueues (or coalesces onto) the pending notification for a (subscriber, agent) pair. `INSERT OR
     /// REPLACE` on the unique index replaces any existing pending line for the same pair, so a child that
     /// goes blocked then done while its subscriber is busy leaves exactly one row rendering the latest
-    /// state. A fresh `id` is generated on every write like the other event stores.
-    public func upsertPendingAgentNotification(subscriberTerminalSessionID: String, agentSessionID: String, message: String, createdAt: String) throws
-    {
+    /// state. `transition` is the transition word the rendered `message` carries (`blocked`/`done`/
+    /// `exited`) — the structural key a resume uses to withdraw held blocked lines. A fresh `id` is
+    /// generated on every write like the other event stores.
+    public func upsertPendingAgentNotification(
+        subscriberTerminalSessionID: String, agentSessionID: String, transition: String, message: String, createdAt: String
+    ) throws {
         try execute(
             sql: """
-                INSERT OR REPLACE INTO agent_pending_notifications(id, subscriber_terminal_session_id, agent_session_id, message, created_at)
-                VALUES (?, ?, ?, ?, ?)
-                """, bindings: [UUID().uuidString, subscriberTerminalSessionID, agentSessionID, message, createdAt])
+                INSERT OR REPLACE INTO agent_pending_notifications(id, subscriber_terminal_session_id, agent_session_id, transition, message, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """, bindings: [UUID().uuidString, subscriberTerminalSessionID, agentSessionID, transition, message, createdAt])
     }
 
     /// Pending notifications for a subscriber terminal in enqueue order, flushed when it goes idle.
@@ -370,6 +373,14 @@ extension SQLiteStore {
 
     public func deletePendingAgentNotifications(subscriberTerminalSessionID: String) throws {
         try execute(sql: "DELETE FROM agent_pending_notifications WHERE subscriber_terminal_session_id = ?", bindings: [subscriberTerminalSessionID])
+    }
+
+    /// Withdraws every subscriber's held line for one watched agent when that line renders `transition`.
+    /// Used when a blocked child resumes working: its held `blocked` lines (across all subscribers) are
+    /// misinformation, while `done`/`exited` lines are terminal facts and are never passed here.
+    public func deletePendingAgentNotifications(agentSessionID: String, transition: String) throws {
+        try execute(
+            sql: "DELETE FROM agent_pending_notifications WHERE agent_session_id = ? AND transition = ?", bindings: [agentSessionID, transition])
     }
 
     private func decodePendingAgentNotification(row: [String]) -> AgentPendingNotificationRecord? {

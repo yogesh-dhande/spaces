@@ -84,6 +84,45 @@ final class AgentOrchestrationStoreTests: XCTestCase {
         XCTAssertEqual(try store.agentSubscriptions(subscriberTerminalSessionID: "sub").map(\.agentSessionID), [second.id])
     }
 
+    /// Per-tool hooks make an active agent signal `working` on every tool call. Repeat `working`
+    /// signals while the row already spins are suppressed — the event log records state transitions,
+    /// not tool calls — while a real blocked→working resume records a fresh transition event.
+    func testDuplicateConsecutiveWorkingSignalsRecordOneTransitionEvent() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        let agent = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "agent-session", status: .idle)
+
+        func signalWorking() throws -> AgentWindowRecord {
+            try orchestrator.updateAgentWindowStatus(
+                workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "agent-session", status: .spinning, eventType: "working",
+                eventSource: "spaces_agent_signal")
+        }
+
+        // The first working is a transition; the next two are per-tool-call repeats and record nothing.
+        let entered = try signalWorking()
+        _ = try signalWorking()
+        let suppressed = try signalWorking()
+        XCTAssertEqual(try workingEventCount(store: store, agentID: agent.id), 1)
+        XCTAssertEqual(suppressed.status, .spinning)
+        XCTAssertEqual(suppressed.updatedAt, entered.updatedAt, "A suppressed repeat must not refresh updated_at: it marks the transition time.")
+
+        // blocked then working again is a real resume: a second working transition is recorded.
+        _ = try orchestrator.updateAgentWindowStatus(
+            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "agent-session", status: .waiting, eventType: "blocked",
+            eventSource: "spaces_agent_signal")
+        _ = try signalWorking()
+        XCTAssertEqual(try workingEventCount(store: store, agentID: agent.id), 2)
+    }
+
+    private func workingEventCount(store: SQLiteStore, agentID: String) throws -> Int {
+        let row = try store.queryRow(
+            sql: "SELECT COUNT(*) FROM agent_session_events WHERE agent_session_id = ? AND event_type = 'working' AND source = 'spaces_agent_signal'",
+            bindings: [agentID])
+        return Int(row?.first ?? "0") ?? 0
+    }
+
     func testLastAgentSignalAtCountsOnlyHookSignalEvents() throws {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)
