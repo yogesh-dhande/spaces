@@ -1207,6 +1207,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         case .spawnAgentSession(let payload): return try handleSpawnAgentSessionRequest(payload, context: context)
         case .listAgentSessions(let payload): return try handleListAgentSessionsRequest(payload, context: context)
         case .annotateAgentSession(let payload): return try handleAnnotateAgentSessionRequest(payload, context: context)
+        case .terminateTerminalSession(let payload): return try handleTerminateTerminalSessionRequest(payload, context: context)
         case .openServiceTunnel:
             // Hijacks the connection into a raw byte pipe after this response, like a subscription;
             // it cannot be answered on the request/response path handled here.
@@ -2218,6 +2219,25 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         return SpacesDeviceAPIResponse(
             ok: true, message: row.note == nil ? "Cleared agent note." : "Annotated agent session.",
             result: .agentSessions(.init(rows: [Self.deviceAgentSessionRow(row)])))
+    }
+
+    /// Terminates a coding-agent terminal session on the daemon host by session id. This is the remote
+    /// counterpart of the local `.agentKill` terminate branch (`killProfileAgentSession`): once the CLI
+    /// has confirmed there is no agent row to `stopCodingAgent`, this tears down the raw session. The
+    /// orchestrator's `terminateSpawnedAgentTerminalSession(sessionID:)` resolves the session's owning
+    /// workspace itself (a spawned agent session is a workspace-owned built-in terminal), so no
+    /// `workspaceID` is required — that is exactly what a pre-signal remote kill cannot supply. A session
+    /// that is not a tracked built-in terminal is a loud error, not a silent no-op.
+    private func handleTerminateTerminalSessionRequest(_ request: SpacesDeviceTerminateTerminalSessionRequest, context: RequestContext) throws
+        -> SpacesDeviceAPIResponse
+    {
+        guard let sessionID = normalizedString(request.sessionID) else {
+            return SpacesDeviceAPIResponse(ok: false, message: "sessionID is required.", errorCode: .invalidArgument)
+        }
+        guard try context.orchestrator().terminateSpawnedAgentTerminalSession(sessionID: sessionID) else {
+            return SpacesDeviceAPIResponse(ok: false, message: "No agent session for terminal \(sessionID).", errorCode: .invalidArgument)
+        }
+        return try refreshedMutationResponse(context: context, message: "Killed agent session \(sessionID).")
     }
 
     /// Maps the neutral orchestration row the daemon builds to its Device API wire shape.

@@ -25,6 +25,34 @@ extension WorkspaceOrchestrator {
         }
     }
 
+    /// Terminates a spawned coding-agent terminal session by id and tears down its tracked window and
+    /// agent rows — the orchestrator-level equivalent of the local `.agentKill` terminate branch
+    /// (`killProfileAgentSession`), used by the remote `terminateTerminalSession` Device API command to
+    /// kill a not-yet-signaled agent session (one with no agent row for `stopCodingAgent` to target).
+    /// Unlike `stopAdHocBuiltInTerminalSession` it deliberately does **not** exclude the `.agent` (or
+    /// `.process`) launch kind — killing a spawned agent is exactly its purpose — so it resolves the
+    /// owning workspace from any tracking evidence (window, agent, process, or launch config) rather than
+    /// gating on ad-hoc-shell ownership. Returns false when no built-in terminal session with that id is
+    /// tracked, which the caller surfaces as a loud error rather than a silent no-op.
+    @discardableResult public func terminateSpawnedAgentTerminalSession(sessionID: String) throws -> Bool {
+        guard let sessionID = normalizedTerminalSessionID(sessionID) else { return false }
+        let ownership = try builtInTerminalSessionOwnership(sessionID: sessionID)
+        guard
+            let workspaceID = ownership.processWorkspaceID ?? ownership.agentWorkspaceID ?? ownership.terminalWindowWorkspaceID
+                ?? ownership.launchWorkspaceID
+        else { return false }
+        return try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
+            let matchingWindowIDs = try store.windows(workspaceID: workspaceID).filter {
+                $0.roleValue == .terminal && terminalHost(for: $0.app) == .spaces && terminalSessionID(for: $0) == sessionID
+            }.map(\.id)
+            terminateBuiltInTerminalSession(sessionID)
+            for windowID in matchingWindowIDs { try store.deleteWindow(id: windowID) }
+            try deleteAgentRows(forBuiltInTerminalSession: sessionID, workspaceID: workspaceID)
+            try clearWorkspaceRunningIfNoTrackedRuntimeIndicators(workspaceID: workspaceID)
+            return true
+        }
+    }
+
     @discardableResult public func removeAdHocBuiltInTerminalSession(sessionID: String) throws -> Bool {
         guard let sessionID = normalizedTerminalSessionID(sessionID) else { return false }
         let ownership = try builtInTerminalSessionOwnership(sessionID: sessionID)

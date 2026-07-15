@@ -16,13 +16,13 @@ public struct SpacesCommand: ParsableCommand {
               - Installed or non-dev builds default to ~/.spaces/spaces.db.
               - Runtime state defaults to <profile-root>/runtime unless `SPACES_RUNTIME_DIR` overrides it.
               - Workspace commands require explicit IDs; agent signal defaults workspace/session IDs from Spaces terminal environment.
-              - `workspace create` targets this device's spacesd daemon.
+              - `project list`, `workspace list`, and `workspace create`/`start`/`restart` accept `--device <name-or-id>` to read or act on a paired device; the discovery listings read the device's overview, so `workspace list --device` shows only active workspaces and rejects `--include-archived`. Omitting `--device` targets this device's spacesd daemon.
               - `workspace start` waits for pending/running setup to complete and fails with the setup error if setup failed. It ensures a workspace and all its processes are running: launches when stopped; when already running, restarts any exited processes. Windows open without activating the app.
               - `workspace restart` forces a full stop and relaunch for a workspace.
               - Agent events stay explicit. Workspace runtime commands do not imply agent lifecycle. `agent signal <event>` records those lifecycle transitions for the current Spaces terminal session, or no-ops outside one.
               - `agent list`/`agent status` report coding-agent sessions with status, note, project/workspace context, and a spaces://terminal deep link. `agent annotate` sets an explicit note (empty clears it). `status`/`annotate` default the session to SPACES_TERMINAL_TRACKING_ID.
               - `agent spawn --command <cmd>` starts a supported coding agent (claude, codex, opencode) in a new terminal and blocks until it reports its first lifecycle signal, then optionally injects `--prompt`; it auto-subscribes the current terminal. `agent interrupt <session>` sends ESC, `agent kill <session>` terminates the session, and `agent subscribe`/`unsubscribe <session>` record a watch edge (subscriber defaults to SPACES_TERMINAL_TRACKING_ID).
-              - `agent spawn`/`list`/`status`/`annotate`/`interrupt`/`kill`/`subscribe`/`unsubscribe` accept `--device <name-or-id>` to act on a paired device; remote `spawn` requires `--workspace`, auto-subscribes the current terminal to the remote child, and remote `kill` needs the child to have signaled. `agent subscribe --device` records a cross-device watch: the current terminal receives the same blocked/done/exited notification lines for the remote child, delivered by this machine's daemon (device-qualified deep links). Cross-device subscription cycles cannot be detected (the remote's own subscriptions are not queryable locally).
+              - `agent spawn`/`list`/`status`/`annotate`/`interrupt`/`kill`/`subscribe`/`unsubscribe` accept `--device <name-or-id>` to act on a paired device; remote `spawn` requires `--workspace`, auto-subscribes the current terminal to the remote child, and remote `kill` works before the child signals (it terminates the session directly when no agent row exists yet). `agent subscribe --device` records a cross-device watch: the current terminal receives the same blocked/done/exited notification lines for the remote child, delivered by this machine's daemon (device-qualified deep links). Cross-device subscription cycles cannot be detected (the remote's own subscriptions are not queryable locally).
             """, version: AppVersion.current,
         subcommands: [
             ProjectCommand.self, WorkspaceCommand.self, AgentCommand.self, TerminalCommand.self, DeviceCommand.self, DaemonCommand.self,
@@ -37,13 +37,41 @@ struct ProjectCommand: ParsableCommand {
         commandName: "project", abstract: "Manage Spaces projects.", subcommands: [ProjectListCommand.self])
 }
 
+/// Renders one project as a tab-separated row. Shared by the local and `--device` paths so both forms
+/// print identical columns; the two overloads adapt the local profile summary and the device overview
+/// summary to the same primitives.
+func projectListRow(id: String, name: String, dir: String) -> String { "\(id)\tname=\(name)\tdir=\(dir)" }
+func projectListRow(_ summary: TerminalServiceProfileProjectSummary) -> String { projectListRow(id: summary.id, name: summary.name, dir: summary.dir) }
+func projectListRow(_ summary: SpacesDeviceProjectSummary) -> String { projectListRow(id: summary.id, name: summary.name, dir: summary.dir) }
+
+/// Renders one workspace as a tab-separated row. Shared by the local and `--device` paths; the device
+/// overview carries every column the local record surfaces here (id, project, branch, run state, name).
+func workspaceListRow(id: String, projectID: String, branch: String?, isRunning: Bool, displayName: String) -> String {
+    "\(id)\tproject=\(projectID)\tbranch=\(branch ?? "-")\trunning=\(isRunning)\tname=\(displayName)"
+}
+func workspaceListRow(_ record: TerminalServiceProfileWorkspaceRecord) -> String {
+    workspaceListRow(id: record.id, projectID: record.projectID, branch: record.branch, isRunning: record.isRunning, displayName: record.displayName)
+}
+func workspaceListRow(_ summary: SpacesDeviceWorkspaceSummary) -> String {
+    workspaceListRow(
+        id: summary.id, projectID: summary.projectID, branch: summary.branch, isRunning: summary.isRunning, displayName: summary.displayName)
+}
+
 struct ProjectListCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "list", abstract: "List projects.")
+    static let configuration = CommandConfiguration(commandName: "list", abstract: "List projects on this or a paired device.")
+
+    @Option(name: .long, help: "Paired device name or ID. Defaults to this machine's local projects.") var device: String?
 
     func run() throws {
         let context = CLIContext()
+        if let device {
+            let record = try SpacesPairedDeviceSelection.resolve(device)
+            let projects = try SpacesDeviceClient.projects(device: record, clientApp: cliDeviceClientApp())
+            context.output.emitLines(projects.map(projectListRow))
+            return
+        }
         let projects = try TerminalService.sendProfileCommand(.projectList).projects ?? []
-        context.output.emitLines(projects.map { "\($0.id)\tname=\($0.name)\tdir=\($0.dir)" })
+        context.output.emitLines(projects.map(projectListRow))
     }
 }
 
@@ -54,30 +82,54 @@ struct WorkspaceCommand: ParsableCommand {
 }
 
 struct WorkspaceListCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "list", abstract: "List workspaces.")
+    static let configuration = CommandConfiguration(commandName: "list", abstract: "List workspaces on this or a paired device.")
 
     @Option(name: .long, help: "Project ID. When omitted, lists workspaces from every project.") var project: String?
-    @Flag(name: .long, help: "Include archived workspaces.") var includeArchived = false
+    @Flag(name: .long, help: "Include archived workspaces. Not supported with --device.") var includeArchived = false
+    @Option(name: .long, help: "Paired device name or ID. Defaults to this machine's local workspaces.") var device: String?
 
     func run() throws {
         let context = CLIContext()
+        if let device {
+            // The device overview carries only active workspaces, so archived ones are unreachable over
+            // this path. Reject the flag combination loudly rather than silently ignoring it and
+            // returning a subset that looks like the full archived listing.
+            guard !includeArchived else {
+                throw ValidationError("--include-archived is not supported with --device: a paired device's overview lists only active workspaces.")
+            }
+            let record = try SpacesPairedDeviceSelection.resolve(device)
+            var workspaces = try SpacesDeviceClient.workspaces(device: record, clientApp: cliDeviceClientApp())
+            if let project { workspaces = workspaces.filter { $0.projectID == project } }
+            context.output.emitLines(workspaces.map(workspaceListRow))
+            return
+        }
         let workspaces =
             try TerminalService.sendProfileCommand(.workspaceList(.init(projectID: project, includeArchived: includeArchived))).workspaces ?? []
-        context.output.emitLines(
-            workspaces.map { "\($0.id)\tproject=\($0.projectID)\tbranch=\($0.branch ?? "-")\trunning=\($0.isRunning)\tname=\($0.displayName)" })
+        context.output.emitLines(workspaces.map(workspaceListRow))
     }
 }
 
 struct WorkspaceCreateCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "create", abstract: "Create a workspace on this device.")
+    static let configuration = CommandConfiguration(commandName: "create", abstract: "Create a workspace on this or a paired device.")
 
     @Option(name: .long, help: "Project ID.") var project: String
     @Option(name: .long, help: "Workspace branch.") var branch: String
     @Option(name: .long, help: "Base branch for new branch creation.") var baseBranch: String?
     @Flag(name: .long, help: "Use an existing branch instead of creating a new branch.") var existingBranch = false
+    @Option(name: .long, help: "Paired device name or ID. Defaults to this machine.") var device: String?
 
     func run() throws {
         let context = CLIContext()
+        if let device {
+            let record = try SpacesPairedDeviceSelection.resolve(device)
+            // The remote path runs the workspace's setup script in the background, so the response
+            // returns before setup completes; the message reports the created workspace by name.
+            let response = try SpacesDeviceClient.createWorkspace(
+                projectID: project, branch: branch, baseBranch: baseBranch, allowExistingBranchReuse: existingBranch, device: record,
+                clientApp: cliDeviceClientApp())
+            context.output.emit(response.message)
+            return
+        }
         let workspace = try requireProfileWorkspace(
             try TerminalService.sendProfileCommand(
                 .workspaceCreate(.init(projectID: project, branch: branch, baseBranch: baseBranch, existingBranch: existingBranch))))
@@ -86,24 +138,39 @@ struct WorkspaceCreateCommand: ParsableCommand {
 }
 
 struct WorkspaceStartCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "start", abstract: "Ensure a workspace is running.")
+    static let configuration = CommandConfiguration(commandName: "start", abstract: "Ensure a workspace is running on this or a paired device.")
 
     @Option(name: .long, help: "Workspace ID.") var workspace: String
+    @Option(name: .long, help: "Paired device name or ID. Defaults to this machine.") var device: String?
 
     func run() throws {
         let context = CLIContext()
+        if let device {
+            let record = try SpacesPairedDeviceSelection.resolve(device)
+            let response = try SpacesDeviceClient.launchWorkspace(workspaceID: workspace, device: record, clientApp: cliDeviceClientApp())
+            context.output.emit(response.message)
+            return
+        }
         _ = try requireProfileWorkspace(try TerminalService.sendProfileCommand(.workspaceStart(workspaceID: workspace)))
         context.output.emit("Workspace is running \(workspace)")
     }
 }
 
 struct WorkspaceRestartCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "restart", abstract: "Force a full stop and relaunch for a workspace.")
+    static let configuration = CommandConfiguration(
+        commandName: "restart", abstract: "Force a full stop and relaunch for a workspace on this or a paired device.")
 
     @Option(name: .long, help: "Workspace ID.") var workspace: String
+    @Option(name: .long, help: "Paired device name or ID. Defaults to this machine.") var device: String?
 
     func run() throws {
         let context = CLIContext()
+        if let device {
+            let record = try SpacesPairedDeviceSelection.resolve(device)
+            let response = try SpacesDeviceClient.restartWorkspace(workspaceID: workspace, device: record, clientApp: cliDeviceClientApp())
+            context.output.emit(response.message)
+            return
+        }
         _ = try requireProfileWorkspace(try TerminalService.sendProfileCommand(.workspaceRestart(workspaceID: workspace)))
         context.output.emit("Workspace restarted \(workspace)")
     }
@@ -444,17 +511,19 @@ struct AgentKillCommand: ParsableCommand {
         let context = CLIContext()
         if let device {
             let record = try SpacesPairedDeviceSelection.resolve(device)
-            // The Device API has no ad-hoc terminal-terminate command, so a remote kill resolves the
-            // child's agent row (which exists only after its first hook signal) and stops it through the
-            // coding-agent stop path. A remote session that has not signaled yet has no agent row and
-            // cannot be killed remotely in v1 — fail loudly rather than silently no-op.
-            guard let row = try SpacesDeviceClient.listAgentSessions(sessionID: session, device: record, clientApp: cliDeviceClientApp()).first else {
-                throw ValidationError(
-                    "No agent session for terminal \(session) on \(record.name). A remote session can only be killed after it reports its first lifecycle signal; interrupt it, or stop it from \(record.name)."
-                )
+            // Mirror the local kill: when the child has an agent row (present only after its first hook
+            // signal) stop it through the coding-agent stop path, which also deletes the row. Before the
+            // first signal there is no row, so fall back to the terminate command, which tears down the
+            // raw session the same way the local `.agentKill` terminate branch does. A session that is
+            // neither an agent row nor a stoppable terminal is a loud error from the terminate command.
+            if let row = try SpacesDeviceClient.listAgentSessions(sessionID: session, device: record, clientApp: cliDeviceClientApp()).first {
+                let response = try SpacesDeviceClient.stopCodingAgent(
+                    workspaceID: row.workspaceID, agentID: row.id, agentName: nil, agentLauncherID: nil, device: record,
+                    clientApp: cliDeviceClientApp())
+                context.output.emit(response.message)
+                return
             }
-            let response = try SpacesDeviceClient.stopCodingAgent(
-                workspaceID: row.workspaceID, agentID: row.id, agentName: nil, agentLauncherID: nil, device: record, clientApp: cliDeviceClientApp())
+            let response = try SpacesDeviceClient.terminateTerminalSession(sessionID: session, device: record, clientApp: cliDeviceClientApp())
             context.output.emit(response.message)
             return
         }

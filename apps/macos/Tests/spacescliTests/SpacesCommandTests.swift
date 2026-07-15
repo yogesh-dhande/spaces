@@ -3,6 +3,7 @@ import Darwin
 import Foundation
 import XCTest
 import spacesdeviceapi
+import spacesdevicecore
 import spacesterminalcore
 import spacesterminalghostty
 
@@ -11,11 +12,59 @@ import spacesterminalghostty
 final class SpacesCommandTests: XCTestCase {
     func testProjectListParses() throws { XCTAssertNoThrow(try ProjectListCommand.parse([])) }
 
+    func testDiscoveryAndLifecycleCommandsParseDeviceSelector() throws {
+        XCTAssertEqual(try ProjectListCommand.parse(["--device", "phone"]).device, "phone")
+        XCTAssertEqual(try WorkspaceListCommand.parse(["--device", "phone"]).device, "phone")
+        XCTAssertEqual(
+            try WorkspaceCreateCommand.parse(["--project", "project-1", "--branch", "feature/a", "--device", "phone"]).device, "phone")
+        XCTAssertEqual(try WorkspaceStartCommand.parse(["--workspace", "workspace-1", "--device", "phone"]).device, "phone")
+        XCTAssertEqual(try WorkspaceRestartCommand.parse(["--workspace", "workspace-1", "--device", "phone"]).device, "phone")
+    }
+
+    func testWorkspaceListRejectsIncludeArchivedWithDevice() throws {
+        // The include-archived guard runs before device resolution, so it fails deterministically
+        // without a paired device — the device overview cannot carry archived workspaces.
+        let command = try WorkspaceListCommand.parse(["--device", "phone", "--include-archived"])
+        XCTAssertThrowsError(try command.run()) { error in
+            XCTAssertTrue("\(error)".contains("--include-archived is not supported with --device"), "\(error)")
+        }
+    }
+
     func testWorkspaceListParsesProjectFilter() throws {
         let command = try WorkspaceListCommand.parse(["--project", "project-1", "--include-archived"])
 
         XCTAssertEqual(command.project, "project-1")
         XCTAssertTrue(command.includeArchived)
+    }
+
+    func testProjectListRowRendersColumnsFromLocalAndDeviceSummaries() {
+        let local = TerminalServiceProfileProjectSummary(id: "project-1", name: "Spaces", dir: "/repos/spaces", isGitRepo: true, defaultBranch: "main")
+        let remote = SpacesDeviceProjectSummary(id: "project-1", name: "Spaces", dir: "/repos/spaces", isGitRepo: true, defaultBranch: "main")
+
+        let expected = "project-1\tname=Spaces\tdir=/repos/spaces"
+        XCTAssertEqual(projectListRow(local), expected)
+        XCTAssertEqual(projectListRow(remote), expected)
+    }
+
+    func testWorkspaceListRowRendersColumnsFromLocalAndDeviceSummaries() {
+        let local = TerminalServiceProfileWorkspaceRecord(
+            id: "workspace-1", projectID: "project-1", dir: "/repos/spaces/ws", dirname: nil, branch: "feature", baseBranch: "main",
+            isDefault: false, isArchived: false, isHidden: false, isRunning: true, lastLaunchedAt: nil, notes: nil)
+        let remote = SpacesDeviceWorkspaceSummary(
+            id: "workspace-1", projectID: "project-1", projectName: "Spaces", branch: "feature", baseBranch: "main", dir: "/repos/spaces/ws",
+            isRunning: true, isArchived: false, isHidden: false, isDefault: false, sessionCount: 0)
+
+        let expected = "workspace-1\tproject=project-1\tbranch=feature\trunning=true\tname=feature"
+        XCTAssertEqual(workspaceListRow(local), expected)
+        XCTAssertEqual(workspaceListRow(remote), expected)
+    }
+
+    func testWorkspaceListRowRendersFolderNameAndDashForNonGitWorkspace() {
+        let remote = SpacesDeviceWorkspaceSummary(
+            id: "workspace-2", projectID: "project-2", projectName: "Tools", branch: nil, baseBranch: nil, dir: "/repos/tools",
+            isRunning: false, isArchived: false, isHidden: false, isDefault: true, sessionCount: 0)
+
+        XCTAssertEqual(workspaceListRow(remote), "workspace-2\tproject=project-2\tbranch=-\trunning=false\tname=tools")
     }
 
     func testWorkspaceCreateParsesDeviceScopedArguments() throws {

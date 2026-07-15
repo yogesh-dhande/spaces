@@ -61,6 +61,36 @@ final class AgentSpawnOrchestrationTests: XCTestCase {
         XCTAssertThrowsError(try orchestrator.createWorkspaceAgentSession(workspaceID: workspace.id, command: "   ", title: nil))
     }
 
+    func testTerminateSpawnedAgentTerminalSessionKillsPreSignalAgentKindSession() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let terminateCapture = TerminalTerminateCapture()
+        let orchestrator = makeAgentOrchestrator(
+            store: store, launchCapture: TerminalLaunchConfigurationCapture(), terminateCapture: terminateCapture)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
+        // A spawned agent session launches with `.agent` kind and has no agent row until it signals.
+        let session = try orchestrator.createWorkspaceAgentSession(workspaceID: workspace.id, command: "claude", title: "Reviewer")
+        XCTAssertTrue(try store.agentWindows(workspaceID: workspace.id).isEmpty)
+        XCTAssertFalse(try store.windows(workspaceID: workspace.id).filter { $0.terminalTrackingID == session.id }.isEmpty)
+
+        let killed = try orchestrator.terminateSpawnedAgentTerminalSession(sessionID: session.id)
+
+        // Unlike stopAdHocBuiltInTerminalSession, this does not exclude the `.agent` launch kind: the
+        // session is terminated and its tracked window torn down.
+        XCTAssertTrue(killed)
+        XCTAssertEqual(terminateCapture.sessionIDs, [session.id])
+        XCTAssertTrue(try store.windows(workspaceID: workspace.id).filter { $0.terminalTrackingID == session.id }.isEmpty)
+    }
+
+    func testTerminateSpawnedAgentTerminalSessionReturnsFalseForUnknownSession() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        XCTAssertFalse(try orchestrator.terminateSpawnedAgentTerminalSession(sessionID: "no-such-session"))
+    }
+
     func testResolveSpacesAgentSessionFindsRowAcrossWorkspacesAndNilForUnknown() throws {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)

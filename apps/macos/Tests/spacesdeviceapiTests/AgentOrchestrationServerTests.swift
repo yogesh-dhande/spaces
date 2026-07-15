@@ -8,8 +8,8 @@
     @testable import spacesterminalcore
 
     /// Device API server coverage for the remote orchestration surface (`spawnAgentSession`,
-    /// `listAgentSessions`, `annotateAgentSession`): the remote spawn gate, the row shape carried over
-    /// the wire, and note sanitization.
+    /// `listAgentSessions`, `annotateAgentSession`, `terminateTerminalSession`): the remote spawn gate,
+    /// the row shape carried over the wire, note sanitization, and the pre-signal remote kill.
     final class AgentOrchestrationServerTests: XCTestCase {
         func testSpawnAgentSessionRejectsUnsupportedCommandWithoutTouchingWorkspace() throws {
             try withTemporaryProfile { _ in
@@ -78,7 +78,81 @@
             }
         }
 
+        func testTerminateTerminalSessionKillsPreSignalAgentSession() throws {
+            try withTemporaryProfile { _ in
+                let sessionID = try seedPreSignalAgentSession()
+                let terminated = TerminatedSessionRecorder()
+                let (server, client, clientApp, token) = try startServerAndClient(builtInTerminalSessionTerminator: { terminated.append($0) })
+                defer {
+                    client.cancel()
+                    server.stop()
+                }
+
+                // The child has not signaled, so there is no agent row for stopCodingAgent to target —
+                // this exercises exactly the pre-signal kill path the terminate command exists for.
+                let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
+                XCTAssertTrue(try store.agentWindows(workspaceID: "workspace-1").isEmpty)
+
+                let response = try client.send(
+                    SpacesDeviceAPIRequest(
+                        command: .terminateTerminalSession(.init(sessionID: sessionID)), authToken: token, clientApp: clientApp))
+
+                XCTAssertTrue(response.ok, response.message)
+                XCTAssertTrue(response.message.contains("Killed agent session"), response.message)
+                // The session process was terminated and its tracked window row torn down, so the
+                // refreshed overview no longer lists it.
+                XCTAssertEqual(terminated.sessionIDs(), [sessionID])
+                XCTAssertTrue(try store.windows(workspaceID: "workspace-1").filter { $0.terminalTrackingID == sessionID }.isEmpty)
+            }
+        }
+
+        func testTerminateTerminalSessionFailsLoudlyForUnknownSession() throws {
+            try withTemporaryProfile { _ in
+                let (server, client, clientApp, token) = try startServerAndClient()
+                defer {
+                    client.cancel()
+                    server.stop()
+                }
+
+                let response = try client.send(
+                    SpacesDeviceAPIRequest(
+                        command: .terminateTerminalSession(.init(sessionID: "ghost-session")), authToken: token, clientApp: clientApp))
+
+                XCTAssertFalse(response.ok)
+                XCTAssertEqual(response.errorCode, .invalidArgument)
+                XCTAssertTrue(response.message.contains("No agent session"), response.message)
+            }
+        }
+
         // MARK: - Fixtures
+
+        /// Creates a workspace and spawns an ad-hoc coding-agent terminal in it through a fake launcher,
+        /// without emitting any hook signal — so the session has a tracked terminal window but no agent
+        /// row, the pre-signal state a remote kill must handle. Returns the session id.
+        private func seedPreSignalAgentSession() throws -> String {
+            let store = try SQLiteStore(path: DatabaseLocator.defaultPath())
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            let workspaceDir = root.appendingPathComponent("ws", isDirectory: true)
+            try FileManager.default.createDirectory(at: workspaceDir, withIntermediateDirectories: true)
+            try store.upsert(
+                project: ProjectRecord(
+                    id: "project-1", name: "Spaces", dir: root.path, isGitRepo: false, defaultBranch: nil, setupScript: nil, stopScript: nil,
+                    ports: [], processes: [], browserSessions: []))
+            try store.upsert(
+                workspace: WorkspaceRecord(
+                    id: "workspace-1", projectID: "project-1", dir: workspaceDir.path, dirname: nil, branch: "feature", isDefault: false,
+                    isArchived: false, isRunning: false, lastLaunchedAt: nil))
+            let orchestrator = WorkspaceOrchestrator(
+                store: store,
+                builtInTerminalSessionLauncher: { configuration in
+                    TerminalServiceSessionSummary(
+                        id: configuration.sessionID, title: configuration.title, workingDirectory: configuration.workingDirectory,
+                        backend: configuration.backend, lifetimePolicy: configuration.lifetimePolicy, state: .running, servicePID: 123, childPID: 456,
+                        controlSocketPath: "/tmp/control-\(configuration.sessionID)", outputPath: "/tmp/output-\(configuration.sessionID)",
+                        launchConfiguration: configuration)
+                })
+            return try orchestrator.createWorkspaceAgentSession(workspaceID: "workspace-1", command: "claude", title: "Reviewer").id
+        }
 
         @discardableResult private func seedAgentSession(
             terminalSessionID: String, label: String, status: AgentWindowStatus, note: String?, signalAt: String?
@@ -104,12 +178,16 @@
             return agent
         }
 
-        private func startServerAndClient() throws -> (
+        private func startServerAndClient(
+            builtInTerminalSessionTerminator: WorkspaceOrchestrator.BuiltInTerminalSessionTerminator? = nil
+        ) throws -> (
             server: SpacesDeviceAPIServer, client: SpacesDeviceAPIRequestSessionClient, clientApp: SpacesDeviceClientApp, token: String
         ) {
             let identity = try agentOrchestrationTestTLSIdentity()
             let pairingStore = AlwaysAuthorizedAgentOrchestrationPairingStore()
-            let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore)
+            let server = SpacesDeviceAPIServer(
+                host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore,
+                builtInTerminalSessionTerminator: builtInTerminalSessionTerminator)
             try server.start()
             let client = try SpacesDeviceAPIRequestSessionClient(
                 host: "127.0.0.1", port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
@@ -147,6 +225,25 @@
 
         private func agentOrchestrationTestTLSIdentity() throws -> TerminalServiceTLSIdentity {
             try TerminalServiceTLSIdentityStore.loadOrCreate(root: agentOrchestrationTestTLSRoot)
+        }
+    }
+
+    /// Records the session ids the server's terminator closure is invoked with. The closure is
+    /// `@Sendable` and runs on the server queue, so access is lock-guarded.
+    private final class TerminatedSessionRecorder: @unchecked Sendable {
+        private let lock = NSLock()
+        private var ids: [String] = []
+
+        func append(_ sessionID: String) {
+            lock.lock()
+            defer { lock.unlock() }
+            ids.append(sessionID)
+        }
+
+        func sessionIDs() -> [String] {
+            lock.lock()
+            defer { lock.unlock() }
+            return ids
         }
     }
 

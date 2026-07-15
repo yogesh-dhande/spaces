@@ -46,49 +46,92 @@ final class SpacesMCPStdioServer {
 
     private static func toolDescriptors() -> [MCPToolDescriptor] {
         [
-            MCPToolDescriptor(name: "spaces_project_list", description: "List Spaces projects.", properties: [:], required: []) { _, _ in
-                try TerminalService.sendProfileCommand(.projectList)
+            MCPToolDescriptor(
+                name: "spaces_project_list", description: "List Spaces projects on this or a paired device.",
+                properties: ["device": stringSchema("Paired device name or ID. Defaults to this machine.")], required: []
+            ) { server, arguments in
+                if let device = try server.resolvedDevice(arguments) {
+                    let projects = try SpacesDeviceClient.projects(device: device, clientApp: cliDeviceClientApp())
+                    return TerminalServiceProfileCommandResponse(message: "Listed projects.", projects: projects.map(Self.profileProjectSummary))
+                }
+                return try TerminalService.sendProfileCommand(.projectList)
             },
             MCPToolDescriptor(
-                name: "spaces_workspace_list", description: "List Spaces workspaces.",
-                properties: ["project": stringSchema("Project ID filter."), "includeArchived": boolSchema("Include archived workspaces.")],
+                name: "spaces_workspace_list", description: "List Spaces workspaces on this or a paired device.",
+                properties: [
+                    "project": stringSchema("Project ID filter."),
+                    "includeArchived": boolSchema("Include archived workspaces. Not supported with device."),
+                    "device": stringSchema("Paired device name or ID. Defaults to this machine."),
+                ],
                 required: []
             ) { server, arguments in
-                try TerminalService.sendProfileCommand(
+                if let device = try server.resolvedDevice(arguments) {
+                    // The device overview carries only active workspaces, so archived ones are
+                    // unreachable over this path; reject the combination rather than silently ignore it.
+                    guard server.optionalBool(arguments["includeArchived"]) != true else {
+                        throw MCPError.invalidArguments("includeArchived is not supported with device: a paired device's overview lists only active workspaces.")
+                    }
+                    var workspaces = try SpacesDeviceClient.workspaces(device: device, clientApp: cliDeviceClientApp())
+                    if let project = server.optionalString(arguments["project"]) { workspaces = workspaces.filter { $0.projectID == project } }
+                    return TerminalServiceProfileCommandResponse(message: "Listed workspaces.", workspaces: workspaces.map(Self.profileWorkspaceRecord))
+                }
+                return try TerminalService.sendProfileCommand(
                     .workspaceList(
                         .init(
                             projectID: server.optionalString(arguments["project"]),
                             includeArchived: server.optionalBool(arguments["includeArchived"]) ?? false)))
             },
             MCPToolDescriptor(
-                name: "spaces_workspace_create", description: "Create a workspace on this device.",
+                name: "spaces_workspace_create", description: "Create a workspace on this or a paired device.",
                 properties: [
                     "project": stringSchema("Project ID."), "branch": stringSchema("Workspace branch."),
                     "baseBranch": stringSchema("Base branch for new branch creation."),
                     "existingBranch": boolSchema("Use an existing branch instead of creating a new branch."),
+                    "device": stringSchema("Paired device name or ID. Defaults to this machine."),
                 ], required: ["project", "branch"]
             ) { server, arguments in
-                try TerminalService.sendProfileCommand(
+                let project = try server.requiredString(arguments["project"], field: "project")
+                let branch = try server.requiredString(arguments["branch"], field: "branch")
+                if let device = try server.resolvedDevice(arguments) {
+                    let response = try SpacesDeviceClient.createWorkspace(
+                        projectID: project, branch: branch, baseBranch: server.optionalString(arguments["baseBranch"]),
+                        allowExistingBranchReuse: server.optionalBool(arguments["existingBranch"]) ?? false, device: device,
+                        clientApp: cliDeviceClientApp())
+                    return TerminalServiceProfileCommandResponse(message: response.message)
+                }
+                return try TerminalService.sendProfileCommand(
                     .workspaceCreate(
                         .init(
-                            projectID: try server.requiredString(arguments["project"], field: "project"),
-                            branch: try server.requiredString(arguments["branch"], field: "branch"),
-                            baseBranch: server.optionalString(arguments["baseBranch"]),
+                            projectID: project, branch: branch, baseBranch: server.optionalString(arguments["baseBranch"]),
                             existingBranch: server.optionalBool(arguments["existingBranch"]) ?? false)))
             },
             MCPToolDescriptor(
-                name: "spaces_workspace_start", description: "Ensure a workspace is running.",
-                properties: ["workspace": stringSchema("Workspace ID.")], required: ["workspace"]
+                name: "spaces_workspace_start", description: "Ensure a workspace is running on this or a paired device.",
+                properties: [
+                    "workspace": stringSchema("Workspace ID."),
+                    "device": stringSchema("Paired device name or ID. Defaults to this machine."),
+                ], required: ["workspace"]
             ) { server, arguments in
-                try TerminalService.sendProfileCommand(
-                    .workspaceStart(workspaceID: try server.requiredString(arguments["workspace"], field: "workspace")))
+                let workspace = try server.requiredString(arguments["workspace"], field: "workspace")
+                if let device = try server.resolvedDevice(arguments) {
+                    let response = try SpacesDeviceClient.launchWorkspace(workspaceID: workspace, device: device, clientApp: cliDeviceClientApp())
+                    return TerminalServiceProfileCommandResponse(message: response.message)
+                }
+                return try TerminalService.sendProfileCommand(.workspaceStart(workspaceID: workspace))
             },
             MCPToolDescriptor(
-                name: "spaces_workspace_restart", description: "Force a full stop and relaunch for a workspace.",
-                properties: ["workspace": stringSchema("Workspace ID.")], required: ["workspace"]
+                name: "spaces_workspace_restart", description: "Force a full stop and relaunch for a workspace on this or a paired device.",
+                properties: [
+                    "workspace": stringSchema("Workspace ID."),
+                    "device": stringSchema("Paired device name or ID. Defaults to this machine."),
+                ], required: ["workspace"]
             ) { server, arguments in
-                try TerminalService.sendProfileCommand(
-                    .workspaceRestart(workspaceID: try server.requiredString(arguments["workspace"], field: "workspace")))
+                let workspace = try server.requiredString(arguments["workspace"], field: "workspace")
+                if let device = try server.resolvedDevice(arguments) {
+                    let response = try SpacesDeviceClient.restartWorkspace(workspaceID: workspace, device: device, clientApp: cliDeviceClientApp())
+                    return TerminalServiceProfileCommandResponse(message: response.message)
+                }
+                return try TerminalService.sendProfileCommand(.workspaceRestart(workspaceID: workspace))
             },
             MCPToolDescriptor(
                 name: "spaces_terminal_list", description: "List available Spaces terminal sessions.",
@@ -272,18 +315,17 @@ final class SpacesMCPStdioServer {
             ) { server, arguments in
                 let sessionID = try server.requiredString(arguments["session"], field: "session")
                 if let device = try server.resolvedDevice(arguments) {
-                    // No remote ad-hoc terminal-terminate command exists; resolve the child's agent row
-                    // (present only after its first signal) and stop it. A not-yet-signaled remote
-                    // session cannot be killed in v1.
-                    guard let row = try SpacesDeviceClient.listAgentSessions(sessionID: sessionID, device: device, clientApp: cliDeviceClientApp()).first
-                    else {
-                        throw MCPError.invalidArguments(
-                            "No agent session for terminal \(sessionID) on \(device.name). A remote session can only be killed after its first lifecycle signal."
-                        )
+                    // Mirror the local kill: stop the child's agent row (present only after its first
+                    // signal) through the coding-agent stop path, else terminate the raw session, which
+                    // is how a not-yet-signaled remote session is killed.
+                    if let row = try SpacesDeviceClient.listAgentSessions(sessionID: sessionID, device: device, clientApp: cliDeviceClientApp()).first {
+                        let response = try SpacesDeviceClient.stopCodingAgent(
+                            workspaceID: row.workspaceID, agentID: row.id, agentName: nil, agentLauncherID: nil, device: device,
+                            clientApp: cliDeviceClientApp())
+                        return TerminalServiceProfileCommandResponse(message: response.message)
                     }
-                    let response = try SpacesDeviceClient.stopCodingAgent(
-                        workspaceID: row.workspaceID, agentID: row.id, agentName: nil, agentLauncherID: nil, device: device,
-                        clientApp: cliDeviceClientApp())
+                    let response = try SpacesDeviceClient.terminateTerminalSession(
+                        sessionID: sessionID, device: device, clientApp: cliDeviceClientApp())
                     return TerminalServiceProfileCommandResponse(message: response.message)
                 }
                 return try TerminalService.sendProfileCommand(.agentKill(.init(sessionID: sessionID)))
@@ -421,6 +463,24 @@ final class SpacesMCPStdioServer {
     private func resolvedDevice(_ arguments: [String: Any]) throws -> SpacesPairedDeviceRecord? {
         guard let selector = optionalString(arguments["device"]) else { return nil }
         return try SpacesPairedDeviceSelection.resolve(selector)
+    }
+
+    /// Maps a paired-device project summary to the profile summary shape so remote and local
+    /// `spaces_project_list` results share one JSON shape.
+    private static func profileProjectSummary(_ summary: SpacesDeviceProjectSummary) -> TerminalServiceProfileProjectSummary {
+        TerminalServiceProfileProjectSummary(
+            id: summary.id, name: summary.name, dir: summary.dir, isGitRepo: summary.isGitRepo, defaultBranch: summary.defaultBranch)
+    }
+
+    /// Maps a paired-device workspace summary to the profile record shape so remote and local
+    /// `spaces_workspace_list` results share one JSON shape. `dirname` and `lastLaunchedAt` are not
+    /// carried by the overview and render as null; the fields the listing surfaces (id, project, branch,
+    /// run state, name) are all present.
+    private static func profileWorkspaceRecord(_ summary: SpacesDeviceWorkspaceSummary) -> TerminalServiceProfileWorkspaceRecord {
+        TerminalServiceProfileWorkspaceRecord(
+            id: summary.id, projectID: summary.projectID, dir: summary.dir, dirname: nil, branch: summary.branch, baseBranch: summary.baseBranch,
+            isDefault: summary.isDefault, isArchived: summary.isArchived, isHidden: summary.isHidden, isRunning: summary.isRunning,
+            lastLaunchedAt: nil, notes: summary.notes)
     }
 
     /// Maps a paired-device agent row to the profile row shape so remote and local `agent_*` tool

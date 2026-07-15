@@ -602,10 +602,34 @@ public enum SpacesDeviceClient {
         return response.agentSessions ?? []
     }
 
+    /// Terminates a coding-agent terminal session on a paired device by session id (`spaces agent kill
+    /// --device` when the child has not signaled and so has no agent row `stopCodingAgent` could target).
+    /// The daemon resolves the session's owning workspace itself, mirroring the local `.agentKill`
+    /// terminate branch.
+    @discardableResult public static func terminateTerminalSession(
+        sessionID: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
+    ) throws -> SpacesDeviceAPIResponse {
+        try request(
+            .init(command: .terminateTerminalSession(.init(sessionID: sessionID))), device: device, clientApp: clientApp, profile: profile)
+    }
+
     /// Terminal sessions on a paired device, read from the overview (`spaces terminal list --device`).
     public static func terminalSessions(
         device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
     ) throws -> [SpacesDeviceTerminalSessionSummary] { try overview(device: device, clientApp: clientApp, profile: profile).overview.sessions }
+
+    /// Projects on a paired device, read from the overview (`spaces project list --device`). Reuses the
+    /// overview the sidebar already loads rather than a dedicated listing command.
+    public static func projects(
+        device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
+    ) throws -> [SpacesDeviceProjectSummary] { try overview(device: device, clientApp: clientApp, profile: profile).overview.projects }
+
+    /// Workspaces on a paired device, read from the overview (`spaces workspace list --device`). The
+    /// overview carries only active workspaces, so this never includes archived ones (see the CLI, which
+    /// rejects `--include-archived` with `--device` rather than silently returning a filtered subset).
+    public static func workspaces(
+        device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
+    ) throws -> [SpacesDeviceWorkspaceSummary] { try overview(device: device, clientApp: clientApp, profile: profile).overview.workspaces }
 
     /// Reads a device's Device API credentials (pinned TLS certificate fingerprint and auth token),
     /// transparently re-bootstrapping the local device when its token is missing; the re-bootstrap also
@@ -704,7 +728,7 @@ public enum SpacesDeviceClient {
         case .createProject, .previewGitProject, .deleteProject, .importProject, .exportProject, .createWorkspace, .launchWorkspace, .stopWorkspace,
             .restartWorkspace, .archiveWorkspace, .runWorkspaceSetup, .openWorkspaceTerminal, .stopWorkspaceTerminal, .runWorkspaceProcess,
             .stopWorkspaceProcess, .restartWorkspaceProcess, .runCodingAgent, .stopCodingAgent, .restartCodingAgent, .installAgentHooks,
-            .spawnAgentSession:
+            .spawnAgentSession, .terminateTerminalSession:
             longRunningMutationTimeoutSeconds
         case .agentHooksStatus: agentHooksStatusRequestTimeoutSeconds
         case .pair, .ping, .daemonStatus, .requestDaemonRestart, .overview, .previewProject, .listDirectories, .workspaceCreateOptions,

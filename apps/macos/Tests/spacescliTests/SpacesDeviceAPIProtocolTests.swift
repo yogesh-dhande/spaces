@@ -97,6 +97,16 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
         XCTAssertEqual(try SpacesDeviceAPICodec.decodeRequest(SpacesDeviceAPICodec.encodeRequest(request)), request)
     }
 
+    func testTerminateTerminalSessionRequestRoundTripsAndIsNotReplaySafe() throws {
+        let request = SpacesDeviceAPIRequest(command: .terminateTerminalSession(.init(sessionID: "agent-session")), authToken: "SECRET")
+
+        XCTAssertEqual(request.commandName, "terminateTerminalSession")
+        // Terminating a session is a mutation; a replay after an ambiguous failure could kill a session
+        // reusing the id, so it is not replay-safe.
+        XCTAssertFalse(request.isSafeToReplayAfterConnectionFailure)
+        XCTAssertEqual(try SpacesDeviceAPICodec.decodeRequest(SpacesDeviceAPICodec.encodeRequest(request)), request)
+    }
+
     func testAgentSessionsResultRoundTripsThroughResponse() throws {
         let row = SpacesDeviceAgentSessionRow(
             id: "agent-1", terminalSessionID: "session-1", agent: "Claude Code CLI", label: "Claude Code CLI", status: "waiting", note: "review auth",
