@@ -341,7 +341,7 @@ final class AgentOrchestrationStoreTests: XCTestCase {
             INSERT INTO agent_sessions(id, workspace_id, provider, label, status, terminal_session_id, note, created_at, updated_at)
             VALUES ('\(agentID)', '\(workspaceID)', 'spaces', 'X', 'spinning', '\(terminalSessionID)', 'carried', 'now', 'now');
             INSERT INTO agent_pending_notifications(id, subscriber_terminal_session_id, agent_session_id, message, created_at)
-            VALUES ('pending-1', 'sub', '\(agentID)', '[spaces] X (spaces) is blocked — spaces://terminal/\(terminalSessionID)', 't0');
+            VALUES ('pending-1', 'sub', '\(agentID)', '[spaces] X (spaces) is blocked — project: Project — workspace: workspace-1 — session: \(terminalSessionID) — spaces://terminal/\(terminalSessionID)', 't0');
             """
         var errorMessage: UnsafeMutablePointer<CChar>?
         guard sqlite3_exec(db, sql, nil, nil, &errorMessage) == SQLITE_OK else {

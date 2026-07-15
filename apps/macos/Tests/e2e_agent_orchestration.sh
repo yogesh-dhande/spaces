@@ -111,15 +111,16 @@ tail_count() {
   "$SPACES_CLI" terminal tail "$session_id" --lines 120 | grep -Fc "$needle" || true
 }
 
-# Polls the notification shape (`[spaces] ... is <transition> ... spaces://terminal/<child>`) into the
-# subscriber's tail. Chained greps require all fragments on the same line so a fixed literal is not
-# needed (the optional `— note:` segment can appear between them).
+# Polls the notification shape (`[spaces] ... is <transition> ... session: <child> ... spaces://terminal/<child>`)
+# into the subscriber's tail. Chained greps require all fragments on the same line so a fixed literal is
+# not needed (the enriched project/workspace/session fields and the optional `— note:` segment sit
+# between them). `session: <child>` pins the enriched session field the injected line always carries.
 wait_for_notification() {
   local subscriber="$1" transition="$2" child="$3" timeout="${4:-15}" start
   start="$(now_ms)"
   while true; do
     if "$SPACES_CLI" terminal tail "$subscriber" --lines 120 \
-      | grep -F "spaces://terminal/$child" | grep -F "is $transition" | grep -Fq "[spaces]"; then
+      | grep -F "spaces://terminal/$child" | grep -F "is $transition" | grep -F "session: $child" | grep -Fq "[spaces]"; then
       return 0
     fi
     if (( "$(now_ms)" - start >= timeout * 1000 )); then
@@ -197,9 +198,10 @@ part_a() {
   signal "$O" working
   status="$(json_field "$("$SPACES_CLI" agent status --session "$O" --json)" 'd.get("status") or ""')"
   [[ "$status" == "spinning" ]] || fail "expected O busy (spinning) before queue test, got: $status"
-  # The needle pins the full line shape including the note set in step 1b: a status transition must
-  # not drop the annotation from the injected notification.
-  local done_needle="is done — note: investigating flaky test — spaces://terminal/$C"
+  # The needle pins the enriched tail of the line including the note set in step 1b: the session field,
+  # the note, and the deep link are contiguous, so a status transition must not drop the annotation from
+  # the injected notification.
+  local done_needle="session: $C — note: investigating flaky test — spaces://terminal/$C"
   local before_done
   before_done="$(tail_count "$O" "$done_needle")"
   signal "$C" "done"

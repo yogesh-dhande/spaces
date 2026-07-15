@@ -141,8 +141,7 @@ import workspacecore
             databasePath: databasePath, clientApp: Self.daemonDeviceClientApp(),
             deliver: { [weak self] sessionID, line in
                 guard let self else { throw Self.requestFailedError("spacesd is shutting down.") }
-                _ = try self.sendProfileTerminalInput(
-                    TerminalServiceTerminalSendPayload(sessionID: sessionID, input: .text(line), appendNewline: true))
+                try self.submitAgentNotificationLine(sessionID: sessionID, line: line)
             }, logError: { writeStandardError($0) })
         remoteAgentWatch.start()
         remoteAgentWatchService = remoteAgentWatch
@@ -1023,17 +1022,31 @@ import workspacecore
     { try orchestrator.agentWindows(workspaceID: workspaceID).first { $0.provider == .spaces && $0.terminalTrackingID == sessionID } }
 
     /// Builds the notification engine bound to the real terminal-send path: delivery is the same
-    /// `sendProfileTerminalInput` plumbing a `terminal send` uses, appending a newline so the injected
-    /// line is submitted. A send failure throws, which the engine reads as the subscriber having
+    /// `sendProfileTerminalInput` plumbing a `terminal send` uses, via `submitAgentNotificationLine` so
+    /// the line submits reliably. A send failure throws, which the engine reads as the subscriber having
     /// vanished (dead session) and tears the watch edge down.
     private func makeAgentNotificationEngine(orchestrator: WorkspaceOrchestrator) -> AgentNotificationEngine {
         AgentNotificationEngine(
             store: orchestrator.store,
             deliver: { [weak self] sessionID, line in
                 guard let self else { throw Self.requestFailedError("spacesd is shutting down.") }
-                _ = try self.sendProfileTerminalInput(
-                    TerminalServiceTerminalSendPayload(sessionID: sessionID, input: .text(line), appendNewline: true))
+                try self.submitAgentNotificationLine(sessionID: sessionID, line: line)
             }, logError: { writeStandardError($0) })
+    }
+
+    /// Delivers a rendered notification line into a subscriber terminal and submits it. An agent TUI
+    /// (Codex) treats a single text+carriage-return write as an unsubmitted paste — the line lands in the
+    /// composer but never runs — so the submit is split into two writes: first the text with no trailing
+    /// return, then a bare carriage return as a separate submit keystroke. `appendNewline` maps to a CR
+    /// (0x0D) in the terminal send path (`GhosttyEmbeddedSessionHost`/`GhosttyLinuxHeadlessSessionCore`),
+    /// which shells, Claude Code, and Codex all accept as submit. Shared by the local chokepoint engine
+    /// and the cross-device `RemoteAgentWatchService` so both submit identically. A send failure throws,
+    /// signalling the caller that the subscriber has vanished.
+    private func submitAgentNotificationLine(sessionID: String, line: String) throws {
+        _ = try sendProfileTerminalInput(
+            TerminalServiceTerminalSendPayload(sessionID: sessionID, input: .text(line), appendNewline: false))
+        _ = try sendProfileTerminalInput(
+            TerminalServiceTerminalSendPayload(sessionID: sessionID, input: .text(""), appendNewline: true))
     }
 
     private func profileAgentRuntimeLabel(sessionID: String) -> String? {
