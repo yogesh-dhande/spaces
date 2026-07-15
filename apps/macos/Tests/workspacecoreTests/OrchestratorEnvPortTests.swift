@@ -497,8 +497,8 @@ extension OrchestratorTests {
         let slug = SpacesProfile.workspaceHostSlug(
             branch: workspace.branch, projectName: project.name, isGitRepo: project.isGitRepo, workspaceID: workspace.id)
         let manifest = WorkspaceRuntimeManifest(
-            workspaceID: workspace.id, projectID: project.id, localPath: workspace.dir, branch: workspace.branch,
-            baseBranch: workspace.baseBranch, namedPorts: [WorkspaceRuntimePortMapping(id: "web", name: "web", port: 3000)],
+            workspaceID: workspace.id, projectID: project.id, localPath: workspace.dir, branch: workspace.branch, baseBranch: workspace.baseBranch,
+            namedPorts: [WorkspaceRuntimePortMapping(id: "web", name: "web", port: 3000)],
             processEnvironment: [
                 "SPACES_WORKSPACE_ID": workspace.id, "SPACES_PROJECT_ID": project.id, "SPACES_WORKSPACE_SLUG": slug, "SPACES_WEB_PORT": "3000",
                 "SPACES_WEB_HOST": "web.\(slug).localhost",

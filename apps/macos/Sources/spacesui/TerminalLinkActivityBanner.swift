@@ -36,9 +36,7 @@
         private var onCancel: (@MainActor () -> Void)?
         private var autoDismissTask: Task<Void, Never>?
 
-        init(hostView: NSView) {
-            buildUI(in: hostView)
-        }
+        init(hostView: NSView) { buildUI(in: hostView) }
 
         deinit { MainActor.assumeIsolated { autoDismissTask?.cancel() } }
 
@@ -179,17 +177,14 @@
             leading.priority = .defaultHigh
             NSLayoutConstraint.activate([
                 container.topAnchor.constraint(equalTo: hostView.topAnchor, constant: 12),
-                container.centerXAnchor.constraint(equalTo: hostView.centerXAnchor),
-                leading,
+                container.centerXAnchor.constraint(equalTo: hostView.centerXAnchor), leading,
                 container.trailingAnchor.constraint(lessThanOrEqualTo: hostView.trailingAnchor, constant: -12),
                 stack.topAnchor.constraint(equalTo: container.topAnchor, constant: 6),
                 stack.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -6),
                 stack.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 10),
                 stack.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
-                iconView.widthAnchor.constraint(equalToConstant: 15),
-                iconView.heightAnchor.constraint(equalToConstant: 15),
-                cancelButton.widthAnchor.constraint(equalToConstant: 20),
-                cancelButton.heightAnchor.constraint(equalToConstant: 20),
+                iconView.widthAnchor.constraint(equalToConstant: 15), iconView.heightAnchor.constraint(equalToConstant: 15),
+                cancelButton.widthAnchor.constraint(equalToConstant: 20), cancelButton.heightAnchor.constraint(equalToConstant: 20),
             ])
         }
     }

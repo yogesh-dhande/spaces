@@ -7,8 +7,8 @@ final class SpacesDeviceTests: XCTestCase {
         let store = try makeTemporaryStore()
         let project = makeProjectRecord(id: "project-12345678", dir: try makeTempDirectory().path)
         let workspace = WorkspaceRecord(
-            id: "workspace-12345678", projectID: project.id, dir: try makeTempDirectory().path,
-            dirname: "feature-a", branch: "feature/a", isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
+            id: "workspace-12345678", projectID: project.id, dir: try makeTempDirectory().path, dirname: "feature-a", branch: "feature/a",
+            isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
         try store.upsert(project: project)
 
         try store.upsert(workspace: workspace)
@@ -53,8 +53,8 @@ final class SpacesDeviceTests: XCTestCase {
     func testPlannerBuildsRuntimeManifest() throws {
         let project = ProjectRecord(id: "project", name: "Project", dir: "/project", isGitRepo: true, defaultBranch: "main")
         let workspace = WorkspaceRecord(
-            id: "workspace", projectID: project.id, dir: "/project/.worktrees/feature", dirname: nil,
-            branch: "feature", isDefault: false, isArchived: false, isRunning: false, lastLaunchedAt: nil)
+            id: "workspace", projectID: project.id, dir: "/project/.worktrees/feature", dirname: nil, branch: "feature", isDefault: false,
+            isArchived: false, isRunning: false, lastLaunchedAt: nil)
 
         let manifest = SpacesDevicePlanner.runtimeManifest(
             project: project, workspace: workspace, namedPorts: [WorkspaceRuntimePortMapping(id: "web", name: "web", port: 3000)])

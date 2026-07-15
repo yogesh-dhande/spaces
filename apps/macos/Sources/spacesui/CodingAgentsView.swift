@@ -10,8 +10,7 @@ import spacesterminalcore
 /// narrow protocol instead of the controller keeps that ordering from mattering, and keeps the view
 /// testable without an app.
 @MainActor protocol CodingAgentsHost: AnyObject {
-    func formSectionCard(icon: String?, title: String, subtitle: String, iconColor: NSColor?, trailingView: NSView?, contentViews: [NSView])
-        -> NSView
+    func formSectionCard(icon: String?, title: String, subtitle: String, iconColor: NSColor?, trailingView: NSView?, contentViews: [NSView]) -> NSView
     func settingsLabeledField(name: String, hint: String, control: NSView) -> NSView
     func helpTextLabel(_ text: String) -> NSTextField
     func clientDatabase() throws -> SpacesClientDatabase
@@ -76,9 +75,7 @@ extension AppKitController: CodingAgentsHost {}
     /// Builds the card and starts a status reload for the selected device.
     func makeCard(subtitle: String = "Install Spaces lifecycle hooks on this machine's coding agents.") -> NSView {
         let devices = self.devices()
-        if !devices.contains(where: { $0.record.id == deviceID }) {
-            deviceID = devices.first?.record.id ?? SpacesPairedDeviceRecord.localDeviceID
-        }
+        if !devices.contains(where: { $0.record.id == deviceID }) { deviceID = devices.first?.record.id ?? SpacesPairedDeviceRecord.localDeviceID }
 
         let picker = NSPopUpButton()
         for device in devices {
@@ -115,16 +112,12 @@ extension AppKitController: CodingAgentsHost {}
     /// This Mac plus every paired remote, as (record, display label) pairs.
     private func devices() -> [(record: SpacesPairedDeviceRecord, label: String)] {
         var devices: [(SpacesPairedDeviceRecord, String)] = []
-        if let local = try? host.clientDatabase().pairedDevice(id: SpacesPairedDeviceRecord.localDeviceID) {
-            devices.append((local, "This Mac"))
-        }
+        if let local = try? host.clientDatabase().pairedDevice(id: SpacesPairedDeviceRecord.localDeviceID) { devices.append((local, "This Mac")) }
         for remote in host.macPairedDevices() { devices.append((remote, remote.name)) }
         return devices
     }
 
-    private func resolvedDevice() -> SpacesPairedDeviceRecord? {
-        devices().first { $0.record.id == deviceID }?.record
-    }
+    private func resolvedDevice() -> SpacesPairedDeviceRecord? { devices().first { $0.record.id == deviceID }?.record }
 
     private var isLocalDeviceSelected: Bool { deviceID == SpacesPairedDeviceRecord.localDeviceID }
 
@@ -221,7 +214,10 @@ extension AppKitController: CodingAgentsHost {}
         labelStack.spacing = 2
         labelStack.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
-        var rowViews: [NSView] = [RowPrimitives.statusSlot(RowPrimitives.statusDot(statusDotKind(available: available, installState: installState))), tile, labelStack, NSView()]
+        var rowViews: [NSView] = [
+            RowPrimitives.statusSlot(RowPrimitives.statusDot(statusDotKind(available: available, installState: installState))), tile, labelStack,
+            NSView(),
+        ]
         if available {
             let isInstalling = installingKind == kind
             let button = NSButton(
@@ -306,8 +302,7 @@ extension AppKitController: CodingAgentsHost {}
             // problem the user has since fixed.
             failures[kind] = outcome.failures.first { $0.kind == kind }?.message
             renderRows(message: outcome.failures.first.map { "Install failed: \($0.message)" }, isLoading: false)
-        case .failure(let error):
-            renderRows(message: "Install failed: \(error.localizedDescription)", isLoading: false)
+        case .failure(let error): renderRows(message: "Install failed: \(error.localizedDescription)", isLoading: false)
         }
         emitLocalStatusChangeIfLocal()
     }

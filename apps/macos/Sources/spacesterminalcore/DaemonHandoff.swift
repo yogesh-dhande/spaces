@@ -47,9 +47,9 @@ public struct DaemonHandoffTable: Codable, Sendable {
     public static let currentFormatVersion = 1
 
     public let formatVersion: Int
-    /// Count of consecutive handoffs landing on the same `sourceVersion` without an
-    /// intervening version bump. The daemon refuses to exec again once this crosses
-    /// a small threshold, guarding against an exec loop between two bad builds.
+    /// Count of rapid consecutive handoffs landing on the same `sourceVersion`. The
+    /// daemon refuses to exec again once this crosses a small threshold, guarding
+    /// against a loop between two bad builds, and resets it after a stable interval.
     public let generation: Int
     /// pid of the process that wrote this table. `DaemonHandoffStore.consume`
     /// requires this to equal the current process's pid, which discriminates an
@@ -206,13 +206,35 @@ public enum DaemonHandoffResumeAction: Equatable, Sendable {
 /// `SpacesDaemonController` (an executable target's types are not importable by tests) so the
 /// generation-guard and resume-selection contracts can be unit-tested directly.
 public enum DaemonHandoffDecision {
+    /// A generation chain only represents an exec loop while handoffs keep arriving within this
+    /// interval. Stable daemons begin a fresh chain so later same-version development builds remain
+    /// installable without a supervisor restart.
+    public static let generationGuardResetInterval: TimeInterval = 60
+
+    /// Returns the generation to write into the next handoff table, or nil when a rapid sequence of
+    /// same-version handoffs has exhausted the loop guard. Version changes and a stable interval both
+    /// begin a fresh chain at generation one.
+    public static func nextHandoffGeneration(
+        generation: Int, lastSourceVersion: String?, currentVersion: String, stagedVersion: String?, elapsedSinceLastHandoff: TimeInterval?
+    ) -> Int? {
+        let continuesSameVersionChain = lastSourceVersion == currentVersion && (stagedVersion == nil || stagedVersion == currentVersion)
+        guard continuesSameVersionChain else { return 1 }
+        if let elapsedSinceLastHandoff, elapsedSinceLastHandoff >= generationGuardResetInterval { return 1 }
+        guard generation < 3 else { return nil }
+        return generation + 1
+    }
+
     /// Whether to refuse an exec-in-place handoff to guard against an exec loop between two builds.
     /// Refuses once `generation` reaches the threshold AND another exec would land on the version
     /// already involved in the loop. A genuinely different staged target always proceeds, even when
     /// repeated same-version handoffs have exhausted the current generation budget.
     public static func refusesExecByGenerationGuard(generation: Int, lastSourceVersion: String?, currentVersion: String, stagedVersion: String?)
         -> Bool
-    { generation >= 3 && lastSourceVersion == currentVersion && (stagedVersion == nil || stagedVersion == currentVersion) }
+    {
+        nextHandoffGeneration(
+            generation: generation, lastSourceVersion: lastSourceVersion, currentVersion: currentVersion, stagedVersion: stagedVersion,
+            elapsedSinceLastHandoff: nil) == nil
+    }
 
     /// See `DaemonHandoffResumeAction`. A record with a bad descriptor is discarded regardless of
     /// child liveness (there is nothing to adopt without a PTY master).

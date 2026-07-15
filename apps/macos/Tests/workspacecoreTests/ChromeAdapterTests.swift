@@ -117,7 +117,9 @@ final class ChromeAdapterTests: XCTestCase {
             XCTAssertTrue(script.contains("return wid &"))
             let exactRange = try XCTUnwrap(script.range(of: "repeat with exactTargetURL in exactTargetURLs"))
             let prefixRange = try XCTUnwrap(script.range(of: "if u starts with targetURLPrefix then"))
-            XCTAssertLessThan(script.distance(from: script.startIndex, to: exactRange.lowerBound), script.distance(from: script.startIndex, to: prefixRange.lowerBound))
+            XCTAssertLessThan(
+                script.distance(from: script.startIndex, to: exactRange.lowerBound),
+                script.distance(from: script.startIndex, to: prefixRange.lowerBound))
         }
     }
 
@@ -140,7 +142,9 @@ final class ChromeAdapterTests: XCTestCase {
             XCTAssertTrue(script.contains("set excludedURLPrefixes to {\"http://localhost:3000/admin\"}"))
             let exactRange = try XCTUnwrap(script.range(of: "repeat with exactTargetURL in exactTargetURLs"))
             let prefixRange = try XCTUnwrap(script.range(of: "if u starts with targetURLPrefix then"))
-            XCTAssertLessThan(script.distance(from: script.startIndex, to: exactRange.lowerBound), script.distance(from: script.startIndex, to: prefixRange.lowerBound))
+            XCTAssertLessThan(
+                script.distance(from: script.startIndex, to: exactRange.lowerBound),
+                script.distance(from: script.startIndex, to: prefixRange.lowerBound))
         }
     }
 

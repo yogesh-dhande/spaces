@@ -235,8 +235,8 @@ import Foundation
         private lazy var activateInputRecognizer = UITapGestureRecognizer(target: self, action: #selector(handleTapToActivateInput(_:)))
         private lazy var scrollPanRecognizer = UIPanGestureRecognizer(target: self, action: #selector(handleScrollPan))
         private lazy var terminalAccessoryView = TerminalAccessoryToolbar(
-            onComposer: { [weak self] in self?.onOpenComposer?() },
-            onText: { [weak self] text in self?.sendAccessoryText(text) }, onKey: { [weak self] key in self?.sendAccessoryKey(key) },
+            onComposer: { [weak self] in self?.onOpenComposer?() }, onText: { [weak self] text in self?.sendAccessoryText(text) },
+            onKey: { [weak self] key in self?.sendAccessoryKey(key) },
             onModifier: { [weak self] modifier in self?.toggleAccessoryModifier(modifier) },
             onKeyboardToggle: { [weak self] in self?.toggleAccessorySoftwareKeyboard() })
         var debugTapLinkHandlerForTesting: ((CGPoint) -> Bool)?

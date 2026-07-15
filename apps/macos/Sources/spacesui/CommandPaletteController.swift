@@ -342,9 +342,7 @@ final class CommandPalettePanel: NSPanel {
         root.translatesAutoresizingMaskIntoConstraints = false
         root.wantsLayer = true
         root.layer?.borderWidth = 1
-        bindAppearanceReactiveLayer(root) { view in
-            view.layer?.borderColor = Theme.border.cgColor
-        }
+        bindAppearanceReactiveLayer(root) { view in view.layer?.borderColor = Theme.border.cgColor }
 
         let content = NSView()
         content.translatesAutoresizingMaskIntoConstraints = false

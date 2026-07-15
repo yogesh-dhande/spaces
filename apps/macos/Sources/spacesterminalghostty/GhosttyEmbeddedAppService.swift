@@ -140,8 +140,7 @@ import Foundation
         /// A no-op when the requested appearance already matches `currentAppearance`, so repeated
         /// attaches on the same scheme do not churn the surfaces. Returns whether a re-theme was
         /// applied; callers use this to decide whether to force a full render rebroadcast.
-        @discardableResult
-        public func applyColorScheme(_ appearance: ThemeAppearance) -> Bool {
+        @discardableResult public func applyColorScheme(_ appearance: ThemeAppearance) -> Bool {
             guard appearance != currentAppearance else { return false }
             guard let app, let config else { return false }
             let scheme: ghostty_color_scheme_e = appearance == .dark ? GHOSTTY_COLOR_SCHEME_DARK : GHOSTTY_COLOR_SCHEME_LIGHT

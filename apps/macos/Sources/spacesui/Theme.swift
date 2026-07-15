@@ -180,7 +180,6 @@ enum Theme {
 
     private static func nsColor(_ color: ThemeColor) -> NSColor {
         NSColor(
-            srgbRed: CGFloat(color.red) / 255.0, green: CGFloat(color.green) / 255.0, blue: CGFloat(color.blue) / 255.0,
-            alpha: CGFloat(color.alpha))
+            srgbRed: CGFloat(color.red) / 255.0, green: CGFloat(color.green) / 255.0, blue: CGFloat(color.blue) / 255.0, alpha: CGFloat(color.alpha))
     }
 }

@@ -32,8 +32,7 @@ private nonisolated(unsafe) var appearanceReactiveLayerBinderKey = 0
         self.view = view
         self.apply = apply
         super.init()
-        NotificationCenter.default.addObserver(
-            self, selector: #selector(appearanceDidChange), name: .spacesAppAppearanceDidChange, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(appearanceDidChange), name: .spacesAppAppearanceDidChange, object: nil)
         run()
     }
 

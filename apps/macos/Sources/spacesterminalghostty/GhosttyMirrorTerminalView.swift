@@ -327,11 +327,7 @@
         func applyActionEvent(_ event: GhosttyActionEvent) {
             switch event {
             case .openURL(_, let value):
-                if let onOpenLink {
-                    onOpenLink(value)
-                } else {
-                    _ = GhosttyTerminalLinkOpener.open(value, openURL: debugOpenURLHandler)
-                }
+                if let onOpenLink { onOpenLink(value) } else { _ = GhosttyTerminalLinkOpener.open(value, openURL: debugOpenURLHandler) }
             case .mouseOverLink(let value): hoveredLink = value
             case .startSearch(let needle): showSearchOverlay(query: needle, submitSeededQuery: needle != nil)
             case .endSearch: hideSearchOverlay()

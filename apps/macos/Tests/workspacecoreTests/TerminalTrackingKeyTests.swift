@@ -7,8 +7,7 @@ import systembridge
     @Test func runningProcessFocusIdentityUsesTrackingSessionID() {
         let record = RunningProcessRecord(
             id: "process-1", workspaceID: "workspace-1", templateName: "frontend", command: "npm run dev", terminalApp: TerminalHost.spaces.appName,
-            terminalTrackingID: "session-1", pid: nil, status: .running, logPath: nil, lastOutputAt: nil,
-            startedAt: "now", exitedAt: nil)
+            terminalTrackingID: "session-1", pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil)
 
         #expect(record.terminalFocusIdentity == .session("session-1"))
         #expect(record.terminalTrackingIdentity == .session("session-1"))
@@ -25,8 +24,8 @@ import systembridge
 
     @Test func agentFocusIdentityUsesTrackingSessionID() {
         let record = AgentWindowRecord(
-            id: "agent-1", workspaceID: "workspace-1", provider: .spaces, label: "Claude", terminalTrackingID: "session-3",
-            sessionKey: nil, status: .waiting, createdAt: "now", updatedAt: "now")
+            id: "agent-1", workspaceID: "workspace-1", provider: .spaces, label: "Claude", terminalTrackingID: "session-3", sessionKey: nil,
+            status: .waiting, createdAt: "now", updatedAt: "now")
 
         #expect(record.terminalFocusIdentity == TerminalTrackingIdentity.session("session-3"))
         #expect(record.terminalTrackingIdentity == TerminalTrackingIdentity.session("session-3"))

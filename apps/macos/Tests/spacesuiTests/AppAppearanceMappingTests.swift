@@ -5,9 +5,7 @@ import Testing
 @testable import spacesui
 
 @Suite struct AppAppearanceMappingTests {
-    @Test func systemFollowsOSWithNoOverride() {
-        #expect(AppAppearanceMode.system.nsAppearance == nil)
-    }
+    @Test func systemFollowsOSWithNoOverride() { #expect(AppAppearanceMode.system.nsAppearance == nil) }
 
     @Test func forcedModesPinConcreteAppearances() {
         #expect(AppAppearanceMode.light.nsAppearance?.name == .aqua)

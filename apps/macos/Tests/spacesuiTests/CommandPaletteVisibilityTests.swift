@@ -148,8 +148,7 @@ import workspacecore
         let items = (1...15).map { index in
             makeItem(
                 id: "picker:\(index)", source: .workspaceTarget, workspaceID: "workspace-\(index)", kind: .window, label: "session-\(index)",
-                detail: nil, focusRequest: .workspaceWindow(workspaceID: "workspace-\(index)", index: 1),
-                workspaceTitle: "Workspace \(index)")
+                detail: nil, focusRequest: .workspaceWindow(workspaceID: "workspace-\(index)", index: 1), workspaceTitle: "Workspace \(index)")
         }
 
         let visible = AppKitController.visibleSessionPickerItems(allItems: items, query: "session-15")

@@ -12,18 +12,13 @@
                 "spaces-linux-tunnel-preparation-tests-\(UUID().uuidString)", isDirectory: true)
             defer { try? FileManager.default.removeItem(at: identityRoot) }
             let identity = try TerminalServiceTLSIdentityStore.loadOrCreate(root: identityRoot)
-            let server = SpacesDeviceAPIServer(
-                host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: RejectingPairingStore())
+            let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: RejectingPairingStore())
             let tunnelRequest = SpacesDeviceServiceTunnelRequest(workspaceID: "workspace-1", serviceName: "web")
             let request = SpacesDeviceAPIRequest(
-                command: .openServiceTunnel(tunnelRequest),
-                authToken: "revoked-token",
+                command: .openServiceTunnel(tunnelRequest), authToken: "revoked-token",
                 clientApp: SpacesDeviceClientApp(
-                    installationID: "revoked-installation",
-                    bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID,
-                    platform: "ios",
-                    deviceName: "iPhone",
-                    appVersion: "1.0"))
+                    installationID: "revoked-installation", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "ios",
+                    deviceName: "iPhone", appVersion: "1.0"))
 
             let outcome = server.prepareServiceTunnel(request, tunnelRequest: tunnelRequest)
 
@@ -48,9 +43,7 @@
 
         func removeAll() throws {}
 
-        func authorize(clientApp: SpacesDeviceClientApp?, authToken: String?) throws {
-            throw SpacesDevicePairingError.invalidAuthToken
-        }
+        func authorize(clientApp: SpacesDeviceClientApp?, authToken: String?) throws { throw SpacesDevicePairingError.invalidAuthToken }
 
         func validate(clientApp: SpacesDeviceClientApp) throws {}
     }

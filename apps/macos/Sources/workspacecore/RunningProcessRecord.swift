@@ -39,8 +39,8 @@ public struct RunningProcessRecord: Codable, Sendable {
 
     public init(
         id: String, workspaceID: String, templateID: String? = nil, templateName: String, command: String, runtimeTargetID: String? = nil,
-        terminalApp: String?, terminalTrackingID: String? = nil, pid: Int?, status: RunningProcessState,
-        logPath: String?, lastOutputAt: String?, startedAt: String?, exitedAt: String?
+        terminalApp: String?, terminalTrackingID: String? = nil, pid: Int?, status: RunningProcessState, logPath: String?, lastOutputAt: String?,
+        startedAt: String?, exitedAt: String?
     ) {
         let terminalTarget: TerminalTargetRecord? =
             if terminalTrackingID != nil { TerminalTargetRecord(runtimeTargetID: runtimeTargetID, trackingID: terminalTrackingID) } else { nil }
@@ -52,13 +52,13 @@ public struct RunningProcessRecord: Codable, Sendable {
 
     public init(
         id: String, workspaceID: String, templateID: String? = nil, templateName: String, command: String, terminalApp: String?,
-        terminalTrackingID: String? = nil, pid: Int?, status: RunningProcessState, logPath: String?,
-        lastOutputAt: String?, startedAt: String?, exitedAt: String?
+        terminalTrackingID: String? = nil, pid: Int?, status: RunningProcessState, logPath: String?, lastOutputAt: String?, startedAt: String?,
+        exitedAt: String?
     ) {
         self.init(
             id: id, workspaceID: workspaceID, templateID: templateID, templateName: templateName, command: command, runtimeTargetID: nil,
-            terminalApp: terminalApp, terminalTrackingID: terminalTrackingID, pid: pid, status: status,
-            logPath: logPath, lastOutputAt: lastOutputAt, startedAt: startedAt, exitedAt: exitedAt)
+            terminalApp: terminalApp, terminalTrackingID: terminalTrackingID, pid: pid, status: status, logPath: logPath, lastOutputAt: lastOutputAt,
+            startedAt: startedAt, exitedAt: exitedAt)
     }
 
     public var terminalTrackingID: String? { terminalTarget?.trackingID }

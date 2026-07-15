@@ -142,9 +142,7 @@ extension SQLiteStore {
         return value
     }
 
-    public func appendAgentSessionEvent(
-        agentSessionID: String, eventType: String, source: String, message: String?, createdAt: String
-    ) throws {
+    public func appendAgentSessionEvent(agentSessionID: String, eventType: String, source: String, message: String?, createdAt: String) throws {
         try execute(
             sql: """
                 INSERT INTO agent_session_events(id, agent_session_id, event_type, source, message, created_at)
@@ -195,7 +193,8 @@ extension SQLiteStore {
             window: WindowRecord(
                 id: targetID, workspaceID: record.workspaceID, app: TerminalHost.spaces.appName,
                 name: preservesExistingMetadata ? (existingWindow?.name ?? record.label ?? "Coding Agent CLI") : (record.label ?? "Coding Agent CLI"),
-                detail: preservesExistingMetadata ? existingWindow?.detail : nil, targetURL: nil, terminalTrackingID: terminalTarget.trackingID, role: "terminal",
+                detail: preservesExistingMetadata ? existingWindow?.detail : nil, targetURL: nil, terminalTrackingID: terminalTarget.trackingID,
+                role: "terminal",
                 orderIndex: existingWindow?.orderIndex ?? nextRuntimeTargetOrderIndex(existing: existingWindows, role: "terminal", orderOffset: 200),
                 lastSeenAt: now))
         return targetID

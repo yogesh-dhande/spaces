@@ -28,8 +28,8 @@ extension SQLiteStore {
                       notes = excluded.notes
                     """,
                 bindings: [
-                    workspace.id, workspace.projectID, workspace.dir, workspace.dirname ?? "", workspace.branch ?? "",
-                    workspace.baseBranch ?? "", workspace.isDefault ? "1" : "0", workspace.isArchived ? "1" : "0", workspace.isHidden ? "1" : "0",
+                    workspace.id, workspace.projectID, workspace.dir, workspace.dirname ?? "", workspace.branch ?? "", workspace.baseBranch ?? "",
+                    workspace.isDefault ? "1" : "0", workspace.isArchived ? "1" : "0", workspace.isHidden ? "1" : "0",
                     workspace.isRunning ? "1" : "0", workspace.lastLaunchedAt ?? "", workspace.notes ?? "",
                 ])
             try execute(sql: "DELETE FROM ignored_worktrees WHERE worktree_dir = ?", bindings: [workspace.dir])
@@ -293,9 +293,8 @@ extension SQLiteStore {
     func decodeWorkspace(row: [String]) -> WorkspaceRecord? {
         guard row.count >= 12 else { return nil }
         return WorkspaceRecord(
-            id: row[0], projectID: row[1], dir: row[2], dirname: row[3].isEmpty ? nil : row[3],
-            branch: row[4].isEmpty ? nil : row[4], baseBranch: row[5].isEmpty ? nil : row[5], isDefault: row[6] == "1", isArchived: row[7] == "1",
-            isHidden: row[8] == "1", isRunning: row[9] == "1", lastLaunchedAt: row[10].isEmpty ? nil : row[10],
-            notes: row[11].isEmpty ? nil : row[11])
+            id: row[0], projectID: row[1], dir: row[2], dirname: row[3].isEmpty ? nil : row[3], branch: row[4].isEmpty ? nil : row[4],
+            baseBranch: row[5].isEmpty ? nil : row[5], isDefault: row[6] == "1", isArchived: row[7] == "1", isHidden: row[8] == "1",
+            isRunning: row[9] == "1", lastLaunchedAt: row[10].isEmpty ? nil : row[10], notes: row[11].isEmpty ? nil : row[11])
     }
 }

@@ -1673,8 +1673,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             launchConfiguration: TerminalSessionLaunchConfiguration(
                 sessionID: "control-attach-appearance-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "owner",
                 workingDirectory: FileManager.default.temporaryDirectory.path, shell: "/bin/sh", command: "sleep 5",
-                createdAt: "2026-07-07T00:00:00Z", workspaceID: "workspace-1", kind: .shell),
-            paths: paths)
+                createdAt: "2026-07-07T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
         defer { host.terminate() }
 
         try host.startIfNeeded()
@@ -1731,8 +1730,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             launchConfiguration: TerminalSessionLaunchConfiguration(
                 sessionID: "control-set-appearance-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "owner",
                 workingDirectory: FileManager.default.temporaryDirectory.path, shell: "/bin/sh", command: "sleep 5",
-                createdAt: "2026-07-07T00:00:00Z", workspaceID: "workspace-1", kind: .shell),
-            paths: paths)
+                createdAt: "2026-07-07T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
         defer { host.terminate() }
 
         try host.startIfNeeded()

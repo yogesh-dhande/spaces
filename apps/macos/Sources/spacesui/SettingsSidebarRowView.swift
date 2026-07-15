@@ -71,9 +71,7 @@ final class SettingsSidebarRowView: NSView {
         return self
     }
 
-    override func mouseDown(with event: NSEvent) {
-        onClick?()
-    }
+    override func mouseDown(with event: NSEvent) { onClick?() }
 
     override func accessibilityPerformPress() -> Bool {
         guard let onClick else { return super.accessibilityPerformPress() }

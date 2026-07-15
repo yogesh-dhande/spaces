@@ -7,9 +7,7 @@ import Testing
     /// A dynamic color that is pure black in light and pure white in dark, so the resolved
     /// layer color unambiguously identifies which variant the binder applied.
     private func blackWhiteDynamic() -> NSColor {
-        NSColor(name: nil) { appearance in
-            appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? .white : .black
-        }
+        NSColor(name: nil) { appearance in appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? .white : .black }
     }
 
     private func layerWhiteComponent(_ view: NSView) -> CGFloat? {

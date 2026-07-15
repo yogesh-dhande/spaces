@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 import { DocsShell } from "../components/docs-shell";
 
 export const metadata: Metadata = {
@@ -33,7 +34,7 @@ export default function ProcessesDocsPage() {
           <li>• Plain commands such as <code>npm run dev</code> and <code>python manage.py runserver</code> run naturally.</li>
           <li>• Composite commands can use <code>cd</code>, <code>&amp;&amp;</code>, pipes, redirects, and normal shell expansion.</li>
         </ul>
-        <pre className="mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-lg border border-line/70 bg-background-soft/60 p-3 text-xs leading-6 text-foreground">
+        <pre className="mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-sm border border-line/70 bg-background-soft/60 p-3 text-xs leading-6 text-foreground">
           <code>{`# Env assignment
 PORT=$SPACES_WEB_PORT npm run dev
 
@@ -68,7 +69,7 @@ npm run dev | tee .logs/frontend.log`}</code>
         <p className="mt-2 text-sm leading-7 text-foreground-soft">
           Every process runs with the workspace&apos;s per-service variables and directory variables in its environment:
         </p>
-        <pre className="mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-lg border border-line/70 bg-background-soft/60 p-3 text-xs leading-6 text-foreground">
+        <pre className="mt-3 w-full max-w-full min-w-0 overflow-x-auto whitespace-pre-wrap break-words rounded-sm border border-line/70 bg-background-soft/60 p-3 text-xs leading-6 text-foreground">
           <code>{`SPACES_WEB_PORT, SPACES_API_PORT, ...   # assigned port per service
 SPACES_WEB_URL, SPACES_API_URL, ...     # Caddy URL per service
 SPACES_WEB_HOST, SPACES_API_HOST, ...   # Caddy hostname per service (no scheme or port)
@@ -76,7 +77,11 @@ SPACES_PROJECT_DIR                      # project directory
 SPACES_WORKSPACE_DIR                    # this workspace's directory`}</code>
         </pre>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Reference them directly in your command, for example <code>PORT=$SPACES_WEB_PORT npm run dev</code>. The shell expands those variables when the process starts.
+          Reference them directly in your command, for example <code>PORT=$SPACES_WEB_PORT npm run dev</code>. The shell expands those variables when the process starts. See{" "}
+          <Link href="/docs/services" className="text-accent hover:underline">
+            Services
+          </Link>{" "}
+          for how these ports and URLs are assigned and routed.
         </p>
       </article>
 

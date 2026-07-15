@@ -4,11 +4,7 @@ import XCTest
 @testable import spacesterminalghostty
 
 final class GhosttyInputOutputResyncSchedulerTests: XCTestCase {
-    @MainActor private func waitForCondition(
-        _ description: String,
-        timeout: TimeInterval = 5,
-        condition: @escaping @MainActor () -> Bool
-    ) async {
+    @MainActor private func waitForCondition(_ description: String, timeout: TimeInterval = 5, condition: @escaping @MainActor () -> Bool) async {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             if condition() { return }

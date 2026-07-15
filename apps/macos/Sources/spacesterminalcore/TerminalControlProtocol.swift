@@ -295,8 +295,7 @@ public enum TerminalControlCommand: Sendable, Equatable {
                 TerminalControlScrollPayload(
                     clientID: request.clientID, ownerEpoch: request.ownerEpoch, scrollHorizontal: request.scrollHorizontal,
                     scrollVertical: request.scrollVertical, scrollMods: request.scrollMods))
-        case "setAppearance":
-            self = .setAppearance(TerminalControlSetAppearancePayload(clientID: request.clientID, appearance: request.appearance))
+        case "setAppearance": self = .setAppearance(TerminalControlSetAppearancePayload(clientID: request.clientID, appearance: request.appearance))
         default: self = .unsupported(request.command)
         }
     }

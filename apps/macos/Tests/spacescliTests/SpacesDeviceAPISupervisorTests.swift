@@ -184,8 +184,8 @@ private func supervisorTestTLSIdentity() throws -> TerminalServiceTLSIdentity {
             relaunch: { _ in
                 relaunchCount += 1
                 return false
-            }, send: { _ in SpacesDeviceAPIControlResponse(ok: false, message: "Device API is not running.") },
-            hasLiveTerminalSessions: { false }, retryInterval: 0)
+            }, send: { _ in SpacesDeviceAPIControlResponse(ok: false, message: "Device API is not running.") }, hasLiveTerminalSessions: { false },
+            retryInterval: 0)
 
         XCTAssertFalse(response.ok)
         XCTAssertEqual(response.message, "Device API is not running.")
@@ -479,8 +479,8 @@ private func supervisorTestTLSIdentity() throws -> TerminalServiceTLSIdentity {
             try store.upsert(
                 runningProcess: RunningProcessRecord(
                     id: "process-dead-service", workspaceID: workspace.id, templateName: "dead-process", command: "sleep 300",
-                    terminalApp: TerminalHost.spaces.appName, terminalTrackingID: sessionID, pid: nil, status: .running,
-                    logPath: nil, lastOutputAt: nil, startedAt: "2026-06-04T12:00:00Z", exitedAt: nil))
+                    terminalApp: TerminalHost.spaces.appName, terminalTrackingID: sessionID, pid: nil, status: .running, logPath: nil,
+                    lastOutputAt: nil, startedAt: "2026-06-04T12:00:00Z", exitedAt: nil))
 
             let identity = try supervisorTestTLSIdentity()
             let clientApp = SpacesDeviceClientApp(

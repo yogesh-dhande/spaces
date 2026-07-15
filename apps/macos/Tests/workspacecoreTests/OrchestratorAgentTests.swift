@@ -18,8 +18,8 @@ extension OrchestratorTests {
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
         try store.upsert(
             window: WindowRecord(
-                id: "window-codex", workspaceID: workspace.id, app: "Spaces", name: "Codex", terminalTrackingID: "session-codex",
-                role: "terminal", orderIndex: 0, lastSeenAt: "now"))
+                id: "window-codex", workspaceID: workspace.id, app: "Spaces", name: "Codex", terminalTrackingID: "session-codex", role: "terminal",
+                orderIndex: 0, lastSeenAt: "now"))
         try store.upsertAgentWindow(
             AgentWindowRecord(
                 id: "agent-codex", workspaceID: workspace.id, provider: .spaces, label: "Codex", runtimeTargetID: "window-codex",
@@ -51,8 +51,8 @@ extension OrchestratorTests {
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
         try store.upsertAgentWindow(
             AgentWindowRecord(
-                id: "agent-codex", workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "old-session",
-                sessionKey: nil, status: .idle, createdAt: "now", updatedAt: "now"))
+                id: "agent-codex", workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "old-session", sessionKey: nil,
+                status: .idle, createdAt: "now", updatedAt: "now"))
         let launches = TerminalLaunchConfigurationCapture()
         let terminated = TerminalTerminateCapture()
         let orchestrator = WorkspaceOrchestrator(
@@ -104,8 +104,8 @@ extension OrchestratorTests {
         try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
         try store.upsertAgentWindow(
             AgentWindowRecord(
-                id: "agent-codex", workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "old-session",
-                sessionKey: nil, status: .idle, createdAt: "now", updatedAt: "now"))
+                id: "agent-codex", workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "old-session", sessionKey: nil,
+                status: .idle, createdAt: "now", updatedAt: "now"))
         try store.upsertAgentWindow(
             AgentWindowRecord(
                 id: "agent-codex", workspaceID: workspace.id, provider: .spaces, label: "Codex",
@@ -225,8 +225,8 @@ extension OrchestratorTests {
         // configured "Codex" label and is matched/replaced on relaunch.
         try seedTerminalSessionWindow(store: store, workspaceID: workspace.id, sessionID: "stale-session")
         _ = try orchestrator.registerAgentWindow(
-            workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "stale-session",
-            status: .idle, claimedLauncherName: "Codex")
+            workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "stale-session", status: .idle,
+            claimedLauncherName: "Codex")
 
         try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
             let record = try orchestrator.launchAgentLauncher(workspaceID: workspace.id, name: "Codex")
@@ -261,12 +261,11 @@ extension OrchestratorTests {
         try seedTerminalSessionWindow(store: store, workspaceID: workspace.id, sessionID: "session-b")
 
         let configured = try orchestrator.registerAgentWindow(
-            workspaceID: workspace.id, provider: .spaces, label: "Mock Agent", terminalTrackingID: "session-a",
-            status: .idle, claimedLauncherName: "Mock Agent")
+            workspaceID: workspace.id, provider: .spaces, label: "Mock Agent", terminalTrackingID: "session-a", status: .idle,
+            claimedLauncherName: "Mock Agent")
 
         let updated = try orchestrator.updateAgentWindowStatus(
-            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "session-b", label: "Mock Agent",
-            status: .waiting)
+            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "session-b", label: "Mock Agent", status: .waiting)
 
         let agentWindows = try store.agentWindows(workspaceID: workspace.id)
         let configuredAfterUpdate = try XCTUnwrap(agentWindows.first { $0.id == configured.id })
@@ -294,8 +293,8 @@ extension OrchestratorTests {
         let sessionID = "spaces-agent-session"
         try store.upsertAgentWindow(
             AgentWindowRecord(
-                id: "agent-codex", workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: sessionID,
-                sessionKey: nil, status: .spinning, createdAt: "now", updatedAt: "now"))
+                id: "agent-codex", workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: sessionID, sessionKey: nil,
+                status: .spinning, createdAt: "now", updatedAt: "now"))
 
         try withEnv(name: "SPACES_DB_PATH", value: dbPath.path) {
             let paths = try TerminalSessionPaths.forSession(id: sessionID)
@@ -399,8 +398,8 @@ extension OrchestratorTests {
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
         try store.upsertAgentWindow(
             AgentWindowRecord(
-                id: "agent-1", workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: sessionID,
-                sessionKey: nil, status: .spinning, createdAt: "now", updatedAt: "now"))
+                id: "agent-1", workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: sessionID, sessionKey: nil,
+                status: .spinning, createdAt: "now", updatedAt: "now"))
         try store.upsert(
             window: WindowRecord(
                 id: "agent-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "Codex", detail: nil, targetURL: nil,
@@ -480,8 +479,8 @@ extension OrchestratorTests {
         try store.upsert(
             runningProcess: RunningProcessRecord(
                 id: "process-1", workspaceID: childWorkspace.id, templateName: "api", command: "npm run api",
-                terminalApp: TerminalHost.spaces.appName, terminalTrackingID: "process-session", pid: nil,
-                status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+                terminalApp: TerminalHost.spaces.appName, terminalTrackingID: "process-session", pid: nil, status: .running, logPath: nil,
+                lastOutputAt: nil, startedAt: "now", exitedAt: nil))
         try store.upsertAgentWindow(
             AgentWindowRecord(
                 id: "agent-1", workspaceID: childWorkspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "agent-session",
@@ -617,8 +616,8 @@ extension OrchestratorTests {
                     id: "terminal-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil, targetURL: nil,
                     terminalTrackingID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
             let signalAgent = try orchestrator.registerAgentWindow(
-                workspaceID: workspace.id, provider: .spaces, label: "Custom Hook Agent", terminalTrackingID: sessionID,
-                status: .spinning, eventSource: "spaces_signal")
+                workspaceID: workspace.id, provider: .spaces, label: "Custom Hook Agent", terminalTrackingID: sessionID, status: .spinning,
+                eventSource: "spaces_signal")
 
             XCTAssertFalse(try orchestrator.reconcileTerminalForegroundAgentClassifications())
 
@@ -669,8 +668,8 @@ extension OrchestratorTests {
                     id: "terminal-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil, targetURL: nil,
                     terminalTrackingID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
             let signalAgent = try orchestrator.registerAgentWindow(
-                workspaceID: workspace.id, provider: .spaces, label: "Custom Hook Agent", terminalTrackingID: sessionID,
-                status: .spinning, eventSource: "spaces_signal")
+                workspaceID: workspace.id, provider: .spaces, label: "Custom Hook Agent", terminalTrackingID: sessionID, status: .spinning,
+                eventSource: "spaces_signal")
 
             XCTAssertFalse(try orchestrator.reconcileTerminalForegroundAgentClassifications())
             XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).map(\.id), [signalAgent.id])
@@ -712,8 +711,8 @@ extension OrchestratorTests {
                     id: "terminal-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil, targetURL: nil,
                     terminalTrackingID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
             let signalAgent = try orchestrator.registerAgentWindow(
-                workspaceID: workspace.id, provider: .spaces, label: "Custom Hook Agent", terminalTrackingID: sessionID,
-                status: .spinning, eventSource: "spaces_signal")
+                workspaceID: workspace.id, provider: .spaces, label: "Custom Hook Agent", terminalTrackingID: sessionID, status: .spinning,
+                eventSource: "spaces_signal")
 
             try TerminalSessionPersistence.writeRuntimeState(
                 TerminalSessionRuntimeState(
@@ -763,8 +762,8 @@ extension OrchestratorTests {
                     id: "terminal-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil, targetURL: nil,
                     terminalTrackingID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
             let signalAgent = try orchestrator.registerAgentWindow(
-                workspaceID: workspace.id, provider: .spaces, label: "Custom Hook Agent", terminalTrackingID: sessionID,
-                status: .waiting, eventSource: "spaces_signal")
+                workspaceID: workspace.id, provider: .spaces, label: "Custom Hook Agent", terminalTrackingID: sessionID, status: .waiting,
+                eventSource: "spaces_signal")
 
             XCTAssertFalse(try orchestrator.reconcileTerminalForegroundAgentClassifications())
 
@@ -808,8 +807,8 @@ extension OrchestratorTests {
             XCTAssertEqual(detectedAgent.label, "Codex")
 
             let signaledAgent = try orchestrator.updateAgentWindowStatus(
-                workspaceID: workspace.id, provider: .spaces, terminalTrackingID: sessionID, label: "Custom Hook Agent",
-                status: .spinning, eventType: "start", eventSource: "spaces_signal")
+                workspaceID: workspace.id, provider: .spaces, terminalTrackingID: sessionID, label: "Custom Hook Agent", status: .spinning,
+                eventType: "start", eventSource: "spaces_signal")
             XCTAssertEqual(signaledAgent.id, detectedAgent.id)
 
             XCTAssertFalse(try orchestrator.reconcileTerminalForegroundAgentClassifications())
@@ -864,8 +863,8 @@ extension OrchestratorTests {
             XCTAssertEqual(try XCTUnwrap(store.windows(workspaceID: workspace.id).first).detail, "codex --model gpt-5")
 
             let updated = try orchestrator.updateAgentWindowStatus(
-                workspaceID: workspace.id, provider: .spaces, terminalTrackingID: sessionID, sessionKey: "thread-1", label: "Codex",
-                status: .spinning)
+                workspaceID: workspace.id, provider: .spaces, terminalTrackingID: sessionID, sessionKey: "thread-1", label: "Codex", status: .spinning
+            )
 
             XCTAssertNil(updated.claimedLauncherName)
             let window = try XCTUnwrap(store.windows(workspaceID: workspace.id).first)
@@ -934,8 +933,7 @@ extension OrchestratorTests {
                 try store.upsert(
                     window: WindowRecord(
                         id: "terminal-window-\(index + 1)", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-\(index + 1)",
-                        detail: nil, targetURL: nil, terminalTrackingID: sessionID, role: "terminal",
-                        orderIndex: 200 + index, lastSeenAt: "now"))
+                        detail: nil, targetURL: nil, terminalTrackingID: sessionID, role: "terminal", orderIndex: 200 + index, lastSeenAt: "now"))
             }
 
             XCTAssertTrue(try orchestrator.reconcileTerminalForegroundAgentClassifications())
@@ -1032,8 +1030,7 @@ extension OrchestratorTests {
             try store.upsert(
                 runningProcess: RunningProcessRecord(
                     id: "process-1", workspaceID: workspace.id, templateName: "api", command: "npm run api", terminalApp: TerminalHost.spaces.appName,
-                    terminalTrackingID: sessionID, pid: nil, status: .running, logPath: nil, lastOutputAt: nil,
-                    startedAt: "now", exitedAt: nil))
+                    terminalTrackingID: sessionID, pid: nil, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
 
             XCTAssertFalse(try orchestrator.reconcileTerminalForegroundAgentClassifications())
             XCTAssertTrue(try store.agentWindows(workspaceID: workspace.id).isEmpty)
@@ -1046,7 +1043,8 @@ extension OrchestratorTests {
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
         try store.upsert(
             window: WindowRecord(
-                id: UUID().uuidString, workspaceID: workspace.id, app: "Spaces", title: "Claude Code", terminalTrackingID: "workspace-session", role: "terminal", orderIndex: 201, lastSeenAt: "now"))
+                id: UUID().uuidString, workspaceID: workspace.id, app: "Spaces", title: "Claude Code", terminalTrackingID: "workspace-session",
+                role: "terminal", orderIndex: 201, lastSeenAt: "now"))
         let agentRecord = AgentWindowRecord(
             id: UUID().uuidString, workspaceID: workspace.id, provider: .spaces, label: "Claude Code", terminalTrackingID: "workspace-session",
             sessionKey: nil, status: .spinning, createdAt: "now", updatedAt: "now")

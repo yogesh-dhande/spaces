@@ -9,7 +9,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/installation",
     title: "Installation & Setup",
     summary:
-      "Get Spaces installed, its dependencies in place, and your environment verified, then grant permission to control Google Chrome on first launch.",
+      "Get Spaces installed, its dependencies in place, and your environment verified, then grant permission to control Google Chrome on first launch. Includes installing and updating the daemon on Linux.",
   },
   {
     href: "/docs/getting-started",
@@ -35,10 +35,10 @@ export const docsPageLinks: DocsPageLink[] = [
       "Understand how workspaces move between stopped, running, and archived states across the GUI and the minimal CLI runtime flow.",
   },
   {
-    href: "/docs/window-management",
-    title: "Window Management",
+    href: "/docs/services",
+    title: "Services",
     summary:
-      "Spaces tracks workspace Chrome tabs and terminal panes so direct shortcuts can open or focus targets and cycling stays inside already-open windows.",
+      "Declare named services once and reach each at a stable per-workspace URL through a bundled Caddy proxy — no manual port assignment, no cookie collisions between workspaces.",
   },
   {
     href: "/docs/processes",
@@ -51,6 +51,12 @@ export const docsPageLinks: DocsPageLink[] = [
     title: "Browser Sessions",
     summary:
       "Attach Chrome URLs to a workspace so the pages you need are one direct shortcut away while unopened sessions stay out of window cycling, and open the same sessions in an in-app web view from your iPhone.",
+  },
+  {
+    href: "/docs/window-management",
+    title: "Window Management",
+    summary:
+      "Spaces tracks workspace Chrome tabs and terminal panes so direct shortcuts can open or focus targets and cycling stays inside already-open windows.",
   },
   {
     href: "/docs/coding-agents",

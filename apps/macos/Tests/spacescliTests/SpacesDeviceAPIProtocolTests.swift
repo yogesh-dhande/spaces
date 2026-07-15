@@ -5,9 +5,7 @@ import spacesterminalcore
 @testable import spacesdevicecore
 
 final class SpacesDeviceAPIProtocolTests: XCTestCase {
-    func testWireProtocolVersionCoversAgentHooksCommands() {
-        XCTAssertGreaterThanOrEqual(SpacesWireProtocol.version, 2)
-    }
+    func testWireProtocolVersionCoversAgentHooksCommands() { XCTAssertGreaterThanOrEqual(SpacesWireProtocol.version, 2) }
 
     func testSubscribeDeviceOverviewRoundTripsThroughCodecAndIsASubscription() throws {
         let request = SpacesDeviceAPIRequest(command: .subscribeDeviceOverview, authToken: "SECRET")
@@ -24,8 +22,7 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
     }
 
     func testInstallAgentHooksCommandRoundTripsAndIsNotReplaySafe() throws {
-        let request = SpacesDeviceAPIRequest(
-            command: .installAgentHooks(.init(kinds: [.claudeCode, .opencode])), authToken: "SECRET")
+        let request = SpacesDeviceAPIRequest(command: .installAgentHooks(.init(kinds: [.claudeCode, .opencode])), authToken: "SECRET")
         XCTAssertFalse(request.isSafeToReplayAfterConnectionFailure)
         XCTAssertEqual(try SpacesDeviceAPICodec.decodeRequest(SpacesDeviceAPICodec.encodeRequest(request)), request)
     }
@@ -49,8 +46,7 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
             agents: [
                 AgentHookStatus(kind: .claudeCode, displayName: "Claude Code", available: true, installState: .current),
                 AgentHookStatus(kind: .codex, displayName: "Codex", available: true, installState: .notInstalled),
-            ],
-            failures: [AgentHookInstallFailure(kind: .codex, message: "config.toml already defines `features`.")])
+            ], failures: [AgentHookInstallFailure(kind: .codex, message: "config.toml already defines `features`.")])
         let response = SpacesDeviceAPIResponse(ok: true, message: "Installed agent hooks.", result: .agentHooksInstall(outcome))
 
         let decoded = try SpacesDeviceAPICodec.decodeResponse(SpacesDeviceAPICodec.encodeResponse(response))

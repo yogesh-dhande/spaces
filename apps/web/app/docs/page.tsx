@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { SiteHeader } from "../components/site-header";
 import { SiteFooter } from "../components/site-footer";
+import { PrimaryButton } from "../components/primary-button";
 import { docsPageLinks } from "./content";
 
 export const metadata: Metadata = {
@@ -31,9 +32,9 @@ const terms = [
       "URLs you want tied to a workspace (e.g. localhost:3000, github.com/owner/repo) so you can return to them quickly.",
   },
   {
-    name: "Reserved Ports",
+    name: "Service",
     description:
-      "Named port definitions allocated per workspace so parallel work never collides on the same local port.",
+      "A named process (like web or api) that gets its own reserved port per workspace and a stable URL through the bundled proxy — so parallel workspaces never fight over the same local port.",
   },
   {
     name: "Worktree",
@@ -65,13 +66,10 @@ export default function DocsPage() {
             workspaces during parallel development.
           </p>
           <div className="mt-8 flex flex-wrap items-center gap-3">
-            <Link
-              href="/docs/getting-started"
-              className="btn-primary inline-flex items-center gap-2 rounded-full px-6 py-3 text-sm font-semibold"
-            >
+            <PrimaryButton href="/docs/getting-started">
               Getting Started
               <span aria-hidden>→</span>
-            </Link>
+            </PrimaryButton>
             <a
               href="#docs-map"
               className="inline-flex items-center gap-1.5 rounded-full px-5 py-3 text-sm font-semibold text-foreground-soft transition-colors hover:text-accent"
@@ -140,7 +138,7 @@ export default function DocsPage() {
             <Link
               key={page.href}
               href={page.href}
-              className="group flex flex-col gap-3 rounded-2xl border border-line/80 bg-surface/80 p-5 transition-colors hover:border-accent/60"
+              className="group flex flex-col gap-3 rounded-sm border border-line/80 bg-surface/80 p-5 transition-colors hover:border-accent/60"
             >
               <span className="font-mono text-[0.6rem] uppercase tracking-[0.18em] text-foreground-soft">
                 {String(i + 1).padStart(2, "0")}

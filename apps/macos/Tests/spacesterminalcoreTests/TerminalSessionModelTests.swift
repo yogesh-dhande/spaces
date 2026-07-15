@@ -375,8 +375,8 @@ final class TerminalSessionModelTests: XCTestCase {
         try writeLaunchConfiguration(sessionID: sessionID, paths: paths)
         let event = TerminalServiceAgentSignalEvent(
             id: "event-1", sessionID: sessionID, workspaceID: "workspace-1", workspacePath: "/tmp/workspace", type: "blocked", provider: "spaces",
-            label: "Mock Agent", terminalTrackingID: sessionID,
-            environmentKeys: ["SPACES_WORKSPACE_ID", "SPACES_TERMINAL_TRACKING_ID"], createdAt: "2026-05-08T00:00:00Z")
+            label: "Mock Agent", terminalTrackingID: sessionID, environmentKeys: ["SPACES_WORKSPACE_ID", "SPACES_TERMINAL_TRACKING_ID"],
+            createdAt: "2026-05-08T00:00:00Z")
 
         try TerminalSessionPersistence.appendPendingAgentSignal(event, paths: paths)
 

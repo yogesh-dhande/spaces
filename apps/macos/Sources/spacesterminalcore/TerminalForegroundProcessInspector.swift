@@ -137,9 +137,7 @@ public enum TerminalForegroundProcessInspector {
         #if os(macOS)
             var info = proc_vnodepathinfo()
             let expectedSize = Int32(MemoryLayout<proc_vnodepathinfo>.size)
-            let returnedSize = withUnsafeMutablePointer(to: &info) { pointer in
-                proc_pidinfo(pid, PROC_PIDVNODEPATHINFO, 0, pointer, expectedSize)
-            }
+            let returnedSize = withUnsafeMutablePointer(to: &info) { pointer in proc_pidinfo(pid, PROC_PIDVNODEPATHINFO, 0, pointer, expectedSize) }
             guard returnedSize == expectedSize else { return nil }
             let capacity = MemoryLayout.size(ofValue: info.pvi_cdir.vip_path)
             let path = withUnsafePointer(to: &info.pvi_cdir.vip_path) { pointer in

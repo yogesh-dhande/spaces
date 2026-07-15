@@ -621,8 +621,8 @@ private struct ServiceTunnelCommand: ParsableCommand {
     @Option(help: "Device API port.") var port: Int
     @Option(help: "Expected daemon certificate fingerprint.") var certificateFingerprint: String
     @Option(help: "Paired-device auth token.") var authToken: String
-    @Option(help: "Installation ID the auth token was paired with; the daemon binds each token to its paired installation and bundle.") var
-        clientInstallationID: String
+    @Option(help: "Installation ID the auth token was paired with; the daemon binds each token to its paired installation and bundle.")
+    var clientInstallationID: String
     @Option(help: "Workspace whose running service the tunnel targets.") var workspaceID: String
     @Option(help: "Configured service name to tunnel to.") var serviceName: String
     @Option(help: "Absolute request path for the single HTTP GET performed through the tunnel, e.g. /README.txt.") var httpGet: String
@@ -633,8 +633,7 @@ private struct ServiceTunnelCommand: ParsableCommand {
         guard (1...65_535).contains(port) else { throw ValidationError("Port must be between 1 and 65535.") }
         guard httpGet.hasPrefix("/") else { throw ValidationError("--http-get must be an absolute path starting with /.") }
         let request = SpacesDeviceAPIRequest(
-            command: .openServiceTunnel(SpacesDeviceServiceTunnelRequest(workspaceID: workspaceID, serviceName: serviceName)),
-            authToken: authToken,
+            command: .openServiceTunnel(SpacesDeviceServiceTunnelRequest(workspaceID: workspaceID, serviceName: serviceName)), authToken: authToken,
             clientApp: SpacesDeviceClientApp(
                 installationID: clientInstallationID, bundleID: SpacesDeviceFirstPartyPolicy.iosBundleID, platform: "ios",
                 deviceName: "Spaces E2E Service Tunnel", appVersion: "1.0"))

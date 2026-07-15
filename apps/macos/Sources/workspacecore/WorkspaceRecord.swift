@@ -15,8 +15,8 @@ public struct WorkspaceRecord: Codable, Sendable {
     public let notes: String?
 
     public init(
-        id: String, projectID: String, dir: String, dirname: String?, branch: String?, baseBranch: String? = nil,
-        isDefault: Bool, isArchived: Bool, isHidden: Bool = false, isRunning: Bool, lastLaunchedAt: String?, notes: String? = nil
+        id: String, projectID: String, dir: String, dirname: String?, branch: String?, baseBranch: String? = nil, isDefault: Bool, isArchived: Bool,
+        isHidden: Bool = false, isRunning: Bool, lastLaunchedAt: String?, notes: String? = nil
     ) {
         self.id = id
         self.projectID = projectID

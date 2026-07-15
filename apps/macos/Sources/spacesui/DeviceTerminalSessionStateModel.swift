@@ -345,10 +345,12 @@
                 }
                 let response = try requestClient.send(
                     SpacesDeviceAPIRequest(
-                        command: .resolveTerminalLink(SpacesDeviceTerminalLinkResolveRequest(sessionID: payload.sessionID, terminalLink: terminalLink)),
-                        authToken: authToken, clientApp: clientApp))
+                        command: .resolveTerminalLink(
+                            SpacesDeviceTerminalLinkResolveRequest(sessionID: payload.sessionID, terminalLink: terminalLink)), authToken: authToken,
+                        clientApp: clientApp))
                 return TerminalServiceResponse(
-                    ok: response.ok, message: response.message, terminalLinkMetadata: response.terminalLinkMetadata.map(Self.terminalServiceLinkMetadata))
+                    ok: response.ok, message: response.message,
+                    terminalLinkMetadata: response.terminalLinkMetadata.map(Self.terminalServiceLinkMetadata))
             case .readTerminalLinkChunk(let payload):
                 guard let terminalLinkID = payload.terminalLinkID?.trimmingCharacters(in: .whitespacesAndNewlines), !terminalLinkID.isEmpty else {
                     throw WorkspaceError.invalidArgument(message: "Missing terminal link id to read.")
@@ -369,7 +371,9 @@
         /// Mirrors the daemon's own mapping for the reverse direction (a local Ghostty-embedded
         /// session resolving a link), see `SpacesdMain.terminalServiceLinkMetadata`, so a link
         /// resolved through either path produces the same `TerminalServiceTerminalLinkMetadata`.
-        private nonisolated static func terminalServiceLinkMetadata(_ metadata: SpacesDeviceTerminalLinkMetadata) -> TerminalServiceTerminalLinkMetadata {
+        private nonisolated static func terminalServiceLinkMetadata(_ metadata: SpacesDeviceTerminalLinkMetadata)
+            -> TerminalServiceTerminalLinkMetadata
+        {
             TerminalServiceTerminalLinkMetadata(
                 id: metadata.id, source: metadata.source.rawValue, originalLink: metadata.originalLink, displayName: metadata.displayName,
                 contentType: metadata.contentType, artifactKind: metadata.artifactKind?.rawValue, byteCount: metadata.byteCount,
@@ -379,7 +383,8 @@
         /// Maps a Device API terminal-link chunk payload into the terminal-service wire type.
         /// Mirrors `SpacesdMain.terminalServiceLinkChunk`.
         private nonisolated static func terminalServiceLinkChunk(_ chunk: SpacesDeviceTerminalLinkChunk) -> TerminalServiceTerminalLinkChunk {
-            TerminalServiceTerminalLinkChunk(linkID: chunk.linkID, offset: chunk.offset, byteCount: chunk.byteCount, isFinal: chunk.isFinal, base64Data: chunk.base64Data)
+            TerminalServiceTerminalLinkChunk(
+                linkID: chunk.linkID, offset: chunk.offset, byteCount: chunk.byteCount, isFinal: chunk.isFinal, base64Data: chunk.base64Data)
         }
     }
 

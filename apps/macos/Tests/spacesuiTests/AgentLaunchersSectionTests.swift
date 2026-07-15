@@ -26,8 +26,8 @@ import workspacecore
                 id: "matched", workspaceID: "workspace", provider: .spaces, label: "Claude", terminalTrackingID: "session-claude", sessionKey: nil,
                 status: .idle, createdAt: "now", updatedAt: "now"),
             AgentWindowRecord(
-                id: "adhoc", workspaceID: "workspace", provider: .spaces, label: "reviewer", terminalTrackingID: "session-reviewer",
-                sessionKey: nil, status: .spinning, createdAt: "now", updatedAt: "now"),
+                id: "adhoc", workspaceID: "workspace", provider: .spaces, label: "reviewer", terminalTrackingID: "session-reviewer", sessionKey: nil,
+                status: .spinning, createdAt: "now", updatedAt: "now"),
         ]
 
         #expect(section.rowCount == 3)
@@ -73,8 +73,8 @@ import workspacecore
         let section = AgentLaunchersSection()
         section.runtimeAgentWindows = [
             AgentWindowRecord(
-                id: "adhoc", workspaceID: "workspace", provider: .spaces, label: "reviewer", terminalTrackingID: "session-reviewer",
-                sessionKey: nil, status: .waiting, createdAt: "now", updatedAt: "now")
+                id: "adhoc", workspaceID: "workspace", provider: .spaces, label: "reviewer", terminalTrackingID: "session-reviewer", sessionKey: nil,
+                status: .waiting, createdAt: "now", updatedAt: "now")
         ]
         section.runtimeWindowTitleByAgentWindowID = ["adhoc": "review notes"]
 
@@ -88,8 +88,8 @@ import workspacecore
         let section = AgentLaunchersSection()
         section.runtimeAgentWindows = [
             AgentWindowRecord(
-                id: "adhoc", workspaceID: "workspace", provider: .spaces, label: nil, terminalTrackingID: "ghostty-hook-1",
-                sessionKey: nil, status: .waiting, createdAt: "now", updatedAt: "now")
+                id: "adhoc", workspaceID: "workspace", provider: .spaces, label: nil, terminalTrackingID: "ghostty-hook-1", sessionKey: nil,
+                status: .waiting, createdAt: "now", updatedAt: "now")
         ]
         section.runtimeWindowTitleByAgentWindowID = ["adhoc": "shell-1"]
 

@@ -58,9 +58,7 @@ import systembridge
     /// this cannot know locally — whether the user has since installed a coding agent whose hooks are
     /// missing. Suppressing the probe on "nothing to install right now" would freeze that answer
     /// forever and silently retire the step for a user who installs Claude or Codex tomorrow.
-    static func shouldProbeLocalAgents(dismissedHookVersion: Int?, currentHookVersion: Int) -> Bool {
-        dismissedHookVersion != currentHookVersion
-    }
+    static func shouldProbeLocalAgents(dismissedHookVersion: Int?, currentHookVersion: Int) -> Bool { dismissedHookVersion != currentHookVersion }
 
     /// Whether the coding-agents step should be shown.
     ///
@@ -142,7 +140,9 @@ import systembridge
         Task { @MainActor [weak self] in
             guard let self else { return }
             let localAgents = await localAgentStatusWithinTimeout()
-            guard Self.requiresCodingAgentsSetup(localAgents: localAgents, dismissedHookVersion: dismissedHookVersion(), currentHookVersion: currentVersion)
+            guard
+                Self.requiresCodingAgentsSetup(
+                    localAgents: localAgents, dismissedHookVersion: dismissedHookVersion(), currentHookVersion: currentVersion)
             else {
                 // Nothing to install right now — either no detected agent needs hooks, or the daemon
                 // never answered. Do not record a dismissal: the user has not seen the step, and
@@ -157,9 +157,7 @@ import systembridge
 
     private func showCodingAgentsStep() {
         let agents = CodingAgentsView(host: host)
-        agents.onLocalStatusChange = { [weak self] summary in
-            self?.continueButton?.title = summary.allDetectedCurrent ? "Done" : "Continue"
-        }
+        agents.onLocalStatusChange = { [weak self] summary in self?.continueButton?.title = summary.allDetectedCurrent ? "Done" : "Continue" }
         codingAgents = agents
 
         let icon = NSImageView()

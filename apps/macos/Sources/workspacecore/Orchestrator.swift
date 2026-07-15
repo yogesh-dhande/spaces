@@ -818,8 +818,8 @@ public final class WorkspaceOrchestrator {
         for window in uniqueWindows {
             let stored = WindowRecord(
                 id: window.id, workspaceID: window.workspaceID, app: window.app, name: window.name, detail: window.detail,
-                targetURL: window.targetURL, terminalTrackingID: window.terminalTrackingID,
-                role: window.role, orderIndex: index, lastSeenAt: window.lastSeenAt)
+                targetURL: window.targetURL, terminalTrackingID: window.terminalTrackingID, role: window.role, orderIndex: index,
+                lastSeenAt: window.lastSeenAt)
             index += 1
             try store.upsert(window: stored)
         }
@@ -1184,8 +1184,8 @@ public final class WorkspaceOrchestrator {
             let existing = try store.windows(workspaceID: workspace.id)
             try store.upsert(
                 window: WindowRecord(
-                    id: windowRecordID, workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: sessionTitle, detail: nil,
-                    targetURL: nil, terminalTrackingID: session.id, role: "terminal",
+                    id: windowRecordID, workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: sessionTitle, detail: nil, targetURL: nil,
+                    terminalTrackingID: session.id, role: "terminal",
                     orderIndex: Self.nextWindowOrderIndex(existing: existing, role: "terminal", orderOffset: 200), lastSeenAt: nowISO8601()))
             try markWorkspaceRunningIfNeeded(workspace)
         } catch {
@@ -1278,8 +1278,8 @@ public final class WorkspaceOrchestrator {
             try store.upsert(
                 window: WindowRecord(
                     id: reservation.windowRecordID, workspaceID: reservation.workspaceID, app: reservation.appName, name: reservation.title,
-                    detail: nil, targetURL: nil, terminalTrackingID: session.sessionID, role: "terminal",
-                    orderIndex: reservation.orderIndex, lastSeenAt: nowISO8601()))
+                    detail: nil, targetURL: nil, terminalTrackingID: session.sessionID, role: "terminal", orderIndex: reservation.orderIndex,
+                    lastSeenAt: nowISO8601()))
             try markWorkspaceRunningIfNeeded(workspaceID: reservation.workspaceID, launchedAtFallback: reservation.createdAt)
             return session.sessionID
         } catch {

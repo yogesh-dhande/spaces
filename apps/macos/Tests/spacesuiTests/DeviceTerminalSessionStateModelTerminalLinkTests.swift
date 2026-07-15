@@ -132,7 +132,8 @@ import workspacecore
 
         do {
             _ = try DeviceTerminalSessionStateModel.sendTerminalServiceRequest(
-                TerminalServiceRequest(command: .resolveTerminalLink(TerminalServiceTerminalLinkResolveRequest(sessionID: "session-1", terminalLink: nil))),
+                TerminalServiceRequest(
+                    command: .resolveTerminalLink(TerminalServiceTerminalLinkResolveRequest(sessionID: "session-1", terminalLink: nil))),
                 defaultSessionID: "session-1", requestClient: requestClient, authToken: nil, clientApp: clientApp)
             Issue.record("expected sendTerminalServiceRequest to throw for a missing terminal link")
         } catch let error as WorkspaceError {
@@ -169,8 +170,10 @@ import workspacecore
     private static let closedPort = 1
 
     private func withServer(
-        _ body: (_ pairingStore: AlwaysAuthorizedTerminalLinkPairingStore, _ clientApp: SpacesDeviceClientApp, _ requestClient: SpacesDeviceAPIRequestSessionClient)
-            throws -> Void
+        _ body: (
+            _ pairingStore: AlwaysAuthorizedTerminalLinkPairingStore, _ clientApp: SpacesDeviceClientApp,
+            _ requestClient: SpacesDeviceAPIRequestSessionClient
+        ) throws -> Void
     ) throws {
         let identity = try TerminalServiceTLSIdentityStore.loadOrCreate(root: Self.tlsRoot)
         let pairingStore = AlwaysAuthorizedTerminalLinkPairingStore()

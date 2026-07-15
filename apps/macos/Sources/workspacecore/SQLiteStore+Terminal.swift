@@ -35,8 +35,8 @@ extension SQLiteStore {
                     }
                 } else { window.id }
             let baseBindings: [Any] = [
-                runtimeTargetID, window.workspaceID, targetType, window.name ?? "", window.detail ?? "", window.app,
-                window.terminalTrackingID ?? "", String(window.orderIndex), window.lastSeenAt,
+                runtimeTargetID, window.workspaceID, targetType, window.name ?? "", window.detail ?? "", window.app, window.terminalTrackingID ?? "",
+                String(window.orderIndex), window.lastSeenAt,
             ]
             try execute(
                 sql: """
@@ -148,7 +148,6 @@ extension SQLiteStore {
         let role = row[7]
         return WindowRecord(
             id: row[0], workspaceID: row[1], app: row[2], name: row[3].isEmpty ? nil : row[3], detail: row[4].isEmpty ? nil : row[4],
-            targetURL: targetURL, terminalTrackingID: trackingID, role: role, orderIndex: Int(row[8]) ?? 0,
-            lastSeenAt: row[9])
+            targetURL: targetURL, terminalTrackingID: trackingID, role: role, orderIndex: Int(row[8]) ?? 0, lastSeenAt: row[9])
     }
 }

@@ -54,8 +54,8 @@ public enum SpacesDevicePlanner {
         }
 
         return WorkspaceRuntimeManifest(
-            workspaceID: workspace.id, projectID: project.id, localPath: workspace.dir, branch: workspace.branch,
-            baseBranch: workspace.baseBranch, namedPorts: namedPorts, processEnvironment: environment, allowedFileRoots: [workingPath])
+            workspaceID: workspace.id, projectID: project.id, localPath: workspace.dir, branch: workspace.branch, baseBranch: workspace.baseBranch,
+            namedPorts: namedPorts, processEnvironment: environment, allowedFileRoots: [workingPath])
     }
 }
 

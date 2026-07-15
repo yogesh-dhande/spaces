@@ -15,8 +15,7 @@ import Testing
     }
 
     private func requires(_ localAgents: [AgentHookStatus]?, dismissed: Int?) -> Bool {
-        SetupFlowController.requiresCodingAgentsSetup(
-            localAgents: localAgents, dismissedHookVersion: dismissed, currentHookVersion: currentVersion)
+        SetupFlowController.requiresCodingAgentsSetup(localAgents: localAgents, dismissedHookVersion: dismissed, currentHookVersion: currentVersion)
     }
 
     @Test func launchWaitExceedsTheAgentStatusRequestTimeout() {
@@ -29,8 +28,8 @@ import Testing
         // One agent needing attention is enough, even beside agents that are already current.
         #expect(
             requires(
-                [agent(.claudeCode, available: true, installState: .current), agent(.codex, available: true, installState: .outdated)],
-                dismissed: nil))
+                [agent(.claudeCode, available: true, installState: .current), agent(.codex, available: true, installState: .outdated)], dismissed: nil
+            ))
     }
 
     @Test func stepIsSkippedWhenThereIsNothingToOffer() {
@@ -91,8 +90,7 @@ import Testing
 
     @Test func summaryReportsWhenEveryDetectedAgentIsCurrent() {
         let summary = CodingAgentsView.localSummary(status: [
-            agent(.claudeCode, available: true, installState: .current),
-            agent(.codex, available: false, installState: .notInstalled),  // undetected agents do not count against "done"
+            agent(.claudeCode, available: true, installState: .current), agent(.codex, available: false, installState: .notInstalled),  // undetected agents do not count against "done"
         ])
         #expect(summary.allDetectedCurrent)
         #expect(!summary.hasActionableAgent)

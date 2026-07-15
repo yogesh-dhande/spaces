@@ -41,6 +41,9 @@ import workspacecore
     /// The `sourceVersion` of the daemon image that handed off to this one (nil on a fresh boot).
     /// The generation guard refuses another same-target handoff only while this keeps equalling `AppVersion.current`.
     private var lastHandoffSourceVersion: String?
+    /// Monotonic process uptime when this image finished replaying an exec handoff. A daemon that
+    /// remains stable beyond the guard window starts a fresh generation chain on its next update.
+    private var lastHandoffResumeUptime: TimeInterval?
     /// True while `performExecHandoff()` is between its first await and exec; see its reentrancy guard.
     private var handoffInProgress = false
     private let instanceLock: TerminalServiceInstanceLock
@@ -363,10 +366,13 @@ import workspacecore
         handoffInProgress = true
         defer { handoffInProgress = false }
 
-        if DaemonHandoffDecision.refusesExecByGenerationGuard(
-            generation: handoffGeneration, lastSourceVersion: lastHandoffSourceVersion, currentVersion: AppVersion.current,
-            stagedVersion: InstalledSpacesVersion.current())
-        {
+        let currentUptime = ProcessInfo.processInfo.systemUptime
+        let elapsedSinceLastHandoff = lastHandoffResumeUptime.map { Swift.max(0, currentUptime - $0) }
+        guard
+            let nextGeneration = DaemonHandoffDecision.nextHandoffGeneration(
+                generation: handoffGeneration, lastSourceVersion: lastHandoffSourceVersion, currentVersion: AppVersion.current,
+                stagedVersion: InstalledSpacesVersion.current(), elapsedSinceLastHandoff: elapsedSinceLastHandoff)
+        else {
             writeStandardError(
                 "spacesd handoff_refused reason=generation_guard generation=\(handoffGeneration) source=\(lastHandoffSourceVersion ?? "")\n")
             return
@@ -414,7 +420,6 @@ import workspacecore
             }
         }
 
-        let nextGeneration = handoffGeneration + 1
         let table = DaemonHandoffTable(generation: nextGeneration, pid: getpid(), sourceVersion: AppVersion.current, sessions: records)
         do { try DaemonHandoffStore.write(table) } catch {
             writeStandardError("spacesd handoff_table_write_failed error=\(error)\n")
@@ -483,6 +488,7 @@ import workspacecore
         lastHandoffSourceVersion = table.sourceVersion
         writeStandardError("spacesd handoff_resume generation=\(table.generation) sessions=\(table.sessions.count)\n")
         for record in table.sessions { await resumeHandoffSession(record) }
+        lastHandoffResumeUptime = ProcessInfo.processInfo.systemUptime
     }
 
     /// Adopts a single handoff record. Validates the inherited descriptor is still a PTY master and

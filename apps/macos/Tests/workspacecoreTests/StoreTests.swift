@@ -648,8 +648,8 @@ final class StoreTests: XCTestCase {
         try store.upsert(
             runningProcess: RunningProcessRecord(
                 id: "process-1", workspaceID: workspace.id, templateName: "docs-watch", command: "sleep 300",
-                terminalApp: TerminalHost.spaces.appName, terminalTrackingID: sessionID, pid: nil, status: .exited,
-                logPath: nil, lastOutputAt: nil, startedAt: "2026-06-04T14:23:10Z", exitedAt: "2026-06-04T14:23:23Z"))
+                terminalApp: TerminalHost.spaces.appName, terminalTrackingID: sessionID, pid: nil, status: .exited, logPath: nil, lastOutputAt: nil,
+                startedAt: "2026-06-04T14:23:10Z", exitedAt: "2026-06-04T14:23:23Z"))
 
         let loaded = try XCTUnwrap(try store.runningProcesses(workspaceID: workspace.id).first)
         let runtimeTargetID = try XCTUnwrap(loaded.runtimeTargetID)
@@ -956,8 +956,8 @@ final class StoreTests: XCTestCase {
         let id = UUID().uuidString
         try store.upsertAgentWindow(
             AgentWindowRecord(
-                id: id, workspaceID: workspace.id, provider: .spaces, label: nil, terminalTrackingID: sessionID, sessionKey: nil,
-                status: .spinning, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z"))
+                id: id, workspaceID: workspace.id, provider: .spaces, label: nil, terminalTrackingID: sessionID, sessionKey: nil, status: .spinning,
+                createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z"))
 
         let found = try store.agentWindow(workspaceID: workspace.id, terminalTrackingID: sessionID)
         XCTAssertEqual(found?.id, id)
@@ -975,8 +975,8 @@ final class StoreTests: XCTestCase {
         let sessionID = "spaces-agent-session"
         try store.upsertAgentWindow(
             AgentWindowRecord(
-                id: "agent-1", workspaceID: workspace.id, provider: .spaces, label: "review-agent", terminalTrackingID: sessionID,
-                sessionKey: nil, status: .done, createdAt: "2026-06-04T14:23:10Z", updatedAt: "2026-06-04T14:25:06Z"))
+                id: "agent-1", workspaceID: workspace.id, provider: .spaces, label: "review-agent", terminalTrackingID: sessionID, sessionKey: nil,
+                status: .done, createdAt: "2026-06-04T14:23:10Z", updatedAt: "2026-06-04T14:25:06Z"))
 
         let loaded = try XCTUnwrap(try store.agentWindows(workspaceID: workspace.id).first)
         let runtimeTargetID = try XCTUnwrap(loaded.runtimeTargetID)
@@ -1125,22 +1125,20 @@ final class StoreTests: XCTestCase {
         // ws1: two running processes and two agents with distinct order keys, ports, and a setup state.
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: "p1b", workspaceID: ws1.id, templateName: "web", command: "npm run web", terminalApp: "Spaces",
-                terminalTrackingID: "sess-web", pid: 2, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "2026-01-01T00:00:02Z",
-                exitedAt: nil))
+                id: "p1b", workspaceID: ws1.id, templateName: "web", command: "npm run web", terminalApp: "Spaces", terminalTrackingID: "sess-web",
+                pid: 2, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "2026-01-01T00:00:02Z", exitedAt: nil))
         try store.upsert(
             runningProcess: RunningProcessRecord(
-                id: "p1a", workspaceID: ws1.id, templateName: "api", command: "npm run api", terminalApp: "Spaces",
-                terminalTrackingID: "sess-api", pid: 1, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "2026-01-01T00:00:01Z",
-                exitedAt: nil))
+                id: "p1a", workspaceID: ws1.id, templateName: "api", command: "npm run api", terminalApp: "Spaces", terminalTrackingID: "sess-api",
+                pid: 1, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "2026-01-01T00:00:01Z", exitedAt: nil))
         try store.upsertAgentWindow(
             AgentWindowRecord(
-                id: "a1b", workspaceID: ws1.id, provider: .spaces, label: "Second", terminalTrackingID: "agent-2", sessionKey: nil,
-                status: .idle, createdAt: "2026-01-01T00:00:02Z", updatedAt: "2026-01-01T00:00:02Z"))
+                id: "a1b", workspaceID: ws1.id, provider: .spaces, label: "Second", terminalTrackingID: "agent-2", sessionKey: nil, status: .idle,
+                createdAt: "2026-01-01T00:00:02Z", updatedAt: "2026-01-01T00:00:02Z"))
         try store.upsertAgentWindow(
             AgentWindowRecord(
-                id: "a1a", workspaceID: ws1.id, provider: .spaces, label: "First", terminalTrackingID: "agent-1", sessionKey: nil,
-                status: .idle, createdAt: "2026-01-01T00:00:01Z", updatedAt: "2026-01-01T00:00:01Z"))
+                id: "a1a", workspaceID: ws1.id, provider: .spaces, label: "First", terminalTrackingID: "agent-1", sessionKey: nil, status: .idle,
+                createdAt: "2026-01-01T00:00:01Z", updatedAt: "2026-01-01T00:00:01Z"))
         try store.setWorkspacePorts(workspaceID: ws1.id, ports: [3000, 3001], names: ["api", "web"])
         try store.setWorkspaceSetupState(
             workspaceID: ws1.id, status: .failed, errorMessage: "boom", startedAt: "2026-01-01T00:00:00Z", finishedAt: "2026-01-01T00:00:05Z",
@@ -1155,8 +1153,8 @@ final class StoreTests: XCTestCase {
                 exitedAt: "2026-01-02T00:01:00Z"))
         try store.upsertAgentWindow(
             AgentWindowRecord(
-                id: "a2", workspaceID: ws2.id, provider: .spaces, label: "Solo", terminalTrackingID: "agent-solo", sessionKey: nil,
-                status: .idle, createdAt: "2026-01-02T00:00:00Z", updatedAt: "2026-01-02T00:00:00Z"))
+                id: "a2", workspaceID: ws2.id, provider: .spaces, label: "Solo", terminalTrackingID: "agent-solo", sessionKey: nil, status: .idle,
+                createdAt: "2026-01-02T00:00:00Z", updatedAt: "2026-01-02T00:00:00Z"))
         try store.upsert(
             window: WindowRecord(
                 id: "w2-browser", workspaceID: ws2.id, app: "Google Chrome", title: "Docs", role: "browser", orderIndex: 500, lastSeenAt: "now"))

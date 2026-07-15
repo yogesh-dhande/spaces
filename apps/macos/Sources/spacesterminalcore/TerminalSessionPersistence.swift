@@ -309,8 +309,7 @@ public enum TerminalSessionPersistence {
                         ON CONFLICT(session_id) DO UPDATE SET
                           root_directory = excluded.root_directory,
                           payload_json = excluded.payload_json
-                        """,
-                    bindings: [payload.sessionID, root, payloadJSON])
+                        """, bindings: [payload.sessionID, root, payloadJSON])
             }
         }
     }
@@ -453,8 +452,7 @@ public enum TerminalSessionPersistence {
                         """,
                     bindings: [
                         event.id, root, event.sessionID, event.type, event.workspaceID ?? "", event.workspacePath ?? "", event.provider,
-                        event.label ?? "", event.terminalTrackingID ?? "",
-                        environmentKeysJSON, event.createdAt,
+                        event.label ?? "", event.terminalTrackingID ?? "", environmentKeysJSON, event.createdAt,
                     ])
             }
         }

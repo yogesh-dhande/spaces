@@ -57,7 +57,7 @@ export default function GuidesDocsPage() {
             <Link
               key={guide.href}
               href={guide.href}
-              className="group grid gap-3 rounded-2xl border border-line/70 bg-surface/60 p-5 transition-colors hover:border-accent/60 hover:bg-surface/80 md:grid-cols-[auto_minmax(0,1fr)_auto] md:items-center"
+              className="group grid gap-3 rounded-sm border border-line/70 bg-surface/60 p-5 transition-colors hover:border-accent/60 hover:bg-surface/80 md:grid-cols-[auto_minmax(0,1fr)_auto] md:items-center"
             >
               <span className="font-mono text-[0.6rem] uppercase tracking-[0.18em] text-foreground-soft">
                 {String(i + 1).padStart(2, "0")}

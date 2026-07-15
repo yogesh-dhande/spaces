@@ -907,9 +907,10 @@ PY
         # the same pid, then resumes them. Drive this through the bundled install.sh so the poke
         # branch added to write_linux_install_script runs for real. install.sh's
         # ensure_user_linger/systemctl steps talk to a real user systemd + logind session that this
-        # Docker smoke sandbox does not run, so loginctl/systemctl are shimmed as no-ops on PATH for
-        # this leg only; the poke, readiness poll, and (if the poke failed) restart fallback are the
-        # real generated commands running against the real already-running daemon.
+        # Docker smoke sandbox does not run, so loginctl/systemctl are shimmed on PATH for this leg.
+        # Docker Desktop's amd64 Rosetta runner also exposes /proc/<pid>/exe as the translator rather
+        # than the guest executable. Its stat shim reports the staged identity only after the real
+        # daemon log proves the handoff resumed; native Linux still uses the real /proc identity.
         echo "==> smoke: reinstall handoff (install.sh apply-update poke)"
         terminal_child_pid="$(python3 - "$smoke_root" <<'PY'
 import os
@@ -930,25 +931,40 @@ PY
         kill -0 "$daemon_pid"
         kill -0 "$terminal_child_pid"
 
-        systemd_shim_dir="$smoke_root/systemd-shim"
-        mkdir -p "$systemd_shim_dir"
-        cat > "$systemd_shim_dir/loginctl" <<'SHIM'
+        install_shim_dir="$smoke_root/install-shim"
+        mkdir -p "$install_shim_dir"
+        cat > "$install_shim_dir/loginctl" <<'SHIM'
 #!/usr/bin/env bash
 case "$*" in
     *"-p Linger --value"*) echo "yes" ;;
 esac
 exit 0
 SHIM
-        cat > "$systemd_shim_dir/systemctl" <<'SHIM'
+        cat > "$install_shim_dir/systemctl" <<'SHIM'
 #!/usr/bin/env bash
 case "$*" in
     *"show spacesd.service --property MainPID --value"*) echo "${SPACES_SMOKE_DAEMON_PID:-0}" ;;
 esac
 exit 0
 SHIM
-        chmod +x "$systemd_shim_dir/loginctl" "$systemd_shim_dir/systemctl"
-        if ! PATH="$systemd_shim_dir:$PATH" HOME="$smoke_root/reinstall-home" \
+        cat > "$install_shim_dir/stat" <<'SHIM'
+#!/usr/bin/env bash
+proc_executable="/proc/${SPACES_SMOKE_DAEMON_PID:-0}/exe"
+last_argument="${!#}"
+if [[ "$last_argument" == "$proc_executable" ]] \
+    && [[ "$(readlink "$proc_executable" 2>/dev/null || true)" == "/run/rosetta/rosetta" ]] \
+    && grep -q "handoff_resume generation=1" "${SPACES_SMOKE_DAEMON_LOG:?}"; then
+    staged_wrapper="$(readlink -f "$HOME/.spaces/bin/spacesd")"
+    arguments=("$@")
+    arguments[$# - 1]="$(dirname "$staged_wrapper")/spacesd-bin"
+    exec /usr/bin/stat "${arguments[@]}"
+fi
+exec /usr/bin/stat "$@"
+SHIM
+        chmod +x "$install_shim_dir/loginctl" "$install_shim_dir/systemctl" "$install_shim_dir/stat"
+        if ! PATH="$install_shim_dir:$PATH" HOME="$smoke_root/reinstall-home" \
             SPACES_SMOKE_DAEMON_PID="$daemon_pid" \
+            SPACES_SMOKE_DAEMON_LOG="$smoke_root/spacesd.log" \
             SPACES_DB_PATH="$smoke_root/profile/spaces.db" SPACES_RUNTIME_DIR="$smoke_root/profile/runtime" \
             ./install.sh >"$smoke_root/reinstall.log" 2>&1; then
             echo "install.sh reinstall failed" >&2

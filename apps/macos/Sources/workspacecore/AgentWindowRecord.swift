@@ -45,8 +45,8 @@ public struct AgentWindowRecord: Codable, Sendable {
     }
 
     public init(
-        id: String, workspaceID: String, provider: AgentProvider, label: String?, terminalTrackingID: String?,
-        sessionKey: String?, status: AgentWindowStatus, createdAt: String, updatedAt: String
+        id: String, workspaceID: String, provider: AgentProvider, label: String?, terminalTrackingID: String?, sessionKey: String?,
+        status: AgentWindowStatus, createdAt: String, updatedAt: String
     ) {
         self.init(
             id: id, workspaceID: workspaceID, provider: provider, label: label, runtimeTargetID: nil, terminalTrackingID: terminalTrackingID,

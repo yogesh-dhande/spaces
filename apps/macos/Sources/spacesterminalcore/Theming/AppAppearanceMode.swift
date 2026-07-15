@@ -14,9 +14,7 @@ public enum AppAppearanceMode: String, CaseIterable, Sendable {
 
     /// Resolves a persisted raw value, falling back to the default for missing or
     /// unknown strings so an unreadable setting never leaves the app appearance unset.
-    public init(persistedRawValue: String?) {
-        self = persistedRawValue.flatMap(AppAppearanceMode.init(rawValue:)) ?? .default
-    }
+    public init(persistedRawValue: String?) { self = persistedRawValue.flatMap(AppAppearanceMode.init(rawValue:)) ?? .default }
 
     /// Human-facing label for the settings picker.
     public var displayName: String {

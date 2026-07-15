@@ -26,13 +26,10 @@
             }
 
             let expandedPath = NSString(string: trimmed).expandingTildeInPath
-            if expandedPath.hasPrefix("/") {
-                return URL(fileURLWithPath: expandedPath).standardizedFileURL
-            }
+            if expandedPath.hasPrefix("/") { return URL(fileURLWithPath: expandedPath).standardizedFileURL }
 
             guard let workingDirectory, !workingDirectory.isEmpty else { return nil }
-            return URL(fileURLWithPath: workingDirectory, isDirectory: true)
-                .appendingPathComponent(expandedPath).standardizedFileURL
+            return URL(fileURLWithPath: workingDirectory, isDirectory: true).appendingPathComponent(expandedPath).standardizedFileURL
         }
 
         /// Resolves and opens `value`. `openURL`, when supplied, replaces the real opening layer
@@ -41,16 +38,12 @@
         /// the default-browser handler and everything else is treated as a local file and
         /// classified/dispatched by `TerminalArtifactHandlerRegistry`. This layer stays free of
         /// loopback-vs-open routing — a later per-pane coordinator decides that before calling here.
-        @discardableResult @MainActor static func open(
-            _ value: String, workingDirectory: String? = nil, openURL: ((URL) -> Bool)? = nil
-        ) -> Bool {
+        @discardableResult @MainActor static func open(_ value: String, workingDirectory: String? = nil, openURL: ((URL) -> Bool)? = nil) -> Bool {
             guard let url = resolvedURL(for: value, workingDirectory: workingDirectory) else { return false }
             if let openURL { return openURL(url) }
 
             let registry = TerminalArtifactHandlerRegistry.defaultRegistry()
-            if let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" {
-                return registry.open(url, as: .webURL)
-            }
+            if let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" { return registry.open(url, as: .webURL) }
             return registry.openLocalFile(at: url)
         }
 

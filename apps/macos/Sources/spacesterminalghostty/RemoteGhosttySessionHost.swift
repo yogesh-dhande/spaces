@@ -411,8 +411,7 @@
             case "session_metadata":
                 TerminalSessionNotification.post(.spacesTerminalSessionMetadataDidChange, sessionID: sessionID)
                 TerminalSessionNotification.post(.spacesTerminalRuntimeStateDidChange, sessionID: sessionID)
-            case "output":
-                TerminalSessionNotification.post(.spacesTerminalOutputDidChange, sessionID: sessionID)
+            case "output": TerminalSessionNotification.post(.spacesTerminalOutputDidChange, sessionID: sessionID)
             case "initial", "runtime_state", "terminated":
                 TerminalSessionNotification.post(.spacesTerminalRuntimeStateDidChange, sessionID: sessionID)
             default: TerminalSessionNotification.post(.spacesTerminalRuntimeStateDidChange, sessionID: sessionID)
@@ -467,9 +466,7 @@
                 _ = try Self.sendControlRequest(
                     TerminalControlRequest(
                         command: .send(
-                            .init(
-                                text: text, bytes: nil, clientID: clientID, ownerEpoch: ownerEpoch, appendNewline: false,
-                                asPaste: asPaste))),
+                            .init(text: text, bytes: nil, clientID: clientID, ownerEpoch: ownerEpoch, appendNewline: false, asPaste: asPaste))),
                     sessionID: sessionID, socketPath: socketPath, requestSender: requestSender)
                 if shouldRefreshAfterControl { Task { @MainActor [weak self] in self?.requestDirectStateRefresh(reason: "input") } }
             }

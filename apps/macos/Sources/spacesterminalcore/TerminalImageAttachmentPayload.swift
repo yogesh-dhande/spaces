@@ -6,9 +6,7 @@ import Foundation
 /// platform depending on AppKit/UIKit here.
 public struct TerminalImageAttachmentPayload: Sendable, Equatable {
     public static let maxByteCount = 10 * 1024 * 1024
-    public static let supportedFileExtensions: Set<String> = [
-        "avif", "bmp", "gif", "heic", "heif", "jpg", "jpeg", "png", "tif", "tiff", "webp",
-    ]
+    public static let supportedFileExtensions: Set<String> = ["avif", "bmp", "gif", "heic", "heif", "jpg", "jpeg", "png", "tif", "tiff", "webp"]
 
     public let fileExtension: String
     public let imageData: Data
@@ -32,9 +30,7 @@ extension TerminalImageAttachmentPayload {
         guard !imageData.isEmpty else { throw TerminalImageAttachmentValidationError.emptyImageData }
         guard imageData.count <= maxByteCount else { throw TerminalImageAttachmentValidationError.imageTooLarge }
         let normalizedExtension = fileExtension.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard supportedFileExtensions.contains(normalizedExtension) else {
-            throw TerminalImageAttachmentValidationError.unsupportedFileExtension
-        }
+        guard supportedFileExtensions.contains(normalizedExtension) else { throw TerminalImageAttachmentValidationError.unsupportedFileExtension }
         return TerminalImageAttachmentPayload(fileExtension: normalizedExtension, imageData: imageData)
     }
 }

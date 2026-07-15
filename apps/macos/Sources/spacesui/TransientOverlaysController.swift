@@ -16,8 +16,7 @@ import workspacecore
 /// blocking modal. `AppKitController` holds a single instance and delegates these
 /// overlays to it. The controller reaches back into the host for the window,
 /// selection state, and shared services via `host`.
-@MainActor
-final class TransientOverlaysController: NSObject {
+@MainActor final class TransientOverlaysController: NSObject {
     unowned let host: AppKitController
 
     init(host: AppKitController) {

@@ -30,7 +30,7 @@ export default function ShortcutsDocsPage() {
     >
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Default Shortcuts</h2>
-        <div className="mt-3 overflow-x-auto rounded-xl border border-line/70">
+        <div className="mt-3 overflow-x-auto rounded-sm border border-line/70">
           <table className="min-w-full border-collapse text-left text-sm">
             <thead className="bg-background-soft/70 text-foreground">
               <tr>

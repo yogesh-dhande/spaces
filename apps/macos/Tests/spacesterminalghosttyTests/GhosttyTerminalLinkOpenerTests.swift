@@ -55,8 +55,7 @@ final class GhosttyTerminalLinkOpenerTests: XCTestCase {
 
     // MARK: - open(_:workingDirectory:openURL:)
 
-    @MainActor
-    func testOpenUsesInjectedOpenURLHandlerAndSkipsWorkingDirectoryWhenAbsolute() {
+    @MainActor func testOpenUsesInjectedOpenURLHandlerAndSkipsWorkingDirectoryWhenAbsolute() {
         var openedURLs: [URL] = []
         let handled = GhosttyTerminalLinkOpener.open("/tmp/notes.md") { url in
             openedURLs.append(url)
@@ -66,8 +65,7 @@ final class GhosttyTerminalLinkOpenerTests: XCTestCase {
         XCTAssertEqual(openedURLs, [URL(fileURLWithPath: "/tmp/notes.md")])
     }
 
-    @MainActor
-    func testOpenUsesInjectedOpenURLHandlerWithWorkingDirectoryForRelativePaths() {
+    @MainActor func testOpenUsesInjectedOpenURLHandlerWithWorkingDirectoryForRelativePaths() {
         var openedURLs: [URL] = []
         let handled = GhosttyTerminalLinkOpener.open("notes.md", workingDirectory: "/tmp/project") { url in
             openedURLs.append(url)
@@ -77,8 +75,7 @@ final class GhosttyTerminalLinkOpenerTests: XCTestCase {
         XCTAssertEqual(openedURLs, [URL(fileURLWithPath: "/tmp/project/notes.md")])
     }
 
-    @MainActor
-    func testOpenReturnsFalseWhenValueDoesNotResolve() {
+    @MainActor func testOpenReturnsFalseWhenValueDoesNotResolve() {
         var called = false
         let handled = GhosttyTerminalLinkOpener.open("relative/path.md") { _ in
             called = true

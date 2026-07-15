@@ -670,8 +670,7 @@ public enum SpacesDeviceClient {
             .restartWorkspace, .archiveWorkspace, .runWorkspaceSetup, .openWorkspaceTerminal, .stopWorkspaceTerminal, .runWorkspaceProcess,
             .stopWorkspaceProcess, .restartWorkspaceProcess, .runCodingAgent, .stopCodingAgent, .restartCodingAgent, .installAgentHooks:
             longRunningMutationTimeoutSeconds
-        case .agentHooksStatus:
-            agentHooksStatusRequestTimeoutSeconds
+        case .agentHooksStatus: agentHooksStatusRequestTimeoutSeconds
         case .pair, .ping, .daemonStatus, .requestDaemonRestart, .overview, .previewProject, .listDirectories, .workspaceCreateOptions,
             .updateProjectConfig, .updateWorkspaceConfig, .updateWorkspaceMetadata, .renameTerminalSession, .state, .terminalControl,
             .terminalPasteImage, .sendTerminalInput, .tailTerminalOutput, .resolveTerminalLink, .readTerminalLinkChunk, .subscribe,

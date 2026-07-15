@@ -1,7 +1,7 @@
 import Foundation
 import XCTest
-
 import spacesdevicecore
+
 @testable import spacesterminalghostty
 
 final class TerminalArtifactOpenerTests: XCTestCase {
@@ -33,8 +33,7 @@ final class TerminalArtifactOpenerTests: XCTestCase {
 
     // MARK: - Registry dispatch
 
-    @MainActor
-    func testOpenDispatchesToTheHandlerRegisteredForTheCategory() {
+    @MainActor func testOpenDispatchesToTheHandlerRegisteredForTheCategory() {
         var openedURLs: [TerminalArtifactCategory: URL] = [:]
         let registry = TerminalArtifactHandlerRegistry(handlers: [
             .pdf: { url in
@@ -56,8 +55,7 @@ final class TerminalArtifactOpenerTests: XCTestCase {
         XCTAssertEqual(openedURLs[.webURL], webURL)
     }
 
-    @MainActor
-    func testOpenFallsBackToDefaultOpenHandlerWhenCategoryHasNoRegisteredHandler() {
+    @MainActor func testOpenFallsBackToDefaultOpenHandlerWhenCategoryHasNoRegisteredHandler() {
         var defaultOpenedURL: URL?
         let registry = TerminalArtifactHandlerRegistry(
             handlers: [:],
@@ -71,8 +69,7 @@ final class TerminalArtifactOpenerTests: XCTestCase {
         XCTAssertEqual(defaultOpenedURL, url)
     }
 
-    @MainActor
-    func testOpenLocalFileDispatchesClassifiedFilesToTheMatchingHandler() {
+    @MainActor func testOpenLocalFileDispatchesClassifiedFilesToTheMatchingHandler() {
         var markdownOpenedURL: URL?
         let registry = TerminalArtifactHandlerRegistry(
             handlers: [
@@ -91,8 +88,7 @@ final class TerminalArtifactOpenerTests: XCTestCase {
         XCTAssertEqual(markdownOpenedURL, url)
     }
 
-    @MainActor
-    func testOpenLocalFileFallsThroughToDefaultOpenHandlerForUnclassifiedFiles() {
+    @MainActor func testOpenLocalFileFallsThroughToDefaultOpenHandlerForUnclassifiedFiles() {
         var defaultOpenedURL: URL?
         let registry = TerminalArtifactHandlerRegistry(
             handlers: [
@@ -113,8 +109,7 @@ final class TerminalArtifactOpenerTests: XCTestCase {
 
     // MARK: - Browser-forcing default handlers
 
-    @MainActor
-    func testDefaultRegistryRoutesWebURLAndHTMLThroughTheSameInjectedBrowserHandler() {
+    @MainActor func testDefaultRegistryRoutesWebURLAndHTMLThroughTheSameInjectedBrowserHandler() {
         // The default registry itself calls real NSWorkspace APIs, so this test only verifies the
         // *shape* other tests need: that .webURL and .html can be independently overridden without
         // touching NSWorkspace, by building a registry the way defaultRegistry() would but with a
@@ -124,11 +119,7 @@ final class TerminalArtifactOpenerTests: XCTestCase {
             browsedURLs.append(url)
             return true
         }
-        let registry = TerminalArtifactHandlerRegistry(handlers: [
-            .webURL: browserHandler,
-            .html: browserHandler,
-            .text: { _ in false },
-        ])
+        let registry = TerminalArtifactHandlerRegistry(handlers: [.webURL: browserHandler, .html: browserHandler, .text: { _ in false }])
 
         let webURL = URL(string: "https://example.com")!
         let htmlURL = URL(fileURLWithPath: "/tmp/page.html")

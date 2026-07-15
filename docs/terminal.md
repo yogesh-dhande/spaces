@@ -1,167 +1,224 @@
 # Built-in Terminal
 
-This document describes the built-in terminal runtime in Spaces: what owns a session, what clients attach to, what is persisted on disk, and where the Ghostty compatibility boundary sits. User-visible behavior belongs in [spec.md](spec.md). Broader module boundaries belong in [implementation.md](implementation.md).
+The built-in terminal runtime: what owns a session, what clients attach to, what is persisted, and where the Ghostty compatibility boundary sits.
+
+| Doc | Owns |
+| --- | --- |
+| [spec.md](spec.md) | User-visible terminal behavior |
+| [implementation.md](implementation.md) | Module boundaries, pairing, TLS, panels, focus |
+| [dev.md](dev.md) | Ghostty artifact workflow, E2E harnesses, performance logging |
 
 ## Scope
-- `ghostty-embedded` is the only supported built-in terminal backend for Spaces-owned sessions.
-- Spaces consumes a forked `GhosttyKit.xcframework` from `yogesh-dhande/ghostty` because the integration depends on additive embedded terminal exports for raw PTY I/O, host rebinding, session state callbacks, renderer attachment, headless sessions, render-frame export, and mirror renderer surfaces.
-- The Ghostty fork is pinned by the `apps/macos/vendor/ghostty` submodule; Spaces-owned prebuilt artifact releases use the `ghostty-artifacts-<full-ghostty-sha>` naming convention for PR, manual, main-push, and release workflow provisioning.
-- Spaces renders built-in terminal UI from service-published Ghostty render frames; fork-level passive-viewer attachment APIs, VT replay, raw output, and `output.log` are outside the UI rendering path.
-- Spaces also builds `libghostty-vt` from the same fork lineage for `spaces terminal tail` and diagnostics.
-- Spaces terminal sessions own process lifetime directly.
+
+- `ghostty-embedded` is the only supported backend for Spaces-owned sessions.
+- Spaces consumes a forked `GhosttyKit.xcframework` because the integration depends on additive exports the upstream app does not need: raw PTY I/O, host rebinding, session-state callbacks, renderer attachment, headless sessions, render-frame export, and mirror renderer surfaces. The fork is pinned by the `apps/macos/vendor/ghostty` submodule; see [dev.md](dev.md) for the artifact workflow.
+- Spaces also builds `libghostty-vt` from the same fork lineage, used only by `spaces terminal tail` and diagnostics.
+- Terminal UI renders exclusively from service-published render frames. VT replay, raw output, and `output.log` are **not** part of the UI rendering path.
 
 ## Ownership Model
-- `spacesd` owns built-in terminal sessions, including workspace terminals, built-in process windows, built-in coding-agent windows, mobile-visible sessions, and sessions created through `spaces terminal ...`.
-- The service is a per-device background executable that autostarts for installed builds and can outlive `SpacesApp`.
-- First-party clients attach through SQLite-backed session metadata, the per-session control socket, and the render-frame stream.
-- The owning daemon remains authoritative for project/workspace metadata, workspace creation, PTYs, and render streams.
+
+`spacesd` owns every built-in session — workspace terminals, process and coding-agent terminals, mobile-visible sessions, and sessions created through `spaces terminal ...`. The daemon is a per-device background executable that autostarts for installed builds and outlives `SpacesApp`.
+
+```mermaid
+flowchart LR
+  subgraph daemon["spacesd (owns the session)"]
+    core["Ghostty session core"]
+    pty["PTY"]
+    db[("SQLite: metadata, attachments")]
+  end
+
+  owner["Active owner client<br/>(one at a time)"]
+  viewer["Viewer clients<br/>(any number)"]
+
+  core --- pty
+  core --> db
+  core -->|render frames| owner
+  core -->|render frames| viewer
+  owner -->|input, key, resize, scroll| core
+  viewer -.->|setAppearance only| core
+```
+
+Exactly one client holds the **active owner** attachment; only it may drive input or PTY size. Ownership transfers by explicit takeover, including across devices. Attachment state is authoritative in SQLite, not in client memory.
+
+Clients never open the daemon's `spaces.db`. They reach launch configuration, runtime state, ownership, and render payloads through the owning device's Device API — for the local device too, over the loopback endpoint.
 
 ## Session Boundary
-Each session keeps canonical metadata in SQLite and runtime-only files under `<profile-root>/runtime/terminal/sessions/<session-id>/`.
 
-SQLite stores:
-- launch configuration, backend, lifetime policy, launch workspace ID, and session kind
-- runtime state, service PID, child PID, title, working directory, and last known columns or rows
-- known client identities and remote lease timestamps
-- owner or viewer attachment history
-- final Ghostty remote session-state payloads keyed by session ID
+Canonical metadata lives in SQLite; runtime-only artifacts live on disk under `<profile-root>/runtime/terminal/sessions/<session-id>/`.
 
-The session directory keeps:
-- `output.log`: append-only terminal output used for `spaces terminal tail` and diagnostics
-- `control.sock`: local control-plane socket for attach, detach, send, key, takeover, setAppearance, and related requests
-- `subscription.sock`: service-published session state and Ghostty render-frame stream for daemon-owned client windows
-- `service.log`: service diagnostics for the session
+| SQLite holds | Session directory holds |
+| --- | --- |
+| Launch config, backend, lifetime policy, workspace ID, kind | `output.log` — append-only output, for `tail` and diagnostics |
+| Runtime state, service PID, child PID, title, cwd, columns/rows | `service.log` — per-session service diagnostics |
+| Known client identities and remote lease timestamps | |
+| Owner and viewer attachment history | |
+| Final render payload, keyed by session ID | |
 
-Each live session also participates in a service-level control path:
-- `/tmp/spaces-sockets-<uid>/service-<profile-hash>.sock` is the profile-scoped service command socket used for session creation, listing, and termination.
-- `TerminalControlRequest` is the flat control JSON shape for compatibility. `TerminalControlCommand` is the typed view over that shape, with per-command payload structs and shared command properties such as owner-client gating and takeover response state inclusion.
+Control and subscription sockets live in the hardened per-user socket root with hashed names rather than inside the session directory, because AF_UNIX paths are length-capped (see [implementation.md](implementation.md)). The profile-scoped `service-<hash>.sock` carries session creation, listing, and termination.
 
-## Local and Remote Daemons
-- Every Mac or Linux daemon owns PTYs, headless Ghostty sessions, render-frame export, terminal input, resize, scroll, file-link preview chunks, process execution, and clone or worktree preparation for its own workspaces.
-- macOS and iOS terminal detail attach directly to the paired daemon through the Device API after TLS identity pinning and token authorization.
-- macOS remote-device terminal windows require SSH to the same device for local window attach and owner control. Browser sessions that target daemon-local services use SSH local forwarding, while unrelated URLs open unchanged.
-- Agent lifecycle signals are written to the owning daemon database with the terminal session identity and workspace context.
-- Terminal file-link resolution for cross-device transfer runs in the owning daemon: iOS previews and macOS remote-session fetches stream files as authorized chunks from that daemon. A macOS local-session file link opens directly on the Mac with no daemon round trip, and direct HTTPS media downloads remain client-side.
+`TerminalControlRequest` is the flat control JSON kept for wire compatibility; `TerminalControlCommand` is the typed view over it, and it is where owner gating and takeover state-inclusion are decided rather than in scattered string checks.
 
-## Service Runtime
-- `GhosttyEmbeddedSessionHost` is the service-owned runtime for `ghostty-embedded`.
-- It owns one live libghostty-backed session, writes `output.log`, refreshes SQLite runtime state, enforces owner-only input or resize, and expires stale remote leases from SQLite client rows.
-- `GhosttyEmbeddedAppService` loads only the Spaces-generated Ghostty config under `<profile-root>/ghostty/` (theme variants, `window-vsync = false`, `font-size = 12`) — never the user's `~/.config/ghostty` files; service-owned sessions publish render frames on demand and must initialize without depending on a display-linked render loop.
-- HOST_MANAGED sessions use `HostManagedPTYTerminalSessionDriver` for PTY-backed shell ownership. The driver uses Darwin or Glibc PTY/process calls, links `libutil` for Linux `forkpty`, and defaults to `/bin/bash` on Linux and `/bin/zsh` on macOS when a launch request does not provide a shell.
-- Runtime state includes foreground PID, executable path or name, argv, and known coding-agent classification. macOS samples those fields from host process APIs; Linux headless sessions sample `/proc/<pid>/exe` and `/proc/<pid>/cmdline`. Foreground signature changes raise the terminal runtime-state signal consumed by daemon-side agent reconciliation.
-- It also preserves live metadata such as title, working directory, and child PID so attached clients can reopen a session without restarting the shell.
-- During termination it captures the Ghostty render frame before renderer teardown, writes a final `terminated` payload to SQLite, broadcasts that payload to attached clients, marks active attachments detached, and then closes the live stream and renderer.
-- App-created ad hoc workspace terminals use persistent service-owned sessions so they survive app quit. The `.whileAttached` lifetime policy remains available for callers that intentionally want service reaping after the final live attachment detaches or expires.
-- Closing a native Spaces terminal window detaches the local window from process and coding-agent sessions while preserving the owning runtime and service session. Ad hoc workspace terminal closes terminate the matching service-owned session. Programmatic closes used by stop and restart are marked as terminating so AppKit cleanup does not issue an ad hoc close cleanup.
-- If the service restarts and finds a session left in `starting` or `running` by a dead service PID, it marks that session failed and removes the stale `control.sock`.
+| Command | Owner-gated | Notes |
+| --- | --- | --- |
+| `send`, `key`, `clearScreen`, `resize`, `scroll` | Yes | Only the active owner may drive the PTY |
+| `attach`, `detach`, `heartbeat` | No | Attachment lifecycle |
+| `takeover` | No | The one command that returns session state on success |
+| `setAppearance` | No | A per-client view preference, not a mutation |
 
-## App Client Runtime
-- Built-in Spaces terminals are service-owned, so `SpacesApp` windows attach to sessions and can reconnect after app quit or relaunch.
-- The Mac GUI treats terminal session state as device-owned daemon state: launch configuration, runtime state, attachment ownership, and the latest render payload are reached through the owning device's Device API, never by opening the daemon's `spaces.db`. Local and remote terminal panes share one path — a `DeviceTerminalSessionStateModel` (conforming to `TerminalSessionStateProviding`) owns one pinned-TLS session client and one `subscribe` stream per session, seeds launch configuration from the device overview, fetches catch-up state with `state`, and fans its single subscription out to both the pane controller (metadata) and `RemoteGhosttySessionHost` (render). `TerminalSessionPaneViewController` reads only through the injected provider; the host renders only from injected state and writes no local mirror. For the local device this routes through the loopback Device API endpoint rather than the per-session Unix control socket.
-- Only Mac presentation state stays client-side, in `spaces-client.db`: panel layouts and panel-window frames, collapsed projects, selected workspace, shortcut settings, and browser/window IDs.
-- An ended session's final render comes from the device `state` response, not a local on-disk cache; there is no remote-state mirror in `spaces.db`.
-- App shutdown does not terminate service-owned terminal sessions. The quit prompt offers a destructive stop-all option for users who want to end every live service session before quitting.
+## Session Lifecycle
 
-## First-Party Clients
-- `spaces terminal command` creates sessions through `spacesd`.
-- `spaces terminal list` reads live session summaries from the service abstraction.
-- `spaces terminal show` asks `SpacesApp` to open a native owner-seeking window for an existing session ID. Owner-seeking opens express ownership intent and may transfer the active owner from another attached client, including a client on another device.
-- `spaces terminal send text` and `spaces terminal send bytes` are agent-facing input commands. Local sends use the profile `terminalSend` command, while `--device <name-or-id>` sends through the paired device's authenticated Device API. Text input can append a newline; byte input accepts decimal byte values from `0` through `255`.
-- `spacesd` publishes the first-party Device API consumed by macOS and iOS clients. The Mac app owns user-facing device pairing and status, while `spacese2e` provides harness-only status, request, and standalone Device API commands.
-- `SpacesMobile` discovers daemons through Bonjour or accepts manual host entry, reads workspace metadata from the paired `spacesd`, and routes terminal state, control, link-preview, and chunk reads through that daemon. The iOS client stores its paired-device token in Keychain keyed by the pinned daemon endpoint. It keeps one selected terminal detail at a time, opens live sessions as owner-seeking clients, renders the owner path from service-published Ghostty render frames, and renders ended sessions from persisted final Ghostty state.
-- Workspace process launch, built-in coding-agent launch, app-opened workspace terminals, CLI-created sessions, and mobile-visible sessions use the service-owned path.
+`TerminalSessionState` is `starting`, `running`, `exited`, or `failed`; `starting` and `running` are the interactive states. Lifetime policy is `persistent` (app-created ad hoc terminals, so they survive app quit) or `whileAttached` (reaped after the last live attachment detaches or expires).
 
-## macOS Window Behavior
-- `SpacesApp` uses `RemoteGhosttySessionHost` for service-owned sessions. Local daemon sessions subscribe to the daemon-owned session state stream for owner handoff compatibility and metadata updates; remote daemon sessions poll the owning daemon's `state` command and send control through the owning daemon's `control` command.
-- `TerminalSessionWindowController` attaches a local owner or viewer client record to the daemon-owned session, keeps window reuse keyed by stable session ID, renders owner windows from the service render-frame stream, and uses a compact ownership/status shell for non-owner windows instead of rendering a passive terminal transcript. Owner-seeking show and focus paths may request an owner attachment immediately; the daemon enforces the single-owner invariant by transferring ownership from the prior active owner when one exists.
-- Process, coding-agent, and ad hoc workspace terminal windows can receive compact runtime controls from `spacesui`. The native window title carries the row title while the terminal UI renders only right-aligned icon actions; workspace lookup, stable process-template and launcher-ID matching, and lifecycle mutations remain in `AppKitController` and `workspacecore`.
-- The macOS daemon client path uses the service live Ghostty render stream for owner bootstrap and output refreshes while a macOS window owns the session. The state stream carries compact binary v2 render updates: full updates establish baselines and resync clients, while steady live updates, including `state_change`, use cell-run deltas and Ghostty-exported scroll-rectangle operations when the stream baseline is valid. One-shot state fetches and subscriber bootstrap payloads are self-contained full updates so callers can materialize the current screen without prior stream history. Render-update revisions are monotonic render revisions, so viewport-only scrollback changes advance the render revision even when the underlying session-state revision is unchanged. VT replay, snapshot-to-VT encoding, raw output bytes, and `output.log` are not terminal-rendering fallbacks.
-- Title and working-directory updates still follow live session metadata emitted by the service.
-- Owner or viewer attachment state is authoritative in SQLite.
-- Only the active owner attachment may send input or drive PTY size.
-- Owner macOS windows dispatch standard edit and find command-key equivalents directly to the terminal session window controller so AppKit menu routing does not bypass the live Ghostty surface. Copy, select-all, find, use-selection-for-find, and find navigation use Ghostty binding actions on the active mirror surface; paste reads the system pasteboard and sends text through the active owner input path with the terminal-control `asPaste` flag because the PTY remains service-owned. `Ctrl+C` and terminal-owned navigation or clear shortcuts continue through the terminal key translator.
-- Image paste is an image-only extension of the same owner input boundary. The macOS window controller reads PNG/JPEG/TIFF pasteboard data and image file URLs from the local pasteboard, checks pasteboard data length before image decoding, checks image file URL size before reading file contents, normalizes TIFF data to PNG, rejects images over 10 MiB before upload, and leaves non-image `Ctrl+V` as ordinary terminal input. Accepted images are sent to the owning daemon with the current client ID and owner epoch from an async paste callback so upload work does not block AppKit event handling; the daemon writes a `/tmp/spaces-paste-<uuid>.<ext>` file and injects only that path string through a paste-marked terminal send.
-- `GhosttyMirrorTerminalView` forwards mouse press, release, move, and drag events into the local mirror surface using Ghostty's AppKit coordinate convention and modifier bits. The mirror surface owns selection hit testing, copy selection behavior, and search match navigation.
-- Live terminal find uses a compact overlay owned by the macOS mirror view. Ghostty search action events open and close the overlay and update match counts; query edits call `search:<query>`, navigation calls `navigate_search:next` or `navigate_search:previous`, and `Esc` sends `end_search`.
-- Reopening a built-in window for an existing session reattaches to the same shell session instead of creating a new one.
-- Non-running sessions are treated as read-only even when older attachment rows still name an owner. macOS windows for ended sessions mount the local Ghostty mirror surface from the final render frame in the device `state` response and do not take ownership, resize, or send input.
+```mermaid
+stateDiagram-v2
+  [*] --> starting: reservation persists config
+  starting --> running: shell backend ready
+  starting --> failed: launch failure
+  running --> exited: child exits or explicit stop
+  running --> failed: dead service PID found at daemon restart
+  exited --> [*]
+  failed --> [*]
+```
+
+On termination the daemon captures the render frame **before** renderer teardown, writes a final `terminated` payload to SQLite, broadcasts it to attached clients, marks attachments detached, then closes the stream and renderer. An ended session's final render is served from that payload through the Device API `state` response — there is no local on-disk mirror.
+
+Closing a pane detaches the local client from process and coding-agent sessions while the daemon session keeps running. Closing an ad hoc workspace terminal terminates its session.
+
+## Render Pipeline
+
+```mermaid
+flowchart LR
+  pty["PTY bytes"] --> ghostty["Ghostty session core"]
+  ghostty --> frame["Render frame export"]
+  frame --> sub["subscribe stream"]
+  sub --> mac["macOS mirror surface"]
+  sub --> ios["iOS mirror surface"]
+  ghostty --> log["output.log"]
+  log --> vt["libghostty-vt"]
+  vt --> tail["spaces terminal tail"]
+```
+
+The two paths never cross: `output.log` and VT replay feed only `tail` and diagnostics, never the UI.
+
+The stream carries v2 render updates in one of three kinds. Full updates are self-contained, so a one-shot `state` fetch or a fresh subscriber can materialize the current screen with no prior history.
+
+| Kind | Used for |
+| --- | --- |
+| `full` | Initial baseline, self-contained fetches, resize, termination, `input_output`, correctness resyncs |
+| `delta` | Steady-state output, prompt redraws, scrollback movement — cell-run deltas plus Ghostty scroll-rectangle operations |
+| `resyncRequired` | The baseline is unusable; the client must re-establish one |
+
+Every full update records why it was not a delta — a missing or mismatched baseline, an invalid grid or scroll rectangle — which is what makes render regressions diagnosable from logs alone.
+
+## Clients
+
+| Client | Reaches the session via | Renders |
+| --- | --- | --- |
+| macOS app | Device API (loopback for local, TLS for remote) | Ghostty mirror surface from render frames |
+| iOS app | Device API over pinned TLS | Ghostty mirror surface from render frames |
+| `spaces terminal` CLI | Profile socket, or Device API with `--device` | Plain-text tail through the VT bridge |
+| MCP tools | Same two routes, chosen by the `device` argument | Plain-text tail |
+
+A single `DeviceTerminalSessionStateModel` owns one session client and one `subscribe` stream per session, then fans it out to the pane controller for metadata and to `RemoteGhosttySessionHost` for rendering. Local and remote panes share that one path.
+
+`spaces terminal show` opens an owner-seeking window: it expresses ownership intent and may transfer the active owner away from another client, on this device or another.
+
+Two Device API commands are token-authorized but deliberately **not** owner- or attachment-gated, because orchestrator agents drive sessions they never render: `sendTerminalInput` and `tailTerminalOutput`. The Device API is an internal first-party transport, not a stable public API.
+
+Image paste (`terminalPasteImage`) is an image-only extension of the owner input boundary. The daemon validates owner and epoch, rejects ended sessions and payloads over 10 MiB, writes a `/tmp/spaces-paste-<uuid>.<ext>` file, and injects only that path through the same owner-gated send that protects text.
 
 ## Tail and Metadata
-- `spaces terminal tail` reads `output.log`, not a live client window.
-- ANSI and full-screen output are replayed through `libghostty-vt`.
-- Tail rendering uses the persisted terminal size from SQLite so wrapping and redraw-heavy transcripts stay aligned with the last visible geometry.
-- Tail returns recent output, including lines that scrolled above the current prompt, so an agent that sent a command through `sendTerminalInput` can read its result. Only a genuine full-screen repaint — an entire-screen clear (`clear`) or a cursor-home rewrite (status frames, full-screen apps) — resets the tail to the current screen; a shell prompt's routine erase-below on redraw does not. Tail renders at most the most recent window of the append-only output log, so its cost stays bounded over a long-lived session.
-- The VT bridge feeds `spaces terminal tail` and diagnostics. Terminal UI rendering does not use VT replay, snapshot-to-VT encoding, or `output.log`.
 
-## Device API
-- `spacesd` starts the first-party Device API listener on launch. The default listener binds all IPv4 interfaces on port `47847`; if another Spaces profile already owns that port in a development checkout, the daemon persists a deterministic profile-specific port so paired clients keep reconnecting to a stable endpoint.
-- Device API settings live under the terminal root in `device-api.json` and hold the listener host and port. The TLS identity that secures the listener lives separately under the terminal root's `daemon-tls` directory; resetting all pairings regenerates that identity so every previously pinned client fails closed until it re-pairs.
-- `spaces device pair` with no source asks the same-machine daemon to open a five-minute pairing window and prints the `spaces://` pairing link, code, expiry, and endpoint fingerprint. `spaces device pair --json` prints structured pairing metadata for SSH-assisted remote-device pairing. A remote Mac must already have the Spaces app installed; an Ubuntu 24.04 device is installed by running `https://usespaces.dev/install.sh` on it, either manually or through the Mac app's install-over-SSH pairing recovery action. `spacese2e mobile-status`, `mobile-serve`, and `mobile-request` remain harness-only commands for status and transport tests.
-- The Mac sidebar Devices action opens a compact panel with the connected daemon list, a five-minute QR pairing window for iPhone and iPad clients under each connected daemon, and an SSH target form for pairing this Mac with a remote `spacesd`.
-- The service advertises `_spaces-device._tcp.` with Bonjour so first-party client pairing flows can discover daemon endpoints without using Bonjour for trust or authorization.
-- The Device API serves workspace and terminal overview data plus authenticated attach, subscribe, takeover, send, key, setAppearance, workspace-creation, workspace-terminal, process, and coding-agent lifecycle requests over the same session boundary.
-- The Device API also serves two agent-facing terminal commands that are token-authorized but not attachment- or owner-gated, because orchestrator agents drive sessions they never attach to or render: `sendTerminalInput` (one-shot text or raw bytes, optional trailing newline — the same contract as the local profile `terminalSend`) and `tailTerminalOutput` (rendered plain-text tail of the session's output log through the VT bridge, the same contract as `spaces terminal tail`). `spaces terminal send text`, `spaces terminal send bytes`, `spaces terminal tail`, and `spaces terminal list` use these commands with `--device` (list rides `overview`), and MCP terminal tools use their `device` argument for the same path.
-- The Device API `terminalPasteImage` command accepts an owner-scoped image upload for one terminal session and returns a plain control response. It rejects missing client identity, non-owner clients, stale owner epochs, ended or unavailable sessions, empty image data, unsupported file extensions, and payloads over 10 MiB. Successful requests create owner-readable and owner-writable temp files on the daemon host and then reuse the typed terminal send command with `asPaste` so the same owner gate that protects text input protects pasted image paths.
-- Mobile workspace terminals are persistent service-owned sessions created at the workspace root. The bridge uses the workspace terminal reservation and finish flow with no native macOS window opener, so the session is immediately visible to iOS without presenting a Mac terminal window. Stop requests terminate ad hoc workspace terminal sessions through the same workspacecore path used for native window close.
-- Mobile process actions reuse the same configured-process recovery and running-process stop or restart behavior as the macOS app. A configured process without a live runtime is launched from its saved workspace settings; a live row is stopped or restarted by running-process identity.
-- Mobile coding-agent actions use the workspace agent lifecycle path. Stopping a Spaces-backed agent closes any tracked native terminal window, terminates the backing service session, removes the runtime row, and leaves the configured launcher in settings. Restarting is available for configured launchers and claimed launcher rows; unconfigured live agents can stop but cannot restart.
-- Terminal overview rows are assembled from workspace runtime rows first: configured processes use `running_processes`, configured coding agents use `agent_sessions`, and both carry the runtime target's terminal session ID. Live ad-hoc terminal sessions are included only when they are not represented by one of those configured rows, resolve workspace ownership from launch metadata before falling back to working-directory matching, and expose stop availability only while running with a live session ID.
-- Spaces-owned ad-hoc terminal sessions are promoted to coding-agent rows while their persisted foreground runtime metadata identifies a known agent command such as `codex`, `claude`, `claude-code`, or `opencode`. The underlying terminal row name is preserved, and the agent detail shows the live foreground command when it is distinct from the agent label.
-- The Device API `state` endpoint returns a self-contained live service state for interactive sessions and the persisted final `terminated` payload for ended sessions. Ended-session `subscribe` requests send that same final payload and complete so stale clients do not report a missing live stream. Attach, takeover, input, resize, scroll, and setAppearance control remain live-session-only operations.
-- `setAppearance` re-themes a live session to a client's light/dark preference. It is a per-client view preference, not an ownership-gated mutation, so any attached client (including a viewer) may send it; a shared session applies it last-writer-wins, and a same-value request is a cheap no-op. The daemon re-themes the already-rendering session in place and broadcasts a full render frame so subscribers see the new variant without reopening.
-- The iOS terminal detail view resolves the selected session back to the latest device overview runtime row while it is visible. Its trailing `...` menu reuses the app model's run, stop, and restart mutations, and swaps to a replacement session when run or restart returns one.
-- Standalone Device API runs used by latency harnesses can apply test-only response and stream shaping through `SPACES_DEVICE_API_NETWORK_PROFILE`; the daemon-supervised Device API path uses the default local profile.
-- Device API terminal and overview stream relays serialize outbound network sends through a queue-confined `StreamSendSequencer`. Enqueue and completion run on the server queue identified by a dispatch-specific key, so send ordering and sequencer mutation stay explicit around network-shaping callbacks.
-- Pairing is first-party policy-gated: the daemon issues a per-install auth token after one-time code and nonce verification inside an open pairing window, and persists the paired installation alongside client metadata, daemon endpoint fingerprint, and the expected first-party bundle identifier.
-- Every later request must connect over TLS pinned to the daemon's certificate fingerprint and present the stored auth token plus allowed bundle identity in the request, so an unpaired or non-first-party client is rejected before it can browse or control sessions.
-- Remote attachments are lease-based. Host time stamps the lease, and only client-identified activity refreshes that specific remote lease.
-- The Device API is an internal first-party transport, not a stable third-party public API.
-- Simulator-based manual verification can seed settings with a pairing link whose host is `127.0.0.1`. A real iPhone or iPad scans the Mac app QR code from the Devices panel.
-- `GhosttyMobileAppService` prepares simulator stdio before it boots the local iOS terminal support runtime: missing stdout or stderr descriptors are repaired, and stdin is rebound to a kept-open pipe so manual `simctl launch` does not immediately deliver EOF.
+`spaces terminal tail` reads `output.log` and replays ANSI and full-screen output through `libghostty-vt`, using the terminal geometry persisted in SQLite so wrapping stays aligned with what was last visible.
 
-## Mobile Owner Bootstrap
-- `ghostty_session_export_render_frame` is the authoritative live owner export path for takeover and remote screen updates.
-- The Device API takeover response carries a post-transfer terminal state payload when live state is readable; clients keep the takeover UI pending and issue one explicit state refresh when that payload is unavailable.
-- Each takeover creates one owner epoch on iOS. The epoch carries the bootstrap render frame used for first paint, and later service-published render frames update that same rendered epoch.
-- Active macOS and iOS owners receive screen-state-change render frames from the service, so command output, row clears, and prompts are published from the terminal state stream without depending on later input activity.
-- macOS owner command submissions keep a trailing `input_output` render-frame resync after the first interactive output chunk, while ordinary character echo can remain on the fast output path.
-- Render-frame snapshots preserve Ghostty row wrap metadata in internal cell flags when exported by the service and restore it when materialized into a local mirror surface. The iOS mirror therefore keeps Ghostty's native selection and link detection semantics for soft-wrapped output, including file paths with spaces that wrap across rows.
-- Output events carry byte counts and ending output byte offsets for ordering and diagnostics, but not raw output bytes for client rendering.
-- macOS remote windows and iOS owner rendering use the same render-frame coordination policy for preserving an already-bootstrapped owner render and applying fresh service frames.
-- Client renderers update from structured render frames and scroll gestures so prompt redraws and row clears are visible before readiness or rendered-text state advances.
-- iOS first paint and first input-ready are driven from the bootstrap render frame. Raw-output history replay and incremental output byte rendering are not used for terminal rendering.
-- The iOS terminal detail model derives visible permissions and status from `TerminalViewerPhase`, which folds session unavailability, ended state, connecting state, ownership, takeover, owner busy work, and ownership synchronization into one read-only lifecycle view. Task cancellation for reconnect, heartbeat, buffered input, scroll coalescing, input send, ownership synchronization, and stream handles is centralized so stop, authentication recovery, and ended-session cleanup reset the same task set deliberately.
-- macOS owner windows and the iOS toolbar share `TerminalKeyInput` named key specs for terminal line editing. `cmd+left` and `cmd+right` encode as `Ctrl+A` and `Ctrl+E`, `opt+left` and `opt+right` encode as meta backward/forward word, and `cmd+backspace` or `opt+backspace` encode as kill-line-left or kill-word-left. `cmd+k` is a terminal-owned host action that clears the visible screen and scrollback without sending `Ctrl+L` as PTY input.
-- The iOS message composer builds one ordered send that shares the terminal input serial queue so it stays ordered with any buffered text and keys. The queued closure runs the typed text as a paste-marked `terminalControl` send, then each image (`terminalPasteImage`) separated by a paste-marked space, then Enter (`terminalControl` key), stopping at the first failure so Enter — the submission — is never reached after a partial send. The composer owns its completion: a partial failure surfaces a composer-scoped error and keeps the whole draft, while success clears it, so a failed image never routes through the generic terminal error path. Composer image attachments come from the staged-screenshot store (a captured screenshot) or the iOS pasteboard reader, which prefers the encoded PNG/JPEG/HEIC representation and otherwise re-encodes a raw pasteboard image as PNG, validating against the shared 10 MiB cap and supported-extension set.
-- The staged-screenshot store is a single in-memory slot on the shared iOS app model, written by the browser session view's Screenshot capture and read by the composer; staging a new screenshot replaces whatever was staged before, and nothing persists across launches. Capture writes the viewport PNG to a temp file and presents `QLPreviewController` full screen as the root of its own modal presentation (a `.fullScreenCover` container view controller `present`s it on appear) — QuickLook only shows its native chrome, including the markup pencil, when it owns the presentation. The editor uses in-place editing (`.updateContents`); dismissing the preview (Done or swipe) reads the possibly edited temp file back, re-validates it, writes it into the store — or surfaces an error toast if validation fails — and deletes the temp file either way. There is no separate cancel/confirm step: the slot is single and replaceable, and attaching from the composer is the explicit step.
-- Ordinary resize reconciles viewport geometry inside the owner epoch. It does not schedule another full bootstrap.
-- If the owner epoch becomes desynchronized after takeover, the Device API prefers one explicit refresh or resync request instead of an implicit bootstrap loop.
-- When `SPACES_MOBILE_TERMINAL_PERFORMANCE_LOG_PATH` is set, the macOS host, Linux headless host, Device API, and the iOS client append structured JSONL events to that path. Events include wall-clock `emittedAt` plus monotonic `emittedUptimeNanoseconds` for same-process latency correlation. Render events identify `frame_kind=full`, `frame_kind=delta`, or `frame_kind=resync_required` and include revision, payload, delta, and recovery fields: `base_revision`, `target_revision`, `applied_revision`, `payload_bytes`, `render_update_bytes`, `operation_count`, `changed_cell_count`, `scroll_operation_count`, `full_frame_fallback_reason`, `apply_ms`, and `drop_reason`. Device API control and stream relay events mark request receipt, terminal-control dispatch, response write, `stream_relay_read`, `stream_network_send_begin`, and `stream_network_send_end` so server handling, local control dispatch, and transport delay are separated from client rendering. Linux headless scroll profiling also emits `scroll_native_end` and `scroll_broadcast_end` so native viewport mutation is separated from render-frame publish work. The Device API `state` endpoint returns a materialized current render state for tests and diagnostics. The standalone demo and standalone E2E wrappers set this automatically and preserve the file under the disposable demo root as `mobile-terminal-performance.jsonl`.
+Tail returns recent output including lines that scrolled above the current prompt, so an agent that sent a command through `sendTerminalInput` can read the result.
 
 ## Scroll Rendering
-- Scroll requests stay inside the active-owner control boundary. Requests carry Ghostty scroll modifier bits for precise deltas and momentum phases; requests that omit those bits default to `0`.
-- macOS service-owned terminal windows use `RemoteGhosttySessionHost` with `GhosttyMirrorTerminalView`. AppKit trackpad and mouse-wheel deltas are forwarded as native scroll deltas to the service, scroll RPCs are coalesced to display-frame cadence, and Ghostty applies the scroll against its live terminal state. This path gives the highest fidelity because Ghostty owns scrollback, alternate-screen behavior, momentum interpretation, and viewport state.
-- iOS owner rendering uses `GhosttyRemoteTerminalView`. It forwards touch-derived native scroll deltas and the same modifier metadata through display-frame coalescing, then renders the authoritative service-published frame when the owner applies the scroll.
-- Linux headless owners receive the same native scroll payloads but only have the VT viewport API, so they use the shared `TerminalScrollDeltaNormalizer` to mirror Ghostty's native precise-delta behavior: precise deltas divide by cell height and retain sub-row remainder, while non-precise wheel ticks use Ghostty's default discrete multiplier. The Linux VT session uses Ghostty's default 10 MB scrollback byte budget. macOS and iOS viewers share the same `TerminalScrollModifiers` bit encoding so the owner sees one wire contract.
-- Scroll requests that normalize to zero rows or reach the current scroll boundary succeed as no-ops, so high-frequency trackpad, touch, and momentum events do not surface terminal-control errors at the top or bottom of scrollback.
+
+Scroll stays inside the active-owner control boundary. Requests carry Ghostty scroll modifier bits for precise deltas and momentum phases.
+
+- macOS forwards AppKit trackpad and wheel deltas as native scroll deltas, coalesced to display-frame cadence. Ghostty owns scrollback, alternate-screen behavior, momentum interpretation, and viewport state, which is why this path has the highest fidelity.
+- iOS forwards touch-derived deltas through the same coalescing and renders the authoritative published frame.
+- Linux headless owners have only the VT viewport API, so `TerminalScrollDeltaNormalizer` reproduces Ghostty's native precise-delta behavior. macOS and iOS share one `TerminalScrollModifiers` bit encoding so the owner sees a single wire contract.
 
 ## Ghostty Compatibility Boundary
-- The Ghostty fork exposes additive headless-session, render-frame, and mirror-renderer entrypoints for Spaces without changing default Ghostty app behavior. Spaces keeps the v2 render-update protocol behind its first-party service and bridge boundary; current clients materialize v2 updates back into Ghostty mirror snapshots until the prebuilt GhosttyKit contract exposes direct native render-update apply calls.
-- The service remains the only PTY and session-state owner. Client windows and mobile views import service frames into local mirror state and may only send input, resize, mouse, keyboard, binding-action, or scroll events while their client ID and owner epoch match the active owner.
-- The first-party render stream uses v2 render updates only. Full v2 updates are retained for initial baselines, self-contained fetches, resize, termination, `input_output`, subscriber baseline resets, and correctness resyncs; steady-state output, `state_change` prompt redraws, and scrollback movement use deltas with native scroll-rectangle operations when Ghostty provides them.
-- Pixel streaming is not the primary architecture.
+
+- The fork adds headless-session, render-frame, and mirror-renderer entrypoints without changing default Ghostty app behavior.
+- The daemon is the only PTY and session-state owner. Clients import frames into local mirror state and may send input, resize, mouse, keyboard, binding-action, or scroll events only while their client ID and owner epoch match the active owner.
+- Clients materialize v2 updates back into Ghostty mirror snapshots until the prebuilt GhosttyKit contract exposes native render-update apply calls.
+- Pixel streaming is not the architecture.
+
+## Hard-Earned Learnings
+
+Non-obvious constraints. Each names a trap and what breaks without the guard.
+
+### Service runtime
+
+- **Capture the render frame before renderer teardown.** Termination tears down the renderer, so a frame captured afterward is empty and the ended session shows a blank final screen.
+- **A dead service PID leaves sessions stranded in `starting` or `running`.** On restart the daemon marks those failed and removes the stale `control.sock`, otherwise clients attach to a socket no process is listening on.
+- **The embedded service must initialize without a display-linked render loop.** It publishes frames on demand and runs headless; depending on a display link would make daemon-hosted sessions fail with no window on screen.
+- **Mark programmatic closes as terminating.** Stop and restart close windows themselves; without the marker, AppKit cleanup also fires the ad hoc close path and terminates the replacement session.
+- **The default shell is platform-specific** — `/bin/zsh` on macOS, `/bin/bash` on Linux — and `forkpty` needs `libutil` linked on Linux only, where it does not live in libc.
+
+### Rendering
+
+- **Render revisions are monotonic and distinct from session-state revisions.** A viewport-only scrollback change advances the render revision while session state is unchanged, so gating renders on session-state revision drops scroll updates.
+- **VT replay and `output.log` are not rendering fallbacks.** They exist for `tail` and diagnostics. Reaching for them when a frame is missing reintroduces the transcript-rendering path the render-frame design replaced.
+- **Render frames preserve Ghostty row-wrap metadata in cell flags.** Dropping it costs native selection and link detection across soft-wrapped output, including file paths with spaces that wrap mid-path.
+- **Output events carry byte counts and offsets, never raw bytes for rendering.** The counts are for ordering and diagnostics; rendering from them would resurrect incremental byte rendering.
+- **Owner command submissions keep a trailing `input_output` resync after the first output chunk.** Ordinary character echo can ride the fast path, but a command's first output needs the resync or the screen drifts from the session.
+- **Active owners receive screen-state-change frames.** Command output, row clears, and prompt redraws publish from the state stream rather than waiting on the next input event, which is what keeps a redrawing prompt from appearing frozen.
+
+### Ownership and takeover
+
+- **Ordinary resize reconciles inside the owner epoch.** It must not schedule a second bootstrap, which would blank and repaint the screen on every window drag.
+- **Prefer one explicit refresh over an implicit bootstrap loop.** When an owner epoch desynchronizes after takeover, retrying the bootstrap implicitly can loop indefinitely.
+- **The takeover response carries post-transfer state when it is readable.** Clients hold the takeover UI pending and issue exactly one explicit refresh when it is not, rather than polling.
+- **An ended session is read-only even when stale attachment rows still name an owner.** Trusting those rows lets a client try to resize or send input to a dead PTY.
+- **Only client-identified activity refreshes that client's remote lease.** Any-activity refresh would keep a disconnected client's lease alive forever.
+- **An ended-session `subscribe` sends the final payload and completes.** Leaving the stream open makes stale clients report a missing live stream instead of showing the final frame.
+
+### Device API
+
+- **`sendTerminalInput` and `tailTerminalOutput` are token-authorized but not owner-gated.** This is deliberate: orchestrator agents drive sessions they never attach to or render. Adding an owner gate would break headless agent control.
+- **`setAppearance` is not owner-gated either.** Appearance is a per-client view preference, so a viewer may send it. A shared session applies it last-writer-wins, and a same-value request is a cheap no-op.
+- **Resetting all pairings regenerates the daemon TLS identity.** Every client holding the old pin fails closed until it re-pairs — correct, but it means a reset is not a locally recoverable action for remote clients.
+- **Serialize outbound stream sends through the queue-confined `StreamSendSequencer`.** Enqueue and completion run on the server queue identified by a dispatch-specific key, so send ordering stays explicit across network-shaping callbacks rather than depending on callback timing.
+
+### macOS windows
+
+- **Owner windows dispatch edit and find command-key equivalents directly to the window controller.** Left to normal AppKit menu routing, those chords bypass the live Ghostty surface entirely.
+- **`cmd+k` is a terminal-owned host action.** It clears the visible screen and scrollback without sending `Ctrl+L` as PTY input, so it does not disturb a running program.
+- **Check pasteboard data length before decoding and file URL size before reading.** Image paste otherwise decodes an arbitrarily large payload into memory before the 10 MiB limit can reject it. The upload runs from an async callback so it never blocks AppKit event handling.
+
+### Tail
+
+- **A shell prompt's routine erase-below must not reset the tail.** Only a genuine full-screen repaint — an entire-screen clear, or a cursor-home rewrite from a status frame or full-screen app — resets to the current screen. Treating every erase as a repaint truncates exactly the command output an agent is trying to read.
+- **Tail renders at most the most recent window of `output.log`,** so its cost stays bounded across a long-lived session.
+
+### Scroll
+
+- **A scroll that normalizes to zero rows, or that is already at a scrollback boundary, succeeds as a no-op.** Returning an error surfaces control-error noise on every trackpad flick at the top or bottom.
+- **A request that omits scroll modifier bits defaults to `0`,** rather than inheriting the previous request's momentum phase.
+
+### iOS
+
+- **`simctl launch` delivers EOF on stdin immediately.** `GhosttyMobileAppService` repairs missing stdout and stderr descriptors and rebinds stdin to a kept-open pipe before booting the terminal runtime, or the runtime shuts down at launch.
+
+### Overview rows
+
+- **Resolve an ad hoc session's workspace from launch metadata before falling back to working-directory matching.** Directory matching alone misattributes a session started in a nested path.
 
 ## Validation
-The terminal slice is considered healthy when these flows work:
-- app-launched workspace terminals, built-in process windows, and coding-agent windows attach to service-owned sessions and reopen without restarting the session across `SpacesApp` quit and relaunch
-- session creation through `spaces terminal command`
-- `list`, `send`, `key`, `tail`, `show`, and `takeover`
-- owner-scoped image paste writes a daemon-local `/tmp/spaces-paste-*` image file and injects that path into the terminal without changing non-image `Ctrl+V`
-- app quit followed by app relaunch and reopen of the same live session
-- owner and viewer attachment persistence and lease expiry
+
+The terminal slice is healthy when these flows work:
+
+- App-launched workspace terminals, process windows, and coding-agent windows attach to daemon-owned sessions and reopen across `SpacesApp` quit and relaunch without restarting the session
+- Session creation through `spaces terminal command`; `list`, `send`, `key`, `tail`, `show`, and `takeover`
+- Owner-scoped image paste writes a daemon-local `/tmp/spaces-paste-*` file and injects that path, leaving non-image `Ctrl+V` as ordinary input
+- Owner and viewer attachment persistence, and lease expiry
 - CLI `tail` transcript rendering from `output.log` with persisted geometry
-- iOS attach, auto-takeover to the remote client, ownership transfer back to a macOS owner, and streamed render or input freshness on top of the same session boundary
-- large-transcript iPhone takeover through the standalone demo path with a non-blank first owner frame, one owner bootstrap epoch, and preserved live updates after takeover
-- long-output iPhone scrollback after takeover, with preserved scroll position while scrolled up and no stray prompt repaint rows during owner rendering
-- built-in terminal churn profiling through `apps/macos/Tests/e2e.sh terminal --scenario stress`, with `codex_churn` kept as the primary redraw-heavy regression scenario
-- longer manual churn sampling through `apps/macos/Tests/e2e.sh terminal --scenario soak`, including `SOAK_MODE=codex_churn` for sustained scrollback pressure and redraw churn
+- iOS attach, auto-takeover, ownership transfer back to a macOS owner, and streamed render freshness on the same session boundary
+- Large-transcript iPhone takeover with a non-blank first owner frame, one bootstrap epoch, and preserved live updates
+- Long-output iPhone scrollback after takeover, preserving scroll position with no stray prompt repaint rows
+- Redraw-heavy churn and soak scenarios through `apps/macos/Tests/e2e.sh terminal` (see [dev.md](dev.md))

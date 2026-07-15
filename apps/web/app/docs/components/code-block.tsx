@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 
 export function CodeBlock({ children }: { children: string }) {
   return (
-    <pre className="mt-3 overflow-x-auto rounded-xl border border-line bg-code-surface px-4 py-3 font-mono text-xs leading-6 text-code-foreground">
+    <pre className="mt-3 overflow-x-auto rounded-sm border border-line bg-code-surface px-4 py-3 font-mono text-xs leading-6 text-code-foreground">
       <code>{children}</code>
     </pre>
   );

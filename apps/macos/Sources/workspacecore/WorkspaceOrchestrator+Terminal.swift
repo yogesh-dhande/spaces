@@ -94,8 +94,8 @@ extension WorkspaceOrchestrator {
                 try store.upsert(
                     window: WindowRecord(
                         id: window.id, workspaceID: window.workspaceID, app: window.app, name: title, detail: window.detail,
-                        targetURL: window.targetURL, terminalTrackingID: window.terminalTrackingID,
-                        role: window.role, orderIndex: window.orderIndex, lastSeenAt: nowISO8601()))
+                        targetURL: window.targetURL, terminalTrackingID: window.terminalTrackingID, role: window.role, orderIndex: window.orderIndex,
+                        lastSeenAt: nowISO8601()))
             }
             if terminalSessionLaunchConfiguration(sessionID: sessionID) != nil {
                 let paths = try TerminalSessionPaths.forSession(id: sessionID)
@@ -349,9 +349,7 @@ extension WorkspaceOrchestrator {
     func liveAdHocBuiltInTerminalSessionIDs(workspaceID: String) throws -> [String] {
         guard let workspace = try store.workspace(id: workspaceID) else { return [] }
         let liveSessions: [TerminalSessionCatalogEntry]
-        do {
-            liveSessions = try TerminalSessionCatalog.listLiveSessions()
-        } catch {
+        do { liveSessions = try TerminalSessionCatalog.listLiveSessions() } catch {
             // This sweep is only for untracked shells; tracked process and agent sessions
             // have already been handled, so catalog errors must not leave stop half-applied.
             if ProcessInfo.processInfo.environment["DEBUG"] == "1" {
