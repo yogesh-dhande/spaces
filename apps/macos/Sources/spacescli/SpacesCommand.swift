@@ -20,6 +20,7 @@ public struct SpacesCommand: ParsableCommand {
               - `workspace start` waits for pending/running setup to complete and fails with the setup error if setup failed. It ensures a workspace and all its processes are running: launches when stopped; when already running, restarts any exited processes. Windows open without activating the app.
               - `workspace restart` forces a full stop and relaunch for a workspace.
               - Agent events stay explicit. Workspace runtime commands do not imply agent lifecycle. `agent signal <event>` records those lifecycle transitions for the current Spaces terminal session, or no-ops outside one.
+              - `agent list`/`agent status` report coding-agent sessions with status, note, project/workspace context, and a spaces://terminal deep link. `agent annotate` sets an explicit note (empty clears it). `status`/`annotate` default the session to SPACES_TERMINAL_TRACKING_ID.
             """, version: AppVersion.current,
         subcommands: [
             ProjectCommand.self, WorkspaceCommand.self, AgentCommand.self, TerminalCommand.self, DeviceCommand.self, DaemonCommand.self,
@@ -108,7 +109,87 @@ struct WorkspaceRestartCommand: ParsableCommand {
 
 struct AgentCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
-        commandName: "agent", abstract: "Manage coding-agent lifecycle state.", subcommands: [AgentSignalCommand.self])
+        commandName: "agent", abstract: "Manage and orchestrate coding-agent sessions.",
+        subcommands: [AgentSignalCommand.self, AgentListCommand.self, AgentStatusCommand.self, AgentAnnotateCommand.self])
+}
+
+/// Renders one agent session as a tab-separated `key=value` row, matching the terminal-list convention.
+/// The leading column is the terminal session id (the target for `terminal send`, subscriptions, and the
+/// `open` deep link); missing optional values render as `-`.
+func agentSessionRow(_ row: TerminalServiceAgentSessionRow) -> String {
+    let terminalSessionID = row.terminalSessionID ?? row.id
+    let ready = row.lastSignalAt != nil
+    return [
+        terminalSessionID, "agent=\(row.agent ?? "-")", "status=\(row.status)", "ready=\(ready)", "note=\(row.note ?? "-")",
+        "project=\(row.projectName)", "workspace=\(row.workspaceName)", "branch=\(row.branch ?? "-")",
+        "open=\(SpacesTerminalDeepLink(sessionID: terminalSessionID).absoluteString)",
+    ].joined(separator: "\t")
+}
+
+/// Resolves the terminal session id to act on for `status`/`annotate`, defaulting to the current Spaces
+/// terminal's `SPACES_TERMINAL_TRACKING_ID`. Unlike `agent signal`, these commands always target a
+/// specific session, so a missing id is an error rather than a silent no-op.
+func resolvedAgentSessionID(_ session: String?, environment: [String: String] = ProcessInfo.processInfo.environment) throws -> String {
+    if let session = session?.trimmingCharacters(in: .whitespacesAndNewlines), !session.isEmpty { return session }
+    let envValue = environment[WorkspaceOrchestrator.terminalTrackingIDEnvVar]?.trimmingCharacters(in: .whitespacesAndNewlines)
+    if let envValue, !envValue.isEmpty { return envValue }
+    throw ValidationError("--session is required, or run inside a Spaces terminal so \(WorkspaceOrchestrator.terminalTrackingIDEnvVar) is set.")
+}
+
+struct AgentListCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "list", abstract: "List coding-agent sessions on this device.")
+
+    @Option(name: .long, help: "Workspace ID. When omitted, lists agents across every workspace.") var workspace: String?
+    @Flag(name: .long, help: "Emit machine-readable JSON.") var json = false
+
+    func run() throws {
+        let context = CLIContext()
+        let rows = try TerminalService.sendProfileCommand(.agentList(.init(workspaceID: workspace))).agentSessions ?? []
+        if json {
+            try context.output.emitJSON(rows)
+            return
+        }
+        if rows.isEmpty {
+            context.output.emit("No agent sessions.")
+            return
+        }
+        context.output.emitLines(rows.map(agentSessionRow))
+    }
+}
+
+struct AgentStatusCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "status", abstract: "Show a single coding-agent session's status.")
+
+    @Option(name: .long, help: "Spaces terminal session ID. Defaults to SPACES_TERMINAL_TRACKING_ID.") var session: String?
+    @Flag(name: .long, help: "Emit machine-readable JSON.") var json = false
+
+    func run() throws {
+        let context = CLIContext()
+        let sessionID = try resolvedAgentSessionID(session)
+        guard let row = (try TerminalService.sendProfileCommand(.agentList(.init(sessionID: sessionID))).agentSessions ?? []).first else {
+            throw ValidationError("No agent session for terminal \(sessionID).")
+        }
+        if json {
+            try context.output.emitJSON(row)
+            return
+        }
+        context.output.emit(agentSessionRow(row))
+    }
+}
+
+struct AgentAnnotateCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "annotate", abstract: "Set (or clear, with an empty note) a coding-agent session's note.")
+
+    @Argument(help: "Note text. Pass an empty string to clear the note.") var note: String
+    @Option(name: .long, help: "Spaces terminal session ID. Defaults to SPACES_TERMINAL_TRACKING_ID.") var session: String?
+
+    func run() throws {
+        let context = CLIContext()
+        let sessionID = try resolvedAgentSessionID(session)
+        let response = try TerminalService.sendProfileCommand(.agentAnnotate(.init(sessionID: sessionID, note: note)))
+        context.output.emit(response.message)
+    }
 }
 
 struct AgentSignalCommand: ParsableCommand {

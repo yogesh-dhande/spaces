@@ -94,10 +94,11 @@ final class SpacesCommandTests: XCTestCase {
         XCTAssertEqual(context?.sessionID, "session-env")
     }
 
-    /// Hook installation and status are owned by the app and the daemon, never the CLI or MCP.
-    func testAgentCommandExposesSignalOnly() {
+    /// Signal, plus the read/annotate orchestration surface. Hook installation and status stay owned by
+    /// the app and the daemon, never the CLI or MCP.
+    func testAgentCommandExposesSignalAndOrchestrationCommands() {
         let subcommands = AgentCommand.configuration.subcommands.map { String(describing: $0) }
-        XCTAssertEqual(subcommands, ["AgentSignalCommand"])
+        XCTAssertEqual(subcommands, ["AgentSignalCommand", "AgentListCommand", "AgentStatusCommand", "AgentAnnotateCommand"])
         XCTAssertThrowsError(try AgentCommand.parseAsRoot(["hooks", "status"]))
     }
 
@@ -338,8 +339,10 @@ final class SpacesCommandTests: XCTestCase {
             names,
             [
                 "spaces_project_list", "spaces_workspace_list", "spaces_workspace_create", "spaces_workspace_start", "spaces_workspace_restart",
-                "spaces_terminal_list", "spaces_terminal_tail", "spaces_terminal_send", "spaces_device_list",
+                "spaces_terminal_list", "spaces_terminal_tail", "spaces_terminal_send", "spaces_agent_list", "spaces_agent_status",
+                "spaces_agent_annotate", "spaces_device_list",
             ])
+        // `agent signal` is CLI-only forever: an orchestrating agent may read peers' status but must not forge it.
         XCTAssertFalse(names.contains("spaces_agent_signal"))
 
         let createTool = try XCTUnwrap(tools.first { ($0["name"] as? String) == "spaces_workspace_create" })

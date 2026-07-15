@@ -1,0 +1,185 @@
+import Foundation
+import XCTest
+import spacesterminalcore
+
+#if os(Linux)
+    import CSQLite3
+#else
+    import SQLite3
+#endif
+
+@testable import workspacecore
+
+/// Behavior coverage for the schema-v2 orchestration surface: explicit notes, subscription edges,
+/// hook-signal readiness, and the v1→v2 migration carrying existing agent rows forward.
+final class AgentOrchestrationStoreTests: XCTestCase {
+    func testAnnotatedNoteSurvivesStatusSignalCycle() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+
+        let agent = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Claude Code CLI", terminalTrackingID: "agent-session", status: .idle)
+        try store.setAgentSessionNote(id: agent.id, note: "review the auth flow", updatedAt: "2026-07-14T00:00:00Z")
+
+        // A working then blocked signal re-upserts the agent row with a nil note; the annotation must
+        // be preserved through both.
+        _ = try orchestrator.updateAgentWindowStatus(
+            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "agent-session", status: .spinning)
+        let afterWorking = try XCTUnwrap(store.agentWindows(workspaceID: workspace.id).first)
+        XCTAssertEqual(afterWorking.note, "review the auth flow")
+        XCTAssertEqual(afterWorking.status, .spinning)
+
+        _ = try orchestrator.updateAgentWindowStatus(
+            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "agent-session", status: .waiting)
+        let afterBlocked = try XCTUnwrap(store.agentWindows(workspaceID: workspace.id).first)
+        XCTAssertEqual(afterBlocked.note, "review the auth flow")
+        XCTAssertEqual(afterBlocked.status, .waiting)
+    }
+
+    func testSetAgentSessionNoteWithEmptyStringClearsNote() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        let agent = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "agent-session", status: .idle)
+
+        try store.setAgentSessionNote(id: agent.id, note: "temporary", updatedAt: "2026-07-14T00:00:00Z")
+        XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).first?.note, "temporary")
+
+        try store.setAgentSessionNote(id: agent.id, note: nil, updatedAt: "2026-07-14T00:01:00Z")
+        XCTAssertNil(try store.agentWindows(workspaceID: workspace.id).first?.note)
+    }
+
+    func testSubscriptionInsertListAndCascadeOnAgentDelete() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        let child = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "child-session", status: .idle)
+
+        try store.insertAgentSubscription(subscriberTerminalSessionID: "orchestrator-session", agentSessionID: child.id, createdAt: "2026-07-14T00:00:00Z")
+        // Duplicate insert is a no-op (PRIMARY KEY conflict ignored).
+        try store.insertAgentSubscription(subscriberTerminalSessionID: "orchestrator-session", agentSessionID: child.id, createdAt: "2026-07-14T00:02:00Z")
+
+        XCTAssertEqual(try store.agentSubscriptions(agentSessionID: child.id).map(\.subscriberTerminalSessionID), ["orchestrator-session"])
+        XCTAssertEqual(try store.agentSubscriptions(subscriberTerminalSessionID: "orchestrator-session").map(\.agentSessionID), [child.id])
+
+        try store.deleteAgentWindow(id: child.id)
+        XCTAssertTrue(try store.agentSubscriptions(agentSessionID: child.id).isEmpty)
+        XCTAssertTrue(try store.agentSubscriptions(subscriberTerminalSessionID: "orchestrator-session").isEmpty)
+    }
+
+    func testDeleteSubscriptionRemovesOnlyMatchingEdge() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        let first = try orchestrator.registerAgentWindow(workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "first", status: .idle)
+        let second = try orchestrator.registerAgentWindow(workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "second", status: .idle)
+        try store.insertAgentSubscription(subscriberTerminalSessionID: "sub", agentSessionID: first.id, createdAt: "2026-07-14T00:00:00Z")
+        try store.insertAgentSubscription(subscriberTerminalSessionID: "sub", agentSessionID: second.id, createdAt: "2026-07-14T00:00:01Z")
+
+        try store.deleteAgentSubscription(subscriberTerminalSessionID: "sub", agentSessionID: first.id)
+
+        XCTAssertEqual(try store.agentSubscriptions(subscriberTerminalSessionID: "sub").map(\.agentSessionID), [second.id])
+    }
+
+    func testLastAgentSignalAtCountsOnlyHookSignalEvents() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        let agent = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "agent-session", status: .idle)
+
+        // A foreground-detection event (different source) never counts as a readiness signal.
+        try store.appendAgentSessionEvent(
+            agentSessionID: agent.id, eventType: "foreground_identity", source: "foreground_agent_signal", message: nil,
+            createdAt: "2026-07-14T09:00:00Z")
+        XCTAssertNil(try store.lastAgentSignalAt(agentSessionID: agent.id))
+
+        try store.appendAgentSessionEvent(
+            agentSessionID: agent.id, eventType: "working", source: "spaces_agent_signal", message: nil, createdAt: "2026-07-14T10:00:00Z")
+        try store.appendAgentSessionEvent(
+            agentSessionID: agent.id, eventType: "blocked", source: "spaces_agent_signal", message: nil, createdAt: "2026-07-14T11:00:00Z")
+
+        XCTAssertEqual(try store.lastAgentSignalAt(agentSessionID: agent.id), "2026-07-14T11:00:00Z")
+    }
+
+    func testMigrationFromV1CarriesAgentRowForwardAndEnablesAnnotate() throws {
+        let dir = try makeTempDirectory()
+        let dbPath = dir.appendingPathComponent("v1.db").path
+        try createV1Database(at: dbPath, workspaceID: "workspace-1", agentID: "agent-1", terminalSessionID: "agent-session")
+
+        // Opening the store runs the v1→v2 migration in place.
+        let store = try SQLiteStore(path: dbPath)
+
+        let migrated = try XCTUnwrap(store.agentWindows(workspaceID: "workspace-1").first)
+        XCTAssertEqual(migrated.id, "agent-1")
+        XCTAssertEqual(migrated.terminalTrackingID, "agent-session")
+        XCTAssertNil(migrated.note)
+
+        try store.setAgentSessionNote(id: "agent-1", note: "carried forward", updatedAt: "2026-07-14T00:00:00Z")
+        XCTAssertEqual(try store.agentWindows(workspaceID: "workspace-1").first?.note, "carried forward")
+
+        // The new subscriptions table exists post-migration and cascades on the carried-forward row.
+        try store.insertAgentSubscription(subscriberTerminalSessionID: "sub", agentSessionID: "agent-1", createdAt: "2026-07-14T00:01:00Z")
+        XCTAssertEqual(try store.agentSubscriptions(agentSessionID: "agent-1").count, 1)
+        try store.deleteAgentWindow(id: "agent-1")
+        XCTAssertTrue(try store.agentSubscriptions(agentSessionID: "agent-1").isEmpty)
+    }
+
+    // MARK: - Fixtures
+
+    private func makeProjectAndWorkspace(store: SQLiteStore) throws -> (ProjectRecord, WorkspaceRecord) {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
+        let project = makeProjectRecord(dir: dir)
+        try store.upsert(project: project)
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: dir + "/ws")
+        try store.upsert(workspace: workspace)
+        return (project, workspace)
+    }
+
+    /// Writes a minimal schema-v1 database: the `migration_state` marker at version 1 and the
+    /// pre-note `agent_sessions` table (plus the `runtime_targets` table the agent read joins), with one
+    /// agent row. Only the tables this migration test reads through are created; the migrator upgrades
+    /// this fixture to v2 on open.
+    private func createV1Database(at path: String, workspaceID: String, agentID: String, terminalSessionID: String) throws {
+        var handle: OpaquePointer?
+        guard sqlite3_open(path, &handle) == SQLITE_OK, let db = handle else {
+            XCTFail("Failed opening fixture database at \(path)")
+            return
+        }
+        defer { sqlite3_close(db) }
+        let sql = """
+            CREATE TABLE migration_state (current_version INTEGER NOT NULL);
+            INSERT INTO migration_state(current_version) VALUES (1);
+            CREATE TABLE runtime_targets (
+              id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, type TEXT NOT NULL, name TEXT, detail TEXT,
+              app TEXT NOT NULL, tracking_id TEXT, order_index INTEGER NOT NULL, updated_at TEXT NOT NULL
+            );
+            CREATE TABLE agent_sessions (
+              id TEXT PRIMARY KEY,
+              workspace_id TEXT NOT NULL,
+              provider TEXT NOT NULL,
+              label TEXT,
+              status TEXT NOT NULL DEFAULT 'idle',
+              runtime_target_id TEXT,
+              terminal_session_id TEXT,
+              session_key TEXT,
+              claimed_launcher_id TEXT,
+              claimed_launcher_name TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+            INSERT INTO agent_sessions(id, workspace_id, provider, label, status, terminal_session_id, created_at, updated_at)
+            VALUES ('\(agentID)', '\(workspaceID)', 'spaces', 'Claude Code CLI', 'spinning', '\(terminalSessionID)', 'now', 'now');
+            """
+        var errorMessage: UnsafeMutablePointer<CChar>?
+        guard sqlite3_exec(db, sql, nil, nil, &errorMessage) == SQLITE_OK else {
+            let message = errorMessage.map { String(cString: $0) } ?? "unknown sqlite error"
+            if let errorMessage { sqlite3_free(errorMessage) }
+            XCTFail("Failed seeding v1 fixture: \(message)")
+            return
+        }
+    }
+}

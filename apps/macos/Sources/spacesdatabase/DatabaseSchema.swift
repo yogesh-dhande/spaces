@@ -7,9 +7,35 @@ import Foundation
 #endif
 
 public enum DatabaseSchema {
-    public static let currentVersion = 1
+    public static let currentVersion = 2
 
-    public static let migrationSteps: [DatabaseMigrationStep] = []
+    /// Adds the coding-agent orchestration surface: an explicit `note` on each agent session and the
+    /// `agent_subscriptions` graph. The subscriber key is a terminal session id (a subscriber may be a
+    /// plain terminal with no agent row), and the target is the agent session id so deleting an agent
+    /// row cascades its inbound subscriptions away. Named separately so both this step and the
+    /// fresh-schema SQL share one definition and can never drift apart.
+    static let agentSubscriptionsSQL = """
+            CREATE TABLE IF NOT EXISTS agent_subscriptions (
+              subscriber_terminal_session_id TEXT NOT NULL,
+              agent_session_id TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              PRIMARY KEY (subscriber_terminal_session_id, agent_session_id),
+              FOREIGN KEY (agent_session_id) REFERENCES agent_sessions(id) ON DELETE CASCADE
+            );
+        """
+
+    public static let migrationSteps: [DatabaseMigrationStep] = [
+        DatabaseMigrationStep(
+            fromVersion: 1, toVersion: 2, description: "Add agent_sessions.note and agent_subscriptions", requiresBackup: true
+        ) { handle in
+            try migrationExecuteBatch(
+                handle,
+                sql: """
+                    ALTER TABLE agent_sessions ADD COLUMN note TEXT;
+                    \(agentSubscriptionsSQL)
+                    """)
+        }
+    ]
 
     static let terminalRemoteSessionStateSQL = """
             CREATE TABLE IF NOT EXISTS terminal_remote_session_states (
@@ -311,11 +337,14 @@ public enum DatabaseSchema {
               session_key TEXT,
               claimed_launcher_id TEXT,
               claimed_launcher_name TEXT,
+              note TEXT,
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL,
               FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
               FOREIGN KEY (runtime_target_id) REFERENCES runtime_targets(id) ON DELETE SET NULL
             );
+
+            \(agentSubscriptionsSQL)
 
             CREATE TABLE IF NOT EXISTS agent_session_events (
               id TEXT PRIMARY KEY,

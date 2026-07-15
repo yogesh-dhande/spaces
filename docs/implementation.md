@@ -180,7 +180,7 @@ The boundary is strict. A client reads daemon-owned data over the Device API rat
 
 ## Data Model
 
-`DatabaseSchema.currentVersion` and `SpacesClientDatabase.currentVersion` are both `1`. `migration_state.current_version` records the canonical version; `PRAGMA user_version` is not used for migration control.
+`DatabaseSchema.currentVersion` is `2` and `SpacesClientDatabase.currentVersion` is `1`. `migration_state.current_version` records the canonical version; `PRAGMA user_version` is not used for migration control. The daemon store's one migration step (`v1` → `v2`) adds `agent_sessions.note` and the `agent_subscriptions` table; it takes a pre-migration backup and carries existing agent rows forward with a null note.
 
 Diagrams show keys and discriminating columns only — full column lists live in `DatabaseSchema.swift` and `SpacesClientDatabase.swift`.
 
@@ -239,11 +239,16 @@ erDiagram
     TEXT runtime_target_id FK
     TEXT terminal_session_id
     TEXT status
+    TEXT note
   }
   agent_session_events {
     TEXT id PK
     TEXT agent_session_id FK
     TEXT event_type
+  }
+  agent_subscriptions {
+    TEXT subscriber_terminal_session_id PK
+    TEXT agent_session_id PK
   }
   terminal_sessions {
     TEXT session_id PK
@@ -294,6 +299,7 @@ erDiagram
   runtime_targets ||--o{ running_processes : focus_target
   runtime_targets ||--o{ agent_sessions : focus_target
   agent_sessions ||--o{ agent_session_events : records
+  agent_sessions ||--o{ agent_subscriptions : watched_by
   terminal_sessions ||--o| terminal_runtime_states : state
   terminal_sessions ||--o{ terminal_clients : clients
   terminal_sessions ||--o{ terminal_attachments : attachments
@@ -322,7 +328,9 @@ The single exception is the Chrome window containing a browser session's tab, wh
 - `runtime_targets` is the canonical inventory of focusable runtime items for a workspace: `type`, host app, durable terminal `tracking_id`, ordering, display metadata. The persisted `type` string is surfaced through the `WindowRole` typed view.
 - `browser_targets` extends a browser target with its configured URL.
 - `running_processes` and `agent_sessions` each link to a `runtime_target` when focusable, and each carries a durable `terminal_session_id` used for focus, restart, and final-frame viewing.
-- `agent_session_events` records signal-driven lifecycle transitions, giving an inspectable trail across rebind, detach, and prune.
+- `agent_session_events` records signal-driven lifecycle transitions, giving an inspectable trail across rebind, detach, and prune. Readiness for orchestration (`lastAgentSignalAt`) is defined as the most recent `agent_session_events` row whose `source` is `spaces_agent_signal`, so foreground-detected rows — which never signal — read as not-yet-ready.
+- `agent_sessions.note` is an explicit, human-authored annotation for orchestration. It is written only through the annotate path (`setAgentSessionNote`); the `upsertAgentWindow` conflict clause coalesces an incoming null note back to the stored value, so a status signal never clobbers an annotation.
+- `agent_subscriptions` is the subscribe relationship an orchestrator uses to watch other agents. Its subscriber key is a **terminal session id**, not an agent id, because a subscriber may be a plain terminal with no agent row of its own; its target is an **agent session id** with an `ON DELETE CASCADE` foreign key, so deleting an agent row (e.g. an ad-hoc agent pruned on exit) removes its inbound subscriptions automatically. There is no parent/child column on `agent_sessions` — the subscription edge is the only relationship between agents.
 - Targets are seeded as soon as a process or agent terminal is known, not filled in by a later window-reconciliation pass.
 
 ### Data modeling guidelines
@@ -479,7 +487,9 @@ Because the CLI forwards a folder open to a running instance — which focuses t
 | `TerminalServiceProfileCommand` | No device selector | Profile service socket to the adjacent `spacesd` |
 | `SpacesDeviceClient` | `--device <name-or-id>`, or the MCP `device` argument | Device API |
 
-Only the three terminal commands — `terminal list`, `terminal tail`, and `terminal send` — accept a device selector, so they are the only ones that can take the Device API route. Project, workspace, and agent lifecycle commands always target the same-machine daemon over the profile socket. `spaces device list` reads the client database and contacts no daemon at all.
+Only the three terminal commands — `terminal list`, `terminal tail`, and `terminal send` — accept a device selector, so they are the only ones that can take the Device API route. Project, workspace, and agent commands always target the same-machine daemon over the profile socket. `spaces device list` reads the client database and contacts no daemon at all.
+
+The agent orchestration commands (`agent list`, `agent status`, `agent annotate`) and their MCP tools (`spaces_agent_list`, `spaces_agent_status`, `spaces_agent_annotate`) run over the profile socket. `agent list`/`status` resolve the daemon-side agent view — status, note, project/workspace/branch context, and `lastAgentSignalAt` readiness — reusing the same agent-identity helper (`profileAgentRuntimeLabel`) that `agent signal` uses, and render a `spaces://terminal/<session-id>` deep link per row (`SpacesTerminalDeepLink`). `agent signal` is deliberately never exposed as an MCP tool: an orchestrating agent may read peers' status but must not forge it. `status`/`annotate` default their target session to `SPACES_TERMINAL_TRACKING_ID`.
 
 The profile command is a one-key-tagged union with one case per operation, and required strings are validated at wire decode, so the daemon's `runProfileCommand` destructures a payload and performs only genuinely daemon-side checks.
 

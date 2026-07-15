@@ -123,6 +123,55 @@ public struct TerminalServiceProfileAgentSignalPayload: Codable, Sendable, Equat
     }
 }
 
+public struct TerminalServiceAgentListPayload: Codable, Sendable, Equatable {
+    /// Optional workspace filter. `nil` (or an empty value the daemon normalizes away) lists agents
+    /// across every workspace.
+    public let workspaceID: String?
+    /// Optional terminal-session filter, matched against each agent's terminal tracking id. Used for a
+    /// single-agent `status` view and for readiness polling.
+    public let sessionID: String?
+
+    public init(workspaceID: String? = nil, sessionID: String? = nil) {
+        self.workspaceID = workspaceID
+        self.sessionID = sessionID
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case workspaceID
+        case sessionID
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        workspaceID = try container.decodeIfPresent(String.self, forKey: .workspaceID)
+        sessionID = try container.decodeIfPresent(String.self, forKey: .sessionID)
+    }
+}
+
+public struct TerminalServiceAgentAnnotatePayload: Codable, Sendable, Equatable {
+    /// Terminal session / tracking id of the agent to annotate.
+    public let sessionID: String
+    /// The annotation to store. An empty string clears the note, so this field is required but not
+    /// normalized-non-empty at the wire boundary.
+    public let note: String
+
+    public init(sessionID: String, note: String) {
+        self.sessionID = sessionID
+        self.note = note
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case sessionID
+        case note
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        sessionID = try container.decodeRequiredNonEmpty(forKey: .sessionID)
+        note = try container.decode(String.self, forKey: .note)
+    }
+}
+
 public struct TerminalServiceTerminalSendPayload: Codable, Sendable, Equatable {
     public let sessionID: String
     public let input: TerminalProfileInput
@@ -213,6 +262,8 @@ public enum TerminalServiceProfileCommand: Sendable, Equatable {
     case workspaceStart(workspaceID: String)
     case workspaceRestart(workspaceID: String)
     case agentSignal(TerminalServiceProfileAgentSignalPayload)
+    case agentList(TerminalServiceAgentListPayload)
+    case agentAnnotate(TerminalServiceAgentAnnotatePayload)
     case terminalSend(TerminalServiceTerminalSendPayload)
     case terminalTail(TerminalServiceTerminalTailPayload)
     case terminalCommand(TerminalServiceTerminalCommandPayload)
@@ -227,6 +278,8 @@ extension TerminalServiceProfileCommand: Codable {
         case workspaceStart
         case workspaceRestart
         case agentSignal
+        case agentList
+        case agentAnnotate
         case terminalSend
         case terminalTail
         case terminalCommand
@@ -250,6 +303,8 @@ extension TerminalServiceProfileCommand: Codable {
         case .workspaceStart: self = .workspaceStart(workspaceID: try container.decodeRequiredNonEmpty(forKey: key))
         case .workspaceRestart: self = .workspaceRestart(workspaceID: try container.decodeRequiredNonEmpty(forKey: key))
         case .agentSignal: self = .agentSignal(try container.decode(TerminalServiceProfileAgentSignalPayload.self, forKey: key))
+        case .agentList: self = .agentList(try container.decode(TerminalServiceAgentListPayload.self, forKey: key))
+        case .agentAnnotate: self = .agentAnnotate(try container.decode(TerminalServiceAgentAnnotatePayload.self, forKey: key))
         case .terminalSend: self = .terminalSend(try container.decode(TerminalServiceTerminalSendPayload.self, forKey: key))
         case .terminalTail: self = .terminalTail(try container.decode(TerminalServiceTerminalTailPayload.self, forKey: key))
         case .terminalCommand: self = .terminalCommand(try container.decode(TerminalServiceTerminalCommandPayload.self, forKey: key))
@@ -266,6 +321,8 @@ extension TerminalServiceProfileCommand: Codable {
         case .workspaceStart(let workspaceID): try container.encode(workspaceID, forKey: .workspaceStart)
         case .workspaceRestart(let workspaceID): try container.encode(workspaceID, forKey: .workspaceRestart)
         case .agentSignal(let payload): try container.encode(payload, forKey: .agentSignal)
+        case .agentList(let payload): try container.encode(payload, forKey: .agentList)
+        case .agentAnnotate(let payload): try container.encode(payload, forKey: .agentAnnotate)
         case .terminalSend(let payload): try container.encode(payload, forKey: .terminalSend)
         case .terminalTail(let payload): try container.encode(payload, forKey: .terminalTail)
         case .terminalCommand(let payload): try container.encode(payload, forKey: .terminalCommand)

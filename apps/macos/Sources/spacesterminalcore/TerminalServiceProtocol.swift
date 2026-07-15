@@ -321,6 +321,46 @@ public struct TerminalServiceProfileWorkspaceRecord: Codable, Sendable, Equatabl
     }
 }
 
+/// One coding-agent session as reported to orchestration clients (`agent list`/`status`). Carries the
+/// agent's live status, its explicit note, and the full project/workspace context an orchestrator needs
+/// to reason about and reach the agent (`terminalSessionID` is the target for `terminal send`, deep
+/// links, and subscriptions). `lastSignalAt` is the readiness marker: `nil` until the agent's hooks
+/// emit their first lifecycle signal.
+public struct TerminalServiceAgentSessionRow: Codable, Sendable, Equatable {
+    public let id: String
+    public let terminalSessionID: String?
+    public let agent: String?
+    public let label: String?
+    public let status: String
+    public let note: String?
+    public let projectID: String
+    public let projectName: String
+    public let workspaceID: String
+    public let workspaceName: String
+    public let branch: String?
+    public let updatedAt: String
+    public let lastSignalAt: String?
+
+    public init(
+        id: String, terminalSessionID: String?, agent: String?, label: String?, status: String, note: String?, projectID: String,
+        projectName: String, workspaceID: String, workspaceName: String, branch: String?, updatedAt: String, lastSignalAt: String?
+    ) {
+        self.id = id
+        self.terminalSessionID = terminalSessionID
+        self.agent = agent
+        self.label = label
+        self.status = status
+        self.note = note
+        self.projectID = projectID
+        self.projectName = projectName
+        self.workspaceID = workspaceID
+        self.workspaceName = workspaceName
+        self.branch = branch
+        self.updatedAt = updatedAt
+        self.lastSignalAt = lastSignalAt
+    }
+}
+
 public struct TerminalServiceProfileCommandResponse: Codable, Sendable, Equatable {
     public let message: String
     public let projects: [TerminalServiceProfileProjectSummary]?
@@ -329,11 +369,12 @@ public struct TerminalServiceProfileCommandResponse: Codable, Sendable, Equatabl
     public let terminalSessions: [TerminalServiceSessionSummary]?
     public let terminalSession: TerminalServiceSessionSummary?
     public let terminalOutput: String?
+    public let agentSessions: [TerminalServiceAgentSessionRow]?
 
     public init(
         message: String, projects: [TerminalServiceProfileProjectSummary]? = nil, workspaces: [TerminalServiceProfileWorkspaceRecord]? = nil,
         workspace: TerminalServiceProfileWorkspaceRecord? = nil, terminalSessions: [TerminalServiceSessionSummary]? = nil,
-        terminalSession: TerminalServiceSessionSummary? = nil, terminalOutput: String? = nil
+        terminalSession: TerminalServiceSessionSummary? = nil, terminalOutput: String? = nil, agentSessions: [TerminalServiceAgentSessionRow]? = nil
     ) {
         self.message = message
         self.projects = projects
@@ -342,6 +383,7 @@ public struct TerminalServiceProfileCommandResponse: Codable, Sendable, Equatabl
         self.terminalSessions = terminalSessions
         self.terminalSession = terminalSession
         self.terminalOutput = terminalOutput
+        self.agentSessions = agentSessions
     }
 }
 

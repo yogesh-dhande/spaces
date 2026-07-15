@@ -23,6 +23,7 @@ extension SQLiteStore {
         COALESCE(agent_sessions.claimed_launcher_id, ''),
         COALESCE(agent_sessions.claimed_launcher_name, ''),
         agent_sessions.status,
+        agent_sessions.note,
         agent_sessions.created_at,
         agent_sessions.updated_at
         """
@@ -34,9 +35,9 @@ extension SQLiteStore {
             try execute(
                 sql: """
                         INSERT INTO agent_sessions(
-                          id, workspace_id, provider, label, status, runtime_target_id, terminal_session_id, session_key, claimed_launcher_id, claimed_launcher_name, created_at, updated_at
+                          id, workspace_id, provider, label, status, runtime_target_id, terminal_session_id, session_key, claimed_launcher_id, claimed_launcher_name, note, created_at, updated_at
                         )
-                        VALUES (?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, ?)
+                        VALUES (?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, ?)
                         ON CONFLICT(id) DO UPDATE SET
                           workspace_id = excluded.workspace_id,
                           provider = excluded.provider,
@@ -47,12 +48,13 @@ extension SQLiteStore {
                           session_key = excluded.session_key,
                           claimed_launcher_id = COALESCE(excluded.claimed_launcher_id, agent_sessions.claimed_launcher_id),
                           claimed_launcher_name = excluded.claimed_launcher_name,
+                          note = COALESCE(excluded.note, agent_sessions.note),
                           updated_at = excluded.updated_at
                     """,
                 bindings: [
                     record.id, record.workspaceID, record.provider.rawValue, record.label ?? "", record.status.rawValue, runtimeTargetID ?? "",
                     terminalSessionID ?? "", record.sessionKey ?? "", record.claimedLauncherID ?? "", record.claimedLauncherName ?? "",
-                    record.createdAt, record.updatedAt,
+                    record.note ?? "", record.createdAt, record.updatedAt,
                 ])
         }
     }
@@ -156,12 +158,75 @@ extension SQLiteStore {
 
     public func deleteAgentWindow(id: String) throws { try execute(sql: "DELETE FROM agent_sessions WHERE id = ?", bindings: [id]) }
 
+    /// Sets (or, with an empty `note`, clears) an agent session's explicit annotation. The note is
+    /// written directly here rather than through `upsertAgentWindow` so a status signal — which upserts
+    /// with a nil note and therefore preserves the stored one — never clobbers an annotation.
+    public func setAgentSessionNote(id: String, note: String?, updatedAt: String) throws {
+        try execute(sql: "UPDATE agent_sessions SET note = NULLIF(?, ''), updated_at = ? WHERE id = ?", bindings: [note ?? "", updatedAt, id])
+    }
+
+    public func insertAgentSubscription(subscriberTerminalSessionID: String, agentSessionID: String, createdAt: String) throws {
+        try execute(
+            sql: """
+                INSERT INTO agent_subscriptions(subscriber_terminal_session_id, agent_session_id, created_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(subscriber_terminal_session_id, agent_session_id) DO NOTHING
+                """, bindings: [subscriberTerminalSessionID, agentSessionID, createdAt])
+    }
+
+    public func deleteAgentSubscription(subscriberTerminalSessionID: String, agentSessionID: String) throws {
+        try execute(
+            sql: "DELETE FROM agent_subscriptions WHERE subscriber_terminal_session_id = ? AND agent_session_id = ?",
+            bindings: [subscriberTerminalSessionID, agentSessionID])
+    }
+
+    /// Subscribers watching a given agent session (used when that agent changes state).
+    public func agentSubscriptions(agentSessionID: String) throws -> [AgentSubscriptionRecord] {
+        try queryRows(
+            sql: """
+                SELECT subscriber_terminal_session_id, agent_session_id, created_at
+                FROM agent_subscriptions
+                WHERE agent_session_id = ?
+                ORDER BY created_at
+                """, bindings: [agentSessionID]
+        ).compactMap(decodeAgentSubscription)
+    }
+
+    /// Agent sessions a given terminal session is watching (used when that subscriber goes idle).
+    public func agentSubscriptions(subscriberTerminalSessionID: String) throws -> [AgentSubscriptionRecord] {
+        try queryRows(
+            sql: """
+                SELECT subscriber_terminal_session_id, agent_session_id, created_at
+                FROM agent_subscriptions
+                WHERE subscriber_terminal_session_id = ?
+                ORDER BY created_at
+                """, bindings: [subscriberTerminalSessionID]
+        ).compactMap(decodeAgentSubscription)
+    }
+
+    /// Timestamp of the most recent hook-sourced lifecycle signal for an agent session, or `nil` when it
+    /// has never been signaled. Readiness is defined by a real `spaces_agent_signal` event, so
+    /// foreground-detection events (a different source) are deliberately excluded.
+    public func lastAgentSignalAt(agentSessionID: String) throws -> String? {
+        guard
+            let value = try queryRow(
+                sql: "SELECT MAX(created_at) FROM agent_session_events WHERE agent_session_id = ? AND source = 'spaces_agent_signal'",
+                bindings: [agentSessionID])?.first, !value.isEmpty
+        else { return nil }
+        return value
+    }
+
+    private func decodeAgentSubscription(row: [String]) -> AgentSubscriptionRecord? {
+        guard row.count >= 3 else { return nil }
+        return AgentSubscriptionRecord(subscriberTerminalSessionID: row[0], agentSessionID: row[1], createdAt: row[2])
+    }
+
     public func deleteAgentWindowsByProvider(workspaceID: String, provider: AgentProvider) throws {
         try execute(sql: "DELETE FROM agent_sessions WHERE workspace_id = ? AND provider = ?", bindings: [workspaceID, provider.rawValue])
     }
 
     func decodeAgentWindow(row: [String]) -> AgentWindowRecord? {
-        guard row.count >= 16 else { return nil }
+        guard row.count >= 17 else { return nil }
         guard let provider = AgentProvider(rawValue: row[2]) else { return nil }
         let terminalSessionID = row[9].isEmpty ? nil : row[9]
         let status = AgentWindowStatus(rawValue: row[13]) ?? .idle
@@ -172,7 +237,8 @@ extension SQLiteStore {
         return AgentWindowRecord(
             id: row[0], workspaceID: row[1], provider: provider, label: row[3].isEmpty ? nil : row[3], runtimeTargetID: row[4].isEmpty ? nil : row[4],
             terminalTarget: terminalTarget, sessionKey: row[10].isEmpty ? nil : row[10], claimedLauncherID: row[11].isEmpty ? nil : row[11],
-            claimedLauncherName: row[12].isEmpty ? nil : row[12], status: status, createdAt: row[14], updatedAt: row[15])
+            claimedLauncherName: row[12].isEmpty ? nil : row[12], status: status, note: row[14].isEmpty ? nil : row[14], createdAt: row[15],
+            updatedAt: row[16])
     }
 
     func spacesAgentTerminalSessionID(_ record: AgentWindowRecord) -> String? {

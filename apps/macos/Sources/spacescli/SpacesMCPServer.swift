@@ -149,6 +149,37 @@ final class SpacesMCPStdioServer {
                     .terminalSend(.init(sessionID: sessionID, input: input, appendNewline: appendNewline)), timeout: 5)
             },
             MCPToolDescriptor(
+                name: "spaces_agent_list",
+                description: "List coding-agent sessions on this device with status, note, project/workspace, and a spaces://terminal deep link.",
+                properties: ["workspace": stringSchema("Workspace ID filter. When omitted, lists agents across every workspace.")], required: []
+            ) { server, arguments in
+                try TerminalService.sendProfileCommand(.agentList(.init(workspaceID: server.optionalString(arguments["workspace"]))))
+            },
+            MCPToolDescriptor(
+                name: "spaces_agent_status",
+                description: "Show one coding-agent session's status, note, project/workspace, and deep link.",
+                properties: [
+                    "session": stringSchema("Spaces terminal session ID. Defaults to SPACES_TERMINAL_TRACKING_ID.")
+                ], required: []
+            ) { server, arguments in
+                let sessionID = try server.resolvedAgentSessionID(arguments)
+                let response = try TerminalService.sendProfileCommand(.agentList(.init(sessionID: sessionID)))
+                guard (response.agentSessions ?? []).first != nil else { throw MCPError.invalidArguments("No agent session for terminal \(sessionID).") }
+                return response
+            },
+            MCPToolDescriptor(
+                name: "spaces_agent_annotate",
+                description: "Set (or clear, with an empty note) a coding-agent session's explicit note.",
+                properties: [
+                    "note": stringSchema("Note text. Pass an empty string to clear the note."),
+                    "session": stringSchema("Spaces terminal session ID. Defaults to SPACES_TERMINAL_TRACKING_ID."),
+                ], required: ["note"]
+            ) { server, arguments in
+                let note = try server.requiredRawString(arguments["note"], field: "note")
+                let sessionID = try server.resolvedAgentSessionID(arguments)
+                return try TerminalService.sendProfileCommand(.agentAnnotate(.init(sessionID: sessionID, note: note)))
+            },
+            MCPToolDescriptor(
                 name: "spaces_device_list", description: "List paired devices reachable from this machine.", properties: [:], required: []
             ) { _, _ in
                 let devices = try SpacesClientDatabase.defaultDatabase().pairedDevices()
@@ -239,6 +270,17 @@ final class SpacesMCPStdioServer {
     private func resolvedDevice(_ arguments: [String: Any]) throws -> SpacesPairedDeviceRecord? {
         guard let selector = optionalString(arguments["device"]) else { return nil }
         return try SpacesPairedDeviceSelection.resolve(selector)
+    }
+
+    /// Resolves the agent's terminal session id for `status`/`annotate`, defaulting to the current
+    /// Spaces terminal's `SPACES_TERMINAL_TRACKING_ID`. Internal so it is unit-testable.
+    func resolvedAgentSessionID(_ arguments: [String: Any]) throws -> String {
+        if let session = optionalString(arguments["session"]) { return session }
+        let envValue = ProcessInfo.processInfo.environment[WorkspaceOrchestrator.terminalTrackingIDEnvVar]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if let envValue, !envValue.isEmpty { return envValue }
+        throw MCPError.invalidArguments(
+            "session is required, or run inside a Spaces terminal so \(WorkspaceOrchestrator.terminalTrackingIDEnvVar) is set.")
     }
 
     private func optionalString(_ value: Any?) -> String? {

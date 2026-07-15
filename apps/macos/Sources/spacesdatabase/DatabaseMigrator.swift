@@ -6,6 +6,19 @@ import Foundation
     import SQLite3
 #endif
 
+/// Runs a multi-statement SQL batch on the raw connection handed to a migration step's `apply`
+/// closure. Migration steps operate on the bare `OpaquePointer` (the migrator owns the surrounding
+/// transaction), so they cannot reach `SpacesSQLiteDatabase.execute`; this mirrors its `sqlite3_exec`
+/// error surfacing.
+func migrationExecuteBatch(_ handle: OpaquePointer, sql: String) throws {
+    var errorMessage: UnsafeMutablePointer<CChar>?
+    if sqlite3_exec(handle, sql, nil, nil, &errorMessage) != SQLITE_OK {
+        let message = errorMessage.map { String(cString: $0) } ?? String(cString: sqlite3_errmsg(handle))
+        if let errorMessage { sqlite3_free(errorMessage) }
+        throw SpacesDatabaseError.migrationFailed(message: message)
+    }
+}
+
 public struct DatabaseMigrationStep: Sendable {
     public let fromVersion: Int
     public let toVersion: Int

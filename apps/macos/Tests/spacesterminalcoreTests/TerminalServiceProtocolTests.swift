@@ -140,6 +140,9 @@ final class TerminalServiceProtocolTests: XCTestCase {
             .workspaceCreate(.init(projectID: "project-1", branch: "feature")), .workspaceStart(workspaceID: "workspace-1"),
             .workspaceRestart(workspaceID: "workspace-1"),
             .agentSignal(.init(workspaceID: "workspace-1", terminalSessionID: "session-1", event: "blocked")),
+            .agentList(.init(workspaceID: "workspace-1", sessionID: "session-1")), .agentList(.init()),
+            .agentAnnotate(.init(sessionID: "session-1", note: "review the auth flow")),
+            .agentAnnotate(.init(sessionID: "session-1", note: "")),
             .terminalSend(.init(sessionID: "session-1", input: .text("hello"), appendNewline: true)),
             .terminalSend(.init(sessionID: "session-1", input: .bytes(Data([0, 10, 255])))),
             .terminalTail(.init(sessionID: "session-1", lineCount: 40)), .terminalTail(.init(sessionID: "session-1")),
@@ -152,6 +155,33 @@ final class TerminalServiceProtocolTests: XCTestCase {
             let decoded = try decoder.decode(TerminalServiceProfileCommand.self, from: encoder.encode(command))
             XCTAssertEqual(decoded, command)
         }
+    }
+
+    func testAgentSessionRowResponseRoundTrips() throws {
+        let response = TerminalServiceProfileCommandResponse(
+            message: "Listed agent sessions.",
+            agentSessions: [
+                TerminalServiceAgentSessionRow(
+                    id: "agent-1", terminalSessionID: "session-1", agent: "Claude Code CLI", label: "Claude Code CLI", status: "waiting",
+                    note: "review the auth flow", projectID: "project-1", projectName: "Spaces", workspaceID: "workspace-1", workspaceName: "feature",
+                    branch: "feature", updatedAt: "2026-07-14T00:00:00Z", lastSignalAt: "2026-07-14T00:00:00Z"),
+                TerminalServiceAgentSessionRow(
+                    id: "agent-2", terminalSessionID: "session-2", agent: nil, label: nil, status: "idle", note: nil, projectID: "project-1",
+                    projectName: "Spaces", workspaceID: "workspace-1", workspaceName: "feature", branch: nil, updatedAt: "2026-07-14T00:00:00Z",
+                    lastSignalAt: nil),
+            ])
+        let decoded = try JSONDecoder().decode(TerminalServiceProfileCommandResponse.self, from: JSONEncoder().encode(response))
+        XCTAssertEqual(decoded, response)
+    }
+
+    func testAgentAnnotatePayloadRejectsEmptySessionButKeepsEmptyNote() throws {
+        let decoder = JSONDecoder()
+        // An empty note is a valid clear request; an empty session id is not.
+        XCTAssertEqual(
+            try decoder.decode(TerminalServiceProfileCommand.self, from: Data(#"{"agentAnnotate":{"sessionID":"session-1","note":""}}"#.utf8)),
+            .agentAnnotate(.init(sessionID: "session-1", note: "")))
+        XCTAssertThrowsError(
+            try decoder.decode(TerminalServiceProfileCommand.self, from: Data(#"{"agentAnnotate":{"sessionID":"  ","note":"hi"}}"#.utf8)))
     }
 
     func testProfileCommandDecodeNormalizesRequiredStringsAndRejectsEmpty() throws {
