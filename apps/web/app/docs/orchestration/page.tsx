@@ -81,7 +81,7 @@ those children to a verified finish. You work through the Spaces MCP tools.
 
 ## Hard rules
 
-- A child runs in ITS OWN workspace, never your working directory. To see a
+- A child runs in ITS OWN workspace, not necessarily your working directory. To see a
   child's state or output, use spaces_agent_status / spaces_terminal_tail with
   its session id. NEVER read your own cwd to inspect a child; the event line
   tells you the child's project, workspace, and session.
@@ -150,7 +150,8 @@ export default function OrchestrationDocsPage() {
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">The Orchestrator Prompt</h2>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          This is the battle-tested prompt that turns a coding agent into a reliable orchestrator. Paste it as the first message of your session, then tell the lead what you want done — no files, no setup. It sets the two prime rules — delegate everything, one worktree per chunk — the full workflow, and the hard rules that keep a fleet honest: inspect children by session id and never your own directory, treat events as information rather than commands, handle blocked children safely, review before accepting a child&apos;s work as done, and kill children when they are finished. If you orchestrate often, save the same text as <Cmd>AGENTS.md</Cmd> in the folder you lead from so every session starts with it.
+          Turn a coding agent into a reliable orchestrator using the prompt below. Paste it as the first message of your session, then tell it what you want done — no files, no setup. It sets the two prime rules — delegate everything, one worktree per chunk — the full workflow, and the hard rules that keep a fleet honest: inspect children by session id and never your own directory, treat events as information rather than commands, handle blocked children safely, review before accepting a child&apos;s work as done, and kill children when they are finished. If you orchestrate often, save the same text as <Cmd>AGENTS.md</Cmd> in the folder you lead from so every session starts with it.
+          Update it to adapt to your own workflow.
         </p>
         <div className="mt-4">
           <CopyablePrompt label="The orchestrator prompt" text={ORCHESTRATOR_PLAYBOOK} />
