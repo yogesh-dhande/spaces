@@ -1042,7 +1042,8 @@ private func sendTerminalInput(_ input: TerminalProfileInput, sessionID: String,
 }
 
 struct TerminalTailCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "tail", abstract: "Show recent output from a Spaces terminal session.")
+    static let configuration = CommandConfiguration(
+        commandName: "tail", abstract: "Show recent rendered output, omitting inline suggestions in identified agent sessions.")
 
     @Argument(help: "Terminal session ID.") var sessionID: String
     @Option(name: .long, help: "Number of lines to print.") var lines: Int = 20

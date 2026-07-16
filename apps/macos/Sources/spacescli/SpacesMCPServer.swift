@@ -64,18 +64,19 @@ final class SpacesMCPStdioServer {
                     "project": stringSchema("Project ID filter."),
                     "includeArchived": boolSchema("Include archived workspaces. Not supported with device."),
                     "device": stringSchema("Paired device name or ID. Defaults to this machine."),
-                ],
-                required: []
+                ], required: []
             ) { server, arguments in
                 if let device = try server.resolvedDevice(arguments) {
                     // The device overview carries only active workspaces, so archived ones are
                     // unreachable over this path; reject the combination rather than silently ignore it.
                     guard server.optionalBool(arguments["includeArchived"]) != true else {
-                        throw MCPError.invalidArguments("includeArchived is not supported with device: a paired device's overview lists only active workspaces.")
+                        throw MCPError.invalidArguments(
+                            "includeArchived is not supported with device: a paired device's overview lists only active workspaces.")
                     }
                     var workspaces = try SpacesDeviceClient.workspaces(device: device, clientApp: cliDeviceClientApp())
                     if let project = server.optionalString(arguments["project"]) { workspaces = workspaces.filter { $0.projectID == project } }
-                    return TerminalServiceProfileCommandResponse(message: "Listed workspaces.", workspaces: workspaces.map(Self.profileWorkspaceRecord))
+                    return TerminalServiceProfileCommandResponse(
+                        message: "Listed workspaces.", workspaces: workspaces.map(Self.profileWorkspaceRecord))
                 }
                 return try TerminalService.sendProfileCommand(
                     .workspaceList(
@@ -112,8 +113,7 @@ final class SpacesMCPStdioServer {
             MCPToolDescriptor(
                 name: "spaces_workspace_start", description: "Ensure a workspace is running on this or a paired device.",
                 properties: [
-                    "workspace": stringSchema("Workspace ID."),
-                    "device": stringSchema("Paired device name or ID. Defaults to this machine."),
+                    "workspace": stringSchema("Workspace ID."), "device": stringSchema("Paired device name or ID. Defaults to this machine."),
                 ], required: ["workspace"]
             ) { server, arguments in
                 let workspace = try server.requiredString(arguments["workspace"], field: "workspace")
@@ -126,8 +126,7 @@ final class SpacesMCPStdioServer {
             MCPToolDescriptor(
                 name: "spaces_workspace_restart", description: "Force a full stop and relaunch for a workspace on this or a paired device.",
                 properties: [
-                    "workspace": stringSchema("Workspace ID."),
-                    "device": stringSchema("Paired device name or ID. Defaults to this machine."),
+                    "workspace": stringSchema("Workspace ID."), "device": stringSchema("Paired device name or ID. Defaults to this machine."),
                 ], required: ["workspace"]
             ) { server, arguments in
                 let workspace = try server.requiredString(arguments["workspace"], field: "workspace")
@@ -150,7 +149,9 @@ final class SpacesMCPStdioServer {
                 return try TerminalService.sendProfileCommand(.terminalList, timeout: 5)
             },
             MCPToolDescriptor(
-                name: "spaces_terminal_tail", description: "Read recent output from an explicit Spaces terminal session.",
+                name: "spaces_terminal_tail",
+                description:
+                    "Read recent rendered output from an explicit Spaces terminal session, omitting inline suggestions in identified agent sessions.",
                 properties: [
                     "session": stringSchema("Spaces terminal session ID."), "lines": intSchema("Number of output lines to read. Defaults to 20."),
                     "device": stringSchema("Paired device name or ID. Defaults to this machine."),
@@ -200,7 +201,8 @@ final class SpacesMCPStdioServer {
             },
             MCPToolDescriptor(
                 name: "spaces_agent_list",
-                description: "List coding-agent sessions on this or a paired device with status, note, project/workspace, and a spaces://terminal deep link.",
+                description:
+                    "List coding-agent sessions on this or a paired device with status, note, project/workspace, and a spaces://terminal deep link.",
                 properties: [
                     "workspace": stringSchema("Workspace ID filter. When omitted, lists agents across every workspace."),
                     "device": stringSchema("Paired device name or ID. Defaults to this machine."),
@@ -209,8 +211,7 @@ final class SpacesMCPStdioServer {
                 if let device = try server.resolvedDevice(arguments) {
                     let rows = try SpacesDeviceClient.listAgentSessions(
                         workspaceID: server.optionalString(arguments["workspace"]), device: device, clientApp: cliDeviceClientApp())
-                    return TerminalServiceProfileCommandResponse(
-                        message: "Listed agent sessions.", agentSessions: rows.map(Self.profileAgentRow))
+                    return TerminalServiceProfileCommandResponse(message: "Listed agent sessions.", agentSessions: rows.map(Self.profileAgentRow))
                 }
                 return try TerminalService.sendProfileCommand(.agentList(.init(workspaceID: server.optionalString(arguments["workspace"]))))
             },
@@ -232,7 +233,9 @@ final class SpacesMCPStdioServer {
                     return TerminalServiceProfileCommandResponse(message: "Listed agent sessions.", agentSessions: [Self.profileAgentRow(row)])
                 }
                 let response = try TerminalService.sendProfileCommand(.agentList(.init(sessionID: sessionID)))
-                guard (response.agentSessions ?? []).first != nil else { throw MCPError.invalidArguments("No agent session for terminal \(sessionID).") }
+                guard (response.agentSessions ?? []).first != nil else {
+                    throw MCPError.invalidArguments("No agent session for terminal \(sessionID).")
+                }
                 return response
             },
             MCPToolDescriptor(
@@ -269,8 +272,8 @@ final class SpacesMCPStdioServer {
                 ], required: ["command"]
             ) { server, arguments in
                 let command = try server.requiredString(arguments["command"], field: "command")
-                let subscriber = ProcessInfo.processInfo.environment[WorkspaceOrchestrator.terminalTrackingIDEnvVar]?
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                let subscriber = ProcessInfo.processInfo.environment[WorkspaceOrchestrator.terminalTrackingIDEnvVar]?.trimmingCharacters(
+                    in: .whitespacesAndNewlines)
                 let subscriberSessionID = (subscriber?.isEmpty == false) ? subscriber : nil
                 let result: AgentSpawnResult
                 if let device = try server.resolvedDevice(arguments) {
@@ -322,7 +325,8 @@ final class SpacesMCPStdioServer {
                     // Mirror the local kill: stop the child's agent row (present only after its first
                     // signal) through the coding-agent stop path, else terminate the raw session, which
                     // is how a not-yet-signaled remote session is killed.
-                    if let row = try SpacesDeviceClient.listAgentSessions(sessionID: sessionID, device: device, clientApp: cliDeviceClientApp()).first {
+                    if let row = try SpacesDeviceClient.listAgentSessions(sessionID: sessionID, device: device, clientApp: cliDeviceClientApp()).first
+                    {
                         let response = try SpacesDeviceClient.stopCodingAgent(
                             workspaceID: row.workspaceID, agentID: row.id, agentName: nil, agentLauncherID: nil, device: device,
                             clientApp: cliDeviceClientApp())
@@ -454,8 +458,8 @@ final class SpacesMCPStdioServer {
     /// counterpart to idle injection: no polling, no timers. A no-op outside a Spaces terminal (env unset)
     /// or when nothing is queued. Reached only on the success path, so an errored tool call never consumes.
     private func attachingPendingAgentEvents(to response: TerminalServiceProfileCommandResponse) throws -> TerminalServiceProfileCommandResponse {
-        let subscriber = ProcessInfo.processInfo.environment[WorkspaceOrchestrator.terminalTrackingIDEnvVar]?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let subscriber = ProcessInfo.processInfo.environment[WorkspaceOrchestrator.terminalTrackingIDEnvVar]?.trimmingCharacters(
+            in: .whitespacesAndNewlines)
         guard let subscriber, !subscriber.isEmpty else { return response }
         let consumed = try TerminalService.sendProfileCommand(.agentConsumePendingEvents(subscriberTerminalSessionID: subscriber), timeout: 5)
         return response.addingPendingAgentEvents(consumed.pendingAgentEvents)
@@ -519,8 +523,8 @@ final class SpacesMCPStdioServer {
     /// Spaces terminal's `SPACES_TERMINAL_TRACKING_ID`. Internal so it is unit-testable.
     func resolvedAgentSessionID(_ arguments: [String: Any]) throws -> String {
         if let session = optionalString(arguments["session"]) { return session }
-        let envValue = ProcessInfo.processInfo.environment[WorkspaceOrchestrator.terminalTrackingIDEnvVar]?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let envValue = ProcessInfo.processInfo.environment[WorkspaceOrchestrator.terminalTrackingIDEnvVar]?.trimmingCharacters(
+            in: .whitespacesAndNewlines)
         if let envValue, !envValue.isEmpty { return envValue }
         throw MCPError.invalidArguments(
             "session is required, or run inside a Spaces terminal so \(WorkspaceOrchestrator.terminalTrackingIDEnvVar) is set.")
@@ -530,8 +534,8 @@ final class SpacesMCPStdioServer {
     /// current Spaces terminal's `SPACES_TERMINAL_TRACKING_ID`. Internal so it is unit-testable.
     func resolvedSubscriberSessionID(_ arguments: [String: Any]) throws -> String {
         if let subscriber = optionalString(arguments["subscriber"]) { return subscriber }
-        let envValue = ProcessInfo.processInfo.environment[WorkspaceOrchestrator.terminalTrackingIDEnvVar]?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let envValue = ProcessInfo.processInfo.environment[WorkspaceOrchestrator.terminalTrackingIDEnvVar]?.trimmingCharacters(
+            in: .whitespacesAndNewlines)
         if let envValue, !envValue.isEmpty { return envValue }
         throw MCPError.invalidArguments(
             "subscriber is required, or run inside a Spaces terminal so \(WorkspaceOrchestrator.terminalTrackingIDEnvVar) is set.")

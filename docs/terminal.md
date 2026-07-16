@@ -133,6 +133,8 @@ Image paste (`terminalPasteImage`) is an image-only extension of the owner input
 
 Tail returns recent output including lines that scrolled above the current prompt, so an agent that sent a command through `sendTerminalInput` can read the result.
 
+For sessions identified as coding agents, tail removes a faint inline completion beginning at the visible cursor before plain-text formatting, following only Ghostty-marked soft wraps. Ordinary terminal sessions do not apply this filter. Tail preserves all other screen content, including real text after the cursor and status, help, menu, and dialog rows below it.
+
 ## Scroll Rendering
 
 Scroll stays inside the active-owner control boundary. Requests carry Ghostty scroll modifier bits for precise deltas and momentum phases.

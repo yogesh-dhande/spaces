@@ -78,6 +78,12 @@ bool spaces_ghostty_vt_session_copy_snapshot(
     SpacesGhosttyVtSnapshot *out_snapshot
 );
 
+// Erases a faint-styled text run that begins at the visible cursor. The caller must first establish
+// that the replay belongs to an identified coding-agent session; faint style alone does not identify
+// a suggestion. The run may continue only across Ghostty-marked soft wraps. This mutates only the
+// supplied replay session.
+bool spaces_ghostty_vt_session_erase_faint_run_at_cursor(SpacesGhosttyVtSession *session);
+
 bool spaces_ghostty_vt_session_scroll_viewport(
     SpacesGhosttyVtSession *session,
     intptr_t delta_rows

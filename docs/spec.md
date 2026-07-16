@@ -377,6 +377,7 @@ Every terminal runs in the built-in terminal, never an external terminal app. A 
 - Configured workspace processes and browser sessions must always have explicit names; Spaces should reject unnamed entries instead of falling back to commands or URLs as identities.
 - Focus target discovery may remain GUI-centric; the production CLI does not need a separate read-only discovery command.
 - `spaces terminal tail` should reconstruct the visible terminal screen from persisted session output using the session's last known terminal size, so wrapped lines and full-screen terminal redraws stay aligned with the live session after resizes.
+- For sessions Spaces identifies as coding agents, terminal tail output should omit a faint inline suggestion that begins at the visible cursor, including its soft-wrapped continuation. Ordinary terminal sessions should not apply this filter. Real input, status and model lines, tips, dialogs, autocomplete menus, and faint text outside that cursor-start run should remain visible even when they appear after or below the cursor.
 - Window-number shortcuts should use a configurable direct-focus modifier plus digits `1` through `9`.
 - Shortcut handling must not break normal text-edit shortcuts while an input is focused.
 - Recovery affordances should reserve `Cmd+R`; app-data reload should default to leader+`R` so it stays distinct from recovery modals.

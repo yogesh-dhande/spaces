@@ -65,7 +65,9 @@ public enum TerminalOutputTail {
             let data = try fileHandle.readToEnd() ?? Data()
             guard !data.isEmpty else { return "" }
             let terminalSize = resolvedTerminalSize(forOutputPath: path)
-            let rendered = try TerminalOutputVTRenderer.renderPlain(data, columns: terminalSize.columns, rows: terminalSize.rows)
+            let rendered = try TerminalOutputVTRenderer.renderTailPlain(
+                data, columns: terminalSize.columns, rows: terminalSize.rows,
+                suppressInlineAgentSuggestion: isIdentifiedAgentSession(forOutputPath: path))
             result = tailRenderedText(rendered, lineCount: lineCount)
             detail =
                 "bytes=\(data.count) lines=\(lineCount) mode=ghostty_vt_window scanned_bytes=\(data.count) "
@@ -141,7 +143,9 @@ public enum TerminalOutputTail {
 
             let suffix = data.suffix(from: boundaryOffset)
             let terminalSize = resolvedTerminalSize(forOutputPath: outputPath)
-            let rendered = try TerminalOutputVTRenderer.renderPlain(suffix, columns: terminalSize.columns, rows: terminalSize.rows)
+            let rendered = try TerminalOutputVTRenderer.renderTailPlain(
+                suffix, columns: terminalSize.columns, rows: terminalSize.rows,
+                suppressInlineAgentSuggestion: isIdentifiedAgentSession(forOutputPath: outputPath))
             let result = tailRenderedText(rendered, lineCount: lineCount)
             return VTTailResult(result: result, scannedBytes: UInt64(data.count), renderedByteCount: suffix.count, boundaryOffset: boundaryOffset)
         }
@@ -176,6 +180,15 @@ public enum TerminalOutputTail {
         let columns = max(runtimeState.columns ?? defaultColumns, 1)
         let rows = max(runtimeState.rows ?? defaultRows, 1)
         return (columns, rows)
+    }
+
+    private static func isIdentifiedAgentSession(forOutputPath path: String) -> Bool {
+        let sessionRoot = URL(fileURLWithPath: path).deletingLastPathComponent().path
+        let paths = TerminalSessionPaths(rootDirectory: sessionRoot)
+        if let launchConfiguration = try? TerminalSessionPersistence.readLaunchConfiguration(paths: paths), launchConfiguration.kind == .agent {
+            return true
+        }
+        return (try? TerminalSessionPersistence.readRuntimeState(paths: paths).foregroundDetectedAgentKind) != nil
     }
 
     private static func containsUnsafeTranscriptControls(_ data: Data, chunkOffset: UInt64, fileHandle: FileHandle, fileSize: UInt64) throws -> Bool {
@@ -315,6 +328,30 @@ public enum TerminalOutputTail {
 extension Array { fileprivate subscript(safe index: Int) -> Element? { indices.contains(index) ? self[index] : nil } }
 
 private enum TerminalOutputVTRenderer {
+    static func renderTailPlain(_ data: Data, columns: Int, rows: Int, suppressInlineAgentSuggestion: Bool) throws -> String {
+        guard
+            let session = spaces_ghostty_vt_session_new(UInt16(clamping: columns), UInt16(clamping: rows), TerminalOutputTail.maxScrollbackBytes, nil)
+        else { throw TerminalOutputTailError.ghosttyVTRenderFailed }
+        defer { spaces_ghostty_vt_session_free(session) }
+
+        let replayed = data.withUnsafeBytes { rawBuffer in
+            spaces_ghostty_vt_session_write(session, rawBuffer.bindMemory(to: UInt8.self).baseAddress, rawBuffer.count)
+        }
+        guard replayed else { throw TerminalOutputTailError.ghosttyVTRenderFailed }
+        if suppressInlineAgentSuggestion, !spaces_ghostty_vt_session_erase_faint_run_at_cursor(session) {
+            throw TerminalOutputTailError.ghosttyVTRenderFailed
+        }
+
+        var outputPointer: UnsafeMutablePointer<CChar>?
+        var outputLength = 0
+        guard spaces_ghostty_vt_session_format_plain(session, &outputPointer, &outputLength), let outputPointer else {
+            throw TerminalOutputTailError.ghosttyVTRenderFailed
+        }
+        defer { spaces_ghostty_vt_free_buffer(outputPointer) }
+        let buffer = UnsafeBufferPointer(start: outputPointer, count: outputLength)
+        return String(decoding: UnsafeRawBufferPointer(buffer), as: UTF8.self)
+    }
+
     static func renderPlain(_ data: Data, columns: Int, rows: Int) throws -> String {
         var outputPointer: UnsafeMutablePointer<CChar>?
         var outputLength = 0

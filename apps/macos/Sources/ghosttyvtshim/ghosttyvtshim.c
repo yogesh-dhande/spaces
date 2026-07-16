@@ -43,6 +43,7 @@ typedef void (*GhosttyRenderStateRowCellsFreeFn)(GhosttyRenderStateRowCells);
 typedef bool (*GhosttyRenderStateRowCellsNextFn)(GhosttyRenderStateRowCells);
 typedef GhosttyResult (*GhosttyRenderStateRowCellsGetFn)(GhosttyRenderStateRowCells, GhosttyRenderStateRowCellsData, void *);
 typedef GhosttyResult (*GhosttyCellGetFn)(GhosttyCell, GhosttyCellData, void *);
+typedef GhosttyResult (*GhosttyRowGetFn)(GhosttyRow, GhosttyRowData, void *);
 
 typedef struct {
     void *handle;
@@ -72,6 +73,7 @@ typedef struct {
     GhosttyRenderStateRowCellsNextFn row_cells_next;
     GhosttyRenderStateRowCellsGetFn row_cells_get;
     GhosttyCellGetFn cell_get;
+    GhosttyRowGetFn grid_row_get;
 } SpacesGhosttyVtSymbols;
 
 struct SpacesGhosttyVtSession {
@@ -301,6 +303,7 @@ static bool spaces_ghostty_vt_load_symbols(SpacesGhosttyVtSymbols *symbols) {
     symbols->row_cells_next = (GhosttyRenderStateRowCellsNextFn)dlsym(handle, "ghostty_render_state_row_cells_next");
     symbols->row_cells_get = (GhosttyRenderStateRowCellsGetFn)dlsym(handle, "ghostty_render_state_row_cells_get");
     symbols->cell_get = (GhosttyCellGetFn)dlsym(handle, "ghostty_cell_get");
+    symbols->grid_row_get = (GhosttyRowGetFn)dlsym(handle, "ghostty_row_get");
 
     if (
         symbols->terminal_new == NULL ||
@@ -327,7 +330,8 @@ static bool spaces_ghostty_vt_load_symbols(SpacesGhosttyVtSymbols *symbols) {
         symbols->row_cells_free == NULL ||
         symbols->row_cells_next == NULL ||
         symbols->row_cells_get == NULL ||
-        symbols->cell_get == NULL
+        symbols->cell_get == NULL ||
+        symbols->grid_row_get == NULL
     ) {
         dlclose(handle);
         memset(symbols, 0, sizeof(*symbols));
@@ -744,6 +748,195 @@ bool spaces_ghostty_vt_session_copy_snapshot(SpacesGhosttyVtSession *session, Sp
     out_snapshot->cell_count = cell_count;
     out_snapshot->cells = cells;
     return true;
+}
+
+typedef struct {
+    uint16_t length;
+} SpacesGhosttyVtEraseSpan;
+
+bool spaces_ghostty_vt_session_erase_faint_run_at_cursor(SpacesGhosttyVtSession *session) {
+    if (session == NULL || session->terminal == NULL) return false;
+    if (session->symbols.render_state_update(session->render_state, session->terminal) != GHOSTTY_SUCCESS) return false;
+
+    uint16_t columns = 0;
+    uint16_t rows = 0;
+    uint16_t cursor_column = 0;
+    uint16_t cursor_row = 0;
+    bool cursor_visible = false;
+    bool cursor_has_position = false;
+    if (
+        session->symbols.render_state_get(session->render_state, GHOSTTY_RENDER_STATE_DATA_COLS, &columns) != GHOSTTY_SUCCESS ||
+        session->symbols.render_state_get(session->render_state, GHOSTTY_RENDER_STATE_DATA_ROWS, &rows) != GHOSTTY_SUCCESS ||
+        session->symbols.render_state_get(session->render_state, GHOSTTY_RENDER_STATE_DATA_CURSOR_VISIBLE, &cursor_visible) != GHOSTTY_SUCCESS ||
+        session->symbols.render_state_get(
+            session->render_state,
+            GHOSTTY_RENDER_STATE_DATA_CURSOR_VIEWPORT_HAS_VALUE,
+            &cursor_has_position
+        ) != GHOSTTY_SUCCESS
+    ) {
+        return false;
+    }
+    if (!cursor_visible || !cursor_has_position) return true;
+    if (
+        session->symbols.render_state_get(
+            session->render_state,
+            GHOSTTY_RENDER_STATE_DATA_CURSOR_VIEWPORT_X,
+            &cursor_column
+        ) != GHOSTTY_SUCCESS ||
+        session->symbols.render_state_get(
+            session->render_state,
+            GHOSTTY_RENDER_STATE_DATA_CURSOR_VIEWPORT_Y,
+            &cursor_row
+        ) != GHOSTTY_SUCCESS
+    ) {
+        return false;
+    }
+    if (columns == 0 || rows == 0 || cursor_column >= columns || cursor_row >= rows) return false;
+
+    SpacesGhosttyVtEraseSpan *spans = (SpacesGhosttyVtEraseSpan *)calloc(rows, sizeof(SpacesGhosttyVtEraseSpan));
+    if (spans == NULL) return false;
+
+    if (session->symbols.render_state_get(session->render_state, GHOSTTY_RENDER_STATE_DATA_ROW_ITERATOR, &session->row_iterator) != GHOSTTY_SUCCESS) {
+        free(spans);
+        return false;
+    }
+
+    size_t span_count = 0;
+    bool contains_text = false;
+    bool preceding_row_wraps = false;
+    uint16_t row_index = 0;
+    while (row_index < rows && session->symbols.row_iterator_next(session->row_iterator)) {
+        GhosttyRow raw_row = 0;
+        if (
+            session->symbols.row_get(session->row_iterator, GHOSTTY_RENDER_STATE_ROW_DATA_RAW, &raw_row) != GHOSTTY_SUCCESS ||
+            raw_row == 0
+        ) {
+            free(spans);
+            return false;
+        }
+
+        bool row_wraps = false;
+        bool row_is_wrap_continuation = false;
+        if (
+            session->symbols.grid_row_get(raw_row, GHOSTTY_ROW_DATA_WRAP, &row_wraps) != GHOSTTY_SUCCESS ||
+            session->symbols.grid_row_get(raw_row, GHOSTTY_ROW_DATA_WRAP_CONTINUATION, &row_is_wrap_continuation) != GHOSTTY_SUCCESS
+        ) {
+            free(spans);
+            return false;
+        }
+
+        if (row_index >= cursor_row) {
+            if (row_index > cursor_row && (!preceding_row_wraps || !row_is_wrap_continuation)) break;
+            if (
+                session->symbols.row_get(
+                    session->row_iterator,
+                    GHOSTTY_RENDER_STATE_ROW_DATA_CELLS,
+                    &session->row_cells
+                ) != GHOSTTY_SUCCESS
+            ) {
+                free(spans);
+                return false;
+            }
+
+            uint16_t start_column = row_index == cursor_row ? cursor_column : 0;
+            uint16_t column = 0;
+            uint16_t run_length = 0;
+            bool run_ended = false;
+            while (column < columns && session->symbols.row_cells_next(session->row_cells)) {
+                GhosttyCell raw_cell = 0;
+                GhosttyStyle style = GHOSTTY_INIT_SIZED(GhosttyStyle);
+                if (
+                    session->symbols.row_cells_get(
+                        session->row_cells,
+                        GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_RAW,
+                        &raw_cell
+                    ) != GHOSTTY_SUCCESS ||
+                    session->symbols.row_cells_get(
+                        session->row_cells,
+                        GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_STYLE,
+                        &style
+                    ) != GHOSTTY_SUCCESS
+                ) {
+                    free(spans);
+                    return false;
+                }
+
+                if (column >= start_column) {
+                    if (!style.faint) {
+                        run_ended = true;
+                        break;
+                    }
+                    bool has_text = false;
+                    if (session->symbols.cell_get(raw_cell, GHOSTTY_CELL_DATA_HAS_TEXT, &has_text) != GHOSTTY_SUCCESS) {
+                        free(spans);
+                        return false;
+                    }
+                    contains_text = contains_text || has_text;
+                    run_length++;
+                }
+                column++;
+            }
+
+            if (run_length == 0) break;
+            spans[span_count].length = run_length;
+            span_count++;
+            if (run_ended || start_column + run_length < columns) break;
+            preceding_row_wraps = row_wraps;
+            if (!preceding_row_wraps) break;
+        }
+        row_index++;
+    }
+
+    if (span_count == 0 || !contains_text) {
+        free(spans);
+        return true;
+    }
+
+    size_t erase_capacity = 8 + span_count * 32;
+    char *erase_sequence = (char *)malloc(erase_capacity);
+    if (erase_sequence == NULL) {
+        free(spans);
+        return false;
+    }
+
+    size_t erase_length = 0;
+    int written = snprintf(erase_sequence, erase_capacity, "\x1b" "7\x1b[%uX", spans[0].length);
+    if (written < 0 || (size_t)written >= erase_capacity) {
+        free(erase_sequence);
+        free(spans);
+        return false;
+    }
+    erase_length = (size_t)written;
+    for (size_t index = 1; index < span_count; index++) {
+        written = snprintf(
+            erase_sequence + erase_length,
+            erase_capacity - erase_length,
+            "\x1b[1B\x1b[1G\x1b[%uX",
+            spans[index].length
+        );
+        if (written < 0 || (size_t)written >= erase_capacity - erase_length) {
+            free(erase_sequence);
+            free(spans);
+            return false;
+        }
+        erase_length += (size_t)written;
+    }
+    if (erase_capacity - erase_length < 3) {
+        free(erase_sequence);
+        free(spans);
+        return false;
+    }
+    erase_sequence[erase_length++] = '\x1b';
+    erase_sequence[erase_length++] = '8';
+
+    bool succeeded = spaces_ghostty_vt_session_write(
+        session,
+        (const uint8_t *)erase_sequence,
+        erase_length
+    );
+    free(erase_sequence);
+    free(spans);
+    return succeeded;
 }
 
 static SpacesGhosttyVtScrollbar spaces_ghostty_vt_scrollbar_from_ghostty(GhosttyTerminalScrollbar scrollbar) {

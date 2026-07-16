@@ -83,6 +83,9 @@ spaces terminal send text <session-id> <text> [--newline] [--device <name-or-id>
 spaces terminal send bytes <session-id> <byte> [<byte>...] [--device <name-or-id>]
 spaces terminal tail <session-id> [--lines <count>] [--device <name-or-id>]
 spaces terminal show <session-id>`}</CodeBlock>
+        <p className="mt-3 text-sm leading-7 text-foreground-soft">
+          Tail reconstructs rendered terminal output. For identified coding-agent sessions, it omits an inline suggestion at the cursor while preserving status lines, dialogs, menus, and real input. Ordinary terminal sessions preserve faint text at the cursor.
+        </p>
         <ul className="mt-3 space-y-1">
           <Flag name="--device <name-or-id>" description="Paired device selector for list, send, and tail. Defaults to this machine's local sessions." />
           <Flag name="--workspace <id>" description="Workspace ID for terminal command; omit inside a workspace." />

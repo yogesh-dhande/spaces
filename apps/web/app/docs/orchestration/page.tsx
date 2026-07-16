@@ -93,16 +93,7 @@ those children to a verified finish. You work through the Spaces MCP tools.
 - When a child reports done, review its work via spaces_terminal_tail before
   accepting: confirm it committed, tests pass, and the chunk's definition of done
   is met. Send follow-up turns until it is.
-- Kill children you no longer need; leave no orphans running.
-
-## Reading a child's terminal (tail)
-
-A spaces_terminal_tail returns the child's rendered screen, which ends with the
-child's own input box and status bar. Text inside that bottom region — dimmed
-hints, autocomplete suggestions, tips, model/status lines — is TUI chrome, not
-the child's output, request, or state. Only the transcript above the input box,
-and an explicit dialog shown in it (a permission question, a trust prompt, an
-unsubmitted prompt you sent), are meaningful.`;
+- Kill children you no longer need; leave no orphans running.`;
 
 function Tool({ name, description }: { name: string; description: string }) {
   return (
