@@ -413,6 +413,35 @@ Useful overrides:
 - `SPACES_MOBILE_DEMO_PORT=...` sets the daemon Device API port for the demo profile; the E2E wrapper supplies `0` by default so the daemon chooses an available port.
 - `SPACES_MOBILE_E2E_DEVICE_KEY=iphone|ipad` and `SPACES_MOBILE_E2E_DEVICE_NAME=...` select the simulator used by the mobile E2E lane; the default E2E target is `iPhone 17 Pro`.
 
+For staging App Store screenshots against a running mobile-demo stack, `SpacesMobileScreenshotUITests` navigates the paired app to a chosen screen and holds it idle so a host process can capture it with `xcrun simctl io <udid> screenshot`; the test captures nothing itself. Build the UI test bundle once with `build-for-testing`, then run `testScreenshotStaging` with `test-without-building` once per screenshot, changing only the env vars and (when capturing both simulators) the destination UDID:
+
+```bash
+xcodebuild \
+  -project apps/ios/SpacesMobile.xcodeproj \
+  -scheme SpacesMobile \
+  -destination "platform=iOS Simulator,id=$IPHONE_UDID" \
+  -derivedDataPath apps/macos/.build/ios-derived-data \
+  -only-testing:SpacesMobileUITests/SpacesMobileScreenshotUITests \
+  build-for-testing
+
+SPACES_MOBILE_UI_TEST_CONFIG_PATH="$UI_TEST_CONFIG" \
+SPACES_MOBILE_SCREENSHOT_TAB=agents \
+SPACES_MOBILE_SCREENSHOT_HOLD_SECONDS=45 \
+xcodebuild \
+  -project apps/ios/SpacesMobile.xcodeproj \
+  -scheme SpacesMobile \
+  -destination "platform=iOS Simulator,id=$IPHONE_UDID" \
+  -derivedDataPath apps/macos/.build/ios-derived-data \
+  -only-testing:SpacesMobileUITests/SpacesMobileScreenshotUITests/testScreenshotStaging \
+  test-without-building &
+sleep 20 && xcrun simctl io "$IPHONE_UDID" screenshot /tmp/agents-tab.png
+wait
+```
+
+The test reads the same `SPACES_MOBILE_UI_TEST_CONFIG_PATH` config file (and default path) as `SpacesMobileUITests`, but only needs its `host`, `port`, `authToken`, `certificateFingerprint`, and `installationID` fields; build `$UI_TEST_CONFIG` from the mobile-demo stack's printed `deviceAPIHost`/`deviceAPIPort` plus the matching device entry (`ipad` or `iphone`) in `<demo root>/pairing.json`. Screenshot env vars are passed as plain, non-`TEST_RUNNER_`-prefixed names in the invoking shell — the same form `SPACES_MOBILE_UI_TEST_CONFIG_PATH` already relies on for `xcodebuild test-without-building` against an iOS Simulator destination.
+
+`SPACES_MOBILE_SCREENSHOT_TAB` selects `alerts`, `spaces`, `agents`, or `settings`. `SPACES_MOBILE_SCREENSHOT_OPEN_ROW`, honored only with `SPACES_MOBILE_SCREENSHOT_TAB=spaces`, taps the first Spaces row whose visible title contains the given text, opening its terminal detail. `SPACES_MOBILE_SCREENSHOT_PAYWALL=1` launches the app without the paywall bypass so `PaywallView` renders — for the App Store Connect subscription-review screenshot — instead of navigating tabs. The scheme's StoreKit configuration is attached to the Run action only, not the Test action, so a `test-without-building` launch would otherwise reach no StoreKit products at all; the test instead opens its own `SKTestSession` from the bundled `SpacesMobile.storekit` (added as a `SpacesMobileUITests` resource so `SKTestSession(configurationFileNamed:)` can find it) before launching the app, with `clearTransactions()` and `disableDialogs = true` so no purchase UI or stale entitlement interferes, and the paywall renders the real price line from that session's product catalog.
+
 For targeted mobile E2E runs, use `--scenario`:
 
 ```bash

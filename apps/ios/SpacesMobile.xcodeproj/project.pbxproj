@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		030BFF03D2B9BF6C0F540BAB /* SubscriptionGateView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FBDC0E9523C09DFCE3694D10 /* SubscriptionGateView.swift */; };
+		04B9B8FE1DF35D0770AA024B /* SpacesMobileScreenshotUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01CF826C2C94E7C075B96D26 /* SpacesMobileScreenshotUITests.swift */; };
 		053C34166110A5C90FCCD9A9 /* SpacesMobileAppModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4159C5F22837F10A5A814E23 /* SpacesMobileAppModelTests.swift */; };
 		07BF7831235AE0F2E2CA97B3 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = B0B57F94C61B24E0729B79F1 /* Assets.xcassets */; };
 		0E7F176A6DFB6F22E4C67688 /* RowPrimitives.swift in Sources */ = {isa = PBXBuildFile; fileRef = C6930FB499F3E9C3B13AA59E /* RowPrimitives.swift */; };
@@ -71,6 +72,7 @@
 		EF5A873F100F9A6B3757F99E /* spacesterminalcore in Frameworks */ = {isa = PBXBuildFile; productRef = 43EB21BA2206002F56560C15 /* spacesterminalcore */; };
 		F0B1976C2F5ED584C46E6C79 /* TerminalViewerModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = F40914D63AD1216CD699DAC4 /* TerminalViewerModel.swift */; };
 		F1340E71F8BFB1C3BE19D9E1 /* WorkspaceControlBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C920538A76B1EF14F680074 /* WorkspaceControlBar.swift */; };
+		F1B8E5D2BB0BD49F2B57D3E3 /* SpacesMobile.storekit in Resources */ = {isa = PBXBuildFile; fileRef = A1A372295C55536AC3E9F7E8 /* SpacesMobile.storekit */; };
 		F4DCDE7C8A94835047353CCE /* ScreenshotMarkupPresenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = B9115C75CD6E289D76B640B9 /* ScreenshotMarkupPresenter.swift */; };
 /* End PBXBuildFile section */
 
@@ -92,6 +94,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		01CF826C2C94E7C075B96D26 /* SpacesMobileScreenshotUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacesMobileScreenshotUITests.swift; sourceTree = "<group>"; };
 		01EA5212204832CDA41A1793 /* SettingsTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsTabView.swift; sourceTree = "<group>"; };
 		03832ADD9E34BC981F089A96 /* SpacesDeviceAPIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacesDeviceAPIClient.swift; sourceTree = "<group>"; };
 		07AE33B363649D6D32B8D2D8 /* BrowserSessionDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserSessionDetailView.swift; sourceTree = "<group>"; };
@@ -129,6 +132,7 @@
 		9653B3B66E0DCF0C0583B3B5 /* TerminalFlow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalFlow.swift; sourceTree = "<group>"; };
 		99364D0D95BDF6680EFCD26D /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
 		9FE5D9FFF657B6A463220FCC /* StagedScreenshotStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StagedScreenshotStoreTests.swift; sourceTree = "<group>"; };
+		A1A372295C55536AC3E9F7E8 /* SpacesMobile.storekit */ = {isa = PBXFileReference; path = SpacesMobile.storekit; sourceTree = "<group>"; };
 		A1A8A24AA9252CFEE41B435E /* SpacesMobileApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacesMobileApp.swift; sourceTree = "<group>"; };
 		A421951CBC1E4BE4576F010F /* SpacesMobileAgentsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacesMobileAgentsTests.swift; sourceTree = "<group>"; };
 		A5C2B6685BB88364360E9184 /* QRCodeScannerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRCodeScannerView.swift; sourceTree = "<group>"; };
@@ -332,6 +336,7 @@
 			children = (
 				B0B57F94C61B24E0729B79F1 /* Assets.xcassets */,
 				BF394C292B9577F991DE1AAE /* PrivacyInfo.xcprivacy */,
+				A1A372295C55536AC3E9F7E8 /* SpacesMobile.storekit */,
 				A2CBFAA5B4DF490C0C86C859 /* apps */,
 				CB2D338B9B55AD82C84E6311 /* Packages */,
 				21C5A9A4E04249D13D49172C /* Resources */,
@@ -383,6 +388,7 @@
 		E5AB46FF545C04AB6319A6DB /* UITests */ = {
 			isa = PBXGroup;
 			children = (
+				01CF826C2C94E7C075B96D26 /* SpacesMobileScreenshotUITests.swift */,
 				160A1AE591A4376DA6C06AE7 /* SpacesMobileUITests.swift */,
 			);
 			path = UITests;
@@ -396,6 +402,7 @@
 			buildConfigurationList = 8AE2A712028AC613F5CB8728 /* Build configuration list for PBXNativeTarget "SpacesMobileUITests" */;
 			buildPhases = (
 				F98C80571E50298C7333EAE0 /* Sources */,
+				0AD16A159AE1DA5747CE839A /* Resources */,
 			);
 			buildRules = (
 			);
@@ -498,6 +505,14 @@
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
+		0AD16A159AE1DA5747CE839A /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				F1B8E5D2BB0BD49F2B57D3E3 /* SpacesMobile.storekit in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		B5868B03FBB3F8891A03A7E6 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -585,6 +600,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				04B9B8FE1DF35D0770AA024B /* SpacesMobileScreenshotUITests.swift in Sources */,
 				3A856B3C563D5D2DEB3746F0 /* SpacesMobileUITests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

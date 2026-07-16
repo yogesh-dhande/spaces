@@ -62,6 +62,10 @@ targets:
     deploymentTarget: "17.0"
     sources:
       - UITests
+      # Bundled so SKTestSession(configurationFileNamed: "SpacesMobile") can find it when the
+      # screenshot-staging UI test opens a local StoreKit test session for the paywall screenshot.
+      - path: SpacesMobile.storekit
+        buildPhase: resources
     settings:
       base:
         GENERATE_INFOPLIST_FILE: YES
