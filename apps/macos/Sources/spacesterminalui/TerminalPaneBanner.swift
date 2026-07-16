@@ -43,12 +43,35 @@ import spacesterminalghostty
 /// The material and neutral text come from system-dynamic values, and the stopped-state accent from
 /// the active theme's `statusFailed` token — the same one the sidebar tints an exited runtime target
 /// with — so the pane and the sidebar can never disagree about the state they both report.
+/// The banner's chrome view. Owns its own border color because a `CALayer`'s `borderColor` is a
+/// `CGColor`, which snapshots whichever appearance resolved it — a dynamic `NSColor` assigned once
+/// would leave a light-mode border sitting on a dark pane forever. `spacesui`'s
+/// `bindAppearanceReactiveLayer` solves this app-side, but it lives above this module, so the
+/// re-resolve happens here instead.
+@MainActor private final class TerminalPaneBannerContainerView: NSVisualEffectView {
+    var borderColor: NSColor = .separatorColor { didSet { applyBorderColor() } }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applyBorderColor()
+    }
+
+    func applyBorderColor() {
+        effectiveAppearance.performAsCurrentDrawingAppearance { [self] in layer?.borderColor = borderColor.cgColor }
+    }
+}
+
 @MainActor public final class TerminalPaneBanner: TerminalPaneBannerPresenting {
     private enum TransientMode { case progress, error, notice }
 
+    /// Thin hairline for the ordinary banner; the stopped-state banner gets a full point of tinted
+    /// border, since it is competing with a whole terminal surface for the eye.
+    private static let idleBorderWidth: CGFloat = 0.5
+    private static let stoppedBorderWidth: CGFloat = 1
+
     private static let autoDismissDelay: Duration = .seconds(6)
 
-    private let container = NSVisualEffectView()
+    private let container = TerminalPaneBannerContainerView()
     private let spinner = NSProgressIndicator()
     private let iconView = NSImageView()
     private let label = NSTextField(labelWithString: "")
@@ -146,6 +169,7 @@ import spacesterminalghostty
     }
 
     private func applyTransientChrome(_ mode: TransientMode) {
+        applyBorder(isStopped: false)
         let showsSpinner = mode == .progress
         spinner.isHidden = !showsSpinner
         if showsSpinner { spinner.startAnimation(nil) } else { spinner.stopAnimation(nil) }
@@ -164,12 +188,20 @@ import spacesterminalghostty
     /// stop/pause mark — a filled square in a circle reads as a button on a pane where nothing is
     /// clickable.
     private func applyPersistentChrome() {
+        applyBorder(isStopped: true)
         spinner.stopAnimation(nil)
         spinner.isHidden = true
         iconView.isHidden = false
         applyIcon("exclamationmark.triangle.fill", description: "Session stopped", tint: .activeTheme(\.statusFailed))
         // A persistent notice has no action to cancel and no timer to wait out; the pane clears it.
         cancelButton.isHidden = true
+    }
+
+    /// The stopped banner outlines itself in the same tint as its glyph, so it separates from the
+    /// terminal behind it instead of reading as one more HUD.
+    private func applyBorder(isStopped: Bool) {
+        container.layer?.borderWidth = isStopped ? Self.stoppedBorderWidth : Self.idleBorderWidth
+        container.borderColor = isStopped ? .activeTheme(\.statusFailed) : .separatorColor
     }
 
     private func applyIcon(_ symbolName: String, description: String, tint: NSColor) {
@@ -206,8 +238,8 @@ import spacesterminalghostty
         container.wantsLayer = true
         container.layer?.cornerRadius = 8
         container.layer?.masksToBounds = false
-        container.layer?.borderWidth = 0.5
-        container.layer?.borderColor = NSColor.separatorColor.cgColor
+        container.layer?.borderWidth = Self.idleBorderWidth
+        container.borderColor = .separatorColor
         container.layer?.shadowColor = NSColor.black.cgColor
         container.layer?.shadowOpacity = 0.18
         container.layer?.shadowRadius = 8
