@@ -302,6 +302,31 @@ extension WorkspaceOrchestrator {
         }
     }
 
+    /// Records a same-device watch edge addressed by the child's *terminal session id* — the id a CLI or
+    /// device caller holds — rather than the agent row id. A device-qualified subscribe naming this
+    /// machine (`--device` resolving to the local device) is normalized onto this path so it is validated
+    /// like a plain local watch instead of taking the cross-device path that skips cycle detection. The
+    /// child's terminal session id is resolved to its agent row (as `killAgentSession` does), the edge is
+    /// checked for a self-edge or any cycle (`validateAgentSubscription`), and only then persisted.
+    /// Throws when no agent session is bound to that terminal yet.
+    public func subscribeAgentWatch(subscriberTerminalSessionID: String, childTerminalSessionID: String) throws {
+        guard let match = try resolveSpacesAgentSession(terminalSessionID: childTerminalSessionID) else {
+            throw WorkspaceError.invalidArgument(message: "No agent session for terminal \(childTerminalSessionID).")
+        }
+        try validateAgentSubscription(subscriberTerminalSessionID: subscriberTerminalSessionID, agentSessionID: match.record.id)
+        try store.insertAgentSubscription(
+            subscriberTerminalSessionID: subscriberTerminalSessionID, agentSessionID: match.record.id, createdAt: nowISO8601())
+    }
+
+    /// Removes the same-device watch edge addressed by the child's *terminal session id*. Resolves the
+    /// agent row bound to that terminal and deletes the subscriber's edge to it. When no agent row is
+    /// bound to the child terminal this is a quiet success: a local edge FK-cascades away with its agent
+    /// row, so there is nothing left to delete.
+    public func unsubscribeAgentWatch(subscriberTerminalSessionID: String, childTerminalSessionID: String) throws {
+        guard let match = try resolveSpacesAgentSession(terminalSessionID: childTerminalSessionID) else { return }
+        try store.deleteAgentSubscription(subscriberTerminalSessionID: subscriberTerminalSessionID, agentSessionID: match.record.id)
+    }
+
     @discardableResult public func recordRemoteAgentSignal(_ event: TerminalServiceAgentSignalEvent) throws -> Bool {
         guard let type = RemoteAgentSignalType(rawValue: event.type), let provider = AgentProvider(rawValue: event.provider) else { return false }
         guard let workspaceID = try remoteAgentSignalWorkspaceID(event) else { return false }

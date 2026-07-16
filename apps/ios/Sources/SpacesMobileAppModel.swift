@@ -720,7 +720,10 @@ private enum SpacesMobileMutationTimeoutRecovery {
             // The overview did not decode (a wire-incompatible daemon) or the device is unreachable. The
             // frozen-core handshake stays decodable across versions, so use it to tell those apart: an
             // incompatible verdict shows the block; otherwise surface the original connection error.
-            await refreshCompatibility()
+            await refreshCompatibility(identity: identity)
+            // The user may have switched or removed the active device while the fallback handshake was
+            // in flight; a stale verdict must not clear the new connection's state.
+            guard identity == overviewIdentity else { return }
             if isActiveDeviceBlocked {
                 overview = nil
                 connectionNotice = nil
@@ -755,11 +758,16 @@ private enum SpacesMobileMutationTimeoutRecovery {
 
     /// Standalone frozen-core handshake, used only as a fallback when the overview cannot carry the
     /// inline status (an older daemon) or could not be fetched/decoded at all (incompatible/offline).
-    private func refreshCompatibility() async {
+    /// Takes the caller's connection `identity` and re-checks it after the await: this fallback only
+    /// runs once an overview fetch has already failed, so by the time it resolves the user may have
+    /// switched or removed the active device, and a stale handshake must not publish for the new one.
+    private func refreshCompatibility(identity: Int) async {
         do {
             let status = try await bridgeClient.fetchDaemonStatus(commandChannel: commandChannel)
+            guard identity == overviewIdentity else { return }
             applyCompatibility(status)
         } catch is CancellationError { return } catch {
+            guard identity == overviewIdentity else { return }
             // Could not read the handshake; leave compatibility unknown rather than blocking.
             daemonStatus = nil
             compatibility = nil

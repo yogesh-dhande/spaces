@@ -455,6 +455,41 @@
             XCTAssertEqual(model.connectionNotice, "Token rejected.")
         }
 
+        /// A failed overview fetch falls back to a standalone frozen-core handshake. If the identity
+        /// changes (device switch/removal) while that fallback is still in flight, its stale verdict must
+        /// not overwrite `daemonStatus`/`compatibility` for the new connection, nor clear the
+        /// `connectionNotice` the identity change just published.
+        func testStaleCompatibilityFallbackDoesNotOverwriteNewIdentityState() async {
+            let recorder = SpacesMobileRequestRecorder()
+            let gate = SpacesMobileAsyncGate()
+            let settings = SpacesMobileConnectionSettings()
+            let staleStatus = daemonStatus(protocolVersion: SpacesWireProtocol.version + 1)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                switch request.commandName {
+                case "overview": throw SpacesDeviceAPIClientError.requestTimedOut
+                case "daemonStatus":
+                    await gate.wait()
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .daemonStatus(staleStatus))
+                default: return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                }
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+
+            let refreshTask = Task { await model.refresh() }
+            while !(await recorder.snapshot()).contains(where: { $0.commandName == "daemonStatus" }) { await Task.yield() }
+            // The overview fetch already failed and the fallback handshake is now gated. Switch the
+            // identity out from under it before letting it resolve.
+            model.handleAuthenticationFailure(message: "Token rejected.")
+            await gate.open()
+            await refreshTask.value
+
+            XCTAssertNil(model.daemonStatus, "a stale handshake must not publish daemon status for the new identity")
+            XCTAssertNil(model.compatibility, "a stale handshake must not publish compatibility for the new identity")
+            XCTAssertNil(model.overview)
+            XCTAssertEqual(model.connectionNotice, "Token rejected.", "the identity change's notice must survive the stale fallback")
+        }
+
         func testTerminalGroupsExcludeSessionsRepresentedByWorkspaceRows() {
             let model = makeModel()
             model.overview = makeOverview(sessions: [makeSession(id: "session-api"), makeSession(id: "session-orphan")])

@@ -797,6 +797,15 @@ import workspacecore
         case .agentUnsubscribe(let payload):
             let orchestrator = try makeProfileOrchestrator()
             if let deviceID = payload.deviceID {
+                // Symmetry with subscribe: a device-qualified request naming this machine drops the *local*
+                // edge, resolving the agent row from the child's terminal session id (the device-qualified
+                // payload shape). No agent row means nothing to delete — a local edge FK-cascades with its
+                // row — so it succeeds quietly.
+                if deviceID == SpacesPairedDeviceRecord.localDeviceID {
+                    try orchestrator.unsubscribeAgentWatch(
+                        subscriberTerminalSessionID: payload.subscriberTerminalSessionID, childTerminalSessionID: payload.agentSessionID)
+                    return TerminalServiceProfileCommandResponse(message: "Unsubscribed from agent session.")
+                }
                 // A cross-device edge keys on the child's terminal session id, so it drops without a remote
                 // call — unsubscribing works even when the device is offline.
                 try orchestrator.store.deleteAgentRemoteSubscription(
@@ -1155,15 +1164,25 @@ import workspacecore
     /// Persists a subscription edge. Same-device: validate (in the orchestrator) that the watched agent
     /// exists and the edge keeps the subscription graph acyclic — a self-edge or any cycle-closing edge is
     /// a loud error, since a cycle would let injected notifications chase each other around a loop.
-    /// Cross-device (`deviceID` set): validate the device is paired and the child has an agent session on
-    /// it (one `listAgentSessions` call), then record a cross-device edge keyed on the child's terminal
-    /// session id and nudge the watch service to open/refresh that device's stream. Cross-device cycle
-    /// detection is impossible locally — the remote's own subscription graph is not queryable — so only
-    /// the same-device acyclic invariant is enforced.
+    /// A device-qualified request naming *this* machine (`deviceID == localDeviceID`) is normalized onto
+    /// the same-device path: it is a local watch expressed with the local device's id or name, so it is
+    /// validated like any local watch rather than recorded as a cross-device edge (which skips cycle
+    /// detection). The payload shape differs — on the device-qualified path `agentSessionID` is the
+    /// child's terminal session id — so the orchestrator resolves the agent row from that terminal id.
+    /// Cross-device (`deviceID` set to a remote device): validate the device is paired and the child has
+    /// an agent session on it (one `listAgentSessions` call), then record a cross-device edge keyed on the
+    /// child's terminal session id and nudge the watch service to open/refresh that device's stream.
+    /// Cross-device cycle detection is impossible locally — the remote's own subscription graph is not
+    /// queryable — so only the same-device acyclic invariant is enforced.
     private func subscribeProfileAgentSession(_ payload: TerminalServiceAgentSubscriptionPayload, orchestrator: WorkspaceOrchestrator) throws
         -> TerminalServiceProfileCommandResponse
     {
         if let deviceID = payload.deviceID {
+            if deviceID == SpacesPairedDeviceRecord.localDeviceID {
+                try orchestrator.subscribeAgentWatch(
+                    subscriberTerminalSessionID: payload.subscriberTerminalSessionID, childTerminalSessionID: payload.agentSessionID)
+                return TerminalServiceProfileCommandResponse(message: "Subscribed to agent session.")
+            }
             let clientApp = Self.daemonDeviceClientApp()
             try RemoteAgentSubscriptionValidation.validate(
                 deviceID: deviceID, childTerminalSessionID: payload.agentSessionID,
