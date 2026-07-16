@@ -463,7 +463,7 @@ export default function HomePage() {
             <dl className="mt-8 grid grid-cols-3 gap-6 border-t border-line/70 pt-7">
               <SpecItem label="Client" value="macOS + iOS" />
               <SpecItem label="Daemon" value="macOS + Linux" />
-              <SpecItem label="Price" value="Free" sub="iOS app $29/yr" />
+              <SpecItem label="Price" value="Mac: Free" sub="iOS: $29/year" />
             </dl>
           </div>
 
@@ -1220,7 +1220,9 @@ function SpecItem({ label, value, sub }: { label: string; value: string; sub?: s
         {value}
       </dd>
       {sub ? (
-        <dd className="mt-1 text-xs leading-tight text-foreground-soft">{sub}</dd>
+        <dd className="mt-1 text-sm font-semibold leading-tight tracking-tight tabular-nums md:text-base">
+          {sub}
+        </dd>
       ) : null}
     </div>
   );
