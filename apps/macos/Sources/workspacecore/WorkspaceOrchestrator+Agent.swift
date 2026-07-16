@@ -556,6 +556,24 @@ extension WorkspaceOrchestrator {
         }
     }
 
+    /// Terminates a coding-agent session addressed by its terminal session id — the shared local
+    /// implementation of `spaces agent kill` (`.agentKill`). A hook-signaled child (one with an agent
+    /// row) is stopped through the coding-agent stop path *after* its subscribers are told it exited:
+    /// stopping deletes the agent row, whose FK cascade removes the subscription edges, so the notice
+    /// must be delivered or queued first (`childDidTransition`'s documented contract — queued rows
+    /// have no FK and survive the deletion). A not-yet-signaled session goes through
+    /// `terminateSpawnedAgentTerminalSession`, whose `.agent` launch-kind gate refuses ordinary shell
+    /// and process terminals. Returns false when the id names neither, for the caller to surface
+    /// loudly.
+    public func killAgentSession(terminalSessionID: String, engine: AgentNotificationEngine) throws -> Bool {
+        if let match = try resolveSpacesAgentSession(terminalSessionID: terminalSessionID) {
+            try engine.childDidTransition(agent: match.record, transition: .exited)
+            try stopCodingAgent(workspaceID: match.workspaceID, agentID: match.record.id)
+            return true
+        }
+        return try terminateSpawnedAgentTerminalSession(sessionID: terminalSessionID)
+    }
+
     @discardableResult public func restartCodingAgent(workspaceID: String, agentID: String) throws -> AgentWindowRecord {
         try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
             try requireWorkspaceSetupSucceeded(workspaceID: workspaceID)

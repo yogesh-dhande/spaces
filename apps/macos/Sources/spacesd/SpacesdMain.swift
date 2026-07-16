@@ -1110,25 +1110,14 @@ import workspacecore
         return TerminalServiceProfileCommandResponse(message: "Started agent session.", terminalSession: session)
     }
 
-    /// Terminates a coding-agent session addressed by its terminal session id. When a Spaces agent row
-    /// is bound to the session, the coding-agent stop path terminates the terminal and deletes the row;
-    /// before the first hook signal no agent row exists yet, so the terminal session itself is
-    /// terminated. A session that is neither an agent row nor a live terminal is a loud error.
+    /// Terminates a coding-agent session addressed by its terminal session id. The orchestrator owns
+    /// the flow (`killAgentSession`): a hook-signaled child stops through the coding-agent stop path
+    /// with its subscribers told it exited first, and a not-yet-signaled session is terminated only
+    /// when it was launched as a coding agent. A session that is neither is a loud error.
     private func killProfileAgentSession(_ sessionID: String, orchestrator: WorkspaceOrchestrator) throws -> TerminalServiceProfileCommandResponse {
-        if let match = try orchestrator.resolveSpacesAgentSession(terminalSessionID: sessionID) {
-            try orchestrator.stopCodingAgent(workspaceID: match.workspaceID, agentID: match.record.id)
-            return TerminalServiceProfileCommandResponse(message: "Killed agent session \(sessionID).")
-        }
-        guard sessionCores[sessionID] != nil || profileTerminalSessionExists(sessionID) else {
-            throw SpacesRuntimeError.invalidArgument(message: "No agent session for terminal \(sessionID).")
-        }
-        _ = terminateSession(id: sessionID)
+        guard try orchestrator.killAgentSession(terminalSessionID: sessionID, engine: makeAgentNotificationEngine(orchestrator: orchestrator))
+        else { throw SpacesRuntimeError.invalidArgument(message: "No agent session for terminal \(sessionID).") }
         return TerminalServiceProfileCommandResponse(message: "Killed agent session \(sessionID).")
-    }
-
-    private func profileTerminalSessionExists(_ sessionID: String) -> Bool {
-        guard let paths = try? TerminalSessionPaths.forSession(id: sessionID) else { return false }
-        return (try? TerminalSessionPersistence.readLaunchConfiguration(paths: paths)) != nil
     }
 
     /// Persists a subscription edge. Same-device: validate (in the orchestrator) that the watched agent

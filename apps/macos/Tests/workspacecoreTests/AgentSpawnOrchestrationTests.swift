@@ -75,11 +75,20 @@ final class AgentSpawnOrchestrationTests: XCTestCase {
         let session = try orchestrator.createWorkspaceAgentSession(workspaceID: workspace.id, command: "claude", title: "Reviewer")
         XCTAssertTrue(try store.agentWindows(workspaceID: workspace.id).isEmpty)
         XCTAssertFalse(try store.windows(workspaceID: workspace.id).filter { $0.terminalTrackingID == session.id }.isEmpty)
+        // The real terminal service persists the launch configuration at launch; the capture fake
+        // does not, so persist the `.agent`-kind config the kind gate reads.
+        let paths = try TerminalSessionPaths.forSession(id: session.id)
+        try paths.ensureDirectories()
+        defer { try? FileManager.default.removeItem(atPath: paths.rootDirectory) }
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: session.id, title: "Reviewer", workingDirectory: projectDir.path, shell: "/bin/zsh", command: "claude",
+                createdAt: "now", workspaceID: workspace.id, kind: .agent), paths: paths)
 
         let killed = try orchestrator.terminateSpawnedAgentTerminalSession(sessionID: session.id)
 
-        // Unlike stopAdHocBuiltInTerminalSession, this does not exclude the `.agent` launch kind: the
-        // session is terminated and its tracked window torn down.
+        // The `.agent` launch kind is exactly what qualifies here (unlike stopAdHocBuiltInTerminalSession,
+        // which excludes it): the session is terminated and its tracked window torn down.
         XCTAssertTrue(killed)
         XCTAssertEqual(terminateCapture.sessionIDs, [session.id])
         XCTAssertTrue(try store.windows(workspaceID: workspace.id).filter { $0.terminalTrackingID == session.id }.isEmpty)
@@ -89,6 +98,44 @@ final class AgentSpawnOrchestrationTests: XCTestCase {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)
         XCTAssertFalse(try orchestrator.terminateSpawnedAgentTerminalSession(sessionID: "no-such-session"))
+    }
+
+    /// `agent kill`'s pre-signal terminate fallback must refuse a session that was not launched as a
+    /// coding agent: a mistyped or wrong session id naming an ordinary shell or process terminal must
+    /// come back as "no agent session", not silently destroy that terminal.
+    func testTerminateSpawnedAgentTerminalSessionRefusesShellAndProcessKindSessions() throws {
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let store = try makeTemporaryStore()
+        let terminateCapture = TerminalTerminateCapture()
+        let orchestrator = makeAgentOrchestrator(
+            store: store, launchCapture: TerminalLaunchConfigurationCapture(), terminateCapture: terminateCapture)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
+
+        for kind: TerminalSessionKind in [.shell, .process] {
+            let sessionID = "kill-refuse-\(kind.rawValue)-\(UUID().uuidString)"
+            try store.upsert(
+                window: WindowRecord(
+                    id: "window-\(sessionID)", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: kind.rawValue, detail: nil,
+                    targetURL: nil, terminalTrackingID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+            let paths = try TerminalSessionPaths.forSession(id: sessionID)
+            try paths.ensureDirectories()
+            defer { try? FileManager.default.removeItem(atPath: paths.rootDirectory) }
+            try TerminalSessionPersistence.writeLaunchConfiguration(
+                .init(
+                    sessionID: sessionID, title: kind.rawValue, workingDirectory: projectDir.path, shell: "/bin/zsh", command: nil,
+                    createdAt: "now", workspaceID: workspace.id, kind: kind), paths: paths)
+
+            let killed = try orchestrator.terminateSpawnedAgentTerminalSession(sessionID: sessionID)
+
+            XCTAssertFalse(killed, "a \(kind.rawValue)-kind session must be refused, not treated as a spawned agent")
+            XCTAssertTrue(terminateCapture.sessionIDs.isEmpty, "a refused \(kind.rawValue)-kind session must not be terminated")
+            XCTAssertFalse(
+                try store.windows(workspaceID: workspace.id).filter { $0.terminalTrackingID == sessionID }.isEmpty,
+                "a refused \(kind.rawValue)-kind session must keep its tracked window")
+        }
     }
 
     func testResolveSpacesAgentSessionFindsRowAcrossWorkspacesAndNilForUnknown() throws {

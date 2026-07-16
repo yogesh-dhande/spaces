@@ -149,7 +149,16 @@
                         controlSocketPath: "/tmp/control-\(configuration.sessionID)", outputPath: "/tmp/output-\(configuration.sessionID)",
                         launchConfiguration: configuration)
                 })
-            return try orchestrator.createWorkspaceAgentSession(workspaceID: "workspace-1", command: "claude", title: "Reviewer").id
+            let sessionID = try orchestrator.createWorkspaceAgentSession(workspaceID: "workspace-1", command: "claude", title: "Reviewer").id
+            // The real terminal service persists the launch configuration at launch; the summary fake
+            // above does not, so persist the `.agent`-kind config the kill path's kind gate reads.
+            let paths = try TerminalSessionPaths.forSession(id: sessionID)
+            try paths.ensureDirectories()
+            try TerminalSessionPersistence.writeLaunchConfiguration(
+                .init(
+                    sessionID: sessionID, title: "Reviewer", workingDirectory: workspaceDir.path, shell: "/bin/zsh", command: "claude",
+                    createdAt: "now", workspaceID: "workspace-1", kind: .agent), paths: paths)
+            return sessionID
         }
 
         @discardableResult private func seedAgentSession(

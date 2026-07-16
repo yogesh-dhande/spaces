@@ -258,6 +258,31 @@ final class AgentNotificationEngineTests: XCTestCase {
         XCTAssertTrue(recorder.delivered.isEmpty, "A row consumed by the piggyback path must not be re-delivered by the idle flush.")
     }
 
+    /// `spaces agent kill` of a hook-signaled watched child is an exit its subscribers were promised:
+    /// the exited notice must be delivered (or queued) before the stop deletes the agent row, whose
+    /// FK cascade removes the subscription edges with it.
+    func testKillAgentSessionDeliversExitedNoticeBeforeRowDeletion() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        let recorder = DeliveryRecorder()
+        let engine = makeEngine(store: store, recorder: recorder, kind: "claude")
+
+        let child = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Claude Code CLI", terminalTrackingID: "child-session", status: .spinning)
+        // A plain-shell subscriber terminal with no agent row of its own counts as idle.
+        try store.insertAgentSubscription(subscriberTerminalSessionID: "orchestrator-session", agentSessionID: child.id, createdAt: "t")
+
+        let killed = try orchestrator.killAgentSession(terminalSessionID: "child-session", engine: engine)
+
+        XCTAssertTrue(killed)
+        XCTAssertNil(try store.agentWindow(id: child.id), "the kill must still delete the agent row")
+        XCTAssertEqual(recorder.delivered.map(\.sessionID), ["orchestrator-session"])
+        XCTAssertTrue(
+            recorder.delivered.first?.line.contains("is exited") == true,
+            "the subscriber must be told the killed child exited, got: \(recorder.delivered.first?.line ?? "nothing")")
+    }
+
     func testBlockedThenDoneWhileBusyCoalescesToSingleDoneLine() throws {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)

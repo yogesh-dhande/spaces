@@ -601,8 +601,9 @@ struct AgentKillCommand: ParsableCommand {
             // Mirror the local kill: when the child has an agent row (present only after its first hook
             // signal) stop it through the coding-agent stop path, which also deletes the row. Before the
             // first signal there is no row, so fall back to the terminate command, which tears down the
-            // raw session the same way the local `.agentKill` terminate branch does. A session that is
-            // neither an agent row nor a stoppable terminal is a loud error from the terminate command.
+            // session the same way the local `.agentKill` terminate branch does — only when it was
+            // launched as a coding agent. A session that is neither an agent row nor an agent-kind
+            // terminal is a loud error from the terminate command.
             if let row = try SpacesDeviceClient.listAgentSessions(sessionID: session, device: record, clientApp: cliDeviceClientApp()).first {
                 let response = try SpacesDeviceClient.stopCodingAgent(
                     workspaceID: row.workspaceID, agentID: row.id, agentName: nil, agentLauncherID: nil, device: record,
