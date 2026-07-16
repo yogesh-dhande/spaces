@@ -601,6 +601,43 @@ export default function HomePage() {
         </div>
       </section>
 
+      {/* ── Remote machines ── */}
+      <section id="remote" className="border-t border-line/70">
+        <div className="mx-auto w-full max-w-7xl px-6 py-20 md:py-24">
+          <div className="max-w-3xl">
+            <h2 className="mt-5 text-[clamp(1.5rem,3.5vw,2.3rem)] font-semibold leading-[1.15] tracking-[-0.01em]">
+              Connect to all machines <span className="text-accent whitespace-nowrap">from one Mac</span>
+            </h2>
+            <p className="mt-5 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
+              Pair another Mac or a cloud Linux box over SSH with pinned TLS.
+              Each machine runs its own <code>spacesd</code> and appears as its
+              own section in the sidebar — projects, workspaces, terminals, and
+              agents, all reachable from the Mac in front of you.
+            </p>
+          </div>
+
+          <div className="mt-14 grid gap-10 lg:grid-cols-[1.1fr_0.9fr] lg:items-center">
+            <RemoteDiagram />
+
+            <div className="rounded-sm border border-accent-2/45 bg-[color:color-mix(in_oklab,var(--accent-2)_8%,var(--surface))] p-6 md:p-8">
+              <p className="inline-flex items-center gap-2 font-mono text-[0.7rem] uppercase tracking-[0.18em] text-accent-2">
+                <span className="h-1.5 w-1.5 rounded-full bg-accent-2" />
+                Sessions outlive your laptop
+              </p>
+              <p className="mt-4 text-lg font-semibold leading-snug tracking-tight text-foreground md:text-xl">
+                Like tmux, for everything a session runs.
+              </p>
+              <p className="mt-3 text-sm leading-6 text-foreground-soft md:text-base md:leading-7">
+                Terminals and coding agents run on the daemon, not on your SSH
+                connection. Kick off a build or an agent on a remote box, close
+                your laptop, and it keeps running — then reattach later from
+                your Mac or your phone, right where it left off.
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
       {/* ── Agent orchestration ── */}
       <section id="orchestrate" className="border-t border-line/70 bg-background-soft/40">
         <div className="mx-auto w-full max-w-7xl px-6 py-20 md:py-24">
@@ -668,7 +705,50 @@ export default function HomePage() {
         </div>
       </section>
 
-      {/* ── Ports & proxy ── */}
+      {/* ── Take it with you (mobile) ── */}
+      <section id="mobile" className="border-t border-line/70 bg-background-soft/60">
+        <div className="mx-auto w-full max-w-7xl px-6 py-20 md:py-24">
+          <div className="grid gap-10 lg:grid-cols-2 lg:items-center">
+            <div className="max-w-xl">
+              <p className="inline-flex items-center gap-2 font-mono text-[0.7rem] uppercase tracking-[0.18em] text-foreground-soft">
+                <span className="rounded-full border border-accent-2/50 px-2 py-0.5 text-[0.62rem] text-accent-2">
+                  Coming soon
+                </span>
+              </p>
+              <h2 className="mt-5 text-[clamp(1.5rem,3.5vw,2.3rem)] font-semibold leading-[1.15] tracking-[-0.01em]">
+                Remote control <span className="text-accent whitespace-nowrap">from your iPhone</span>
+              </h2>
+              <p className="mt-5 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
+                Pair the Spaces iOS app with a QR code. Browse live terminal
+                sessions across your workspaces, watch an agent that&apos;s
+                working or waiting, type into the same shell, and run or restart
+                processes — from your phone.
+              </p>
+              <p className="mt-4 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
+                Sessions run in the Spaces daemon, so they keep running even if
+                the Mac app quits — and your phone works whether or not the app
+                is open.
+              </p>
+              <Link
+                href="/docs/ios"
+                className="mt-6 inline-flex items-center gap-1.5 text-sm font-semibold text-accent transition-colors hover:underline"
+              >
+                Read the iOS docs
+                <span aria-hidden>→</span>
+              </Link>
+            </div>
+
+            <MediaPlaceholder
+              label="iOS app — live session list & terminal"
+              aspect="aspect-[4/3]"
+            >
+              <PhoneGlyph />
+            </MediaPlaceholder>
+          </div>
+        </div>
+      </section>
+
+      {/* ── Sessions that keep running (tmux-style persistence) ── */}
       <section id="proxy" className="border-t border-line/70">
         <div className="mx-auto w-full max-w-7xl px-6 py-20 md:py-24">
           <div className="max-w-3xl">
@@ -728,87 +808,7 @@ export default function HomePage() {
         </div>
       </section>
 
-      {/* ── Remote machines ── */}
-      <section id="remote" className="border-t border-line/70">
-        <div className="mx-auto w-full max-w-7xl px-6 py-20 md:py-24">
-          <div className="max-w-3xl">
-            <h2 className="mt-5 text-[clamp(1.5rem,3.5vw,2.3rem)] font-semibold leading-[1.15] tracking-[-0.01em]">
-              Connect to all machines <span className="text-accent whitespace-nowrap">from one Mac</span>
-            </h2>
-            <p className="mt-5 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
-              Pair another Mac or a cloud Linux box over SSH with pinned TLS.
-              Each machine runs its own <code>spacesd</code> and appears as its
-              own section in the sidebar — projects, workspaces, terminals, and
-              agents, all reachable from the Mac in front of you.
-            </p>
-          </div>
-
-          <div className="mt-14 grid gap-10 lg:grid-cols-[1.1fr_0.9fr] lg:items-center">
-            <RemoteDiagram />
-
-            <div className="rounded-sm border border-accent-2/45 bg-[color:color-mix(in_oklab,var(--accent-2)_8%,var(--surface))] p-6 md:p-8">
-              <p className="inline-flex items-center gap-2 font-mono text-[0.7rem] uppercase tracking-[0.18em] text-accent-2">
-                <span className="h-1.5 w-1.5 rounded-full bg-accent-2" />
-                Sessions outlive your laptop
-              </p>
-              <p className="mt-4 text-lg font-semibold leading-snug tracking-tight text-foreground md:text-xl">
-                Like tmux, for everything a session runs.
-              </p>
-              <p className="mt-3 text-sm leading-6 text-foreground-soft md:text-base md:leading-7">
-                Terminals and coding agents run on the daemon, not on your SSH
-                connection. Kick off a build or an agent on a remote box, close
-                your laptop, and it keeps running — then reattach later from
-                your Mac or your phone, right where it left off.
-              </p>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      {/* ── Take it with you (mobile) ── */}
-      <section id="mobile" className="border-t border-line/70 bg-background-soft/60">
-        <div className="mx-auto w-full max-w-7xl px-6 py-20 md:py-24">
-          <div className="grid gap-10 lg:grid-cols-2 lg:items-center">
-            <div className="max-w-xl">
-              <p className="inline-flex items-center gap-2 font-mono text-[0.7rem] uppercase tracking-[0.18em] text-foreground-soft">
-                <span className="rounded-full border border-accent-2/50 px-2 py-0.5 text-[0.62rem] text-accent-2">
-                  Coming soon
-                </span>
-              </p>
-              <h2 className="mt-5 text-[clamp(1.5rem,3.5vw,2.3rem)] font-semibold leading-[1.15] tracking-[-0.01em]">
-                Remote control <span className="text-accent whitespace-nowrap">from your iPhone</span>
-              </h2>
-              <p className="mt-5 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
-                Pair the Spaces iOS app with a QR code. Browse live terminal
-                sessions across your workspaces, watch an agent that&apos;s
-                working or waiting, type into the same shell, and run or restart
-                processes — from your phone.
-              </p>
-              <p className="mt-4 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
-                Sessions run in the Spaces daemon, so they keep running even if
-                the Mac app quits — and your phone works whether or not the app
-                is open.
-              </p>
-              <Link
-                href="/docs/ios"
-                className="mt-6 inline-flex items-center gap-1.5 text-sm font-semibold text-accent transition-colors hover:underline"
-              >
-                Read the iOS docs
-                <span aria-hidden>→</span>
-              </Link>
-            </div>
-
-            <MediaPlaceholder
-              label="iOS app — live session list & terminal"
-              aspect="aspect-[4/3]"
-            >
-              <PhoneGlyph />
-            </MediaPlaceholder>
-          </div>
-        </div>
-      </section>
-
-      {/* ── Capabilities index ── */}
+      {/* ── FAQ ── */}
       <section id="features" className="border-t border-line/70">
         <div className="mx-auto w-full max-w-7xl px-6 py-20 md:py-24">
           <div className="flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
@@ -825,7 +825,7 @@ export default function HomePage() {
         </div>
       </section>
 
-      {/* ── FAQ ── */}
+      {/* ── Ports & proxy ── */}
       <section id="faq" className="border-t border-line/70 bg-background-soft/40">
         <div className="mx-auto w-full max-w-7xl px-6 py-20 md:py-24">
           <div className="max-w-3xl">
@@ -1027,6 +1027,9 @@ function OrchestrationDiagram() {
     </figure>
   );
 }
+
+// Diagram for the persistence section: the Spaces app detaches, but the
+// device daemon keeps every terminal and agent session alive for reattach.
 
 // A muted keycap used inside the app mocks, distinct from the amber marketing
 // <Key>. Mirrors the subtle shortcut chips in the real sidebar.
