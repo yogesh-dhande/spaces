@@ -462,6 +462,14 @@ private enum SpacesMobileMutationTimeoutRecovery {
     var dismissedAlertIDs: Set<String> = []
     @ObservationIgnored private var bridgeClient: SpacesDeviceAPIClient
     @ObservationIgnored private var commandChannel: SpacesDeviceAPICommandChannel
+    /// Monotonic identity of the connection the published overview belongs to. Bumped whenever the
+    /// active connection changes (device switch or removal, new settings, auth reset) so an overview
+    /// fetch begun against the previous connection can neither publish its stale payload nor satisfy
+    /// a `refresh()` caller waiting on the new one.
+    @ObservationIgnored private var overviewIdentity = 0
+    /// The in-flight overview fetch, tagged with the identity it serves. `refresh()` joins it when
+    /// the identity still matches, and re-fetches after it completes when the identity moved on.
+    @ObservationIgnored private var refreshInFlight: (identity: Int, task: Task<Void, Never>)?
     /// On-device loopback reverse proxy WKWebView browser sessions load through. Owned for the app's
     /// lifetime (its installation identity is stable across device switches), started/stopped by
     /// `RootTabView`'s scene-phase observation.
@@ -666,24 +674,49 @@ private enum SpacesMobileMutationTimeoutRecovery {
         await browserProxy.updateRoutes(table)
     }
 
+    /// Fetches and publishes the active device's overview. Reentrant: a call while a fetch for the
+    /// same connection is in flight joins that fetch instead of silently dropping (a deep link
+    /// arriving mid-poll still resolves), and a call made after the connection identity changed
+    /// waits out the stale fetch — whose result is discarded — and then fetches fresh, so every
+    /// awaited `refresh()` returns having attempted an overview for the current connection.
     func refresh() async {
-        guard !isLoading else { return }
+        while let inFlight = refreshInFlight {
+            let identity = overviewIdentity
+            await inFlight.task.value
+            if inFlight.identity == identity, overviewIdentity == identity { return }
+        }
+        let identity = overviewIdentity
+        let task = Task { await self.performRefresh(identity: identity) }
+        refreshInFlight = (identity: identity, task: task)
+        await task.value
+    }
+
+    /// One overview fetch on behalf of connection `identity`. Publishes nothing when the identity
+    /// moved on mid-fetch: the payload — or error — belongs to the previous connection and would
+    /// overwrite the reset state the identity change just established.
+    private func performRefresh(identity: Int) async {
         isLoading = true
-        defer { isLoading = false }
+        defer {
+            isLoading = false
+            refreshInFlight = nil
+        }
         do {
             // Read compatibility from the overview's inline frozen-core status so the compatible steady
             // state costs a single round-trip. Only a refresh that fails entirely falls back to the
             // standalone frozen-core handshake below.
             let overview = try await bridgeClient.fetchOverview(commandChannel: commandChannel)
+            guard identity == overviewIdentity else { return }
             applyCompatibility(overview.daemonStatus)
             // A decodable overview whose daemon nonetheless reports an incompatible protocol is blocked;
             // show the restart/update block, not its stale workspace data.
             let acceptedOverview = isActiveDeviceBlocked ? nil : overview
             if let acceptedOverview { await updateBrowserRoutes(overview: acceptedOverview) }
+            guard identity == overviewIdentity else { return }
             self.overview = acceptedOverview
             connectionNotice = nil
             errorMessage = nil
         } catch is CancellationError { return } catch {
+            guard identity == overviewIdentity else { return }
             // The overview did not decode (a wire-incompatible daemon) or the device is unreachable. The
             // frozen-core handshake stays decodable across versions, so use it to tell those apart: an
             // incompatible verdict shows the block; otherwise surface the original connection error.
@@ -744,6 +777,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         activeDeviceID = deviceState.activeDeviceID
         bridgeClient = SpacesDeviceAPIClient(settings: deviceState.settings)
         commandChannel = bridgeClient.makeCommandChannel()
+        overviewIdentity += 1
         SpacesMobileSettingsStore.save(deviceState.settings)
         overview = nil
         daemonStatus = nil
@@ -762,6 +796,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         activeDeviceID = deviceState.activeDeviceID
         bridgeClient = SpacesDeviceAPIClient(settings: settings)
         commandChannel = bridgeClient.makeCommandChannel()
+        overviewIdentity += 1
         SpacesMobileSettingsStore.save(settings)
         overview = nil
         daemonStatus = nil
@@ -780,6 +815,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         activeDeviceID = deviceState.activeDeviceID
         bridgeClient = SpacesDeviceAPIClient(settings: settings)
         commandChannel = bridgeClient.makeCommandChannel()
+        overviewIdentity += 1
         SpacesMobileSettingsStore.save(settings)
         overview = nil
         daemonStatus = nil
@@ -806,6 +842,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         settings.authToken = ""
         bridgeClient = SpacesDeviceAPIClient(settings: settings)
         commandChannel = bridgeClient.makeCommandChannel()
+        overviewIdentity += 1
         SpacesMobileSettingsStore.save(settings)
         overview = nil
         workspaceCreateOptions = nil
@@ -826,10 +863,9 @@ private enum SpacesMobileMutationTimeoutRecovery {
     }
 
     /// Focuses the terminal session named by a `spaces://terminal/…` deep link. When the link is
-    /// device-qualified for a different paired device, switches to that device and refreshes its
-    /// overview so the session is resolvable; a device that isn't paired, or a session that can't be
-    /// found, surfaces a user-visible error. On success it selects the Spaces tab and stages the
-    /// session for that tab to navigate to.
+    /// device-qualified for a different paired device, switches to that device first; a device that
+    /// isn't paired, or a session that can't be found, surfaces a user-visible error. On success it
+    /// selects the Spaces tab and stages the session for that tab to navigate to.
     func openTerminalDeepLink(_ link: SpacesTerminalDeepLink) async {
         if let deviceID = link.deviceID, deviceID != activeDeviceID {
             guard pairedDevices.contains(where: { $0.id == deviceID }) else {
@@ -837,10 +873,11 @@ private enum SpacesMobileMutationTimeoutRecovery {
                 return
             }
             selectDevice(id: deviceID)
-            await refresh()
-        } else if overview == nil {
-            await refresh()
         }
+        // The cached overview may predate the linked session: polling pauses while a terminal
+        // detail view is open — exactly where agent-notification links are tapped — and a device
+        // switch just cleared it. A lookup miss refreshes once before the link is declared dead.
+        if session(forSessionID: link.sessionID) == nil { await refresh() }
         guard let session = session(forSessionID: link.sessionID) else {
             errorMessage = "Couldn't find terminal session “\(link.sessionID)” on \(connectionSummary)."
             return

@@ -11,6 +11,23 @@
         func snapshot() -> [SpacesDeviceAPIRequest] { requests }
     }
 
+    /// Holds callers until opened, so tests can keep a fake request in flight deterministically.
+    private actor SpacesMobileAsyncGate {
+        private var isOpen = false
+        private var waiters: [CheckedContinuation<Void, Never>] = []
+
+        func wait() async {
+            if isOpen { return }
+            await withCheckedContinuation { waiters.append($0) }
+        }
+
+        func open() {
+            isOpen = true
+            for waiter in waiters { waiter.resume() }
+            waiters.removeAll()
+        }
+    }
+
     @MainActor final class SpacesMobileAppModelTests: XCTestCase {
         func testWorkspaceGroupsFilterByTypeStateAndSearch() {
             let model = makeModel()
@@ -367,6 +384,75 @@
 
             XCTAssertNil(model.pendingTerminalDeepLinkSession)
             XCTAssertNotNil(model.errorMessage)
+        }
+
+        /// A deep link can name a session created after the overview was last fetched (polling pauses
+        /// while a terminal detail view is open — exactly where agent-notification links appear), so a
+        /// lookup miss against the cached overview must refresh once before the link is rejected.
+        func testOpenTerminalDeepLinkRefreshesStaleOverviewBeforeRejecting() async {
+            let freshOverview = makeOverview(sessions: [makeSession(id: "session-new")])
+            let settings = SpacesMobileConnectionSettings()
+            let client = SpacesDeviceAPIClient(settings: settings) { _ in
+                SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(freshOverview))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            model.overview = makeOverview()
+
+            await model.openTerminalDeepLink(SpacesTerminalDeepLink(sessionID: "session-new"))
+
+            XCTAssertEqual(model.pendingTerminalDeepLinkSession?.id, "session-new")
+            XCTAssertEqual(model.selectedTab, .spaces)
+            XCTAssertNil(model.errorMessage)
+        }
+
+        /// A deep link typically arrives while the app is foregrounding — the same moment the overview
+        /// poller fires. Its refresh must join the in-flight fetch and resolve the session from the
+        /// result instead of silently returning with no overview and rejecting the link.
+        func testOpenTerminalDeepLinkResolvesWhileRefreshIsInFlight() async {
+            let overview = makeOverview(sessions: [makeSession(id: "session-linked")])
+            let gate = SpacesMobileAsyncGate()
+            let settings = SpacesMobileConnectionSettings()
+            let client = SpacesDeviceAPIClient(settings: settings) { _ in
+                await gate.wait()
+                return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+
+            let poll = Task { await model.refresh() }
+            while !model.isLoading { await Task.yield() }
+            let deepLink = Task { await model.openTerminalDeepLink(SpacesTerminalDeepLink(sessionID: "session-linked")) }
+            // Give the deep link ample turns to reach its refresh while the poll's fetch is still
+            // gated, so a refresh that drops concurrent callers is caught deterministically.
+            for _ in 0..<100 { await Task.yield() }
+            await gate.open()
+            await deepLink.value
+            await poll.value
+
+            XCTAssertEqual(model.pendingTerminalDeepLinkSession?.id, "session-linked")
+            XCTAssertNil(model.errorMessage)
+        }
+
+        /// An overview fetch begun before the connection identity changed (device switch, settings
+        /// change, auth reset) must not publish afterwards: its payload belongs to the previous
+        /// identity and would overwrite the reset state the change just established.
+        func testIdentityChangeDiscardsInFlightRefreshResult() async {
+            let overview = makeOverview()
+            let gate = SpacesMobileAsyncGate()
+            let settings = SpacesMobileConnectionSettings()
+            let client = SpacesDeviceAPIClient(settings: settings) { _ in
+                await gate.wait()
+                return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+
+            let poll = Task { await model.refresh() }
+            while !model.isLoading { await Task.yield() }
+            model.handleAuthenticationFailure(message: "Token rejected.")
+            await gate.open()
+            await poll.value
+
+            XCTAssertNil(model.overview, "a fetch begun before the identity change must not publish its stale overview")
+            XCTAssertEqual(model.connectionNotice, "Token rejected.")
         }
 
         func testTerminalGroupsExcludeSessionsRepresentedByWorkspaceRows() {

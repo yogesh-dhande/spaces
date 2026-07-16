@@ -23,6 +23,7 @@ final class RemoteAgentWatchServiceTests: XCTestCase {
         private var listing: [SpacesDeviceAgentSessionRow] = []
         private var listGate: DispatchSemaphore?
         private var listCallCount = 0
+        private var pendingListFailures = 0
         private var activeListCalls = 0
         private var maxConcurrentListCalls = 0
 
@@ -37,6 +38,11 @@ final class RemoteAgentWatchServiceTests: XCTestCase {
                 listAgentSessions: { _ in
                     self.lock.lock()
                     self.listCallCount += 1
+                    if self.pendingListFailures > 0 {
+                        self.pendingListFailures -= 1
+                        self.lock.unlock()
+                        throw NSError(domain: "FakeTransport", code: 1, userInfo: [NSLocalizedDescriptionKey: "scripted listing failure"])
+                    }
                     self.activeListCalls += 1
                     self.maxConcurrentListCalls = max(self.maxConcurrentListCalls, self.activeListCalls)
                     let gate = self.listGate
@@ -77,6 +83,12 @@ final class RemoteAgentWatchServiceTests: XCTestCase {
         func setListGate(_ gate: DispatchSemaphore?) {
             lock.lock()
             listGate = gate
+            lock.unlock()
+        }
+
+        func failNextListings(_ count: Int) {
+            lock.lock()
+            pendingListFailures = count
             lock.unlock()
         }
 
@@ -368,6 +380,28 @@ final class RemoteAgentWatchServiceTests: XCTestCase {
         try waitUntil(message: "coalesced follow-up pull never ran") { transport.listCalls == baselineListCalls + 2 }
         gate.signal()
         try waitUntil(message: "blocked transition was never delivered") {
+            recorder.delivered.contains { $0.sessionID == "sub-1" && $0.line.contains("is blocked") }
+        }
+        XCTAssertEqual(recorder.delivered.count, 1)
+    }
+
+    /// An overview signal can be the only cue for a transition, so a listing pull that fails
+    /// transiently while the stream stays healthy must schedule its own retry — otherwise the
+    /// transition sits undelivered until some unrelated signal or reconnect happens to re-pull.
+    @MainActor func testFailedListingPullSchedulesRetry() throws {
+        let transport = FakeTransport()
+        let recorder = DeliveryRecorder()
+        let (service, _) = try makeWatchedService(transport: transport, recorder: recorder, baselineStatus: AgentWindowStatus.spinning.rawValue)
+        defer { service.stop() }
+        service.reconnectDelay = .milliseconds(20)
+
+        // The child blocked, the device signaled, but the signal-driven pull fails transiently.
+        transport.setListing([makeRow(status: AgentWindowStatus.waiting.rawValue)])
+        transport.failNextListings(1)
+        transport.fireSignal(connection: 0)
+
+        // No further signal arrives; the retry alone must recover the blocked transition.
+        try waitUntil(message: "failed listing pull was never retried") {
             recorder.delivered.contains { $0.sessionID == "sub-1" && $0.line.contains("is blocked") }
         }
         XCTAssertEqual(recorder.delivered.count, 1)

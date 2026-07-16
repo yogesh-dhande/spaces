@@ -42,6 +42,9 @@ import spacesdevicecore
     /// when the in-flight one completes.
     private var listingQueued: Set<String> = []
     private var isStopped = false
+    /// Delay before a failed connect, a dropped stream, or a failed listing pull retries through
+    /// `reconcile()`. Internal so behavior tests can shorten it instead of waiting out real seconds.
+    var reconnectDelay: Duration = .seconds(5)
 
     public init(
         databasePath: String, transport: RemoteAgentWatchTransport,
@@ -174,7 +177,12 @@ import spacesdevicecore
             if let rows {
                 self.applyRows(deviceID: deviceID, rows: rows)
             } else {
-                self.logError("spacesd remote_agent_watch device=\(deviceID) list_agent_sessions_failed\n")
+                // The overview signal that drove this pull may have been the only cue for a
+                // transition, and with the stream still healthy nothing else would re-pull, so a
+                // failed pull schedules its own retry. The baseline did not advance, so the retried
+                // listing still diffs against the last reported state.
+                self.logError("spacesd remote_agent_watch device=\(deviceID) list_agent_sessions_failed scheduling_retry\n")
+                self.scheduleReconnect()
             }
             if followUpQueued { self.requestListing(deviceID: deviceID) }
         }
@@ -237,8 +245,9 @@ import spacesdevicecore
     /// Retries reconciling after a short delay so a persistently unreachable remote reconnects without
     /// spinning. `reconcile()` reopens any watched device that has no live stream.
     private func scheduleReconnect() {
+        let delay = reconnectDelay
         Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .seconds(5))
+            try? await Task.sleep(for: delay)
             self?.reconcile()
         }
     }
