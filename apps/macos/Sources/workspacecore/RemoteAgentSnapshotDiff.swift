@@ -9,8 +9,9 @@ import spacesdevicecore
 ///
 /// Emission is gated per-agent on having a prior observation of that agent, which gives two properties
 /// for free:
-///  - the first snapshot after a (re)connect (empty `previous`) emits nothing and only seeds a baseline,
-///    so a dropped-then-restored stream never replays the state it already reported;
+///  - a device's very first snapshot (empty `previous`) emits nothing and only seeds a baseline, while a
+///    reconnect diffs against the retained baseline — so a dropped-then-restored stream never replays
+///    the state it already reported, yet still emits every transition from the outage window;
 ///  - a newly-watched agent seen for the first time seeds silently, so subscribing never replays the
 ///    state the agent was already in at subscribe time.
 ///

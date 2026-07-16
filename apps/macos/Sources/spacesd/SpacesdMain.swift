@@ -138,7 +138,7 @@ import workspacecore
         foregroundAgentReconciler.start()
         terminalForegroundAgentReconciler = foregroundAgentReconciler
         let remoteAgentWatch = RemoteAgentWatchService(
-            databasePath: databasePath, clientApp: Self.daemonDeviceClientApp(),
+            databasePath: databasePath, transport: .live(clientApp: Self.daemonDeviceClientApp()),
             deliver: { [weak self] sessionID, line in
                 guard let self else { throw Self.requestFailedError("spacesd is shutting down.") }
                 try self.submitAgentNotificationLine(sessionID: sessionID, line: line)
