@@ -27,11 +27,13 @@ import spacesdevicecore
     private var streams: [String: any RemoteAgentOverviewStreamHandle] = [:]
     private var connecting: Set<String> = []
     /// Per-device baseline: watched child terminal session id → last-seen row. Retained across
-    /// disconnects so the first post-reconnect listing diffs against the last reported state and
-    /// emits every transition that happened during the outage — including an exit, whose row is
-    /// simply absent from that listing. Only a device's last watch edge being removed (or the device
-    /// unpairing) clears its baseline. Replay is impossible either way: an unchanged row diffs to
-    /// nothing, and a never-seen row seeds silently (`RemoteAgentSnapshotDiff`'s per-agent gating).
+    /// disconnects and mirrored to `agent_remote_watch_baselines` on every change, so the first
+    /// listing after a reconnect — or after a daemon restart, which `start()` seeds from the persisted
+    /// mirror — diffs against the last reported state and emits every transition from the outage
+    /// window, including an exit, whose row is simply absent from that listing. Only a device's last
+    /// watch edge being removed (or the device unpairing) retires its baseline. Replay is impossible
+    /// either way: an unchanged row diffs to nothing, and a never-seen row seeds silently
+    /// (`RemoteAgentSnapshotDiff`'s per-agent gating).
     private var snapshots: [String: [String: SpacesDeviceAgentSessionRow]] = [:]
     /// Devices with a `listAgentSessions` pull in flight. Pulls are serialized per device — responses
     /// of overlapping pulls could complete out of order and apply a stale listing over a newer one.
@@ -51,7 +53,15 @@ import spacesdevicecore
         self.logError = logError
     }
 
-    public func start() { reconcile() }
+    public func start() {
+        // Seed the in-memory baselines from the persisted mirror before the first reconcile, so the
+        // first listing of each still-watched device diffs against what the previous daemon run had
+        // reported and surfaces transitions from the downtime window.
+        do { snapshots = try makeStore().agentRemoteWatchBaselines() } catch {
+            logError("spacesd remote_agent_watch_error op=load_baselines error=\(error)\n")
+        }
+        reconcile()
+    }
 
     public func stop() {
         isStopped = true
@@ -79,9 +89,12 @@ import spacesdevicecore
             streams[deviceID] = nil
             client.stop()
         }
-        // Baselines outlive streams (they survive disconnects), so clear them by desired-set
-        // membership rather than alongside stream teardown.
-        for deviceID in snapshots.keys where !desired.contains(deviceID) { snapshots[deviceID] = nil }
+        // Baselines outlive streams (they survive disconnects and daemon restarts), so retire them by
+        // desired-set membership rather than alongside stream teardown.
+        for deviceID in snapshots.keys where !desired.contains(deviceID) {
+            snapshots[deviceID] = nil
+            deletePersistedBaseline(deviceID: deviceID)
+        }
         listingQueued = listingQueued.filter(desired.contains)
         for deviceID in desired where streams[deviceID] == nil && !connecting.contains(deviceID) { openStream(deviceID: deviceID) }
         for deviceID in desired where streams[deviceID] != nil { requestListing(deviceID: deviceID) }
@@ -177,9 +190,9 @@ import spacesdevicecore
             logError("spacesd remote_agent_watch_error op=apply_rows device=\(deviceID) error=\(error)\n")
             return
         }
-        let result = RemoteAgentSnapshotDiff.diff(previous: snapshots[deviceID] ?? [:], newRows: rows, watchedTerminalSessionIDs: watched)
+        let previous = snapshots[deviceID] ?? [:]
+        let result = RemoteAgentSnapshotDiff.diff(previous: previous, newRows: rows, watchedTerminalSessionIDs: watched)
         snapshots[deviceID] = result.snapshot
-        guard !result.transitions.isEmpty else { return }
         let engine = AgentNotificationEngine(store: store, deliver: deliver, logError: logError)
         for transition in result.transitions {
             do {
@@ -198,6 +211,14 @@ import spacesdevicecore
                 // its edges down — the watch is complete.
                 try? store.deleteAgentRemoteSubscriptions(deviceID: deviceID, agentSessionID: transition.terminalSessionID)
             }
+        }
+        // Mirror the baseline after the transitions were delivered or queued (both durable), so a
+        // crash in between re-emits rather than silently drops. Only a real change writes: the write
+        // signals databaseDidChange, which drives reconcile back through here — an unconditional
+        // mirror would loop pull → write → signal → pull.
+        guard previous != result.snapshot else { return }
+        do { try store.replaceAgentRemoteWatchBaseline(deviceID: deviceID, baseline: result.snapshot) } catch {
+            logError("spacesd remote_agent_watch_error op=persist_baseline device=\(deviceID) error=\(error)\n")
         }
     }
 
@@ -231,6 +252,13 @@ import spacesdevicecore
             }
         } catch { logError("spacesd remote_agent_watch_error op=drop_edges device=\(deviceID) error=\(error)\n") }
         snapshots[deviceID] = nil
+        deletePersistedBaseline(deviceID: deviceID)
+    }
+
+    private func deletePersistedBaseline(deviceID: String) {
+        do { try makeStore().deleteAgentRemoteWatchBaseline(deviceID: deviceID) } catch {
+            logError("spacesd remote_agent_watch_error op=delete_baseline device=\(deviceID) error=\(error)\n")
+        }
     }
 
     private func deviceIsStillWatched(_ deviceID: String) -> Bool {

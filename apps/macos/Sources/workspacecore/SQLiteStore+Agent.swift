@@ -1,5 +1,6 @@
 import Foundation
 import spacesdatabase
+import spacesdevicecore
 import spacesterminalcore
 import systembridge
 
@@ -301,6 +302,44 @@ extension SQLiteStore {
     private func decodeAgentRemoteSubscription(row: [String]) -> AgentRemoteSubscriptionRecord? {
         guard row.count >= 4 else { return nil }
         return AgentRemoteSubscriptionRecord(subscriberTerminalSessionID: row[0], deviceID: row[1], agentSessionID: row[2], createdAt: row[3])
+    }
+
+    // MARK: - Remote watch baselines (agent_remote_watch_baselines)
+
+    /// Replaces one device's persisted watch baseline with `baseline` (watched child terminal session
+    /// id → last-seen listing row) in a single transaction, so a reader never observes a half-replaced
+    /// device. The watch service mirrors its in-memory baseline here on every change, which is what
+    /// lets a restarted daemon diff its first listing against the state the previous run had reported.
+    public func replaceAgentRemoteWatchBaseline(deviceID: String, baseline: [String: SpacesDeviceAgentSessionRow]) throws {
+        let encoder = JSONEncoder()
+        let encoded = try baseline.map { (agentSessionID, row) in (agentSessionID, String(decoding: try encoder.encode(row), as: UTF8.self)) }
+        try withTransaction {
+            try execute(sql: "DELETE FROM agent_remote_watch_baselines WHERE device_id = ?", bindings: [deviceID])
+            for (agentSessionID, rowJSON) in encoded {
+                try execute(
+                    sql: "INSERT INTO agent_remote_watch_baselines(device_id, agent_session_id, row_json) VALUES (?, ?, ?)",
+                    bindings: [deviceID, agentSessionID, rowJSON])
+            }
+        }
+    }
+
+    /// Every device's persisted watch baseline, in the shape the watch service holds in memory. A row
+    /// whose JSON no longer decodes is skipped — the watch then seeds that child silently, exactly as
+    /// if it had never been observed.
+    public func agentRemoteWatchBaselines() throws -> [String: [String: SpacesDeviceAgentSessionRow]] {
+        let decoder = JSONDecoder()
+        var baselines: [String: [String: SpacesDeviceAgentSessionRow]] = [:]
+        for row in try queryRows(sql: "SELECT device_id, agent_session_id, row_json FROM agent_remote_watch_baselines") {
+            guard row.count >= 3, let decoded = try? decoder.decode(SpacesDeviceAgentSessionRow.self, from: Data(row[2].utf8)) else { continue }
+            baselines[row[0], default: [:]][row[1]] = decoded
+        }
+        return baselines
+    }
+
+    /// Retires one device's persisted watch baseline — the device's last watch edge was removed or the
+    /// device unpaired, so a later watch of it must start fresh instead of diffing against dead state.
+    public func deleteAgentRemoteWatchBaseline(deviceID: String) throws {
+        try execute(sql: "DELETE FROM agent_remote_watch_baselines WHERE device_id = ?", bindings: [deviceID])
     }
 
     /// The Spaces agent row bound to a terminal session id, searched across every workspace. Returns

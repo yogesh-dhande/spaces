@@ -7,7 +7,7 @@ import Foundation
 #endif
 
 public enum DatabaseSchema {
-    public static let currentVersion = 5
+    public static let currentVersion = 6
 
     /// Adds the coding-agent orchestration surface: an explicit `note` on each agent session and the
     /// `agent_subscriptions` graph. The subscriber key is a terminal session id (a subscriber may be a
@@ -66,6 +66,25 @@ public enum DatabaseSchema {
             );
         """
 
+    /// The remote agent watch's per-device baseline: the last-seen `listAgentSessions` row of each
+    /// watched child, keyed by device and by the child's terminal session id on that device. The watch
+    /// service diffs fresh listings against this baseline to recover blocked/done/exited transitions;
+    /// persisting it lets a restarted daemon deliver transitions that happened while it was down
+    /// (including an exit, whose row is simply absent from the first post-restart listing). `row_json`
+    /// is the encoded wire row — the baseline needs the full row to render an exited line after the
+    /// agent is gone, and a row that fails to decode simply re-seeds silently. Deliberately has NO
+    /// foreign key: rows mirror `agent_remote_subscriptions` edges, whose lifecycle the watch service
+    /// drives. Named separately so this step and the fresh-schema SQL share one definition and can
+    /// never drift apart.
+    static let agentRemoteWatchBaselinesSQL = """
+            CREATE TABLE IF NOT EXISTS agent_remote_watch_baselines (
+              device_id TEXT NOT NULL,
+              agent_session_id TEXT NOT NULL,
+              row_json TEXT NOT NULL,
+              PRIMARY KEY (device_id, agent_session_id)
+            );
+        """
+
     public static let migrationSteps: [DatabaseMigrationStep] = [
         DatabaseMigrationStep(fromVersion: 1, toVersion: 2, description: "Add agent_sessions.note and agent_subscriptions", requiresBackup: true) {
             handle in
@@ -103,6 +122,9 @@ public enum DatabaseSchema {
         DatabaseMigrationStep(fromVersion: 4, toVersion: 5, description: "Add agent_pending_notifications.transition", requiresBackup: true) {
             handle in
             try migrationExecuteBatch(handle, sql: "ALTER TABLE agent_pending_notifications ADD COLUMN transition TEXT NOT NULL DEFAULT '';")
+        },
+        DatabaseMigrationStep(fromVersion: 5, toVersion: 6, description: "Add agent_remote_watch_baselines", requiresBackup: true) { handle in
+            try migrationExecuteBatch(handle, sql: agentRemoteWatchBaselinesSQL)
         },
     ]
 
@@ -418,6 +440,8 @@ public enum DatabaseSchema {
             \(agentPendingNotificationsSQL)
 
             \(agentRemoteSubscriptionsSQL)
+
+            \(agentRemoteWatchBaselinesSQL)
 
             CREATE TABLE IF NOT EXISTS agent_session_events (
               id TEXT PRIMARY KEY,

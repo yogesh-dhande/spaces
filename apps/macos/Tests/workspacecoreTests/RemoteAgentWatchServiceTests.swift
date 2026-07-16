@@ -5,9 +5,11 @@ import spacesdevicecore
 @testable import workspacecore
 
 /// Behavior coverage for the remote agent watch's stream lifecycle: transitions that happen while the
-/// overview stream is disconnected are delivered after the reconnect (including an exit, whose edge is
-/// then dropped), already-reported state never replays across a reconnect, and each device runs at most
-/// one `listAgentSessions` pull at a time so a stale response can never overwrite newer state.
+/// overview stream is disconnected — or while the daemon itself is down, via the persisted baseline —
+/// are delivered afterwards (including an exit, whose edge is then dropped), already-reported state
+/// never replays across a reconnect, a retired baseline never replays into a fresh watch, and each
+/// device runs at most one `listAgentSessions` pull at a time so a stale response can never overwrite
+/// newer state.
 final class RemoteAgentWatchServiceTests: XCTestCase {
     private final class FakeStreamHandle: RemoteAgentOverviewStreamHandle {
         func stop() {}
@@ -111,10 +113,14 @@ final class RemoteAgentWatchServiceTests: XCTestCase {
     }
 
     private var temporaryDirectory: URL?
+    /// Path of the database backing the current test's store, for spinning up a second service
+    /// instance on the same database (simulating a daemon restart).
+    private var currentDatabasePath: String?
 
     override func tearDownWithError() throws {
         if let temporaryDirectory { try? FileManager.default.removeItem(at: temporaryDirectory) }
         temporaryDirectory = nil
+        currentDatabasePath = nil
         try super.tearDownWithError()
     }
 
@@ -123,6 +129,7 @@ final class RemoteAgentWatchServiceTests: XCTestCase {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         temporaryDirectory = dir
         let path = dir.appendingPathComponent("spaces-test.db").path
+        currentDatabasePath = path
         return (try SQLiteStore(path: path), path)
     }
 
@@ -237,6 +244,94 @@ final class RemoteAgentWatchServiceTests: XCTestCase {
         }
 
         XCTAssertEqual(recorder.delivered.count, 1, "an unchanged still-waiting child must not re-notify after a reconnect")
+    }
+
+    /// The baseline must survive the daemon itself restarting, not just the stream dropping: a child
+    /// that goes blocked while the daemon is down must be reported by the restarted daemon's watch,
+    /// whose first listing diffs against the baseline persisted by the previous run.
+    @MainActor func testTransitionDuringDaemonRestartIsDeliveredByFreshService() throws {
+        let transport = FakeTransport()
+        let recorder = DeliveryRecorder()
+        let (service, store) = try makeWatchedService(transport: transport, recorder: recorder, baselineStatus: AgentWindowStatus.spinning.rawValue)
+        service.stop()
+
+        // The child blocked while no daemon was running; the restarted daemon's watch starts fresh
+        // on the same database and its first listing carries the new state.
+        let restartTransport = FakeTransport()
+        restartTransport.setListing([makeRow(status: AgentWindowStatus.waiting.rawValue)])
+        let restartRecorder = DeliveryRecorder()
+        let restartedService = RemoteAgentWatchService(
+            databasePath: try XCTUnwrap(currentDatabasePath), transport: restartTransport.transport,
+            deliver: { sessionID, line in restartRecorder.record(sessionID, line) }, logError: { _ in })
+        defer { restartedService.stop() }
+        restartedService.start()
+        try waitUntil(message: "restarted service never connected") { restartedService.debugStreamingDeviceIDs == ["device-1"] }
+
+        try waitUntil(message: "blocked transition from the daemon-restart window was never delivered") {
+            restartRecorder.delivered.contains { $0.sessionID == "sub-1" && $0.line.contains("is blocked") }
+        }
+    }
+
+    /// A child that exits while the daemon is down must still produce its exited line after the
+    /// restart (and the completed edge must drop) — otherwise the subscriber never hears the terminal
+    /// fact and the edge leaks until manual cleanup.
+    @MainActor func testExitDuringDaemonRestartIsDeliveredByFreshServiceAndDropsEdge() throws {
+        let transport = FakeTransport()
+        let recorder = DeliveryRecorder()
+        let (service, store) = try makeWatchedService(transport: transport, recorder: recorder, baselineStatus: AgentWindowStatus.spinning.rawValue)
+        service.stop()
+
+        let restartTransport = FakeTransport()
+        restartTransport.setListing([])
+        let restartRecorder = DeliveryRecorder()
+        let restartedService = RemoteAgentWatchService(
+            databasePath: try XCTUnwrap(currentDatabasePath), transport: restartTransport.transport,
+            deliver: { sessionID, line in restartRecorder.record(sessionID, line) }, logError: { _ in })
+        defer { restartedService.stop() }
+        restartedService.start()
+        try waitUntil(message: "restarted service never connected") { restartedService.debugStreamingDeviceIDs == ["device-1"] }
+
+        try waitUntil(message: "exit from the daemon-restart window was never delivered") {
+            restartRecorder.delivered.contains { $0.sessionID == "sub-1" && $0.line.contains("is exited") }
+        }
+        try waitUntil(message: "completed watch edge was never dropped") {
+            ((try? store.agentRemoteSubscriptions(deviceID: "device-1")) ?? []).isEmpty
+        }
+    }
+
+    /// Removing a device's last watch edge retires its baseline for good: re-subscribing later starts
+    /// a fresh watch that seeds silently instead of replaying transitions diffed against dead state.
+    @MainActor func testUnsubscribingRetiresBaselineSoResubscribeSeedsFresh() throws {
+        let transport = FakeTransport()
+        let recorder = DeliveryRecorder()
+        let (service, store) = try makeWatchedService(transport: transport, recorder: recorder, baselineStatus: AgentWindowStatus.spinning.rawValue)
+        defer { service.stop() }
+
+        try store.deleteAgentRemoteSubscription(subscriberTerminalSessionID: "sub-1", deviceID: "device-1", agentSessionID: "child-1")
+        service.reconcile()
+        try waitUntil(message: "unwatched device's stream never closed") { service.debugStreamingDeviceIDs.isEmpty }
+
+        // Re-subscribe after the child exited: a fresh watch has nothing to diff against, so the
+        // absent row must seed silently, not replay an exit from the retired baseline.
+        try store.insertAgentRemoteSubscription(
+            subscriberTerminalSessionID: "sub-1", deviceID: "device-1", agentSessionID: "child-1", createdAt: "t2")
+        let restartTransport = FakeTransport()
+        restartTransport.setListing([])
+        let restartRecorder = DeliveryRecorder()
+        let restartedService = RemoteAgentWatchService(
+            databasePath: try XCTUnwrap(currentDatabasePath), transport: restartTransport.transport,
+            deliver: { sessionID, line in restartRecorder.record(sessionID, line) }, logError: { _ in })
+        defer { restartedService.stop() }
+        restartedService.start()
+        try waitUntil(message: "re-subscribed service never connected") { restartedService.debugStreamingDeviceIDs == ["device-1"] }
+        let listCallsAfterConnect = restartTransport.listCalls
+        try waitUntil(message: "first listing never pulled") { restartTransport.listCalls >= max(listCallsAfterConnect, 1) }
+
+        // The edge must survive (nothing exited on a fresh watch) and nothing must be delivered.
+        try waitUntil(message: "fresh watch edge disappeared") {
+            ((try? store.agentRemoteSubscriptions(deviceID: "device-1")) ?? []).isEmpty == false
+        }
+        XCTAssertTrue(restartRecorder.delivered.isEmpty, "a fresh watch must seed silently, not replay the retired baseline")
     }
 
     /// Overview pushes can arrive faster than listing pulls complete. Pulls for one device must run
