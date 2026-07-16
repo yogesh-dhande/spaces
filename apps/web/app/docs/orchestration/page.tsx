@@ -129,6 +129,9 @@ export default function OrchestrationDocsPage() {
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           It works <strong>across harnesses</strong> — Claude Code, Codex, and opencode, any of them as the lead and any as a child — <strong>across models</strong> — each agent runs whatever model its harness supports — and <strong>across machines</strong> — children can run on a paired Mac or a cloud Linux box, driven from the Mac in front of you. Every child is a real terminal in the app, so you can watch the whole fleet work, see which agents need attention in <a className="text-accent hover:underline" href="/docs/coding-agents">Alerts</a>, and jump to any child&apos;s pane with a shortcut.
         </p>
+        <p className="mt-3 text-sm leading-7 text-foreground-soft">
+          A lead isn&apos;t only for one big task. Because it can list your projects, create worktrees, and reach paired machines, it can stand in front of <strong>everything you have going</strong> — a fix in one repo, a feature in another, an experiment on the Linux box. You talk to one agent; it runs, watches, and reports on all of it.
+        </p>
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">

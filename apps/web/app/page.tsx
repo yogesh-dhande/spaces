@@ -617,6 +617,11 @@ export default function HomePage() {
               child&apos;s terminal, and answers its prompts — pulling the fleet
               to a finish while you watch every agent work live.
             </p>
+            <p className="mt-4 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
+              Or make it your standing front door. One agent in charge of work
+              across all your projects, features, and worktrees — you talk to a
+              single agent, and it runs everything else.
+            </p>
           </div>
 
           <div className="mt-14 grid gap-10 lg:grid-cols-[1.1fr_0.9fr] lg:items-center">
