@@ -3058,7 +3058,7 @@ final class TerminalPaneBannerTests: XCTestCase {
         let (banner, _) = makeBanner()
         XCTAssertFalse(banner.debugIsVisible)
 
-        banner.showPersistent(message: "Session ended.", severity: .neutral)
+        banner.showPersistent(message: "Session ended.")
         XCTAssertTrue(banner.debugIsVisible)
         XCTAssertEqual(banner.debugMessage, "Session ended.")
 
@@ -3068,7 +3068,7 @@ final class TerminalPaneBannerTests: XCTestCase {
 
     @MainActor func testTransientBannerOverridesPersistentNoticeAndRestoresItOnDismiss() {
         let (banner, _) = makeBanner()
-        banner.showPersistent(message: "Session ended.", severity: .neutral)
+        banner.showPersistent(message: "Session ended.")
 
         banner.showProgress(message: "Fetching link…") {}
         XCTAssertEqual(banner.debugMessage, "Fetching link…")
@@ -3091,7 +3091,7 @@ final class TerminalPaneBannerTests: XCTestCase {
     /// banner out from under it.
     @MainActor func testClearingPersistentNoticeLeavesActiveTransientBannerUp() {
         let (banner, _) = makeBanner()
-        banner.showPersistent(message: "Session ended.", severity: .neutral)
+        banner.showPersistent(message: "Session ended.")
         banner.showProgress(message: "Fetching link…") {}
 
         banner.clearPersistent()

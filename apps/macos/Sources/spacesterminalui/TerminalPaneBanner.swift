@@ -1,12 +1,7 @@
 import AppKit
 import Foundation
-
-/// Tone of a persistent banner notice. `neutral` is for states the user asked for (a shell that
-/// exited because they typed `exit`); `error` is for states they did not (a process that died).
-public enum TerminalPaneBannerSeverity: Sendable {
-    case neutral
-    case error
-}
+import spacesterminalcore
+import spacesterminalghostty
 
 /// The seam pane collaborators drive to surface banner state. Kept as a protocol so
 /// `TerminalLinkOpenCoordinator`'s unit tests can inject a recording fake without building an
@@ -23,7 +18,7 @@ public enum TerminalPaneBannerSeverity: Sendable {
     func dismiss()
     /// Sets the pane's persistent notice — shown whenever no transient banner is up, and never
     /// auto-dismissed. Replaces any previous persistent notice.
-    func showPersistent(message: String, severity: TerminalPaneBannerSeverity)
+    func showPersistent(message: String)
     /// Clears the persistent notice, hiding the banner when no transient banner is up.
     func clearPersistent()
     /// Draws attention to the banner without changing what it says. Used when the user acts on a
@@ -45,15 +40,11 @@ public enum TerminalPaneBannerSeverity: Sendable {
 /// restores the persistent notice rather than hiding the banner. One banner per pane means the two
 /// can never overlap in the same corner, and precedence is decided here instead of by z-order.
 ///
-/// Colors and material come from system-dynamic values so the banner tracks light/dark
-/// automatically.
+/// The material and neutral text come from system-dynamic values, and the stopped-state accent from
+/// the active theme's `statusFailed` token — the same one the sidebar tints an exited runtime target
+/// with — so the pane and the sidebar can never disagree about the state they both report.
 @MainActor public final class TerminalPaneBanner: TerminalPaneBannerPresenting {
     private enum TransientMode { case progress, error, notice }
-
-    private struct PersistentNotice {
-        let message: String
-        let severity: TerminalPaneBannerSeverity
-    }
 
     private static let autoDismissDelay: Duration = .seconds(6)
 
@@ -65,7 +56,7 @@ public enum TerminalPaneBannerSeverity: Sendable {
     private let clickRecognizer = NSClickGestureRecognizer()
 
     private var transientMode: TransientMode?
-    private var persistentNotice: PersistentNotice?
+    private var persistentMessage: String?
     private var onCancel: (@MainActor () -> Void)?
     private var autoDismissTask: Task<Void, Never>?
 
@@ -100,16 +91,15 @@ public enum TerminalPaneBannerSeverity: Sendable {
         render()
     }
 
-    public func showPersistent(message: String, severity: TerminalPaneBannerSeverity) {
-        let notice = PersistentNotice(message: message, severity: severity)
-        guard persistentNotice?.message != notice.message || persistentNotice?.severity != notice.severity else { return }
-        persistentNotice = notice
+    public func showPersistent(message: String) {
+        guard persistentMessage != message else { return }
+        persistentMessage = message
         render()
     }
 
     public func clearPersistent() {
-        guard persistentNotice != nil else { return }
-        persistentNotice = nil
+        guard persistentMessage != nil else { return }
+        persistentMessage = nil
         render()
     }
 
@@ -145,13 +135,13 @@ public enum TerminalPaneBannerSeverity: Sendable {
             container.isHidden = false
             return
         }
-        guard let persistentNotice else {
+        guard let persistentMessage else {
             spinner.stopAnimation(nil)
             container.isHidden = true
             return
         }
-        label.stringValue = persistentNotice.message
-        applyPersistentChrome(persistentNotice.severity)
+        label.stringValue = persistentMessage
+        applyPersistentChrome()
         container.isHidden = false
     }
 
@@ -162,20 +152,22 @@ public enum TerminalPaneBannerSeverity: Sendable {
         iconView.isHidden = showsSpinner
         switch mode {
         case .progress: break
-        case .error: applyIcon("exclamationmark.triangle.fill", description: "Error", tint: .systemRed)
+        case .error: applyIcon("exclamationmark.triangle.fill", description: "Error", tint: .activeTheme(\.statusFailed))
         case .notice: applyIcon("info.circle.fill", description: "Notice", tint: .secondaryLabelColor)
         }
         cancelButton.isHidden = mode != .progress
     }
 
-    private func applyPersistentChrome(_ severity: TerminalPaneBannerSeverity) {
+    /// One chrome for every stopped state. The sidebar draws a cleanly-exited target and a crashed
+    /// one in the same tint, so the pane says the same thing rather than inventing a distinction the
+    /// rest of the app does not make; the message carries which one it was. A warning glyph, not a
+    /// stop/pause mark — a filled square in a circle reads as a button on a pane where nothing is
+    /// clickable.
+    private func applyPersistentChrome() {
         spinner.stopAnimation(nil)
         spinner.isHidden = true
         iconView.isHidden = false
-        switch severity {
-        case .neutral: applyIcon("stop.circle.fill", description: "Session ended", tint: .secondaryLabelColor)
-        case .error: applyIcon("exclamationmark.triangle.fill", description: "Session failed", tint: .systemRed)
-        }
+        applyIcon("exclamationmark.triangle.fill", description: "Session stopped", tint: .activeTheme(\.statusFailed))
         // A persistent notice has no action to cancel and no timer to wait out; the pane clears it.
         cancelButton.isHidden = true
     }
@@ -285,5 +277,5 @@ public enum TerminalPaneBannerSeverity: Sendable {
 
     var debugIsVisible: Bool { !container.isHidden }
     var debugMessage: String { container.isHidden ? "" : label.stringValue }
-    var debugHasPersistentNotice: Bool { persistentNotice != nil }
+    var debugHasPersistentNotice: Bool { persistentMessage != nil }
 }

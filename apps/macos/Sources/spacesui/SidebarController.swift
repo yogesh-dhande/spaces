@@ -1549,7 +1549,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
 
     func sidebarRunningIndicatorColor() -> NSColor { sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184), alpha: 0.95) }
 
-    func sidebarFailedIndicatorColor() -> NSColor { sidebarThemeColor(light: (186, 67, 111), dark: (255, 111, 91), alpha: 0.95) }
+    func sidebarFailedIndicatorColor() -> NSColor { Theme.statusFailed }
 
     func sidebarIdleIndicatorColor() -> NSColor { sidebarThemeColor(light: (213, 216, 211), dark: (48, 67, 70), alpha: 0.85) }
 

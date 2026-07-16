@@ -209,8 +209,8 @@ extension TerminalSessionPaneViewController {
         }
         switch runtimeState.state {
         case .starting, .running: banner.clearPersistent()
-        case .exited: banner.showPersistent(message: "Session ended. This pane is read-only.", severity: .neutral)
-        case .failed: banner.showPersistent(message: "Session failed. The process stopped unexpectedly.", severity: .error)
+        case .exited: banner.showPersistent(message: "Session ended. This pane is read-only.")
+        case .failed: banner.showPersistent(message: "Session failed. The process stopped unexpectedly.")
         }
     }
 

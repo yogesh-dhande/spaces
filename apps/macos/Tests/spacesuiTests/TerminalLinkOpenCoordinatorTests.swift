@@ -31,7 +31,7 @@ import spacesterminalui
         func dismiss() { dismissCount += 1 }
         // The link coordinator never touches the pane's own persistent notice; these exist only to
         // satisfy the protocol.
-        func showPersistent(message _: String, severity _: TerminalPaneBannerSeverity) {}
+        func showPersistent(message _: String) {}
         func clearPersistent() {}
         func flash() {}
     }

@@ -89,6 +89,9 @@ enum Theme {
     static let statusRunningFill = green
     static let statusRunningHalo = dynamic(\.statusRunningHalo)
     static let statusExitedStroke = red
+    /// Shared by every surface reporting a stopped runtime target: the sidebar's exited rows and
+    /// offline/warning marks, and the terminal pane's ended banner.
+    static let statusFailed = dynamic(\.statusFailed)
     static let statusIdleStroke = mutedSecondary
     static let statusWaitingFill = orange
 
