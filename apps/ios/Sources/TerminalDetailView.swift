@@ -96,8 +96,13 @@ struct TerminalDetailView: View {
                             onSendKey: { key in
                                 sendTerminalKey(key)
                             },
-                            onSendScroll: { horizontal, vertical, scrollMods in
-                                sendTerminalScroll(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods)
+                            onSendScroll: { horizontal, vertical, scrollMods, pointerPosition in
+                                sendTerminalScroll(
+                                    horizontal: horizontal,
+                                    vertical: vertical,
+                                    scrollMods: scrollMods,
+                                    pointerPosition: pointerPosition
+                                )
                             },
                             onOpenLink: { link in
                                 openTerminalLink(link)
@@ -187,9 +192,21 @@ struct TerminalDetailView: View {
         Task { await model.sendKey(key) }
     }
 
-    private func sendTerminalScroll(horizontal: Double, vertical: Double, scrollMods: Int32) {
+    private func sendTerminalScroll(
+        horizontal: Double,
+        vertical: Double,
+        scrollMods: Int32,
+        pointerPosition: TerminalScrollPointerPosition?
+    ) {
         writeE2EEventIfNeeded(kind: "send_scroll", detail: "\(horizontal),\(vertical)")
-        Task { await model.sendScroll(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods) }
+        Task {
+            await model.sendScroll(
+                horizontal: horizontal,
+                vertical: vertical,
+                scrollMods: scrollMods,
+                pointerPosition: pointerPosition
+            )
+        }
     }
 
     private func openTerminalLink(_ link: String) {

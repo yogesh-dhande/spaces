@@ -159,9 +159,11 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         container.addSubview(view)
 
         let position = GhosttyMirrorTerminalView.ghosttyMousePosition(for: NSPoint(x: 60, y: 70), in: view)
+        let scrollPosition = GhosttyMirrorTerminalView.scrollPointerPosition(for: NSPoint(x: 60, y: 70), in: view, mods: mods)
 
         XCTAssertEqual(position.x, 50, accuracy: 0.01)
         XCTAssertEqual(position.y, 50, accuracy: 0.01)
+        XCTAssertEqual(scrollPosition, .init(x: 0.25, y: 0.5, mods: mods))
     }
 
     @MainActor func testRemoteMirrorSuppressesFocusOnlyMouseClickBeforeForwarding() throws {

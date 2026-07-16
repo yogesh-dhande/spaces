@@ -35,7 +35,7 @@ SCROLLBACK_SWIPE_COUNT=2
 TERMINAL_LINK_PREVIEW_IMAGE_NAME="${SPACES_MOBILE_E2E_LINK_PREVIEW_IMAGE_NAME:-spaces-link-preview.png}"
 TERMINAL_LINK_PREVIEW_PATH="${SPACES_MOBILE_E2E_LINK_PREVIEW_PATH:-/tmp/$TERMINAL_LINK_PREVIEW_IMAGE_NAME}"
 
-SCENARIOS=(takeover codex codex-resume-reopen roundtrip scrollback terminal-link-preview two-session ctrl-c-final-frame ctrl-c-final-frame-codex-survivor ownership-guard)
+SCENARIOS=(takeover codex codex-resume-reopen roundtrip scrollback mouse-reporting-scroll terminal-link-preview two-session ctrl-c-final-frame ctrl-c-final-frame-codex-survivor ownership-guard)
 REMOTE_UI_SCENARIOS=(takeover two-session)
 SELECTED_SCENARIOS=()
 REQUESTED_KEEP_ROOT="${SPACES_MOBILE_DEMO_KEEP_ROOT:-0}"
@@ -105,6 +105,7 @@ Scenarios:
   codex-resume-reopen
   roundtrip
   scrollback
+  mouse-reporting-scroll
   terminal-link-preview
   two-session
   ctrl-c-final-frame
@@ -1428,6 +1429,12 @@ elif scenario == "scrollback":
         "scrollbackSwipeCount": scrollback_swipe_count,
         "minimumVisibleTerminalInkBands": 3,
         "maximumTerminalTopBlankRatio": 0.20,
+    })
+elif scenario == "mouse-reporting-scroll":
+    payload.update({
+        "scrollbackSwipeCount": 1,
+        "minimumVisibleTerminalInkBands": 1,
+        "maximumTerminalTopBlankRatio": 0.40,
     })
 elif scenario == "terminal-link-preview":
     payload.update({
@@ -3117,6 +3124,131 @@ PY
   printf 'Mobile scenario passed: scrollback\n'
 }
 
+run_mouse_reporting_scroll_scenario() {
+  begin_scenario "mouse-reporting-scroll"
+  [[ "$CURRENT_TARGET" == "local" ]] || fail "Mouse-reporting mobile scroll E2E currently requires the local macOS Ghostty daemon."
+
+  local probe_script="$SCENARIO_DIR/mouse-reporting-scroll.py"
+  local probe_output="$SCENARIO_DIR/mouse-reporting-input.bin"
+  python3 - "$probe_script" <<'PY'
+import sys
+from pathlib import Path
+
+Path(sys.argv[1]).write_text(
+    """
+import os
+import re
+import select
+import sys
+import termios
+import time
+import tty
+
+fd = sys.stdin.fileno()
+previous = termios.tcgetattr(fd)
+captured = bytearray()
+deadline = time.time() + 45
+try:
+    tty.setraw(fd)
+    os.write(sys.stdout.fileno(), b"\\x1b[?1000h\\x1b[?1006hMOUSE_SCROLL_READY\\r\\n")
+    while time.time() < deadline:
+        readable, _, _ = select.select([fd], [], [], 0.25)
+        if not readable:
+            continue
+        captured.extend(os.read(fd, 128))
+        if re.search(rb"\\x1b\\[<(64|65);[0-9]+;[0-9]+M", captured):
+            break
+finally:
+    with open(sys.argv[1], "wb") as output:
+        output.write(captured)
+    termios.tcsetattr(fd, termios.TCSADRAIN, previous)
+""".lstrip()
+)
+PY
+
+  local command_text session_id output_log
+  command_text="$(
+    python3 - "$probe_script" "$probe_output" <<'PY'
+import shlex
+import sys
+print(f"/usr/bin/python3 {shlex.quote(sys.argv[1])} {shlex.quote(sys.argv[2])}")
+PY
+  )"
+  session_id="$(new_terminal_session "e2e-mouse-reporting-scroll" "$command_text")"
+  track_current_scenario_session "$session_id"
+  output_log="$(session_output_path "$session_id")"
+
+  if ! python3 - "$output_log" <<'PY'
+import sys
+import time
+from pathlib import Path
+
+path = Path(sys.argv[1])
+deadline = time.time() + 30
+while time.time() < deadline:
+    if path.exists() and b"MOUSE_SCROLL_READY" in path.read_bytes():
+        raise SystemExit(0)
+    time.sleep(0.1)
+raise SystemExit("Timed out waiting for the mouse-reporting fixture to become ready.")
+PY
+  then
+    fail "Mouse-reporting fixture did not become ready."
+  fi
+
+  write_ui_test_config "mouse-reporting-scroll" "$session_id"
+  reset_mobile_app
+  if ! SPACES_MOBILE_UI_TEST_CONFIG_PATH="$UI_TEST_CONFIG" \
+    xcodebuild \
+      -project "$ROOT_DIR/apps/ios/SpacesMobile.xcodeproj" \
+      -scheme SpacesMobile \
+      -destination "platform=iOS Simulator,id=$MOBILE_UDID" \
+      -derivedDataPath "$IOS_DERIVED_DATA" \
+      -only-testing:SpacesMobileUITests/SpacesMobileUITests/testTerminalTakeOverFromList \
+      test-without-building >"$UI_TEST_LOG" 2>&1
+  then
+    fail "Mouse-reporting scroll UI test failed."
+  fi
+
+  if ! python3 - "$probe_output" "$UI_TEST_CONFIG" "$MOBILE_DEVICE_LABEL" <<'PY'
+import json
+import re
+import sys
+import time
+from pathlib import Path
+
+probe_output = Path(sys.argv[1])
+config = json.loads(Path(sys.argv[2]).read_text())
+mobile_device_label = sys.argv[3]
+event_log = Path(config["eventLogPath"])
+deadline = time.time() + 10
+while time.time() < deadline:
+    if probe_output.exists():
+        captured = probe_output.read_bytes()
+        match = re.search(rb"\x1b\[<(64|65);([0-9]+);([0-9]+)M", captured)
+        if match:
+            column = int(match.group(2))
+            row = int(match.group(3))
+            if column < 1 or row < 1:
+                raise SystemExit(f"Invalid application mouse coordinates: column={column} row={row}")
+            break
+    time.sleep(0.1)
+else:
+    captured = probe_output.read_bytes() if probe_output.exists() else b""
+    raise SystemExit(f"{mobile_device_label} swipe did not reach the mouse-reporting terminal application: {captured!r}")
+
+events = []
+if event_log.exists():
+    events = [json.loads(line) for line in event_log.read_text().splitlines() if line.strip()]
+if not any(event.get("kind") == "e2e_scroll_gesture_applied" for event in events):
+    raise SystemExit(f"{mobile_device_label} UI test did not record an applied terminal scroll gesture.")
+PY
+  then
+    fail "Mouse-reporting scroll event validation failed."
+  fi
+
+  printf 'Mobile scenario passed: mouse-reporting-scroll\n'
+}
+
 write_terminal_link_preview_fixture() {
   local image_base64="iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAAMElEQVR42mP4T2PAQCcLGKqoj0YtGLVg1IJRC0YtGLVg1IJRC0YtGLWAHAuGcOsaABQNUCo17017AAAAAElFTkSuQmCC"
   python3 - "$TERMINAL_LINK_PREVIEW_PATH" "$image_base64" <<'PY'
@@ -3734,6 +3866,9 @@ run_selected_scenarios() {
         ;;
       scrollback)
         run_scrollback_scenario
+        ;;
+      mouse-reporting-scroll)
+        run_mouse_reporting_scroll_scenario
         ;;
       terminal-link-preview)
         run_terminal_link_preview_scenario

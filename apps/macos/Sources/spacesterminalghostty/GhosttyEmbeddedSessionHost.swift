@@ -39,7 +39,8 @@
         func pasteClipboardContents() -> Bool
         @discardableResult func sendTextAsPaste(_ text: String) -> Bool
         @discardableResult func performBindingAction(_ action: String) -> Bool
-        @discardableResult func sendScroll(horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32) -> Bool
+        @discardableResult func sendScroll(horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32, pointerPosition: TerminalScrollPointerPosition?)
+            -> Bool
         @discardableResult func clearScreenAndScrollback() -> Bool
         var debugSearchState: GhosttyTerminalSearchDebugState { get }
         var debugSurfaceRefreshRequestCount: Int { get }
@@ -50,7 +51,11 @@
 
     extension TerminalGhosttyRendererHosting {
         @discardableResult public func sendScroll(horizontal: CGFloat, vertical: CGFloat) -> Bool {
-            sendScroll(horizontal: horizontal, vertical: vertical, scrollMods: 0)
+            sendScroll(horizontal: horizontal, vertical: vertical, scrollMods: 0, pointerPosition: nil)
+        }
+
+        @discardableResult public func sendScroll(horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32) -> Bool {
+            sendScroll(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods, pointerPosition: nil)
         }
     }
 
@@ -163,9 +168,9 @@
             return sessionDriver.performBindingAction(action)
         }
 
-        @discardableResult public func sendScroll(horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32) -> Bool {
-            sessionDriver.sendScroll(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods)
-        }
+        @discardableResult public func sendScroll(
+            horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32, pointerPosition: TerminalScrollPointerPosition?
+        ) -> Bool { sessionDriver.sendScroll(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods, pointerPosition: pointerPosition) }
 
         @discardableResult public func clearScreenAndScrollback() -> Bool { clearScreenAndScrollbackAction() }
 
@@ -977,6 +982,19 @@
             let horizontal = CGFloat(request.scrollHorizontal ?? 0)
             let vertical = CGFloat(request.scrollVertical ?? 0)
             let scrollMods = request.scrollMods ?? 0
+            let pointerPosition: TerminalScrollPointerPosition?
+            switch (request.scrollPointerX, request.scrollPointerY, request.scrollPointerMods) {
+            case (nil, nil, nil): pointerPosition = nil
+            case (let x?, let y?, let mods):
+                let position = TerminalScrollPointerPosition(x: x, y: y, mods: mods ?? 0)
+                guard position.isValid else {
+                    return TerminalControlResponse(ok: false, message: "Invalid terminal scroll pointer position.", errorCode: .invalidArgument)
+                }
+                pointerPosition = position
+            default:
+                return TerminalControlResponse(
+                    ok: false, message: "Terminal scroll pointer coordinates must be provided together.", errorCode: .invalidArgument)
+            }
             guard horizontal != 0 || vertical != 0 || scrollMods != 0 else {
                 return TerminalControlResponse(ok: true, message: "Ignored zero scroll delta.")
             }
@@ -985,7 +1003,8 @@
                 logMobileTakeoverPerformance(
                     name: "owner_input_activity", attributes: ["owner_kind": ownerClient.kind.rawValue, "interactive": "1", "input_kind": "scroll"])
             }
-            let scrolled = rendererHostStorage.sendScroll(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods)
+            let scrolled = rendererHostStorage.sendScroll(
+                horizontal: horizontal, vertical: vertical, scrollMods: scrollMods, pointerPosition: pointerPosition)
             if scrolled { broadcastCurrentState(reason: TerminalRemoteSessionStateReason.scroll) }
             TerminalPerformance.logMetric(
                 "terminal_control_scroll", target: "session=\(launchConfiguration.sessionID)",
@@ -1810,8 +1829,10 @@
 
         @discardableResult public func performBindingAction(_ action: String) -> Bool { core.rendererHost.performBindingAction(action) }
 
-        @discardableResult public func sendScroll(horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32) -> Bool {
-            core.rendererHost.sendScroll(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods)
+        @discardableResult public func sendScroll(
+            horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32, pointerPosition: TerminalScrollPointerPosition?
+        ) -> Bool {
+            core.rendererHost.sendScroll(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods, pointerPosition: pointerPosition)
         }
 
         @discardableResult public func clearScreenAndScrollback() -> Bool { core.rendererHost.clearScreenAndScrollback() }

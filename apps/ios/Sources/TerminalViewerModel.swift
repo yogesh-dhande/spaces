@@ -818,11 +818,21 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         }
     }
 
-    func sendScroll(horizontal: Double, vertical: Double, scrollMods: Int32 = 0) async {
+    func sendScroll(
+        horizontal: Double,
+        vertical: Double,
+        scrollMods: Int32 = 0,
+        pointerPosition: TerminalScrollPointerPosition? = nil
+    ) async {
         guard isOwner else { return }
         guard keepsTerminalInputSurfaceActive else { return }
         flushBufferedInputText()
-        scrollCoalescer.append(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods)
+        scrollCoalescer.append(
+            horizontal: horizontal,
+            vertical: vertical,
+            scrollMods: scrollMods,
+            pointerPosition: pointerPosition
+        )
     }
 
     func flushPendingScroll() {
@@ -976,7 +986,12 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         }
     }
 
-    private func performSendScrollRequest(horizontal: Double, vertical: Double, scrollMods: Int32) async throws {
+    private func performSendScrollRequest(
+        horizontal: Double,
+        vertical: Double,
+        scrollMods: Int32,
+        pointerPosition: TerminalScrollPointerPosition?
+    ) async throws {
         let ownerEpoch = currentOwnerEpoch
         try await performRequestUsingInputChannel { [bridgeClient, sessionID = session.id, clientID = remoteClient.id, ownerEpoch] commandChannel in
             try await bridgeClient.scroll(
@@ -986,6 +1001,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
                 vertical: vertical,
                 ownerEpoch: ownerEpoch,
                 scrollMods: scrollMods == 0 ? nil : scrollMods,
+                pointerPosition: pointerPosition,
                 timeout: Self.inputRequestTimeout,
                 commandChannel: commandChannel
             )
@@ -1000,7 +1016,12 @@ extension SpacesDeviceTerminalLinkArtifactKind {
                 return
             }
             defer { Task { @MainActor in onFinished() } }
-            try await self.performSendScrollRequest(horizontal: batch.horizontal, vertical: batch.vertical, scrollMods: batch.scrollMods)
+            try await self.performSendScrollRequest(
+                horizontal: batch.horizontal,
+                vertical: batch.vertical,
+                scrollMods: batch.scrollMods,
+                pointerPosition: batch.pointerPosition
+            )
         }
     }
 

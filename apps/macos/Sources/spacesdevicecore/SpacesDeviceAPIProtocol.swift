@@ -1095,6 +1095,9 @@ public struct SpacesDeviceTerminalControlRequest: Codable, Sendable, Equatable {
     public let scrollHorizontal: Double?
     public let scrollVertical: Double?
     public let scrollMods: Int32?
+    public let scrollPointerX: Double?
+    public let scrollPointerY: Double?
+    public let scrollPointerMods: UInt32?
     public let appendNewline: Bool
     public let asPaste: Bool
     /// The attaching client's OS appearance (light/dark), carried on `attach` so a remote daemon can render
@@ -1106,7 +1109,8 @@ public struct SpacesDeviceTerminalControlRequest: Codable, Sendable, Equatable {
         action: SpacesDeviceTerminalControlAction, sessionID: String, clientID: String? = nil, client: TerminalClient? = nil,
         attachmentMode: TerminalAttachmentMode? = nil, text: String? = nil, key: String? = nil, columns: Int? = nil, rows: Int? = nil,
         ownerEpoch: UInt64? = nil, resizeSerial: UInt64? = nil, scrollHorizontal: Double? = nil, scrollVertical: Double? = nil,
-        scrollMods: Int32? = nil, appendNewline: Bool = false, asPaste: Bool = false, appearance: ThemeAppearance? = nil
+        scrollMods: Int32? = nil, scrollPointerX: Double? = nil, scrollPointerY: Double? = nil, scrollPointerMods: UInt32? = nil,
+        appendNewline: Bool = false, asPaste: Bool = false, appearance: ThemeAppearance? = nil
     ) {
         self.action = action
         self.sessionID = sessionID
@@ -1122,6 +1126,9 @@ public struct SpacesDeviceTerminalControlRequest: Codable, Sendable, Equatable {
         self.scrollHorizontal = scrollHorizontal
         self.scrollVertical = scrollVertical
         self.scrollMods = scrollMods
+        self.scrollPointerX = scrollPointerX
+        self.scrollPointerY = scrollPointerY
+        self.scrollPointerMods = scrollPointerMods
         self.appendNewline = appendNewline
         self.asPaste = asPaste
         self.appearance = appearance
@@ -1291,9 +1298,8 @@ public struct SpacesDeviceAgentSessionRow: Codable, Sendable, Equatable {
     public let lastSignalAt: String?
 
     public init(
-        id: String, terminalSessionID: String?, agent: String?, label: String?, status: String, note: String?, projectID: String,
-        projectName: String, workspaceID: String, workspaceName: String, workspaceDir: String, branch: String?, updatedAt: String,
-        lastSignalAt: String?
+        id: String, terminalSessionID: String?, agent: String?, label: String?, status: String, note: String?, projectID: String, projectName: String,
+        workspaceID: String, workspaceName: String, workspaceDir: String, branch: String?, updatedAt: String, lastSignalAt: String?
     ) {
         self.id = id
         self.terminalSessionID = terminalSessionID

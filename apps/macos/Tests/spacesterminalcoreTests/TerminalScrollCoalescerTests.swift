@@ -47,6 +47,21 @@ import XCTest
         try await waitUntil { recorder.batches == [.init(horizontal: 4, vertical: 6, scrollMods: 15)] }
     }
 
+    func testScrollEventsRetainLatestPointerPosition() async throws {
+        let recorder = Recorder()
+        let coalescer = TerminalScrollCoalescer(frameInterval: .milliseconds(20)) { batch, finish in
+            recorder.enqueue(batch, finish: finish)
+            finish()
+        }
+
+        coalescer.append(horizontal: 0, vertical: 2, scrollMods: 7, pointerPosition: .init(x: 0.25, y: 0.5, mods: 1))
+        coalescer.append(horizontal: 0, vertical: 4, scrollMods: 15, pointerPosition: .init(x: 0.75, y: 0.8, mods: 8))
+
+        try await waitUntil {
+            recorder.batches == [.init(horizontal: 0, vertical: 6, scrollMods: 15, pointerPosition: .init(x: 0.75, y: 0.8, mods: 8))]
+        }
+    }
+
     func testInFlightScrollDoesNotQueueStaleFrameBatches() async throws {
         let recorder = Recorder()
         let coalescer = TerminalScrollCoalescer(frameInterval: .milliseconds(20)) { batch, finish in recorder.enqueue(batch, finish: finish) }

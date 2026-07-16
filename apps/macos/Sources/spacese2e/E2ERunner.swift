@@ -132,6 +132,9 @@ private struct E2EScenarioDescriptor: Sendable {
             name: "edit-shortcuts",
             kind: .script(scriptName: "e2e_terminal_edit_shortcuts.sh", arguments: [], environment: { $0.remoteEnvironment(enabled: false) })),
         E2EScenarioDescriptor(
+            name: "mouse-reporting-scroll",
+            kind: .script(scriptName: "e2e_terminal_mouse_reporting_scroll.sh", arguments: [], environment: { $0.remoteEnvironment(enabled: false) })),
+        E2EScenarioDescriptor(
             name: "agent-orchestration",
             kind: .script(scriptName: "e2e_agent_orchestration.sh", arguments: [], environment: { $0.remoteEnvironment(enabled: false) })),
         E2EScenarioDescriptor(name: "mac-input-latency", kind: .terminalLatency),
@@ -169,6 +172,7 @@ private struct E2EScenarioDescriptor: Sendable {
         E2EScenarioDescriptor(name: "codex-resume-reopen", kind: .mobileUI(needsRemote: false)),
         E2EScenarioDescriptor(name: "roundtrip", kind: .mobileUI(needsRemote: false)),
         E2EScenarioDescriptor(name: "scrollback", kind: .mobileUI(needsRemote: false)),
+        E2EScenarioDescriptor(name: "mouse-reporting-scroll", kind: .mobileUI(needsRemote: false)),
         E2EScenarioDescriptor(name: "terminal-link-preview", kind: .mobileUI(needsRemote: false)),
         E2EScenarioDescriptor(name: "two-session", kind: .mobileUI(needsRemote: true)),
         E2EScenarioDescriptor(name: "ctrl-c-final-frame", kind: .mobileUI(needsRemote: false)),

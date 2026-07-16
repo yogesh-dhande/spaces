@@ -2931,15 +2931,23 @@
 
         func testRemoteTerminalHostViewForwardsPreciseScrollMods() {
             let hostView = GhosttyRemoteTerminalHostView(frame: CGRect(x: 0, y: 0, width: 640, height: 480))
-            var sentScrolls: [(horizontal: Double, vertical: Double, scrollMods: Int32)] = []
-            hostView.onSendScroll = { horizontal, vertical, scrollMods in
-                sentScrolls.append((horizontal, vertical, scrollMods))
+            var sentScrolls: [
+                (
+                    horizontal: Double,
+                    vertical: Double,
+                    scrollMods: Int32,
+                    pointerPosition: TerminalScrollPointerPosition?
+                )
+            ] = []
+            hostView.onSendScroll = { horizontal, vertical, scrollMods, pointerPosition in
+                sentScrolls.append((horizontal, vertical, scrollMods, pointerPosition))
             }
 
             XCTAssertTrue(
                 hostView.debugSendScrollForTesting(
                     horizontal: 0,
                     vertical: 8,
+                    location: CGPoint(x: 160, y: 120),
                     hasPreciseDeltas: true,
                     momentumState: .changed
                 )
@@ -2948,6 +2956,7 @@
             XCTAssertEqual(sentScrolls.last?.horizontal, 0)
             XCTAssertEqual(sentScrolls.last?.vertical, 8)
             XCTAssertEqual(sentScrolls.last?.scrollMods, Int32(0b0000_0111))
+            XCTAssertEqual(sentScrolls.last?.pointerPosition, .init(x: 0.25, y: 0.25))
         }
 
         func testRemoteTerminalHostViewTinyScrollDeltaDoesNotForceRowJump() throws {
@@ -2988,7 +2997,7 @@
 
             let hostView = GhosttyRemoteTerminalHostView(frame: CGRect(x: 0, y: 0, width: 640, height: 480))
             var sentScrollCount = 0
-            hostView.onSendScroll = { _, _, _ in sentScrollCount += 1 }
+            hostView.onSendScroll = { _, _, _, _ in sentScrollCount += 1 }
             viewController.view.addSubview(hostView)
             window.isHidden = false
             viewController.view.frame = window.bounds
@@ -3026,9 +3035,16 @@
             window.rootViewController = viewController
 
             let hostView = GhosttyRemoteTerminalHostView(frame: CGRect(x: 0, y: 0, width: 640, height: 480))
-            var sentScrolls: [(horizontal: Double, vertical: Double, scrollMods: Int32)] = []
-            hostView.onSendScroll = { horizontal, vertical, scrollMods in
-                sentScrolls.append((horizontal, vertical, scrollMods))
+            var sentScrolls: [
+                (
+                    horizontal: Double,
+                    vertical: Double,
+                    scrollMods: Int32,
+                    pointerPosition: TerminalScrollPointerPosition?
+                )
+            ] = []
+            hostView.onSendScroll = { horizontal, vertical, scrollMods, pointerPosition in
+                sentScrolls.append((horizontal, vertical, scrollMods, pointerPosition))
             }
             viewController.view.addSubview(hostView)
             window.isHidden = false
@@ -3080,9 +3096,16 @@
             window.rootViewController = viewController
 
             let hostView = GhosttyRemoteTerminalHostView(frame: CGRect(x: 0, y: 0, width: 640, height: 480))
-            var sentScrolls: [(horizontal: Double, vertical: Double, scrollMods: Int32)] = []
-            hostView.onSendScroll = { horizontal, vertical, scrollMods in
-                sentScrolls.append((horizontal, vertical, scrollMods))
+            var sentScrolls: [
+                (
+                    horizontal: Double,
+                    vertical: Double,
+                    scrollMods: Int32,
+                    pointerPosition: TerminalScrollPointerPosition?
+                )
+            ] = []
+            hostView.onSendScroll = { horizontal, vertical, scrollMods, pointerPosition in
+                sentScrolls.append((horizontal, vertical, scrollMods, pointerPosition))
             }
             viewController.view.addSubview(hostView)
             window.isHidden = false

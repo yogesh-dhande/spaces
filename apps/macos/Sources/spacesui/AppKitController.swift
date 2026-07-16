@@ -1385,9 +1385,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// System entry point for the registered `spaces` URL scheme (declared in `CFBundleURLTypes`).
     /// Terminal deep links focus a session; a pairing link (iOS-only flow) is redirected loudly
     /// instead of being silently dropped; anything else is an unrecognized link.
-    public func application(_ application: NSApplication, open urls: [URL]) {
-        for url in urls { handleIncomingSpacesURL(url) }
-    }
+    public func application(_ application: NSApplication, open urls: [URL]) { for url in urls { handleIncomingSpacesURL(url) } }
 
     private func handleIncomingSpacesURL(_ url: URL) {
         if let link = SpacesTerminalDeepLink.parse(url) {
@@ -1400,8 +1398,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 message: "Pairing links open in the Spaces app on your iPhone or iPad, not on this Mac. Scan or tap the link there to pair a device.")
             return
         }
-        presentSpacesLinkAlert(
-            title: "Unrecognized Spaces link", message: "Spaces didn't recognize “\(url.absoluteString)”.")
+        presentSpacesLinkAlert(title: "Unrecognized Spaces link", message: "Spaces didn't recognize “\(url.absoluteString)”.")
     }
 
     /// Where a `spaces://terminal/…` deep link's session lives. A link with no `device` (or the local
@@ -1433,8 +1430,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 let opened = await self.openTerminalSessionPane(sessionID: sessionID, mode: .owner, requestID: focusRequestID)
                 if !opened { self.presentTerminalDeepLinkUnknownSessionAlert(sessionID: sessionID) }
             }
-        case .remote(let sessionID, let deviceID):
-            openRemoteTerminalDeepLink(sessionID: sessionID, deviceID: deviceID)
+        case .remote(let sessionID, let deviceID): openRemoteTerminalDeepLink(sessionID: sessionID, deviceID: deviceID)
         }
     }
 
@@ -1478,8 +1474,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 title: "Device unavailable",
                 message: "Spaces can't reach “\(pairedDevice.name)” right now. Make sure it's connected, then open the link again.")
         } else {
-            presentSpacesLinkAlert(
-                title: "Unknown device", message: "This link points to a device (\(deviceID)) that isn't paired with this Mac.")
+            presentSpacesLinkAlert(title: "Unknown device", message: "This link points to a device (\(deviceID)) that isn't paired with this Mac.")
         }
     }
 
@@ -2088,7 +2083,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             action: action, sessionID: sessionID, clientID: request.clientID, client: request.client, attachmentMode: request.attachmentMode,
             text: request.text, key: request.key, columns: request.columns, rows: request.rows, ownerEpoch: request.ownerEpoch,
             resizeSerial: request.resizeSerial, scrollHorizontal: request.scrollHorizontal, scrollVertical: request.scrollVertical,
-            scrollMods: request.scrollMods, appendNewline: request.appendNewline, asPaste: request.asPaste, appearance: request.appearance)
+            scrollMods: request.scrollMods, scrollPointerX: request.scrollPointerX, scrollPointerY: request.scrollPointerY,
+            scrollPointerMods: request.scrollPointerMods, appendNewline: request.appendNewline, asPaste: request.asPaste,
+            appearance: request.appearance)
     }
 
     /// Issues a terminal control request to the session's owning device and returns

@@ -1369,7 +1369,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             .scroll(
                 TerminalControlScrollPayload(
                     clientID: clientID, ownerEpoch: payload.ownerEpoch, scrollHorizontal: payload.scrollHorizontal,
-                    scrollVertical: payload.scrollVertical, scrollMods: payload.scrollMods))
+                    scrollVertical: payload.scrollVertical, scrollMods: payload.scrollMods, scrollPointerX: payload.scrollPointerX,
+                    scrollPointerY: payload.scrollPointerY, scrollPointerMods: payload.scrollPointerMods))
         case .setAppearance: .setAppearance(TerminalControlSetAppearancePayload(clientID: clientID, appearance: payload.appearance))
         }
     }
@@ -2194,9 +2195,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         guard let command = normalizedString(request.command) else {
             return SpacesDeviceAPIResponse(ok: false, message: "command is required.", errorCode: .invalidArgument)
         }
-        do {
-            _ = try AgentSpawnCommandGate.resolveSpawnableAgent(command: command)
-        } catch let error as AgentSpawnCommandGate.GateError {
+        do { _ = try AgentSpawnCommandGate.resolveSpawnableAgent(command: command) } catch let error as AgentSpawnCommandGate.GateError {
             return SpacesDeviceAPIResponse(
                 ok: false, message: error.errorDescription ?? "Agent spawn command is not supported.", errorCode: .invalidArgument)
         }

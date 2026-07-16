@@ -23,7 +23,7 @@
     @MainActor final class GhosttyMirrorTerminalView: NSView, NSSearchFieldDelegate {
         typealias SendTextHandler = @MainActor (String, Bool) -> Void
         typealias SendKeyHandler = @MainActor (String) -> Void
-        typealias SendScrollHandler = @MainActor (CGFloat, CGFloat, Int32) -> Void
+        typealias SendScrollHandler = @MainActor (CGFloat, CGFloat, Int32, TerminalScrollPointerPosition?) -> Void
         typealias ViewportSizeHandler = @MainActor (Int, Int) -> Void
 
         private struct SurfaceGeometry: Equatable {
@@ -234,7 +234,9 @@
 
         override func scrollWheel(with event: NSEvent) {
             let scrollMods = Self.makeScrollMods(hasPreciseDeltas: event.hasPreciseScrollingDeltas, phase: event.momentumPhase)
-            onSendScroll?(event.scrollingDeltaX, event.scrollingDeltaY, scrollMods)
+            let pointerPosition = Self.scrollPointerPosition(
+                for: event.locationInWindow, in: self, mods: Self.ghosttyMouseModifiers(for: event.modifierFlags).rawValue)
+            onSendScroll?(event.scrollingDeltaX, event.scrollingDeltaY, scrollMods, pointerPosition)
         }
 
         override func keyDown(with event: NSEvent) {
@@ -312,8 +314,10 @@
             return true
         }
 
-        @discardableResult func sendScroll(horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32 = 0) -> Bool {
-            onSendScroll?(horizontal, vertical, scrollMods)
+        @discardableResult func sendScroll(
+            horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32 = 0, pointerPosition: TerminalScrollPointerPosition? = nil
+        ) -> Bool {
+            onSendScroll?(horizontal, vertical, scrollMods, pointerPosition)
             return true
         }
 
@@ -871,6 +875,15 @@
         static func ghosttyMousePosition(for locationInWindow: NSPoint, in view: NSView) -> (x: Double, y: Double) {
             let position = view.convert(locationInWindow, from: nil)
             return (Double(position.x), Double(view.frame.height - position.y))
+        }
+
+        static func scrollPointerPosition(for locationInWindow: NSPoint, in view: NSView, mods: UInt32 = GHOSTTY_MODS_NONE.rawValue)
+            -> TerminalScrollPointerPosition?
+        {
+            let position = view.convert(locationInWindow, from: nil)
+            return TerminalScrollPointerPosition.normalized(
+                x: Double(position.x - view.bounds.minX), y: Double(view.bounds.maxY - position.y), width: Double(view.bounds.width),
+                height: Double(view.bounds.height), mods: mods)
         }
 
         static func ghosttyMouseButton(for buttonNumber: Int) -> ghostty_input_mouse_button_e {

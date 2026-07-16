@@ -5,11 +5,13 @@ import Foundation
         public let horizontal: Double
         public let vertical: Double
         public let scrollMods: Int32
+        public let pointerPosition: TerminalScrollPointerPosition?
 
-        public init(horizontal: Double, vertical: Double, scrollMods: Int32) {
+        public init(horizontal: Double, vertical: Double, scrollMods: Int32, pointerPosition: TerminalScrollPointerPosition? = nil) {
             self.horizontal = horizontal
             self.vertical = vertical
             self.scrollMods = scrollMods
+            self.pointerPosition = pointerPosition
         }
 
         public var hasPayload: Bool { horizontal != 0 || vertical != 0 || scrollMods != 0 }
@@ -22,14 +24,16 @@ import Foundation
         var horizontal: Double
         var vertical: Double
         var scrollMods: Int32
+        var pointerPosition: TerminalScrollPointerPosition?
 
-        mutating func append(horizontal: Double, vertical: Double, scrollMods: Int32) {
+        mutating func append(horizontal: Double, vertical: Double, scrollMods: Int32, pointerPosition: TerminalScrollPointerPosition?) {
             self.horizontal += horizontal
             self.vertical += vertical
             if scrollMods != 0 { self.scrollMods = scrollMods }
+            if let pointerPosition { self.pointerPosition = pointerPosition }
         }
 
-        var batch: Batch { Batch(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods) }
+        var batch: Batch { Batch(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods, pointerPosition: pointerPosition) }
     }
 
     private let frameInterval: Duration
@@ -43,10 +47,10 @@ import Foundation
         self.enqueue = enqueue
     }
 
-    public func append(horizontal: Double, vertical: Double, scrollMods: Int32 = 0) {
+    public func append(horizontal: Double, vertical: Double, scrollMods: Int32 = 0, pointerPosition: TerminalScrollPointerPosition? = nil) {
         guard horizontal != 0 || vertical != 0 || scrollMods != 0 || pending != nil else { return }
-        if pending == nil { pending = Pending(horizontal: 0, vertical: 0, scrollMods: 0) }
-        pending?.append(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods)
+        if pending == nil { pending = Pending(horizontal: 0, vertical: 0, scrollMods: 0, pointerPosition: nil) }
+        pending?.append(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods, pointerPosition: pointerPosition)
         scheduleFlushIfPossible(after: frameInterval)
     }
 

@@ -542,6 +542,7 @@ struct SpacesDeviceAPIClient: Sendable {
         vertical: Double,
         ownerEpoch: UInt64?,
         scrollMods: Int32? = nil,
+        pointerPosition: TerminalScrollPointerPosition? = nil,
         timeout: Duration = .seconds(3),
         commandChannel: SpacesDeviceAPICommandChannel? = nil
     ) async throws {
@@ -554,7 +555,10 @@ struct SpacesDeviceAPIClient: Sendable {
                     ownerEpoch: ownerEpoch,
                     scrollHorizontal: horizontal,
                     scrollVertical: vertical,
-                    scrollMods: scrollMods
+                    scrollMods: scrollMods,
+                    scrollPointerX: pointerPosition?.x,
+                    scrollPointerY: pointerPosition?.y,
+                    scrollPointerMods: pointerPosition?.mods
                 )),
             authToken: settings.trimmedAuthToken,
             clientApp: clientAppIdentity

@@ -90,7 +90,8 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
     }
 
     func testAnnotateAgentSessionRequestRoundTripsAndIsNotReplaySafe() throws {
-        let request = SpacesDeviceAPIRequest(command: .annotateAgentSession(.init(sessionID: "agent-session", note: "review auth")), authToken: "SECRET")
+        let request = SpacesDeviceAPIRequest(
+            command: .annotateAgentSession(.init(sessionID: "agent-session", note: "review auth")), authToken: "SECRET")
 
         XCTAssertEqual(request.commandName, "annotateAgentSession")
         XCTAssertFalse(request.isSafeToReplayAfterConnectionFailure)
@@ -222,7 +223,7 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
             command: .terminalControl(
                 .init(
                     action: .scroll, sessionID: "session-1", clientID: "ios-client", ownerEpoch: 3, scrollHorizontal: 1.5, scrollVertical: -2.5,
-                    scrollMods: 7)), authToken: "SECRET")
+                    scrollMods: 7, scrollPointerX: 0.25, scrollPointerY: 0.75, scrollPointerMods: 9)), authToken: "SECRET")
 
         XCTAssertEqual(try SpacesDeviceAPICodec.decodeRequest(SpacesDeviceAPICodec.encodeRequest(request)), request)
     }

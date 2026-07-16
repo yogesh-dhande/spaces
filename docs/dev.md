@@ -267,6 +267,7 @@ apps/macos/Tests/e2e.sh terminal --list
 apps/macos/Tests/e2e.sh terminal --scenario mac-input-latency
 apps/macos/Tests/e2e.sh terminal --scenario mac-scrollback-latency
 apps/macos/Tests/e2e.sh terminal --scenario mac-scrollback-partial-latency
+apps/macos/Tests/e2e.sh terminal --scenario mouse-reporting-scroll
 apps/macos/Tests/e2e.sh mobile --scenario ios-input-latency --network-profile local
 apps/macos/Tests/e2e.sh mobile --scenario ios-input-latency --network-profile ios-constrained
 apps/macos/Tests/e2e.sh mobile --scenario ios-scrollback-latency --network-profile local
@@ -439,13 +440,14 @@ apps/macos/Tests/e2e.sh mobile --scenario codex
 apps/macos/Tests/e2e.sh mobile --scenario codex-resume-reopen
 apps/macos/Tests/e2e.sh mobile --scenario roundtrip
 apps/macos/Tests/e2e.sh mobile --scenario scrollback
+apps/macos/Tests/e2e.sh mobile --scenario mouse-reporting-scroll
 apps/macos/Tests/e2e.sh mobile --scenario two-session
 apps/macos/Tests/e2e.sh mobile --scenario ctrl-c-final-frame
 apps/macos/Tests/e2e.sh mobile --scenario ctrl-c-final-frame-codex-survivor
 apps/macos/Tests/e2e.sh mobile --scenario ownership-guard
 ```
 
-`codex` starts real Codex in a fresh Mac-owned terminal session and verifies iPhone takeover against the already-running simulator app. Codex scenarios build a generated Codex home inside the demo root by copying the current user's config, linking signed-in auth files, and marking the demo project trusted so the test exercises the TUI instead of the directory-trust prompt. If Codex shows its startup update prompt, the harness selects `Skip` and continues waiting for the TUI. `codex-resume-reopen` runs `codex resume 019e380a-9def-7852-9834-74c67b2da894`, takes over on iPhone, returns to the terminal list, and repeatedly reopens the same session. `roundtrip` drives the Mac/iPhone/Mac/iPhone/Mac ownership path with rendered-content assertions at each handoff. `scrollback` fills the Mac-owned terminal with long output, transfers ownership to iPhone, scrolls away from bottom, runs an owner command while still scrolled up, and checks the owner epoch and prompt rendering. `two-session` takes over two fresh terminal sessions through list navigation. `ctrl-c-final-frame` creates `interrupt-target` and `survivor-peer` process-style sessions, sends `ctrl+c` to `interrupt-target` from the iOS owner path, checks the persisted final Ghostty frame on iOS and Mac, and verifies the `survivor-peer` session remains running. `ctrl-c-final-frame-codex-survivor` uses the same interrupt path with a real Codex TUI as the survivor session. `ownership-guard` exercises the Device API ownership rules without UI automation.
+`codex` starts real Codex in a fresh Mac-owned terminal session and verifies iPhone takeover against the already-running simulator app. Codex scenarios build a generated Codex home inside the demo root by copying the current user's config, linking signed-in auth files, and marking the demo project trusted so the test exercises the TUI instead of the directory-trust prompt. If Codex shows its startup update prompt, the harness selects `Skip` and continues waiting for the TUI. `codex-resume-reopen` runs `codex resume 019e380a-9def-7852-9834-74c67b2da894`, takes over on iPhone, returns to the terminal list, and repeatedly reopens the same session. `roundtrip` drives the Mac/iPhone/Mac/iPhone/Mac ownership path with rendered-content assertions at each handoff. `scrollback` fills the Mac-owned terminal with long output, transfers ownership to iPhone, scrolls away from bottom, runs an owner command while still scrolled up, and checks the owner epoch and prompt rendering. `mouse-reporting-scroll` runs a deterministic SGR mouse-reporting terminal process and verifies that a real Mac wheel event or iPhone simulator swipe reaches it with valid terminal coordinates. `two-session` takes over two fresh terminal sessions through list navigation. `ctrl-c-final-frame` creates `interrupt-target` and `survivor-peer` process-style sessions, sends `ctrl+c` to `interrupt-target` from the iOS owner path, checks the persisted final Ghostty frame on iOS and Mac, and verifies the `survivor-peer` session remains running. `ctrl-c-final-frame-codex-survivor` uses the same interrupt path with a real Codex TUI as the survivor session. `ownership-guard` exercises the Device API ownership rules without UI automation.
 
 Useful overrides:
 - `SPACES_MOBILE_CODEX_COMMAND='codex resume <thread-id>'` replaces the default `codex` startup command for the `codex` scenario.

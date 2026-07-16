@@ -1940,6 +1940,61 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         XCTAssertEqual(sessionDriver.debugLastScrollMods, 0b0000_0111)
     }
 
+    @MainActor func testHeadlessDriverSendsScrollToMouseReportingApplicationAtPointerPosition() throws {
+        let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
+        guard case .available = availability else { throw XCTSkip("Ghostty runtime resources are unavailable for embedded renderer testing.") }
+
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let scriptURL = root.appendingPathComponent("mouse_probe.py")
+        let outputURL = root.appendingPathComponent("mouse_input.bin")
+        try """
+        import os
+        import sys
+        import termios
+        import tty
+
+        fd = sys.stdin.fileno()
+        previous = termios.tcgetattr(fd)
+        try:
+            tty.setraw(fd)
+            os.write(sys.stdout.fileno(), b"\\x1b[?1000h\\x1b[?1006hREADY\\r\\n")
+            data = os.read(fd, 128)
+            with open(sys.argv[1], "wb") as output:
+                output.write(data)
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, previous)
+        """.write(to: scriptURL, atomically: true, encoding: .utf8)
+
+        func shellQuoted(_ value: String) -> String { "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'" }
+        let sessionDriver = GhosttyEmbeddedTerminalSessionDriver(
+            launchConfiguration: TerminalSessionLaunchConfiguration(
+                sessionID: "host-managed-mouse-scroll-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "mouse-scroll",
+                workingDirectory: root.path, shell: "/bin/zsh",
+                command: "/usr/bin/python3 \(shellQuoted(scriptURL.path)) \(shellQuoted(outputURL.path))", createdAt: "2026-07-16T00:00:00Z",
+                workspaceID: "workspace-1", kind: .shell))
+        defer { sessionDriver.terminate() }
+
+        try sessionDriver.startIfNeeded()
+        try waitUntil { sessionDriver.snapshotText()?.contains("READY") == true }
+        let size = try XCTUnwrap(sessionDriver.surfaceCellSize())
+
+        XCTAssertTrue(
+            sessionDriver.sendScroll(
+                horizontal: 0, vertical: 48, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: .init(x: 0.5, y: 0.5)))
+        try waitUntil { FileManager.default.fileExists(atPath: outputURL.path) }
+
+        let input = String(decoding: try Data(contentsOf: outputURL), as: UTF8.self)
+        let expression = try NSRegularExpression(pattern: #"\u001B\[<(64|65);([0-9]+);([0-9]+)M"#)
+        let range = NSRange(input.startIndex..<input.endIndex, in: input)
+        let match = try XCTUnwrap(expression.firstMatch(in: input, range: range))
+        let column = Int((input as NSString).substring(with: match.range(at: 2)))
+        let row = Int((input as NSString).substring(with: match.range(at: 3)))
+        XCTAssertTrue((1...size.columns).contains(try XCTUnwrap(column)))
+        XCTAssertTrue((1...size.rows).contains(try XCTUnwrap(row)))
+    }
+
     @MainActor func testControlAttachAndDetachRequestsUpdatePersistenceAndPostAttachmentChanges() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -2049,6 +2104,32 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         let response = host.handleControlRequest(.init(command: "scroll", clientID: owner.id, scrollHorizontal: 0, scrollVertical: 0, scrollMods: 7))
 
         XCTAssertEqual(response, TerminalControlResponse(ok: true, message: "Ignored zero scroll delta."))
+    }
+
+    @MainActor func testControlScrollRejectsIncompletePointerPosition() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "session-invalid-scroll-pointer-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp",
+            shell: "/bin/zsh", command: nil, createdAt: "2026-07-16T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+        let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+        defer { host.terminate() }
+        try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+        let owner = TerminalClient(
+            id: "remote-owner", kind: .remoteViewer, identity: .init(label: "iPhone", deviceName: "iPhone"), connectedAt: "2026-07-16T00:00:00Z")
+        XCTAssertTrue(host.handleControlRequest(.init(command: "attach", client: owner, attachmentMode: .viewer)).ok)
+        XCTAssertTrue(host.handleControlRequest(.init(command: "takeover", clientID: owner.id)).ok)
+
+        let response = host.handleControlRequest(.init(command: "scroll", clientID: owner.id, scrollVertical: 24, scrollPointerX: 0.5))
+
+        XCTAssertEqual(
+            response,
+            TerminalControlResponse(ok: false, message: "Terminal scroll pointer coordinates must be provided together.", errorCode: .invalidArgument)
+        )
     }
 
     @MainActor func testControlKeyCommandKClearsScreenThroughHostAction() throws {
