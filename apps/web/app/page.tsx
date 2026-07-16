@@ -200,7 +200,12 @@ type FaqItem = {
 const faqItems: FaqItem[] = [
   {
     question: "How much does it cost?",
-    answer: <>Spaces is free!</>,
+    answer: (
+      <>
+        Spaces is free on Mac and Linux. The iOS companion app is $29/year,
+        with a 7-day free trial.
+      </>
+    ),
   },
   {
     question: "What are the system requirements?",
@@ -458,7 +463,11 @@ export default function HomePage() {
             <dl className="mt-8 grid grid-cols-3 gap-6 border-t border-line/70 pt-7">
               <SpecItem label="Client" value="macOS + iOS" />
               <SpecItem label="Daemon" value="macOS + Linux" />
-              <SpecItem label="Price" value="Free" />
+              <SpecItem
+                label="Price"
+                value="Free on Mac & Linux · iOS app $29/year"
+                valueClassName="text-sm md:text-base"
+              />
             </dl>
           </div>
 
@@ -1205,13 +1214,23 @@ function PhoneGlyph() {
   );
 }
 
-function SpecItem({ label, value }: { label: string; value: string }) {
+function SpecItem({
+  label,
+  value,
+  valueClassName = "text-lg md:text-xl",
+}: {
+  label: string;
+  value: string;
+  valueClassName?: string;
+}) {
   return (
     <div>
       <dt className="font-mono text-[0.62rem] uppercase tracking-[0.14em] text-foreground-soft">
         {label}
       </dt>
-      <dd className="mt-1.5 text-lg font-semibold leading-tight tracking-tight tabular-nums md:text-xl">
+      <dd
+        className={`mt-1.5 font-semibold leading-tight tracking-tight tabular-nums ${valueClassName}`}
+      >
         {value}
       </dd>
     </div>

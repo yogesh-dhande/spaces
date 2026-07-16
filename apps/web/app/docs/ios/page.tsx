@@ -86,6 +86,7 @@ export default function IOSDocsPage() {
           <li>• On your Mac, open the Devices panel to show a pairing QR code, or run <code>spaces device pair</code> to print a <code>spaces://pair</code> link.</li>
           <li>• Scan the QR code with the Spaces iOS app, or open the printed link on your phone.</li>
           <li>• The iOS app pairs with any Mac or Linux device running Spaces. Pair more than one and switch between them from the app.</li>
+          <li>• The iOS app is $29/year, with a 7-day free trial. Spaces on Mac and Linux is free.</li>
         </ul>
       </article>
     </DocsShell>
