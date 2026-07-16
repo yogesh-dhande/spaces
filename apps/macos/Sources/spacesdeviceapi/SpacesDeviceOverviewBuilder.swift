@@ -394,6 +394,7 @@ struct SpacesDeviceOverviewBuilder {
         case .spinning: return .spinning
         case .waiting: return .waiting
         case .done: return .done
+        case .exited: return .exited
         case .idle, nil: return .idle
         }
     }

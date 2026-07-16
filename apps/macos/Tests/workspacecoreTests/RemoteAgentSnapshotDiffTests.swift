@@ -60,6 +60,47 @@ final class RemoteAgentSnapshotDiffTests: XCTestCase {
         XCTAssertTrue(result.transitions.isEmpty)
     }
 
+    /// A status change to `exited` (the child process ended but its terminal survived, so the row stays
+    /// in the listing) delivers a single `.exited` transition carrying the fresh row, from every prior
+    /// live state.
+    func testTransitionToExitedStatusEmitsExitedCarryingNewRow() throws {
+        for previousStatus in ["spinning", "waiting", "done"] {
+            let baseline = RemoteAgentSnapshotDiff.diff(
+                previous: [:], newRows: [row(terminal: "term-1", status: previousStatus)], watchedTerminalSessionIDs: ["term-1"])
+
+            let result = RemoteAgentSnapshotDiff.diff(
+                previous: baseline.snapshot, newRows: [row(terminal: "term-1", status: "exited")], watchedTerminalSessionIDs: ["term-1"])
+
+            XCTAssertEqual(result.transitions.map(\.kind), [.exited], "\(previousStatus) → exited must emit one exited transition")
+            // Unlike the row-disappearance case, the status-transition exit renders from the fresh row and
+            // the agent stays in the snapshot (its terminal is still watched).
+            XCTAssertEqual(result.transitions.first?.row.status, "exited")
+            XCTAssertEqual(Set(result.snapshot.keys), ["term-1"])
+        }
+    }
+
+    /// A newly-watched agent already observed as `exited` on its first snapshot seeds silently: the first
+    /// observation never emits, so subscribing to an already-exited agent replays nothing.
+    func testFirstObservationOfExitedRowSeedsSilently() throws {
+        let result = RemoteAgentSnapshotDiff.diff(
+            previous: [:], newRows: [row(terminal: "term-1", status: "exited")], watchedTerminalSessionIDs: ["term-1"])
+
+        XCTAssertTrue(result.transitions.isEmpty)
+        XCTAssertEqual(Set(result.snapshot.keys), ["term-1"])
+    }
+
+    /// idle → spinning is an ordinary start with nothing held to withdraw, so it stays silent — only
+    /// waiting → spinning (a post-approval resume) emits the non-notifying `resumedWorking`.
+    func testIdleToSpinningEmitsNothing() throws {
+        let baseline = RemoteAgentSnapshotDiff.diff(
+            previous: [:], newRows: [row(terminal: "term-1", status: "idle")], watchedTerminalSessionIDs: ["term-1"])
+
+        let result = RemoteAgentSnapshotDiff.diff(
+            previous: baseline.snapshot, newRows: [row(terminal: "term-1", status: "spinning")], watchedTerminalSessionIDs: ["term-1"])
+
+        XCTAssertTrue(result.transitions.isEmpty)
+    }
+
     func testWatchedAgentAbsentFromListingIsExitedAndLeavesSnapshot() throws {
         let baseline = RemoteAgentSnapshotDiff.diff(
             previous: [:], newRows: [row(terminal: "term-1", status: "done")], watchedTerminalSessionIDs: ["term-1"])

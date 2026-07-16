@@ -442,6 +442,29 @@ final class AgentNotificationEngineTests: XCTestCase {
         XCTAssertEqual(recorder.delivered.map(\.sessionID), ["plain-shell"], "A terminal with no agent row delivers immediately.")
     }
 
+    /// A subscriber whose own agent row is `.exited` is not idle: its terminal is a bare shell now, so a
+    /// delivered line would type into the shell. The transition queues instead, to flush when a new agent
+    /// inits in that terminal.
+    func testExitedSubscriberQueuesRatherThanDelivers() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        let recorder = DeliveryRecorder()
+        let engine = makeEngine(store: store, recorder: recorder)
+
+        let subscriber = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "sub-session", status: .spinning)
+        try store.updateAgentWindowStatus(id: subscriber.id, status: .exited, updatedAt: "now")
+        let child = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "A", terminalTrackingID: "childA", status: .waiting)
+        try store.insertAgentSubscription(subscriberTerminalSessionID: "sub-session", agentSessionID: child.id, createdAt: "t")
+
+        try engine.childDidTransition(agent: child, transition: .blocked)
+
+        XCTAssertTrue(recorder.delivered.isEmpty, "An exited subscriber must not receive an immediate line.")
+        XCTAssertEqual(try store.pendingAgentNotifications(subscriberTerminalSessionID: "sub-session").count, 1)
+    }
+
     func testFailedImmediateDeliveryDropsSubscriptionEdge() throws {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)

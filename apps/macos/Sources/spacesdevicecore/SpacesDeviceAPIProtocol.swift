@@ -266,6 +266,9 @@ public enum SpacesDeviceCodingAgentActivityState: String, Codable, Sendable, Equ
     case spinning
     case waiting
     case done
+    /// The agent process ended while its terminal session stayed open. Mirrors `AgentWindowStatus.exited`
+    /// over the wire; behaves like `idle` (no alert, not active) but reads as a distinct, gone state.
+    case exited
 }
 
 public struct SpacesDeviceWorkspaceProcessRow: Codable, Sendable, Equatable, Identifiable {

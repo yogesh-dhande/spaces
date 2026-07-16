@@ -62,7 +62,8 @@ enum SpacesMobileAttention {
                 switch agent.activityState {
                 case .waiting: kind = .waitingForInput
                 case .done: kind = .finished
-                case .idle, .spinning: kind = nil
+                // Exited raises no attention event: the agent is gone, nothing needs the user.
+                case .idle, .spinning, .exited: kind = nil
                 }
                 guard let kind, let date = date(fromISO8601: agent.updatedAt) else { continue }
                 events.append(

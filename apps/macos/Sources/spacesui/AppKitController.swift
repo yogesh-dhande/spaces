@@ -3059,6 +3059,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         case .spinning: return .spinning
         case .waiting: return .waiting
         case .done: return .done
+        case .exited: return .exited
         }
     }
 
@@ -6620,6 +6621,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 case .done:
                     statusIconName = "circle.fill"
                     statusColor = .systemGreen
+                case .exited:
+                    // Agent gone, terminal alive: hollow dimmed dot, distinct from idle's filled dot.
+                    statusIconName = "circle"
+                    statusColor = .tertiaryLabelColor
                 default:
                     statusIconName = "circle.fill"
                     statusColor = .tertiaryLabelColor
@@ -10722,6 +10727,7 @@ struct CommandPaletteItem: Sendable {
             case .waiting: return RowPrimitives.statusDot(.waiting)
             case .done: return RowPrimitives.statusDot(.running)
             case .idle: return RowPrimitives.statusDot(.idle)
+            case .exited: return RowPrimitives.statusDot(.exited)
             }
         }
     }

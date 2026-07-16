@@ -142,6 +142,10 @@ public struct AgentNotificationEngine {
         switch agent.status {
         case .idle, .done: return true
         case .spinning, .waiting: return false
+        // The subscriber's own agent process is gone but its row (and terminal) survive. Delivering now
+        // would type the line into a bare shell, so queue it; the queue flushes when a new agent inits in
+        // that terminal (the exited→idle reset makes `init` a `leavesSubscriberIdle` cue).
+        case .exited: return false
         }
     }
 

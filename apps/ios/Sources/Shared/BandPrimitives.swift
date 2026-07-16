@@ -106,7 +106,8 @@ extension StatusDot.Kind {
         case .waiting: self = .waiting
         case .done: self = .done
         case .spinning: self = .running
-        case .idle: self = StatusDot.Kind(runState: runState)
+        // Exited and idle both mean no agent activity, so the dot reflects the terminal's run state.
+        case .idle, .exited: self = StatusDot.Kind(runState: runState)
         }
     }
 

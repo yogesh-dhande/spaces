@@ -415,6 +415,12 @@ extension WorkspaceOrchestrator {
         let existingAgentWindows = try store.agentWindows(workspaceID: workspaceID)
         let trackedWindow = try ensureTrackedWindowExistsForAgent(
             workspaceID: workspaceID, provider: provider, label: label, terminalTrackingID: terminalTrackingID)
+        // The `init` signal re-registers a terminal's agent row and preserves its current status so a
+        // reconnect never disturbs a live agent. But an `init` on a terminal whose previous agent
+        // `.exited` means a fresh agent is reusing that terminal, so its status resets to `.idle` rather
+        // than staying `.exited`. This is the single chokepoint for that restart-reuse reset, shared by
+        // the daemon and remote signal init paths (both pass the preserved `existing.status`).
+        let resolvedStatus: AgentWindowStatus = status == .exited ? .idle : status
         if let existing = try matchingAgentWindow(workspaceID: workspaceID, terminalTrackingID: terminalTrackingID, sessionKey: sessionKey) {
             let resolvedClaimedLauncherName = claimedLauncherName ?? existing.claimedLauncherName
             let resolvedLabel = try uniqueAgentFocusLabel(
@@ -426,7 +432,8 @@ extension WorkspaceOrchestrator {
                 terminalTarget: TerminalTargetRecord(
                     runtimeTargetID: existing.runtimeTargetID ?? trackedWindow?.id, trackingID: terminalTrackingID ?? existing.terminalTrackingID),
                 sessionKey: sessionKey ?? existing.sessionKey, claimedLauncherID: claimedLauncherID ?? existing.claimedLauncherID,
-                claimedLauncherName: resolvedClaimedLauncherName, status: status, note: existing.note, createdAt: existing.createdAt, updatedAt: now)
+                claimedLauncherName: resolvedClaimedLauncherName, status: resolvedStatus, note: existing.note, createdAt: existing.createdAt,
+                updatedAt: now)
             try validateWorkspaceFocusNames(
                 workspaceID: workspaceID, processes: try store.workspaceProcesses(workspaceID: workspaceID),
                 browserSessions: try store.workspaceBrowserSessions(workspaceID: workspaceID),
@@ -443,7 +450,7 @@ extension WorkspaceOrchestrator {
         let record = AgentWindowRecord(
             id: UUID().uuidString, workspaceID: workspaceID, provider: provider, label: resolvedLabel, runtimeTargetID: trackedWindow?.id,
             terminalTarget: TerminalTargetRecord(runtimeTargetID: trackedWindow?.id, trackingID: terminalTrackingID), sessionKey: sessionKey,
-            claimedLauncherID: claimedLauncherID, claimedLauncherName: claimedLauncherName, status: status, createdAt: now, updatedAt: now)
+            claimedLauncherID: claimedLauncherID, claimedLauncherName: claimedLauncherName, status: resolvedStatus, createdAt: now, updatedAt: now)
         try validateWorkspaceFocusNames(
             workspaceID: workspaceID, processes: try store.workspaceProcesses(workspaceID: workspaceID),
             browserSessions: try store.workspaceBrowserSessions(workspaceID: workspaceID), agentWindows: existingAgentWindows + [record])
@@ -511,8 +518,11 @@ extension WorkspaceOrchestrator {
         let sessionBackedSpacesAgent = builtInAgentSessionID(for: existing) != nil
         let existingSessionIsLive = sessionBackedSpacesAgent && builtInAgentSessionIsStillLive(existing)
         if existingSessionIsLive {
+            // The agent process ended but its terminal session is still open, so keep the row and mark it
+            // `exited` (not `idle`): the terminal stays addressable and a restart reuses it, while remote
+            // watchers see a real exit transition instead of a status change they treat as "not started".
             return try recordAgentExitStatus(
-                existing, status: .idle, eventType: eventType, eventSource: eventSource, environmentKeys: environmentKeys)
+                existing, status: .exited, eventType: eventType, eventSource: eventSource, environmentKeys: environmentKeys)
         }
         appendAgentSessionEvent(
             agentSessionID: existing.id, eventType: eventType, source: eventSource,

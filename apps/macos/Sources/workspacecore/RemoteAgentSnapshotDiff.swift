@@ -15,10 +15,13 @@ import spacesdevicecore
 ///  - a newly-watched agent seen for the first time seeds silently, so subscribing never replays the
 ///    state the agent was already in at subscribe time.
 ///
-/// Transitions: a status change to `waiting` is `blocked`, to `done` is `done`, a previously-seen
-/// watched agent that is absent from the new listing has `exited`, and `waiting` → `spinning` is
-/// `resumedWorking` — the child resumed after an approval, which never notifies but withdraws that
-/// child's held `blocked` line.
+/// Transitions: a status change to `waiting` is `blocked`, to `done` is `done`, and `waiting` →
+/// `spinning` is `resumedWorking` — the child resumed after an approval, which never notifies but
+/// withdraws that child's held `blocked` line. Exit has two observable shapes, both mapped to `exited`:
+/// a status change to `exited` (the child process ended but its terminal survived, so the row remains)
+/// and a previously-seen watched agent that is absent from the new listing (the terminal is gone). A
+/// `waiting` → `exited` change delivers `exited`; the engine's per-(subscriber, agent) pending-queue
+/// upsert then replaces any held `blocked` line, so no stale "is blocked" notice outlives the exit.
 public enum RemoteAgentSnapshotDiff {
     public enum TransitionKind: Equatable {
         case blocked
@@ -88,6 +91,7 @@ public enum RemoteAgentSnapshotDiff {
         switch current {
         case AgentWindowStatus.waiting.rawValue: return .blocked
         case AgentWindowStatus.done.rawValue: return .done
+        case AgentWindowStatus.exited.rawValue: return .exited
         case AgentWindowStatus.spinning.rawValue: return previous == AgentWindowStatus.waiting.rawValue ? .resumedWorking : nil
         default: return nil
         }

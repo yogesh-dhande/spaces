@@ -940,13 +940,16 @@ import workspacecore
         case done = "done"
         case exit = "exit"
 
+        /// The status each signal maps its agent row to. The `.exit` value is not consumed on the exit
+        /// path — `handleAgentExit` owns that decision (delete, `.done`, or `.exited`) — but reads
+        /// `.exited` so the mapping stays honest.
         var status: AgentWindowStatus {
             switch self {
             case .`init`: .idle
             case .working: .spinning
             case .blocked: .waiting
             case .done: .done
-            case .exit: .idle
+            case .exit: .exited
             }
         }
 

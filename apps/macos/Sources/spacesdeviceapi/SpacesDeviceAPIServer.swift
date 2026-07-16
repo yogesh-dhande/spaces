@@ -1536,7 +1536,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 switch agent.status {
                 case .spinning: activeAgents += 1
                 case .waiting: waitingAgents += 1
-                case .idle, .done: break
+                // Exited counts as no live agent work, like idle/done: a restart destroys nothing for it.
+                case .idle, .done, .exited: break
                 }
             }
         }
@@ -1711,7 +1712,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         case .spinning: return 3
         case .waiting: return 2
         case .idle: return 1
-        case .done: return 0
+        // Exited agents (process gone, terminal alive) sort to the bottom alongside done.
+        case .done, .exited: return 0
         }
     }
 
