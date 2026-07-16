@@ -1062,8 +1062,7 @@ import workspacecore
                     let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths)
                 else { return nil }
                 return runtimeState.foregroundDetectedAgentKind?.displayLabel
-            },
-            logError: { writeStandardError($0) })
+            }, logError: { writeStandardError($0) })
     }
 
     /// Delivers a rendered notification line into a subscriber terminal and submits it with a single
@@ -1075,8 +1074,7 @@ import workspacecore
     /// engine wiring and the cross-device `RemoteAgentWatchService` so both submit identically. A send
     /// failure throws, signalling the caller that the subscriber has vanished.
     private func submitAgentNotificationLine(sessionID: String, line: String) throws {
-        _ = try sendProfileTerminalInput(
-            TerminalServiceTerminalSendPayload(sessionID: sessionID, input: .text(line), appendNewline: true))
+        _ = try sendProfileTerminalInput(TerminalServiceTerminalSendPayload(sessionID: sessionID, input: .text(line), appendNewline: true))
     }
 
     private func profileAgentRuntimeLabel(sessionID: String) -> String? {

@@ -404,7 +404,8 @@ extension TerminalServiceProfileCommand: Codable {
         case .agentKill: self = .agentKill(try container.decode(TerminalServiceAgentKillPayload.self, forKey: key))
         case .agentSubscribe: self = .agentSubscribe(try container.decode(TerminalServiceAgentSubscriptionPayload.self, forKey: key))
         case .agentUnsubscribe: self = .agentUnsubscribe(try container.decode(TerminalServiceAgentSubscriptionPayload.self, forKey: key))
-        case .agentConsumePendingEvents: self = .agentConsumePendingEvents(subscriberTerminalSessionID: try container.decodeRequiredNonEmpty(forKey: key))
+        case .agentConsumePendingEvents:
+            self = .agentConsumePendingEvents(subscriberTerminalSessionID: try container.decodeRequiredNonEmpty(forKey: key))
         case .terminalSend: self = .terminalSend(try container.decode(TerminalServiceTerminalSendPayload.self, forKey: key))
         case .terminalTail: self = .terminalTail(try container.decode(TerminalServiceTerminalTailPayload.self, forKey: key))
         case .terminalCommand: self = .terminalCommand(try container.decode(TerminalServiceTerminalCommandPayload.self, forKey: key))

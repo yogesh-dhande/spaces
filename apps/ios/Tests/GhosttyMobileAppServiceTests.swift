@@ -9,8 +9,7 @@
     @testable import SpacesMobile
     @testable import spacesterminalmobileghostty
 
-    @MainActor
-    final class TerminalViewerModelTests: XCTestCase {
+    @MainActor final class TerminalViewerModelTests: XCTestCase {
         private actor LinkPreviewGate {
             private var didStartSlow = false
             private var isReleased = false
@@ -26,16 +25,12 @@
 
             func waitForSlowStart() async {
                 guard !didStartSlow else { return }
-                await withCheckedContinuation { continuation in
-                    startWaiters.append(continuation)
-                }
+                await withCheckedContinuation { continuation in startWaiters.append(continuation) }
             }
 
             func waitForRelease() async {
                 guard !isReleased else { return }
-                await withCheckedContinuation { continuation in
-                    releaseWaiters.append(continuation)
-                }
+                await withCheckedContinuation { continuation in releaseWaiters.append(continuation) }
             }
 
             func releaseSlow() {
@@ -77,16 +72,12 @@
 
             func waitForSlowStart() async {
                 guard !didStartSlow else { return }
-                await withCheckedContinuation { continuation in
-                    startWaiters.append(continuation)
-                }
+                await withCheckedContinuation { continuation in startWaiters.append(continuation) }
             }
 
             func waitForSlowCancel() async {
                 guard !didCancelSlow else { return }
-                await withCheckedContinuation { continuation in
-                    cancelWaiters.append(continuation)
-                }
+                await withCheckedContinuation { continuation in cancelWaiters.append(continuation) }
             }
         }
 
@@ -99,18 +90,14 @@
 
             func containsTerminalControlAction(_ action: SpacesDeviceTerminalControlAction) -> Bool {
                 requests.contains { request in
-                    if case .terminalControl(let payload) = request.command {
-                        return payload.action == action
-                    }
+                    if case .terminalControl(let payload) = request.command { return payload.action == action }
                     return false
                 }
             }
 
             func countTerminalControlAction(_ action: SpacesDeviceTerminalControlAction) -> Int {
                 requests.filter { request in
-                    if case .terminalControl(let payload) = request.command {
-                        return payload.action == action
-                    }
+                    if case .terminalControl(let payload) = request.command { return payload.action == action }
                     return false
                 }.count
             }
@@ -177,9 +164,7 @@
                 var boundAddress = sockaddr_in()
                 var length = socklen_t(MemoryLayout<sockaddr_in>.size)
                 let nameResult = withUnsafeMutablePointer(to: &boundAddress) { pointer in
-                    pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPointer in
-                        getsockname(fd, sockaddrPointer, &length)
-                    }
+                    pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPointer in getsockname(fd, sockaddrPointer, &length) }
                 }
                 guard nameResult == 0 else {
                     close(fd)
@@ -210,9 +195,7 @@
                 }
             }
 
-            deinit {
-                stop()
-            }
+            deinit { stop() }
 
             private func acceptConnections() {
                 while true {
@@ -230,9 +213,7 @@
                 }
             }
 
-            private static func currentPOSIXError() -> POSIXError {
-                POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
-            }
+            private static func currentPOSIXError() -> POSIXError { POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
         }
 
         private func settings() -> SpacesMobileConnectionSettings {
@@ -246,57 +227,21 @@
 
         private func session(state: TerminalSessionState = .running) -> SpacesDeviceTerminalSessionSummary {
             SpacesDeviceTerminalSessionSummary(
-                id: "terminal-session",
-                title: "terminal",
-                workingDirectory: "/tmp/work",
-                shell: "/bin/zsh",
-                command: nil,
-                state: state,
-                backend: .ghosttyEmbedded,
-                lifetimePolicy: .persistent,
-                servicePID: 100,
-                childPID: 200,
-                workspaceID: "workspace-1",
-                workspaceTitle: nil,
-                projectID: nil,
-                projectName: nil,
-                createdAt: "2026-06-04T14:23:10Z",
-                updatedAt: "2026-06-04T14:23:23Z",
-                isControlAvailable: true,
-                isSubscriptionAvailable: true,
-                attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
-                rowKind: .process,
-                rowSourceID: "process-row",
-                hasFinalRender: false
-            )
+                id: "terminal-session", title: "terminal", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: nil, state: state,
+                backend: .ghosttyEmbedded, lifetimePolicy: .persistent, servicePID: 100, childPID: 200, workspaceID: "workspace-1",
+                workspaceTitle: nil, projectID: nil, projectName: nil, createdAt: "2026-06-04T14:23:10Z", updatedAt: "2026-06-04T14:23:23Z",
+                isControlAvailable: true, isSubscriptionAvailable: true, attachmentSnapshot: TerminalSessionAttachmentSnapshot(), rowKind: .process,
+                rowSourceID: "process-row", hasFinalRender: false)
         }
 
         func testEndedSessionDoesNotOfferTakeOverWhenFinalRenderIsMissing() {
             let settings = settings()
             let session = SpacesDeviceTerminalSessionSummary(
-                id: "ended-session",
-                title: "ended",
-                workingDirectory: "/tmp/work",
-                shell: "/bin/zsh",
-                command: nil,
-                state: .exited,
-                backend: .ghosttyEmbedded,
-                lifetimePolicy: .persistent,
-                servicePID: 100,
-                childPID: 200,
-                workspaceID: "workspace-1",
-                workspaceTitle: nil,
-                projectID: nil,
-                projectName: nil,
-                createdAt: "2026-06-04T14:23:10Z",
-                updatedAt: "2026-06-04T14:23:23Z",
-                isControlAvailable: false,
-                isSubscriptionAvailable: false,
-                attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
-                rowKind: .process,
-                rowSourceID: "process-row",
-                hasFinalRender: false
-            )
+                id: "ended-session", title: "ended", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: nil, state: .exited,
+                backend: .ghosttyEmbedded, lifetimePolicy: .persistent, servicePID: 100, childPID: 200, workspaceID: "workspace-1",
+                workspaceTitle: nil, projectID: nil, projectName: nil, createdAt: "2026-06-04T14:23:10Z", updatedAt: "2026-06-04T14:23:23Z",
+                isControlAvailable: false, isSubscriptionAvailable: false, attachmentSnapshot: TerminalSessionAttachmentSnapshot(), rowKind: .process,
+                rowSourceID: "process-row", hasFinalRender: false)
             let model = TerminalViewerModel(session: session, settings: settings) { _ in }
 
             XCTAssertEqual(model.renderMode, "ended")
@@ -320,10 +265,7 @@
                 return SpacesDeviceAPIResponse(ok: true, message: "ok")
             }
             let model = TerminalViewerModel(
-                session: session(state: .starting),
-                settings: settings(),
-                onAuthenticationRequired: { _ in },
-                bridgeClient: bridgeClient)
+                session: session(state: .starting), settings: settings(), onAuthenticationRequired: { _ in }, bridgeClient: bridgeClient)
 
             model.start()
             for _ in 0..<40 {
@@ -361,10 +303,7 @@
                 return SpacesDeviceAPIResponse(ok: true, message: "ok")
             }
             let model = TerminalViewerModel(
-                session: session(state: .starting),
-                settings: settings(),
-                onAuthenticationRequired: { _ in },
-                bridgeClient: bridgeClient)
+                session: session(state: .starting), settings: settings(), onAuthenticationRequired: { _ in }, bridgeClient: bridgeClient)
 
             model.start()
             for _ in 0..<40 {
@@ -388,11 +327,7 @@
                 await recorder.append(request)
                 return SpacesDeviceAPIResponse(ok: true, message: "ok")
             }
-            let model = TerminalViewerModel(
-                session: session(),
-                settings: settings(),
-                onAuthenticationRequired: { _ in },
-                bridgeClient: bridgeClient)
+            let model = TerminalViewerModel(session: session(), settings: settings(), onAuthenticationRequired: { _ in }, bridgeClient: bridgeClient)
 
             await model.sendAppearance(.dark)
 
@@ -421,10 +356,7 @@
                 return SpacesDeviceAPIResponse(ok: true, message: "ok")
             }
             let model = TerminalViewerModel(
-                session: session(state: .starting),
-                settings: settings(),
-                onAuthenticationRequired: { _ in },
-                bridgeClient: bridgeClient)
+                session: session(state: .starting), settings: settings(), onAuthenticationRequired: { _ in }, bridgeClient: bridgeClient)
 
             model.start()
             for _ in 0..<40 {
@@ -443,39 +375,23 @@
         func testStartingSessionRefreshesFailedStateWhenAttachReportsNotRunning() async throws {
             let recorder = DeviceAPIRequestRecorder()
             let failedState = GhosttyRemoteSessionStatePayload(
-                sessionID: "terminal-session",
-                reason: TerminalRemoteSessionStateReason.terminated,
-                emittedAt: "2026-06-04T14:23:30Z",
-                sessionStateRevision: nil,
-                sessionStateFlags: nil,
-                screenStateRevision: nil,
+                sessionID: "terminal-session", reason: TerminalRemoteSessionStateReason.terminated, emittedAt: "2026-06-04T14:23:30Z",
+                sessionStateRevision: nil, sessionStateFlags: nil, screenStateRevision: nil,
                 runtimeState: TerminalSessionRuntimeState(
-                    sessionID: "terminal-session",
-                    servicePID: 100,
-                    childPID: nil,
-                    state: .failed,
-                    updatedAt: "2026-06-04T14:23:30Z",
-                    exitedAt: "2026-06-04T14:23:30Z"),
-                attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
-                title: "terminal",
-                workingDirectory: "/tmp/work",
-                outputByteCount: 0)
+                    sessionID: "terminal-session", servicePID: 100, childPID: nil, state: .failed, updatedAt: "2026-06-04T14:23:30Z",
+                    exitedAt: "2026-06-04T14:23:30Z"), attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "terminal",
+                workingDirectory: "/tmp/work", outputByteCount: 0)
             let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in
                 await recorder.append(request)
                 switch request.command {
                 case .terminalControl(let payload) where payload.action == .attach:
                     return SpacesDeviceAPIResponse(ok: false, message: "Terminal session terminal-session is not running.")
-                case .state:
-                    return Self.terminalStateResponse(failedState)
-                default:
-                    return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                case .state: return Self.terminalStateResponse(failedState)
+                default: return SpacesDeviceAPIResponse(ok: true, message: "ok")
                 }
             }
             let model = TerminalViewerModel(
-                session: session(state: .starting),
-                settings: settings(),
-                onAuthenticationRequired: { _ in },
-                bridgeClient: bridgeClient)
+                session: session(state: .starting), settings: settings(), onAuthenticationRequired: { _ in }, bridgeClient: bridgeClient)
 
             model.start()
             for _ in 0..<40 {
@@ -507,11 +423,7 @@
                 }
                 return SpacesDeviceAPIResponse(ok: true, message: "ok")
             }
-            let model = TerminalViewerModel(
-                session: session(),
-                settings: settings,
-                onAuthenticationRequired: { _ in },
-                bridgeClient: bridgeClient)
+            let model = TerminalViewerModel(session: session(), settings: settings, onAuthenticationRequired: { _ in }, bridgeClient: bridgeClient)
 
             model.start()
             let didAttachInitially = try await waitForTerminalControlAction(.attach, count: 1, recorder: recorder)
@@ -541,34 +453,24 @@
             let authenticationRecorder = AuthenticationPromptRecorder()
             let bridgeClient = SpacesDeviceAPIClient(settings: settings) { request in
                 await recorder.append(request)
-                if case .state = request.command {
-                    return SpacesDeviceAPIResponse(ok: false, message: "Invalid device auth token.")
-                }
+                if case .state = request.command { return SpacesDeviceAPIResponse(ok: false, message: "Invalid device auth token.") }
                 return SpacesDeviceAPIResponse(ok: true, message: "ok")
             }
             let model = TerminalViewerModel(
-                session: session(),
-                settings: settings,
-                onAuthenticationRequired: { message in
-                    Task { await authenticationRecorder.append(message) }
-                },
-                bridgeClient: bridgeClient)
+                session: session(), settings: settings,
+                onAuthenticationRequired: { message in Task { await authenticationRecorder.append(message) } }, bridgeClient: bridgeClient)
             defer { model.stop() }
 
             model.start()
             let didAttachInitially = try await waitForTerminalControlAction(.attach, count: 1, recorder: recorder)
             XCTAssertTrue(didAttachInitially, "Expected the initial viewer start to attach before subscribing.")
             let authenticationMessage = try await waitForAuthenticationMessage(recorder: authenticationRecorder)
-            XCTAssertEqual(
-                authenticationMessage,
-                "This Mac no longer recognizes this device. Open Devices and pair this device again.")
+            XCTAssertEqual(authenticationMessage, "This Mac no longer recognizes this device. Open Devices and pair this device again.")
 
             model.start()
 
             let didAttachAfterAuthentication = try await waitForTerminalControlAction(.attach, count: 2, recorder: recorder)
-            XCTAssertTrue(
-                didAttachAfterAuthentication,
-                "Expected restarting after an authentication failure to open a fresh stream.")
+            XCTAssertTrue(didAttachAfterAuthentication, "Expected restarting after an authentication failure to open a fresh stream.")
         }
 
         func testOpenTerminalLinkShowsWebPagePreviewForNonMediaExternalURL() async throws {
@@ -576,21 +478,12 @@
             let bridgeClient = SpacesDeviceAPIClient(settings: settings) { request in
                 XCTAssertEqual(request.commandName, "resolveTerminalLink")
                 XCTAssertEqual(request.terminalLink, "https://example.com/docs")
-                return Self.metadataResponse(SpacesDeviceTerminalLinkMetadata(
-                        id: "external|https://example.com/docs",
-                        source: .externalURL,
-                        originalLink: "https://example.com/docs",
-                        displayName: "docs",
-                        contentType: nil,
-                        artifactKind: nil,
-                        byteCount: nil,
-                        externalURL: "https://example.com/docs"))
+                return Self.metadataResponse(
+                    SpacesDeviceTerminalLinkMetadata(
+                        id: "external|https://example.com/docs", source: .externalURL, originalLink: "https://example.com/docs", displayName: "docs",
+                        contentType: nil, artifactKind: nil, byteCount: nil, externalURL: "https://example.com/docs"))
             }
-            let model = TerminalViewerModel(
-                session: session(),
-                settings: settings,
-                onAuthenticationRequired: { _ in },
-                bridgeClient: bridgeClient)
+            let model = TerminalViewerModel(session: session(), settings: settings, onAuthenticationRequired: { _ in }, bridgeClient: bridgeClient)
 
             await model.openTerminalLink("https://example.com/docs")
 
@@ -610,21 +503,12 @@
             let bridgeClient = SpacesDeviceAPIClient(settings: settings) { request in
                 XCTAssertEqual(request.commandName, "resolveTerminalLink")
                 resolvedLinks.append(request.terminalLink ?? "")
-                return Self.metadataResponse(SpacesDeviceTerminalLinkMetadata(
-                        id: "external|https://example.com/docs",
-                        source: .externalURL,
-                        originalLink: spacedPath,
-                        displayName: "docs",
-                        contentType: nil,
-                        artifactKind: nil,
-                        byteCount: nil,
-                        externalURL: "https://example.com/docs"))
+                return Self.metadataResponse(
+                    SpacesDeviceTerminalLinkMetadata(
+                        id: "external|https://example.com/docs", source: .externalURL, originalLink: spacedPath, displayName: "docs",
+                        contentType: nil, artifactKind: nil, byteCount: nil, externalURL: "https://example.com/docs"))
             }
-            let model = TerminalViewerModel(
-                session: session(),
-                settings: settings,
-                onAuthenticationRequired: { _ in },
-                bridgeClient: bridgeClient)
+            let model = TerminalViewerModel(session: session(), settings: settings, onAuthenticationRequired: { _ in }, bridgeClient: bridgeClient)
 
             await model.openTerminalLink(spacedPath)
 
@@ -637,22 +521,15 @@
             let cacheRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
             defer { try? FileManager.default.removeItem(at: cacheRoot) }
             let bridgeClient = SpacesDeviceAPIClient(settings: settings) { _ in
-                Self.metadataResponse(SpacesDeviceTerminalLinkMetadata(
-                        id: "external|https://example.com/image.png",
-                        source: .externalURL,
-                        originalLink: "https://example.com/image.png",
-                        displayName: "image.png",
-                        contentType: "image/png",
-                        artifactKind: .image,
-                        byteCount: nil,
+                Self.metadataResponse(
+                    SpacesDeviceTerminalLinkMetadata(
+                        id: "external|https://example.com/image.png", source: .externalURL, originalLink: "https://example.com/image.png",
+                        displayName: "image.png", contentType: "image/png", artifactKind: .image, byteCount: nil,
                         externalURL: "https://example.com/image.png"))
             }
             let payload = Data([0x89, 0x50, 0x4E, 0x47])
             let model = TerminalViewerModel(
-                session: session(),
-                settings: settings,
-                onAuthenticationRequired: { _ in },
-                bridgeClient: bridgeClient,
+                session: session(), settings: settings, onAuthenticationRequired: { _ in }, bridgeClient: bridgeClient,
                 remoteMediaDownloader: { url, expectedArtifactKind in
                     XCTAssertEqual(url, URL(string: "https://example.com/image.png"))
                     XCTAssertEqual(expectedArtifactKind, .image)
@@ -660,8 +537,7 @@
                     let downloadedURL = cacheRoot.appendingPathComponent("downloaded-image.png")
                     try payload.write(to: downloadedURL)
                     return downloadedURL
-                },
-                linkPreviewCacheDirectory: cacheRoot)
+                }, linkPreviewCacheDirectory: cacheRoot)
 
             await model.openTerminalLink("https://example.com/image.png")
 
@@ -683,42 +559,25 @@
             let url = URL(string: "https://raw.githubusercontent.com/example/project/main/README.md")!
             let payload = Data("# Read Me\n".utf8)
             let bridgeClient = SpacesDeviceAPIClient(settings: settings) { _ in
-                Self.metadataResponse(SpacesDeviceTerminalLinkMetadata(
-                        id: "external|https://raw.githubusercontent.com/example/project/main/README.md",
-                        source: .externalURL,
-                        originalLink: url.absoluteString,
-                        displayName: "README.md",
-                        contentType: "text/markdown",
-                        artifactKind: .markdown,
-                        byteCount: nil,
-                        externalURL: url.absoluteString))
+                Self.metadataResponse(
+                    SpacesDeviceTerminalLinkMetadata(
+                        id: "external|https://raw.githubusercontent.com/example/project/main/README.md", source: .externalURL,
+                        originalLink: url.absoluteString, displayName: "README.md", contentType: "text/markdown", artifactKind: .markdown,
+                        byteCount: nil, externalURL: url.absoluteString))
             }
             let model = TerminalViewerModel(
-                session: session(),
-                settings: settings,
-                onAuthenticationRequired: { _ in },
-                bridgeClient: bridgeClient,
+                session: session(), settings: settings, onAuthenticationRequired: { _ in }, bridgeClient: bridgeClient,
                 remoteMediaDownloader: { requestedURL, expectedArtifactKind in
                     XCTAssertEqual(requestedURL, url)
                     XCTAssertEqual(expectedArtifactKind, .markdown)
                     try FileManager.default.createDirectory(at: downloadRoot, withIntermediateDirectories: true)
                     let downloadedURL = downloadRoot.appendingPathComponent("README.md")
                     try payload.write(to: downloadedURL)
-                    guard let response = HTTPURLResponse(
-                        url: url,
-                        statusCode: 200,
-                        httpVersion: nil,
-                        headerFields: ["Content-Type": "text/plain"])
-                    else {
-                        throw SpacesDeviceAPIClientError.requestFailed("Missing HTTP response.")
-                    }
+                    guard let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "text/plain"])
+                    else { throw SpacesDeviceAPIClientError.requestFailed("Missing HTTP response.") }
                     return try TerminalViewerModel.validatedRemoteMediaDownloadURL(
-                        downloadedURL,
-                        response: response,
-                        expectedArtifactKind: expectedArtifactKind,
-                        sourceURL: requestedURL)
-                },
-                linkPreviewCacheDirectory: cacheRoot)
+                        downloadedURL, response: response, expectedArtifactKind: expectedArtifactKind, sourceURL: requestedURL)
+                }, linkPreviewCacheDirectory: cacheRoot)
 
             await model.openTerminalLink(url.absoluteString)
 
@@ -739,41 +598,25 @@
             }
             let url = URL(string: "https://example.com/missing.png")!
             let bridgeClient = SpacesDeviceAPIClient(settings: settings) { _ in
-                Self.metadataResponse(SpacesDeviceTerminalLinkMetadata(
-                        id: "external|https://example.com/missing.png",
-                        source: .externalURL,
-                        originalLink: "https://example.com/missing.png",
-                        displayName: "missing.png",
-                        contentType: "image/png",
-                        artifactKind: .image,
-                        byteCount: nil,
+                Self.metadataResponse(
+                    SpacesDeviceTerminalLinkMetadata(
+                        id: "external|https://example.com/missing.png", source: .externalURL, originalLink: "https://example.com/missing.png",
+                        displayName: "missing.png", contentType: "image/png", artifactKind: .image, byteCount: nil,
                         externalURL: "https://example.com/missing.png"))
             }
             let model = TerminalViewerModel(
-                session: session(),
-                settings: settings,
-                onAuthenticationRequired: { _ in },
-                bridgeClient: bridgeClient,
+                session: session(), settings: settings, onAuthenticationRequired: { _ in }, bridgeClient: bridgeClient,
                 remoteMediaDownloader: { requestedURL, expectedArtifactKind in
                     XCTAssertEqual(requestedURL, url)
                     try FileManager.default.createDirectory(at: downloadRoot, withIntermediateDirectories: true)
                     let downloadedURL = downloadRoot.appendingPathComponent("error-page.html")
                     try Data("<html>not found</html>".utf8).write(to: downloadedURL)
-                    guard let response = HTTPURLResponse(
-                        url: url,
-                        statusCode: 404,
-                        httpVersion: nil,
-                        headerFields: nil)
-                    else {
+                    guard let response = HTTPURLResponse(url: url, statusCode: 404, httpVersion: nil, headerFields: nil) else {
                         throw SpacesDeviceAPIClientError.requestFailed("Missing HTTP response.")
                     }
                     return try TerminalViewerModel.validatedRemoteMediaDownloadURL(
-                        downloadedURL,
-                        response: response,
-                        expectedArtifactKind: expectedArtifactKind,
-                        sourceURL: requestedURL)
-                },
-                linkPreviewCacheDirectory: cacheRoot)
+                        downloadedURL, response: response, expectedArtifactKind: expectedArtifactKind, sourceURL: requestedURL)
+                }, linkPreviewCacheDirectory: cacheRoot)
 
             await model.openTerminalLink("https://example.com/missing.png")
 
@@ -793,41 +636,24 @@
             }
             let url = URL(string: "https://example.com/login.png")!
             let bridgeClient = SpacesDeviceAPIClient(settings: settings) { _ in
-                Self.metadataResponse(SpacesDeviceTerminalLinkMetadata(
-                        id: "external|https://example.com/login.png",
-                        source: .externalURL,
-                        originalLink: "https://example.com/login.png",
-                        displayName: "login.png",
-                        contentType: "image/png",
-                        artifactKind: .image,
-                        byteCount: nil,
+                Self.metadataResponse(
+                    SpacesDeviceTerminalLinkMetadata(
+                        id: "external|https://example.com/login.png", source: .externalURL, originalLink: "https://example.com/login.png",
+                        displayName: "login.png", contentType: "image/png", artifactKind: .image, byteCount: nil,
                         externalURL: "https://example.com/login.png"))
             }
             let model = TerminalViewerModel(
-                session: session(),
-                settings: settings,
-                onAuthenticationRequired: { _ in },
-                bridgeClient: bridgeClient,
+                session: session(), settings: settings, onAuthenticationRequired: { _ in }, bridgeClient: bridgeClient,
                 remoteMediaDownloader: { requestedURL, expectedArtifactKind in
                     XCTAssertEqual(requestedURL, url)
                     try FileManager.default.createDirectory(at: downloadRoot, withIntermediateDirectories: true)
                     let downloadedURL = downloadRoot.appendingPathComponent("login.html")
                     try Data("<html>sign in</html>".utf8).write(to: downloadedURL)
-                    guard let response = HTTPURLResponse(
-                        url: url,
-                        statusCode: 200,
-                        httpVersion: nil,
-                        headerFields: ["Content-Type": "text/html"])
-                    else {
-                        throw SpacesDeviceAPIClientError.requestFailed("Missing HTTP response.")
-                    }
+                    guard let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "text/html"])
+                    else { throw SpacesDeviceAPIClientError.requestFailed("Missing HTTP response.") }
                     return try TerminalViewerModel.validatedRemoteMediaDownloadURL(
-                        downloadedURL,
-                        response: response,
-                        expectedArtifactKind: expectedArtifactKind,
-                        sourceURL: requestedURL)
-                },
-                linkPreviewCacheDirectory: cacheRoot)
+                        downloadedURL, response: response, expectedArtifactKind: expectedArtifactKind, sourceURL: requestedURL)
+                }, linkPreviewCacheDirectory: cacheRoot)
 
             await model.openTerminalLink("https://example.com/login.png")
 
@@ -848,28 +674,20 @@
             let oversizedByteCount = 4 * 1024 * 1024 + 1
             let downloadedURL = downloadRoot.appendingPathComponent("huge.log")
             let bridgeClient = SpacesDeviceAPIClient(settings: settings) { _ in
-                Self.metadataResponse(SpacesDeviceTerminalLinkMetadata(
-                        id: "external|https://example.com/huge.log",
-                        source: .externalURL,
-                        originalLink: "https://example.com/huge.log",
-                        displayName: "huge.log",
-                        contentType: "text/plain",
-                        artifactKind: .text,
-                        byteCount: nil,
+                Self.metadataResponse(
+                    SpacesDeviceTerminalLinkMetadata(
+                        id: "external|https://example.com/huge.log", source: .externalURL, originalLink: "https://example.com/huge.log",
+                        displayName: "huge.log", contentType: "text/plain", artifactKind: .text, byteCount: nil,
                         externalURL: "https://example.com/huge.log"))
             }
             let model = TerminalViewerModel(
-                session: session(),
-                settings: settings,
-                onAuthenticationRequired: { _ in },
-                bridgeClient: bridgeClient,
+                session: session(), settings: settings, onAuthenticationRequired: { _ in }, bridgeClient: bridgeClient,
                 remoteMediaDownloader: { _, expectedArtifactKind in
                     XCTAssertEqual(expectedArtifactKind, .text)
                     try FileManager.default.createDirectory(at: downloadRoot, withIntermediateDirectories: true)
                     try Data(repeating: 0x41, count: oversizedByteCount).write(to: downloadedURL)
                     return downloadedURL
-                },
-                linkPreviewCacheDirectory: cacheRoot)
+                }, linkPreviewCacheDirectory: cacheRoot)
 
             await model.openTerminalLink("https://example.com/huge.log")
 
@@ -887,17 +705,11 @@
             try Data([0x89, 0x50, 0x4E, 0x47]).write(to: downloadedURL)
             let finalURL = try XCTUnwrap(URL(string: "http://example.com/image.png"))
             let response = try XCTUnwrap(
-                HTTPURLResponse(
-                    url: finalURL,
-                    statusCode: 200,
-                    httpVersion: nil,
-                    headerFields: ["Content-Type": "image/png"]))
+                HTTPURLResponse(url: finalURL, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "image/png"]))
 
             XCTAssertThrowsError(
                 try TerminalViewerModel.validatedRemoteMediaDownloadURL(downloadedURL, response: response, expectedArtifactKind: .image)
-            ) { error in
-                XCTAssertEqual(error.localizedDescription, "The media link redirected to a non-HTTPS URL.")
-            }
+            ) { error in XCTAssertEqual(error.localizedDescription, "The media link redirected to a non-HTTPS URL.") }
         }
 
         func testValidatedRemoteMediaDownloadRejectsUnsupportedSpecificTypeDespiteResolvedExtension() throws {
@@ -906,21 +718,12 @@
             try Data("<svg></svg>".utf8).write(to: downloadedURL)
             let url = try XCTUnwrap(URL(string: "https://example.com/image.png"))
             let response = try XCTUnwrap(
-                HTTPURLResponse(
-                    url: url,
-                    statusCode: 200,
-                    httpVersion: nil,
-                    headerFields: ["Content-Type": "image/svg+xml"]))
+                HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "image/svg+xml"]))
 
             XCTAssertThrowsError(
                 try TerminalViewerModel.validatedRemoteMediaDownloadURL(
-                    downloadedURL,
-                    response: response,
-                    expectedArtifactKind: .image,
-                    sourceURL: url)
-            ) { error in
-                XCTAssertEqual(error.localizedDescription, "The media link did not return image content.")
-            }
+                    downloadedURL, response: response, expectedArtifactKind: .image, sourceURL: url)
+            ) { error in XCTAssertEqual(error.localizedDescription, "The media link did not return image content.") }
         }
 
         func testOpenTerminalLinkCancelsStaleExternalMediaDownload() async throws {
@@ -931,28 +734,18 @@
             let fastPayload = Data([0x02, 0x02, 0x02])
             let bridgeClient = SpacesDeviceAPIClient(settings: settings) { request in
                 let link = request.terminalLink ?? ""
-                return Self.metadataResponse(SpacesDeviceTerminalLinkMetadata(
-                        id: "external|\(link)",
-                        source: .externalURL,
-                        originalLink: link,
-                        displayName: URL(string: link)?.lastPathComponent ?? link,
-                        contentType: "image/png",
-                        artifactKind: .image,
-                        byteCount: nil,
-                        externalURL: link))
+                return Self.metadataResponse(
+                    SpacesDeviceTerminalLinkMetadata(
+                        id: "external|\(link)", source: .externalURL, originalLink: link, displayName: URL(string: link)?.lastPathComponent ?? link,
+                        contentType: "image/png", artifactKind: .image, byteCount: nil, externalURL: link))
             }
             let model = TerminalViewerModel(
-                session: session(),
-                settings: settings,
-                onAuthenticationRequired: { _ in },
-                bridgeClient: bridgeClient,
+                session: session(), settings: settings, onAuthenticationRequired: { _ in }, bridgeClient: bridgeClient,
                 remoteMediaDownloader: { url, _ in
                     try FileManager.default.createDirectory(at: cacheRoot, withIntermediateDirectories: true)
                     if url.lastPathComponent == "slow.png" {
                         await probe.markSlowStarted()
-                        do {
-                            try await Task.sleep(for: .seconds(5))
-                        } catch {
+                        do { try await Task.sleep(for: .seconds(5)) } catch {
                             await probe.markSlowCancelled()
                             throw error
                         }
@@ -960,8 +753,7 @@
                     let downloadedURL = cacheRoot.appendingPathComponent("downloaded-\(UUID().uuidString).png")
                     try fastPayload.write(to: downloadedURL)
                     return downloadedURL
-                },
-                linkPreviewCacheDirectory: cacheRoot)
+                }, linkPreviewCacheDirectory: cacheRoot)
 
             let slowTask = Task { await model.openTerminalLink("https://example.com/slow.png") }
             await probe.waitForSlowStart()
@@ -990,21 +782,13 @@
             let fastPayload = Data([0x02, 0x02, 0x02])
             let bridgeClient = SpacesDeviceAPIClient(settings: settings) { request in
                 let link = request.terminalLink ?? ""
-                return Self.metadataResponse(SpacesDeviceTerminalLinkMetadata(
-                        id: "external|\(link)",
-                        source: .externalURL,
-                        originalLink: link,
-                        displayName: URL(string: link)?.lastPathComponent ?? link,
-                        contentType: "image/png",
-                        artifactKind: .image,
-                        byteCount: nil,
-                        externalURL: link))
+                return Self.metadataResponse(
+                    SpacesDeviceTerminalLinkMetadata(
+                        id: "external|\(link)", source: .externalURL, originalLink: link, displayName: URL(string: link)?.lastPathComponent ?? link,
+                        contentType: "image/png", artifactKind: .image, byteCount: nil, externalURL: link))
             }
             let model = TerminalViewerModel(
-                session: session(),
-                settings: settings,
-                onAuthenticationRequired: { _ in },
-                bridgeClient: bridgeClient,
+                session: session(), settings: settings, onAuthenticationRequired: { _ in }, bridgeClient: bridgeClient,
                 remoteMediaDownloader: { url, _ in
                     try FileManager.default.createDirectory(at: downloadRoot, withIntermediateDirectories: true)
                     if url.lastPathComponent == "slow.png" {
@@ -1015,8 +799,7 @@
                     }
                     try fastPayload.write(to: fastDownloadedURL)
                     return fastDownloadedURL
-                },
-                linkPreviewCacheDirectory: cacheRoot)
+                }, linkPreviewCacheDirectory: cacheRoot)
 
             let slowTask = Task { await model.openTerminalLink("https://example.com/slow.png") }
             await gate.waitForSlowStart()
@@ -1040,34 +823,23 @@
             let bridgeClient = SpacesDeviceAPIClient(settings: settings) { request in
                 switch request.commandName {
                 case "resolveTerminalLink":
-                    return Self.metadataResponse(SpacesDeviceTerminalLinkMetadata(
-                            id: "link-1",
-                            source: .localFile,
-                            originalLink: "image.png",
-                            displayName: "image.png",
-                            contentType: "image/png",
-                            artifactKind: .image,
-                            byteCount: Int64(payload.count),
-                            externalURL: nil))
+                    return Self.metadataResponse(
+                        SpacesDeviceTerminalLinkMetadata(
+                            id: "link-1", source: .localFile, originalLink: "image.png", displayName: "image.png", contentType: "image/png",
+                            artifactKind: .image, byteCount: Int64(payload.count), externalURL: nil))
                 case "readTerminalLinkChunk":
                     let offset = Int(request.chunkOffset ?? 0)
                     let end = min(offset + 4, payload.count)
                     let chunk = payload[offset..<end]
-                    return Self.chunkResponse(SpacesDeviceTerminalLinkChunk(
-                            linkID: "link-1",
-                            offset: Int64(offset),
-                            byteCount: chunk.count,
-                            isFinal: end >= payload.count,
+                    return Self.chunkResponse(
+                        SpacesDeviceTerminalLinkChunk(
+                            linkID: "link-1", offset: Int64(offset), byteCount: chunk.count, isFinal: end >= payload.count,
                             base64Data: Data(chunk).base64EncodedString()))
-                default:
-                    return SpacesDeviceAPIResponse(ok: false, message: "unexpected command")
+                default: return SpacesDeviceAPIResponse(ok: false, message: "unexpected command")
                 }
             }
             let model = TerminalViewerModel(
-                session: session(),
-                settings: settings,
-                onAuthenticationRequired: { _ in },
-                bridgeClient: bridgeClient,
+                session: session(), settings: settings, onAuthenticationRequired: { _ in }, bridgeClient: bridgeClient,
                 linkPreviewCacheDirectory: cacheRoot)
 
             await model.openTerminalLink("image.png")
@@ -1085,17 +857,11 @@
                 XCTFail("Loopback links must not trigger a resolveTerminalLink round trip.")
                 return SpacesDeviceAPIResponse(ok: false, message: "unexpected")
             }
-            let model = TerminalViewerModel(
-                session: session(),
-                settings: settings,
-                onAuthenticationRequired: { _ in },
-                bridgeClient: bridgeClient)
+            let model = TerminalViewerModel(session: session(), settings: settings, onAuthenticationRequired: { _ in }, bridgeClient: bridgeClient)
 
             await model.openTerminalLink("http://localhost:3000/dashboard")
 
-            XCTAssertEqual(
-                model.linkNotice,
-                "This address runs on the session's host machine and isn't reachable from this device yet.")
+            XCTAssertEqual(model.linkNotice, "This address runs on the session's host machine and isn't reachable from this device yet.")
             XCTAssertNil(model.linkPreview)
             XCTAssertNil(model.linkPreviewErrorMessage)
             XCTAssertFalse(model.isPreparingLinkPreview)
@@ -1107,11 +873,7 @@
                 XCTFail("An unrecognized scheme must not trigger a resolveTerminalLink round trip.")
                 return SpacesDeviceAPIResponse(ok: false, message: "unexpected")
             }
-            let model = TerminalViewerModel(
-                session: session(),
-                settings: settings,
-                onAuthenticationRequired: { _ in },
-                bridgeClient: bridgeClient)
+            let model = TerminalViewerModel(session: session(), settings: settings, onAuthenticationRequired: { _ in }, bridgeClient: bridgeClient)
 
             await model.openTerminalLink("mailto:person@example.com")
 
@@ -1133,22 +895,13 @@
                 case "resolveTerminalLink":
                     await gate.markSlowStarted()
                     await gate.waitForRelease()
-                    return Self.previewMetadata(
-                        id: linkID,
-                        originalLink: "slow.png",
-                        displayName: "slow.png",
-                        byteCount: payload.count)
-                case "readTerminalLinkChunk":
-                    return Self.previewChunk(id: linkID, payload: payload, offset: request.chunkOffset ?? 0)
-                default:
-                    return SpacesDeviceAPIResponse(ok: false, message: "unexpected command")
+                    return Self.previewMetadata(id: linkID, originalLink: "slow.png", displayName: "slow.png", byteCount: payload.count)
+                case "readTerminalLinkChunk": return Self.previewChunk(id: linkID, payload: payload, offset: request.chunkOffset ?? 0)
+                default: return SpacesDeviceAPIResponse(ok: false, message: "unexpected command")
                 }
             }
             let model = TerminalViewerModel(
-                session: session(),
-                settings: settings,
-                onAuthenticationRequired: { _ in },
-                bridgeClient: bridgeClient,
+                session: session(), settings: settings, onAuthenticationRequired: { _ in }, bridgeClient: bridgeClient,
                 linkPreviewCacheDirectory: cacheRoot)
 
             let slowTask = Task { await model.openTerminalLink("slow.png") }
@@ -1171,12 +924,11 @@
         }
 
         func testOpenTerminalLinkDownloadsLocalDocumentPreviewsByKind() async throws {
-            let cases: [(artifactKind: SpacesDeviceTerminalLinkArtifactKind, contentType: String, expectedContent: (URL) -> TerminalLinkPreviewContent)] = [
-                (.text, "text/plain", { .text($0) }),
-                (.markdown, "text/markdown", { .markdown($0) }),
-                (.html, "text/html", { .htmlFile($0) }),
-                (.pdf, "application/pdf", { .quickLook($0) }),
-            ]
+            let cases:
+                [(artifactKind: SpacesDeviceTerminalLinkArtifactKind, contentType: String, expectedContent: (URL) -> TerminalLinkPreviewContent)] = [
+                    (.text, "text/plain", { .text($0) }), (.markdown, "text/markdown", { .markdown($0) }), (.html, "text/html", { .htmlFile($0) }),
+                    (.pdf, "application/pdf", { .quickLook($0) }),
+                ]
             for testCase in cases {
                 let settings = settings()
                 let cacheRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -1185,26 +937,18 @@
                 let bridgeClient = SpacesDeviceAPIClient(settings: settings) { request in
                     switch request.commandName {
                     case "resolveTerminalLink":
-                        return Self.metadataResponse(SpacesDeviceTerminalLinkMetadata(
-                                id: "link-1",
-                                source: .localFile,
-                                originalLink: "file.\(testCase.artifactKind.rawValue)",
-                                displayName: "file.\(testCase.artifactKind.rawValue)",
-                                contentType: testCase.contentType,
-                                artifactKind: testCase.artifactKind,
-                                byteCount: Int64(payload.count),
-                                externalURL: nil))
+                        return Self.metadataResponse(
+                            SpacesDeviceTerminalLinkMetadata(
+                                id: "link-1", source: .localFile, originalLink: "file.\(testCase.artifactKind.rawValue)",
+                                displayName: "file.\(testCase.artifactKind.rawValue)", contentType: testCase.contentType,
+                                artifactKind: testCase.artifactKind, byteCount: Int64(payload.count), externalURL: nil))
                     case "readTerminalLinkChunk":
                         return Self.previewChunk(id: request.terminalLinkID ?? "", payload: payload, offset: request.chunkOffset ?? 0)
-                    default:
-                        return SpacesDeviceAPIResponse(ok: false, message: "unexpected command")
+                    default: return SpacesDeviceAPIResponse(ok: false, message: "unexpected command")
                     }
                 }
                 let model = TerminalViewerModel(
-                    session: session(),
-                    settings: settings,
-                    onAuthenticationRequired: { _ in },
-                    bridgeClient: bridgeClient,
+                    session: session(), settings: settings, onAuthenticationRequired: { _ in }, bridgeClient: bridgeClient,
                     linkPreviewCacheDirectory: cacheRoot)
 
                 await model.openTerminalLink("file.\(testCase.artifactKind.rawValue)")
@@ -1224,27 +968,17 @@
             let bridgeClient = SpacesDeviceAPIClient(settings: settings) { request in
                 switch request.commandName {
                 case "resolveTerminalLink":
-                    return Self.metadataResponse(SpacesDeviceTerminalLinkMetadata(
-                            id: "link-1",
-                            source: .localFile,
-                            originalLink: "huge.log",
-                            displayName: "huge.log",
-                            contentType: "text/plain",
-                            artifactKind: .text,
-                            byteCount: oversizedByteCount,
-                            externalURL: nil))
+                    return Self.metadataResponse(
+                        SpacesDeviceTerminalLinkMetadata(
+                            id: "link-1", source: .localFile, originalLink: "huge.log", displayName: "huge.log", contentType: "text/plain",
+                            artifactKind: .text, byteCount: oversizedByteCount, externalURL: nil))
                 case "readTerminalLinkChunk":
                     didRequestChunk = true
                     return SpacesDeviceAPIResponse(ok: false, message: "unexpected chunk request")
-                default:
-                    return SpacesDeviceAPIResponse(ok: false, message: "unexpected command")
+                default: return SpacesDeviceAPIResponse(ok: false, message: "unexpected command")
                 }
             }
-            let model = TerminalViewerModel(
-                session: session(),
-                settings: settings,
-                onAuthenticationRequired: { _ in },
-                bridgeClient: bridgeClient)
+            let model = TerminalViewerModel(session: session(), settings: settings, onAuthenticationRequired: { _ in }, bridgeClient: bridgeClient)
 
             await model.openTerminalLink("huge.log")
 
@@ -1266,36 +1000,25 @@
                 case "readTerminalLinkChunk":
                     let offset = request.chunkOffset ?? 0
                     if offset == 0 {
-                        return Self.chunkResponse(SpacesDeviceTerminalLinkChunk(
-                                linkID: "link-1",
-                                offset: 0,
-                                byteCount: firstChunk.count,
-                                isFinal: false,
-                                base64Data: firstChunk.base64EncodedString()))
+                        return Self.chunkResponse(
+                            SpacesDeviceTerminalLinkChunk(
+                                linkID: "link-1", offset: 0, byteCount: firstChunk.count, isFinal: false, base64Data: firstChunk.base64EncodedString()
+                            ))
                     }
-                    return Self.chunkResponse(SpacesDeviceTerminalLinkChunk(
-                            linkID: "link-1",
-                            offset: offset,
-                            byteCount: 2,
-                            isFinal: true,
-                            base64Data: Data([0x01]).base64EncodedString()))
-                default:
-                    return SpacesDeviceAPIResponse(ok: false, message: "unexpected command")
+                    return Self.chunkResponse(
+                        SpacesDeviceTerminalLinkChunk(
+                            linkID: "link-1", offset: offset, byteCount: 2, isFinal: true, base64Data: Data([0x01]).base64EncodedString()))
+                default: return SpacesDeviceAPIResponse(ok: false, message: "unexpected command")
                 }
             }
             let model = TerminalViewerModel(
-                session: session(),
-                settings: settings,
-                onAuthenticationRequired: { _ in },
-                bridgeClient: bridgeClient,
+                session: session(), settings: settings, onAuthenticationRequired: { _ in }, bridgeClient: bridgeClient,
                 linkPreviewCacheDirectory: cacheRoot)
 
             await model.openTerminalLink("image.png")
 
             XCTAssertNil(model.linkPreview)
-            XCTAssertEqual(
-                model.linkPreviewErrorMessage,
-                "Terminal link 'link-1' transfer returned an invalid chunk size (reported 2, decoded 1).")
+            XCTAssertEqual(model.linkPreviewErrorMessage, "Terminal link 'link-1' transfer returned an invalid chunk size (reported 2, decoded 1).")
             let cachedFiles = (try? FileManager.default.contentsOfDirectory(at: cacheRoot, includingPropertiesForKeys: nil)) ?? []
             XCTAssertTrue(cachedFiles.isEmpty)
             XCTAssertFalse(model.isPreparingLinkPreview)
@@ -1316,15 +1039,11 @@
                     return SpacesDeviceAPIResponse(ok: false, message: "This file path is not available to mobile preview.")
                 case "readTerminalLinkChunk":
                     return Self.previewChunk(id: request.terminalLinkID ?? "", payload: payload, offset: request.chunkOffset ?? 0)
-                default:
-                    return SpacesDeviceAPIResponse(ok: false, message: "unexpected command")
+                default: return SpacesDeviceAPIResponse(ok: false, message: "unexpected command")
                 }
             }
             let model = TerminalViewerModel(
-                session: session(),
-                settings: settings,
-                onAuthenticationRequired: { _ in },
-                bridgeClient: bridgeClient,
+                session: session(), settings: settings, onAuthenticationRequired: { _ in }, bridgeClient: bridgeClient,
                 linkPreviewCacheDirectory: cacheRoot)
 
             await model.openTerminalLink("image.png")
@@ -1344,11 +1063,7 @@
             let bridgeClient = SpacesDeviceAPIClient(settings: settings) { _ in
                 SpacesDeviceAPIResponse(ok: false, message: "Only image and video files can be previewed on iOS.")
             }
-            let model = TerminalViewerModel(
-                session: session(),
-                settings: settings,
-                onAuthenticationRequired: { _ in },
-                bridgeClient: bridgeClient)
+            let model = TerminalViewerModel(session: session(), settings: settings, onAuthenticationRequired: { _ in }, bridgeClient: bridgeClient)
 
             await model.openTerminalLink("notes.txt")
 
@@ -1377,15 +1092,11 @@
                 case "readTerminalLinkChunk":
                     let payload = request.terminalLinkID == slowID ? slowPayload : fastPayload
                     return Self.previewChunk(id: request.terminalLinkID ?? "", payload: payload, offset: request.chunkOffset ?? 0)
-                default:
-                    return SpacesDeviceAPIResponse(ok: false, message: "unexpected command")
+                default: return SpacesDeviceAPIResponse(ok: false, message: "unexpected command")
                 }
             }
             let model = TerminalViewerModel(
-                session: session(),
-                settings: settings,
-                onAuthenticationRequired: { _ in },
-                bridgeClient: bridgeClient,
+                session: session(), settings: settings, onAuthenticationRequired: { _ in }, bridgeClient: bridgeClient,
                 linkPreviewCacheDirectory: cacheRoot)
 
             let slowTask = Task { await model.openTerminalLink("slow.png") }
@@ -1419,23 +1130,17 @@
                 switch request.commandName {
                 case "resolveTerminalLink":
                     if request.terminalLink == "first.png" {
-                        return Self.previewMetadata(
-                            id: firstID, originalLink: "first.png", displayName: "first.png", byteCount: firstPayload.count)
+                        return Self.previewMetadata(id: firstID, originalLink: "first.png", displayName: "first.png", byteCount: firstPayload.count)
                     }
-                    return Self.previewMetadata(
-                        id: secondID, originalLink: "second.png", displayName: "second.png", byteCount: secondPayload.count)
+                    return Self.previewMetadata(id: secondID, originalLink: "second.png", displayName: "second.png", byteCount: secondPayload.count)
                 case "readTerminalLinkChunk":
                     let payload = request.terminalLinkID == firstID ? firstPayload : secondPayload
                     return Self.previewChunk(id: request.terminalLinkID ?? "", payload: payload, offset: request.chunkOffset ?? 0)
-                default:
-                    return SpacesDeviceAPIResponse(ok: false, message: "unexpected command")
+                default: return SpacesDeviceAPIResponse(ok: false, message: "unexpected command")
                 }
             }
             let model = TerminalViewerModel(
-                session: session(),
-                settings: settings,
-                onAuthenticationRequired: { _ in },
-                bridgeClient: bridgeClient,
+                session: session(), settings: settings, onAuthenticationRequired: { _ in }, bridgeClient: bridgeClient,
                 linkPreviewCacheDirectory: cacheRoot)
 
             await model.openTerminalLink("first.png")
@@ -1448,38 +1153,25 @@
             XCTAssertEqual(try Data(contentsOf: secondURL), secondPayload)
         }
 
-        private nonisolated static func previewMetadata(
-            id: String,
-            originalLink: String,
-            displayName: String,
-            byteCount: Int
-        ) -> SpacesDeviceAPIResponse {
-            Self.metadataResponse(SpacesDeviceTerminalLinkMetadata(
-                    id: id,
-                    source: .localFile,
-                    originalLink: originalLink,
-                    displayName: displayName,
-                    contentType: "image/png",
-                    artifactKind: .image,
-                    byteCount: Int64(byteCount),
-                    externalURL: nil))
+        private nonisolated static func previewMetadata(id: String, originalLink: String, displayName: String, byteCount: Int)
+            -> SpacesDeviceAPIResponse
+        {
+            Self.metadataResponse(
+                SpacesDeviceTerminalLinkMetadata(
+                    id: id, source: .localFile, originalLink: originalLink, displayName: displayName, contentType: "image/png", artifactKind: .image,
+                    byteCount: Int64(byteCount), externalURL: nil))
         }
 
         private nonisolated static func previewChunk(id: String, payload: Data, offset: Int64) -> SpacesDeviceAPIResponse {
             let offset = Int(offset)
             let chunk = payload[offset..<payload.count]
-            return Self.chunkResponse(SpacesDeviceTerminalLinkChunk(
-                    linkID: id,
-                    offset: Int64(offset),
-                    byteCount: chunk.count,
-                    isFinal: true,
-                    base64Data: Data(chunk).base64EncodedString()))
+            return Self.chunkResponse(
+                SpacesDeviceTerminalLinkChunk(
+                    linkID: id, offset: Int64(offset), byteCount: chunk.count, isFinal: true, base64Data: Data(chunk).base64EncodedString()))
         }
 
         private func waitForTerminalControlAction(
-            _ action: SpacesDeviceTerminalControlAction,
-            count expectedCount: Int,
-            recorder: DeviceAPIRequestRecorder
+            _ action: SpacesDeviceTerminalControlAction, count expectedCount: Int, recorder: DeviceAPIRequestRecorder
         ) async throws -> Bool {
             for _ in 0..<40 {
                 if await recorder.countTerminalControlAction(action) >= expectedCount { return true }
@@ -1508,22 +1200,12 @@
             let attachment = TerminalAttachment(
                 sessionID: "terminal-session", clientID: attachedClient.id, mode: .viewer, attachedAt: "2026-06-04T14:23:30Z")
             return GhosttyRemoteSessionStatePayload(
-                sessionID: "terminal-session",
-                reason: TerminalRemoteSessionStateReason.initial,
-                emittedAt: "2026-06-04T14:23:30Z",
-                sessionStateRevision: nil,
-                sessionStateFlags: nil,
-                screenStateRevision: nil,
+                sessionID: "terminal-session", reason: TerminalRemoteSessionStateReason.initial, emittedAt: "2026-06-04T14:23:30Z",
+                sessionStateRevision: nil, sessionStateFlags: nil, screenStateRevision: nil,
                 runtimeState: TerminalSessionRuntimeState(
-                    sessionID: "terminal-session",
-                    servicePID: 100,
-                    childPID: 200,
-                    state: .running,
-                    updatedAt: "2026-06-04T14:23:30Z"),
-                attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [attachedClient], attachments: [attachment]),
-                title: "terminal",
-                workingDirectory: "/tmp/work",
-                outputByteCount: 0)
+                    sessionID: "terminal-session", servicePID: 100, childPID: 200, state: .running, updatedAt: "2026-06-04T14:23:30Z"),
+                attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [attachedClient], attachments: [attachment]), title: "terminal",
+                workingDirectory: "/tmp/work", outputByteCount: 0)
         }
 
         private nonisolated static func metadataResponse(_ metadata: SpacesDeviceTerminalLinkMetadata) -> SpacesDeviceAPIResponse {
@@ -1539,8 +1221,7 @@
         }
     }
 
-    @MainActor
-    final class GhosttyMobileAppServiceTests: XCTestCase {
+    @MainActor final class GhosttyMobileAppServiceTests: XCTestCase {
         override func setUp() {
             super.setUp()
             GhosttyRemoteTerminalHostView.nativeMirrorEnabledForTesting = false
@@ -1568,12 +1249,8 @@
             open.tag = GHOSTTY_ACTION_OPEN_URL
             "https://example.com/movie.mp4".withCString { pointer in
                 open.action.open_url = ghostty_action_open_url_s(
-                    kind: GHOSTTY_ACTION_OPEN_URL_KIND_UNKNOWN,
-                    url: pointer,
-                    len: UInt("https://example.com/movie.mp4".utf8.count))
-                XCTAssertEqual(
-                    GhosttyMobileActionEventParser.parse(open),
-                    .openURL(kind: .unknown, value: "https://example.com/movie.mp4"))
+                    kind: GHOSTTY_ACTION_OPEN_URL_KIND_UNKNOWN, url: pointer, len: UInt("https://example.com/movie.mp4".utf8.count))
+                XCTAssertEqual(GhosttyMobileActionEventParser.parse(open), .openURL(kind: .unknown, value: "https://example.com/movie.mp4"))
             }
 
             var hover = ghostty_action_s()
@@ -1597,16 +1274,12 @@
             action.tag = GHOSTTY_ACTION_OPEN_URL
             var handledEvents: [GhosttyMobileActionEvent] = []
 
-            service.registerActionHandler(for: surface) { event in
-                handledEvents.append(event)
-            }
+            service.registerActionHandler(for: surface) { event in handledEvents.append(event) }
             defer { service.unregisterActionHandler(for: surface) }
 
             url.withCString { pointer in
                 action.action.open_url = ghostty_action_open_url_s(
-                    kind: GHOSTTY_ACTION_OPEN_URL_KIND_UNKNOWN,
-                    url: pointer,
-                    len: UInt(url.utf8.count))
+                    kind: GHOSTTY_ACTION_OPEN_URL_KIND_UNKNOWN, url: pointer, len: UInt(url.utf8.count))
                 let runtimeConfig = GhosttyMobileAppService.makeRuntimeConfig()
                 XCTAssertTrue(runtimeConfig.action_cb(nil, target, action))
                 XCTAssertEqual(handledEvents, [.openURL(kind: .unknown, value: url)])
@@ -1615,11 +1288,7 @@
 
         func testPhoneViewportKeepsRenderableSurfaceColumns() {
             let viewport = GhosttyRemoteTerminalViewport.reportedSize(
-                rawColumns: 80,
-                rawRows: 24,
-                bounds: CGRect(x: 0, y: 0, width: 393, height: 700),
-                idiom: .phone
-            )
+                rawColumns: 80, rawRows: 24, bounds: CGRect(x: 0, y: 0, width: 393, height: 700), idiom: .phone)
 
             XCTAssertEqual(viewport.columns, 80)
             XCTAssertEqual(viewport.rows, 24)
@@ -1627,50 +1296,33 @@
 
         func testPadViewportKeepsGhosttyColumns() {
             let viewport = GhosttyRemoteTerminalViewport.reportedSize(
-                rawColumns: 120,
-                rawRows: 40,
-                bounds: CGRect(x: 0, y: 0, width: 1024, height: 900),
-                idiom: .pad
-            )
+                rawColumns: 120, rawRows: 40, bounds: CGRect(x: 0, y: 0, width: 1024, height: 900), idiom: .pad)
 
             XCTAssertEqual(viewport.columns, 120)
             XCTAssertEqual(viewport.rows, 40)
         }
 
         func testTouchScrollFingerDownMapsTowardOlderScrollback() {
-            let delta = GhosttyRemoteTerminalScrollMapper.scrollDelta(
-                forPanDelta: CGPoint(x: 0, y: 12),
-                scaleFactor: 2
-            )
+            let delta = GhosttyRemoteTerminalScrollMapper.scrollDelta(forPanDelta: CGPoint(x: 0, y: 12), scaleFactor: 2)
 
             XCTAssertEqual(delta.y, 12)
         }
 
         func testTouchScrollFingerUpMapsTowardLiveBottom() {
-            let delta = GhosttyRemoteTerminalScrollMapper.scrollDelta(
-                forPanDelta: CGPoint(x: 0, y: -12),
-                scaleFactor: 2
-            )
+            let delta = GhosttyRemoteTerminalScrollMapper.scrollDelta(forPanDelta: CGPoint(x: 0, y: -12), scaleFactor: 2)
 
             XCTAssertEqual(delta.y, -12)
         }
 
         func testTouchScrollUsesScaleFactorAsPointToPixelConversion() {
-            let delta = GhosttyRemoteTerminalScrollMapper.scrollDelta(
-                forPanDelta: CGPoint(x: 4, y: 10),
-                scaleFactor: 3
-            )
+            let delta = GhosttyRemoteTerminalScrollMapper.scrollDelta(forPanDelta: CGPoint(x: 4, y: 10), scaleFactor: 3)
 
             XCTAssertEqual(delta.x, -6)
             XCTAssertEqual(delta.y, 15)
         }
 
         func testHighVelocityMomentumProducesBoundedDeltas() {
-            let delta = GhosttyRemoteTerminalScrollMapper.momentumFrameDelta(
-                velocity: CGPoint(x: 20_000, y: 20_000),
-                elapsed: 1,
-                scaleFactor: 3
-            )
+            let delta = GhosttyRemoteTerminalScrollMapper.momentumFrameDelta(velocity: CGPoint(x: 20_000, y: 20_000), elapsed: 1, scaleFactor: 3)
 
             XCTAssertEqual(delta.x, -120)
             XCTAssertEqual(delta.y, 120)
@@ -1683,10 +1335,8 @@
             try FileManager.default.createDirectory(at: bundledResources, withIntermediateDirectories: true)
 
             let resolved = try GhosttyMobileAppService.resolveResourcesPath(
-                environment: [:],
-                bundleResourceURL: root,
-                sourceFilePath: "/unavailable/Sources/spacesterminalmobileghostty/GhosttyMobileAppService.swift"
-            )
+                environment: [:], bundleResourceURL: root,
+                sourceFilePath: "/unavailable/Sources/spacesterminalmobileghostty/GhosttyMobileAppService.swift")
 
             XCTAssertEqual(resolved, bundledResources.path)
         }
@@ -1700,14 +1350,11 @@
             var environment: [String: (value: String, overwrite: Int32)] = [:]
 
             try GhosttyMobileAppService.configureGhosttyProcessEnvironment(
-                homeDirectory: home,
-                applicationSupportDirectory: support,
-                cachesDirectory: caches,
+                homeDirectory: home, applicationSupportDirectory: support, cachesDirectory: caches,
                 setEnvironment: { name, value, overwrite in
                     environment[name] = (value, overwrite)
                     return 0
-                }
-            )
+                })
 
             XCTAssertEqual(environment["HOME"]?.value, home.path)
             XCTAssertEqual(environment["HOME"]?.overwrite, 1)
@@ -1748,8 +1395,7 @@
                     closeCalls.append(descriptor)
                     validDescriptors.remove(descriptor)
                     return 0
-                }
-            )
+                })
 
             XCTAssertEqual(operations, ["openNull", "createPipe"])
             XCTAssertEqual(duplicateCalls.map(\.source), [7, 7, 5])
@@ -1783,8 +1429,7 @@
                     closeCalls.append(descriptor)
                     validDescriptors.remove(descriptor)
                     return 0
-                }
-            )
+                })
 
             XCTAssertEqual(duplicateCalls.count, 1)
             XCTAssertEqual(duplicateCalls.first?.source, STDIN_FILENO)
@@ -1823,8 +1468,7 @@
                     closeCalls.append(descriptor)
                     validDescriptors.remove(descriptor)
                     return 0
-                }
-            )
+                })
 
             XCTAssertEqual(duplicateCalls.map(\.source), [5])
             XCTAssertEqual(duplicateCalls.map(\.target), [STDIN_FILENO])
@@ -1848,10 +1492,7 @@
             viewController.view.layoutIfNeeded()
 
             hostView.update(
-                snapshot: nil,
-                renderStateKey: "viewer|runtime=0x0|snapshot=0x0|interactive=0",
-                fallbackText: "Waiting for terminal state…"
-            )
+                snapshot: nil, renderStateKey: "viewer|runtime=0x0|snapshot=0x0|interactive=0", fallbackText: "Waiting for terminal state…")
 
             RunLoop.main.run(until: Date().addingTimeInterval(0.25))
 
@@ -1926,8 +1567,7 @@
 
             XCTAssertTrue(
                 hostView.debugApplyActionEventsDuringTapProbeForTesting([
-                    .mouseOverLink("/Users/yogesh/Downloads/Screen"),
-                    .openURL(kind: .unknown, value: fullPath),
+                    .mouseOverLink("/Users/yogesh/Downloads/Screen"), .openURL(kind: .unknown, value: fullPath),
                 ]))
 
             XCTAssertEqual(openedLinks, [fullPath])
@@ -1955,7 +1595,8 @@
             let buttons = descendants(of: accessoryView, matching: UIButton.self)
             let scrollableButtons = buttons.filter { $0.isDescendant(of: scrollView) }
             let pinnedButtons = buttons.filter { !$0.isDescendant(of: scrollView) }
-            XCTAssertEqual(scrollableButtons.compactMap(\.accessibilityLabel), ["tab", "/", "~", "|", "-", "_", "esc", "Control", "Command", "Option"])
+            XCTAssertEqual(
+                scrollableButtons.compactMap(\.accessibilityLabel), ["tab", "/", "~", "|", "-", "_", "esc", "Control", "Command", "Option"])
             XCTAssertEqual(pinnedButtons.compactMap(\.accessibilityLabel), ["Compose message", "Arrow key joystick", "Hide keyboard"])
             let joystickButton = try XCTUnwrap(pinnedButtons.first { $0.accessibilityLabel == "Arrow key joystick" })
             XCTAssertEqual(joystickButton.accessibilityCustomActions?.map(\.name) ?? [], ["Up arrow", "Down arrow", "Left arrow", "Right arrow"])
@@ -1969,12 +1610,8 @@
             XCTAssertEqual(phoneFrames.joystickButton.width, 40, accuracy: 0.5)
             XCTAssertEqual(phoneFrames.keyboardButton.width, 40, accuracy: 0.5)
             let phoneWidths = hostView.accessoryToolbarButtonWidthsForTesting(width: 320, userInterfaceIdiom: .phone)
-            for width in phoneWidths.scrollable {
-                XCTAssertEqual(width, 44, accuracy: 0.5)
-            }
-            for width in phoneWidths.pinned {
-                XCTAssertEqual(width, 40, accuracy: 0.5)
-            }
+            for width in phoneWidths.scrollable { XCTAssertEqual(width, 44, accuracy: 0.5) }
+            for width in phoneWidths.pinned { XCTAssertEqual(width, 40, accuracy: 0.5) }
 
             let padFrames = hostView.accessoryToolbarLayoutFramesForTesting(width: 320, userInterfaceIdiom: .pad)
             XCTAssertGreaterThan(padFrames.scrollContentSize.width, padFrames.scrollView.width)
@@ -1984,15 +1621,12 @@
             XCTAssertEqual(padFrames.joystickButton.width, 48, accuracy: 0.5)
             XCTAssertEqual(padFrames.keyboardButton.width, 48, accuracy: 0.5)
             let padWidths = hostView.accessoryToolbarButtonWidthsForTesting(width: 320, userInterfaceIdiom: .pad)
-            for width in padWidths.scrollable {
-                XCTAssertEqual(width, 58, accuracy: 0.5)
-            }
-            for width in padWidths.pinned {
-                XCTAssertEqual(width, 48, accuracy: 0.5)
-            }
+            for width in padWidths.scrollable { XCTAssertEqual(width, 58, accuracy: 0.5) }
+            for width in padWidths.pinned { XCTAssertEqual(width, 48, accuracy: 0.5) }
 
             hostView.setSoftwareKeyboardVisible(false)
-            XCTAssertEqual(hostView.accessoryToolbarButtonAccessibilityLabelsForTesting.pinned, ["Compose message", "Arrow key joystick", "Show keyboard"])
+            XCTAssertEqual(
+                hostView.accessoryToolbarButtonAccessibilityLabelsForTesting.pinned, ["Compose message", "Arrow key joystick", "Show keyboard"])
 
             hostView.setAcceptsTerminalInput(false)
             XCTAssertNil(hostView.inputAccessoryView)
@@ -2007,7 +1641,8 @@
 
             // Start near the right edge, then slide left: the swipe direction wins and only
             // "left" fires. The starting location never dispatches a key on its own.
-            hostView.accessoryToolbarBeginJoystickTrackingForTesting(at: CGPoint(x: 44, y: 18), bounds: bounds, initialDelay: .seconds(10), interval: .seconds(10))
+            hostView.accessoryToolbarBeginJoystickTrackingForTesting(
+                at: CGPoint(x: 44, y: 18), bounds: bounds, initialDelay: .seconds(10), interval: .seconds(10))
             hostView.accessoryToolbarMoveJoystickTrackingForTesting(to: CGPoint(x: 10, y: 18))
             hostView.accessoryToolbarEndJoystickTrackingForTesting()
 
@@ -2022,7 +1657,8 @@
             let bounds = CGRect(x: 0, y: 0, width: 46, height: 36)
 
             // A press and release without sliding past the activation distance stays neutral.
-            hostView.accessoryToolbarBeginJoystickTrackingForTesting(at: CGPoint(x: 30, y: 18), bounds: bounds, initialDelay: .milliseconds(50), interval: .milliseconds(10))
+            hostView.accessoryToolbarBeginJoystickTrackingForTesting(
+                at: CGPoint(x: 30, y: 18), bounds: bounds, initialDelay: .milliseconds(50), interval: .milliseconds(10))
             hostView.accessoryToolbarMoveJoystickTrackingForTesting(to: CGPoint(x: 34, y: 18))
             hostView.accessoryToolbarEndJoystickTrackingForTesting()
 
@@ -2036,13 +1672,12 @@
             hostView.setAcceptsTerminalInput(true)
             let bounds = CGRect(x: 0, y: 0, width: 46, height: 36)
 
-            hostView.accessoryToolbarBeginJoystickTrackingForTesting(at: CGPoint(x: 23, y: 18), bounds: bounds, initialDelay: .milliseconds(5), interval: .milliseconds(5))
+            hostView.accessoryToolbarBeginJoystickTrackingForTesting(
+                at: CGPoint(x: 23, y: 18), bounds: bounds, initialDelay: .milliseconds(5), interval: .milliseconds(5))
             hostView.accessoryToolbarMoveJoystickTrackingForTesting(to: CGPoint(x: 0, y: 18))
 
             let deadline = ContinuousClock.now.advanced(by: .seconds(2))
-            while sentKeys.count < 4, ContinuousClock.now < deadline {
-                try await Task.sleep(for: .milliseconds(5))
-            }
+            while sentKeys.count < 4, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(5)) }
             hostView.accessoryToolbarEndJoystickTrackingForTesting()
             let countAtRelease = sentKeys.count
 
@@ -2062,7 +1697,8 @@
             let bounds = CGRect(x: 0, y: 0, width: 46, height: 36)
 
             // Long delays keep repeats from firing, isolating the per-direction key.
-            hostView.accessoryToolbarBeginJoystickTrackingForTesting(at: CGPoint(x: 23, y: 18), bounds: bounds, initialDelay: .seconds(10), interval: .seconds(10))
+            hostView.accessoryToolbarBeginJoystickTrackingForTesting(
+                at: CGPoint(x: 23, y: 18), bounds: bounds, initialDelay: .seconds(10), interval: .seconds(10))
             hostView.accessoryToolbarMoveJoystickTrackingForTesting(to: CGPoint(x: 46, y: 18))
             hostView.accessoryToolbarMoveJoystickTrackingForTesting(to: CGPoint(x: 0, y: 18))
             hostView.accessoryToolbarEndJoystickTrackingForTesting()
@@ -2160,10 +1796,8 @@
             viewController.view.layoutIfNeeded()
 
             hostView.update(
-                snapshot: sampleSnapshot(),
-                renderStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0",
-                fallbackText: "Waiting for terminal state…"
-            )
+                snapshot: sampleSnapshot(), renderStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0",
+                fallbackText: "Waiting for terminal state…")
 
             RunLoop.main.run(until: Date().addingTimeInterval(0.25))
 
@@ -2192,10 +1826,8 @@
 
             let wideText = String(repeating: ".", count: 42) + "WIDE"
             hostView.update(
-                snapshot: snapshot(columns: 80, rows: 24, text: wideText),
-                renderStateKey: "viewer|runtime=80x24|snapshot=80x24|interactive=0",
-                fallbackText: "Waiting for terminal state…"
-            )
+                snapshot: snapshot(columns: 80, rows: 24, text: wideText), renderStateKey: "viewer|runtime=80x24|snapshot=80x24|interactive=0",
+                fallbackText: "Waiting for terminal state…")
 
             RunLoop.main.run(until: Date().addingTimeInterval(0.5))
 
@@ -2216,9 +1848,7 @@
             let hostView = GhosttyRemoteTerminalHostView(frame: phoneBounds)
             hostView.userInterfaceIdiomOverrideForTesting = .phone
             var reportedViewports: [(columns: Int, rows: Int)] = []
-            hostView.onViewportSizeChanged = { columns, rows in
-                reportedViewports.append((columns: columns, rows: rows))
-            }
+            hostView.onViewportSizeChanged = { columns, rows in reportedViewports.append((columns: columns, rows: rows)) }
             viewController.view.addSubview(hostView)
             window.isHidden = false
             viewController.view.frame = window.bounds
@@ -2245,10 +1875,8 @@
 
             let longSnapshot = promptAtBottomSnapshot(columns: 80, rows: fullViewport.rows + 20)
             hostView.update(
-                snapshot: longSnapshot,
-                renderStateKey: "viewer|runtime=80x\(longSnapshot.rows)|snapshot=80x\(longSnapshot.rows)|interactive=0",
-                fallbackText: "Waiting for terminal state..."
-            )
+                snapshot: longSnapshot, renderStateKey: "viewer|runtime=80x\(longSnapshot.rows)|snapshot=80x\(longSnapshot.rows)|interactive=0",
+                fallbackText: "Waiting for terminal state...")
 
             RunLoop.main.run(until: Date().addingTimeInterval(0.25))
 
@@ -2293,8 +1921,7 @@
             hostView.update(
                 snapshot: longSnapshot,
                 renderStateKey: "viewer|runtime=80x\(longSnapshot.rows)|snapshot=80x\(longSnapshot.rows)|interactive=0|keyboard=hidden",
-                fallbackText: "Waiting for terminal state..."
-            )
+                fallbackText: "Waiting for terminal state...")
 
             RunLoop.main.run(until: Date().addingTimeInterval(0.25))
 
@@ -2320,10 +1947,8 @@
             viewController.view.layoutIfNeeded()
 
             hostView.update(
-                snapshot: sampleSnapshot(),
-                renderStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0|screen=1",
-                fallbackText: "Waiting for terminal state…"
-            )
+                snapshot: sampleSnapshot(), renderStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0|screen=1",
+                fallbackText: "Waiting for terminal state…")
 
             RunLoop.main.run(until: Date().addingTimeInterval(0.25))
 
@@ -2347,10 +1972,8 @@
             viewController.view.layoutIfNeeded()
 
             hostView.update(
-                snapshot: sampleSnapshot(),
-                renderStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0|screen=1",
-                fallbackText: "Waiting for terminal state…"
-            )
+                snapshot: sampleSnapshot(), renderStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0|screen=1",
+                fallbackText: "Waiting for terminal state…")
 
             RunLoop.main.run(until: Date().addingTimeInterval(0.25))
 
@@ -2368,10 +1991,8 @@
             hostView.frame = viewController.view.bounds
             viewController.view.layoutIfNeeded()
             hostView.update(
-                snapshot: sampleSnapshot(),
-                renderStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0|screen=2",
-                fallbackText: "Waiting for terminal state…"
-            )
+                snapshot: sampleSnapshot(), renderStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0|screen=2",
+                fallbackText: "Waiting for terminal state…")
 
             RunLoop.main.run(until: Date().addingTimeInterval(0.25))
 
@@ -2395,10 +2016,8 @@
             viewController.view.layoutIfNeeded()
 
             hostView.update(
-                snapshot: sampleSnapshot(),
-                renderStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0|screen=teardown",
-                fallbackText: "Waiting for terminal state…"
-            )
+                snapshot: sampleSnapshot(), renderStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0|screen=teardown",
+                fallbackText: "Waiting for terminal state…")
 
             RunLoop.main.run(until: Date().addingTimeInterval(0.25))
 
@@ -2410,9 +2029,7 @@
                 Thread.sleep(forTimeInterval: 0.5)
                 freeCompleted.fulfill()
             }
-            defer {
-                GhosttyRemoteTerminalHostView.sessionFreeHandlerForTesting = originalSessionFreeHandler
-            }
+            defer { GhosttyRemoteTerminalHostView.sessionFreeHandlerForTesting = originalSessionFreeHandler }
 
             let startedAt = Date()
             hostView.prepareForDismantle()
@@ -2441,15 +2058,11 @@
             viewController.view.layoutIfNeeded()
 
             hostView.update(
-                snapshot: sampleSnapshot(),
-                renderStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0|screen=native-teardown",
-                fallbackText: "Waiting for terminal state..."
-            )
+                snapshot: sampleSnapshot(), renderStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0|screen=native-teardown",
+                fallbackText: "Waiting for terminal state...")
 
             let mirrorDeadline = Date().addingTimeInterval(2)
-            while !hostView.hasMirrorSurfaceForTesting && Date() < mirrorDeadline {
-                RunLoop.main.run(until: Date().addingTimeInterval(0.05))
-            }
+            while !hostView.hasMirrorSurfaceForTesting && Date() < mirrorDeadline { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
             XCTAssertTrue(hostView.hasMirrorSurfaceForTesting)
 
             let retiredMirrorCount = GhosttyRemoteTerminalHostView.retiredMirrorCountForTesting
@@ -2480,10 +2093,8 @@
             viewController.view.layoutIfNeeded()
 
             hostView.update(
-                snapshot: sampleSnapshot(),
-                renderStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0|screen=1",
-                fallbackText: "Waiting for terminal state…"
-            )
+                snapshot: sampleSnapshot(), renderStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0|screen=1",
+                fallbackText: "Waiting for terminal state…")
 
             RunLoop.main.run(until: Date().addingTimeInterval(0.25))
 
@@ -2493,9 +2104,7 @@
 
             let unexpectedInitialPublication = expectation(description: "input readiness should not publish on callback install")
             unexpectedInitialPublication.isInverted = true
-            hostView.onInputReadinessChanged = { _ in
-                unexpectedInitialPublication.fulfill()
-            }
+            hostView.onInputReadinessChanged = { _ in unexpectedInitialPublication.fulfill() }
             wait(for: [unexpectedInitialPublication], timeout: 0.2)
 
             let unexpectedResponderPublication = expectation(description: "input readiness should not track responder status")
@@ -2537,10 +2146,8 @@
                 viewController.view.layoutIfNeeded()
 
                 hostView.update(
-                    snapshot: sampleSnapshot(),
-                    renderStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0|screen=\(cycle)",
-                    fallbackText: "Waiting for terminal state…"
-                )
+                    snapshot: sampleSnapshot(), renderStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0|screen=\(cycle)",
+                    fallbackText: "Waiting for terminal state…")
 
                 RunLoop.main.run(until: Date().addingTimeInterval(0.25))
 
@@ -2575,10 +2182,8 @@
             viewController.view.layoutIfNeeded()
 
             hostView.update(
-                snapshot: sampleSnapshot(),
-                renderStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0|screen=1",
-                fallbackText: "Waiting for terminal state…"
-            )
+                snapshot: sampleSnapshot(), renderStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0|screen=1",
+                fallbackText: "Waiting for terminal state…")
 
             wait(for: [renderedExpectation], timeout: 2)
             XCTAssertTrue(renderedText.localizedStandardContains("hi"))
@@ -2608,26 +2213,14 @@
             let refreshedSnapshot = snapshot(columns: 12, rows: 2, text: "shell % !")
             let ownerEpochID = "owner|test"
             hostView.update(
-                ownerEpoch: GhosttyRemoteTerminalOwnerEpoch(
-                    sessionID: "test-session",
-                    id: ownerEpochID,
-                    bootstrapSnapshot: bootstrapSnapshot
-                ),
-                endedRender: nil,
-                fallbackText: "Waiting for terminal state..."
-            )
+                ownerEpoch: GhosttyRemoteTerminalOwnerEpoch(sessionID: "test-session", id: ownerEpochID, bootstrapSnapshot: bootstrapSnapshot),
+                endedRender: nil, fallbackText: "Waiting for terminal state...")
 
             RunLoop.main.run(until: Date().addingTimeInterval(0.25))
 
             hostView.update(
-                ownerEpoch: GhosttyRemoteTerminalOwnerEpoch(
-                    sessionID: "test-session",
-                    id: ownerEpochID,
-                    bootstrapSnapshot: refreshedSnapshot
-                ),
-                endedRender: nil,
-                fallbackText: "Waiting for terminal state..."
-            )
+                ownerEpoch: GhosttyRemoteTerminalOwnerEpoch(sessionID: "test-session", id: ownerEpochID, bootstrapSnapshot: refreshedSnapshot),
+                endedRender: nil, fallbackText: "Waiting for terminal state...")
 
             wait(for: [renderedExpectation], timeout: 2)
             XCTAssertTrue(renderedText.localizedStandardContains("shell % !"), renderedText)
@@ -2650,14 +2243,8 @@
             let bootstrapSnapshot = snapshot(columns: 16, rows: 4, text: "shell % first\nsecond")
             let ownerEpochID = "owner|repeated-output-token"
             hostView.update(
-                ownerEpoch: GhosttyRemoteTerminalOwnerEpoch(
-                    sessionID: "test-session",
-                    id: ownerEpochID,
-                    bootstrapSnapshot: bootstrapSnapshot
-                ),
-                endedRender: nil,
-                fallbackText: "Waiting for terminal state..."
-            )
+                ownerEpoch: GhosttyRemoteTerminalOwnerEpoch(sessionID: "test-session", id: ownerEpochID, bootstrapSnapshot: bootstrapSnapshot),
+                endedRender: nil, fallbackText: "Waiting for terminal state...")
 
             RunLoop.main.run(until: Date().addingTimeInterval(0.25))
 
@@ -2690,14 +2277,8 @@
             let ownerEpochID = "owner|autosuggestion-clear"
             let bootstrapSnapshot = snapshot(columns: 80, rows: 8, text: "shell % which t\nt not found\nshell % ")
             hostView.update(
-                ownerEpoch: GhosttyRemoteTerminalOwnerEpoch(
-                    sessionID: "test-session",
-                    id: ownerEpochID,
-                    bootstrapSnapshot: bootstrapSnapshot
-                ),
-                endedRender: nil,
-                fallbackText: "Waiting for terminal state..."
-            )
+                ownerEpoch: GhosttyRemoteTerminalOwnerEpoch(sessionID: "test-session", id: ownerEpochID, bootstrapSnapshot: bootstrapSnapshot),
+                endedRender: nil, fallbackText: "Waiting for terminal state...")
 
             wait(for: [renderedExpectation], timeout: 2)
             XCTAssertTrue(renderedText.localizedStandardContains("t not found"), renderedText)
@@ -2728,13 +2309,8 @@
 
             hostView.update(
                 ownerEpoch: GhosttyRemoteTerminalOwnerEpoch(
-                    sessionID: "test-session",
-                    id: "owner|initial-output-repair",
-                    bootstrapSnapshot: repairedSnapshot
-                ),
-                endedRender: nil,
-                fallbackText: "Waiting for terminal state..."
-            )
+                    sessionID: "test-session", id: "owner|initial-output-repair", bootstrapSnapshot: repairedSnapshot), endedRender: nil,
+                fallbackText: "Waiting for terminal state...")
 
             wait(for: [renderedExpectation], timeout: 2)
             XCTAssertTrue(renderedText.localizedStandardContains("which python"), renderedText)
@@ -2773,28 +2349,20 @@
             viewController.view.layoutIfNeeded()
 
             hostView.update(
-                snapshot: sampleSnapshot(),
-                renderStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0|screen=1",
-                fallbackText: "Waiting for terminal state…"
-            )
+                snapshot: sampleSnapshot(), renderStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0|screen=1",
+                fallbackText: "Waiting for terminal state…")
 
             wait(for: [initialRenderedExpectation], timeout: 2)
 
             hostView.setTerminalVisible(false)
-            hostView.update(
-                snapshot: nil,
-                renderStateKey: "status",
-                fallbackText: "Current owner: Mac"
-            )
+            hostView.update(snapshot: nil, renderStateKey: "status", fallbackText: "Current owner: Mac")
 
             RunLoop.main.run(until: Date().addingTimeInterval(0.25))
 
             hostView.setTerminalVisible(true)
             hostView.update(
-                snapshot: sampleSnapshot(),
-                renderStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0|screen=1",
-                fallbackText: "Waiting for terminal state…"
-            )
+                snapshot: sampleSnapshot(), renderStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0|screen=1",
+                fallbackText: "Waiting for terminal state…")
 
             wait(for: [republishedRenderedExpectation], timeout: 2)
             XCTAssertEqual(renderedEvents.count, 2)
@@ -2811,11 +2379,7 @@
             let initialRenderedExpectation = expectation(description: "initial rendered text published")
             let republishedRenderedExpectation = expectation(description: "rendered text republished after observer is reattached")
 
-            hostView.onRenderedTextChanged = { text in
-                if text.localizedStandardContains("hi") {
-                    initialRenderedExpectation.fulfill()
-                }
-            }
+            hostView.onRenderedTextChanged = { text in if text.localizedStandardContains("hi") { initialRenderedExpectation.fulfill() } }
 
             viewController.view.addSubview(hostView)
             window.isHidden = false
@@ -2824,32 +2388,22 @@
             viewController.view.layoutIfNeeded()
 
             hostView.update(
-                snapshot: sampleSnapshot(),
-                renderStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0",
-                fallbackText: "Waiting for terminal state…"
-            )
+                snapshot: sampleSnapshot(), renderStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0",
+                fallbackText: "Waiting for terminal state…")
 
             wait(for: [initialRenderedExpectation], timeout: 2)
 
             hostView.onRenderedTextChanged = nil
             hostView.update(
-                snapshot: sampleSnapshotWithExclamation(),
-                renderStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0",
-                fallbackText: "Waiting for terminal state…"
-            )
+                snapshot: sampleSnapshotWithExclamation(), renderStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0",
+                fallbackText: "Waiting for terminal state…")
 
             RunLoop.main.run(until: Date().addingTimeInterval(0.25))
 
-            hostView.onRenderedTextChanged = { text in
-                if text.localizedStandardContains("hi!") {
-                    republishedRenderedExpectation.fulfill()
-                }
-            }
+            hostView.onRenderedTextChanged = { text in if text.localizedStandardContains("hi!") { republishedRenderedExpectation.fulfill() } }
             hostView.update(
-                snapshot: sampleSnapshotWithExclamation(),
-                renderStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0",
-                fallbackText: "Waiting for terminal state…"
-            )
+                snapshot: sampleSnapshotWithExclamation(), renderStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0",
+                fallbackText: "Waiting for terminal state…")
 
             wait(for: [republishedRenderedExpectation], timeout: 2)
 
@@ -2882,19 +2436,13 @@
             viewController.view.layoutIfNeeded()
 
             hostView.update(
-                snapshot: sampleSnapshot(),
-                renderStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0|screen=1",
-                fallbackText: "Waiting for terminal state…"
-            )
+                snapshot: sampleSnapshot(), renderStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0|screen=1",
+                fallbackText: "Waiting for terminal state…")
 
             wait(for: [initialRenderedExpectation], timeout: 2)
 
             hostView.setTerminalVisible(false)
-            hostView.update(
-                snapshot: nil,
-                renderStateKey: "status",
-                fallbackText: "Current owner: Mac"
-            )
+            hostView.update(snapshot: nil, renderStateKey: "status", fallbackText: "Current owner: Mac")
 
             wait(for: [clearedRenderedExpectation], timeout: 2)
             XCTAssertEqual(renderedEvents.last, "")
@@ -2903,55 +2451,24 @@
         }
 
         func testRemoteTerminalHostViewEncodesPreciseScrollMods() {
-            XCTAssertEqual(
-                Int32(GhosttyRemoteTerminalHostView.makeScrollMods(hasPreciseDeltas: true, momentumState: .changed)),
-                Int32(0b0000_0111)
-            )
-            XCTAssertEqual(
-                Int32(GhosttyRemoteTerminalHostView.makeScrollMods(hasPreciseDeltas: true, momentumState: .ended)),
-                Int32(0b0000_1001)
-            )
-            XCTAssertEqual(
-                Int32(GhosttyRemoteTerminalHostView.makeScrollMods(hasPreciseDeltas: true, momentumState: .cancelled)),
-                Int32(0b0000_1011)
-            )
-            XCTAssertEqual(
-                Int32(GhosttyRemoteTerminalHostView.makeScrollMods(hasPreciseDeltas: true, momentumState: .possible)),
-                Int32(0b0000_1101)
-            )
-            XCTAssertEqual(
-                Int32(GhosttyRemoteTerminalHostView.makeScrollMods(hasPreciseDeltas: false, momentumState: .ended)),
-                Int32(0b0000_1000)
-            )
-            XCTAssertEqual(
-                Int32(GhosttyRemoteTerminalHostView.makeScrollMods(hasPreciseDeltas: false, momentumState: .possible)),
-                Int32(0b0000_1100)
-            )
+            XCTAssertEqual(Int32(GhosttyRemoteTerminalHostView.makeScrollMods(hasPreciseDeltas: true, momentumState: .changed)), Int32(0b0000_0111))
+            XCTAssertEqual(Int32(GhosttyRemoteTerminalHostView.makeScrollMods(hasPreciseDeltas: true, momentumState: .ended)), Int32(0b0000_1001))
+            XCTAssertEqual(Int32(GhosttyRemoteTerminalHostView.makeScrollMods(hasPreciseDeltas: true, momentumState: .cancelled)), Int32(0b0000_1011))
+            XCTAssertEqual(Int32(GhosttyRemoteTerminalHostView.makeScrollMods(hasPreciseDeltas: true, momentumState: .possible)), Int32(0b0000_1101))
+            XCTAssertEqual(Int32(GhosttyRemoteTerminalHostView.makeScrollMods(hasPreciseDeltas: false, momentumState: .ended)), Int32(0b0000_1000))
+            XCTAssertEqual(Int32(GhosttyRemoteTerminalHostView.makeScrollMods(hasPreciseDeltas: false, momentumState: .possible)), Int32(0b0000_1100))
         }
 
         func testRemoteTerminalHostViewForwardsPreciseScrollMods() {
             let hostView = GhosttyRemoteTerminalHostView(frame: CGRect(x: 0, y: 0, width: 640, height: 480))
-            var sentScrolls: [
-                (
-                    horizontal: Double,
-                    vertical: Double,
-                    scrollMods: Int32,
-                    pointerPosition: TerminalScrollPointerPosition?
-                )
-            ] = []
+            var sentScrolls: [(horizontal: Double, vertical: Double, scrollMods: Int32, pointerPosition: TerminalScrollPointerPosition?)] = []
             hostView.onSendScroll = { horizontal, vertical, scrollMods, pointerPosition in
                 sentScrolls.append((horizontal, vertical, scrollMods, pointerPosition))
             }
 
             XCTAssertTrue(
                 hostView.debugSendScrollForTesting(
-                    horizontal: 0,
-                    vertical: 8,
-                    location: CGPoint(x: 160, y: 120),
-                    hasPreciseDeltas: true,
-                    momentumState: .changed
-                )
-            )
+                    horizontal: 0, vertical: 8, location: CGPoint(x: 160, y: 120), hasPreciseDeltas: true, momentumState: .changed))
 
             XCTAssertEqual(sentScrolls.last?.horizontal, 0)
             XCTAssertEqual(sentScrolls.last?.vertical, 8)
@@ -2972,10 +2489,8 @@
             viewController.view.layoutIfNeeded()
 
             hostView.update(
-                snapshot: scrollbackSnapshot(lineCount: 220),
-                renderStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0",
-                fallbackText: "Waiting for terminal state…"
-            )
+                snapshot: scrollbackSnapshot(lineCount: 220), renderStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0",
+                fallbackText: "Waiting for terminal state…")
 
             RunLoop.main.run(until: Date().addingTimeInterval(0.25))
 
@@ -3005,19 +2520,15 @@
             viewController.view.layoutIfNeeded()
 
             hostView.update(
-                snapshot: scrollbackSnapshot(lineCount: 220),
-                renderStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0",
-                fallbackText: "Waiting for terminal state…"
-            )
+                snapshot: scrollbackSnapshot(lineCount: 220), renderStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0",
+                fallbackText: "Waiting for terminal state…")
 
             RunLoop.main.run(until: Date().addingTimeInterval(0.25))
 
             let bottomSnapshot = try XCTUnwrap(hostView.capturedSnapshotForTesting())
             let bottomText = GhosttyTerminalSnapshotLayout.plainText(for: bottomSnapshot)
 
-            for _ in 0..<20 {
-                XCTAssertTrue(hostView.debugSendScrollForTesting(horizontal: 0, vertical: 1))
-            }
+            for _ in 0..<20 { XCTAssertTrue(hostView.debugSendScrollForTesting(horizontal: 0, vertical: 1)) }
 
             RunLoop.main.run(until: Date().addingTimeInterval(0.1))
 
@@ -3035,14 +2546,7 @@
             window.rootViewController = viewController
 
             let hostView = GhosttyRemoteTerminalHostView(frame: CGRect(x: 0, y: 0, width: 640, height: 480))
-            var sentScrolls: [
-                (
-                    horizontal: Double,
-                    vertical: Double,
-                    scrollMods: Int32,
-                    pointerPosition: TerminalScrollPointerPosition?
-                )
-            ] = []
+            var sentScrolls: [(horizontal: Double, vertical: Double, scrollMods: Int32, pointerPosition: TerminalScrollPointerPosition?)] = []
             hostView.onSendScroll = { horizontal, vertical, scrollMods, pointerPosition in
                 sentScrolls.append((horizontal, vertical, scrollMods, pointerPosition))
             }
@@ -3053,18 +2557,14 @@
             viewController.view.layoutIfNeeded()
 
             hostView.update(
-                snapshot: sampleSnapshot(),
-                renderStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0",
-                fallbackText: "Waiting for terminal state…"
-            )
+                snapshot: sampleSnapshot(), renderStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0",
+                fallbackText: "Waiting for terminal state…")
 
             RunLoop.main.run(until: Date().addingTimeInterval(0.25))
 
             hostView.update(
-                snapshot: scrollbackSnapshot(lineCount: 220),
-                renderStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0",
-                fallbackText: "Waiting for terminal state…"
-            )
+                snapshot: scrollbackSnapshot(lineCount: 220), renderStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0",
+                fallbackText: "Waiting for terminal state…")
 
             RunLoop.main.run(until: Date().addingTimeInterval(0.4))
 
@@ -3073,10 +2573,7 @@
             XCTAssertTrue(bottomText.localizedStandardContains("SEQ 000219"), bottomText)
 
             let didScroll = hostView.debugSendScrollForTesting(
-                horizontal: 0,
-                vertical: 10_000,
-                location: CGPoint(x: hostView.bounds.midX, y: hostView.bounds.midY)
-            )
+                horizontal: 0, vertical: 10_000, location: CGPoint(x: hostView.bounds.midX, y: hostView.bounds.midY))
             XCTAssertTrue(didScroll)
 
             RunLoop.main.run(until: Date().addingTimeInterval(0.4))
@@ -3096,14 +2593,7 @@
             window.rootViewController = viewController
 
             let hostView = GhosttyRemoteTerminalHostView(frame: CGRect(x: 0, y: 0, width: 640, height: 480))
-            var sentScrolls: [
-                (
-                    horizontal: Double,
-                    vertical: Double,
-                    scrollMods: Int32,
-                    pointerPosition: TerminalScrollPointerPosition?
-                )
-            ] = []
+            var sentScrolls: [(horizontal: Double, vertical: Double, scrollMods: Int32, pointerPosition: TerminalScrollPointerPosition?)] = []
             hostView.onSendScroll = { horizontal, vertical, scrollMods, pointerPosition in
                 sentScrolls.append((horizontal, vertical, scrollMods, pointerPosition))
             }
@@ -3114,26 +2604,20 @@
             viewController.view.layoutIfNeeded()
 
             hostView.update(
-                snapshot: sampleSnapshot(),
-                renderStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0",
-                fallbackText: "Waiting for terminal state…"
-            )
+                snapshot: sampleSnapshot(), renderStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0",
+                fallbackText: "Waiting for terminal state…")
 
             RunLoop.main.run(until: Date().addingTimeInterval(0.25))
 
             hostView.update(
-                snapshot: scrollbackSnapshot(lineCount: 220),
-                renderStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0",
-                fallbackText: "Waiting for terminal state…"
-            )
+                snapshot: scrollbackSnapshot(lineCount: 220), renderStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0",
+                fallbackText: "Waiting for terminal state…")
 
             RunLoop.main.run(until: Date().addingTimeInterval(0.4))
 
             hostView.update(
-                snapshot: scrollbackSnapshot(lineCount: 220),
-                renderStateKey: "viewer|runtime=6x4|snapshot=4x2|interactive=0",
-                fallbackText: "Waiting for terminal state…"
-            )
+                snapshot: scrollbackSnapshot(lineCount: 220), renderStateKey: "viewer|runtime=6x4|snapshot=4x2|interactive=0",
+                fallbackText: "Waiting for terminal state…")
 
             hostView.frame = CGRect(x: 0, y: 0, width: 700, height: 420)
             viewController.view.layoutIfNeeded()
@@ -3143,10 +2627,7 @@
             let preScrollText = GhosttyTerminalSnapshotLayout.plainText(for: preScrollSnapshot)
 
             let didScroll = hostView.debugSendScrollForTesting(
-                horizontal: 0,
-                vertical: 10_000,
-                location: CGPoint(x: hostView.bounds.midX, y: hostView.bounds.midY)
-            )
+                horizontal: 0, vertical: 10_000, location: CGPoint(x: hostView.bounds.midX, y: hostView.bounds.midY))
             XCTAssertTrue(didScroll)
 
             RunLoop.main.run(until: Date().addingTimeInterval(0.4))
@@ -3175,14 +2656,8 @@
             let bootstrapSnapshot = snapshot(columns: 16, rows: 2, text: "old-output-line\nshell % ")
             let refreshedBootstrapSnapshot = snapshot(columns: 16, rows: 2, text: "shell % ")
             hostView.update(
-                ownerEpoch: GhosttyRemoteTerminalOwnerEpoch(
-                    sessionID: "test-session",
-                    id: "owner-epoch-1",
-                    bootstrapSnapshot: bootstrapSnapshot
-                ),
-                endedRender: nil,
-                fallbackText: "Waiting for terminal state…"
-            )
+                ownerEpoch: GhosttyRemoteTerminalOwnerEpoch(sessionID: "test-session", id: "owner-epoch-1", bootstrapSnapshot: bootstrapSnapshot),
+                endedRender: nil, fallbackText: "Waiting for terminal state…")
 
             RunLoop.main.run(until: Date().addingTimeInterval(0.3))
 
@@ -3192,13 +2667,8 @@
 
             hostView.update(
                 ownerEpoch: GhosttyRemoteTerminalOwnerEpoch(
-                    sessionID: "test-session",
-                    id: "owner-epoch-2",
-                    bootstrapSnapshot: refreshedBootstrapSnapshot
-                ),
-                endedRender: nil,
-                fallbackText: "Waiting for terminal state…"
-            )
+                    sessionID: "test-session", id: "owner-epoch-2", bootstrapSnapshot: refreshedBootstrapSnapshot), endedRender: nil,
+                fallbackText: "Waiting for terminal state…")
 
             RunLoop.main.run(until: Date().addingTimeInterval(0.3))
 
@@ -3223,18 +2693,14 @@
             viewController.view.layoutIfNeeded()
 
             hostView.update(
-                snapshot: sampleSnapshot(),
-                renderStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0",
-                fallbackText: "Waiting for terminal state…"
-            )
+                snapshot: sampleSnapshot(), renderStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0",
+                fallbackText: "Waiting for terminal state…")
 
             RunLoop.main.run(until: Date().addingTimeInterval(0.25))
 
             hostView.update(
-                snapshot: promptSnapshot(),
-                renderStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0",
-                fallbackText: "Waiting for terminal state…"
-            )
+                snapshot: promptSnapshot(), renderStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0",
+                fallbackText: "Waiting for terminal state…")
 
             RunLoop.main.run(until: Date().addingTimeInterval(0.4))
 
@@ -3249,8 +2715,7 @@
 
         private func terminalSurfaceLayer(in hostView: GhosttyRemoteTerminalHostView) -> CALayer? {
             hostView.layer.sublayers?.first(where: { layer in
-                abs(layer.frame.width - hostView.bounds.width) < 0.5
-                    && abs(layer.frame.height - hostView.bounds.height) < 0.5
+                abs(layer.frame.width - hostView.bounds.width) < 0.5 && abs(layer.frame.height - hostView.bounds.height) < 0.5
             })
         }
 
@@ -3259,25 +2724,13 @@
             let characters = Array("hi".unicodeScalars)
             let cells: [GhosttyTerminalSnapshot.Cell] = [
                 GhosttyTerminalSnapshot.Cell(codepoint: characters[0].value, foregroundRGB: 0xF2F2F2, backgroundRGB: 0x1A1E26, flags: 0),
-                GhosttyTerminalSnapshot.Cell(codepoint: characters[1].value, foregroundRGB: 0xF2F2F2, backgroundRGB: 0x1A1E26, flags: 0),
-                blank,
-                blank,
-                blank,
-                blank,
-                blank,
-                blank,
+                GhosttyTerminalSnapshot.Cell(codepoint: characters[1].value, foregroundRGB: 0xF2F2F2, backgroundRGB: 0x1A1E26, flags: 0), blank,
+                blank, blank, blank, blank, blank,
             ]
 
             return GhosttyTerminalSnapshot(
-                columns: 4,
-                rows: 2,
-                cursorColumn: 2,
-                cursorRow: 0,
-                cursorVisible: true,
-                defaultForegroundRGB: 0xF2F2F2,
-                defaultBackgroundRGB: 0x1A1E26,
-                cells: cells
-            )
+                columns: 4, rows: 2, cursorColumn: 2, cursorRow: 0, cursorVisible: true, defaultForegroundRGB: 0xF2F2F2,
+                defaultBackgroundRGB: 0x1A1E26, cells: cells)
         }
 
         private func sampleSnapshotWithExclamation() -> GhosttyTerminalSnapshot {
@@ -3286,33 +2739,16 @@
             let cells: [GhosttyTerminalSnapshot.Cell] = [
                 GhosttyTerminalSnapshot.Cell(codepoint: characters[0].value, foregroundRGB: 0xF2F2F2, backgroundRGB: 0x1A1E26, flags: 0),
                 GhosttyTerminalSnapshot.Cell(codepoint: characters[1].value, foregroundRGB: 0xF2F2F2, backgroundRGB: 0x1A1E26, flags: 0),
-                GhosttyTerminalSnapshot.Cell(codepoint: characters[2].value, foregroundRGB: 0xF2F2F2, backgroundRGB: 0x1A1E26, flags: 0),
-                blank,
-                blank,
-                blank,
-                blank,
-                blank,
+                GhosttyTerminalSnapshot.Cell(codepoint: characters[2].value, foregroundRGB: 0xF2F2F2, backgroundRGB: 0x1A1E26, flags: 0), blank,
+                blank, blank, blank, blank,
             ]
 
             return GhosttyTerminalSnapshot(
-                columns: 4,
-                rows: 2,
-                cursorColumn: 3,
-                cursorRow: 0,
-                cursorVisible: true,
-                defaultForegroundRGB: 0xF2F2F2,
-                defaultBackgroundRGB: 0x1A1E26,
-                cells: cells
-            )
+                columns: 4, rows: 2, cursorColumn: 3, cursorRow: 0, cursorVisible: true, defaultForegroundRGB: 0xF2F2F2,
+                defaultBackgroundRGB: 0x1A1E26, cells: cells)
         }
 
-        private func promptSnapshot() -> GhosttyTerminalSnapshot {
-            snapshot(
-                columns: 8,
-                rows: 2,
-                text: "shell % "
-            )
-        }
+        private func promptSnapshot() -> GhosttyTerminalSnapshot { snapshot(columns: 8, rows: 2, text: "shell % ") }
 
         private func scrollbackSnapshot(lineCount: Int) -> GhosttyTerminalSnapshot {
             let lines = (0..<lineCount).map { index in "SEQ \(String(format: "%06d", index)) scrollback-line-\(index)" }
@@ -3351,25 +2787,14 @@
                 }
                 guard cursorRow < rows else { break }
                 let cellIndex = cursorRow * columns + cursorColumn
-                cells[cellIndex] = GhosttyTerminalSnapshot.Cell(
-                    codepoint: scalar.value,
-                    foregroundRGB: 0xF2F2F2,
-                    backgroundRGB: 0x1A1E26,
-                    flags: 0
-                )
+                cells[cellIndex] = GhosttyTerminalSnapshot.Cell(codepoint: scalar.value, foregroundRGB: 0xF2F2F2, backgroundRGB: 0x1A1E26, flags: 0)
                 cursorColumn += 1
             }
 
             return GhosttyTerminalSnapshot(
-                columns: columns,
-                rows: rows,
-                cursorColumn: min(max(cursorColumn, 0), max(columns - 1, 0)),
-                cursorRow: min(max(cursorRow, 0), max(rows - 1, 0)),
-                cursorVisible: true,
-                defaultForegroundRGB: 0xF2F2F2,
-                defaultBackgroundRGB: 0x1A1E26,
-                cells: cells
-            )
+                columns: columns, rows: rows, cursorColumn: min(max(cursorColumn, 0), max(columns - 1, 0)),
+                cursorRow: min(max(cursorRow, 0), max(rows - 1, 0)), cursorVisible: true, defaultForegroundRGB: 0xF2F2F2,
+                defaultBackgroundRGB: 0x1A1E26, cells: cells)
         }
 
     }
@@ -3377,40 +2802,24 @@
     private func descendants<ViewType: UIView>(of view: UIView, matching type: ViewType.Type) -> [ViewType] {
         var matches: [ViewType] = []
         if let typedView = view as? ViewType { matches.append(typedView) }
-        for subview in view.subviews {
-            matches.append(contentsOf: descendants(of: subview, matching: type))
-        }
+        for subview in view.subviews { matches.append(contentsOf: descendants(of: subview, matching: type)) }
         return matches
     }
 
-    private extension SpacesDeviceAPIRequest {
-        var terminalLink: String? {
-            if case .resolveTerminalLink(let payload) = command { payload.terminalLink } else { nil }
-        }
+    extension SpacesDeviceAPIRequest {
+        fileprivate var terminalLink: String? { if case .resolveTerminalLink(let payload) = command { payload.terminalLink } else { nil } }
 
-        var terminalLinkID: String? {
-            if case .readTerminalLinkChunk(let payload) = command { payload.terminalLinkID } else { nil }
-        }
+        fileprivate var terminalLinkID: String? { if case .readTerminalLinkChunk(let payload) = command { payload.terminalLinkID } else { nil } }
 
-        var chunkOffset: Int64? {
-            if case .readTerminalLinkChunk(let payload) = command { payload.offset } else { nil }
-        }
+        fileprivate var chunkOffset: Int64? { if case .readTerminalLinkChunk(let payload) = command { payload.offset } else { nil } }
     }
 
-    private extension GhosttyRemoteTerminalHostView {
-        func update(
-            snapshot: GhosttyTerminalSnapshot?,
-            renderStateKey: String,
-            fallbackText: String
-        ) {
+    extension GhosttyRemoteTerminalHostView {
+        fileprivate func update(snapshot: GhosttyTerminalSnapshot?, renderStateKey: String, fallbackText: String) {
             let ownerEpoch: GhosttyRemoteTerminalOwnerEpoch?
             if snapshot != nil {
                 let epochID = "owner|\(renderStateKey)|\(snapshotSignature(snapshot))"
-                ownerEpoch = GhosttyRemoteTerminalOwnerEpoch(
-                    sessionID: "test-session",
-                    id: epochID,
-                    bootstrapSnapshot: snapshot
-                )
+                ownerEpoch = GhosttyRemoteTerminalOwnerEpoch(sessionID: "test-session", id: epochID, bootstrapSnapshot: snapshot)
             } else {
                 ownerEpoch = nil
             }

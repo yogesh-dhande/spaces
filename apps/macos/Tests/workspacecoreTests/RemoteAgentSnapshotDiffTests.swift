@@ -103,11 +103,9 @@ final class RemoteAgentSnapshotDiffTests: XCTestCase {
     func testValidateThrowsForUnknownDevice() {
         XCTAssertThrowsError(
             try RemoteAgentSubscriptionValidation.validate(
-                deviceID: "dev-missing", childTerminalSessionID: "term-1", resolveDevice: { _ in Optional<FakeDevice>.none },
-                deviceName: { $0.name }, fetchRows: { _ in [] })
-        ) { error in
-            XCTAssertTrue("\(error)".contains("No paired device dev-missing"))
-        }
+                deviceID: "dev-missing", childTerminalSessionID: "term-1", resolveDevice: { _ in Optional<FakeDevice>.none }, deviceName: { $0.name },
+                fetchRows: { _ in [] })
+        ) { error in XCTAssertTrue("\(error)".contains("No paired device dev-missing")) }
     }
 
     func testValidateThrowsForUnknownRemoteSession() {
@@ -115,9 +113,7 @@ final class RemoteAgentSnapshotDiffTests: XCTestCase {
             try RemoteAgentSubscriptionValidation.validate(
                 deviceID: "dev-1", childTerminalSessionID: "term-1", resolveDevice: { _ in FakeDevice(name: "Studio") }, deviceName: { $0.name },
                 fetchRows: { _ in [self.row(terminal: "other-term", status: "waiting")] })
-        ) { error in
-            XCTAssertTrue("\(error)".contains("No agent session for terminal term-1 on Studio"))
-        }
+        ) { error in XCTAssertTrue("\(error)".contains("No agent session for terminal term-1 on Studio")) }
     }
 
     func testValidatePassesForPairedDeviceWithMatchingChild() throws {

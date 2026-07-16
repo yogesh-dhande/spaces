@@ -25,10 +25,8 @@ enum SpacesMobileDeviceStore {
 
     #if DEBUG
         static func applyDebugSeed(environment: [String: String] = ProcessInfo.processInfo.environment) {
-            guard let rawSeed = environment["SPACES_MOBILE_TEST_DEVICE_SEED_JSON"]?.trimmingCharacters(in: .whitespacesAndNewlines),
-                  !rawSeed.isEmpty,
-                  let data = rawSeed.data(using: .utf8),
-                  let seed = try? JSONDecoder().decode(DebugDeviceSeed.self, from: data)
+            guard let rawSeed = environment["SPACES_MOBILE_TEST_DEVICE_SEED_JSON"]?.trimmingCharacters(in: .whitespacesAndNewlines), !rawSeed.isEmpty,
+                let data = rawSeed.data(using: .utf8), let seed = try? JSONDecoder().decode(DebugDeviceSeed.self, from: data)
             else { return }
 
             let now = ISO8601DateFormatter().string(from: Date())
@@ -36,35 +34,22 @@ enum SpacesMobileDeviceStore {
                 let host = seededDevice.host.trimmingCharacters(in: .whitespacesAndNewlines)
                 let fingerprint = seededDevice.certificateFingerprint.trimmingCharacters(in: .whitespacesAndNewlines)
                 let authToken = seededDevice.authToken.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !host.isEmpty, (1...65_535).contains(seededDevice.port), !fingerprint.isEmpty, !authToken.isEmpty
-                else { return nil }
+                guard !host.isEmpty, (1...65_535).contains(seededDevice.port), !fingerprint.isEmpty, !authToken.isEmpty else { return nil }
 
-                let id = seededDevice.id?.nilIfBlank ?? deviceID(
-                    certificateFingerprint: fingerprint,
-                    host: host,
-                    port: seededDevice.port
-                )
+                let id = seededDevice.id?.nilIfBlank ?? deviceID(certificateFingerprint: fingerprint, host: host, port: seededDevice.port)
                 saveSecret(authToken, deviceID: id, kind: .authToken)
                 return SpacesMobilePairedDeviceRecord(
-                    id: id,
-                    name: seededDevice.name.nilIfBlank ?? host,
-                    host: host,
-                    port: seededDevice.port,
-                    certificateFingerprint: fingerprint,
-                    createdAt: seededDevice.createdAt ?? now,
-                    updatedAt: seededDevice.updatedAt ?? now,
-                    lastSelectedAt: seededDevice.lastSelectedAt ?? now
-                )
+                    id: id, name: seededDevice.name.nilIfBlank ?? host, host: host, port: seededDevice.port, certificateFingerprint: fingerprint,
+                    createdAt: seededDevice.createdAt ?? now, updatedAt: seededDevice.updatedAt ?? now,
+                    lastSelectedAt: seededDevice.lastSelectedAt ?? now)
             }
             guard !records.isEmpty else { return }
 
             saveDevices(records)
-            let activeID = seed.activeDeviceID?.nilIfBlank.flatMap { requestedID in
-                records.contains(where: { $0.id == requestedID }) ? requestedID : nil
-            } ?? records.first?.id
-            if let activeID {
-                UserDefaults.standard.set(activeID, forKey: activeDeviceKey)
-            }
+            let activeID =
+                seed.activeDeviceID?.nilIfBlank.flatMap { requestedID in records.contains(where: { $0.id == requestedID }) ? requestedID : nil }
+                ?? records.first?.id
+            if let activeID { UserDefaults.standard.set(activeID, forKey: activeDeviceKey) }
         }
 
         private struct DebugDeviceSeed: Decodable {
@@ -119,18 +104,11 @@ enum SpacesMobileDeviceStore {
         return SpacesMobileDeviceStoreState(devices: devices, activeDeviceID: activeDeviceID, settings: settings)
     }
 
-    @discardableResult static func upsert(
-        settings: SpacesMobileConnectionSettings,
-        name: String
-    ) -> SpacesMobileDeviceStoreState {
+    @discardableResult static func upsert(settings: SpacesMobileConnectionSettings, name: String) -> SpacesMobileDeviceStoreState {
         let now = ISO8601DateFormatter().string(from: Date())
         var devices = loadDevices()
         var record = record(from: settings, name: name)
-        if let existing = devices.first(where: { $0.id == record.id }) {
-            record.createdAt = existing.createdAt
-        } else {
-            record.createdAt = now
-        }
+        if let existing = devices.first(where: { $0.id == record.id }) { record.createdAt = existing.createdAt } else { record.createdAt = now }
         record.updatedAt = now
         record.lastSelectedAt = now
         devices.removeAll { $0.id == record.id }
@@ -141,11 +119,9 @@ enum SpacesMobileDeviceStore {
         return load(fallbackSettings: settings)
     }
 
-    @discardableResult static func rename(
-        deviceID: String,
-        name: String,
-        fallbackSettings: SpacesMobileConnectionSettings
-    ) -> SpacesMobileDeviceStoreState {
+    @discardableResult static func rename(deviceID: String, name: String, fallbackSettings: SpacesMobileConnectionSettings)
+        -> SpacesMobileDeviceStoreState
+    {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         var devices = loadDevices()
         if !trimmed.isEmpty, let index = devices.firstIndex(where: { $0.id == deviceID }) {
@@ -188,17 +164,13 @@ enum SpacesMobileDeviceStore {
     /// Reads a paired device's Device API auth token from the Keychain, keyed by the same device ID
     /// the browser routing table carries. The browser proxy dialer authenticates its raw-byte service
     /// tunnel with this token, so it needs to look the secret up out of band from the settings flow.
-    static func authToken(deviceID: String) -> String? {
-        secret(deviceID: deviceID, kind: .authToken)
-    }
+    static func authToken(deviceID: String) -> String? { secret(deviceID: deviceID, kind: .authToken) }
 
     private static func loadDevices() -> [SpacesMobilePairedDeviceRecord] {
         guard let data = UserDefaults.standard.data(forKey: devicesKey),
-              let decoded = try? JSONDecoder().decode([SpacesMobilePairedDeviceRecord].self, from: data)
+            let decoded = try? JSONDecoder().decode([SpacesMobilePairedDeviceRecord].self, from: data)
         else { return [] }
-        return decoded.sorted {
-            ($0.lastSelectedAt ?? $0.updatedAt) > ($1.lastSelectedAt ?? $1.updatedAt)
-        }
+        return decoded.sorted { ($0.lastSelectedAt ?? $0.updatedAt) > ($1.lastSelectedAt ?? $1.updatedAt) }
     }
 
     private static func saveDevices(_ devices: [SpacesMobilePairedDeviceRecord]) {
@@ -209,15 +181,9 @@ enum SpacesMobileDeviceStore {
     private static func record(from settings: SpacesMobileConnectionSettings, name: String) -> SpacesMobilePairedDeviceRecord {
         let now = ISO8601DateFormatter().string(from: Date())
         return SpacesMobilePairedDeviceRecord(
-            id: deviceID(certificateFingerprint: settings.certificateFingerprint, host: settings.trimmedHost, port: settings.port),
-            name: name,
-            host: settings.trimmedHost,
-            port: settings.port,
-            certificateFingerprint: settings.certificateFingerprint,
-            createdAt: now,
-            updatedAt: now,
-            lastSelectedAt: now
-        )
+            id: deviceID(certificateFingerprint: settings.certificateFingerprint, host: settings.trimmedHost, port: settings.port), name: name,
+            host: settings.trimmedHost, port: settings.port, certificateFingerprint: settings.certificateFingerprint, createdAt: now, updatedAt: now,
+            lastSelectedAt: now)
     }
 
     private static func settings(from device: SpacesMobilePairedDeviceRecord, installationID: String) -> SpacesMobileConnectionSettings {
@@ -232,14 +198,12 @@ enum SpacesMobileDeviceStore {
 
     private static func deviceID(certificateFingerprint: String, host: String, port: Int) -> String {
         let source = "\(certificateFingerprint)|\(host)|\(port)".lowercased()
-        let slug = source.replacingOccurrences(of: #"[^a-z0-9]+"#, with: "-", options: .regularExpression)
-            .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+        let slug = source.replacingOccurrences(of: #"[^a-z0-9]+"#, with: "-", options: .regularExpression).trimmingCharacters(
+            in: CharacterSet(charactersIn: "-"))
         return "device-\(slug.prefix(48))"
     }
 
-    private enum SecretKind: String {
-        case authToken
-    }
+    private enum SecretKind: String { case authToken }
 
     private static func saveSecret(_ value: String, deviceID: String, kind: SecretKind) {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -257,9 +221,8 @@ enum SpacesMobileDeviceStore {
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
         var result: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
-              let data = result as? Data,
-              let value = String(data: data, encoding: .utf8)
+        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess, let data = result as? Data,
+            let value = String(data: data, encoding: .utf8)
         else { return nil }
         return value.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank
     }
@@ -270,15 +233,14 @@ enum SpacesMobileDeviceStore {
 
     private static func keychainQuery(deviceID: String, kind: SecretKind) -> [String: Any] {
         [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: keychainService,
+            kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: keychainService,
             kSecAttrAccount as String: "\(deviceID).\(kind.rawValue)",
         ]
     }
 }
 
-private extension String {
-    var nilIfBlank: String? {
+extension String {
+    fileprivate var nilIfBlank: String? {
         let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
     }

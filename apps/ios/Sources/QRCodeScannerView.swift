@@ -10,13 +10,11 @@ struct QRCodeScannerView: View {
             DataScannerRepresentable { payload in
                 onScanned(payload)
                 dismiss()
-            }
-            .ignoresSafeArea()
-            Button { dismiss() } label: {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 30))
-                    .foregroundStyle(.white.opacity(0.85))
-                    .padding(20)
+            }.ignoresSafeArea()
+            Button {
+                dismiss()
+            } label: {
+                Image(systemName: "xmark.circle.fill").font(.system(size: 30)).foregroundStyle(.white.opacity(0.85)).padding(20)
             }
         }
     }
@@ -29,10 +27,7 @@ private struct DataScannerRepresentable: UIViewControllerRepresentable {
 
     func makeUIViewController(context: Context) -> DataScannerViewController {
         let scanner = DataScannerViewController(
-            recognizedDataTypes: [.barcode(symbologies: [.qr])],
-            qualityLevel: .accurate,
-            isHighlightingEnabled: true
-        )
+            recognizedDataTypes: [.barcode(symbologies: [.qr])], qualityLevel: .accurate, isHighlightingEnabled: true)
         scanner.delegate = context.coordinator
         try? scanner.startScanning()
         return scanner

@@ -8,9 +8,7 @@ import spacesterminalcore
 /// An error that carries a machine-readable Spaces failure category. Auth-failure classification
 /// branches on the code when present instead of substring-matching the message; errors without a
 /// code (raw transport failures) fall through to the message heuristics.
-public protocol SpacesDeviceErrorCodeProviding {
-    var spacesDeviceErrorCode: SpacesDeviceErrorCode? { get }
-}
+public protocol SpacesDeviceErrorCodeProviding { var spacesDeviceErrorCode: SpacesDeviceErrorCode? { get } }
 
 public enum SpacesDeviceAPIAuthentication {
     private static let reAuthenticationMessage = "This Mac no longer recognizes this device. Open Devices and pair this device again."
@@ -38,8 +36,8 @@ public enum SpacesDeviceAPIAuthentication {
 
     private static func isAuthenticationFailure(message: String) -> Bool {
         message.localizedStandardContains("not paired") || message.localizedStandardContains("invalid device auth token")
-            || message.localizedStandardContains("missing device auth token")
-            || message.localizedStandardContains("unauthorized") || message.localizedStandardContains("certificate fingerprint")
+            || message.localizedStandardContains("missing device auth token") || message.localizedStandardContains("unauthorized")
+            || message.localizedStandardContains("certificate fingerprint")
             // The iOS client reports a reachable port whose pinned-TLS handshake never completes as
             // "The secure Device API transport could not authenticate." That means the daemon's TLS
             // identity no longer matches the pinned fingerprint (rotated or wrong endpoint), which is

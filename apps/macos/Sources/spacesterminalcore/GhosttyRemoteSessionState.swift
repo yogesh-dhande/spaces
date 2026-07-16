@@ -105,9 +105,7 @@ public enum GhosttyRemoteSessionStateTimestamp {
     // Fallback for legacy/foreign timestamps that lack fractional seconds.
     nonisolated(unsafe) private static let defaultFormatter = ISO8601DateFormatter()
 
-    public static func string(from date: Date) -> String {
-        fractionalSecondsFormatter.string(from: date)
-    }
+    public static func string(from date: Date) -> String { fractionalSecondsFormatter.string(from: date) }
 
     public static func date(from string: String) -> Date? {
         if let parsed = fractionalSecondsFormatter.date(from: string) { return parsed }

@@ -16,8 +16,7 @@ import workspacecore
 /// blocking connect and pulls, and a 5s reconnect on disconnect/failure (the stream has no built-in
 /// reconnect). `reconcile()` is driven by the daemon's `databaseDidChange` observer, so subscribing or
 /// unsubscribing opens or closes streams without a poll.
-@MainActor
-final class RemoteAgentWatchService {
+@MainActor final class RemoteAgentWatchService {
     private let databasePath: String
     private let clientApp: SpacesDeviceClientApp
     /// Injects a rendered line into a local subscriber terminal — the same terminal-send path a

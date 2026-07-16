@@ -17,23 +17,15 @@ struct BrowserProxyRequest: Sendable, Equatable, Hashable {
         self.authToken = authToken
     }
 
-    var urlRequest: URLRequest {
-        URLRequest(url: url)
-    }
+    var urlRequest: URLRequest { URLRequest(url: url) }
 
     var httpCookie: HTTPCookie {
         guard let host = url.host,
-              let cookie = HTTPCookie(properties: [
-                  .domain: host,
-                  .path: "/",
-                  .name: Self.cookieName,
-                  .value: authToken,
-                  .discard: "TRUE",
-                  HTTPCookiePropertyKey(rawValue: "HttpOnly"): "TRUE",
-              ])
-        else {
-            preconditionFailure("Browser proxy requests are created only for host-bearing URLs.")
-        }
+            let cookie = HTTPCookie(properties: [
+                .domain: host, .path: "/", .name: Self.cookieName, .value: authToken, .discard: "TRUE",
+                HTTPCookiePropertyKey(rawValue: "HttpOnly"): "TRUE",
+            ])
+        else { preconditionFailure("Browser proxy requests are created only for host-bearing URLs.") }
         return cookie
     }
 
@@ -68,14 +60,8 @@ struct BrowserProxyRoutingTable: Sendable, Equatable {
     /// Routes owned by this device but absent from the refresh are removed.
     /// Returns the hosts whose owning `(deviceID, workspaceID)` changed as a result, so the caller
     /// can surface the reassignment.
-    @discardableResult
-    mutating func merge(
-        deviceID: String,
-        deviceName: String,
-        host: String,
-        port: Int,
-        certificateFingerprint: String,
-        overview: SpacesDeviceOverviewPayload
+    @discardableResult mutating func merge(
+        deviceID: String, deviceName: String, host: String, port: Int, certificateFingerprint: String, overview: SpacesDeviceOverviewPayload
     ) -> [String] {
         var refreshedKeys = Set<String>()
         for workspace in overview.workspaces {
@@ -84,51 +70,31 @@ struct BrowserProxyRoutingTable: Sendable, Equatable {
                 refreshedKeys.insert(key)
             }
         }
-        targets = targets.filter { key, target in
-            target.deviceID != deviceID || refreshedKeys.contains(key)
-        }
+        targets = targets.filter { key, target in target.deviceID != deviceID || refreshedKeys.contains(key) }
 
         var replacedHosts: [String] = []
         for workspace in overview.workspaces {
             for assignedPort in workspace.assignedPorts {
                 guard let key = Self.routingKey(forURL: assignedPort.url) else { continue }
                 let existing = targets[key]
-                if let existing, existing.deviceID != deviceID || existing.workspaceID != workspace.id {
-                    replacedHosts.append(key)
-                }
+                if let existing, existing.deviceID != deviceID || existing.workspaceID != workspace.id { replacedHosts.append(key) }
                 let proxyAuthToken =
-                    if let existing, existing.deviceID == deviceID, existing.workspaceID == workspace.id,
-                       existing.serviceName == assignedPort.name
-                    {
+                    if let existing, existing.deviceID == deviceID, existing.workspaceID == workspace.id, existing.serviceName == assignedPort.name {
                         existing.proxyAuthToken
-                    } else {
-                        Self.makeProxyAuthToken()
-                    }
+                    } else { Self.makeProxyAuthToken() }
                 targets[key] = BrowserProxyRouteTarget(
-                    deviceID: deviceID,
-                    host: host,
-                    port: port,
-                    certificateFingerprint: certificateFingerprint,
-                    workspaceID: workspace.id,
-                    serviceName: assignedPort.name,
-                    workspaceName: workspace.displayName,
-                    deviceName: deviceName,
-                    proxyAuthToken: proxyAuthToken
-                )
+                    deviceID: deviceID, host: host, port: port, certificateFingerprint: certificateFingerprint, workspaceID: workspace.id,
+                    serviceName: assignedPort.name, workspaceName: workspace.displayName, deviceName: deviceName, proxyAuthToken: proxyAuthToken)
             }
         }
         return replacedHosts
     }
 
     /// Drops every route owned by a device (e.g. after it is unpaired or its overview goes away).
-    mutating func removeDevice(deviceID: String) {
-        targets = targets.filter { $0.value.deviceID != deviceID }
-    }
+    mutating func removeDevice(deviceID: String) { targets = targets.filter { $0.value.deviceID != deviceID } }
 
     /// Looks up the target for a browser `Host`. The host is lowercased to match the stored keys.
-    func target(forHost host: String) -> BrowserProxyRouteTarget? {
-        targets[host.lowercased()]
-    }
+    func target(forHost host: String) -> BrowserProxyRouteTarget? { targets[host.lowercased()] }
 
     /// Extracts the lowercased host from a workspace service URL, or nil if the URL has no host.
     static func routingKey(forURL urlString: String) -> String? {
@@ -141,9 +107,7 @@ struct BrowserProxyRoutingTable: Sendable, Equatable {
         var bytes = [UInt8](repeating: 0, count: 32)
         let status = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
         precondition(status == errSecSuccess, "Unable to generate browser proxy authentication token.")
-        return Data(bytes).base64EncodedString()
-            .replacingOccurrences(of: "+", with: "-")
-            .replacingOccurrences(of: "/", with: "_")
+        return Data(bytes).base64EncodedString().replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
             .replacingOccurrences(of: "=", with: "")
     }
 }

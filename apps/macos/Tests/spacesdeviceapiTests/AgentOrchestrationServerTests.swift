@@ -43,8 +43,7 @@
                 }
 
                 let response = try client.send(
-                    SpacesDeviceAPIRequest(
-                        command: .listAgentSessions(.init(sessionID: "agent-session")), authToken: token, clientApp: clientApp))
+                    SpacesDeviceAPIRequest(command: .listAgentSessions(.init(sessionID: "agent-session")), authToken: token, clientApp: clientApp))
 
                 XCTAssertTrue(response.ok, response.message)
                 let row = try XCTUnwrap(response.agentSessions?.first)
@@ -94,8 +93,7 @@
                 XCTAssertTrue(try store.agentWindows(workspaceID: "workspace-1").isEmpty)
 
                 let response = try client.send(
-                    SpacesDeviceAPIRequest(
-                        command: .terminateTerminalSession(.init(sessionID: sessionID)), authToken: token, clientApp: clientApp))
+                    SpacesDeviceAPIRequest(command: .terminateTerminalSession(.init(sessionID: sessionID)), authToken: token, clientApp: clientApp))
 
                 XCTAssertTrue(response.ok, response.message)
                 XCTAssertTrue(response.message.contains("Killed agent session"), response.message)
@@ -178,9 +176,7 @@
             return agent
         }
 
-        private func startServerAndClient(
-            builtInTerminalSessionTerminator: WorkspaceOrchestrator.BuiltInTerminalSessionTerminator? = nil
-        ) throws -> (
+        private func startServerAndClient(builtInTerminalSessionTerminator: WorkspaceOrchestrator.BuiltInTerminalSessionTerminator? = nil) throws -> (
             server: SpacesDeviceAPIServer, client: SpacesDeviceAPIRequestSessionClient, clientApp: SpacesDeviceClientApp, token: String
         ) {
             let identity = try agentOrchestrationTestTLSIdentity()

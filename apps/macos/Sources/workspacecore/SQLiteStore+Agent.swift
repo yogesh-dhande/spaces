@@ -230,7 +230,8 @@ extension SQLiteStore {
 
     // MARK: - Cross-device watch edges (agent_remote_subscriptions)
 
-    public func insertAgentRemoteSubscription(subscriberTerminalSessionID: String, deviceID: String, agentSessionID: String, createdAt: String) throws {
+    public func insertAgentRemoteSubscription(subscriberTerminalSessionID: String, deviceID: String, agentSessionID: String, createdAt: String) throws
+    {
         try execute(
             sql: """
                 INSERT INTO agent_remote_subscriptions(subscriber_terminal_session_id, device_id, agent_session_id, created_at)
@@ -250,8 +251,7 @@ extension SQLiteStore {
     /// Drops every subscriber's edge to one remote agent — used when the watch service sees that agent
     /// exit (its row left the remote listing), after the terminating line has been delivered.
     public func deleteAgentRemoteSubscriptions(deviceID: String, agentSessionID: String) throws {
-        try execute(
-            sql: "DELETE FROM agent_remote_subscriptions WHERE device_id = ? AND agent_session_id = ?", bindings: [deviceID, agentSessionID])
+        try execute(sql: "DELETE FROM agent_remote_subscriptions WHERE device_id = ? AND agent_session_id = ?", bindings: [deviceID, agentSessionID])
     }
 
     /// Remote agents a given local terminal is watching (used when that subscriber goes idle to flush its

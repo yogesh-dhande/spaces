@@ -7,9 +7,7 @@ import spacesterminalcore
 enum ScreenshotStager {
     static func makeStagedScreenshot(pngData: Data, sourceTitle: String, capturedAt: Date) throws -> StagedScreenshot {
         let payload = try TerminalImageAttachmentPayload.validated(fileExtension: "png", imageData: pngData)
-        guard let thumbnail = UIImage(data: pngData) else {
-            throw ScreenshotStagerError.undecodableImage
-        }
+        guard let thumbnail = UIImage(data: pngData) else { throw ScreenshotStagerError.undecodableImage }
         return StagedScreenshot(payload: payload, thumbnail: thumbnail, capturedAt: capturedAt, sourceTitle: sourceTitle)
     }
 }

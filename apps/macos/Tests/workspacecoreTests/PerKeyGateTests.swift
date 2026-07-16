@@ -10,12 +10,8 @@ final class PerKeyGateTests: XCTestCase {
         let gate = PerKeyGate()
 
         XCTAssertThrowsError(
-            try gate.withKey("workspace-1", busyError: { BusyError() }) {
-                try gate.withKey("workspace-1", busyError: { BusyError() }) {}
-            }
-        ) { error in
-            XCTAssertTrue(error is BusyError)
-        }
+            try gate.withKey("workspace-1", busyError: { BusyError() }) { try gate.withKey("workspace-1", busyError: { BusyError() }) {} }
+        ) { error in XCTAssertTrue(error is BusyError) }
     }
 
     // Tests that a key can be reacquired after a successful operation releases it.
@@ -40,9 +36,7 @@ final class PerKeyGateTests: XCTestCase {
     func testDifferentKeysAreIndependent() throws {
         let gate = PerKeyGate()
 
-        try gate.withKey("workspace-a", busyError: { BusyError() }) {
-            try gate.withKey("workspace-b", busyError: { BusyError() }) {}
-        }
+        try gate.withKey("workspace-a", busyError: { BusyError() }) { try gate.withKey("workspace-b", busyError: { BusyError() }) {} }
     }
 
     // Tests that the operation's return value propagates through withKey.

@@ -38,8 +38,7 @@ public struct SpacesTerminalDeepLink: Codable, Sendable, Equatable {
         guard url.scheme == Self.scheme, url.host == Self.host else { return nil }
         let segments = url.path.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
         guard segments.count == 1, let sessionID = trimmed(segments.first) else { return nil }
-        let deviceID = URLComponents(url: url, resolvingAgainstBaseURL: false)?
-            .queryItems?.first(where: { $0.name == "device" })?.value
+        let deviceID = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "device" })?.value
         return SpacesTerminalDeepLink(sessionID: sessionID, deviceID: trimmed(deviceID))
     }
 

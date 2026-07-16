@@ -240,9 +240,7 @@ public enum SpacesPinnedTLSConnector {
                 stateLock.lock()
                 if let content, !content.isEmpty { readBuffer.append(content) }
                 var lines: [Data] = []
-                while let line = readBuffer.popLine() {
-                    if !line.isEmpty { lines.append(line) }
-                }
+                while let line = readBuffer.popLine() { if !line.isEmpty { lines.append(line) } }
                 stateLock.unlock()
                 for line in lines { onLine(line) }
                 if isComplete {
@@ -393,9 +391,7 @@ public enum SpacesPinnedTLSConnector {
             Self.setSocketTimeout(fd, seconds: timeout)
             var buffer = [UInt8](repeating: 0, count: 65_536)
             while true {
-                if let line = readBuffer.popLine() {
-                    return line
-                }
+                if let line = readBuffer.popLine() { return line }
                 let count = SSL_read(ssl, &buffer, Int32(buffer.count))
                 if count > 0 {
                     readBuffer.append(Data(buffer[..<Int(count)]))
@@ -433,9 +429,7 @@ public enum SpacesPinnedTLSConnector {
             }
             var buffer = [UInt8](repeating: 0, count: 65_536)
             while true {
-                while let line = readBuffer.popLine() {
-                    if !line.isEmpty { onLine(line) }
-                }
+                while let line = readBuffer.popLine() { if !line.isEmpty { onLine(line) } }
                 let count = SSL_read(ssl, &buffer, Int32(buffer.count))
                 if count > 0 {
                     readBuffer.append(Data(buffer[..<Int(count)]))

@@ -21,8 +21,7 @@
                 return SpacesDeviceAPIResponse(ok: true, message: "pasted")
             }
 
-            try await client.pasteImage(
-                sessionID: "session-shell", clientID: "client-ios", ownerEpoch: 7, fileExtension: "png", imageData: imageData)
+            try await client.pasteImage(sessionID: "session-shell", clientID: "client-ios", ownerEpoch: 7, fileExtension: "png", imageData: imageData)
 
             let request = await recorder.snapshot().first
             XCTAssertEqual(request?.commandName, "terminalPasteImage")
@@ -39,9 +38,7 @@
 
         func testPasteImageThrowsWhenResponseNotOK() async {
             let settings = SpacesMobileConnectionSettings()
-            let client = SpacesDeviceAPIClient(settings: settings) { _ in
-                SpacesDeviceAPIResponse(ok: false, message: "denied")
-            }
+            let client = SpacesDeviceAPIClient(settings: settings) { _ in SpacesDeviceAPIResponse(ok: false, message: "denied") }
 
             do {
                 try await client.pasteImage(
@@ -49,14 +46,10 @@
                 XCTFail("Expected pasteImage to throw when the response is not ok.")
             } catch let error as SpacesDeviceAPIClientError {
                 switch error {
-                case .requestFailed(let message, _):
-                    XCTAssertEqual(message, "denied")
-                default:
-                    XCTFail("Expected requestFailed, got \(error).")
+                case .requestFailed(let message, _): XCTAssertEqual(message, "denied")
+                default: XCTFail("Expected requestFailed, got \(error).")
                 }
-            } catch {
-                XCTFail("Expected SpacesDeviceAPIClientError, got \(error).")
-            }
+            } catch { XCTFail("Expected SpacesDeviceAPIClientError, got \(error).") }
         }
     }
 #endif

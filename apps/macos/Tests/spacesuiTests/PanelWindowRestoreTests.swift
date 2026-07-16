@@ -8,9 +8,7 @@ import Testing
         Pane(id: id, content: .terminalSession(deviceID: deviceID, sessionID: "sess-\(id)"))
     }
 
-    private func layoutJSON(_ layout: PanelLayout) throws -> String {
-        String(decoding: try JSONEncoder().encode(layout), as: UTF8.self)
-    }
+    private func layoutJSON(_ layout: PanelLayout) throws -> String { String(decoding: try JSONEncoder().encode(layout), as: UTF8.self) }
 
     @Test func waitsUntilEveryReferencedDeviceIsLoaded() throws {
         var layout = PanelLayoutEngine.appendTab(tabID: "tab-1", pane: pane("a", deviceID: "local"), to: PanelLayout())
@@ -21,14 +19,11 @@ import Testing
                 == .waitForDevices)
         #expect(
             AppKitController.panelWindowRestoreDecision(
-                layoutJSON: json, loadedDeviceIDs: ["local", "remote"], liveSessionIDs: ["sess-a", "sess-b"])
-                == .open(layout))
+                layoutJSON: json, loadedDeviceIDs: ["local", "remote"], liveSessionIDs: ["sess-a", "sess-b"]) == .open(layout))
     }
 
     @Test func skipsUnreadableAndFutureVersionRows() {
-        #expect(
-            AppKitController.panelWindowRestoreDecision(layoutJSON: "not json", loadedDeviceIDs: ["local"], liveSessionIDs: [])
-                == .skip)
+        #expect(AppKitController.panelWindowRestoreDecision(layoutJSON: "not json", loadedDeviceIDs: ["local"], liveSessionIDs: []) == .skip)
         #expect(
             AppKitController.panelWindowRestoreDecision(layoutJSON: #"{"version":999,"tabs":[]}"#, loadedDeviceIDs: ["local"], liveSessionIDs: [])
                 == .skip)

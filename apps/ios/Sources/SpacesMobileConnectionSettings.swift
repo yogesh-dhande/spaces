@@ -24,9 +24,7 @@ struct SpacesMobileConnectionSettings: Codable, Equatable, Sendable {
     var isValid: Bool { !trimmedHost.isEmpty && (1...65535).contains(port) }
     var isPaired: Bool { trimmedAuthToken != nil && trimmedCertificateFingerprint != nil }
 
-    static var defaultHost: String {
-        SpacesDeviceAPIEndpointDefaults.loopbackHost
-    }
+    static var defaultHost: String { SpacesDeviceAPIEndpointDefaults.loopbackHost }
 
     private enum CodingKeys: String, CodingKey {
         case host
@@ -40,12 +38,8 @@ struct SpacesMobileConnectionSettings: Codable, Equatable, Sendable {
 
     func migratedToCurrentDefaults() -> Self {
         var migrated = self
-        if migrated.port == Self.legacyDefaultPort {
-            migrated.port = Self.defaultPort
-        }
-        if migrated.trimmedCertificateFingerprint == nil {
-            migrated.authToken = ""
-        }
+        if migrated.port == Self.legacyDefaultPort { migrated.port = Self.defaultPort }
+        if migrated.trimmedCertificateFingerprint == nil { migrated.authToken = "" }
         return migrated
     }
 

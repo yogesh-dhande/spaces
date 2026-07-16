@@ -33,9 +33,7 @@ import workspacecore
     // MARK: - Local vs remote classification
 
     @Test func deepLinkWithoutDeviceTargetsLocal() {
-        #expect(
-            AppKitController.terminalDeepLinkTarget(for: SpacesTerminalDeepLink(sessionID: "session-1"))
-                == .local(sessionID: "session-1"))
+        #expect(AppKitController.terminalDeepLinkTarget(for: SpacesTerminalDeepLink(sessionID: "session-1")) == .local(sessionID: "session-1"))
     }
 
     @Test func deepLinkWithLocalDeviceIDTargetsLocal() {

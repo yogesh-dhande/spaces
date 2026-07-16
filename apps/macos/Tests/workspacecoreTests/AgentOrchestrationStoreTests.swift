@@ -2,13 +2,13 @@ import Foundation
 import XCTest
 import spacesterminalcore
 
+@testable import workspacecore
+
 #if os(Linux)
     import CSQLite3
 #else
     import SQLite3
 #endif
-
-@testable import workspacecore
 
 /// Behavior coverage for the schema-v2 orchestration surface: explicit notes, subscription edges,
 /// hook-signal readiness, and the v1→v2 migration carrying existing agent rows forward.
@@ -58,9 +58,11 @@ final class AgentOrchestrationStoreTests: XCTestCase {
         let child = try orchestrator.registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "child-session", status: .idle)
 
-        try store.insertAgentSubscription(subscriberTerminalSessionID: "orchestrator-session", agentSessionID: child.id, createdAt: "2026-07-14T00:00:00Z")
+        try store.insertAgentSubscription(
+            subscriberTerminalSessionID: "orchestrator-session", agentSessionID: child.id, createdAt: "2026-07-14T00:00:00Z")
         // Duplicate insert is a no-op (PRIMARY KEY conflict ignored).
-        try store.insertAgentSubscription(subscriberTerminalSessionID: "orchestrator-session", agentSessionID: child.id, createdAt: "2026-07-14T00:02:00Z")
+        try store.insertAgentSubscription(
+            subscriberTerminalSessionID: "orchestrator-session", agentSessionID: child.id, createdAt: "2026-07-14T00:02:00Z")
 
         XCTAssertEqual(try store.agentSubscriptions(agentSessionID: child.id).map(\.subscriberTerminalSessionID), ["orchestrator-session"])
         XCTAssertEqual(try store.agentSubscriptions(subscriberTerminalSessionID: "orchestrator-session").map(\.agentSessionID), [child.id])
@@ -94,8 +96,8 @@ final class AgentOrchestrationStoreTests: XCTestCase {
             subscriberTerminalSessionID: "orch", agentSessionID: "childA", transition: "blocked", message: "A is blocked",
             createdAt: "2026-07-14T00:00:01Z")
         try store.upsertPendingAgentNotification(
-            subscriberTerminalSessionID: "orch", agentSessionID: "childB", transition: "done", message: "B is done",
-            createdAt: "2026-07-14T00:00:02Z")
+            subscriberTerminalSessionID: "orch", agentSessionID: "childB", transition: "done", message: "B is done", createdAt: "2026-07-14T00:00:02Z"
+        )
         try store.upsertPendingAgentNotification(
             subscriberTerminalSessionID: "other", agentSessionID: "childC", transition: "exited", message: "C is exited",
             createdAt: "2026-07-14T00:00:03Z")
@@ -209,8 +211,7 @@ final class AgentOrchestrationStoreTests: XCTestCase {
         try store.insertAgentRemoteSubscription(
             subscriberTerminalSessionID: "local-A", deviceID: "dev-1", agentSessionID: "child-1", createdAt: "2026-07-14T00:00:03Z")
 
-        XCTAssertEqual(
-            try store.agentRemoteSubscriptions(subscriberTerminalSessionID: "local-A").map(\.agentSessionID), ["child-1", "child-2"])
+        XCTAssertEqual(try store.agentRemoteSubscriptions(subscriberTerminalSessionID: "local-A").map(\.agentSessionID), ["child-1", "child-2"])
         XCTAssertEqual(Set(try store.agentRemoteSubscriptions(deviceID: "dev-1").map(\.subscriberTerminalSessionID)), ["local-A", "local-B"])
         XCTAssertEqual(try store.agentRemoteSubscribers(deviceID: "dev-1", agentSessionID: "child-1"), ["local-A", "local-B"])
         XCTAssertEqual(try store.agentRemoteSubscriptionDeviceIDs(), ["dev-1", "dev-2"])
@@ -218,12 +219,9 @@ final class AgentOrchestrationStoreTests: XCTestCase {
 
     func testRemoteSubscriptionDeleteOneEdgeAndDeleteAllForDeviceAgent() throws {
         let store = try makeTemporaryStore()
-        try store.insertAgentRemoteSubscription(
-            subscriberTerminalSessionID: "local-A", deviceID: "dev-1", agentSessionID: "child-1", createdAt: "t0")
-        try store.insertAgentRemoteSubscription(
-            subscriberTerminalSessionID: "local-B", deviceID: "dev-1", agentSessionID: "child-1", createdAt: "t1")
-        try store.insertAgentRemoteSubscription(
-            subscriberTerminalSessionID: "local-A", deviceID: "dev-1", agentSessionID: "child-2", createdAt: "t2")
+        try store.insertAgentRemoteSubscription(subscriberTerminalSessionID: "local-A", deviceID: "dev-1", agentSessionID: "child-1", createdAt: "t0")
+        try store.insertAgentRemoteSubscription(subscriberTerminalSessionID: "local-B", deviceID: "dev-1", agentSessionID: "child-1", createdAt: "t1")
+        try store.insertAgentRemoteSubscription(subscriberTerminalSessionID: "local-A", deviceID: "dev-1", agentSessionID: "child-2", createdAt: "t2")
 
         // Deleting one edge leaves the others.
         try store.deleteAgentRemoteSubscription(subscriberTerminalSessionID: "local-A", deviceID: "dev-1", agentSessionID: "child-1")
@@ -286,8 +284,7 @@ final class AgentOrchestrationStoreTests: XCTestCase {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
-        _ = try orchestrator.registerAgentWindow(
-            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "agent-session", status: .idle)
+        _ = try orchestrator.registerAgentWindow(workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "agent-session", status: .idle)
 
         let updated = try orchestrator.annotateAgentSession(terminalSessionID: "agent-session", note: "line one\nline two\u{07}")
 
@@ -300,8 +297,7 @@ final class AgentOrchestrationStoreTests: XCTestCase {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
-        _ = try orchestrator.registerAgentWindow(
-            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "agent-session", status: .idle)
+        _ = try orchestrator.registerAgentWindow(workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "agent-session", status: .idle)
 
         _ = try orchestrator.annotateAgentSession(terminalSessionID: "agent-session", note: "temporary")
         let cleared = try orchestrator.annotateAgentSession(terminalSessionID: "agent-session", note: "  ")

@@ -7,20 +7,12 @@ final class AgentSpawnCommandGateTests: XCTestCase {
 
     func testMatchingResolvesSupportedAgentsAcrossCommandShapes() {
         let cases: [(command: String, expected: SupportedCodingAgentHook?)] = [
-            ("claude", .claudeCode),
-            ("codex --yolo", .codex),
-            ("FOO=1 claude", .claudeCode),
-            ("env FOO=1 codex", .codex),
-            ("/usr/local/bin/claude -c", .claudeCode),
-            ("opencode", .opencode),
-            ("vim", nil),
-            ("", nil),
-            ("env", nil),
+            ("claude", .claudeCode), ("codex --yolo", .codex), ("FOO=1 claude", .claudeCode), ("env FOO=1 codex", .codex),
+            ("/usr/local/bin/claude -c", .claudeCode), ("opencode", .opencode), ("vim", nil), ("", nil), ("env", nil),
         ]
         for testCase in cases {
             XCTAssertEqual(
-                SupportedCodingAgentHook.matching(command: testCase.command), testCase.expected,
-                "matching(command: \"\(testCase.command)\")")
+                SupportedCodingAgentHook.matching(command: testCase.command), testCase.expected, "matching(command: \"\(testCase.command)\")")
         }
     }
 

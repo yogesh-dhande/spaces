@@ -131,8 +131,9 @@ final class TerminalServiceProtocolTests: XCTestCase {
         // The MCP tools/call chokepoint attaches a busy orchestrator's drained child events to the tool
         // result, so a client reads them from `pendingAgentEvents` — the busy-time counterpart to idle
         // injection. The field is present only when the piggyback drained a row, and omitted otherwise.
-        let response = TerminalServiceProfileCommandResponse(message: "Listed agent sessions.")
-            .addingPendingAgentEvents(["[spaces] A (claude) is blocked", "[spaces] B (codex) is done"])
+        let response = TerminalServiceProfileCommandResponse(message: "Listed agent sessions.").addingPendingAgentEvents([
+            "[spaces] A (claude) is blocked", "[spaces] B (codex) is done",
+        ])
         let encoded = try JSONEncoder().encode(response)
         let json = String(decoding: encoded, as: UTF8.self)
         XCTAssertTrue(json.contains(#""pendingAgentEvents""#))
@@ -181,11 +182,9 @@ final class TerminalServiceProtocolTests: XCTestCase {
             .workspaceRestart(workspaceID: "workspace-1"),
             .agentSignal(.init(workspaceID: "workspace-1", terminalSessionID: "session-1", event: "blocked")),
             .agentList(.init(workspaceID: "workspace-1", sessionID: "session-1")), .agentList(.init()),
-            .agentAnnotate(.init(sessionID: "session-1", note: "review the auth flow")),
-            .agentAnnotate(.init(sessionID: "session-1", note: "")),
+            .agentAnnotate(.init(sessionID: "session-1", note: "review the auth flow")), .agentAnnotate(.init(sessionID: "session-1", note: "")),
             .agentSpawn(.init(cwd: "/tmp/work", workspaceID: "workspace-1", command: "claude", title: "Claude Code")),
-            .agentSpawn(.init(cwd: "/tmp/work", command: "codex --yolo")),
-            .agentKill(.init(sessionID: "session-1")),
+            .agentSpawn(.init(cwd: "/tmp/work", command: "codex --yolo")), .agentKill(.init(sessionID: "session-1")),
             .agentSubscribe(.init(subscriberTerminalSessionID: "orchestrator-session", agentSessionID: "agent-1")),
             .agentUnsubscribe(.init(subscriberTerminalSessionID: "orchestrator-session", agentSessionID: "agent-1")),
             .agentConsumePendingEvents(subscriberTerminalSessionID: "orchestrator-session"),
@@ -247,10 +246,12 @@ final class TerminalServiceProtocolTests: XCTestCase {
         let decoder = JSONDecoder()
         XCTAssertThrowsError(
             try decoder.decode(
-                TerminalServiceProfileCommand.self, from: Data(#"{"agentSubscribe":{"subscriberTerminalSessionID":"sub","agentSessionID":""}}"#.utf8)))
+                TerminalServiceProfileCommand.self, from: Data(#"{"agentSubscribe":{"subscriberTerminalSessionID":"sub","agentSessionID":""}}"#.utf8))
+        )
         XCTAssertThrowsError(
             try decoder.decode(
-                TerminalServiceProfileCommand.self, from: Data(#"{"agentSubscribe":{"subscriberTerminalSessionID":"","agentSessionID":"agent-1"}}"#.utf8)))
+                TerminalServiceProfileCommand.self,
+                from: Data(#"{"agentSubscribe":{"subscriberTerminalSessionID":"","agentSessionID":"agent-1"}}"#.utf8)))
     }
 
     func testProfileCommandDecodeNormalizesRequiredStringsAndRejectsEmpty() throws {

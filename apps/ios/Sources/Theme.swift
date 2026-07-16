@@ -55,22 +55,13 @@ enum Theme {
 
     // MARK: Helpers
 
-    private static func dynamic(
-        light: (Int, Int, Int),
-        dark: (Int, Int, Int),
-        lightAlpha: CGFloat = 1,
-        darkAlpha: CGFloat = 1
-    ) -> Color {
-        Color(uiColor: UIColor { traits in
-            let isDark = traits.userInterfaceStyle == .dark
-            let rgb = isDark ? dark : light
-            let alpha = isDark ? darkAlpha : lightAlpha
-            return UIColor(
-                red: CGFloat(rgb.0) / 255,
-                green: CGFloat(rgb.1) / 255,
-                blue: CGFloat(rgb.2) / 255,
-                alpha: alpha
-            )
-        })
+    private static func dynamic(light: (Int, Int, Int), dark: (Int, Int, Int), lightAlpha: CGFloat = 1, darkAlpha: CGFloat = 1) -> Color {
+        Color(
+            uiColor: UIColor { traits in
+                let isDark = traits.userInterfaceStyle == .dark
+                let rgb = isDark ? dark : light
+                let alpha = isDark ? darkAlpha : lightAlpha
+                return UIColor(red: CGFloat(rgb.0) / 255, green: CGFloat(rgb.1) / 255, blue: CGFloat(rgb.2) / 255, alpha: alpha)
+            })
     }
 }

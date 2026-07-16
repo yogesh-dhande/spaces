@@ -175,8 +175,7 @@ import spacesterminalghostty
         let banner = RecordingBanner()
         let recorder = OpenRecorder()
         var routed: [SpacesTerminalDeepLink] = []
-        let coordinator = makeCoordinator(
-            isLocalDevice: true, banner: banner, recorder: recorder, onSpacesTerminalLink: { routed.append($0) })
+        let coordinator = makeCoordinator(isLocalDevice: true, banner: banner, recorder: recorder, onSpacesTerminalLink: { routed.append($0) })
 
         coordinator.openLink("spaces://terminal/session-1?device=device-9")
 

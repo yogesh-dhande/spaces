@@ -38,8 +38,7 @@ extension SQLiteStore {
     /// `workspace_id` then the same `service_index` key the per-workspace query uses, and the
     /// order-preserving append keeps each group in the same order as `workspacePortsNamed(workspaceID:)`.
     public func workspacePortsNamedByWorkspace() throws -> [String: [(port: Int, name: String)]] {
-        let rows = try queryRows(
-            sql: "SELECT workspace_id, port, service_name FROM workspace_service_ports ORDER BY workspace_id, service_index")
+        let rows = try queryRows(sql: "SELECT workspace_id, port, service_name FROM workspace_service_ports ORDER BY workspace_id, service_index")
         var result: [String: [(port: Int, name: String)]] = [:]
         for row in rows {
             guard row.count >= 3, let port = Int(row[1]) else { continue }

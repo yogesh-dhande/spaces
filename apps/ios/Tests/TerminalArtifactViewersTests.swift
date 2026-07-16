@@ -12,11 +12,7 @@
         // MARK: - Markdown HTML shell builder
 
         func testMakeHTMLInlinesJavaScriptAndCSSAndScaffolding() {
-            let doc = TerminalMarkdownDocument.makeHTML(
-                markdownSource: "# Title",
-                markdownItJS: "/*JS-MARKER*/",
-                css: "/*CSS-MARKER*/"
-            )
+            let doc = TerminalMarkdownDocument.makeHTML(markdownSource: "# Title", markdownItJS: "/*JS-MARKER*/", css: "/*CSS-MARKER*/")
             // Inlined JS/CSS (the web view loads with baseURL: nil and can't fetch bundle files).
             XCTAssertTrue(doc.contains("/*JS-MARKER*/"), "markdown-it JS should be inlined")
             XCTAssertTrue(doc.contains("/*CSS-MARKER*/"), "CSS should be inlined")
@@ -31,11 +27,7 @@
         func testMakeHTMLEscapesSourceSoItCannotBreakOutOfScript() {
             // A source deliberately crafted to break out of the <script> context and inject markup.
             let hostile = "```code``` </script><script>alert('x')</script>\"q\"\nline2"
-            let doc = TerminalMarkdownDocument.makeHTML(
-                markdownSource: hostile,
-                markdownItJS: "/*JS*/",
-                css: "/*CSS*/"
-            )
+            let doc = TerminalMarkdownDocument.makeHTML(markdownSource: hostile, markdownItJS: "/*JS*/", css: "/*CSS*/")
 
             // The injected live script must not appear as markup.
             XCTAssertFalse(doc.contains("<script>alert('x')"), "hostile source must not inject a live <script>")
@@ -80,8 +72,7 @@
             XCTAssertFalse(TerminalWebArtifactNetworkPolicy.shouldBlockNetworkLoad(for: .request(networkURL), url: networkURL))
         }
 
-        @MainActor
-        func testArtifactNetworkPolicyContentRuleCompiles() async throws {
+        @MainActor func testArtifactNetworkPolicyContentRuleCompiles() async throws {
             _ = try await TerminalWebArtifactNetworkPolicy.makeNetworkBlockContentRuleList()
         }
 
@@ -96,10 +87,7 @@
             let overLimit = String(repeating: "x", count: TerminalTextArtifact.displayCharacterLimit + 500)
             let result = TerminalTextArtifact.truncatedForDisplay(overLimit)
             XCTAssertTrue(result.hasSuffix(TerminalTextArtifact.truncationFooter))
-            XCTAssertEqual(
-                result.count,
-                TerminalTextArtifact.displayCharacterLimit + TerminalTextArtifact.truncationFooter.count
-            )
+            XCTAssertEqual(result.count, TerminalTextArtifact.displayCharacterLimit + TerminalTextArtifact.truncationFooter.count)
         }
 
         // MARK: - Lossy decode

@@ -36,10 +36,8 @@ import AppKit
         panelView.removeFromSuperview()
         content.addSubview(panelView)
         NSLayoutConstraint.activate([
-            panelView.topAnchor.constraint(equalTo: content.topAnchor),
-            panelView.leadingAnchor.constraint(equalTo: content.leadingAnchor),
-            panelView.trailingAnchor.constraint(equalTo: content.trailingAnchor),
-            panelView.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+            panelView.topAnchor.constraint(equalTo: content.topAnchor), panelView.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            panelView.trailingAnchor.constraint(equalTo: content.trailingAnchor), panelView.bottomAnchor.constraint(equalTo: content.bottomAnchor),
         ])
         window.contentView = content
     }

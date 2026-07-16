@@ -15,8 +15,7 @@ import Foundation
 /// Each scan writes through `SQLiteStore`, which announces `databaseDidChange`, so
 /// the GUI sidebar and remote overview subscribers refresh without any direct
 /// coupling to this service.
-@MainActor
-public final class WorktreeDiscoveryService {
+@MainActor public final class WorktreeDiscoveryService {
     private struct Watch {
         let projectDir: String
         let commonDirectory: String
@@ -90,9 +89,7 @@ public final class WorktreeDiscoveryService {
             try watcher.start()
             watchers[projectID] = Watch(
                 projectDir: projectDir, commonDirectory: commonDirectory, watchedDirectories: watchedDirectories, watcher: watcher)
-        } catch {
-            onError?(error)
-        }
+        } catch { onError?(error) }
     }
 
     private func handleChange(projectID: String) {
@@ -169,9 +166,7 @@ public final class WorktreeDiscoveryService {
                     let store = try SQLiteStore(path: databasePath)
                     let orchestrator = WorkspaceOrchestrator(store: store)
                     _ = try orchestrator.scanAndCreateWorkspacesFromWorktrees(projectID: projectID)
-                } catch {
-                    onError?(error)
-                }
+                } catch { onError?(error) }
             }.value
             guard let self else { return }
             self.scanInFlight = false

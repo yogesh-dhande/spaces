@@ -88,9 +88,9 @@ public struct AgentNotificationEngine {
     /// device-qualified (`?device=<id>`). The watch edge keys on the child's terminal session id, which
     /// also targets the deep link. For an `exited` transition the caller drops the edges after this
     /// returns; the rendered pending line (no FK) survives that, matching the local exit path.
-    public func remoteChildDidTransition(
-        deviceID: String, terminalSessionID: String, row: SpacesDeviceAgentSessionRow, transition: ChildTransition
-    ) throws {
+    public func remoteChildDidTransition(deviceID: String, terminalSessionID: String, row: SpacesDeviceAgentSessionRow, transition: ChildTransition)
+        throws
+    {
         let subscribers = try store.agentRemoteSubscribers(deviceID: deviceID, agentSessionID: terminalSessionID)
         guard !subscribers.isEmpty else { return }
         let line = renderRemoteLine(terminalSessionID: terminalSessionID, row: row, deviceID: deviceID, transition: transition)
@@ -112,7 +112,8 @@ public struct AgentNotificationEngine {
         if try subscriberIsIdle(terminalSessionID: subscriberID) {
             do { try deliver(subscriberID, line) } catch {
                 logError(
-                    "spaces: agent notification delivery failed subscriber=\(subscriberID) agent=\(agentSessionID) error=\(error.localizedDescription)\n")
+                    "spaces: agent notification delivery failed subscriber=\(subscriberID) agent=\(agentSessionID) error=\(error.localizedDescription)\n"
+                )
                 dropEdge()
             }
         } else {
@@ -175,10 +176,9 @@ public struct AgentNotificationEngine {
         let project = try workspace.flatMap { try store.project(id: $0.projectID) }
         let kind = resolveAgentKind(agent) ?? "coding agent"
         return renderBlock(
-            label: agent.label ?? kind, kind: kind, transition: transition,
-            project: project?.name ?? workspace?.projectID ?? agent.workspaceID,
-            workspace: workspace?.dir ?? agent.workspaceID,
-            branch: workspace?.branch, sessionID: agent.terminalTrackingID ?? agent.id, note: agent.note, deviceID: nil)
+            label: agent.label ?? kind, kind: kind, transition: transition, project: project?.name ?? workspace?.projectID ?? agent.workspaceID,
+            workspace: workspace?.dir ?? agent.workspaceID, branch: workspace?.branch, sessionID: agent.terminalTrackingID ?? agent.id,
+            note: agent.note, deviceID: nil)
     }
 
     /// The single injected block for a watched agent on a paired device. Reuses the shared format; the
@@ -189,8 +189,8 @@ public struct AgentNotificationEngine {
     func renderRemoteLine(terminalSessionID: String, row: SpacesDeviceAgentSessionRow, deviceID: String, transition: ChildTransition) -> String {
         let kind = row.agent ?? "coding agent"
         return renderBlock(
-            label: row.label ?? kind, kind: kind, transition: transition, project: row.projectName,
-            workspace: row.workspaceDir, branch: row.branch, sessionID: terminalSessionID, note: row.note, deviceID: deviceID)
+            label: row.label ?? kind, kind: kind, transition: transition, project: row.projectName, workspace: row.workspaceDir, branch: row.branch,
+            sessionID: terminalSessionID, note: row.note, deviceID: deviceID)
     }
 
     /// The single injected block shared by the local and cross-device paths — a pure formatter over

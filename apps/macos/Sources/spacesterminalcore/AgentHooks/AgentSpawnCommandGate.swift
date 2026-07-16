@@ -48,8 +48,7 @@ public enum AgentSpawnCommandGate {
 
         public var errorDescription: String? {
             switch self {
-            case .unsupportedCommand:
-                return "Agent spawn requires a supported coding agent command (claude, codex, or opencode)."
+            case .unsupportedCommand: return "Agent spawn requires a supported coding agent command (claude, codex, or opencode)."
             }
         }
     }

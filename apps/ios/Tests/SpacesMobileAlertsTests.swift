@@ -4,8 +4,7 @@
     import spacesterminalcore
     @testable import SpacesMobile
 
-    @MainActor
-    final class SpacesMobileAlertsTests: XCTestCase {
+    @MainActor final class SpacesMobileAlertsTests: XCTestCase {
         func testDerivesWaitingFinishedAndExitedEvents() {
             let overview = makeOverview(
                 codingAgentRows: [
@@ -16,11 +15,7 @@
                 processRows: [
                     makeProcessRow(id: "process-web", name: "web", runState: .exited, exitedAt: "2026-01-01T00:05:00Z"),
                     makeProcessRow(id: "process-live", name: "live", runState: .running, exitedAt: nil),
-                ],
-                sessions: [
-                    makeSession(id: "session-loose", title: "zsh", state: .exited, updatedAt: "2026-01-01T00:01:00Z")
-                ]
-            )
+                ], sessions: [makeSession(id: "session-loose", title: "zsh", state: .exited, updatedAt: "2026-01-01T00:01:00Z")])
 
             let events = SpacesMobileAttention.events(in: overview)
 
@@ -35,33 +30,17 @@
 
         func testSkipsSourcesWithoutUsableTimestamps() {
             let overview = makeOverview(
-                codingAgentRows: [
-                    makeAgentRow(id: "agent-waiting", name: "claude", activityState: .waiting, updatedAt: nil)
-                ],
-                processRows: [
-                    makeProcessRow(id: "process-web", name: "web", runState: .exited, exitedAt: nil)
-                ],
-                sessions: [
-                    makeSession(id: "session-loose", title: "zsh", state: .exited, updatedAt: "not-a-timestamp")
-                ]
-            )
+                codingAgentRows: [makeAgentRow(id: "agent-waiting", name: "claude", activityState: .waiting, updatedAt: nil)],
+                processRows: [makeProcessRow(id: "process-web", name: "web", runState: .exited, exitedAt: nil)],
+                sessions: [makeSession(id: "session-loose", title: "zsh", state: .exited, updatedAt: "not-a-timestamp")])
 
             XCTAssertTrue(SpacesMobileAttention.events(in: overview).isEmpty)
         }
 
         func testAcceptsFractionalLinuxDaemonTimestamps() {
             let overview = makeOverview(
-                processRows: [
-                    makeProcessRow(
-                        id: "process-web", name: "web", runState: .exited,
-                        exitedAt: "2026-07-12T12:34:56.123Z")
-                ],
-                sessions: [
-                    makeSession(
-                        id: "session-loose", title: "zsh", state: .failed,
-                        updatedAt: "2026-07-12T12:34:57.456Z")
-                ]
-            )
+                processRows: [makeProcessRow(id: "process-web", name: "web", runState: .exited, exitedAt: "2026-07-12T12:34:56.123Z")],
+                sessions: [makeSession(id: "session-loose", title: "zsh", state: .failed, updatedAt: "2026-07-12T12:34:57.456Z")])
 
             let events = SpacesMobileAttention.events(in: overview)
 
@@ -72,13 +51,8 @@
         func testSessionRepresentedByProcessRowProducesOneEvent() {
             let overview = makeOverview(
                 processRows: [
-                    makeProcessRow(
-                        id: "process-web", name: "web", sessionID: "session-web", runState: .exited, exitedAt: "2026-01-01T00:05:00Z")
-                ],
-                sessions: [
-                    makeSession(id: "session-web", title: "web", state: .exited, updatedAt: "2026-01-01T00:05:30Z")
-                ]
-            )
+                    makeProcessRow(id: "process-web", name: "web", sessionID: "session-web", runState: .exited, exitedAt: "2026-01-01T00:05:00Z")
+                ], sessions: [makeSession(id: "session-web", title: "web", state: .exited, updatedAt: "2026-01-01T00:05:30Z")])
 
             let events = SpacesMobileAttention.events(in: overview)
 
@@ -90,11 +64,7 @@
                 terminalRows: [
                     makeTerminalRow(id: "terminal-shell", title: "zsh", sessionID: "session-shell", runState: .exited),
                     makeTerminalRow(id: "terminal-untracked", title: "lost", sessionID: nil, runState: .exited),
-                ],
-                sessions: [
-                    makeSession(id: "session-shell", title: "zsh", state: .failed, updatedAt: "2026-01-01T00:07:00Z")
-                ]
-            )
+                ], sessions: [makeSession(id: "session-shell", title: "zsh", state: .failed, updatedAt: "2026-01-01T00:07:00Z")])
 
             let events = SpacesMobileAttention.events(in: overview)
 
@@ -106,19 +76,11 @@
         func testSkipsEventsAndLooseSessionsFromHiddenWorkspaces() {
             let workspace = makeWorkspace(
                 id: "workspace-feature", branch: "feature", isHidden: true,
-                codingAgentRows: [
-                    makeAgentRow(
-                        id: "agent-hidden", name: "claude", activityState: .waiting,
-                        updatedAt: "2026-01-01T00:01:00Z")
-                ],
+                codingAgentRows: [makeAgentRow(id: "agent-hidden", name: "claude", activityState: .waiting, updatedAt: "2026-01-01T00:01:00Z")],
                 processRows: [
                     makeProcessRow(
-                        id: "process-hidden", name: "web", sessionID: "session-process", runState: .exited,
-                        exitedAt: "2026-01-01T00:02:00Z")
-                ],
-                terminalRows: [
-                    makeTerminalRow(id: "terminal-hidden", title: "zsh", sessionID: "session-terminal", runState: .exited)
-                ])
+                        id: "process-hidden", name: "web", sessionID: "session-process", runState: .exited, exitedAt: "2026-01-01T00:02:00Z")
+                ], terminalRows: [makeTerminalRow(id: "terminal-hidden", title: "zsh", sessionID: "session-terminal", runState: .exited)])
             let overview = makeOverview(
                 workspaces: [workspace],
                 sessions: [
@@ -131,27 +93,24 @@
         }
 
         func testGroupsSortNewestFirstAndEventsWithinGroupNewestFirst() {
-            let overview = makeOverview(
-                workspaces: [
-                    makeWorkspace(
-                        id: "workspace-old", branch: "old",
-                        codingAgentRows: [
-                            makeAgentRow(
-                                id: "agent-old", workspaceID: "workspace-old", name: "claude", activityState: .waiting,
-                                updatedAt: "2026-01-01T00:01:00Z")
-                        ]),
-                    makeWorkspace(
-                        id: "workspace-new", branch: "new",
-                        codingAgentRows: [
-                            makeAgentRow(
-                                id: "agent-new-early", workspaceID: "workspace-new", name: "claude", activityState: .waiting,
-                                updatedAt: "2026-01-01T00:02:00Z"),
-                            makeAgentRow(
-                                id: "agent-new-late", workspaceID: "workspace-new", name: "codex", activityState: .done,
-                                updatedAt: "2026-01-01T00:09:00Z"),
-                        ]),
-                ]
-            )
+            let overview = makeOverview(workspaces: [
+                makeWorkspace(
+                    id: "workspace-old", branch: "old",
+                    codingAgentRows: [
+                        makeAgentRow(
+                            id: "agent-old", workspaceID: "workspace-old", name: "claude", activityState: .waiting, updatedAt: "2026-01-01T00:01:00Z")
+                    ]),
+                makeWorkspace(
+                    id: "workspace-new", branch: "new",
+                    codingAgentRows: [
+                        makeAgentRow(
+                            id: "agent-new-early", workspaceID: "workspace-new", name: "claude", activityState: .waiting,
+                            updatedAt: "2026-01-01T00:02:00Z"),
+                        makeAgentRow(
+                            id: "agent-new-late", workspaceID: "workspace-new", name: "codex", activityState: .done, updatedAt: "2026-01-01T00:09:00Z"
+                        ),
+                    ]),
+            ])
 
             let groups = SpacesMobileAttention.groups(in: overview, dismissedEventIDs: [])
 
@@ -164,11 +123,9 @@
 
         func testClearDismissesCurrentEventsAndNewStateChangeReappears() {
             let model = makeModel()
-            model.overview = makeOverview(
-                codingAgentRows: [
-                    makeAgentRow(id: "agent-waiting", name: "claude", activityState: .waiting, updatedAt: "2026-01-01T00:10:00Z")
-                ]
-            )
+            model.overview = makeOverview(codingAgentRows: [
+                makeAgentRow(id: "agent-waiting", name: "claude", activityState: .waiting, updatedAt: "2026-01-01T00:10:00Z")
+            ])
 
             XCTAssertEqual(model.undismissedAlertCount, 1)
 
@@ -178,23 +135,19 @@
             XCTAssertTrue(model.attentionGroups.isEmpty)
 
             // The same source in a new state (later timestamp) mints a new identity and reappears.
-            model.overview = makeOverview(
-                codingAgentRows: [
-                    makeAgentRow(id: "agent-waiting", name: "claude", activityState: .waiting, updatedAt: "2026-01-01T00:15:00Z")
-                ]
-            )
+            model.overview = makeOverview(codingAgentRows: [
+                makeAgentRow(id: "agent-waiting", name: "claude", activityState: .waiting, updatedAt: "2026-01-01T00:15:00Z")
+            ])
 
             XCTAssertEqual(model.undismissedAlertCount, 1)
         }
 
         func testDismissedEventFilteringLeavesOtherEvents() {
             let model = makeModel()
-            model.overview = makeOverview(
-                codingAgentRows: [
-                    makeAgentRow(id: "agent-a", name: "claude", activityState: .waiting, updatedAt: "2026-01-01T00:10:00Z"),
-                    makeAgentRow(id: "agent-b", name: "codex", activityState: .done, updatedAt: "2026-01-01T00:20:00Z"),
-                ]
-            )
+            model.overview = makeOverview(codingAgentRows: [
+                makeAgentRow(id: "agent-a", name: "claude", activityState: .waiting, updatedAt: "2026-01-01T00:10:00Z"),
+                makeAgentRow(id: "agent-b", name: "codex", activityState: .done, updatedAt: "2026-01-01T00:20:00Z"),
+            ])
             guard let dismissed = model.attentionGroups.first?.events.last else {
                 XCTFail("Expected derived events.")
                 return
@@ -218,17 +171,13 @@
 
         private func makeModel() -> SpacesMobileAppModel {
             let settings = SpacesMobileConnectionSettings()
-            let client = SpacesDeviceAPIClient(settings: settings) { _ in
-                SpacesDeviceAPIResponse(ok: true, message: "ok")
-            }
+            let client = SpacesDeviceAPIClient(settings: settings) { _ in SpacesDeviceAPIResponse(ok: true, message: "ok") }
             return SpacesMobileAppModel(settings: settings, bridgeClient: client)
         }
 
         private func makeOverview(
-            workspaces: [SpacesDeviceWorkspaceSummary]? = nil,
-            codingAgentRows: [SpacesDeviceWorkspaceCodingAgentRow] = [],
-            processRows: [SpacesDeviceWorkspaceProcessRow] = [],
-            terminalRows: [SpacesDeviceWorkspaceTerminalRow] = [],
+            workspaces: [SpacesDeviceWorkspaceSummary]? = nil, codingAgentRows: [SpacesDeviceWorkspaceCodingAgentRow] = [],
+            processRows: [SpacesDeviceWorkspaceProcessRow] = [], terminalRows: [SpacesDeviceWorkspaceTerminalRow] = [],
             sessions: [SpacesDeviceTerminalSessionSummary] = []
         ) -> SpacesDeviceOverviewPayload {
             let project = SpacesDeviceProjectSummary(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
@@ -246,85 +195,48 @@
         }
 
         private func makeWorkspace(
-            id: String,
-            branch: String?,
-            isArchived: Bool = false,
-            isHidden: Bool = false,
-            codingAgentRows: [SpacesDeviceWorkspaceCodingAgentRow] = [],
-            processRows: [SpacesDeviceWorkspaceProcessRow] = [],
+            id: String, branch: String?, isArchived: Bool = false, isHidden: Bool = false,
+            codingAgentRows: [SpacesDeviceWorkspaceCodingAgentRow] = [], processRows: [SpacesDeviceWorkspaceProcessRow] = [],
             terminalRows: [SpacesDeviceWorkspaceTerminalRow] = []
         ) -> SpacesDeviceWorkspaceSummary {
             SpacesDeviceWorkspaceSummary(
-                id: id, projectID: "project-1", projectName: "Project", branch: branch, baseBranch: "main", dir: "/repo/\(id)",
-                isRunning: true, isArchived: isArchived, isHidden: isHidden, isDefault: false, sessionCount: 0, processRows: processRows,
+                id: id, projectID: "project-1", projectName: "Project", branch: branch, baseBranch: "main", dir: "/repo/\(id)", isRunning: true,
+                isArchived: isArchived, isHidden: isHidden, isDefault: false, sessionCount: 0, processRows: processRows,
                 codingAgentRows: codingAgentRows, terminalRows: terminalRows)
         }
 
         private func makeAgentRow(
-            id: String,
-            workspaceID: String = "workspace-feature",
-            name: String,
-            runState: SpacesDeviceRunState = .running,
-            activityState: SpacesDeviceCodingAgentActivityState,
-            updatedAt: String?
+            id: String, workspaceID: String = "workspace-feature", name: String, runState: SpacesDeviceRunState = .running,
+            activityState: SpacesDeviceCodingAgentActivityState, updatedAt: String?
         ) -> SpacesDeviceWorkspaceCodingAgentRow {
             SpacesDeviceWorkspaceCodingAgentRow(
-                id: id, workspaceID: workspaceID, name: name, command: name, agentID: "runtime-\(id)", sessionID: "session-\(id)",
-                isConfigured: true, runState: runState, activityState: activityState, updatedAt: updatedAt, canRun: false,
-                canStop: true, canRestart: true)
+                id: id, workspaceID: workspaceID, name: name, command: name, agentID: "runtime-\(id)", sessionID: "session-\(id)", isConfigured: true,
+                runState: runState, activityState: activityState, updatedAt: updatedAt, canRun: false, canStop: true, canRestart: true)
         }
 
-        private func makeProcessRow(
-            id: String,
-            name: String,
-            sessionID: String? = nil,
-            runState: SpacesDeviceRunState,
-            exitedAt: String?
-        ) -> SpacesDeviceWorkspaceProcessRow {
+        private func makeProcessRow(id: String, name: String, sessionID: String? = nil, runState: SpacesDeviceRunState, exitedAt: String?)
+            -> SpacesDeviceWorkspaceProcessRow
+        {
             SpacesDeviceWorkspaceProcessRow(
-                id: id, workspaceID: "workspace-feature", name: name, command: "npm run \(name)", processID: "runtime-\(id)",
-                sessionID: sessionID, runState: runState, exitedAt: exitedAt, canRun: runState != .running,
-                canStop: runState == .running, canRestart: runState == .running)
+                id: id, workspaceID: "workspace-feature", name: name, command: "npm run \(name)", processID: "runtime-\(id)", sessionID: sessionID,
+                runState: runState, exitedAt: exitedAt, canRun: runState != .running, canStop: runState == .running, canRestart: runState == .running)
         }
 
-        private func makeTerminalRow(
-            id: String,
-            title: String,
-            sessionID: String?,
-            runState: SpacesDeviceRunState
-        ) -> SpacesDeviceWorkspaceTerminalRow {
+        private func makeTerminalRow(id: String, title: String, sessionID: String?, runState: SpacesDeviceRunState)
+            -> SpacesDeviceWorkspaceTerminalRow
+        {
             SpacesDeviceWorkspaceTerminalRow(
-                id: id, workspaceID: "workspace-feature", title: title, workingDirectory: "/repo/workspace-feature",
-                sessionID: sessionID, runState: runState, canOpenTerminal: runState == .running)
+                id: id, workspaceID: "workspace-feature", title: title, workingDirectory: "/repo/workspace-feature", sessionID: sessionID,
+                runState: runState, canOpenTerminal: runState == .running)
         }
 
-        private func makeSession(
-            id: String,
-            title: String,
-            state: TerminalSessionState,
-            updatedAt: String
-        ) -> SpacesDeviceTerminalSessionSummary {
+        private func makeSession(id: String, title: String, state: TerminalSessionState, updatedAt: String) -> SpacesDeviceTerminalSessionSummary {
             SpacesDeviceTerminalSessionSummary(
-                id: id,
-                title: title,
-                workingDirectory: "/repo/workspace-feature",
-                shell: "/bin/zsh",
-                command: nil,
-                state: state,
-                backend: .ghosttyEmbedded,
-                lifetimePolicy: .persistent,
-                servicePID: 100,
-                childPID: nil,
-                workspaceID: "workspace-feature",
-                workspaceTitle: "feature",
-                projectID: "project-1",
-                projectName: "Project",
-                createdAt: "2026-01-01T00:00:00Z",
-                updatedAt: updatedAt,
-                isControlAvailable: state == .running,
-                isSubscriptionAvailable: state == .running,
-                attachmentSnapshot: TerminalSessionAttachmentSnapshot()
-            )
+                id: id, title: title, workingDirectory: "/repo/workspace-feature", shell: "/bin/zsh", command: nil, state: state,
+                backend: .ghosttyEmbedded, lifetimePolicy: .persistent, servicePID: 100, childPID: nil, workspaceID: "workspace-feature",
+                workspaceTitle: "feature", projectID: "project-1", projectName: "Project", createdAt: "2026-01-01T00:00:00Z", updatedAt: updatedAt,
+                isControlAvailable: state == .running, isSubscriptionAvailable: state == .running,
+                attachmentSnapshot: TerminalSessionAttachmentSnapshot())
         }
     }
 #endif

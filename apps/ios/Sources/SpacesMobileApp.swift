@@ -5,10 +5,5 @@ import spacesterminalcore
     @State private var model = SpacesMobileAppModel()
     @AppStorage(AppAppearanceStorage.key) private var appearanceMode: AppAppearanceMode = .default
 
-    var body: some Scene {
-        WindowGroup {
-            RootTabView(model: model)
-                .preferredColorScheme(appearanceMode.colorScheme)
-        }
-    }
+    var body: some Scene { WindowGroup { RootTabView(model: model).preferredColorScheme(appearanceMode.colorScheme) } }
 }

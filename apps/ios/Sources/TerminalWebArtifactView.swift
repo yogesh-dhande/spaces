@@ -74,17 +74,13 @@ enum TerminalWebArtifactNetworkPolicy {
         return scheme == "http" || scheme == "https" || scheme == "ws" || scheme == "wss"
     }
 
-    @MainActor
-    static func makeNetworkBlockContentRuleList() async throws -> WKContentRuleList {
-        guard let ruleList = try await WKContentRuleListStore.default().compileContentRuleList(
-            forIdentifier: contentRuleListIdentifier,
-            encodedContentRuleList: networkBlockContentRuleListJSON
-        ) else {
+    @MainActor static func makeNetworkBlockContentRuleList() async throws -> WKContentRuleList {
+        guard
+            let ruleList = try await WKContentRuleListStore.default().compileContentRuleList(
+                forIdentifier: contentRuleListIdentifier, encodedContentRuleList: networkBlockContentRuleListJSON)
+        else {
             throw NSError(
-                domain: "TerminalWebArtifactNetworkPolicy",
-                code: 1,
-                userInfo: [NSLocalizedDescriptionKey: "Couldn't prepare the isolated preview."]
-            )
+                domain: "TerminalWebArtifactNetworkPolicy", code: 1, userInfo: [NSLocalizedDescriptionKey: "Couldn't prepare the isolated preview."])
         }
         return ruleList
     }
@@ -102,23 +98,15 @@ struct TerminalWebArtifactView: View {
     var body: some View {
         VStack(spacing: 0) {
             if model.isLoading {
-                ProgressView(value: model.progress)
-                    .progressViewStyle(.linear)
-                    .tint(Theme.accent)
-                    .frame(height: 2)
-                    .accessibilityIdentifier("terminal.webArtifact.progress")
+                ProgressView(value: model.progress).progressViewStyle(.linear).tint(Theme.accent).frame(height: 2).accessibilityIdentifier(
+                    "terminal.webArtifact.progress")
             }
 
             ZStack {
                 TerminalWebArtifactRepresentable(load: load, model: model)
-                if let message = model.loadErrorMessage {
-                    TerminalArtifactFailureView(message: message) { model.retry?() }
-                }
+                if let message = model.loadErrorMessage { TerminalArtifactFailureView(message: message) { model.retry?() } }
             }
-        }
-        .background(Color(uiColor: .systemBackground))
-        .ignoresSafeArea(edges: .bottom)
-        .accessibilityIdentifier("terminal.webArtifact")
+        }.background(Color(uiColor: .systemBackground)).ignoresSafeArea(edges: .bottom).accessibilityIdentifier("terminal.webArtifact")
     }
 }
 
@@ -130,32 +118,18 @@ struct TerminalArtifactFailureView: View {
 
     var body: some View {
         VStack(spacing: 12) {
-            Image(systemName: "exclamationmark.triangle")
-                .font(.system(size: 28, weight: .semibold))
-                .foregroundStyle(Theme.orange)
-            Text("Couldn't load this content")
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(Theme.text)
-            Text(message)
-                .font(.footnote)
-                .foregroundStyle(Theme.muted)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 28)
-            Button("Retry", action: retry)
-                .buttonStyle(.bordered)
-                .accessibilityIdentifier("terminal.webArtifact.retry")
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(uiColor: .systemBackground))
-        .accessibilityIdentifier("terminal.webArtifact.error")
+            Image(systemName: "exclamationmark.triangle").font(.system(size: 28, weight: .semibold)).foregroundStyle(Theme.orange)
+            Text("Couldn't load this content").font(.subheadline.weight(.semibold)).foregroundStyle(Theme.text)
+            Text(message).font(.footnote).foregroundStyle(Theme.muted).multilineTextAlignment(.center).padding(.horizontal, 28)
+            Button("Retry", action: retry).buttonStyle(.bordered).accessibilityIdentifier("terminal.webArtifact.retry")
+        }.frame(maxWidth: .infinity, maxHeight: .infinity).background(Color(uiColor: .systemBackground)).accessibilityIdentifier(
+            "terminal.webArtifact.error")
     }
 }
 
 /// Navigation state for the artifact web view, kept in sync by the coordinator's KVO and delegate
 /// callbacks so the SwiftUI wrapper never holds a `WKWebView` reference.
-@MainActor
-@Observable
-final class TerminalWebArtifactViewModel {
+@MainActor @Observable final class TerminalWebArtifactViewModel {
     var isLoading = false
     var progress: Double = 0
     var loadErrorMessage: String?
@@ -166,9 +140,7 @@ private struct TerminalWebArtifactRepresentable: UIViewRepresentable {
     let load: TerminalWebArtifactLoad
     let model: TerminalWebArtifactViewModel
 
-    func makeCoordinator() -> Coordinator {
-        Coordinator(model: model)
-    }
+    func makeCoordinator() -> Coordinator { Coordinator(model: model) }
 
     func makeUIView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
@@ -182,9 +154,7 @@ private struct TerminalWebArtifactRepresentable: UIViewRepresentable {
         return webView
     }
 
-    func updateUIView(_ webView: WKWebView, context: Context) {
-        context.coordinator.load(load, on: webView)
-    }
+    func updateUIView(_ webView: WKWebView, context: Context) { context.coordinator.load(load, on: webView) }
 
     @MainActor final class Coordinator: NSObject, WKNavigationDelegate {
         private let model: TerminalWebArtifactViewModel
@@ -193,13 +163,9 @@ private struct TerminalWebArtifactRepresentable: UIViewRepresentable {
         private var loadTask: Task<Void, Never>?
         private var observations: [NSKeyValueObservation] = []
 
-        init(model: TerminalWebArtifactViewModel) {
-            self.model = model
-        }
+        init(model: TerminalWebArtifactViewModel) { self.model = model }
 
-        deinit {
-            loadTask?.cancel()
-        }
+        deinit { loadTask?.cancel() }
 
         func attach(to webView: WKWebView, load: TerminalWebArtifactLoad) {
             model.retry = { [weak self, weak webView] in
@@ -231,11 +197,7 @@ private struct TerminalWebArtifactRepresentable: UIViewRepresentable {
                     try Task.checkCancellation()
                     guard self.loadedDescription == description else { return }
                     self.performConfiguredLoad(load, on: webView)
-                } catch is CancellationError {
-                    return
-                } catch {
-                    self.handleFailure(error)
-                }
+                } catch is CancellationError { return } catch { self.handleFailure(error) }
             }
         }
 
@@ -258,10 +220,8 @@ private struct TerminalWebArtifactRepresentable: UIViewRepresentable {
                 // the HTML is intentionally unreachable. Terminal HTML artifacts are treated as standalone
                 // documents; loading a whole directory to satisfy relative asset refs is out of scope.
                 webView.loadFileURL(url, allowingReadAccessTo: url)
-            case .request(let url):
-                webView.load(URLRequest(url: url))
-            case .htmlString(let html):
-                webView.loadHTMLString(html, baseURL: nil)
+            case .request(let url): webView.load(URLRequest(url: url))
+            case .htmlString(let html): webView.loadHTMLString(html, baseURL: nil)
             }
         }
 
@@ -291,8 +251,7 @@ private struct TerminalWebArtifactRepresentable: UIViewRepresentable {
         }
 
         func webView(
-            _ webView: WKWebView,
-            decidePolicyFor navigationAction: WKNavigationAction,
+            _ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
             decisionHandler: @escaping @MainActor @Sendable (WKNavigationActionPolicy) -> Void
         ) {
             if let url = navigationAction.request.url,
@@ -304,13 +263,9 @@ private struct TerminalWebArtifactRepresentable: UIViewRepresentable {
             decisionHandler(.allow)
         }
 
-        func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-            handleFailure(error)
-        }
+        func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { handleFailure(error) }
 
-        func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-            handleFailure(error)
-        }
+        func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { handleFailure(error) }
 
         private func handleFailure(_ error: Error) {
             let nsError = error as NSError

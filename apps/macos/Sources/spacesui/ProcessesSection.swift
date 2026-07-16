@@ -235,9 +235,8 @@ import workspacecore
         }
         let displayName = target.name?.isEmpty == false ? (target.name ?? "") : "this process"
         RowSectionRemoveConfirmation.confirm(
-            messageText: "Remove \(displayName)?",
-            informativeText: "This removes the process from the workspace. You can add it again later.", isDraft: isDraft,
-            presenter: presentRemoveConfirmation.map { presenter in { presenter(target, $0) } }, onDecision: confirm)
+            messageText: "Remove \(displayName)?", informativeText: "This removes the process from the workspace. You can add it again later.",
+            isDraft: isDraft, presenter: presentRemoveConfirmation.map { presenter in { presenter(target, $0) } }, onDecision: confirm)
     }
 
     @objc func handleAdd(_ sender: NSButton) {

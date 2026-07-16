@@ -13,8 +13,7 @@ enum BrowserProxyStatus: Sendable, Equatable {
 
 /// Observable wrapper the UI reads to reflect the proxy's bind status. The actor updates it on the
 /// main actor so SwiftUI observation stays consistent.
-@MainActor @Observable
-final class BrowserProxyRuntimeState {
+@MainActor @Observable final class BrowserProxyRuntimeState {
     var status: BrowserProxyStatus = .idle
     /// Nonisolated so the proxy actor can construct a default instance from its own nonisolated init.
     nonisolated init() {}
@@ -59,9 +58,7 @@ actor SpacesMobileBrowserProxy {
     ///   - dialer: tunnel opener; defaults to the production pinned-TLS dialer. Injected as a fake in tests.
     ///   - runtimeState: observable status object; defaults to a fresh one.
     init(
-        port: UInt16 = SpacesMobileBrowserProxy.fixedPort,
-        installationID: String,
-        dialer: (any BrowserTunnelDialing)? = nil,
+        port: UInt16 = SpacesMobileBrowserProxy.fixedPort, installationID: String, dialer: (any BrowserTunnelDialing)? = nil,
         runtimeState: BrowserProxyRuntimeState = BrowserProxyRuntimeState()
     ) {
         self.port = port
@@ -70,14 +67,10 @@ actor SpacesMobileBrowserProxy {
     }
 
     /// Replaces the routing table used for subsequent connections. In-flight tunnels are unaffected.
-    func updateRoutes(_ table: BrowserProxyRoutingTable) {
-        routingTable = table
-    }
+    func updateRoutes(_ table: BrowserProxyRoutingTable) { routingTable = table }
 
     /// Looks up the route the proxy would use for a browser `Host`.
-    func routeTarget(forHost host: String) -> BrowserProxyRouteTarget? {
-        routingTable.target(forHost: host)
-    }
+    func routeTarget(forHost host: String) -> BrowserProxyRouteTarget? { routingTable.target(forHost: host) }
 
     /// Binds the loopback listener, retrying a bind failure a few times with backoff before exposing
     /// `.failed`. Idempotent: a second call while already running is a no-op.
@@ -86,11 +79,7 @@ actor SpacesMobileBrowserProxy {
         startToken += 1
         let token = startToken
         isStarting = true
-        defer {
-            if startToken == token {
-                isStarting = false
-            }
-        }
+        defer { if startToken == token { isStarting = false } }
         var lastError: (any Error)?
         for attempt in 0..<Self.bindRetryLimit {
             guard startToken == token else { return }
@@ -118,13 +107,12 @@ actor SpacesMobileBrowserProxy {
                     guard listener === pendingListener else { return }
                     listener = nil
                 }
-                if attempt < Self.bindRetryLimit - 1 {
-                    try? await Task.sleep(for: Self.bindRetryBackoff)
-                }
+                if attempt < Self.bindRetryLimit - 1 { try? await Task.sleep(for: Self.bindRetryBackoff) }
             }
         }
         guard startToken == token else { return }
-        let message = lastError.map { "The on-device browser proxy could not bind to port \(port): \($0.localizedDescription)" }
+        let message =
+            lastError.map { "The on-device browser proxy could not bind to port \(port): \($0.localizedDescription)" }
             ?? "The on-device browser proxy could not bind to port \(port)."
         log.error("browser proxy bind failed: \(message, privacy: .public)")
         await setStatus(.failed(message: message))
@@ -165,19 +153,15 @@ actor SpacesMobileBrowserProxy {
             let resume = BrowserProxyOneShot(continuation)
             listener.stateUpdateHandler = { state in
                 switch state {
-                case .ready:
-                    resume.resume(returning: ())
+                case .ready: resume.resume(returning: ())
                 case .waiting(let error):
                     // A bind conflict (another process holding the port) surfaces as `.waiting`
                     // because Network.framework treats it as retryable; for the proxy it is a bind
                     // failure that feeds the start() retry/backoff loop.
                     resume.resume(throwing: error)
-                case .failed(let error):
-                    resume.resume(throwing: error)
-                case .cancelled:
-                    resume.resume(throwing: BrowserProxyConnectionIO.IOError.cancelled)
-                default:
-                    break
+                case .failed(let error): resume.resume(throwing: error)
+                case .cancelled: resume.resume(throwing: BrowserProxyConnectionIO.IOError.cancelled)
+                default: break
                 }
             }
             listener.start(queue: queue)
@@ -194,38 +178,37 @@ actor SpacesMobileBrowserProxy {
     private func serve(_ session: BrowserProxySession) async {
         let client = session.client
         let parser: BrowserProxyHTTPHeadParser
-        do {
-            parser = try await BrowserProxyConnectionIO.withTimeout(Self.headReadTimeout) {
-                try await Self.readHead(from: client)
-            }
-        } catch {
+        do { parser = try await BrowserProxyConnectionIO.withTimeout(Self.headReadTimeout) { try await Self.readHead(from: client) } } catch {
             // Malformed, oversized, or slow head: nothing routable, so just drop the connection.
             teardown(session.id)
             return
         }
 
         guard let host = parser.host else {
-            await respondAndClose(session, BrowserProxyErrorResponse.badGateway(
-                service: nil, workspace: nil, device: nil, reason: "The request did not include a Host header, so it can’t be routed."))
+            await respondAndClose(
+                session,
+                BrowserProxyErrorResponse.badGateway(
+                    service: nil, workspace: nil, device: nil, reason: "The request did not include a Host header, so it can’t be routed."))
             return
         }
         guard let target = routingTable.target(forHost: host) else {
-            await respondAndClose(session, BrowserProxyErrorResponse.badGateway(
-                service: nil, workspace: nil, device: nil,
-                reason: "No running workspace service is mapped to \(host)."))
+            await respondAndClose(
+                session,
+                BrowserProxyErrorResponse.badGateway(
+                    service: nil, workspace: nil, device: nil, reason: "No running workspace service is mapped to \(host)."))
             return
         }
         guard parser.cookieValue(named: BrowserProxyRequest.cookieName) == target.proxyAuthToken else {
-            await respondAndClose(session, BrowserProxyErrorResponse.forbidden(
-                service: target.serviceName, workspace: target.workspaceName, device: target.deviceName,
-                reason: "This request did not come from the active Spaces browser session."))
+            await respondAndClose(
+                session,
+                BrowserProxyErrorResponse.forbidden(
+                    service: target.serviceName, workspace: target.workspaceName, device: target.deviceName,
+                    reason: "This request did not come from the active Spaces browser session."))
             return
         }
 
         let opened: OpenedTunnel
-        do {
-            opened = try await dialer.openTunnel(to: target)
-        } catch let error as BrowserTunnelError {
+        do { opened = try await dialer.openTunnel(to: target) } catch let error as BrowserTunnelError {
             let response: Data
             if error.code == .serviceNotRunning {
                 response = BrowserProxyErrorResponse.serviceUnavailable(
@@ -237,9 +220,11 @@ actor SpacesMobileBrowserProxy {
             await respondAndClose(session, response)
             return
         } catch {
-            await respondAndClose(session, BrowserProxyErrorResponse.badGateway(
-                service: target.serviceName, workspace: target.workspaceName, device: target.deviceName,
-                reason: "The connection to \(target.deviceName) failed."))
+            await respondAndClose(
+                session,
+                BrowserProxyErrorResponse.badGateway(
+                    service: target.serviceName, workspace: target.workspaceName, device: target.deviceName,
+                    reason: "The connection to \(target.deviceName) failed."))
             return
         }
 
@@ -272,25 +257,17 @@ actor SpacesMobileBrowserProxy {
         do {
             // Forward any early service bytes the daemon already delivered, then replay the consumed
             // request head (and any body bytes read with it) to the service.
-            if !opened.residual.isEmpty {
-                try await BrowserProxyConnectionIO.send(opened.residual, on: client)
-            }
+            if !opened.residual.isEmpty { try await BrowserProxyConnectionIO.send(opened.residual, on: client) }
             try await BrowserProxyConnectionIO.send(
                 parser.consumedBytes(
-                    droppingCookieNamed: BrowserProxyRequest.cookieName,
-                    forcingConnectionClose: !parser.isUpgradeRequest,
-                    bodyLimit: bodyLimit),
+                    droppingCookieNamed: BrowserProxyRequest.cookieName, forcingConnectionClose: !parser.isUpgradeRequest, bodyLimit: bodyLimit),
                 on: opened.connection)
         } catch {
             teardown(session.id)
             return
         }
 
-        if parser.isUpgradeRequest {
-            splice(session)
-        } else {
-            relaySingleRequestResponse(session, requestBodyRelay: requestBodyRelay)
-        }
+        if parser.isUpgradeRequest { splice(session) } else { relaySingleRequestResponse(session, requestBodyRelay: requestBodyRelay) }
     }
 
     /// Reads the HTTP head off a freshly accepted client connection.
@@ -314,10 +291,7 @@ actor SpacesMobileBrowserProxy {
             // `.finalMessage` is what actually emits a TCP FIN; the default message context
             // ignores `isComplete` for stream protocols.
             client.send(
-                content: response,
-                contentContext: .finalMessage,
-                isComplete: true,
-                completion: .contentProcessed { _ in continuation.resume() })
+                content: response, contentContext: .finalMessage, isComplete: true, completion: .contentProcessed { _ in continuation.resume() })
         }
         teardown(session.id)
     }
@@ -331,9 +305,7 @@ actor SpacesMobileBrowserProxy {
         }
         let client = session.client
         let id = session.id
-        let coordinator = BrowserProxyRelayCoordinator {
-            Task { await self.teardown(id) }
-        }
+        let coordinator = BrowserProxyRelayCoordinator { Task { await self.teardown(id) } }
         Self.pump(from: client, to: tunnel, coordinator: coordinator)
         Self.pump(from: tunnel, to: client, coordinator: coordinator)
     }
@@ -348,16 +320,12 @@ actor SpacesMobileBrowserProxy {
         }
         let client = session.client
         let id = session.id
-        let coordinator = BrowserProxyRelayCoordinator {
-            Task { await self.teardown(id) }
-        }
+        let coordinator = BrowserProxyRelayCoordinator { Task { await self.teardown(id) } }
         switch requestBodyRelay {
-        case .none:
-            Self.finishSingleRequestBody(from: client, to: tunnel, remainingBytes: 0, coordinator: coordinator)
+        case .none: Self.finishSingleRequestBody(from: client, to: tunnel, remainingBytes: 0, coordinator: coordinator)
         case .contentLength(let remainingBytes):
             Self.finishSingleRequestBody(from: client, to: tunnel, remainingBytes: remainingBytes, coordinator: coordinator)
-        case .chunked(let bufferedBody):
-            Self.finishChunkedRequestBody(from: client, to: tunnel, bufferedBody: bufferedBody, coordinator: coordinator)
+        case .chunked(let bufferedBody): Self.finishChunkedRequestBody(from: client, to: tunnel, bufferedBody: bufferedBody, coordinator: coordinator)
         }
         Self.pump(from: tunnel, to: client, coordinator: coordinator)
     }
@@ -374,31 +342,18 @@ actor SpacesMobileBrowserProxy {
             }
             if let content, !content.isEmpty {
                 dest.send(
-                    content: content,
-                    contentContext: isComplete ? .finalMessage : .defaultMessage,
-                    isComplete: isComplete,
+                    content: content, contentContext: isComplete ? .finalMessage : .defaultMessage, isComplete: isComplete,
                     completion: .contentProcessed { sendError in
                         if sendError != nil {
                             coordinator.abort()
                             return
                         }
-                        if isComplete {
-                            coordinator.directionComplete()
-                        } else {
-                            pump(from: source, to: dest, coordinator: coordinator)
-                        }
+                        if isComplete { coordinator.directionComplete() } else { pump(from: source, to: dest, coordinator: coordinator) }
                     })
             } else if isComplete {
                 dest.send(
-                    content: nil,
-                    contentContext: .finalMessage,
-                    isComplete: true,
-                    completion: .contentProcessed { sendError in
-                        if sendError != nil {
-                            coordinator.abort()
-                        } else {
-                            coordinator.directionComplete()
-                        }
+                    content: nil, contentContext: .finalMessage, isComplete: true,
+                    completion: .contentProcessed { sendError in if sendError != nil { coordinator.abort() } else { coordinator.directionComplete() }
                     })
             } else {
                 pump(from: source, to: dest, coordinator: coordinator)
@@ -410,23 +365,12 @@ actor SpacesMobileBrowserProxy {
     /// write side. If the client stops before the declared body is complete, the tunnel is aborted
     /// rather than forwarding a truncated request.
     private static func finishSingleRequestBody(
-        from source: NWConnection,
-        to dest: NWConnection,
-        remainingBytes: Int,
-        coordinator: BrowserProxyRelayCoordinator
+        from source: NWConnection, to dest: NWConnection, remainingBytes: Int, coordinator: BrowserProxyRelayCoordinator
     ) {
         guard remainingBytes > 0 else {
             dest.send(
-                content: nil,
-                contentContext: .finalMessage,
-                isComplete: true,
-                completion: .contentProcessed { sendError in
-                    if sendError != nil {
-                        coordinator.abort()
-                    } else {
-                        coordinator.directionComplete()
-                    }
-                })
+                content: nil, contentContext: .finalMessage, isComplete: true,
+                completion: .contentProcessed { sendError in if sendError != nil { coordinator.abort() } else { coordinator.directionComplete() } })
             return
         }
 
@@ -450,9 +394,7 @@ actor SpacesMobileBrowserProxy {
                 return
             }
             dest.send(
-                content: content,
-                contentContext: nextRemainingBytes == 0 ? .finalMessage : .defaultMessage,
-                isComplete: nextRemainingBytes == 0,
+                content: content, contentContext: nextRemainingBytes == 0 ? .finalMessage : .defaultMessage, isComplete: nextRemainingBytes == 0,
                 completion: .contentProcessed { sendError in
                     if sendError != nil {
                         coordinator.abort()
@@ -470,10 +412,7 @@ actor SpacesMobileBrowserProxy {
     /// pipelined request on the browser connection and are intentionally not forwarded because they
     /// would still carry the proxy auth cookie.
     private static func finishChunkedRequestBody(
-        from source: NWConnection,
-        to dest: NWConnection,
-        bufferedBody: Data,
-        coordinator: BrowserProxyRelayCoordinator
+        from source: NWConnection, to dest: NWConnection, bufferedBody: Data, coordinator: BrowserProxyRelayCoordinator
     ) {
         var tracker = BrowserProxyChunkedBodyTracker()
         guard let progress = tracker.consume(bufferedBody) else {
@@ -482,26 +421,15 @@ actor SpacesMobileBrowserProxy {
         }
         if progress.isComplete {
             dest.send(
-                content: nil,
-                contentContext: .finalMessage,
-                isComplete: true,
-                completion: .contentProcessed { sendError in
-                    if sendError != nil {
-                        coordinator.abort()
-                    } else {
-                        coordinator.directionComplete()
-                    }
-                })
+                content: nil, contentContext: .finalMessage, isComplete: true,
+                completion: .contentProcessed { sendError in if sendError != nil { coordinator.abort() } else { coordinator.directionComplete() } })
             return
         }
         finishChunkedRequestBody(from: source, to: dest, tracker: tracker, coordinator: coordinator)
     }
 
     private static func finishChunkedRequestBody(
-        from source: NWConnection,
-        to dest: NWConnection,
-        tracker: BrowserProxyChunkedBodyTracker,
-        coordinator: BrowserProxyRelayCoordinator
+        from source: NWConnection, to dest: NWConnection, tracker: BrowserProxyChunkedBodyTracker, coordinator: BrowserProxyRelayCoordinator
     ) {
         source.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { content, _, isComplete, error in
             if error != nil {
@@ -529,8 +457,7 @@ actor SpacesMobileBrowserProxy {
             let nextTracker = updatedTracker
             let bodyBytes = content.prefix(progress.forwardedByteCount)
             dest.send(
-                content: bodyBytes.isEmpty ? nil : Data(bodyBytes),
-                contentContext: progress.isComplete ? .finalMessage : .defaultMessage,
+                content: bodyBytes.isEmpty ? nil : Data(bodyBytes), contentContext: progress.isComplete ? .finalMessage : .defaultMessage,
                 isComplete: progress.isComplete,
                 completion: .contentProcessed { sendError in
                     if sendError != nil {
@@ -549,9 +476,7 @@ actor SpacesMobileBrowserProxy {
         session.cancelAll()
     }
 
-    private func setStatus(_ status: BrowserProxyStatus) async {
-        await MainActor.run { runtimeState.status = status }
-    }
+    private func setStatus(_ status: BrowserProxyStatus) async { await MainActor.run { runtimeState.status = status } }
 }
 
 private enum BrowserProxyRequestBodyRelay: Sendable {

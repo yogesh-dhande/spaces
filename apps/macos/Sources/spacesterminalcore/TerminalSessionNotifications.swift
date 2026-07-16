@@ -20,7 +20,5 @@ public enum TerminalSessionNotification {
     }
 
     /// Defensively reads the `sessionID` string from a session notification.
-    public static func sessionID(from notification: Notification) -> String? {
-        notification.userInfo?[sessionIDKey] as? String
-    }
+    public static func sessionID(from notification: Notification) -> String? { notification.userInfo?[sessionIDKey] as? String }
 }

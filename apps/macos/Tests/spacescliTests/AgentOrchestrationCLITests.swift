@@ -12,7 +12,8 @@ final class AgentOrchestrationCLITests: XCTestCase {
 
     func testTerminalDeepLinkRendersLocalAndDeviceQualified() {
         XCTAssertEqual(SpacesTerminalDeepLink(sessionID: "session-1").absoluteString, "spaces://terminal/session-1")
-        XCTAssertEqual(SpacesTerminalDeepLink(sessionID: "session-1", deviceID: "device-9").absoluteString, "spaces://terminal/session-1?device=device-9")
+        XCTAssertEqual(
+            SpacesTerminalDeepLink(sessionID: "session-1", deviceID: "device-9").absoluteString, "spaces://terminal/session-1?device=device-9")
     }
 
     func testTerminalDeepLinkParsesLocalAndDeviceQualified() {
@@ -44,8 +45,7 @@ final class AgentOrchestrationCLITests: XCTestCase {
             TerminalServiceAgentSessionRow(
                 id: "agent-1", terminalSessionID: "session-1", agent: "Claude Code CLI", label: "Claude Code CLI", status: "waiting",
                 note: "review auth", projectID: "project-1", projectName: "Spaces", workspaceID: "workspace-1", workspaceName: "feature",
-                workspaceDir: "/repo/workspaces/feature", branch: "feature", updatedAt: "2026-07-14T00:00:00Z",
-                lastSignalAt: "2026-07-14T00:00:00Z"))
+                workspaceDir: "/repo/workspaces/feature", branch: "feature", updatedAt: "2026-07-14T00:00:00Z", lastSignalAt: "2026-07-14T00:00:00Z"))
         XCTAssertTrue(row.hasPrefix("session-1\t"))
         XCTAssertTrue(row.contains("agent=Claude Code CLI"))
         XCTAssertTrue(row.contains("status=waiting"))
@@ -143,8 +143,7 @@ final class AgentOrchestrationCLITests: XCTestCase {
         XCTAssertEqual(try AgentListCommand.parse(["--device", "phone"]).device, "phone")
         XCTAssertEqual(try AgentStatusCommand.parse(["--device", "phone"]).device, "phone")
         XCTAssertEqual(try AgentAnnotateCommand.parse(["note", "--device", "phone"]).device, "phone")
-        XCTAssertEqual(
-            try AgentSpawnCommand.parse(["--command", "claude", "--workspace", "workspace-1", "--device", "phone"]).device, "phone")
+        XCTAssertEqual(try AgentSpawnCommand.parse(["--command", "claude", "--workspace", "workspace-1", "--device", "phone"]).device, "phone")
         XCTAssertEqual(try AgentInterruptCommand.parse(["session-1", "--device", "phone"]).device, "phone")
         XCTAssertEqual(try AgentKillCommand.parse(["session-1", "--device", "phone"]).device, "phone")
     }
@@ -153,9 +152,7 @@ final class AgentOrchestrationCLITests: XCTestCase {
         // The workspace guard runs before device resolution, so it fails deterministically without a
         // paired device.
         let spawn = try AgentSpawnCommand.parse(["--command", "claude", "--device", "phone"])
-        XCTAssertThrowsError(try spawn.run()) { error in
-            XCTAssertTrue("\(error)".contains("--workspace is required"), "\(error)")
-        }
+        XCTAssertThrowsError(try spawn.run()) { error in XCTAssertTrue("\(error)".contains("--workspace is required"), "\(error)") }
     }
 
     func testAgentSubscribeAndUnsubscribeAcceptDeviceForCrossDeviceWatch() throws {
@@ -215,7 +212,8 @@ final class AgentOrchestrationCLITests: XCTestCase {
 
     func testAgentSpawnResultLineDeviceQualifiesDeepLinkForRemoteSpawn() {
         let line = agentSpawnResultLine(
-            AgentSpawnResult(terminalSessionID: "session-3", workspaceID: "workspace-2", detectedAgent: "opencode", deviceID: "device-9", subscribed: false))
+            AgentSpawnResult(
+                terminalSessionID: "session-3", workspaceID: "workspace-2", detectedAgent: "opencode", deviceID: "device-9", subscribed: false))
         XCTAssertTrue(line.contains("open=\(SpacesTerminalDeepLink(sessionID: "session-3", deviceID: "device-9").absoluteString)"))
     }
 

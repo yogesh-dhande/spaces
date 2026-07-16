@@ -7,9 +7,9 @@ import spacesterminalcore
 /// Behavior coverage for the commit-2 spawn/kill/subscribe orchestration surface: the `.agent`-kind
 /// launch, default titling, cross-workspace agent resolution, and hook-signal readiness.
 final class AgentSpawnOrchestrationTests: XCTestCase {
-    private func makeAgentOrchestrator(store: SQLiteStore, launchCapture: TerminalLaunchConfigurationCapture, terminateCapture: TerminalTerminateCapture)
-        -> WorkspaceOrchestrator
-    {
+    private func makeAgentOrchestrator(
+        store: SQLiteStore, launchCapture: TerminalLaunchConfigurationCapture, terminateCapture: TerminalTerminateCapture
+    ) -> WorkspaceOrchestrator {
         WorkspaceOrchestrator(
             store: store, builtInTerminalSessionTerminator: { sessionID in terminateCapture.sessionIDs.append(sessionID) },
             builtInTerminalSessionLauncher: { configuration in

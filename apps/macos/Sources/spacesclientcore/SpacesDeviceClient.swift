@@ -582,8 +582,8 @@ public enum SpacesDeviceClient {
     /// Coding-agent sessions on a paired device (`spaces agent list/status --device`), also used for
     /// remote spawn-readiness polling. `workspaceID`/`sessionID` narrow the listing; both optional.
     public static func listAgentSessions(
-        workspaceID: String? = nil, sessionID: String? = nil, device: SpacesPairedDeviceRecord,
-        clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
+        workspaceID: String? = nil, sessionID: String? = nil, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
+        profile: SpacesProfile? = nil
     ) throws -> [SpacesDeviceAgentSessionRow] {
         let response = try request(
             .init(command: .listAgentSessions(.init(workspaceID: workspaceID, sessionID: sessionID))), device: device, clientApp: clientApp,
@@ -609,8 +609,7 @@ public enum SpacesDeviceClient {
     @discardableResult public static func terminateTerminalSession(
         sessionID: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
     ) throws -> SpacesDeviceAPIResponse {
-        try request(
-            .init(command: .terminateTerminalSession(.init(sessionID: sessionID))), device: device, clientApp: clientApp, profile: profile)
+        try request(.init(command: .terminateTerminalSession(.init(sessionID: sessionID))), device: device, clientApp: clientApp, profile: profile)
     }
 
     /// Terminal sessions on a paired device, read from the overview (`spaces terminal list --device`).
@@ -620,9 +619,9 @@ public enum SpacesDeviceClient {
 
     /// Projects on a paired device, read from the overview (`spaces project list --device`). Reuses the
     /// overview the sidebar already loads rather than a dedicated listing command.
-    public static func projects(
-        device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
-    ) throws -> [SpacesDeviceProjectSummary] { try overview(device: device, clientApp: clientApp, profile: profile).overview.projects }
+    public static func projects(device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil)
+        throws -> [SpacesDeviceProjectSummary]
+    { try overview(device: device, clientApp: clientApp, profile: profile).overview.projects }
 
     /// Workspaces on a paired device, read from the overview (`spaces workspace list --device`). The
     /// overview carries only active workspaces, so this never includes archived ones (see the CLI, which

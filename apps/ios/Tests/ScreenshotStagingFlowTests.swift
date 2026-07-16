@@ -21,8 +21,7 @@
         func testMakeStagedScreenshotStagesValidatedPNG() throws {
             let capturedAt = Date(timeIntervalSince1970: 1_700_000_000)
 
-            let screenshot = try ScreenshotStager.makeStagedScreenshot(
-                pngData: makePNGData(), sourceTitle: "Preview server", capturedAt: capturedAt)
+            let screenshot = try ScreenshotStager.makeStagedScreenshot(pngData: makePNGData(), sourceTitle: "Preview server", capturedAt: capturedAt)
 
             XCTAssertEqual(screenshot.payload.fileExtension, "png")
             XCTAssertFalse(screenshot.payload.imageData.isEmpty)
@@ -35,9 +34,7 @@
         func testMakeStagedScreenshotRejectsOversizedData() {
             let oversized = Data(count: TerminalImageAttachmentPayload.maxByteCount + 1)
 
-            XCTAssertThrowsError(
-                try ScreenshotStager.makeStagedScreenshot(pngData: oversized, sourceTitle: "shell", capturedAt: .now)
-            ) { error in
+            XCTAssertThrowsError(try ScreenshotStager.makeStagedScreenshot(pngData: oversized, sourceTitle: "shell", capturedAt: .now)) { error in
                 XCTAssertEqual(error as? TerminalImageAttachmentValidationError, .imageTooLarge)
             }
         }
@@ -46,9 +43,7 @@
             // Passes size/extension validation but is not a real image, so the thumbnail decode fails.
             let bogus = Data([0x01, 0x02, 0x03, 0x04])
 
-            XCTAssertThrowsError(
-                try ScreenshotStager.makeStagedScreenshot(pngData: bogus, sourceTitle: "shell", capturedAt: .now)
-            ) { error in
+            XCTAssertThrowsError(try ScreenshotStager.makeStagedScreenshot(pngData: bogus, sourceTitle: "shell", capturedAt: .now)) { error in
                 XCTAssertEqual(error as? ScreenshotStagerError, .undecodableImage)
             }
         }

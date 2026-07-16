@@ -49,8 +49,7 @@ enum SpacesMobileAgentGrouping {
         var entriesByKind: [SpacesMobileAgentGroupKind: [SpacesMobileAgentEntry]] = [:]
         for workspace in overview.workspaces where !workspace.isArchived && !workspace.isHidden {
             for agent in workspace.codingAgentRows {
-                let entry = SpacesMobileAgentEntry(
-                    row: agent, workspaceDisplayName: workspace.displayName, projectName: workspace.projectName)
+                let entry = SpacesMobileAgentEntry(row: agent, workspaceDisplayName: workspace.displayName, projectName: workspace.projectName)
                 entriesByKind[kind(for: agent), default: []].append(entry)
             }
         }

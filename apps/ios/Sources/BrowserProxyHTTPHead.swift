@@ -95,9 +95,7 @@ struct BrowserProxyHTTPHeadParser {
     }
 
     var bodyFraming: RequestBodyFraming {
-        if transferEncodingTokens.contains(where: { $0.caseInsensitiveCompare("chunked") == .orderedSame }) {
-            return .chunked
-        }
+        if transferEncodingTokens.contains(where: { $0.caseInsensitiveCompare("chunked") == .orderedSame }) { return .chunked }
         guard let contentLength, contentLength > 0 else { return .none }
         return .contentLength(contentLength)
     }
@@ -107,9 +105,7 @@ struct BrowserProxyHTTPHeadParser {
         return consumedBytes.count - headEndIndex
     }
 
-    var chunkedBodyProgress: ChunkedBodyProgress? {
-        Self.chunkedBodyProgress(in: bodyBytes())
-    }
+    var chunkedBodyProgress: ChunkedBodyProgress? { Self.chunkedBodyProgress(in: bodyBytes()) }
 
     func bodyBytes(limit: Int? = nil) -> Data {
         guard isComplete, let headEndIndex else { return Data() }
@@ -126,11 +122,7 @@ struct BrowserProxyHTTPHeadParser {
     func consumedBytes(droppingCookieNamed cookieName: String, forcingConnectionClose: Bool = false, bodyLimit: Int? = nil) -> Data {
         guard isComplete, let headEndIndex, let headText else { return consumedBytes }
         let fullBody = consumedBytes[headEndIndex...]
-        let body = if let bodyLimit {
-            fullBody.prefix(max(0, min(bodyLimit, fullBody.count)))
-        } else {
-            fullBody
-        }
+        let body = if let bodyLimit { fullBody.prefix(max(0, min(bodyLimit, fullBody.count))) } else { fullBody }
         var sanitizedLines: [String] = []
         var addedConnectionClose = false
         for line in headText.components(separatedBy: "\r\n") {
@@ -141,9 +133,8 @@ struct BrowserProxyHTTPHeadParser {
             }
             let name = line[..<colon].trimmingCharacters(in: .whitespaces)
             if forcingConnectionClose,
-               name.caseInsensitiveCompare("Connection") == .orderedSame
-                   || name.caseInsensitiveCompare("Proxy-Connection") == .orderedSame
-                   || name.caseInsensitiveCompare("Keep-Alive") == .orderedSame
+                name.caseInsensitiveCompare("Connection") == .orderedSame || name.caseInsensitiveCompare("Proxy-Connection") == .orderedSame
+                    || name.caseInsensitiveCompare("Keep-Alive") == .orderedSame
             {
                 if name.caseInsensitiveCompare("Connection") == .orderedSame, !addedConnectionClose {
                     sanitizedLines.append("Connection: close")
@@ -161,13 +152,9 @@ struct BrowserProxyHTTPHeadParser {
                 guard let equals = trimmed.firstIndex(of: "=") else { return trimmed.isEmpty ? nil : trimmed }
                 return trimmed[..<equals] == cookieName ? nil : trimmed
             }
-            if !remaining.isEmpty {
-                sanitizedLines.append("Cookie: \(remaining.joined(separator: "; "))")
-            }
+            if !remaining.isEmpty { sanitizedLines.append("Cookie: \(remaining.joined(separator: "; "))") }
         }
-        if forcingConnectionClose, !addedConnectionClose {
-            sanitizedLines.append("Connection: close")
-        }
+        if forcingConnectionClose, !addedConnectionClose { sanitizedLines.append("Connection: close") }
         var sanitized = sanitizedLines.joined(separator: "\r\n").data(using: .isoLatin1)!
         sanitized.append(Data("\r\n\r\n".utf8))
         sanitized.append(body)
@@ -193,25 +180,19 @@ struct BrowserProxyHTTPHeadParser {
 
     private var transferEncodingTokens: [String] {
         headerValues(named: "Transfer-Encoding").flatMap { value in
-            value.split(separator: ",").map { token in
-                token.trimmingCharacters(in: .whitespaces)
-            }
+            value.split(separator: ",").map { token in token.trimmingCharacters(in: .whitespaces) }
         }
     }
 
     /// Drops the `:port` suffix from a `Host` header value, handling bracketed IPv6 literals.
     private static func stripPort(_ value: String) -> String {
         if value.hasPrefix("[") {
-            if let close = value.firstIndex(of: "]") {
-                return String(value[value.index(after: value.startIndex)..<close])
-            }
+            if let close = value.firstIndex(of: "]") { return String(value[value.index(after: value.startIndex)..<close]) }
             return value
         }
         if let colon = value.lastIndex(of: ":") {
             let portPart = value[value.index(after: colon)...]
-            if !portPart.isEmpty, portPart.allSatisfy(\.isNumber) {
-                return String(value[..<colon])
-            }
+            if !portPart.isEmpty, portPart.allSatisfy(\.isNumber) { return String(value[..<colon]) }
         }
         return value
     }
@@ -237,9 +218,7 @@ struct BrowserProxyChunkedBodyTracker: Sendable {
 
         while index < data.endIndex {
             switch state {
-            case .complete:
-                return BrowserProxyHTTPHeadParser.ChunkedBodyProgress(
-                    forwardedByteCount: forwardedByteCount, isComplete: true)
+            case .complete: return BrowserProxyHTTPHeadParser.ChunkedBodyProgress(forwardedByteCount: forwardedByteCount, isComplete: true)
 
             case .chunkSizeLine(var line):
                 while index < data.endIndex {
@@ -254,9 +233,7 @@ struct BrowserProxyChunkedBodyTracker: Sendable {
                         break
                     }
                 }
-                if case .chunkSizeLine = state {
-                    state = .chunkSizeLine(line)
-                }
+                if case .chunkSizeLine = state { state = .chunkSizeLine(line) }
 
             case .chunkData(let remaining):
                 let available = data.distance(from: index, to: data.endIndex)
@@ -286,44 +263,31 @@ struct BrowserProxyChunkedBodyTracker: Sendable {
                     if line.endsWithCRLF {
                         if line.count == 2 {
                             state = .complete
-                            return BrowserProxyHTTPHeadParser.ChunkedBodyProgress(
-                                forwardedByteCount: forwardedByteCount, isComplete: true)
+                            return BrowserProxyHTTPHeadParser.ChunkedBodyProgress(forwardedByteCount: forwardedByteCount, isComplete: true)
                         }
                         line.removeAll(keepingCapacity: true)
                     }
                 }
-                if case .trailerLine = state {
-                    state = .trailerLine(line)
-                }
+                if case .trailerLine = state { state = .trailerLine(line) }
             }
         }
 
         let isComplete: Bool
-        if case .complete = state {
-            isComplete = true
-        } else {
-            isComplete = false
-        }
-        return BrowserProxyHTTPHeadParser.ChunkedBodyProgress(
-            forwardedByteCount: forwardedByteCount, isComplete: isComplete)
+        if case .complete = state { isComplete = true } else { isComplete = false }
+        return BrowserProxyHTTPHeadParser.ChunkedBodyProgress(forwardedByteCount: forwardedByteCount, isComplete: isComplete)
     }
 
     private static func parseChunkSize(_ bytes: ArraySlice<UInt8>) -> Int? {
-        let sizeBytes = bytes.prefix { $0 != UInt8(ascii: ";") }
-            .trimmedHTTPWhitespace
+        let sizeBytes = bytes.prefix { $0 != UInt8(ascii: ";") }.trimmedHTTPWhitespace
         guard !sizeBytes.isEmpty else { return nil }
         var value = 0
         for byte in sizeBytes {
             let digit: Int
             switch byte {
-            case UInt8(ascii: "0")...UInt8(ascii: "9"):
-                digit = Int(byte - UInt8(ascii: "0"))
-            case UInt8(ascii: "a")...UInt8(ascii: "f"):
-                digit = Int(byte - UInt8(ascii: "a") + 10)
-            case UInt8(ascii: "A")...UInt8(ascii: "F"):
-                digit = Int(byte - UInt8(ascii: "A") + 10)
-            default:
-                return nil
+            case UInt8(ascii: "0")...UInt8(ascii: "9"): digit = Int(byte - UInt8(ascii: "0"))
+            case UInt8(ascii: "a")...UInt8(ascii: "f"): digit = Int(byte - UInt8(ascii: "a") + 10)
+            case UInt8(ascii: "A")...UInt8(ascii: "F"): digit = Int(byte - UInt8(ascii: "A") + 10)
+            default: return nil
             }
             guard value <= (Int.max - digit) / 16 else { return nil }
             value = value * 16 + digit
@@ -332,19 +296,13 @@ struct BrowserProxyChunkedBodyTracker: Sendable {
     }
 }
 
-private extension Array where Element == UInt8 {
-    var endsWithCRLF: Bool {
-        count >= 2 && self[count - 2] == 0x0D && self[count - 1] == 0x0A
-    }
-}
+extension Array where Element == UInt8 { fileprivate var endsWithCRLF: Bool { count >= 2 && self[count - 2] == 0x0D && self[count - 1] == 0x0A } }
 
-private extension ArraySlice where Element == UInt8 {
-    var trimmedHTTPWhitespace: ArraySlice<UInt8> {
+extension ArraySlice where Element == UInt8 {
+    fileprivate var trimmedHTTPWhitespace: ArraySlice<UInt8> {
         var start = startIndex
         var end = endIndex
-        while start < end, self[start] == UInt8(ascii: " ") || self[start] == UInt8(ascii: "\t") {
-            start = index(after: start)
-        }
+        while start < end, self[start] == UInt8(ascii: " ") || self[start] == UInt8(ascii: "\t") { start = index(after: start) }
         while start < end {
             let previous = index(before: end)
             guard self[previous] == UInt8(ascii: " ") || self[previous] == UInt8(ascii: "\t") else { break }
@@ -381,11 +339,8 @@ enum BrowserProxyErrorResponse {
         let body = html(status: status, title: title, service: service, workspace: workspace, device: device, reason: reason)
         let bodyData = Data(body.utf8)
         let head =
-            "HTTP/1.1 \(status)\r\n"
-            + "Content-Type: text/html; charset=utf-8\r\n"
-            + "Content-Length: \(bodyData.count)\r\n"
-            + "Connection: close\r\n"
-            + "\r\n"
+            "HTTP/1.1 \(status)\r\n" + "Content-Type: text/html; charset=utf-8\r\n" + "Content-Length: \(bodyData.count)\r\n"
+            + "Connection: close\r\n" + "\r\n"
         var data = Data(head.utf8)
         data.append(bodyData)
         return data
@@ -425,10 +380,7 @@ enum BrowserProxyErrorResponse {
     }
 
     private static func escape(_ value: String) -> String {
-        value
-            .replacingOccurrences(of: "&", with: "&amp;")
-            .replacingOccurrences(of: "<", with: "&lt;")
-            .replacingOccurrences(of: ">", with: "&gt;")
+        value.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;").replacingOccurrences(of: ">", with: "&gt;")
             .replacingOccurrences(of: "\"", with: "&quot;")
     }
 }
