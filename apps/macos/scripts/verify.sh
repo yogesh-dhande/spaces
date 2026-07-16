@@ -4,6 +4,7 @@ set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 repo_root="$(cd "$root/../.." && pwd)"
 source "$repo_root/scripts/spaces-profile-helpers.sh"
+source "$repo_root/scripts/ios-simulator-lifecycle.sh"
 source "$root/scripts/silence-watchdog.sh"
 
 # Builds and coverage export can legitimately produce no output for long stretches. The silence
@@ -26,16 +27,10 @@ ios_simulator_arch() {
   esac
 }
 
-ios_test_destination() {
-  if [ -n "${SPACES_IOS_TEST_DESTINATION:-}" ]; then
-    printf '%s\n' "$SPACES_IOS_TEST_DESTINATION"
-    return
-  fi
-
+select_ios_test_destination() {
   local simulator_arch
   local simulator_selection
   local simulator_id
-  local simulator_state
   simulator_arch="$(ios_simulator_arch)"
 
   simulator_selection="$(
@@ -55,37 +50,33 @@ for runtime, runtime_devices in data.get("devices", {}).items():
             devices.append(device)
 
 for candidates in (
-    [device for device in devices if device.get("state") != "Booted"],
+    [device for device in devices if device.get("state") == "Shutdown"],
     [device for device in devices if device.get("state") == "Booted"],
     devices,
 ):
     for preferred_name in preferred_names:
         for device in candidates:
             if device.get("name") == preferred_name:
-                print("{}\t{}".format(device.get("udid"), device.get("state")))
+                print(device.get("udid"))
                 raise SystemExit(0)
     if candidates:
-        print("{}\t{}".format(candidates[0].get("udid"), candidates[0].get("state")))
+        print(candidates[0].get("udid"))
         raise SystemExit(0)
 
 raise SystemExit("No available iPhone simulator found for iOS tests.")
 '
   )"
-  IFS=$'\t' read -r simulator_id simulator_state <<<"$simulator_selection"
+  simulator_id="$simulator_selection"
 
-  if [ "$simulator_state" != "Booted" ]; then
-    printf 'Booting iOS simulator %s...\n' "$simulator_id" >&2
-    xcrun simctl boot "$simulator_id" >&2
-  fi
-  xcrun simctl bootstatus "$simulator_id" -b >&2
-  printf 'platform=iOS Simulator,id=%s,arch=%s\n' "$simulator_id" "$simulator_arch"
+  spaces_ios_simulator_boot_if_needed "$simulator_id"
+  destination="platform=iOS Simulator,id=$simulator_id,arch=$simulator_arch"
 }
 
 run_ios_tests() {
   local -a xcodebuild_args
   ios_root="$repo_root/apps/ios"
-  ios_derived_data="${SPACES_IOS_DERIVED_DATA:-$root/.build/ios-derived-data}"
-  destination="$(ios_test_destination)"
+  ios_derived_data="$root/.build/ios-derived-data"
+  select_ios_test_destination
   xcodebuild_args=(
     -project "$ios_root/SpacesMobile.xcodeproj"
     -scheme SpacesMobile
@@ -125,6 +116,7 @@ stop_current_profile_runtime_for_tests() {
 run_verify_steps() {
   cd "$root"
 
+  "$root/Tests/ios_simulator_lifecycle.sh"
   "$root/Tests/silence_watchdog.sh"
   "$root/Tests/setup_ghostty_xcode_mismatch_autobuild.sh"
   "$root/Tests/setup_ghostty_cache_restore.sh"
@@ -137,5 +129,17 @@ run_verify_steps() {
   "$root/scripts/coverage.sh"
   run_ios_tests
 }
+
+cleanup() {
+  local exit_code=$?
+  spaces_ios_simulator_shutdown_owned "$exit_code"
+}
+
+handle_interrupt() {
+  exit 130
+}
+
+trap cleanup EXIT
+trap handle_interrupt INT TERM
 
 run_verify_steps
