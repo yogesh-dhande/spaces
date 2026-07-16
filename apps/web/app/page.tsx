@@ -643,21 +643,21 @@ export default function HomePage() {
         <div className="mx-auto w-full max-w-7xl px-6 py-20 md:py-24">
           <div className="max-w-3xl">
             <h2 className="mt-5 text-[clamp(1.5rem,3.5vw,2.3rem)] font-semibold leading-[1.15] tracking-[-0.01em]">
-              Put one agent in charge{" "}
-              <span className="text-accent whitespace-nowrap">of the whole fleet</span>
+              Talk to one agent{" "}
+              <span className="text-accent whitespace-nowrap">to get all your work done</span>
             </h2>
             <p className="mt-5 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
-              Hand a big task to a single coding agent and let it run the show.
-              It breaks the work into pieces, spins up a fresh isolated worktree
-              for each, and gives every piece its own child agent. It sends them
-              work, is told the moment one needs input or finishes, checks any
-              child&apos;s terminal, and answers its prompts — pulling the fleet
-              to a finish while you watch every agent work live.
+              Put a single agent in front of everything you have going — a fix
+              in this repo, a feature on that branch, an experiment on the Linux
+              box. Tell it what you want; it breaks the work into pieces, spins
+              up an isolated worktree for each, and puts a child agent on every
+              one — across all your projects, features, and machines.
             </p>
             <p className="mt-4 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
-              Or make it your standing front door. One agent in charge of work
-              across all your projects, features, and worktrees — you talk to a
-              single agent, and it runs everything else.
+              The lead sends each child its work, is told the moment one needs
+              input or finishes, checks any child&apos;s terminal, and answers
+              its prompts — pulling the whole fleet to a finish while you watch
+              every agent work live.
             </p>
           </div>
 

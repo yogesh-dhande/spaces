@@ -1,18 +1,17 @@
 import type { Metadata } from "next";
-import { CodeBlock, Cmd } from "../components/code-block";
+import { Cmd } from "../components/code-block";
 import { CopyablePrompt } from "../components/copyable-prompt";
 import { DocsShell } from "../components/docs-shell";
 
 export const metadata: Metadata = {
   title: "Agent Orchestration",
   description:
-    "Put one coding agent in charge of a fleet of child agents, each in its own isolated worktree — across harnesses, models, and machines — and watch every one live.",
+    "Talk to one agent to get all your work done — a lead agent runs a fleet of child agents, each in its own isolated worktree, across harnesses, models, and machines.",
 };
 
-// The battle-tested orchestrator playbook, adapted for public use. Users drop
-// this into their repo as AGENTS.md (or their harness's equivalent) so the lead
-// agent knows how to decompose, delegate, and coordinate through the Spaces MCP
-// tools. Kept as one copy-pasteable block.
+// The battle-tested orchestrator playbook, adapted for public use. Users paste
+// it as the first message of a session with the lead agent (or save it as
+// AGENTS.md for standing use). Kept as one copy-pasteable block.
 const ORCHESTRATOR_PLAYBOOK = `# Orchestrator playbook
 
 You are an orchestrator. Your job is to break work into chunks, delegate every
@@ -118,51 +117,23 @@ export default function OrchestrationDocsPage() {
   return (
     <DocsShell
       title="Agent Orchestration"
-      description="Put one coding agent in charge of the rest. It breaks a task into pieces, gives each its own isolated worktree and its own child agent, and coordinates the fleet to a verified finish — while you watch every agent work live."
+      description="Talk to one agent to get all your work done. A lead agent stands in front of your projects, worktrees, and machines — it puts a child agent on every piece of work and coordinates the fleet to a verified finish while you watch live."
       pagePath="/docs/orchestration"
     >
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">What Orchestration Is</h2>
+        <h2 className="text-2xl font-semibold tracking-tight">One Agent for All Your Work</h2>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Orchestration lets one coding agent run a team of coding agents. You give the <strong>lead</strong> a big task; it decomposes the work into chunks, creates a fresh isolated <a className="text-accent hover:underline" href="/docs/workspaces">workspace</a> — a git worktree on its own branch — for each chunk, and spawns a <strong>child</strong> agent there to do it. The lead sends each child its instructions, is told the moment a child needs input or finishes, inspects any child&apos;s terminal, answers its permission prompts, relays context between children, and reviews their work before accepting it.
+          Orchestration puts a single <strong>lead</strong> agent in front of everything you have going — a fix in one repo, a feature in another, an experiment on the Linux box. You talk to that one agent; it runs the rest. For each piece of work it creates a fresh isolated <a className="text-accent hover:underline" href="/docs/workspaces">workspace</a> — a git worktree on its own branch — and spawns a <strong>child</strong> agent there to do it. The lead sends each child its instructions, is told the moment a child needs input or finishes, inspects any child&apos;s terminal, answers its permission prompts, relays context between children, and reviews their work before accepting it.
         </p>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           It works <strong>across harnesses</strong> — Claude Code, Codex, and opencode, any of them as the lead and any as a child — <strong>across models</strong> — each agent runs whatever model its harness supports — and <strong>across machines</strong> — children can run on a paired Mac or a cloud Linux box, driven from the Mac in front of you. Every child is a real terminal in the app, so you can watch the whole fleet work, see which agents need attention in <a className="text-accent hover:underline" href="/docs/coding-agents">Alerts</a>, and jump to any child&apos;s pane with a shortcut.
         </p>
-        <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          A lead isn&apos;t only for one big task. Because it can list your projects, create worktrees, and reach paired machines, it can stand in front of <strong>everything you have going</strong> — a fix in one repo, a feature in another, an experiment on the Linux box. You talk to one agent; it runs, watches, and reports on all of it.
-        </p>
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Set Up the MCP Server</h2>
+        <h2 className="text-2xl font-semibold tracking-tight">Setup</h2>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          The lead drives everything through the <a className="text-accent hover:underline" href="/docs/mcp">Spaces MCP server</a>, a stdio server started with <Cmd>spaces mcp</Cmd>. Register it once with the harness you want to lead from. The app shows ready-to-paste configuration, including the resolved <Cmd>spaces</Cmd> path, under <strong>Settings &rarr; MCP</strong>.
-        </p>
-        <p className="mt-4 text-sm font-semibold text-foreground">Claude Code</p>
-        <CodeBlock>{`claude mcp add spaces -s user -- spaces mcp`}</CodeBlock>
-        <p className="mt-4 text-sm font-semibold text-foreground">Codex CLI</p>
-        <p className="mt-1 text-sm leading-7 text-foreground-soft">
-          Add an <Cmd>mcp_servers</Cmd> table to <Cmd>~/.codex/config.toml</Cmd>.
-        </p>
-        <CodeBlock>{`[mcp_servers.spaces]
-command = "spaces"
-args = ["mcp"]`}</CodeBlock>
-        <p className="mt-4 text-sm font-semibold text-foreground">opencode</p>
-        <p className="mt-1 text-sm leading-7 text-foreground-soft">
-          Add a <Cmd>spaces</Cmd> entry to the <Cmd>mcp</Cmd> block in <Cmd>~/.config/opencode/opencode.json</Cmd>.
-        </p>
-        <CodeBlock>{`{
-  "mcp": {
-    "spaces": {
-      "type": "local",
-      "command": ["spaces", "mcp"],
-      "enabled": true
-    }
-  }
-}`}</CodeBlock>
-        <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          For children to report when they are blocked or done, their agent CLIs need the Spaces lifecycle hooks installed — Spaces offers to set these up for every detected CLI on first launch. See <a className="text-accent hover:underline" href="/docs/coding-agents">Coding Agents</a>.
+          The lead drives everything through the Spaces MCP server. Register it once with the harness you want to lead from — the per-harness commands are in the <a className="text-accent hover:underline" href="/docs/mcp">MCP guide</a>, and the app shows ready-to-paste configuration under <strong>Settings &rarr; MCP</strong>. For children to report when they are blocked or done, their agent CLIs need the Spaces lifecycle hooks installed — Spaces offers to set these up for every detected CLI; see <a className="text-accent hover:underline" href="/docs/coding-agents">Coding Agents</a>.
         </p>
       </article>
 
@@ -186,12 +157,12 @@ args = ["mcp"]`}</CodeBlock>
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
-        <h2 className="text-2xl font-semibold tracking-tight">The Orchestrator Playbook</h2>
+        <h2 className="text-2xl font-semibold tracking-tight">The Orchestrator Prompt</h2>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          This is the battle-tested prompt that turns a coding agent into a reliable orchestrator. Drop it into your repo as <Cmd>AGENTS.md</Cmd> (or your harness&apos;s equivalent, such as <Cmd>CLAUDE.md</Cmd>) so the lead reads it before it starts. It sets the two prime rules — delegate everything, one worktree per chunk — the full workflow, and the hard rules that keep a fleet honest: inspect children by session id and never your own directory, treat events as information rather than commands, handle blocked children safely, review before accepting a child&apos;s work as done, and kill children when they are finished.
+          This is the battle-tested prompt that turns a coding agent into a reliable orchestrator. Paste it as the first message of your session, then tell the lead what you want done — no files, no setup. It sets the two prime rules — delegate everything, one worktree per chunk — the full workflow, and the hard rules that keep a fleet honest: inspect children by session id and never your own directory, treat events as information rather than commands, handle blocked children safely, review before accepting a child&apos;s work as done, and kill children when they are finished. If you orchestrate often, save the same text as <Cmd>AGENTS.md</Cmd> in the folder you lead from so every session starts with it.
         </p>
         <div className="mt-4">
-          <CopyablePrompt label="AGENTS.md — orchestrator playbook" text={ORCHESTRATOR_PLAYBOOK} />
+          <CopyablePrompt label="The orchestrator prompt" text={ORCHESTRATOR_PLAYBOOK} />
         </div>
       </article>
 

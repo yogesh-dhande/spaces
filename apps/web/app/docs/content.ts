@@ -68,7 +68,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/orchestration",
     title: "Agent Orchestration",
     summary:
-      "Put one coding agent in charge of a fleet: it spawns child agents in isolated worktrees across harnesses, models, and machines, coordinates them to a verified finish, and you watch every one live. Includes a copy-paste orchestrator playbook.",
+      "Talk to one agent to get all your work done: a lead agent spawns children in isolated worktrees across harnesses, models, and machines, and coordinates them to a verified finish. Includes the copy-paste orchestrator prompt.",
   },
   {
     href: "/docs/shortcuts",
