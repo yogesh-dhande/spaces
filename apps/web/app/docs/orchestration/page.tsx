@@ -133,7 +133,7 @@ export default function OrchestrationDocsPage() {
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Setup</h2>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          The lead drives everything through the Spaces MCP server. Register it once with the harness you want to lead from — the per-harness commands are in the <a className="text-accent hover:underline" href="/docs/mcp">MCP guide</a>, and the app shows ready-to-paste configuration under <strong>Settings &rarr; MCP</strong>. For children to report when they are blocked or done, their agent CLIs need the Spaces lifecycle hooks installed — Spaces offers to set these up for every detected CLI; see <a className="text-accent hover:underline" href="/docs/coding-agents">Coding Agents</a>.
+          The lead drives everything through the Spaces MCP server. Register it once with the harness you want to lead from — the per-harness commands are in the <a className="text-accent hover:underline" href="/docs/mcp">MCP guide</a>, and the app shows ready-to-paste configuration under <strong>Settings &rarr; MCP</strong>. The first time a lead uses the tools, your harness may ask you to approve each one — approve once and it remembers. For children to report when they are blocked or done, their agent CLIs need the Spaces lifecycle hooks installed — Spaces offers to set these up for every detected CLI; see <a className="text-accent hover:underline" href="/docs/coding-agents">Coding Agents</a>.
         </p>
       </article>
 
