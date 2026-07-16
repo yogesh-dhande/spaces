@@ -715,6 +715,19 @@ For GitHub Actions releases, `CODESIGN_CERTIFICATE_P12` must be the base64-encod
 
 Sparkle update hosting lives under `https://usespaces.dev/releases/` on the static Firebase site. The update feed and Sparkle archives are staged into `apps/web/public/releases`, which Next.js exports as real static files before Firebase deploy. The release pipeline keeps a single DMG, a single Sparkle zip, one stable `appcast.xml`, and signed Linux remote artifacts the installer downloads; the Linux installer itself is published separately at `https://usespaces.dev/install.sh` through the `apps/web` `prebuild` copy rather than as a GitHub release asset. The app bundle carries `spaces`, `spacesd`, and Caddy in `Contents/Resources`; the DMG installer links `/usr/local/bin` and `~/.spaces/bin` helpers to those bundled binaries so installed CLI commands, launchd, and remote Mac pairing use the updated app bundle after Sparkle updates. Linux artifacts link `~/.local/bin/spaces` to the managed `~/.spaces/bin/spaces` helper so user shells can run `spaces` without a system-wide install.
 
+## iOS Release
+
+[`.github/workflows/ios-release.yml`](../.github/workflows/ios-release.yml) builds the iOS app and uploads it to App Store Connect for TestFlight. Pushing a `v*` tag runs both the macOS and iOS release workflows, so the same version ships across every client. A `workflow_dispatch` run with a required `version` input cuts a TestFlight-only build from any branch without tagging a public macOS release. The build number is `GITHUB_RUN_NUMBER` in both cases, and `scripts/sync-app-version.sh --short <version> --build <build>` stamps the shared version metadata while preserving the checked-in Sparkle feed URL and keys.
+
+The workflow obtains `GhosttyKit` the same way as the macOS release, running `apps/macos/scripts/ensure_ghostty_artifacts.sh --publish-missing` so the pinned-submodule `GhosttyKit.xcframework` (including its iOS device and simulator slices) is present, then `xcodebuild archive`/`-exportArchive` with [`apps/ios/ExportOptions.plist`](../apps/ios/ExportOptions.plist) (`method: app-store-connect`, `destination: upload`). The export step itself uploads the build to App Store Connect. The `.xcarchive` is retained as a workflow artifact for debugging.
+
+Signing uses Apple cloud-managed distribution certificates and provisioning, created and refreshed by `xcodebuild -allowProvisioningUpdates` with an App Store Connect API key. No signing certificate or provisioning profile secrets are needed; the workflow reads three secrets:
+- `APP_STORE_CONNECT_KEY_ID`
+- `APP_STORE_CONNECT_ISSUER_ID`
+- `APP_STORE_CONNECT_API_KEY_P8` (raw `.p8` key contents, written to `$RUNNER_TEMP` with `600` permissions for the build only)
+
+The App Store Connect app record for `dev.usespaces.spacesmobile` must already exist before the first upload.
+
 ## Website Deploy
 
 Firebase Hosting deploys from [`.github/workflows/firebase-hosting-merge.yml`](../.github/workflows/firebase-hosting-merge.yml). It builds `apps/web` and deploys the static export on pushes to `main` that touch the site or on manual dispatch.
