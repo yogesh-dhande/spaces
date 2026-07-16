@@ -408,7 +408,7 @@ There are two `PanelScope`s: the selected workspace's panel, which fills the mai
 
 Panes render the terminal surface only — runtime lifecycle actions live on the sidebar target rows. Lifecycle actions never remove panes; a pane keeps showing its session's final render.
 
-Mac wheel events and iOS pan gestures send scroll deltas together with a normalized pointer position through `TerminalScrollCoalescer`, TerminalService, and the Device API. The daemon converts that position into its own headless Ghostty surface coordinates and updates Ghostty's cursor before scrolling. This is required for full-screen applications that enable terminal mouse reporting; raw client pixels are not transported because client and daemon display scales may differ. The pointer fields are part of wire protocol version 6, following the exact-version compatibility policy.
+Mac wheel events and iOS pan gestures send scroll deltas together with a normalized pointer position and modifier snapshot through `TerminalScrollCoalescer`, TerminalService, and the Device API. The daemon converts that position into its own headless Ghostty surface coordinates and updates Ghostty's modifiers and cursor before scrolling. Ghostty refreshes modifiers before deduplicating stationary pointer updates, so modifier-only changes still affect the next mouse report without reintroducing phantom motion. This is required for full-screen applications that enable terminal mouse reporting; raw client pixels are not transported because client and daemon display scales may differ. The pointer fields are part of wire protocol version 6, following the exact-version compatibility policy.
 
 ### Focus and window cycling
 

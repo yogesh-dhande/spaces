@@ -1,6 +1,7 @@
 import AppKit
 import Carbon
 import Foundation
+import GhosttyKit
 import XCTest
 import spacesterminalcore
 
@@ -1993,6 +1994,79 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         let row = Int((input as NSString).substring(with: match.range(at: 3)))
         XCTAssertTrue((1...size.columns).contains(try XCTUnwrap(column)))
         XCTAssertTrue((1...size.rows).contains(try XCTUnwrap(row)))
+    }
+
+    @MainActor func testHeadlessDriverRefreshesMouseModifiersAtStationaryPointerBeforeScroll() throws {
+        let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
+        guard case .available = availability else { throw XCTSkip("Ghostty runtime resources are unavailable for embedded renderer testing.") }
+
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let scriptURL = root.appendingPathComponent("mouse_modifier_probe.py")
+        let outputURL = root.appendingPathComponent("mouse_input.bin")
+        try """
+        import os
+        import select
+        import sys
+        import termios
+        import tty
+
+        def read_scroll_burst(fd):
+            data = b""
+            while True:
+                ready, _, _ = select.select([fd], [], [], 1 if not data else 0.05)
+                if not ready:
+                    return data
+                data += os.read(fd, 128)
+
+        fd = sys.stdin.fileno()
+        previous = termios.tcgetattr(fd)
+        try:
+            tty.setraw(fd)
+            os.write(sys.stdout.fileno(), b"\\x1b[?1000h\\x1b[?1006hREADY\\r\\n")
+            first = read_scroll_burst(fd)
+            os.write(sys.stdout.fileno(), b"FIRST\\r\\n")
+            second = read_scroll_burst(fd)
+            with open(sys.argv[1], "wb") as output:
+                output.write(first + b"\\n" + second)
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, previous)
+        """.write(to: scriptURL, atomically: true, encoding: .utf8)
+
+        func shellQuoted(_ value: String) -> String { "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'" }
+        let sessionDriver = GhosttyEmbeddedTerminalSessionDriver(
+            launchConfiguration: TerminalSessionLaunchConfiguration(
+                sessionID: "host-managed-mouse-mods-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "mouse-mods",
+                workingDirectory: root.path, shell: "/bin/zsh",
+                command: "/usr/bin/python3 \(shellQuoted(scriptURL.path)) \(shellQuoted(outputURL.path))", createdAt: "2026-07-16T00:00:00Z",
+                workspaceID: "workspace-1", kind: .shell))
+        defer { sessionDriver.terminate() }
+
+        try sessionDriver.startIfNeeded()
+        try waitUntil { sessionDriver.snapshotText()?.contains("READY") == true }
+        let pointerPosition = TerminalScrollPointerPosition(x: 0.5, y: 0.5)
+
+        XCTAssertTrue(
+            sessionDriver.sendScroll(horizontal: 0, vertical: 48, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: pointerPosition)
+        )
+        try waitUntil { sessionDriver.snapshotText()?.contains("FIRST") == true }
+        XCTAssertTrue(
+            sessionDriver.sendScroll(
+                horizontal: 0, vertical: 48, scrollMods: TerminalScrollModifiers.precisionMask,
+                pointerPosition: .init(x: pointerPosition.x, y: pointerPosition.y, mods: GHOSTTY_MODS_CTRL.rawValue)))
+        try waitUntil { FileManager.default.fileExists(atPath: outputURL.path) }
+
+        let reports = String(decoding: try Data(contentsOf: outputURL), as: UTF8.self).split(separator: "\n")
+        XCTAssertEqual(reports.count, 2)
+        let expression = try NSRegularExpression(pattern: #"\u001B\[<([0-9]+);[0-9]+;[0-9]+M"#)
+        let buttonCodes = try reports.map { report in
+            let input = String(report)
+            let range = NSRange(input.startIndex..<input.endIndex, in: input)
+            let match = try XCTUnwrap(expression.firstMatch(in: input, range: range))
+            return try XCTUnwrap(Int((input as NSString).substring(with: match.range(at: 1))))
+        }
+        XCTAssertEqual(buttonCodes[1], buttonCodes[0] + 16)
     }
 
     @MainActor func testControlAttachAndDetachRequestsUpdatePersistenceAndPostAttachmentChanges() throws {
