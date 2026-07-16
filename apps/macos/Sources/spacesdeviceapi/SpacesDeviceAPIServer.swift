@@ -768,6 +768,12 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     private let onPairingSucceeded: (@Sendable (SpacesDeviceClientApp) -> Void)?
     private let builtInTerminalSessionTerminator: WorkspaceOrchestrator.BuiltInTerminalSessionTerminator?
     private let builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher?
+    /// Kills a coding-agent session by its child terminal session id, returning false when the id names
+    /// no agent session. Injected because the notify-then-stop flow it performs (`killAgentSession`)
+    /// delivers the exited notice through the daemon-owned terminal-send path, which the server cannot
+    /// build itself. Nil only in tests or a misconfigured daemon; the `killAgentSession` handler then
+    /// reports the endpoint unavailable rather than silently no-op.
+    private let agentSessionKiller: (@Sendable (String) throws -> Bool)?
     /// Frozen-core restart hook. Invoked for `.requestDaemonRestart`; the daemon performs its
     /// exec-in-place handoff so running terminals, processes, and agents survive the update.
     private let onRestartRequested: (@Sendable () -> Void)?
@@ -824,7 +830,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         pairingCoordinator: SpacesDevicePairingCoordinator = SpacesDevicePairingCoordinator(), pairingStore: SpacesDevicePairingStore? = nil,
         onPairingSucceeded: (@Sendable (SpacesDeviceClientApp) -> Void)? = nil,
         builtInTerminalSessionTerminator: WorkspaceOrchestrator.BuiltInTerminalSessionTerminator? = nil,
-        builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher? = nil, onRestartRequested: (@Sendable () -> Void)? = nil
+        builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher? = nil,
+        agentSessionKiller: (@Sendable (String) throws -> Bool)? = nil, onRestartRequested: (@Sendable () -> Void)? = nil
     ) throws {
         self.host = host
         self.port = port
@@ -833,6 +840,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         self.onPairingSucceeded = onPairingSucceeded
         self.builtInTerminalSessionTerminator = builtInTerminalSessionTerminator
         self.builtInTerminalSessionLauncher = builtInTerminalSessionLauncher
+        self.agentSessionKiller = agentSessionKiller
         self.onRestartRequested = onRestartRequested
         overviewLoaderForTesting = nil
         agentHookStatusLoader = { AgentHookInstaller.status() }
@@ -853,6 +861,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         networkEnvironment: [String: String] = ProcessInfo.processInfo.environment,
         builtInTerminalSessionTerminator: WorkspaceOrchestrator.BuiltInTerminalSessionTerminator? = nil,
         builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher? = nil,
+        agentSessionKiller: (@Sendable (String) throws -> Bool)? = nil,
         onRestartRequested: (@Sendable () -> Void)? = nil,
         terminalLinkTransferAuthorizationTTL: TimeInterval = SpacesDeviceAPIServer.defaultTerminalLinkTransferAuthorizationTTL,
         overviewLoaderForTesting: (@Sendable (SpacesDeviceClientApp?) throws -> SpacesDeviceOverviewPayload)? = nil,
@@ -867,6 +876,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         self.onPairingSucceeded = onPairingSucceeded
         self.builtInTerminalSessionTerminator = builtInTerminalSessionTerminator
         self.builtInTerminalSessionLauncher = builtInTerminalSessionLauncher
+        self.agentSessionKiller = agentSessionKiller
         self.onRestartRequested = onRestartRequested
         self.overviewLoaderForTesting = overviewLoaderForTesting
         self.agentHookStatusLoader = agentHookStatusLoader
@@ -1207,7 +1217,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         case .spawnAgentSession(let payload): return try handleSpawnAgentSessionRequest(payload, context: context)
         case .listAgentSessions(let payload): return try handleListAgentSessionsRequest(payload, context: context)
         case .annotateAgentSession(let payload): return try handleAnnotateAgentSessionRequest(payload, context: context)
-        case .terminateTerminalSession(let payload): return try handleTerminateTerminalSessionRequest(payload, context: context)
+        case .killAgentSession(let payload): return try handleKillAgentSessionRequest(payload, context: context)
         case .openServiceTunnel:
             // Hijacks the connection into a raw byte pipe after this response, like a subscription;
             // it cannot be answered on the request/response path handled here.
@@ -2234,13 +2244,22 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// workspace itself (a spawned agent session is a workspace-owned built-in terminal), so no
     /// `workspaceID` is required — that is exactly what a pre-signal remote kill cannot supply. A session
     /// that is not a tracked built-in terminal is a loud error, not a silent no-op.
-    private func handleTerminateTerminalSessionRequest(_ request: SpacesDeviceTerminateTerminalSessionRequest, context: RequestContext) throws
+    /// Kills a coding-agent session by its child terminal session id. Delegates to the injected
+    /// `agentSessionKiller`, which runs the daemon's notify-then-stop `killAgentSession` flow (a
+    /// hook-signaled child's subscribers are told it exited before the row is deleted; a not-yet-signaled
+    /// `.agent`-kind session is terminated). A false return means the id names no agent session — the same
+    /// loud error the local `.agentKill` path raises. A nil killer means the daemon never wired the flow,
+    /// so the endpoint is unavailable.
+    private func handleKillAgentSessionRequest(_ request: SpacesDeviceKillAgentSessionRequest, context: RequestContext) throws
         -> SpacesDeviceAPIResponse
     {
         guard let sessionID = normalizedString(request.sessionID) else {
             return SpacesDeviceAPIResponse(ok: false, message: "sessionID is required.", errorCode: .invalidArgument)
         }
-        guard try context.orchestrator().terminateSpawnedAgentTerminalSession(sessionID: sessionID) else {
+        guard let agentSessionKiller else {
+            return SpacesDeviceAPIResponse(ok: false, message: "Agent kill is unavailable on this daemon.", errorCode: .internalError)
+        }
+        guard try agentSessionKiller(sessionID) else {
             return SpacesDeviceAPIResponse(ok: false, message: "No agent session for terminal \(sessionID).", errorCode: .invalidArgument)
         }
         return try refreshedMutationResponse(context: context, message: "Killed agent session \(sessionID).")

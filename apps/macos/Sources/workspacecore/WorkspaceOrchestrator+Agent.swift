@@ -734,19 +734,17 @@ extension WorkspaceOrchestrator {
         return value
     }
 
-    /// The coding agent's runtime display label for a terminal session: an explicit `.agent`-launch
-    /// title, otherwise a foreground-detected agent's label (or its kind default), otherwise nil. Reads
-    /// only the session's persisted launch/runtime state, so it works on the daemon host that owns those
-    /// files. Parallels `SpacesdMain.profileAgentRuntimeLabel`, which serves the stage-4-owned signal
-    /// chokepoint; the two can be unified once that path is refactored.
-    func agentRuntimeLabel(terminalSessionID: String) -> String? {
-        guard let paths = try? TerminalSessionPaths.forSession(id: terminalSessionID) else { return nil }
-        if let launchConfiguration = try? TerminalSessionPersistence.readLaunchConfiguration(paths: paths), launchConfiguration.kind == .agent {
-            return trimmedOrNilAgentField(launchConfiguration.title)
-        }
-        guard let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths), let kind = runtimeState.foregroundDetectedAgentKind
+    /// The coding agent's detected kind (claude/codex/opencode) for a terminal session — the `agent:`
+    /// field of an orchestration row — read only from the session's persisted foreground runtime state,
+    /// never the `.agent` launch title. This is the machine-readable identity remote notification
+    /// rendering uses as the `(<kind>)` parenthetical; keeping it off the launch title is what prevents a
+    /// "Reviewer (Reviewer)" duplication and preserves the claude/codex/opencode identity in listings.
+    /// Nil until a kind is detected, which renders honestly as "coding agent" downstream.
+    func agentRuntimeKind(terminalSessionID: String) -> String? {
+        guard let paths = try? TerminalSessionPaths.forSession(id: terminalSessionID),
+            let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths)
         else { return nil }
-        return trimmedOrNilAgentField(runtimeState.foregroundDisplayLabel) ?? kind.displayLabel
+        return runtimeState.foregroundDetectedAgentKind?.displayLabel
     }
 
     /// Builds the orchestration view of coding-agent sessions shared by the local `agent list`/`status`
@@ -762,11 +760,17 @@ extension WorkspaceOrchestrator {
                 for agent in try store.agentWindows(workspaceID: workspace.id) where agent.provider == .spaces {
                     let terminalSessionID = trimmedOrNilAgentField(agent.terminalTrackingID)
                     if let sessionID, terminalSessionID != sessionID { continue }
-                    let runtimeLabel = terminalSessionID.flatMap { agentRuntimeLabel(terminalSessionID: $0) }
+                    // `agent:` carries the detected kind (claude/codex/opencode), never the launch title;
+                    // `label:` carries the row's stored label — the workspace-unique visible name, which
+                    // signals keep fresh and collisions uniquify ("Reviewer 2"), so two children never
+                    // report the same label. Collapsing kind and label made remote rendering emit
+                    // "Reviewer (Reviewer)" and dropped the kind from listings.
+                    let detectedKind = terminalSessionID.flatMap { agentRuntimeKind(terminalSessionID: $0) }
                     rows.append(
                         TerminalServiceAgentSessionRow(
-                            id: agent.id, terminalSessionID: terminalSessionID, agent: runtimeLabel ?? trimmedOrNilAgentField(agent.label),
-                            label: trimmedOrNilAgentField(agent.label), status: agent.status.rawValue, note: trimmedOrNilAgentField(agent.note),
+                            id: agent.id, terminalSessionID: terminalSessionID, agent: detectedKind,
+                            label: trimmedOrNilAgentField(agent.label), status: agent.status.rawValue,
+                            note: trimmedOrNilAgentField(agent.note),
                             projectID: project.id, projectName: project.name, workspaceID: workspace.id, workspaceName: workspace.displayName,
                             workspaceDir: workspace.dir, branch: trimmedOrNilAgentField(workspace.branch), updatedAt: agent.updatedAt,
                             lastSignalAt: try store.lastAgentSignalAt(agentSessionID: agent.id)))

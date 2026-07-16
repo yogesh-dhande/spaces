@@ -275,6 +275,41 @@ final class AgentHookTests: XCTestCase {
 
         XCTAssertEqual(reinit.status, .idle)
         XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).first?.status, .idle)
+        // The daemon flushes queued child notifications when this resulting status leaves the subscriber
+        // idle: a restart-on-exited lands at idle and correctly flushes.
+        XCTAssertTrue(reinit.status.leavesSubscriberIdle)
+    }
+
+    /// The daemon's flush-on-signal decision reads the status `registerAgentWindow` returns. An `init`
+    /// that preserves a live busy agent's `.spinning` (a reconnecting hook, or Claude Code's SessionStart
+    /// on auto-compact) must keep the row busy so queued child events are NOT flushed into a still-working
+    /// agent. Paired with the exited→idle reset test, this pins both arms of the resulting-status gate.
+    func testRegisterAgentWindowInitPreservesSpinningStatusSoSubscriberStaysBusy() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+
+        _ = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Codex CLI", terminalTrackingID: "live-session", sessionKey: "thread-1",
+            status: .spinning)
+        // A reconnecting init re-registers preserving the existing (still `.spinning`) status.
+        let reinit = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Codex CLI", terminalTrackingID: "live-session", sessionKey: "thread-1",
+            status: .spinning, eventType: "init")
+
+        XCTAssertEqual(reinit.status, .spinning)
+        XCTAssertFalse(reinit.status.leavesSubscriberIdle, "a still-spinning row must not trigger a queued-notification flush")
+    }
+
+    /// The single authority for the flush decision (shared by the daemon signal path and the notification
+    /// engine's live idle check): only idle and done leave a subscriber ready to receive queued lines.
+    /// Exited is a bare shell — its queue must wait for a new agent to init and reset it to idle.
+    func testAgentWindowStatusLeavesSubscriberIdleIsIdleAndDoneOnly() {
+        XCTAssertTrue(AgentWindowStatus.idle.leavesSubscriberIdle)
+        XCTAssertTrue(AgentWindowStatus.done.leavesSubscriberIdle)
+        XCTAssertFalse(AgentWindowStatus.spinning.leavesSubscriberIdle)
+        XCTAssertFalse(AgentWindowStatus.waiting.leavesSubscriberIdle)
+        XCTAssertFalse(AgentWindowStatus.exited.leavesSubscriberIdle)
     }
 
     func testHandleAgentExitKeepsClosedConfiguredSpacesAgentRow() throws {

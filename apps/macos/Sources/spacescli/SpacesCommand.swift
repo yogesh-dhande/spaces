@@ -598,20 +598,10 @@ struct AgentKillCommand: ParsableCommand {
         let context = CLIContext()
         if let device {
             let record = try SpacesPairedDeviceSelection.resolve(device)
-            // Mirror the local kill: when the child has an agent row (present only after its first hook
-            // signal) stop it through the coding-agent stop path, which also deletes the row. Before the
-            // first signal there is no row, so fall back to the terminate command, which tears down the
-            // session the same way the local `.agentKill` terminate branch does — only when it was
-            // launched as a coding agent. A session that is neither an agent row nor an agent-kind
-            // terminal is a loud error from the terminate command.
-            if let row = try SpacesDeviceClient.listAgentSessions(sessionID: session, device: record, clientApp: cliDeviceClientApp()).first {
-                let response = try SpacesDeviceClient.stopCodingAgent(
-                    workspaceID: row.workspaceID, agentID: row.id, agentName: nil, agentLauncherID: nil, device: record,
-                    clientApp: cliDeviceClientApp())
-                context.output.emit(response.message)
-                return
-            }
-            let response = try SpacesDeviceClient.terminateTerminalSession(sessionID: session, device: record, clientApp: cliDeviceClientApp())
+            // The remote daemon's `killAgentSession` runs the same notify-then-stop flow as the local
+            // `.agentKill`: a hook-signaled child's subscribers are told it exited before its row is
+            // deleted, and a not-yet-signaled `.agent`-kind session is terminated — one call covers both.
+            let response = try SpacesDeviceClient.killAgentSession(sessionID: session, device: record, clientApp: cliDeviceClientApp())
             context.output.emit(response.message)
             return
         }

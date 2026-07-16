@@ -602,14 +602,14 @@ public enum SpacesDeviceClient {
         return response.agentSessions ?? []
     }
 
-    /// Terminates a coding-agent terminal session on a paired device by session id (`spaces agent kill
-    /// --device` when the child has not signaled and so has no agent row `stopCodingAgent` could target).
-    /// The daemon resolves the session's owning workspace itself, mirroring the local `.agentKill`
-    /// terminate branch.
-    @discardableResult public static func terminateTerminalSession(
+    /// Kills a coding-agent session on a paired device by its child terminal session id (`spaces agent
+    /// kill --device`). The daemon routes through its `killAgentSession` flow, which handles both a
+    /// hook-signaled child (its subscribers told it exited before the row is deleted) and a
+    /// not-yet-signaled `.agent`-kind session (terminated), so the client makes one call for both cases.
+    @discardableResult public static func killAgentSession(
         sessionID: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
     ) throws -> SpacesDeviceAPIResponse {
-        try request(.init(command: .terminateTerminalSession(.init(sessionID: sessionID))), device: device, clientApp: clientApp, profile: profile)
+        try request(.init(command: .killAgentSession(.init(sessionID: sessionID))), device: device, clientApp: clientApp, profile: profile)
     }
 
     /// Terminal sessions on a paired device, read from the overview (`spaces terminal list --device`).
@@ -727,7 +727,7 @@ public enum SpacesDeviceClient {
         case .createProject, .previewGitProject, .deleteProject, .importProject, .exportProject, .createWorkspace, .launchWorkspace, .stopWorkspace,
             .restartWorkspace, .archiveWorkspace, .runWorkspaceSetup, .openWorkspaceTerminal, .stopWorkspaceTerminal, .runWorkspaceProcess,
             .stopWorkspaceProcess, .restartWorkspaceProcess, .runCodingAgent, .stopCodingAgent, .restartCodingAgent, .installAgentHooks,
-            .spawnAgentSession, .terminateTerminalSession:
+            .spawnAgentSession, .killAgentSession:
             longRunningMutationTimeoutSeconds
         case .agentHooksStatus: agentHooksStatusRequestTimeoutSeconds
         case .pair, .ping, .daemonStatus, .requestDaemonRestart, .overview, .previewProject, .listDirectories, .workspaceCreateOptions,

@@ -280,6 +280,58 @@ final class AgentOrchestrationStoreTests: XCTestCase {
         XCTAssertEqual(afterSignal.lastSignalAt, "2026-07-14T10:00:00Z")
     }
 
+    /// An orchestration row separates the machine-readable detected kind (`agent:`) from the human-facing
+    /// launch title (`label:`). A `.agent`-launch session titled "Reviewer" whose foreground the daemon
+    /// detected as claude must report `agent == "claude"` and `label == "Reviewer"` — not both "Reviewer",
+    /// which made remote rendering emit "Reviewer (Reviewer)" and dropped the kind from listings.
+    func testAgentSessionRowSeparatesDetectedKindFromLaunchTitle() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        let sessionID = "agent-session"
+        _ = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Reviewer", terminalTrackingID: sessionID, status: .spinning)
+        let paths = try TerminalSessionPaths.forSession(id: sessionID)
+        try paths.ensureDirectories()
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            TerminalSessionLaunchConfiguration(
+                sessionID: sessionID, backend: .ghosttyEmbedded, lifetimePolicy: .persistent, title: "Reviewer", workingDirectory: workspace.dir,
+                shell: "/bin/zsh", command: "claude", createdAt: "now", workspaceID: workspace.id, kind: .agent), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            TerminalSessionRuntimeState(
+                sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 123, state: .running, updatedAt: "now",
+                title: "Reviewer", workingDirectory: workspace.dir, foregroundDetectedAgentKind: .claude), paths: paths)
+
+        let row = try XCTUnwrap(orchestrator.agentSessionRows(sessionID: sessionID).first)
+        XCTAssertEqual(row.agent, "claude", "agent: carries the detected kind, never the launch title")
+        XCTAssertEqual(row.label, "Reviewer", "label: keeps the launch title")
+    }
+
+    /// Before any foreground kind is detected, `agent:` is nil (honest — `renderRemoteLine` falls back to
+    /// "coding agent"), while `label:` still carries the launch title.
+    func testAgentSessionRowLeavesAgentNilWhenNoKindDetected() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        let sessionID = "agent-session"
+        _ = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Reviewer", terminalTrackingID: sessionID, status: .spinning)
+        let paths = try TerminalSessionPaths.forSession(id: sessionID)
+        try paths.ensureDirectories()
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            TerminalSessionLaunchConfiguration(
+                sessionID: sessionID, backend: .ghosttyEmbedded, lifetimePolicy: .persistent, title: "Reviewer", workingDirectory: workspace.dir,
+                shell: "/bin/zsh", command: "claude", createdAt: "now", workspaceID: workspace.id, kind: .agent), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            TerminalSessionRuntimeState(
+                sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 123, state: .running, updatedAt: "now",
+                title: "Reviewer", workingDirectory: workspace.dir), paths: paths)
+
+        let row = try XCTUnwrap(orchestrator.agentSessionRows(sessionID: sessionID).first)
+        XCTAssertNil(row.agent, "agent: is nil until a kind is detected")
+        XCTAssertEqual(row.label, "Reviewer")
+    }
+
     func testAnnotateAgentSessionSanitizesControlCharacters() throws {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)

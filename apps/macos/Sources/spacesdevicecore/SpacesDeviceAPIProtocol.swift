@@ -1268,12 +1268,13 @@ public struct SpacesDeviceAnnotateAgentSessionRequest: Codable, Sendable, Equata
     }
 }
 
-/// Terminates a coding-agent terminal session on a paired device by its terminal session id
-/// (`spaces agent kill --device` when the child has not signaled yet). Unlike `stopWorkspaceTerminal`,
-/// no `workspaceID` is carried: a pre-signal session has no agent row an orchestrator could resolve the
-/// workspace from, so the daemon resolves the session's owning workspace itself. Named after the local
-/// `.agentKill` terminate branch it mirrors.
-public struct SpacesDeviceTerminateTerminalSessionRequest: Codable, Sendable, Equatable {
+/// Kills a coding-agent session on a paired device by its child terminal session id (`spaces agent kill
+/// --device`). Routes through the daemon's `killAgentSession` flow, which mirrors the local `.agentKill`
+/// path exactly: a hook-signaled child is told it exited (its subscribers notified) before the stop
+/// deletes its row, and a not-yet-signaled `.agent`-kind session is terminated. Unlike
+/// `stopWorkspaceTerminal`, no `workspaceID` is carried — the daemon resolves the owning workspace
+/// itself, and a pre-signal session has no agent row to resolve it from anyway.
+public struct SpacesDeviceKillAgentSessionRequest: Codable, Sendable, Equatable {
     public let sessionID: String
 
     public init(sessionID: String) { self.sessionID = sessionID }
@@ -1390,9 +1391,10 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
     case listAgentSessions(SpacesDeviceListAgentSessionsRequest)
     /// Sets or clears a coding-agent session's explicit note on the daemon host.
     case annotateAgentSession(SpacesDeviceAnnotateAgentSessionRequest)
-    /// Terminates a coding-agent terminal session on the daemon host by session id, the remote
-    /// counterpart of the local `.agentKill` terminate branch for a not-yet-signaled session.
-    case terminateTerminalSession(SpacesDeviceTerminateTerminalSessionRequest)
+    /// Kills a coding-agent session on the daemon host by its child terminal session id, the remote
+    /// counterpart of the local `.agentKill` command. Routes through the daemon's `killAgentSession`
+    /// flow so a hook-signaled child's subscribers are told it exited before its row is deleted.
+    case killAgentSession(SpacesDeviceKillAgentSessionRequest)
     /// Hijacks the connection into a raw byte tunnel to a workspace service after one `ok` response line.
     case openServiceTunnel(SpacesDeviceServiceTunnelRequest)
 
@@ -1443,7 +1445,7 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
         case .spawnAgentSession: "spawnAgentSession"
         case .listAgentSessions: "listAgentSessions"
         case .annotateAgentSession: "annotateAgentSession"
-        case .terminateTerminalSession: "terminateTerminalSession"
+        case .killAgentSession: "killAgentSession"
         case .openServiceTunnel: "openServiceTunnel"
         }
     }
@@ -1560,7 +1562,7 @@ extension SpacesDeviceAPICommand: Codable {
         case spawnAgentSession
         case listAgentSessions
         case annotateAgentSession
-        case terminateTerminalSession
+        case killAgentSession
         case openServiceTunnel
     }
 
@@ -1631,8 +1633,8 @@ extension SpacesDeviceAPICommand: Codable {
         case .spawnAgentSession: self = .spawnAgentSession(try container.decode(SpacesDeviceSpawnAgentSessionRequest.self, forKey: key))
         case .listAgentSessions: self = .listAgentSessions(try container.decode(SpacesDeviceListAgentSessionsRequest.self, forKey: key))
         case .annotateAgentSession: self = .annotateAgentSession(try container.decode(SpacesDeviceAnnotateAgentSessionRequest.self, forKey: key))
-        case .terminateTerminalSession:
-            self = .terminateTerminalSession(try container.decode(SpacesDeviceTerminateTerminalSessionRequest.self, forKey: key))
+        case .killAgentSession:
+            self = .killAgentSession(try container.decode(SpacesDeviceKillAgentSessionRequest.self, forKey: key))
         case .openServiceTunnel: self = .openServiceTunnel(try container.decode(SpacesDeviceServiceTunnelRequest.self, forKey: key))
         }
     }
@@ -1685,7 +1687,7 @@ extension SpacesDeviceAPICommand: Codable {
         case .spawnAgentSession(let payload): try container.encode(payload, forKey: .spawnAgentSession)
         case .listAgentSessions(let payload): try container.encode(payload, forKey: .listAgentSessions)
         case .annotateAgentSession(let payload): try container.encode(payload, forKey: .annotateAgentSession)
-        case .terminateTerminalSession(let payload): try container.encode(payload, forKey: .terminateTerminalSession)
+        case .killAgentSession(let payload): try container.encode(payload, forKey: .killAgentSession)
         case .openServiceTunnel(let payload): try container.encode(payload, forKey: .openServiceTunnel)
         }
     }

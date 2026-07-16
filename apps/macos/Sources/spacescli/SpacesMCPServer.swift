@@ -322,18 +322,10 @@ final class SpacesMCPStdioServer {
             ) { server, arguments in
                 let sessionID = try server.requiredString(arguments["session"], field: "session")
                 if let device = try server.resolvedDevice(arguments) {
-                    // Mirror the local kill: stop the child's agent row (present only after its first
-                    // signal) through the coding-agent stop path, else terminate the raw session, which
-                    // is how a not-yet-signaled remote session is killed.
-                    if let row = try SpacesDeviceClient.listAgentSessions(sessionID: sessionID, device: device, clientApp: cliDeviceClientApp()).first
-                    {
-                        let response = try SpacesDeviceClient.stopCodingAgent(
-                            workspaceID: row.workspaceID, agentID: row.id, agentName: nil, agentLauncherID: nil, device: device,
-                            clientApp: cliDeviceClientApp())
-                        return TerminalServiceProfileCommandResponse(message: response.message)
-                    }
-                    let response = try SpacesDeviceClient.terminateTerminalSession(
-                        sessionID: sessionID, device: device, clientApp: cliDeviceClientApp())
+                    // The remote daemon's `killAgentSession` runs the same notify-then-stop flow as the
+                    // local `.agentKill`: a hook-signaled child's subscribers are told it exited before its
+                    // row is deleted, and a not-yet-signaled `.agent`-kind session is terminated.
+                    let response = try SpacesDeviceClient.killAgentSession(sessionID: sessionID, device: device, clientApp: cliDeviceClientApp())
                     return TerminalServiceProfileCommandResponse(message: response.message)
                 }
                 return try TerminalService.sendProfileCommand(.agentKill(.init(sessionID: sessionID)))

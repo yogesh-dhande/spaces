@@ -640,6 +640,19 @@ final class AgentNotificationEngineTests: XCTestCase {
         XCTAssertTrue(try store.agentRemoteSubscribers(deviceID: "dev-1", agentSessionID: "remote-term").isEmpty)
     }
 
+    /// The render half of the agent/label split: a row whose `agent` is the detected kind (claude) and
+    /// `label` is the launch title (Reviewer) renders the kind as the `(<kind>)` parenthetical, never a
+    /// duplicated "Reviewer (Reviewer)".
+    func testRenderRemoteLineUsesDetectedKindNotLaunchTitle() throws {
+        let store = try makeTemporaryStore()
+        let engine = makeEngine(store: store, recorder: DeliveryRecorder())
+        let row = makeRemoteRow(terminalSessionID: "remote-term", agent: "claude", label: "Reviewer", note: nil, status: "done")
+
+        let line = engine.renderRemoteLine(terminalSessionID: "remote-term", row: row, deviceID: "dev-1", transition: .done)
+
+        XCTAssertEqual(line.split(separator: "\n").first.map(String.init), "[spaces] Reviewer (claude) is done")
+    }
+
     // MARK: - Fixtures
 
     private func makeRemoteRow(terminalSessionID: String?, agent: String? = nil, label: String?, note: String?, status: String)

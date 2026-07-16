@@ -86,6 +86,20 @@ import workspacecore
                     return try self.launchBuiltInTerminalSession(launchConfiguration)
                 }
             }.get()
+        },
+        // Routes the remote `killAgentSession` Device API command through the same notify-then-stop flow
+        // as the local `.agentKill` (`killProfileAgentSession`): the child's subscribers are told it
+        // exited before the stop deletes its row. Runs on the main actor because the notification engine's
+        // delivery uses the daemon-owned terminal-send path.
+        agentSessionKiller: { [weak self] sessionID in
+            try Self.runOnMainActorSynchronously {
+                Result {
+                    guard let self else { throw Self.requestFailedError("spacesd is shutting down.") }
+                    let orchestrator = try self.makeProfileOrchestrator()
+                    return try orchestrator.killAgentSession(
+                        terminalSessionID: sessionID, engine: self.makeAgentNotificationEngine(orchestrator: orchestrator))
+                }
+            }.get()
         }, onRestartRequested: { [weak self] in Task { @MainActor in self?.requestDaemonRestart() } })
     private let git = RemoteWorkspaceGitClient()
 
@@ -970,15 +984,6 @@ import workspacecore
             case .`init`, .working: nil
             }
         }
-
-        /// Whether this transition leaves the signaling terminal's own agent row idle/done, which is the
-        /// cue to flush any notifications that queued while it was busy. Mirrors `status ∈ {idle, done}`.
-        var leavesSubscriberIdle: Bool {
-            switch self {
-            case .`init`, .done, .exit: true
-            case .working, .blocked: false
-            }
-        }
     }
 
     private func recordProfileAgentSignal(_ payload: TerminalServiceProfileAgentSignalPayload, orchestrator: WorkspaceOrchestrator) throws
@@ -1006,12 +1011,21 @@ import workspacecore
 
         let environmentKeys = [WorkspaceOrchestrator.terminalTrackingIDEnvVar]
         let engine = makeAgentNotificationEngine(orchestrator: orchestrator)
+        // Whether this signal leaves the signaling terminal's own agent row idle/done, the single
+        // authority for the flush decision below. Gated on the RESULTING row status, not the event type:
+        // an `init` preserves a live busy agent's status (a reconnecting hook, or Claude Code's
+        // SessionStart on auto-compact), so flushing on the event alone would deliver queued child events
+        // into a still-working agent. `.exit` always flushes to drain its now-undeliverable queue.
+        let shouldFlushQueuedNotifications: Bool
         switch type {
         case .`init`:
-            try orchestrator.registerAgentWindow(
+            let registered = try orchestrator.registerAgentWindow(
                 workspaceID: workspaceID, provider: .spaces, label: signalLabel, terminalTrackingID: sessionID,
                 status: existingAgent?.status ?? .idle, eventType: type.rawValue, eventSource: "spaces_agent_signal", environmentKeys: environmentKeys
             )
+            // A restart-init on a previously exited row resets to idle (registerAgentWindow) and flushes;
+            // a reconnect on a live busy row stays spinning/waiting and must not.
+            shouldFlushQueuedNotifications = registered.status.leavesSubscriberIdle
         case .working:
             // The first `working` after `blocked` is the resume that follows a permission approval —
             // approvals fire no hook of their own, so this transition is also what withdraws any held
@@ -1021,11 +1035,13 @@ import workspacecore
                 workspaceID: workspaceID, provider: .spaces, terminalTrackingID: sessionID, label: signalLabel, status: type.status,
                 eventType: type.rawValue, eventSource: "spaces_agent_signal", environmentKeys: environmentKeys)
             if resumedFromBlocked { try engine.childDidResumeWorking(agentSessionID: updated.id) }
+            shouldFlushQueuedNotifications = updated.status.leavesSubscriberIdle
         case .blocked, .done:
             let updated = try orchestrator.updateAgentWindowStatus(
                 workspaceID: workspaceID, provider: .spaces, terminalTrackingID: sessionID, label: signalLabel, status: type.status,
                 eventType: type.rawValue, eventSource: "spaces_agent_signal", environmentKeys: environmentKeys)
             if let transition = type.childNotificationTransition { try engine.childDidTransition(agent: updated, transition: transition) }
+            shouldFlushQueuedNotifications = updated.status.leavesSubscriberIdle
         case .exit:
             guard let existingAgent else { return TerminalServiceProfileCommandResponse(message: "Agent exit ignored.") }
             // Render and enqueue/deliver the exit notification before handleAgentExit deletes an ad-hoc
@@ -1034,10 +1050,11 @@ import workspacecore
             try engine.childDidTransition(agent: existingAgent, transition: .exited)
             try orchestrator.handleAgentExit(
                 existingAgent, eventType: type.rawValue, eventSource: "spaces_agent_signal", environmentKeys: environmentKeys)
+            // Exit always flushes: the row is gone (or `.exited`), so any queue for this terminal is now
+            // undeliverable and must be drained.
+            shouldFlushQueuedNotifications = true
         }
-        // A signal that leaves this terminal's own agent row idle/done is the cue to flush notifications
-        // that queued while it was busy (including, on exit, cleaning up its now-undeliverable queue).
-        if type.leavesSubscriberIdle { try engine.subscriberDidBecomeIdle(subscriberTerminalSessionID: sessionID) }
+        if shouldFlushQueuedNotifications { try engine.subscriberDidBecomeIdle(subscriberTerminalSessionID: sessionID) }
         postAgentEventNotification()
         return TerminalServiceProfileCommandResponse(message: "Agent \(type.rawValue) recorded.")
     }
@@ -1057,9 +1074,10 @@ import workspacecore
                 try self.submitAgentNotificationLine(sessionID: sessionID, line: line)
             },
             // The `(<kind>)` parenthetical is the detected agent kind (claude/codex/opencode) from the
-            // child's persisted runtime state — NOT `profileAgentRuntimeLabel`, which prefers the launch
-            // title for `.agent` sessions and would duplicate the label (`smoke-hello (smoke-hello)`).
-            // Reads disk, so it works at exit time too (the row is rendered before deletion).
+            // child's persisted runtime state — the same identity `agentRuntimeKind` puts in an
+            // orchestration row's `agent:` field, kept off the launch title so the label is not
+            // duplicated (`smoke-hello (smoke-hello)`). Reads disk, so it works at exit time too (the row
+            // is rendered before deletion).
             resolveAgentKind: { agent in
                 guard let terminalSessionID = agent.terminalTrackingID, let paths = try? TerminalSessionPaths.forSession(id: terminalSessionID),
                     let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths)
@@ -1632,12 +1650,13 @@ private final class MainActorSyncBox<T>: @unchecked Sendable { var value: T? }
 
     init(
         builtInTerminalSessionTerminator: WorkspaceOrchestrator.BuiltInTerminalSessionTerminator? = nil,
-        builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher? = nil, onRestartRequested: (@Sendable () -> Void)? = nil
+        builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher? = nil,
+        agentSessionKiller: (@Sendable (String) throws -> Bool)? = nil, onRestartRequested: (@Sendable () -> Void)? = nil
     ) {
         #if canImport(spacesdeviceapi)
             supervisor = SpacesDeviceAPISupervisor(
                 builtInTerminalSessionTerminator: builtInTerminalSessionTerminator, builtInTerminalSessionLauncher: builtInTerminalSessionLauncher,
-                onRestartRequested: onRestartRequested)
+                agentSessionKiller: agentSessionKiller, onRestartRequested: onRestartRequested)
         #endif
     }
 

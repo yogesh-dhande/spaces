@@ -135,18 +135,12 @@ public struct AgentNotificationEngine {
         }
     }
 
-    /// A subscriber is idle when its own agent row is idle/done, or when it has no agent row at all (a
-    /// plain shell terminal is always ready to receive). A spinning or waiting agent is busy: queue.
+    /// A subscriber is idle when its own agent row leaves it idle (idle/done — see
+    /// `AgentWindowStatus.leavesSubscriberIdle`), or when it has no agent row at all (a plain shell
+    /// terminal is always ready to receive). A spinning, waiting, or exited agent is not ready: queue.
     private func subscriberIsIdle(terminalSessionID: String) throws -> Bool {
         guard let agent = try store.agentWindowByTerminalSession(terminalSessionID: terminalSessionID) else { return true }
-        switch agent.status {
-        case .idle, .done: return true
-        case .spinning, .waiting: return false
-        // The subscriber's own agent process is gone but its row (and terminal) survive. Delivering now
-        // would type the line into a bare shell, so queue it; the queue flushes when a new agent inits in
-        // that terminal (the exited→idle reset makes `init` a `leavesSubscriberIdle` cue).
-        case .exited: return false
-        }
+        return agent.status.leavesSubscriberIdle
     }
 
     /// Flush-path delivery: delivers a queued line, logging and dropping the same-device subscription edge
@@ -189,7 +183,8 @@ public struct AgentNotificationEngine {
     /// deep link is device-qualified (`?device=<id>`) and targets the remote child's terminal session
     /// (the watched key). Project/workspace/branch/label/note all come straight off the `listAgentSessions`
     /// row — the remote device already resolved them, so this path does no store lookups. The kind is the
-    /// row's `agent` field (the remote daemon's resolved agent label), falling back to `coding agent`.
+    /// row's `agent` field (the remote daemon's detected agent kind — claude/codex/opencode, never the
+    /// launch title), falling back to `coding agent` when no kind is detected yet.
     func renderRemoteLine(terminalSessionID: String, row: SpacesDeviceAgentSessionRow, deviceID: String, transition: ChildTransition) -> String {
         let kind = row.agent ?? "coding agent"
         return renderBlock(
