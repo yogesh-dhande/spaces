@@ -601,6 +601,68 @@ export default function HomePage() {
         </div>
       </section>
 
+      {/* ── Agent orchestration ── */}
+      <section id="orchestrate" className="border-t border-line/70 bg-background-soft/40">
+        <div className="mx-auto w-full max-w-7xl px-6 py-20 md:py-24">
+          <div className="max-w-3xl">
+            <h2 className="mt-5 text-[clamp(1.5rem,3.5vw,2.3rem)] font-semibold leading-[1.15] tracking-[-0.01em]">
+              Put one agent in charge{" "}
+              <span className="text-accent whitespace-nowrap">of the whole fleet</span>
+            </h2>
+            <p className="mt-5 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
+              Hand a big task to a single coding agent and let it run the show.
+              It breaks the work into pieces, spins up a fresh isolated worktree
+              for each, and gives every piece its own child agent. It sends them
+              work, is told the moment one needs input or finishes, checks any
+              child&apos;s terminal, and answers its prompts — pulling the fleet
+              to a finish while you watch every agent work live.
+            </p>
+          </div>
+
+          <div className="mt-14 grid gap-10 lg:grid-cols-[1.1fr_0.9fr] lg:items-center">
+            <OrchestrationDiagram />
+
+            <div className="rounded-sm border border-accent-2/45 bg-[color:color-mix(in_oklab,var(--accent-2)_8%,var(--surface))] p-6 md:p-8">
+              <p className="inline-flex items-center gap-2 font-mono text-[0.7rem] uppercase tracking-[0.18em] text-accent-2">
+                <span className="h-1.5 w-1.5 rounded-full bg-accent-2" />
+                Cross-harness · cross-model · cross-device
+              </p>
+              <p className="mt-4 text-lg font-semibold leading-snug tracking-tight text-foreground md:text-xl">
+                The right agent for every piece of work.
+              </p>
+              <ul className="mt-4 space-y-3 text-sm leading-6 text-foreground-soft md:text-base md:leading-7">
+                <li>
+                  <strong className="font-semibold text-foreground">Mix harnesses.</strong>{" "}
+                  Claude Code, Codex, and opencode — any of them can lead, any can
+                  be a child.
+                </li>
+                <li>
+                  <strong className="font-semibold text-foreground">Mix models.</strong>{" "}
+                  Each agent runs whatever model its harness supports, so you pick
+                  the right brain for each job.
+                </li>
+                <li>
+                  <strong className="font-semibold text-foreground">Mix machines.</strong>{" "}
+                  Children run wherever you have them — a cloud Linux box does the
+                  heavy lifting while you drive from your Mac.
+                </li>
+              </ul>
+              <p className="mt-5 text-sm leading-6 text-foreground-soft md:text-base md:leading-7">
+                Every child is a real terminal in the app. Alerts surface whoever
+                needs you, and one shortcut jumps you to any agent&apos;s pane.
+              </p>
+              <Link
+                href="/docs/orchestration"
+                className="mt-6 inline-flex items-center gap-1.5 text-sm font-semibold text-accent transition-colors hover:underline"
+              >
+                Read the orchestration guide
+                <span aria-hidden>→</span>
+              </Link>
+            </div>
+          </div>
+        </div>
+      </section>
+
       {/* ── Ports & proxy ── */}
       <section id="proxy" className="border-t border-line/70">
         <div className="mx-auto w-full max-w-7xl px-6 py-20 md:py-24">
@@ -905,6 +967,57 @@ function RemoteDiagram() {
       </div>
       <figcaption className="mt-8 text-center font-mono text-[0.7rem] uppercase tracking-[0.16em] text-foreground-soft">
         One sidebar · every machine
+      </figcaption>
+    </figure>
+  );
+}
+
+// Diagram for the orchestration section: one lead agent driving a fleet of
+// child agents, each in its own isolated worktree, some on other machines.
+function OrchestrationDiagram() {
+  const children: { harness: string; where: string }[] = [
+    { harness: "claude", where: "worktree · Mac" },
+    { harness: "codex", where: "worktree · Linux" },
+    { harness: "opencode", where: "worktree · Mac" },
+  ];
+  return (
+    <figure className="rounded-sm border border-line/80 bg-surface/50 p-6 md:p-10">
+      <div className="mx-auto flex max-w-md flex-col items-center">
+        {/* Hub: the lead agent */}
+        <div className="w-full max-w-[15rem] rounded-sm border border-accent/45 bg-accent/10 px-5 py-4 text-center">
+          <p className="font-mono text-[0.62rem] uppercase tracking-[0.16em] text-accent">
+            Lead agent
+          </p>
+        </div>
+
+        {/* Vertical spine from the hub */}
+        <span aria-hidden className="h-8 w-px bg-line/80" />
+
+        {/* Horizontal bus + drop ticks (sm+) */}
+        <div className="relative w-full">
+          <span
+            aria-hidden
+            className="absolute left-[16.666%] right-[16.666%] top-0 hidden h-px bg-line/80 sm:block"
+          />
+          <div className="grid gap-4 sm:grid-cols-3">
+            {children.map((child) => (
+              <div key={child.harness} className="flex flex-col items-center">
+                <span aria-hidden className="hidden h-6 w-px bg-line/80 sm:block" />
+                <div className="w-full rounded-sm border border-line/80 bg-background/60 px-4 py-3 text-center">
+                  <p className="text-sm font-semibold tracking-tight text-foreground">
+                    {child.harness}
+                  </p>
+                  <p className="mt-1 font-mono text-[0.6rem] uppercase tracking-[0.12em] text-foreground-soft">
+                    {child.where}
+                  </p>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+      <figcaption className="mt-8 text-center font-mono text-[0.7rem] uppercase tracking-[0.16em] text-foreground-soft">
+        One lead · a fleet of worktrees
       </figcaption>
     </figure>
   );

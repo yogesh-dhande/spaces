@@ -65,6 +65,12 @@ export const docsPageLinks: DocsPageLink[] = [
       "Track Claude Code, Codex, opencode, and other coding agents per workspace, and drive several of them from a single terminal — list, spawn, annotate, subscribe for blocked/done alerts, interrupt, and kill. Spaces offers to install lifecycle hooks for detected agent CLIs so each session reports its state automatically.",
   },
   {
+    href: "/docs/orchestration",
+    title: "Agent Orchestration",
+    summary:
+      "Put one coding agent in charge of a fleet: it spawns child agents in isolated worktrees across harnesses, models, and machines, coordinates them to a verified finish, and you watch every one live. Includes a copy-paste orchestrator playbook.",
+  },
+  {
     href: "/docs/shortcuts",
     title: "Keyboard Shortcuts",
     summary:
