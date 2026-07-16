@@ -8,6 +8,7 @@ spaces_e2e_load_env "$repo_root"
 source "$script_dir/terminal_harness_lock.sh"
 source "$script_dir/e2e_fixture_repos.sh"
 source "$repo_root/scripts/spaces-profile-helpers.sh"
+source "$repo_root/scripts/ios-simulator-lifecycle.sh"
 spaces_app="${SPACES_APP:-$repo_root/apps/macos/.build/debug/SpacesApp}"
 spaces_cli="${SPACES_CLI:-$repo_root/apps/macos/.build/debug/spaces}"
 spacese2e="${SPACES_E2E:-$repo_root/apps/macos/.build/debug/spacese2e}"
@@ -191,6 +192,7 @@ stop_device_api() {
 }
 
 cleanup() {
+  local exit_code=$?
   stop_demo_workspace
   stop_device_api
   stop_terminal_service
@@ -222,14 +224,15 @@ cleanup() {
   if [[ -n "$iphone_udid" ]]; then
     xcrun simctl terminate "$iphone_udid" "$bundle_id" >/dev/null 2>&1 || true
   fi
+  spaces_ios_simulator_shutdown_owned "$exit_code" || true
   if [[ -n "$temp_root" && -d "$temp_root" && "$keep_root" != "1" ]]; then
     rm -rf "$temp_root"
   fi
   release_terminal_harness_lock
+  return "$exit_code"
 }
 
 handle_interrupt() {
-  cleanup
   exit 130
 }
 
@@ -525,12 +528,6 @@ if not matches:
     raise SystemExit(f"Simulator not found: {target_name}")
 print(matches[0])
 PY
-}
-
-boot_device() {
-  local udid="$1"
-  xcrun simctl boot "$udid" >/dev/null 2>&1 || true
-  xcrun simctl bootstatus "$udid" -b >/dev/null
 }
 
 open_simulator_app() {
@@ -1549,9 +1546,9 @@ fi
 
 require_path "$ios_app_path" "SpacesMobile.app"
 pair_remote_demo_device
+spaces_ios_simulator_boot_if_needed "$ipad_udid"
+spaces_ios_simulator_boot_if_needed "$iphone_udid"
 open_simulator_app
-boot_device "$ipad_udid"
-boot_device "$iphone_udid"
 
 env \
   -u NO_COLOR \
