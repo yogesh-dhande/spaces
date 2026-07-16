@@ -461,9 +461,9 @@ export default function HomePage() {
             </div>
 
             <dl className="mt-8 grid grid-cols-3 gap-6 border-t border-line/70 pt-7">
-              <SpecItem label="Client" value="macOS + iOS" />
-              <SpecItem label="Daemon" value="macOS + Linux" />
-              <SpecItem label="Price" value="Mac: Free" sub="iOS: $29/year" />
+              <SpecItem label="Client" lines={["macOS", "iOS"]} />
+              <SpecItem label="Daemon" lines={["macOS", "Linux"]} />
+              <SpecItem label="Price" lines={["Mac: Free", "iOS: $29/year"]} />
             </dl>
           </div>
 
@@ -1210,20 +1210,20 @@ function PhoneGlyph() {
   );
 }
 
-function SpecItem({ label, value, sub }: { label: string; value: string; sub?: string }) {
+function SpecItem({ label, lines }: { label: string; lines: string[] }) {
   return (
     <div>
       <dt className="font-mono text-[0.62rem] uppercase tracking-[0.14em] text-foreground-soft">
         {label}
       </dt>
-      <dd className="mt-1.5 text-lg font-semibold leading-tight tracking-tight tabular-nums md:text-xl">
-        {value}
-      </dd>
-      {sub ? (
-        <dd className="mt-1 text-sm font-semibold leading-tight tracking-tight tabular-nums md:text-base">
-          {sub}
+      {lines.map((line, index) => (
+        <dd
+          key={line}
+          className={`${index === 0 ? "mt-1.5" : "mt-1"} text-lg font-semibold leading-tight tracking-tight tabular-nums md:text-xl`}
+        >
+          {line}
         </dd>
-      ) : null}
+      ))}
     </div>
   );
 }
