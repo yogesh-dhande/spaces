@@ -808,8 +808,8 @@ export default function HomePage() {
             <p className="mt-5 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
               Context switching is a keystroke, not a window hunt. Focus any
               session (browser or terminal) in the active workspace, cycle
-              through just that workspace&apos;s sessions to stay in flow, or
-              pull any window across every workspace from the command palette,
+              through just that workspace&apos;s windows to stay in flow, or
+              jump to any window of any workspace from the global command palette,
               all without lifting your hands off the keyboard. <Link href="/docs/shortcuts" className="text-accent hover:underline">
                 Every shortcut is configurable.
               </Link>
