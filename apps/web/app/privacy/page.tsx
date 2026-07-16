@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import { SiteHeader } from "../components/site-header";
 import { SiteFooter } from "../components/site-footer";
 
-const githubIssuesURL = "https://github.com/yogesh-dhande/spaces/issues";
+const githubDiscussionsURL = "https://github.com/yogesh-dhande/spaces/discussions";
 
 export const metadata: Metadata = {
   title: "Privacy Policy",
@@ -96,8 +96,8 @@ export default function PrivacyPolicyPage() {
           <article className="border-t border-line/70 pt-8">
             <h2 className="text-2xl font-semibold tracking-tight">Contact</h2>
             <p className="mt-3 text-sm leading-7 text-foreground-soft">
-              Questions about this policy? Open an issue on{" "}
-              <a href={githubIssuesURL} className="text-accent hover:underline">
+              Questions about this policy? Start a discussion on{" "}
+              <a href={githubDiscussionsURL} className="text-accent hover:underline">
                 GitHub
               </a>
               .

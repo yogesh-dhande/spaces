@@ -292,9 +292,12 @@ const faqItems: FaqItem[] = [
     question: "Where do I send bug reports?",
     answer: (
       <>
-        Open a GitHub issue at{" "}
-        <a href="https://github.com/yogesh-dhande/spaces/issues" className="text-accent hover:underline">
-          https://github.com/yogesh-dhande/spaces/issues
+        Start a GitHub discussion at{" "}
+        <a
+          href="https://github.com/yogesh-dhande/spaces/discussions"
+          className="text-accent hover:underline"
+        >
+          https://github.com/yogesh-dhande/spaces/discussions
         </a>
         .
       </>
