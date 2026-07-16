@@ -3,18 +3,19 @@ import Testing
 import spacesdevicecore
 import spacesterminalcore
 import spacesterminalghostty
+import spacesterminalui
 
 @testable import spacesui
 
 /// Exercises `TerminalLinkOpenCoordinator`'s routing of clicked terminal links: web/loopback/local/remote
 /// dispatch, the remote fetch-and-open flow with its cache, and click supersession. The coordinator's
-/// three collaborators are faked — a recording banner (`TerminalLinkActivityBannerPresenting`), a recording
+/// three collaborators are faked — a recording banner (`TerminalPaneBannerPresenting`), a recording
 /// artifact registry (real `TerminalArtifactHandlerRegistry` with capturing handlers), and a scripted
 /// request sender — so no AppKit view tree, browser, or Device API connection is involved.
 @MainActor struct TerminalLinkOpenCoordinatorTests {
     // MARK: - Fakes
 
-    @MainActor private final class RecordingBanner: TerminalLinkActivityBannerPresenting {
+    @MainActor private final class RecordingBanner: TerminalPaneBannerPresenting {
         var progressMessages: [String] = []
         var errorMessages: [String] = []
         var noticeMessages: [String] = []
@@ -28,6 +29,11 @@ import spacesterminalghostty
         func showError(_ message: String) { errorMessages.append(message) }
         func showNotice(_ message: String) { noticeMessages.append(message) }
         func dismiss() { dismissCount += 1 }
+        // The link coordinator never touches the pane's own persistent notice; these exist only to
+        // satisfy the protocol.
+        func showPersistent(message _: String, severity _: TerminalPaneBannerSeverity) {}
+        func clearPersistent() {}
+        func flash() {}
     }
 
     @MainActor private final class OpenRecorder {

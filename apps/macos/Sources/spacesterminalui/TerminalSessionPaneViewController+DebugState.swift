@@ -119,6 +119,9 @@ extension TerminalSessionPaneViewController {
     var debugShowsHeader: Bool { !headerStackView.isHidden }
     var debugShowsTakeoverMessage: Bool { !takeoverMessageLabel.isHidden }
     var debugTakeoverMessage: String { takeoverMessageLabel.stringValue }
+    var debugBannerVisible: Bool { banner.debugIsVisible }
+    var debugBannerMessage: String { banner.debugMessage }
+    var debugBannerHasPersistentNotice: Bool { banner.debugHasPersistentNotice }
     var debugInputStatus: String { inputStatusLabel.stringValue }
     var debugShowsInputStatus: Bool { !inputStatusLabel.isHidden }
     func debugSubmitInput() { submitInput() }

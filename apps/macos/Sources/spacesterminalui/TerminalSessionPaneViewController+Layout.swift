@@ -192,7 +192,26 @@ extension TerminalSessionPaneViewController {
             takeoverContainerView.centerXAnchor.constraint(equalTo: contentView.centerXAnchor), takeoverBottomConstraint!,
         ])
 
+        // Realized after the content subviews so the banner overlays the pane it describes.
+        _ = banner
+
         updateRendererVisibility()
+    }
+
+    /// Mirrors the session's runtime state into the banner's persistent notice. An exited or failed
+    /// session leaves a frozen final Ghostty render on screen that is otherwise indistinguishable
+    /// from a live terminal, so the banner is the only thing telling the user why their keystrokes
+    /// go nowhere.
+    func updateEndedBanner(runtimeState: TerminalSessionRuntimeState?) {
+        guard let runtimeState else {
+            banner.clearPersistent()
+            return
+        }
+        switch runtimeState.state {
+        case .starting, .running: banner.clearPersistent()
+        case .exited: banner.showPersistent(message: "Session ended. This pane is read-only.", severity: .neutral)
+        case .failed: banner.showPersistent(message: "Session failed. The process stopped unexpectedly.", severity: .error)
+        }
     }
 
     func updateInputStatus(message: String, isError: Bool) {

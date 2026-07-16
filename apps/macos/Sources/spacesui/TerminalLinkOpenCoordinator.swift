@@ -5,6 +5,7 @@
     import spacesdevicecore
     import spacesterminalcore
     import spacesterminalghostty
+    import spacesterminalui
 
     /// Late-bound holder wiring a terminal pane's Ghostty link handler to its coordinator.
     ///
@@ -45,7 +46,7 @@
         private let workingDirectoryProvider: @MainActor () -> String?
         private let requestSender: RemoteGhosttyTerminalServiceRequestSender
         private let registry: TerminalArtifactHandlerRegistry
-        private let banner: any TerminalLinkActivityBannerPresenting
+        private let banner: any TerminalPaneBannerPresenting
         /// Focuses a clicked `spaces://terminal/…` session in-app (no OS round trip). The host
         /// (`AppKitController`) owns the same device-resolution + focus path the URL handler uses, so
         /// both entry points share one behavior and one other-device alert.
@@ -67,7 +68,7 @@
         init(
             sessionID: String, deviceID: String, isLocalDevice: Bool, workingDirectoryProvider: @escaping @MainActor () -> String?,
             requestSender: @escaping RemoteGhosttyTerminalServiceRequestSender, registry: TerminalArtifactHandlerRegistry = .defaultRegistry(),
-            banner: any TerminalLinkActivityBannerPresenting, openSpacesTerminalLink: @escaping @MainActor (SpacesTerminalDeepLink) -> Void
+            banner: any TerminalPaneBannerPresenting, openSpacesTerminalLink: @escaping @MainActor (SpacesTerminalDeepLink) -> Void
         ) {
             self.sessionID = sessionID
             self.deviceID = deviceID

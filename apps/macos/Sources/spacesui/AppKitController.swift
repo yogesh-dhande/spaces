@@ -1994,7 +1994,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                         runtimeState: stateModel?.currentRuntimeState ?? payload?.runtimeState, streamedWorkingDirectory: payload?.workingDirectory,
                         launchWorkingDirectory: stateModel?.currentLaunchConfiguration?.workingDirectory,
                         requestWorkingDirectory: request.workingDirectory)
-                }, requestSender: requestSender, banner: TerminalLinkActivityBanner(hostView: pane.view),
+                }, requestSender: requestSender, banner: pane.banner,
                 openSpacesTerminalLink: { [weak self] link in self?.handleTerminalDeepLink(link) })
             linkOpenBox.coordinator = linkOpenCoordinator
             return TerminalPaneContentController(
