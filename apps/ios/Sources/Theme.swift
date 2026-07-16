@@ -45,6 +45,9 @@ enum Theme {
     static let green = dynamic(light: (58, 158, 95), dark: (76, 208, 122))
     static let red = dynamic(light: (198, 58, 47), dark: (255, 107, 96))
     static let orange = dynamic(light: (208, 122, 26), dark: (245, 167, 66))
+    /// The one tint for a stopped runtime target, matching the Mac sidebar's exited rows. Distinct
+    /// from `red`, which stays for attention marks that are not a stopped target.
+    static let statusFailed = dynamic(light: (186, 67, 111), dark: (255, 111, 91), lightAlpha: 0.95, darkAlpha: 0.95)
 
     // MARK: Chips & tiles
 

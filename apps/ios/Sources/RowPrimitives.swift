@@ -47,7 +47,7 @@ struct StatusDot: View {
 
     private var strokeColor: Color {
         switch kind {
-        case .exited: Theme.red
+        case .exited: Theme.statusFailed
         default: Theme.mutedSecondary
         }
     }
