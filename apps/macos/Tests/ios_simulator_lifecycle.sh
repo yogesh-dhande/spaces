@@ -53,6 +53,11 @@ PY
   boot)
     udid="$1"
     printf 'boot %s\n' "$udid" >>"$SPACES_TEST_SIMCTL_LOG"
+    if [[ "${SPACES_TEST_SIMCTL_BOOT_RACE_UDID:-}" == "$udid" ]]; then
+      printf 'Booted\n' >"$SPACES_TEST_SIMULATOR_STATE_ROOT/$udid"
+      echo "Unable to boot device in current state: Booted" >&2
+      exit 149
+    fi
     printf 'Booted\n' >"$SPACES_TEST_SIMULATOR_STATE_ROOT/$udid"
     ;;
   bootstatus)
@@ -112,6 +117,23 @@ assert_count 0 "boot iphone-booted"
 assert_count 1 "bootstatus iphone-booted"
 assert_count 0 "shutdown iphone-booted"
 [[ "$(cat "$STATE_ROOT/iphone-booted")" == "Booted" ]] || fail "pre-booted simulator was changed"
+
+reset_fixture
+printf 'Shutdown\n' >"$STATE_ROOT/iphone-boot-race"
+set +e
+SPACES_TEST_SIMCTL_BOOT_RACE_UDID=iphone-boot-race bash -c '
+  set -euo pipefail
+  source "$1"
+  trap '\''status=$?; spaces_ios_simulator_shutdown_owned "$status"'\'' EXIT
+  spaces_ios_simulator_boot_if_needed iphone-boot-race
+' _ "$LIFECYCLE_HELPER"
+boot_race_status=$?
+set -e
+[[ "$boot_race_status" == "149" ]] || fail "competing boot returned $boot_race_status instead of 149"
+assert_count 1 "boot iphone-boot-race"
+assert_count 0 "bootstatus iphone-boot-race"
+assert_count 0 "shutdown iphone-boot-race"
+[[ "$(cat "$STATE_ROOT/iphone-boot-race")" == "Booted" ]] || fail "competing owner's simulator was changed"
 
 reset_fixture
 printf 'Shutdown\n' >"$STATE_ROOT/iphone-one"

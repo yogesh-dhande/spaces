@@ -35,11 +35,11 @@ spaces_ios_simulator_boot_if_needed() {
       ;;
     Shutdown)
       printf 'Booting iOS simulator %s...\n' "$udid" >&2
+      xcrun simctl boot "$udid" >&2
       if [[ -n "$SPACES_OWNED_IOS_SIMULATOR_UDIDS" ]]; then
         SPACES_OWNED_IOS_SIMULATOR_UDIDS+=$'\n'
       fi
       SPACES_OWNED_IOS_SIMULATOR_UDIDS+="$udid"
-      xcrun simctl boot "$udid" >&2
       ;;
     *)
       printf 'iOS simulator %s is neither Shutdown nor Booted (state: %s).\n' "$udid" "$state" >&2
