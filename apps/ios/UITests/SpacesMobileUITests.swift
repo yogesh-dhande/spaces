@@ -323,6 +323,9 @@ final class SpacesMobileUITests: XCTestCase {
     }
 
     private func applyConfiguredLaunchEnvironment(to app: XCUIApplication, configuration: UITestConfiguration) {
+        // DEBUG-only paywall bypass so cold-start UI test launches reach the app shell without an
+        // active subscription. Release builds ignore the flag.
+        app.launchEnvironment["SPACES_MOBILE_PAYWALL_BYPASS"] = "1"
         app.launchEnvironment["SPACES_MOBILE_TEST_HOST"] = configuration.host
         app.launchEnvironment["SPACES_MOBILE_TEST_PORT"] = String(configuration.port)
         app.launchEnvironment["SPACES_MOBILE_TEST_AUTH_TOKEN"] = configuration.authToken

@@ -1271,6 +1271,7 @@ PY
     "${launch_env[@]}" \
     SIMCTL_CHILD_SPACES_MOBILE_TERMINAL_TRACE=1 \
     SIMCTL_CHILD_SPACES_MOBILE_TERMINAL_PERFORMANCE_LOG_PATH="$PERFORMANCE_LOG_PATH" \
+    SIMCTL_CHILD_SPACES_MOBILE_PAYWALL_BYPASS=1 \
     xcrun simctl launch "$MOBILE_UDID" "$BUNDLE_ID" >>"$SCENARIO_LOG" 2>&1 || fail "Failed to launch SpacesMobile on the $MOBILE_DEVICE_LABEL simulator."
   sleep 2
 }

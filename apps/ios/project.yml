@@ -17,6 +17,8 @@ targets:
         buildPhase: resources
       - path: Assets.xcassets
         buildPhase: resources
+      - path: PrivacyInfo.xcprivacy
+        buildPhase: resources
       - path: ../macos/.local/ghosttykit/Resources/ghostty
         type: folder
         buildPhase: resources
@@ -75,6 +77,8 @@ schemes:
         SpacesMobile: all
         SpacesMobileTests: all
         SpacesMobileUITests: all
+    run:
+      storeKitConfiguration: SpacesMobile.storekit
     test:
       targets:
         - SpacesMobileTests

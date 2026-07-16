@@ -8,6 +8,7 @@ enum SpacesMobileSettingsRoute: Hashable {
 /// Settings tab: connection, appearance, and version in the shared band language.
 struct SettingsTabView: View {
     @Bindable var model: SpacesMobileAppModel
+    @Environment(SubscriptionStore.self) private var subscription
     @State private var path: [SpacesMobileSettingsRoute] = []
     @AppStorage(AppAppearanceStorage.key) private var appearanceMode: AppAppearanceMode = .default
 
@@ -26,6 +27,7 @@ struct SettingsTabView: View {
                                 .monospacedDigit()
                         }
                     }
+                    SubscriptionSettingsSection(store: subscription)
                     settingsGroup("Appearance") {
                         themeRow
                     }
