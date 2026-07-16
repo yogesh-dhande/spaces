@@ -15,8 +15,7 @@ final class SpacesCommandTests: XCTestCase {
     func testDiscoveryAndLifecycleCommandsParseDeviceSelector() throws {
         XCTAssertEqual(try ProjectListCommand.parse(["--device", "phone"]).device, "phone")
         XCTAssertEqual(try WorkspaceListCommand.parse(["--device", "phone"]).device, "phone")
-        XCTAssertEqual(
-            try WorkspaceCreateCommand.parse(["--project", "project-1", "--branch", "feature/a", "--device", "phone"]).device, "phone")
+        XCTAssertEqual(try WorkspaceCreateCommand.parse(["--project", "project-1", "--branch", "feature/a", "--device", "phone"]).device, "phone")
         XCTAssertEqual(try WorkspaceStartCommand.parse(["--workspace", "workspace-1", "--device", "phone"]).device, "phone")
         XCTAssertEqual(try WorkspaceRestartCommand.parse(["--workspace", "workspace-1", "--device", "phone"]).device, "phone")
     }
@@ -38,7 +37,8 @@ final class SpacesCommandTests: XCTestCase {
     }
 
     func testProjectListRowRendersColumnsFromLocalAndDeviceSummaries() {
-        let local = TerminalServiceProfileProjectSummary(id: "project-1", name: "Spaces", dir: "/repos/spaces", isGitRepo: true, defaultBranch: "main")
+        let local = TerminalServiceProfileProjectSummary(
+            id: "project-1", name: "Spaces", dir: "/repos/spaces", isGitRepo: true, defaultBranch: "main")
         let remote = SpacesDeviceProjectSummary(id: "project-1", name: "Spaces", dir: "/repos/spaces", isGitRepo: true, defaultBranch: "main")
 
         let expected = "project-1\tname=Spaces\tdir=/repos/spaces"
@@ -48,8 +48,8 @@ final class SpacesCommandTests: XCTestCase {
 
     func testWorkspaceListRowRendersColumnsFromLocalAndDeviceSummaries() {
         let local = TerminalServiceProfileWorkspaceRecord(
-            id: "workspace-1", projectID: "project-1", dir: "/repos/spaces/ws", dirname: nil, branch: "feature", baseBranch: "main",
-            isDefault: false, isArchived: false, isHidden: false, isRunning: true, lastLaunchedAt: nil, notes: nil)
+            id: "workspace-1", projectID: "project-1", dir: "/repos/spaces/ws", dirname: nil, branch: "feature", baseBranch: "main", isDefault: false,
+            isArchived: false, isHidden: false, isRunning: true, lastLaunchedAt: nil, notes: nil)
         let remote = SpacesDeviceWorkspaceSummary(
             id: "workspace-1", projectID: "project-1", projectName: "Spaces", branch: "feature", baseBranch: "main", dir: "/repos/spaces/ws",
             isRunning: true, isArchived: false, isHidden: false, isDefault: false, sessionCount: 0)
@@ -61,8 +61,8 @@ final class SpacesCommandTests: XCTestCase {
 
     func testWorkspaceListRowRendersFolderNameAndDashForNonGitWorkspace() {
         let remote = SpacesDeviceWorkspaceSummary(
-            id: "workspace-2", projectID: "project-2", projectName: "Tools", branch: nil, baseBranch: nil, dir: "/repos/tools",
-            isRunning: false, isArchived: false, isHidden: false, isDefault: true, sessionCount: 0)
+            id: "workspace-2", projectID: "project-2", projectName: "Tools", branch: nil, baseBranch: nil, dir: "/repos/tools", isRunning: false,
+            isArchived: false, isHidden: false, isDefault: true, sessionCount: 0)
 
         XCTAssertEqual(workspaceListRow(remote), "workspace-2\tproject=project-2\tbranch=-\trunning=false\tname=tools")
     }
@@ -150,8 +150,8 @@ final class SpacesCommandTests: XCTestCase {
         XCTAssertEqual(
             subcommands,
             [
-                "AgentSignalCommand", "AgentListCommand", "AgentStatusCommand", "AgentAnnotateCommand", "AgentSpawnCommand",
-                "AgentInterruptCommand", "AgentKillCommand", "AgentSubscribeCommand", "AgentUnsubscribeCommand",
+                "AgentSignalCommand", "AgentListCommand", "AgentStatusCommand", "AgentAnnotateCommand", "AgentSpawnCommand", "AgentInterruptCommand",
+                "AgentKillCommand", "AgentSubscribeCommand", "AgentUnsubscribeCommand",
             ])
         XCTAssertThrowsError(try AgentCommand.parseAsRoot(["hooks", "status"]))
     }
@@ -203,9 +203,12 @@ final class SpacesCommandTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let originalOverride = ProcessInfo.processInfo.environment["SPACES_DB_PATH"]
+        let originalRuntimeDirectory = ProcessInfo.processInfo.environment["SPACES_RUNTIME_DIR"]
         setenv("SPACES_DB_PATH", root.appendingPathComponent("spaces.db").path, 1)
+        setenv("SPACES_RUNTIME_DIR", root.appendingPathComponent("runtime", isDirectory: true).path, 1)
         defer {
             if let originalOverride { setenv("SPACES_DB_PATH", originalOverride, 1) } else { unsetenv("SPACES_DB_PATH") }
+            if let originalRuntimeDirectory { setenv("SPACES_RUNTIME_DIR", originalRuntimeDirectory, 1) } else { unsetenv("SPACES_RUNTIME_DIR") }
             try? FileManager.default.removeItem(at: root)
         }
 
@@ -222,9 +225,12 @@ final class SpacesCommandTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let originalOverride = ProcessInfo.processInfo.environment["SPACES_DB_PATH"]
+        let originalRuntimeDirectory = ProcessInfo.processInfo.environment["SPACES_RUNTIME_DIR"]
         setenv("SPACES_DB_PATH", root.appendingPathComponent("spaces.db").path, 1)
+        setenv("SPACES_RUNTIME_DIR", root.appendingPathComponent("runtime", isDirectory: true).path, 1)
         defer {
             if let originalOverride { setenv("SPACES_DB_PATH", originalOverride, 1) } else { unsetenv("SPACES_DB_PATH") }
+            if let originalRuntimeDirectory { setenv("SPACES_RUNTIME_DIR", originalRuntimeDirectory, 1) } else { unsetenv("SPACES_RUNTIME_DIR") }
             try? FileManager.default.removeItem(at: root)
         }
 
@@ -421,8 +427,7 @@ final class SpacesCommandTests: XCTestCase {
         // notification (no id, no response expected), then tools/list — all newline-delimited.
         let requests = [
             #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}"#,
-            #"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
-            #"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+            #"{"jsonrpc":"2.0","method":"notifications/initialized"}"#, #"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
         ]
 
         let inputPipe = Pipe()
@@ -450,8 +455,8 @@ final class SpacesCommandTests: XCTestCase {
         let tools = try XCTUnwrap((toolsList["result"] as? [String: Any])?["tools"] as? [[String: Any]])
         let names = Set(tools.compactMap { $0["name"] as? String })
         let agentTools = [
-            "spaces_agent_list", "spaces_agent_status", "spaces_agent_annotate", "spaces_agent_spawn", "spaces_agent_interrupt",
-            "spaces_agent_kill", "spaces_agent_subscribe", "spaces_agent_unsubscribe",
+            "spaces_agent_list", "spaces_agent_status", "spaces_agent_annotate", "spaces_agent_spawn", "spaces_agent_interrupt", "spaces_agent_kill",
+            "spaces_agent_subscribe", "spaces_agent_unsubscribe",
         ]
         XCTAssertTrue(agentTools.allSatisfy(names.contains), "expected all agent tools, got \(names.sorted())")
     }

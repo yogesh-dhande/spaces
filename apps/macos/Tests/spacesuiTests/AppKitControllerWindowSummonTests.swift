@@ -7,22 +7,26 @@ import workspacecore
 @testable import spacesterminalui
 @testable import spacesui
 
-// Some tests resolve the active profile through the process-global SPACES_DB_PATH, so this suite pins an
-// isolated database root for its lifetime and runs serialized to keep that override race-free.
+// Some tests resolve the active profile through process-global profile paths, so this suite pins an
+// isolated database and runtime root for its lifetime and runs serialized to keep those overrides race-free.
 @Suite(.serialized) final class AppKitControllerWindowSummonTests {
     private let originalDatabasePath: String?
+    private let originalRuntimeDirectory: String?
     private let databaseRoot: URL
 
     init() throws {
         originalDatabasePath = ProcessInfo.processInfo.environment["SPACES_DB_PATH"]
+        originalRuntimeDirectory = ProcessInfo.processInfo.environment["SPACES_RUNTIME_DIR"]
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         databaseRoot = root
         setenv("SPACES_DB_PATH", root.appendingPathComponent("spaces.db").path, 1)
+        setenv("SPACES_RUNTIME_DIR", root.appendingPathComponent("runtime", isDirectory: true).path, 1)
     }
 
     deinit {
         if let originalDatabasePath { setenv("SPACES_DB_PATH", originalDatabasePath, 1) } else { unsetenv("SPACES_DB_PATH") }
+        if let originalRuntimeDirectory { setenv("SPACES_RUNTIME_DIR", originalRuntimeDirectory, 1) } else { unsetenv("SPACES_RUNTIME_DIR") }
         try? FileManager.default.removeItem(at: databaseRoot)
     }
 

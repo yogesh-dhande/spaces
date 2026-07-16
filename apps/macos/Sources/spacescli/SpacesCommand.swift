@@ -15,6 +15,7 @@ public struct SpacesCommand: ParsableCommand {
               - Repo-local development builds default to a per-worktree profile under ~/.spaces-dev/profiles/spaces.
               - Installed or non-dev builds default to ~/.spaces/spaces.db.
               - Runtime state defaults to <profile-root>/runtime unless `SPACES_RUNTIME_DIR` overrides it.
+              - The running spacesd owns profile schema upgrades. If a staged helper requires a newer schema, run `spaces daemon apply-update` so the daemon updates in place without stopping its sessions.
               - Workspace commands require explicit IDs; agent signal defaults workspace/session IDs from Spaces terminal environment.
               - `project list`, `workspace list`, and `workspace create`/`start`/`restart` accept `--device <name-or-id>` to read or act on a paired device; the discovery listings read the device's overview, so `workspace list --device` shows only active workspaces and rejects `--include-archived`. Omitting `--device` targets this device's spacesd daemon.
               - `workspace start` waits for pending/running setup to complete and fails with the setup error if setup failed. It ensures a workspace and all its processes are running: launches when stopped; when already running, restarts any exited processes. Windows open without activating the app.
@@ -41,7 +42,9 @@ struct ProjectCommand: ParsableCommand {
 /// print identical columns; the two overloads adapt the local profile summary and the device overview
 /// summary to the same primitives.
 func projectListRow(id: String, name: String, dir: String) -> String { "\(id)\tname=\(name)\tdir=\(dir)" }
-func projectListRow(_ summary: TerminalServiceProfileProjectSummary) -> String { projectListRow(id: summary.id, name: summary.name, dir: summary.dir) }
+func projectListRow(_ summary: TerminalServiceProfileProjectSummary) -> String {
+    projectListRow(id: summary.id, name: summary.name, dir: summary.dir)
+}
 func projectListRow(_ summary: SpacesDeviceProjectSummary) -> String { projectListRow(id: summary.id, name: summary.name, dir: summary.dir) }
 
 /// Renders one workspace as a tab-separated row. Shared by the local and `--device` paths; the device
@@ -196,8 +199,8 @@ func agentSessionRow(
     branch: String?, deviceID: String? = nil
 ) -> String {
     [
-        terminalSessionID, "agent=\(agent ?? "-")", "status=\(status)", "signaled=\(signaled)", "note=\(note ?? "-")",
-        "project=\(projectName)", "workspace=\(workspaceName)", "branch=\(branch ?? "-")",
+        terminalSessionID, "agent=\(agent ?? "-")", "status=\(status)", "signaled=\(signaled)", "note=\(note ?? "-")", "project=\(projectName)",
+        "workspace=\(workspaceName)", "branch=\(branch ?? "-")",
         "open=\(SpacesTerminalDeepLink(sessionID: terminalSessionID, deviceID: deviceID).absoluteString)",
     ].joined(separator: "\t")
 }
@@ -274,9 +277,8 @@ struct AgentStatusCommand: ParsableCommand {
         if let device {
             let record = try SpacesPairedDeviceSelection.resolve(device)
             let sessionID = try resolvedAgentSessionID(session)
-            guard let row = try SpacesDeviceClient.listAgentSessions(sessionID: sessionID, device: record, clientApp: cliDeviceClientApp()).first else {
-                throw ValidationError("No agent session for terminal \(sessionID) on \(record.name).")
-            }
+            guard let row = try SpacesDeviceClient.listAgentSessions(sessionID: sessionID, device: record, clientApp: cliDeviceClientApp()).first
+            else { throw ValidationError("No agent session for terminal \(sessionID) on \(record.name).") }
             if json {
                 try context.output.emitJSON(row)
                 return
@@ -370,9 +372,7 @@ func performAgentSpawn(
     guard
         let detected = try AgentSpawnReadiness.awaitForegroundDetection(
             deadline: deadline, pollInterval: pollInterval, detectedKind: { try foregroundDetectedAgentKind(childSessionID: childSessionID) })
-    else {
-        throw AgentSpawnDetectionTimeoutError(sessionID: childSessionID, command: command, timeoutSeconds: timeoutSeconds)
-    }
+    else { throw AgentSpawnDetectionTimeoutError(sessionID: childSessionID, command: command, timeoutSeconds: timeoutSeconds) }
 
     // Auto-subscribe the spawning terminal, but only when the child already has an agent row: rows
     // appear on the first hook signal, and a spawned `.agent` session has none at detection time. No
@@ -387,8 +387,8 @@ func performAgentSpawn(
     }
 
     return AgentSpawnResult(
-        terminalSessionID: childSessionID, workspaceID: session.launchConfiguration?.workspaceID, detectedAgent: detected.displayLabel,
-        deviceID: nil, subscribed: subscribed)
+        terminalSessionID: childSessionID, workspaceID: session.launchConfiguration?.workspaceID, detectedAgent: detected.displayLabel, deviceID: nil,
+        subscribed: subscribed)
 }
 
 /// The coding-agent kind the daemon's foreground classifier currently reports for a terminal session,
@@ -404,9 +404,9 @@ private func foregroundDetectedAgentKind(childSessionID: String) throws -> Termi
 /// runtime detection over the wire, so a spawned-but-unsignaled remote session reports its detected kind
 /// even though no agent-orchestration row exists yet. The wire field is the kind's raw value; an
 /// unrecognized value maps to nil so the poll keeps going. nil until an agent is detected.
-private func remoteForegroundDetectedAgentKind(
-    childSessionID: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp
-) throws -> TerminalDetectedAgentKind? {
+private func remoteForegroundDetectedAgentKind(childSessionID: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp) throws
+    -> TerminalDetectedAgentKind?
+{
     let summaries = try SpacesDeviceClient.terminalSessions(device: device, clientApp: clientApp)
     guard let raw = summaries.first(where: { $0.id == childSessionID })?.foregroundDetectedAgentKind else { return nil }
     return TerminalDetectedAgentKind(rawValue: raw)
@@ -447,20 +447,19 @@ func performRemoteAgentSpawn(
         let detected = try AgentSpawnReadiness.awaitForegroundDetection(
             deadline: deadline, pollInterval: pollInterval,
             detectedKind: { try remoteForegroundDetectedAgentKind(childSessionID: childSessionID, device: device, clientApp: clientApp) })
-    else {
-        throw AgentSpawnRemoteDetectionTimeoutError(sessionID: childSessionID, command: command, timeoutSeconds: timeoutSeconds)
-    }
+    else { throw AgentSpawnRemoteDetectionTimeoutError(sessionID: childSessionID, command: command, timeoutSeconds: timeoutSeconds) }
 
     var subscribed = false
     if let subscriberSessionID, subscriberSessionID != childSessionID,
-        try SpacesDeviceClient.listAgentSessions(sessionID: childSessionID, device: device, clientApp: clientApp)
-            .contains(where: { $0.terminalSessionID == childSessionID })
+        try SpacesDeviceClient.listAgentSessions(sessionID: childSessionID, device: device, clientApp: clientApp).contains(where: {
+            $0.terminalSessionID == childSessionID
+        })
     {
         // The cross-device watch edge is recorded on the local daemon (which owns this terminal); it
         // keys on the child's terminal session id and names the device the child lives on.
         _ = try TerminalService.sendProfileCommand(
-            .agentSubscribe(.init(subscriberTerminalSessionID: subscriberSessionID, agentSessionID: childSessionID, deviceID: device.id)),
-            timeout: 30)
+            .agentSubscribe(.init(subscriberTerminalSessionID: subscriberSessionID, agentSessionID: childSessionID, deviceID: device.id)), timeout: 30
+        )
         subscribed = true
     }
 
@@ -489,7 +488,8 @@ struct AgentSpawnRemoteDetectionTimeoutError: LocalizedError {
 func resolvedAgentRowID(forChildTerminalSessionID childSessionID: String) throws -> String {
     let rows = try TerminalService.sendProfileCommand(.agentList(.init(sessionID: childSessionID)), timeout: 5).agentSessions ?? []
     guard let row = rows.first else {
-        throw ValidationError("No agent session for terminal \(childSessionID). The child must have reported a lifecycle signal before it can be watched.")
+        throw ValidationError(
+            "No agent session for terminal \(childSessionID). The child must have reported a lifecycle signal before it can be watched.")
     }
     return row.id
 }
@@ -505,8 +505,7 @@ func resolvedSubscriberSessionID(_ subscriber: String?, environment: [String: St
 
 struct AgentSpawnCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
-        commandName: "spawn",
-        abstract: "Start a coding agent in a new Spaces terminal and block until it is detected running.",
+        commandName: "spawn", abstract: "Start a coding agent in a new Spaces terminal and block until it is detected running.",
         discussion: """
             Readiness is foreground detection: spawn returns once the daemon's foreground classifier
             identifies the coding agent in the new terminal — not when it emits a hook signal (a
@@ -520,18 +519,18 @@ struct AgentSpawnCommand: ParsableCommand {
             """)
 
     @Option(name: .long, help: "Command that launches a supported coding agent (claude, codex, or opencode).") var command: String
-    @Option(name: .long, help: "Workspace ID. Defaults to the workspace containing the current directory. Required with --device.")
-    var workspace: String?
+    @Option(name: .long, help: "Workspace ID. Defaults to the workspace containing the current directory. Required with --device.") var workspace:
+        String?
     @Option(name: .long, help: "Window or session title. Defaults to the coding agent's name.") var title: String?
     @Option(name: .long, help: "Seconds to wait for detection before giving up.") var timeout: Int = 90
-    @Option(name: .long, help: "Paired device name or ID. Spawns on that device and requires --workspace. Defaults to this machine.")
-    var device: String?
+    @Option(name: .long, help: "Paired device name or ID. Spawns on that device and requires --workspace. Defaults to this machine.") var device:
+        String?
     @Flag(name: .long, help: "Emit machine-readable JSON.") var json = false
 
     func run() throws {
         let context = CLIContext()
-        let subscriber = ProcessInfo.processInfo.environment[WorkspaceOrchestrator.terminalTrackingIDEnvVar]?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let subscriber = ProcessInfo.processInfo.environment[WorkspaceOrchestrator.terminalTrackingIDEnvVar]?.trimmingCharacters(
+            in: .whitespacesAndNewlines)
         let subscriberSessionID = (subscriber?.isEmpty == false) ? subscriber : nil
         let result: AgentSpawnResult
         if let device {
@@ -562,8 +561,7 @@ struct AgentSpawnCommand: ParsableCommand {
 /// link). A remote result's `deviceID` qualifies the deep link so it resolves on the child's device.
 func agentSpawnResultLine(_ result: AgentSpawnResult) -> String {
     [
-        result.terminalSessionID, "detected=\(result.detectedAgent)", "workspace=\(result.workspaceID ?? "-")",
-        "subscribed=\(result.subscribed)",
+        result.terminalSessionID, "detected=\(result.detectedAgent)", "workspace=\(result.workspaceID ?? "-")", "subscribed=\(result.subscribed)",
         "open=\(SpacesTerminalDeepLink(sessionID: result.terminalSessionID, deviceID: result.deviceID).absoluteString)",
     ].joined(separator: "\t")
 }
@@ -584,7 +582,8 @@ struct AgentInterruptCommand: ParsableCommand {
             context.output.emit("Interrupted agent session \(session) on \(record.name).")
             return
         }
-        _ = try TerminalService.sendProfileCommand(.terminalSend(.init(sessionID: session, input: .bytes(Data([27])), appendNewline: false)), timeout: 5)
+        _ = try TerminalService.sendProfileCommand(
+            .terminalSend(.init(sessionID: session, input: .bytes(Data([27])), appendNewline: false)), timeout: 5)
         context.output.emit("Interrupted agent session \(session).")
     }
 }
@@ -626,8 +625,8 @@ struct AgentSubscribeCommand: ParsableCommand {
 
     @Argument(help: "Child terminal session ID to watch.") var session: String
     @Option(name: .long, help: "Subscriber terminal session ID. Defaults to SPACES_TERMINAL_TRACKING_ID.") var subscriber: String?
-    @Option(name: .long, help: "Paired device name or ID the child runs on. Records a cross-device watch. Defaults to this machine.")
-    var device: String?
+    @Option(name: .long, help: "Paired device name or ID the child runs on. Records a cross-device watch. Defaults to this machine.") var device:
+        String?
 
     func run() throws {
         let context = CLIContext()
@@ -655,8 +654,7 @@ struct AgentUnsubscribeCommand: ParsableCommand {
 
     @Argument(help: "Child terminal session ID to stop watching.") var session: String
     @Option(name: .long, help: "Subscriber terminal session ID. Defaults to SPACES_TERMINAL_TRACKING_ID.") var subscriber: String?
-    @Option(name: .long, help: "Paired device name or ID the child runs on (for a cross-device watch). Defaults to this machine.")
-    var device: String?
+    @Option(name: .long, help: "Paired device name or ID the child runs on (for a cross-device watch). Defaults to this machine.") var device: String?
 
     func run() throws {
         let context = CLIContext()

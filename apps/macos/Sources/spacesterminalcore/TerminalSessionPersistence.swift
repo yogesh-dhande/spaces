@@ -841,12 +841,22 @@ public enum TerminalSessionPersistence {
     }
 
     private static func withDatabase<T>(paths: TerminalSessionPaths, _ body: (SpacesSQLiteDatabase) throws -> T) throws -> T {
-        let database = try SpacesSQLiteDatabase(path: databasePath(for: paths))
+        let databasePath = try databasePath(for: paths)
+        let database = try SpacesSQLiteDatabase(
+            path: databasePath,
+            withMigrationAuthorization: { migration in
+                try ProfileDatabaseMigrationGuard.withMigrationAuthorization(databasePath: databasePath, migration)
+            })
         return try body(database)
     }
 
     private static func withProfileDatabase<T>(_ body: (SpacesSQLiteDatabase) throws -> T) throws -> T {
-        let database = try SpacesSQLiteDatabase(path: SpacesProfile.current().databasePath)
+        let databasePath = try SpacesProfile.current().databasePath
+        let database = try SpacesSQLiteDatabase(
+            path: databasePath,
+            withMigrationAuthorization: { migration in
+                try ProfileDatabaseMigrationGuard.withMigrationAuthorization(databasePath: databasePath, migration)
+            })
         return try body(database)
     }
 

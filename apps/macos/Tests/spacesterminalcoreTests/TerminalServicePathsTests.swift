@@ -29,13 +29,19 @@ final class TerminalServicePathsTests: XCTestCase {
 
         let socketPath = try TerminalServicePaths.socketPath()
         let lockPath = try TerminalServicePaths.instanceLockPath()
+        let launchLockPath = try TerminalServicePaths.launchLockPath()
         let databaseChangeSignalSocketPath = try TerminalServicePaths.databaseChangeSignalSocketPath()
 
         XCTAssertTrue(socketPath.hasPrefix("/tmp/spaces-sockets-\(getuid())/service-"))
         XCTAssertTrue(lockPath.hasPrefix("/tmp/spaces-sockets-\(getuid())/daemon-"))
+        XCTAssertEqual(launchLockPath, "\(socketPath).launch.lock")
         XCTAssertTrue(databaseChangeSignalSocketPath.hasPrefix("/tmp/spaces-sockets-\(getuid())/database-change-"))
+        XCTAssertEqual(
+            lockPath, socketPath.replacingOccurrences(of: "/service-", with: "/daemon-").replacingOccurrences(of: ".sock", with: ".lock"),
+            "IPC and daemon ownership must use the same runtime profile identity.")
         XCTAssertLessThan(socketPath.utf8.count, 104)
         XCTAssertLessThan(lockPath.utf8.count, 104)
+        XCTAssertLessThan(launchLockPath.utf8.count, 104)
         XCTAssertLessThan(databaseChangeSignalSocketPath.utf8.count, 104)
     }
 
@@ -88,6 +94,7 @@ final class TerminalServicePathsTests: XCTestCase {
             runtimeDirectory: root.appendingPathComponent("runtime", isDirectory: true).path)
 
         XCTAssertEqual(paths.serviceSocketPath, serviceSocketPath(forTerminalRoot: paths.terminalRoot))
+        XCTAssertEqual(paths.serviceLockPath, instanceLockPath(forTerminalRoot: paths.terminalRoot))
         XCTAssertEqual(paths.databaseChangeSignalSocketPath, databaseChangeSignalSocketPath(forTerminalRoot: paths.terminalRoot))
         if paths.terminalRoot.hasPrefix("/private/var/") {
             XCTAssertNotEqual(
@@ -122,6 +129,12 @@ final class TerminalServicePathsTests: XCTestCase {
         var hash: UInt64 = 5381
         for byte in terminalRoot.utf8 { hash = ((hash << 5) &+ hash) &+ UInt64(byte) }
         return String(format: "/tmp/spaces-sockets-\(getuid())/database-change-%016llx.sock", hash)
+    }
+
+    private func instanceLockPath(forTerminalRoot terminalRoot: String) -> String {
+        var hash: UInt64 = 5381
+        for byte in terminalRoot.utf8 { hash = ((hash << 5) &+ hash) &+ UInt64(byte) }
+        return String(format: "/tmp/spaces-sockets-\(getuid())/daemon-%016llx.lock", hash)
     }
 
     private func restoreEnvironmentValue(_ value: String?, name: String) { if let value { setenv(name, value, 1) } else { unsetenv(name) } }

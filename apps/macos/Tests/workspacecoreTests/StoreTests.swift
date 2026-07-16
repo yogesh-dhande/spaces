@@ -1,11 +1,14 @@
 import XCTest
 
 @testable import spacesdatabase
+@testable import spacesterminalcore
 @testable import workspacecore
 
 #if os(Linux)
     import CSQLite3
+    import Glibc
 #else
+    import Darwin
     import SQLite3
 #endif
 
@@ -21,6 +24,23 @@ private final class SQLiteCommitThread: Thread {
     override func main() {
         Thread.sleep(forTimeInterval: delay)
         _ = sqlite3_exec(database, "COMMIT;", nil, nil, nil)
+    }
+}
+
+private final class StoreOpenErrors: @unchecked Sendable {
+    private let lock = NSLock()
+    private var messages: [String] = []
+
+    func append(_ error: Error) {
+        lock.lock()
+        messages.append(error.localizedDescription)
+        lock.unlock()
+    }
+
+    var all: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return messages
     }
 }
 
@@ -167,6 +187,113 @@ final class StoreTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("backups").path))
     }
 
+    // A newer direct helper must not move the profile schema out from under the daemon that owns the
+    // live terminal sessions. Once that daemon hands off in place, the owning process may migrate and
+    // the existing data must carry forward.
+    func testRunningDaemonExclusivelyOwnsProfileMigration() throws {
+        let root = try makeTempDirectory()
+        let dbURL = root.appendingPathComponent("spaces.db")
+        let runtimeURL = root.appendingPathComponent("runtime", isDirectory: true)
+        try runSQLiteExec(
+            dbURL: dbURL,
+            sql: """
+                CREATE TABLE migration_state (current_version INTEGER NOT NULL);
+                INSERT INTO migration_state(current_version) VALUES (4);
+                CREATE TABLE agent_pending_notifications (
+                  id TEXT PRIMARY KEY,
+                  subscriber_terminal_session_id TEXT NOT NULL,
+                  agent_session_id TEXT NOT NULL,
+                  message TEXT NOT NULL,
+                  created_at TEXT NOT NULL
+                );
+                INSERT INTO agent_pending_notifications(
+                  id, subscriber_terminal_session_id, agent_session_id, message, created_at
+                ) VALUES ('pending-1', 'subscriber-1', 'agent-1', 'preserve me', '2026-07-15T00:00:00Z');
+                """)
+
+        try withEnvironmentValues([
+            SpacesProfile.databasePathEnvironmentVariable: dbURL.path, SpacesProfile.runtimeDirectoryEnvironmentVariable: runtimeURL.path,
+        ]) {
+            let externalDaemon = Process()
+            externalDaemon.executableURL = URL(fileURLWithPath: "/bin/sleep")
+            externalDaemon.arguments = ["30"]
+            externalDaemon.standardOutput = FileHandle.nullDevice
+            externalDaemon.standardError = FileHandle.nullDevice
+            try externalDaemon.run()
+            defer {
+                if externalDaemon.isRunning { externalDaemon.terminate() }
+                externalDaemon.waitUntilExit()
+            }
+
+            let lockPath = try TerminalServicePaths.instanceLockPath()
+            let launchLockPath = try TerminalServicePaths.launchLockPath()
+            let rawLaunchDescriptor = open(launchLockPath, O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
+            let competingLaunchDescriptor = try XCTUnwrap(rawLaunchDescriptor >= 0 ? rawLaunchDescriptor : nil)
+            defer { close(competingLaunchDescriptor) }
+            let competingLockCandidate = root.appendingPathComponent("competing-daemon.lock")
+            try Data("candidate".utf8).write(to: competingLockCandidate)
+            try ProfileDatabaseMigrationGuard.withMigrationAuthorization(databasePath: dbURL.path) {
+                XCTAssertEqual(flock(competingLaunchDescriptor, LOCK_EX | LOCK_NB), -1)
+                XCTAssertEqual(errno, EWOULDBLOCK, "Daemon startup must wait on the profile launch lock while migration is authorized.")
+                XCTAssertEqual(link(competingLockCandidate.path, lockPath), -1)
+                XCTAssertEqual(errno, EEXIST, "A daemon must not acquire the instance lock while migration is authorized.")
+            }
+            XCTAssertEqual(flock(competingLaunchDescriptor, LOCK_EX | LOCK_NB), 0, "Daemon startup must proceed after migration finishes.")
+            XCTAssertEqual(flock(competingLaunchDescriptor, LOCK_UN), 0)
+            XCTAssertEqual(link(competingLockCandidate.path, lockPath), 0, "The migration lock must be released after the schema work finishes.")
+            try FileManager.default.removeItem(atPath: lockPath)
+
+            let externalLock = try TerminalServiceInstanceLock.acquire(path: lockPath, processID: externalDaemon.processIdentifier)
+            XCTAssertThrowsError(try SQLiteStore(path: dbURL.path)) { error in
+                XCTAssertTrue(error.localizedDescription.contains("while spacesd (pid \(externalDaemon.processIdentifier)) owns this profile"))
+                XCTAssertTrue(error.localizedDescription.contains("spaces daemon apply-update"))
+            }
+            XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), 4)
+            XCTAssertEqual(
+                try readSingleText(dbURL: dbURL, sql: "SELECT message FROM agent_pending_notifications WHERE id = 'pending-1'"), "preserve me")
+
+            externalLock.release()
+            let daemonLock = try TerminalServiceInstanceLock.acquire(path: lockPath)
+            _ = try SQLiteStore(path: dbURL.path)
+            withExtendedLifetime(daemonLock) {}
+
+            XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), DatabaseSchema.currentVersion)
+            XCTAssertEqual(
+                try readSingleText(dbURL: dbURL, sql: "SELECT message FROM agent_pending_notifications WHERE id = 'pending-1'"), "preserve me")
+        }
+    }
+
+    func testConcurrentHelperThreadsShareOneProfileMigration() throws {
+        let root = try makeTempDirectory()
+        let dbURL = root.appendingPathComponent("spaces.db")
+        let runtimeURL = root.appendingPathComponent("runtime", isDirectory: true)
+        try runSQLiteExec(
+            dbURL: dbURL,
+            sql: """
+                CREATE TABLE migration_state (current_version INTEGER NOT NULL);
+                INSERT INTO migration_state(current_version) VALUES (4);
+                CREATE TABLE agent_pending_notifications (
+                  id TEXT PRIMARY KEY,
+                  subscriber_terminal_session_id TEXT NOT NULL,
+                  agent_session_id TEXT NOT NULL,
+                  message TEXT NOT NULL,
+                  created_at TEXT NOT NULL
+                );
+                """)
+
+        try withEnvironmentValues([
+            SpacesProfile.databasePathEnvironmentVariable: dbURL.path, SpacesProfile.runtimeDirectoryEnvironmentVariable: runtimeURL.path,
+        ]) {
+            let errors = StoreOpenErrors()
+            DispatchQueue.concurrentPerform(iterations: 8) { _ in do { _ = try SQLiteStore(path: dbURL.path) } catch { errors.append(error) } }
+
+            XCTAssertEqual(errors.all, [])
+            XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), DatabaseSchema.currentVersion)
+            XCTAssertEqual(
+                try FileManager.default.contentsOfDirectory(at: root.appendingPathComponent("backups"), includingPropertiesForKeys: nil).count, 1)
+        }
+    }
+
     func testCurrentSchemaRejectsBlankPortNamesAtDatabaseLevel() throws {
         let root = try makeTempDirectory()
         let dbURL = root.appendingPathComponent("port-name-constraints.db")
@@ -218,6 +345,42 @@ final class StoreTests: XCTestCase {
         }
     }
 
+    func testNewerSchemaIsRejectedBeforeDaemonMigrationAuthorization() throws {
+        let root = try makeTempDirectory()
+        let dbURL = root.appendingPathComponent("newer-schema.db")
+        let runtimeURL = root.appendingPathComponent("runtime", isDirectory: true)
+        let newerVersion = DatabaseSchema.currentVersion + 1
+        try runSQLiteExec(
+            dbURL: dbURL,
+            sql: """
+                CREATE TABLE migration_state (current_version INTEGER NOT NULL);
+                INSERT INTO migration_state(current_version) VALUES (\(newerVersion));
+                """)
+
+        try withEnvironmentValues([
+            SpacesProfile.databasePathEnvironmentVariable: dbURL.path, SpacesProfile.runtimeDirectoryEnvironmentVariable: runtimeURL.path,
+        ]) {
+            let externalDaemon = Process()
+            externalDaemon.executableURL = URL(fileURLWithPath: "/bin/sleep")
+            externalDaemon.arguments = ["30"]
+            externalDaemon.standardOutput = FileHandle.nullDevice
+            externalDaemon.standardError = FileHandle.nullDevice
+            try externalDaemon.run()
+            defer {
+                if externalDaemon.isRunning { externalDaemon.terminate() }
+                externalDaemon.waitUntilExit()
+            }
+            let daemonLock = try TerminalServiceInstanceLock.acquire(
+                path: try TerminalServicePaths.instanceLockPath(), processID: externalDaemon.processIdentifier)
+            defer { daemonLock.release() }
+
+            XCTAssertThrowsError(try SQLiteStore(path: dbURL.path)) { error in
+                XCTAssertEqual(error.localizedDescription, "Unsupported database schema version \(newerVersion) at \(dbURL.path).")
+                XCTAssertFalse(error.localizedDescription.contains("apply-update"))
+            }
+        }
+    }
+
     // Tests the migrator executes every intermediate step by arranging a direct migrator with two ordered steps and asserting each step runs in sequence.
     func testMigratorRunsIntermediateStepsInOrder() throws {
         let root = try makeTempDirectory()
@@ -250,7 +413,8 @@ final class StoreTests: XCTestCase {
                 dateProvider: { Date(timeIntervalSince1970: 1_000) }))
 
         try migrator.migrateIfNeeded(
-            existingTables: ["migration_state", "migration_log"], schemaVersion: 1, databasePath: dbURL.path, databaseHandle: handle,
+            databasePath: dbURL.path, databaseHandle: handle, readExistingTables: { ["migration_state", "migration_log"] },
+            readSchemaVersion: { try self.readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state") },
             createFreshSchema: {},
             setSchemaVersion: { version in
                 XCTAssertEqual(sqlite3_exec(handle, "DELETE FROM migration_state;", nil, nil, nil), SQLITE_OK)
@@ -270,6 +434,41 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), 4)
         XCTAssertEqual(
             try readRows(dbURL: dbURL, sql: "SELECT entry FROM migration_log ORDER BY rowid").compactMap { $0.first ?? nil }, ["1-2", "2-3", "3-4"])
+    }
+
+    func testMigratorRechecksSchemaAfterMigrationAuthorizationWait() throws {
+        let root = try makeTempDirectory()
+        let dbURL = root.appendingPathComponent("authorization-wait.db")
+        try runSQLiteExec(
+            dbURL: dbURL,
+            sql: """
+                CREATE TABLE migration_state (current_version INTEGER NOT NULL);
+                INSERT INTO migration_state(current_version) VALUES (1);
+                """)
+        let handle = try openSQLiteHandle(dbURL: dbURL)
+        defer { sqlite3_close(handle) }
+        let stepApplications = LockedBox(0)
+        let migrator = DatabaseMigrator(
+            currentSchemaVersion: 2,
+            steps: [
+                DatabaseMigrationStep(fromVersion: 1, toVersion: 2, description: "should already be applied", requiresBackup: false) { _ in
+                    stepApplications.set(stepApplications.get() + 1)
+                }
+            ], backupManager: DatabaseBackupManager(databaseURL: dbURL))
+
+        try migrator.migrateIfNeeded(
+            databasePath: dbURL.path, databaseHandle: handle, readExistingTables: { ["migration_state"] },
+            readSchemaVersion: { try self.readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state") },
+            createFreshSchema: {}, setSchemaVersion: { _ in }, withTransaction: { try $0() }, validateIntegrity: {},
+            withMigrationAuthorization: { migration in
+                // Represents another process completing the migration before this waiter receives
+                // authorization. The migrator must adopt version 2 rather than replaying its v1 snapshot.
+                try self.runSQLiteExec(dbURL: dbURL, sql: "UPDATE migration_state SET current_version = 2;")
+                try migration()
+            })
+
+        XCTAssertEqual(stepApplications.get(), 0)
+        XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), 2)
     }
 
     // Tests migration failure rolls back the in-flight step by arranging a failing step and asserting schema state and pre-migration backup both remain.
@@ -301,7 +500,8 @@ final class StoreTests: XCTestCase {
 
         XCTAssertThrowsError(
             try migrator.migrateIfNeeded(
-                existingTables: ["migration_state", "widgets"], schemaVersion: 1, databasePath: dbURL.path, databaseHandle: handle,
+                databasePath: dbURL.path, databaseHandle: handle, readExistingTables: { ["migration_state", "widgets"] },
+                readSchemaVersion: { try self.readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state") },
                 createFreshSchema: {},
                 setSchemaVersion: { version in
                     XCTAssertEqual(sqlite3_exec(handle, "DELETE FROM migration_state;", nil, nil, nil), SQLITE_OK)
