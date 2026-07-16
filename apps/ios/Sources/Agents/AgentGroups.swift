@@ -61,6 +61,9 @@ enum SpacesMobileAgentGrouping {
 
     static func kind(for agent: SpacesDeviceWorkspaceCodingAgentRow) -> SpacesMobileAgentGroupKind {
         if agent.activityState == .waiting { return .waiting }
+        // An exited agent still owns an interactive terminal (runState `.running`), but the agent process
+        // is gone — it belongs in "Not running", not the Running band.
+        if agent.activityState == .exited { return .notRunning }
         if agent.runState == .running { return .running }
         return .notRunning
     }

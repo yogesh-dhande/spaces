@@ -12,7 +12,16 @@ extension WorkspaceOrchestrator {
             let ownership = try builtInTerminalSessionOwnership(sessionID: sessionID)
             if builtInTerminalSessionHasConfiguredOwner(ownership) { continue }
             guard let workspace = try workspaceForBuiltInTerminalSession(sessionID: sessionID, ownership: ownership) else { continue }
-            if try store.agentWindow(workspaceID: workspace.id, terminalTrackingID: sessionID) != nil { continue }
+            if let existingRow = try store.agentWindow(workspaceID: workspace.id, terminalTrackingID: sessionID) {
+                // A live session that already has a row is normally left alone, but an ad-hoc detected
+                // agent whose foreground genuinely reverted to its own plain shell is demoted back to a
+                // plain terminal here — the one place a live session sheds its ad-hoc classification.
+                if isAdHocDetectedForegroundAgent(existingRow), foregroundHasRevertedToPlainShell(session) {
+                    try demoteAdHocDetectedForegroundAgent(existingRow)
+                    didMutate = true
+                }
+                continue
+            }
             if let detectedAgent = adHocDetectedForegroundAgent(from: session.runtimeState) {
                 try insertAdHocDetectedAgent(detectedAgent: detectedAgent, workspace: workspace, sessionID: sessionID)
                 didMutate = true
@@ -20,6 +29,23 @@ extension WorkspaceOrchestrator {
         }
         if try reconcileExitedAdHocForegroundAgentRows(excludingLiveSessionIDs: liveSessionIDs) { didMutate = true }
         return didMutate
+    }
+
+    /// True only when a live session's foreground process is confirmed to be its own configured
+    /// interactive shell (no program running in it at all), as opposed to `foregroundDetectedAgentKind`
+    /// merely being nil. That nil case is ambiguous on its own: it also covers a foreground sample that
+    /// hasn't landed yet (`foregroundExecutableName` nil, e.g. right after a reconnect) and an
+    /// unclassified but still-running program (`python3 agent.py`) — neither of those is the detected
+    /// agent process exiting, and demoting on either would drop a still-active coding-agent row. Only a
+    /// foreground executable name that matches the session's own launch-configured shell basename is
+    /// unambiguous evidence the terminal is back at a bare prompt.
+    func foregroundHasRevertedToPlainShell(_ session: TerminalSessionCatalogEntry) -> Bool {
+        guard session.runtimeState.foregroundDetectedAgentKind == nil,
+            let executableName = session.runtimeState.foregroundExecutableName?.trimmingCharacters(in: .whitespacesAndNewlines),
+            !executableName.isEmpty
+        else { return false }
+        let shellBasename = URL(fileURLWithPath: session.launchConfiguration.shell).lastPathComponent
+        return executableName == shellBasename
     }
 
     func adHocDetectedForegroundAgent(from runtimeState: TerminalSessionRuntimeState) -> (label: String, displayCommand: String?)? {
@@ -50,6 +76,23 @@ extension WorkspaceOrchestrator {
     }
 
     func adHocDetectedAgentID(sessionID: String) -> String { "terminal-agent-\(sessionID)" }
+
+    /// True when `record` is an ad-hoc coding-agent row that foreground detection promoted from a plain
+    /// terminal (id == `adHocDetectedAgentID(sessionID)`), as opposed to an explicitly spawned or
+    /// configured-launcher agent. Only these are demoted back to plain terminals on agent exit.
+    func isAdHocDetectedForegroundAgent(_ record: AgentWindowRecord) -> Bool {
+        guard record.provider == .spaces, let sessionID = builtInAgentSessionID(for: record) else { return false }
+        return record.id == adHocDetectedAgentID(sessionID: sessionID)
+    }
+
+    /// Reverts a foreground-detection promotion: removes the ad-hoc agent row and clears the agent-command
+    /// detail it wrote onto the shared terminal window, WITHOUT terminating the terminal session or deleting
+    /// its window — the shell is still live and must remain as a plain terminal. Used when the detected agent
+    /// process exits but the terminal stays open, so the session stops being counted as a coding agent.
+    func demoteAdHocDetectedForegroundAgent(_ record: AgentWindowRecord) throws {
+        _ = try? updateAdHocAgentRuntimeTargetDetail(record, displayCommand: nil)
+        try store.deleteAgentWindow(id: record.id)
+    }
 
     @discardableResult func reconcileExitedAdHocForegroundAgentRows(excludingLiveSessionIDs liveSessionIDs: Set<String>) throws -> Bool {
         var didMutate = false
@@ -518,6 +561,12 @@ extension WorkspaceOrchestrator {
         let sessionBackedSpacesAgent = builtInAgentSessionID(for: existing) != nil
         let existingSessionIsLive = sessionBackedSpacesAgent && builtInAgentSessionIsStillLive(existing)
         if existingSessionIsLive {
+            if isAdHocDetectedForegroundAgent(existing) {
+                // Foreground-detected agent's process ended but its shell terminal is still live: demote
+                // to a plain terminal rather than keeping a phantom "exited" coding-agent row on the shell.
+                try demoteAdHocDetectedForegroundAgent(existing)
+                return nil
+            }
             // The agent process ended but its terminal session is still open, so keep the row and mark it
             // `exited` (not `idle`): the terminal stays addressable and a restart reuses it, while remote
             // watchers see a real exit transition instead of a status change they treat as "not started".

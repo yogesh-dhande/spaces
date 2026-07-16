@@ -135,6 +135,16 @@ public struct AgentNotificationEngine {
         }
     }
 
+    /// Drops — without delivering — every queued notification for a subscriber terminal that can no
+    /// longer consume them, e.g. its own agent exited so the terminal is a bare shell (or gone).
+    /// `subscriberDidBecomeIdle` would submit these child-event lines into the shell prompt; on the
+    /// exit path that is corruption, so the queue is discarded instead of flushed.
+    public func discardQueuedNotifications(subscriberTerminalSessionID: String) throws {
+        for pending in try store.pendingAgentNotifications(subscriberTerminalSessionID: subscriberTerminalSessionID) {
+            try store.deletePendingAgentNotification(id: pending.id)
+        }
+    }
+
     /// A subscriber is idle when its own agent row leaves it idle (idle/done — see
     /// `AgentWindowStatus.leavesSubscriberIdle`), or when it has no agent row at all (a plain shell
     /// terminal is always ready to receive). A spinning, waiting, or exited agent is not ready: queue.
@@ -203,22 +213,42 @@ public struct AgentNotificationEngine {
     /// indented continuation lines — like the `[spaces]` first line, which never starts with `#`, `/`, or
     /// `!` — are safe from the slash/command syntax some agent TUIs apply to a leading character. The cost
     /// is that a plain-shell subscriber echoes one junk line per continuation, which is acceptable since
-    /// subscribers are agent TUIs first. Values render verbatim: notes are stripped of control characters
-    /// (including newlines) at annotate time and labels come from launch-config titles, so no continuation
-    /// line can be forged and there is no second sanitization pass to add. `session` and the deep link
-    /// both target the child's terminal session id.
+    /// subscribers are agent TUIs first. Every free-text field (label, kind, project, workspace, branch,
+    /// note) passes through `shellSafeNotificationField` before interpolation: this block is submitted
+    /// with a trailing newline into the subscriber terminal, and a plain-shell subscriber executes each
+    /// submitted line, so a value originating from the watched agent must not be able to smuggle shell
+    /// syntax into that execution. `session` and the deep link are generated/constrained values, not
+    /// free text, so they render verbatim and both target the child's terminal session id.
     func renderBlock(
         label: String, kind: String, transition: ChildTransition, project: String, workspace: String, branch: String?, sessionID: String,
         note: String?, deviceID: String?
     ) -> String {
         let deepLink = SpacesTerminalDeepLink(sessionID: sessionID, deviceID: deviceID).absoluteString
-        var lines = ["[spaces] \(label) (\(kind)) is \(transition.word)"]
-        lines.append("  project: \(project)")
-        lines.append("  workspace: \(workspace)")
-        if let branch, !branch.isEmpty { lines.append("  branch: \(branch)") }
+        let safeLabel = Self.shellSafeNotificationField(label)
+        let safeKind = Self.shellSafeNotificationField(kind)
+        var lines = ["[spaces] \(safeLabel) (\(safeKind)) is \(transition.word)"]
+        lines.append("  project: \(Self.shellSafeNotificationField(project))")
+        lines.append("  workspace: \(Self.shellSafeNotificationField(workspace))")
+        if let branch, !branch.isEmpty { lines.append("  branch: \(Self.shellSafeNotificationField(branch))") }
         lines.append("  session: \(sessionID)")
-        if let note, !note.isEmpty { lines.append("  note: \(note)") }
+        if let note, !note.isEmpty { lines.append("  note: \(Self.shellSafeNotificationField(note))") }
         lines.append("  link: \(deepLink)")
         return lines.joined(separator: "\n")
+    }
+
+    /// Neutralizes a metadata value before it is interpolated into a notification line that may be
+    /// submitted (with Enter) into a plain-shell subscriber. A shell executes such a line, so any
+    /// value originating from a watched agent (note/branch/label/project/workspace/kind) must not be
+    /// able to smuggle command substitution (`$(...)`, backticks), command separators (`;`, `|`, `&`),
+    /// or redirects (`<`, `>`) — each of these runs even inside an otherwise-failing command. Control
+    /// characters (including newlines) are dropped too so a value cannot forge a new continuation line
+    /// or inject terminal control sequences. The value is otherwise preserved for readability in the
+    /// agent-TUI subscribers that are the primary consumer.
+    private static func shellSafeNotificationField(_ value: String) -> String {
+        let forbidden = Set("$`;|&<>()".unicodeScalars)
+        let filtered = value.unicodeScalars.filter { scalar in
+            !forbidden.contains(scalar) && !CharacterSet.controlCharacters.contains(scalar)
+        }
+        return String(String.UnicodeScalarView(filtered))
     }
 }

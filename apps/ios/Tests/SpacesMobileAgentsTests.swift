@@ -23,6 +23,16 @@
             XCTAssertEqual(groups[2].entries.map { $0.row.id }, ["agent-idle-exited", "agent-not-started"])
         }
 
+        /// An exited agent still owns an interactive terminal (`runState == .running`), but the agent
+        /// process is gone. It must group under "Not running" rather than "Running", and its status dot
+        /// must read as exited rather than inheriting the terminal's still-running state.
+        func testExitedAgentGroupsAsNotRunningDespiteRunningTerminal() {
+            let row = makeAgentRow(id: "agent-exited-running-terminal", runState: .running, activityState: .exited)
+
+            XCTAssertEqual(SpacesMobileAgentGrouping.kind(for: row), .notRunning)
+            XCTAssertEqual(StatusDot.Kind(runState: .running, activityState: .exited), .exited)
+        }
+
         func testOmitsEmptyGroups() {
             let overview = makeOverview(codingAgentRows: [makeAgentRow(id: "agent-not-started", runState: .notStarted, activityState: .idle)])
 

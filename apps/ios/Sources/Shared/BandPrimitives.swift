@@ -106,8 +106,11 @@ extension StatusDot.Kind {
         case .waiting: self = .waiting
         case .done: self = .done
         case .spinning: self = .running
-        // Exited and idle both mean no agent activity, so the dot reflects the terminal's run state.
-        case .idle, .exited: self = StatusDot.Kind(runState: runState)
+        // Idle means no agent activity, so the dot reflects the terminal's run state (a live shell reads
+        // as running). Exited means the agent process is gone even though its terminal stays interactive,
+        // so it must read as exited rather than inheriting the terminal's still-running state.
+        case .idle: self = StatusDot.Kind(runState: runState)
+        case .exited: self = .exited
         }
     }
 

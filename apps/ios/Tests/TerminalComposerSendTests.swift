@@ -133,7 +133,8 @@
         }
 
         func testComposerMessageFieldDisablesTextMutationTraits() throws {
-            let model = TerminalViewerModel(session: session(), settings: settings(), onAuthenticationRequired: { _ in })
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in })
             let sheet = TerminalComposerSheet(model: model, stagedScreenshots: StagedScreenshotStore())
             let controller = UIHostingController(rootView: sheet)
             let window = UIWindow(frame: UIScreen.main.bounds)
@@ -152,7 +153,7 @@
         func testComposerMessageFieldDisablesEditingWhileSending() async throws {
             let recorder = ComposerAPIRecorder(delaysByToken: ["paste": .milliseconds(500)])
             let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in await recorder.handle(request) }
-            let model = TerminalViewerModel(session: session(), settings: settings(), onAuthenticationRequired: { _ in }, bridgeClient: bridgeClient)
+            let model = TerminalViewerModel(session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in }, bridgeClient: bridgeClient)
             model.configureOwnerInteractiveForTesting(ownerEpoch: 7)
             model.composerDraftText = "hello"
             model.attachComposerImage(attachment("Screenshot"))
@@ -184,7 +185,7 @@
         func testCancelingQueuedComposedSendClearsSendingState() async throws {
             let recorder = ComposerAPIRecorder(delaysByToken: ["send:blocking": .milliseconds(500)])
             let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in await recorder.handle(request) }
-            let model = TerminalViewerModel(session: session(), settings: settings(), onAuthenticationRequired: { _ in }, bridgeClient: bridgeClient)
+            let model = TerminalViewerModel(session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in }, bridgeClient: bridgeClient)
             model.configureOwnerInteractiveForTesting(ownerEpoch: 7)
 
             await model.sendText("blocking", asPaste: true)
@@ -209,7 +210,7 @@
         func testComposedSendTextThenImagesThenEnterInOrder() async throws {
             let recorder = ComposerAPIRecorder()
             let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in await recorder.handle(request) }
-            let model = TerminalViewerModel(session: session(), settings: settings(), onAuthenticationRequired: { _ in }, bridgeClient: bridgeClient)
+            let model = TerminalViewerModel(session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in }, bridgeClient: bridgeClient)
             model.configureOwnerInteractiveForTesting(ownerEpoch: 7)
             model.composerDraftText = "hello"
             model.attachComposerImage(attachment("Screenshot"))
@@ -231,7 +232,7 @@
         func testComposedSendPreservesDraftEditsMadeDuringInFlightSend() async throws {
             let recorder = ComposerAPIRecorder(delaysByToken: ["paste": .milliseconds(200)])
             let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in await recorder.handle(request) }
-            let model = TerminalViewerModel(session: session(), settings: settings(), onAuthenticationRequired: { _ in }, bridgeClient: bridgeClient)
+            let model = TerminalViewerModel(session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in }, bridgeClient: bridgeClient)
             model.configureOwnerInteractiveForTesting(ownerEpoch: 7)
             model.composerDraftText = "original"
             model.attachComposerImage(attachment("Screenshot"))
@@ -256,7 +257,7 @@
         func testComposedSendStopsBeforeEnterWhenAnImageFails() async throws {
             let recorder = ComposerAPIRecorder(failPasteImageAtIndex: 2)
             let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in await recorder.handle(request) }
-            let model = TerminalViewerModel(session: session(), settings: settings(), onAuthenticationRequired: { _ in }, bridgeClient: bridgeClient)
+            let model = TerminalViewerModel(session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in }, bridgeClient: bridgeClient)
             model.configureOwnerInteractiveForTesting(ownerEpoch: 7)
             model.composerDraftText = "hello"
             model.attachComposerImage(attachment("Screenshot"))
@@ -276,7 +277,7 @@
         func testComposedSendClearsDraftOnSuccess() async throws {
             let recorder = ComposerAPIRecorder()
             let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in await recorder.handle(request) }
-            let model = TerminalViewerModel(session: session(), settings: settings(), onAuthenticationRequired: { _ in }, bridgeClient: bridgeClient)
+            let model = TerminalViewerModel(session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in }, bridgeClient: bridgeClient)
             model.configureOwnerInteractiveForTesting(ownerEpoch: 3)
             model.composerDraftText = "just text"
 
@@ -297,7 +298,7 @@
                 "send:just text": SpacesDeviceAPIResponse(ok: false, message: "Input was rejected.", errorCode: .internalError)
             ])
             let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in await recorder.handle(request) }
-            let model = TerminalViewerModel(session: session(), settings: settings(), onAuthenticationRequired: { _ in }, bridgeClient: bridgeClient)
+            let model = TerminalViewerModel(session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in }, bridgeClient: bridgeClient)
             model.configureOwnerInteractiveForTesting(ownerEpoch: 5)
             model.composerDraftText = "just text"
 
@@ -316,7 +317,7 @@
                 "key:enter": SpacesDeviceAPIResponse(ok: false, message: "Input was rejected.", errorCode: .internalError)
             ])
             let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in await recorder.handle(request) }
-            let model = TerminalViewerModel(session: session(), settings: settings(), onAuthenticationRequired: { _ in }, bridgeClient: bridgeClient)
+            let model = TerminalViewerModel(session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in }, bridgeClient: bridgeClient)
             model.configureOwnerInteractiveForTesting(ownerEpoch: 5)
             model.composerDraftText = "hello"
             model.attachComposerImage(attachment("Screenshot"))
@@ -340,7 +341,8 @@
             let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in await recorder.handle(request) }
             let model = TerminalViewerModel(
                 session: session(), settings: settings(),
-                onAuthenticationRequired: { message in Task { await authenticationRecorder.append(message) } }, bridgeClient: bridgeClient)
+                onAuthenticationRequired: { message in Task { await authenticationRecorder.append(message) } }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
             model.configureOwnerInteractiveForTesting(ownerEpoch: 5)
             model.composerDraftText = "just text"
 
@@ -360,7 +362,8 @@
             let bridgeClient = SpacesDeviceAPIClient(settings: settings()) { request in await recorder.handle(request) }
             let model = TerminalViewerModel(
                 session: session(), settings: settings(),
-                onAuthenticationRequired: { message in Task { await authenticationRecorder.append(message) } }, bridgeClient: bridgeClient)
+                onAuthenticationRequired: { message in Task { await authenticationRecorder.append(message) } }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
             model.configureOwnerInteractiveForTesting(ownerEpoch: 5)
             model.composerDraftText = "hello"
             model.attachComposerImage(attachment("Screenshot"))

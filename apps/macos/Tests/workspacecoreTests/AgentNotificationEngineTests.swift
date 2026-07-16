@@ -183,6 +183,63 @@ final class AgentNotificationEngineTests: XCTestCase {
             ])
     }
 
+    /// A watched agent's note/branch are free text an untrusted process can set, and the block is
+    /// submitted with a trailing newline into subscriber terminals that may be a plain shell — so any
+    /// shell metacharacter reaching a rendered line would execute on the subscriber host. Guards that
+    /// `renderBlock` strips them from every free-text field before interpolation.
+    func testRenderBlockNeutralizesShellMetacharactersInNoteAndBranch() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
+        let project = makeProjectRecord(dir: dir)
+        try store.upsert(project: project)
+        let workspace = WorkspaceRecord(
+            id: UUID().uuidString, projectID: project.id, dir: dir + "/hello", dirname: "hello", branch: "main; rm -rf ~", isDefault: false,
+            isArchived: false, isRunning: false, lastLaunchedAt: nil)
+        try store.upsert(workspace: workspace)
+        let recorder = DeliveryRecorder()
+        let engine = makeEngine(store: store, recorder: recorder, kind: "claude")
+
+        let child = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Claude Code CLI", terminalTrackingID: "child-session", status: .waiting)
+        try store.setAgentSessionNote(id: child.id, note: "$(touch /tmp/pwn)", updatedAt: "t")
+        try store.insertAgentSubscription(subscriberTerminalSessionID: "orchestrator-session", agentSessionID: child.id, createdAt: "t")
+        let noted = try XCTUnwrap(store.agentWindow(id: child.id))
+
+        try engine.childDidTransition(agent: noted, transition: .blocked)
+
+        let line = try XCTUnwrap(recorder.delivered.first?.line)
+        let noteLine = try XCTUnwrap(line.split(separator: "\n").first { $0.contains("note:") })
+        let branchLine = try XCTUnwrap(line.split(separator: "\n").first { $0.contains("branch:") })
+        let forbidden = Set("$`;|&<>()")
+        XCTAssertTrue(noteLine.allSatisfy { !forbidden.contains($0) }, "note line must not carry shell metacharacters, got: \(noteLine)")
+        XCTAssertTrue(branchLine.allSatisfy { !forbidden.contains($0) }, "branch line must not carry shell metacharacters, got: \(branchLine)")
+    }
+
+    /// `discardQueuedNotifications` is the exit-path counterpart to `subscriberDidBecomeIdle`: it drops a
+    /// subscriber's queue instead of flushing it, for a terminal that can no longer consume child-event
+    /// lines (its own agent just exited). No delivery must occur.
+    func testDiscardQueuedNotificationsDropsQueueWithoutDelivering() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        let recorder = DeliveryRecorder()
+        let engine = makeEngine(store: store, recorder: recorder, kind: "claude")
+
+        _ = try orchestrator.registerAgentWindow(workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "sub-session", status: .spinning)
+        let child = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "A", terminalTrackingID: "childA", status: .waiting)
+        try store.insertAgentSubscription(subscriberTerminalSessionID: "sub-session", agentSessionID: child.id, createdAt: "t")
+
+        try engine.childDidTransition(agent: child, transition: .blocked)
+        XCTAssertEqual(try store.pendingAgentNotifications(subscriberTerminalSessionID: "sub-session").count, 1)
+
+        try engine.discardQueuedNotifications(subscriberTerminalSessionID: "sub-session")
+
+        XCTAssertTrue(try store.pendingAgentNotifications(subscriberTerminalSessionID: "sub-session").isEmpty)
+        XCTAssertTrue(recorder.delivered.isEmpty, "Discarding must never deliver the dropped lines.")
+    }
+
     func testBusySubscriberQueuesThenFlushesOnIdleInOrderExactlyOnce() throws {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)

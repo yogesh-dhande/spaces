@@ -550,6 +550,55 @@ extension OrchestratorTests {
         }
     }
 
+    /// A promoted ad-hoc agent whose detected process ends while its shell terminal stays live (foreground
+    /// reverts to a plain shell, not exited) must be demoted back to a plain terminal — not left as a
+    /// phantom coding-agent row — and the still-live terminal window must survive the demotion untouched.
+    func testReconcileTerminalForegroundAgentClassificationsDemotesAdHocAgentWhenForegroundRevertsToShell() throws {
+        let root = try makeTempDirectory()
+        let dbPath = root.appendingPathComponent("spaces.db").path
+        let store = try SQLiteStore(path: dbPath)
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
+        let sessionID = "ad-hoc-foreground-agent-demote"
+
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
+            let paths = try TerminalSessionPaths.forSession(id: sessionID)
+            try writeTerminalSessionFixture(
+                sessionID: sessionID, workspace: workspace, kind: .shell,
+                runtimeState: TerminalSessionRuntimeState(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 123, state: .running,
+                    updatedAt: "2026-06-06T00:00:00Z", title: "shell-1", workingDirectory: workspace.dir, foregroundPID: 123,
+                    foregroundExecutablePath: "/opt/homebrew/bin/codex", foregroundExecutableName: "codex",
+                    foregroundArgv: ["codex", "--model", "gpt-5"], foregroundDetectedAgentKind: .codex, foregroundDisplayLabel: "Codex",
+                    foregroundDisplayCommand: "codex --model gpt-5"))
+            try store.upsert(
+                window: WindowRecord(
+                    id: "terminal-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil, targetURL: nil,
+                    terminalTrackingID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+
+            XCTAssertTrue(try orchestrator.reconcileTerminalForegroundAgentClassifications())
+            let promotedAgent = try XCTUnwrap(store.agentWindows(workspaceID: workspace.id).first)
+            XCTAssertEqual(promotedAgent.id, "terminal-agent-\(sessionID)")
+
+            // The detected process ends but the shell terminal itself stays live — the foreground sample
+            // reverts to a plain shell rather than the session exiting.
+            try TerminalSessionPersistence.writeRuntimeState(
+                TerminalSessionRuntimeState(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 456, state: .running,
+                    updatedAt: "2026-06-06T00:00:10Z", title: "shell-1", workingDirectory: workspace.dir, foregroundPID: 456,
+                    foregroundExecutablePath: "/bin/zsh", foregroundExecutableName: "zsh", foregroundArgv: ["zsh"]), paths: paths)
+
+            XCTAssertTrue(try orchestrator.reconcileTerminalForegroundAgentClassifications())
+            XCTAssertTrue(try store.agentWindows(workspaceID: workspace.id).isEmpty, "Demotion removes the ad-hoc agent row.")
+            let survivingWindow = try XCTUnwrap(store.windows(workspaceID: workspace.id).first)
+            XCTAssertEqual(survivingWindow.terminalTrackingID, sessionID, "Demotion must not delete the still-live terminal window.")
+            XCTAssertNil(survivingWindow.detail, "Demotion clears the agent-command detail written onto the shared terminal window.")
+        }
+    }
+
     func testReconcileTerminalForegroundAgentClassificationsMarksExitedAdHocAgentSessionDone() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path

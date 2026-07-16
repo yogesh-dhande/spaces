@@ -92,6 +92,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     let session: SpacesDeviceTerminalSessionSummary
     let settings: SpacesMobileConnectionSettings
     private let onAuthenticationRequired: @MainActor @Sendable (String) -> Void
+    private let onOpenTerminalDeepLink: @MainActor @Sendable (SpacesTerminalDeepLink) -> Void
 
     var latestState: GhosttyRemoteSessionStatePayload?
     var isConnecting = false
@@ -220,13 +221,15 @@ extension SpacesDeviceTerminalLinkArtifactKind {
 
     init(
         session: SpacesDeviceTerminalSessionSummary, settings: SpacesMobileConnectionSettings,
-        onAuthenticationRequired: @escaping @MainActor @Sendable (String) -> Void, bridgeClient: SpacesDeviceAPIClient? = nil,
+        onAuthenticationRequired: @escaping @MainActor @Sendable (String) -> Void,
+        onOpenTerminalDeepLink: @escaping @MainActor @Sendable (SpacesTerminalDeepLink) -> Void, bridgeClient: SpacesDeviceAPIClient? = nil,
         remoteMediaDownloader: @escaping @Sendable (URL, SpacesDeviceTerminalLinkArtifactKind) async throws -> URL = TerminalViewerModel
             .defaultRemoteMediaDownloader, linkPreviewCacheDirectory: URL? = nil
     ) {
         self.session = session
         self.settings = settings
         self.onAuthenticationRequired = onAuthenticationRequired
+        self.onOpenTerminalDeepLink = onOpenTerminalDeepLink
         let resolvedBridgeClient = bridgeClient ?? SpacesDeviceAPIClient(settings: settings)
         self.bridgeClient = resolvedBridgeClient
         commandChannel = resolvedBridgeClient.makeCommandChannel()
@@ -762,6 +765,15 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         if case .loopbackURL = route {
             cancelAndClearLinkPreviewState()
             linkNotice = Self.loopbackLinkNoticeMessage
+            return
+        }
+        if case .spacesTerminal(let deepLink) = route {
+            // A spaces://terminal/… link tapped inside the terminal is an in-app navigation, not an
+            // external artifact: focus the linked session through the same navigator RootTabView uses
+            // for these links, instead of round-tripping to the daemon resolver (which rejects the scheme).
+            cancelAndClearLinkPreviewState()
+            linkNotice = nil
+            onOpenTerminalDeepLink(deepLink)
             return
         }
         linkNotice = nil

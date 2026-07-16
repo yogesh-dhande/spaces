@@ -1017,6 +1017,10 @@ import workspacecore
         // SessionStart on auto-compact), so flushing on the event alone would deliver queued child events
         // into a still-working agent. `.exit` always flushes to drain its now-undeliverable queue.
         let shouldFlushQueuedNotifications: Bool
+        // Set only by `.exit`: the terminal is now a bare shell (or gone), so its inbound queue must be
+        // discarded rather than flushed. Kept separate from `shouldFlushQueuedNotifications` (which every
+        // other case sets) so the two outcomes stay mutually exclusive at the call site below.
+        var shouldDiscardQueuedNotifications = false
         switch type {
         case .`init`:
             let registered = try orchestrator.registerAgentWindow(
@@ -1050,11 +1054,18 @@ import workspacecore
             try engine.childDidTransition(agent: existingAgent, transition: .exited)
             try orchestrator.handleAgentExit(
                 existingAgent, eventType: type.rawValue, eventSource: "spaces_agent_signal", environmentKeys: environmentKeys)
-            // Exit always flushes: the row is gone (or `.exited`), so any queue for this terminal is now
-            // undeliverable and must be drained.
-            shouldFlushQueuedNotifications = true
+            // Exit always discards: the signaling terminal is now a bare shell (or gone), so anything
+            // still queued for it would submit child-event lines into a shell prompt if flushed. Unlike
+            // the other transitions, an exited terminal can never become a valid delivery target again
+            // under this session id, so the queue is dropped rather than held for a later flush.
+            shouldFlushQueuedNotifications = false
+            shouldDiscardQueuedNotifications = true
         }
-        if shouldFlushQueuedNotifications { try engine.subscriberDidBecomeIdle(subscriberTerminalSessionID: sessionID) }
+        if shouldDiscardQueuedNotifications {
+            try engine.discardQueuedNotifications(subscriberTerminalSessionID: sessionID)
+        } else if shouldFlushQueuedNotifications {
+            try engine.subscriberDidBecomeIdle(subscriberTerminalSessionID: sessionID)
+        }
         postAgentEventNotification()
         return TerminalServiceProfileCommandResponse(message: "Agent \(type.rawValue) recorded.")
     }

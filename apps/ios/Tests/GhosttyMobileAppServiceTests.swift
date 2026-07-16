@@ -242,7 +242,7 @@
                 workspaceTitle: nil, projectID: nil, projectName: nil, createdAt: "2026-06-04T14:23:10Z", updatedAt: "2026-06-04T14:23:23Z",
                 isControlAvailable: false, isSubscriptionAvailable: false, attachmentSnapshot: TerminalSessionAttachmentSnapshot(), rowKind: .process,
                 rowSourceID: "process-row", hasFinalRender: false)
-            let model = TerminalViewerModel(session: session, settings: settings) { _ in }
+            let model = TerminalViewerModel(session: session, settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in })
 
             XCTAssertEqual(model.renderMode, "ended")
             XCTAssertFalse(model.showsTakeOverAction)
@@ -251,7 +251,8 @@
         }
 
         func testStartingSessionShowsPreparingAndDoesNotOfferTakeOver() {
-            let model = TerminalViewerModel(session: session(state: .starting), settings: settings()) { _ in }
+            let model = TerminalViewerModel(
+                session: session(state: .starting), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in })
 
             XCTAssertEqual(model.visibleText, "Preparing terminal…")
             XCTAssertFalse(model.showsTakeOverAction)
@@ -265,7 +266,7 @@
                 return SpacesDeviceAPIResponse(ok: true, message: "ok")
             }
             let model = TerminalViewerModel(
-                session: session(state: .starting), settings: settings(), onAuthenticationRequired: { _ in }, bridgeClient: bridgeClient)
+                session: session(state: .starting), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in }, bridgeClient: bridgeClient)
 
             model.start()
             for _ in 0..<40 {
@@ -303,7 +304,7 @@
                 return SpacesDeviceAPIResponse(ok: true, message: "ok")
             }
             let model = TerminalViewerModel(
-                session: session(state: .starting), settings: settings(), onAuthenticationRequired: { _ in }, bridgeClient: bridgeClient)
+                session: session(state: .starting), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in }, bridgeClient: bridgeClient)
 
             model.start()
             for _ in 0..<40 {
@@ -327,7 +328,7 @@
                 await recorder.append(request)
                 return SpacesDeviceAPIResponse(ok: true, message: "ok")
             }
-            let model = TerminalViewerModel(session: session(), settings: settings(), onAuthenticationRequired: { _ in }, bridgeClient: bridgeClient)
+            let model = TerminalViewerModel(session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in }, bridgeClient: bridgeClient)
 
             await model.sendAppearance(.dark)
 
@@ -356,7 +357,7 @@
                 return SpacesDeviceAPIResponse(ok: true, message: "ok")
             }
             let model = TerminalViewerModel(
-                session: session(state: .starting), settings: settings(), onAuthenticationRequired: { _ in }, bridgeClient: bridgeClient)
+                session: session(state: .starting), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in }, bridgeClient: bridgeClient)
 
             model.start()
             for _ in 0..<40 {
@@ -391,7 +392,7 @@
                 }
             }
             let model = TerminalViewerModel(
-                session: session(state: .starting), settings: settings(), onAuthenticationRequired: { _ in }, bridgeClient: bridgeClient)
+                session: session(state: .starting), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in }, bridgeClient: bridgeClient)
 
             model.start()
             for _ in 0..<40 {
@@ -423,7 +424,7 @@
                 }
                 return SpacesDeviceAPIResponse(ok: true, message: "ok")
             }
-            let model = TerminalViewerModel(session: session(), settings: settings, onAuthenticationRequired: { _ in }, bridgeClient: bridgeClient)
+            let model = TerminalViewerModel(session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in }, bridgeClient: bridgeClient)
 
             model.start()
             let didAttachInitially = try await waitForTerminalControlAction(.attach, count: 1, recorder: recorder)
@@ -458,7 +459,8 @@
             }
             let model = TerminalViewerModel(
                 session: session(), settings: settings,
-                onAuthenticationRequired: { message in Task { await authenticationRecorder.append(message) } }, bridgeClient: bridgeClient)
+                onAuthenticationRequired: { message in Task { await authenticationRecorder.append(message) } }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
             defer { model.stop() }
 
             model.start()
@@ -483,7 +485,7 @@
                         id: "external|https://example.com/docs", source: .externalURL, originalLink: "https://example.com/docs", displayName: "docs",
                         contentType: nil, artifactKind: nil, byteCount: nil, externalURL: "https://example.com/docs"))
             }
-            let model = TerminalViewerModel(session: session(), settings: settings, onAuthenticationRequired: { _ in }, bridgeClient: bridgeClient)
+            let model = TerminalViewerModel(session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in }, bridgeClient: bridgeClient)
 
             await model.openTerminalLink("https://example.com/docs")
 
@@ -508,7 +510,7 @@
                         id: "external|https://example.com/docs", source: .externalURL, originalLink: spacedPath, displayName: "docs",
                         contentType: nil, artifactKind: nil, byteCount: nil, externalURL: "https://example.com/docs"))
             }
-            let model = TerminalViewerModel(session: session(), settings: settings, onAuthenticationRequired: { _ in }, bridgeClient: bridgeClient)
+            let model = TerminalViewerModel(session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in }, bridgeClient: bridgeClient)
 
             await model.openTerminalLink(spacedPath)
 
@@ -529,7 +531,7 @@
             }
             let payload = Data([0x89, 0x50, 0x4E, 0x47])
             let model = TerminalViewerModel(
-                session: session(), settings: settings, onAuthenticationRequired: { _ in }, bridgeClient: bridgeClient,
+                session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in }, bridgeClient: bridgeClient,
                 remoteMediaDownloader: { url, expectedArtifactKind in
                     XCTAssertEqual(url, URL(string: "https://example.com/image.png"))
                     XCTAssertEqual(expectedArtifactKind, .image)
@@ -566,7 +568,7 @@
                         byteCount: nil, externalURL: url.absoluteString))
             }
             let model = TerminalViewerModel(
-                session: session(), settings: settings, onAuthenticationRequired: { _ in }, bridgeClient: bridgeClient,
+                session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in }, bridgeClient: bridgeClient,
                 remoteMediaDownloader: { requestedURL, expectedArtifactKind in
                     XCTAssertEqual(requestedURL, url)
                     XCTAssertEqual(expectedArtifactKind, .markdown)
@@ -605,7 +607,7 @@
                         externalURL: "https://example.com/missing.png"))
             }
             let model = TerminalViewerModel(
-                session: session(), settings: settings, onAuthenticationRequired: { _ in }, bridgeClient: bridgeClient,
+                session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in }, bridgeClient: bridgeClient,
                 remoteMediaDownloader: { requestedURL, expectedArtifactKind in
                     XCTAssertEqual(requestedURL, url)
                     try FileManager.default.createDirectory(at: downloadRoot, withIntermediateDirectories: true)
@@ -643,7 +645,7 @@
                         externalURL: "https://example.com/login.png"))
             }
             let model = TerminalViewerModel(
-                session: session(), settings: settings, onAuthenticationRequired: { _ in }, bridgeClient: bridgeClient,
+                session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in }, bridgeClient: bridgeClient,
                 remoteMediaDownloader: { requestedURL, expectedArtifactKind in
                     XCTAssertEqual(requestedURL, url)
                     try FileManager.default.createDirectory(at: downloadRoot, withIntermediateDirectories: true)
@@ -681,7 +683,7 @@
                         externalURL: "https://example.com/huge.log"))
             }
             let model = TerminalViewerModel(
-                session: session(), settings: settings, onAuthenticationRequired: { _ in }, bridgeClient: bridgeClient,
+                session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in }, bridgeClient: bridgeClient,
                 remoteMediaDownloader: { _, expectedArtifactKind in
                     XCTAssertEqual(expectedArtifactKind, .text)
                     try FileManager.default.createDirectory(at: downloadRoot, withIntermediateDirectories: true)
@@ -740,7 +742,7 @@
                         contentType: "image/png", artifactKind: .image, byteCount: nil, externalURL: link))
             }
             let model = TerminalViewerModel(
-                session: session(), settings: settings, onAuthenticationRequired: { _ in }, bridgeClient: bridgeClient,
+                session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in }, bridgeClient: bridgeClient,
                 remoteMediaDownloader: { url, _ in
                     try FileManager.default.createDirectory(at: cacheRoot, withIntermediateDirectories: true)
                     if url.lastPathComponent == "slow.png" {
@@ -788,7 +790,7 @@
                         contentType: "image/png", artifactKind: .image, byteCount: nil, externalURL: link))
             }
             let model = TerminalViewerModel(
-                session: session(), settings: settings, onAuthenticationRequired: { _ in }, bridgeClient: bridgeClient,
+                session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in }, bridgeClient: bridgeClient,
                 remoteMediaDownloader: { url, _ in
                     try FileManager.default.createDirectory(at: downloadRoot, withIntermediateDirectories: true)
                     if url.lastPathComponent == "slow.png" {
@@ -839,7 +841,7 @@
                 }
             }
             let model = TerminalViewerModel(
-                session: session(), settings: settings, onAuthenticationRequired: { _ in }, bridgeClient: bridgeClient,
+                session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in }, bridgeClient: bridgeClient,
                 linkPreviewCacheDirectory: cacheRoot)
 
             await model.openTerminalLink("image.png")
@@ -857,7 +859,7 @@
                 XCTFail("Loopback links must not trigger a resolveTerminalLink round trip.")
                 return SpacesDeviceAPIResponse(ok: false, message: "unexpected")
             }
-            let model = TerminalViewerModel(session: session(), settings: settings, onAuthenticationRequired: { _ in }, bridgeClient: bridgeClient)
+            let model = TerminalViewerModel(session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in }, bridgeClient: bridgeClient)
 
             await model.openTerminalLink("http://localhost:3000/dashboard")
 
@@ -867,13 +869,36 @@
             XCTAssertFalse(model.isPreparingLinkPreview)
         }
 
+        /// A `spaces://terminal/…` link tapped inside the terminal is an in-app navigation: it must
+        /// invoke the injected navigator callback with the parsed deep link and never reach the daemon's
+        /// `resolveTerminalLink`, which rejects the `spaces` scheme.
+        func testOpenTerminalLinkRoutesSpacesTerminalDeepLinkWithoutResolving() async {
+            let settings = settings()
+            let bridgeClient = SpacesDeviceAPIClient(settings: settings) { _ in
+                XCTFail("A spaces://terminal link must not trigger a resolveTerminalLink round trip.")
+                return SpacesDeviceAPIResponse(ok: false, message: "unexpected")
+            }
+            var openedLink: SpacesTerminalDeepLink?
+            let model = TerminalViewerModel(
+                session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { openedLink = $0 },
+                bridgeClient: bridgeClient)
+
+            await model.openTerminalLink("spaces://terminal/abc")
+
+            XCTAssertEqual(openedLink, SpacesTerminalDeepLink(sessionID: "abc"))
+            XCTAssertNil(model.linkPreview)
+            XCTAssertNil(model.linkPreviewErrorMessage)
+            XCTAssertNil(model.linkNotice)
+            XCTAssertFalse(model.isPreparingLinkPreview)
+        }
+
         func testOpenTerminalLinkIgnoresUnknownScheme() async {
             let settings = settings()
             let bridgeClient = SpacesDeviceAPIClient(settings: settings) { _ in
                 XCTFail("An unrecognized scheme must not trigger a resolveTerminalLink round trip.")
                 return SpacesDeviceAPIResponse(ok: false, message: "unexpected")
             }
-            let model = TerminalViewerModel(session: session(), settings: settings, onAuthenticationRequired: { _ in }, bridgeClient: bridgeClient)
+            let model = TerminalViewerModel(session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in }, bridgeClient: bridgeClient)
 
             await model.openTerminalLink("mailto:person@example.com")
 
@@ -901,7 +926,7 @@
                 }
             }
             let model = TerminalViewerModel(
-                session: session(), settings: settings, onAuthenticationRequired: { _ in }, bridgeClient: bridgeClient,
+                session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in }, bridgeClient: bridgeClient,
                 linkPreviewCacheDirectory: cacheRoot)
 
             let slowTask = Task { await model.openTerminalLink("slow.png") }
@@ -948,7 +973,7 @@
                     }
                 }
                 let model = TerminalViewerModel(
-                    session: session(), settings: settings, onAuthenticationRequired: { _ in }, bridgeClient: bridgeClient,
+                    session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in }, bridgeClient: bridgeClient,
                     linkPreviewCacheDirectory: cacheRoot)
 
                 await model.openTerminalLink("file.\(testCase.artifactKind.rawValue)")
@@ -978,7 +1003,7 @@
                 default: return SpacesDeviceAPIResponse(ok: false, message: "unexpected command")
                 }
             }
-            let model = TerminalViewerModel(session: session(), settings: settings, onAuthenticationRequired: { _ in }, bridgeClient: bridgeClient)
+            let model = TerminalViewerModel(session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in }, bridgeClient: bridgeClient)
 
             await model.openTerminalLink("huge.log")
 
@@ -1012,7 +1037,7 @@
                 }
             }
             let model = TerminalViewerModel(
-                session: session(), settings: settings, onAuthenticationRequired: { _ in }, bridgeClient: bridgeClient,
+                session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in }, bridgeClient: bridgeClient,
                 linkPreviewCacheDirectory: cacheRoot)
 
             await model.openTerminalLink("image.png")
@@ -1043,7 +1068,7 @@
                 }
             }
             let model = TerminalViewerModel(
-                session: session(), settings: settings, onAuthenticationRequired: { _ in }, bridgeClient: bridgeClient,
+                session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in }, bridgeClient: bridgeClient,
                 linkPreviewCacheDirectory: cacheRoot)
 
             await model.openTerminalLink("image.png")
@@ -1063,7 +1088,7 @@
             let bridgeClient = SpacesDeviceAPIClient(settings: settings) { _ in
                 SpacesDeviceAPIResponse(ok: false, message: "Only image and video files can be previewed on iOS.")
             }
-            let model = TerminalViewerModel(session: session(), settings: settings, onAuthenticationRequired: { _ in }, bridgeClient: bridgeClient)
+            let model = TerminalViewerModel(session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in }, bridgeClient: bridgeClient)
 
             await model.openTerminalLink("notes.txt")
 
@@ -1096,7 +1121,7 @@
                 }
             }
             let model = TerminalViewerModel(
-                session: session(), settings: settings, onAuthenticationRequired: { _ in }, bridgeClient: bridgeClient,
+                session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in }, bridgeClient: bridgeClient,
                 linkPreviewCacheDirectory: cacheRoot)
 
             let slowTask = Task { await model.openTerminalLink("slow.png") }
@@ -1140,7 +1165,7 @@
                 }
             }
             let model = TerminalViewerModel(
-                session: session(), settings: settings, onAuthenticationRequired: { _ in }, bridgeClient: bridgeClient,
+                session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in }, bridgeClient: bridgeClient,
                 linkPreviewCacheDirectory: cacheRoot)
 
             await model.openTerminalLink("first.png")
