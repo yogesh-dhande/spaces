@@ -72,6 +72,10 @@
 
         private let controlQueue: DispatchQueue
         private let stateStreamQueue: DispatchQueue
+        /// Orders every control-request input write (send text/bytes/paste, key) for this session and
+        /// spaces submit carriage returns so they read as lone Enter keystrokes; see
+        /// `TerminalControlInputSequencer`.
+        private let controlInputSequencer = TerminalControlInputSequencer()
         private let ptyDriver: HostManagedPTYTerminalSessionDriver
         private let outputDeliveryFence = GhosttyLinuxHandoffOutputDeliveryFence()
         private var controlServer: TerminalControlServer?
@@ -521,7 +525,7 @@
                     return TerminalControlResponse(ok: false, message: "Unable to encode paste input.", errorCode: .internalError)
                 }
                 markLocalOwnerCommandInputOutputResyncPending()
-                ptyDriver.sendRawBytes(payload)
+                enqueueControlInputWrite(payload)
                 return TerminalControlResponse(ok: true, message: "Sent input.")
             }
             guard let payload = request.inputPayload else {
@@ -529,31 +533,29 @@
             }
             markLocalOwnerCommandInputOutputResyncPending()
             // Submit-safe two-write split for text payloads; see GhosttyEmbeddedSessionHost for the
-            // paste-heuristic rationale and why the CR is deferred onto the per-session control queue. A
-            // bare Enter (empty text) and opaque byte payloads keep the single inline write.
+            // paste-heuristic rationale and TerminalControlInputSequencer for the ordering guarantee. A
+            // bare Enter (empty text) and opaque byte payloads keep the single (still sequenced) write.
             let isTextPayload = request.bytes == nil
             if request.appendNewline, isTextPayload, !payload.isEmpty {
-                ptyDriver.sendRawBytes(payload)
-                scheduleAgentSubmitCarriageReturn()
+                enqueueControlInputWrite(payload)
+                enqueueControlSubmitCarriageReturn()
             } else {
                 var bytes = payload
                 if request.appendNewline { bytes.append(0x0D) }
-                ptyDriver.sendRawBytes(bytes)
+                enqueueControlInputWrite(bytes)
             }
             return TerminalControlResponse(ok: true, message: "Sent input.")
         }
 
-        /// The gap between the text write and the carriage-return write of a submit-style send; see
-        /// `GhosttyEmbeddedSessionHost` for the agent-TUI paste-heuristic rationale.
-        private static let agentSubmitCarriageReturnDelay: DispatchTimeInterval = .milliseconds(100)
+        private func enqueueControlInputWrite(_ bytes: Data) {
+            controlInputSequencer.enqueueWrite { [weak self] in
+                await MainActor.run { self?.ptyDriver.sendRawBytes(bytes) }
+            }
+        }
 
-        /// Schedules the trailing carriage return of a submit-style text send on this session's serial
-        /// control queue, deferred so the agent TUI reads it as a distinct Enter keystroke rather than the
-        /// tail of a paste. Staying on `controlQueue` keeps it ordered after the text for this session; the
-        /// write hops back to the main actor where the PTY driver lives.
-        private func scheduleAgentSubmitCarriageReturn() {
-            controlQueue.asyncAfter(deadline: .now() + Self.agentSubmitCarriageReturnDelay) { [weak self] in
-                Self.runOnMainActorSynchronously { self?.ptyDriver.sendRawBytes(Data([0x0D])) }
+        private func enqueueControlSubmitCarriageReturn() {
+            controlInputSequencer.enqueueSubmitCarriageReturn { [weak self] in
+                await MainActor.run { self?.ptyDriver.sendRawBytes(Data([0x0D])) }
             }
         }
 
@@ -581,7 +583,7 @@
                 return TerminalControlResponse(ok: false, message: "Unsupported terminal key.", errorCode: .invalidArgument)
             }
             if bytes.contains(0x0D) { markLocalOwnerCommandInputOutputResyncPending() }
-            ptyDriver.sendRawBytes(Data(bytes))
+            enqueueControlInputWrite(Data(bytes))
             return TerminalControlResponse(ok: true, message: "Sent key.")
         }
 

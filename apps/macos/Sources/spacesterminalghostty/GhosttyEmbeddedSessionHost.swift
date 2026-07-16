@@ -265,6 +265,10 @@
 
         private let controlQueue: DispatchQueue
         private let stateStreamQueue: DispatchQueue
+        /// Orders every control-request input write (send text/bytes/paste, key) for this session and
+        /// spaces submit carriage returns so they read as lone Enter keystrokes; see
+        /// `TerminalControlInputSequencer`.
+        private let controlInputSequencer = TerminalControlInputSequencer()
         private let sessionDriver: GhosttyEmbeddedTerminalSessionDriver
         private lazy var rendererHostStorage = GhosttyHeadlessRendererHost(
             sessionDriver: sessionDriver, clearScreenAndScrollbackAction: { [weak self] in self?.clearScreenAndScrollback() ?? false })
@@ -874,9 +878,13 @@
                     return TerminalControlResponse(ok: false, message: "Paste input requires text payload.", errorCode: .invalidArgument)
                 }
                 if request.appendNewline { text.append("\n") }
-                markLocalOwnerCommandInputOutputResyncPending()
-                guard rendererHostStorage.sendTextAsPaste(text) else {
+                guard !text.isEmpty else {
                     return TerminalControlResponse(ok: false, message: "Missing input payload.", errorCode: .invalidArgument)
+                }
+                markLocalOwnerCommandInputOutputResyncPending()
+                let pasteText = text
+                controlInputSequencer.enqueueWrite { [weak self] in
+                    await MainActor.run { _ = self?.rendererHostStorage.sendTextAsPaste(pasteText) }
                 }
                 TerminalPerformance.logMetric(
                     "terminal_control_send", target: "session=\(launchConfiguration.sessionID)",
@@ -896,15 +904,16 @@
                 // and Claude Code accept LF or CR while Codex submits only on CR. An empty text with
                 // appendNewline is a bare Enter (e.g. answering a TUI dialog): send the CR immediately, there
                 // is nothing to separate. Byte payloads are opaque input rather than composer text, so they
-                // keep the single inline write.
+                // keep the single inline write. Writes land shortly after the response through the
+                // sequencer, which keeps the text+CR pair ordered against every later input write.
                 let isTextPayload = request.bytes == nil
                 if request.appendNewline, isTextPayload, !payload.isEmpty {
-                    rendererHostStorage.sendRawBytes(payload)
-                    scheduleAgentSubmitCarriageReturn()
+                    enqueueControlInputWrite(payload)
+                    enqueueControlSubmitCarriageReturn()
                 } else {
                     var bytes = payload
                     if request.appendNewline { bytes.append(0x0D) }
-                    rendererHostStorage.sendRawBytes(bytes)
+                    enqueueControlInputWrite(bytes)
                 }
                 TerminalPerformance.logMetric(
                     "terminal_control_send", target: "session=\(launchConfiguration.sessionID)",
@@ -913,19 +922,15 @@
             }
         }
 
-        /// The gap between the text write and the carriage-return write of a submit-style send. Agent TUIs
-        /// group a burst of bytes into a paste; separating the CR by this interval makes it register as a
-        /// distinct Enter keystroke that submits the composer.
-        private static let agentSubmitCarriageReturnDelay: DispatchTimeInterval = .milliseconds(100)
+        private func enqueueControlInputWrite(_ bytes: Data) {
+            controlInputSequencer.enqueueWrite { [weak self] in
+                await MainActor.run { self?.rendererHostStorage.sendRawBytes(bytes) }
+            }
+        }
 
-        /// Schedules the trailing carriage return of a submit-style text send on this session's serial
-        /// control queue. The handler runs on the shared main actor (every session's byte write funnels
-        /// through it), so a blocking sleep here would stall UI rendering and unrelated sessions; instead
-        /// the CR is deferred onto `controlQueue`, which keeps it ordered after the text for this session,
-        /// and the byte write hops back to the main actor where the renderer host lives.
-        private func scheduleAgentSubmitCarriageReturn() {
-            controlQueue.asyncAfter(deadline: .now() + Self.agentSubmitCarriageReturnDelay) { [weak self] in
-                Self.runOnMainActorSynchronously { self?.rendererHostStorage.sendRawBytes(Data([0x0D])) }
+        private func enqueueControlSubmitCarriageReturn() {
+            controlInputSequencer.enqueueSubmitCarriageReturn { [weak self] in
+                await MainActor.run { self?.rendererHostStorage.sendRawBytes(Data([0x0D])) }
             }
         }
 
@@ -946,7 +951,7 @@
                 return TerminalControlResponse(ok: false, message: "Unsupported terminal key.", errorCode: .invalidArgument)
             }
             if bytes.contains(0x0D) { markLocalOwnerCommandInputOutputResyncPending() }
-            rendererHostStorage.sendRawBytes(Data(bytes))
+            enqueueControlInputWrite(Data(bytes))
             TerminalPerformance.logMetric(
                 "terminal_control_key", target: "session=\(launchConfiguration.sessionID)",
                 elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true, detail: "key=\(key)")
