@@ -861,8 +861,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         networkEnvironment: [String: String] = ProcessInfo.processInfo.environment,
         builtInTerminalSessionTerminator: WorkspaceOrchestrator.BuiltInTerminalSessionTerminator? = nil,
         builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher? = nil,
-        agentSessionKiller: (@Sendable (String) throws -> Bool)? = nil,
-        onRestartRequested: (@Sendable () -> Void)? = nil,
+        agentSessionKiller: (@Sendable (String) throws -> Bool)? = nil, onRestartRequested: (@Sendable () -> Void)? = nil,
         terminalLinkTransferAuthorizationTTL: TimeInterval = SpacesDeviceAPIServer.defaultTerminalLinkTransferAuthorizationTTL,
         overviewLoaderForTesting: (@Sendable (SpacesDeviceClientApp?) throws -> SpacesDeviceOverviewPayload)? = nil,
         agentHookStatusLoader: @escaping AgentHookStatusLoader = { AgentHookInstaller.status() },
@@ -1929,7 +1928,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         guard let project = try store.project(id: request.projectID) else {
             return SpacesDeviceAPIResponse(ok: false, message: "Project not found.", errorCode: .notFound)
         }
-        try orchestrator.removeProject(dir: project.dir)
+        try orchestrator.removeProject(id: project.id)
         return try refreshedMutationResponse(context: context, message: "Deleted project '\(project.name)'.")
     }
 

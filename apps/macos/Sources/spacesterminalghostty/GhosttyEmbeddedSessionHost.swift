@@ -878,14 +878,10 @@
                     return TerminalControlResponse(ok: false, message: "Paste input requires text payload.", errorCode: .invalidArgument)
                 }
                 if request.appendNewline { text.append("\n") }
-                guard !text.isEmpty else {
-                    return TerminalControlResponse(ok: false, message: "Missing input payload.", errorCode: .invalidArgument)
-                }
+                guard !text.isEmpty else { return TerminalControlResponse(ok: false, message: "Missing input payload.", errorCode: .invalidArgument) }
                 markLocalOwnerCommandInputOutputResyncPending()
                 let pasteText = text
-                controlInputSequencer.enqueueWrite { [weak self] in
-                    await MainActor.run { _ = self?.rendererHostStorage.sendTextAsPaste(pasteText) }
-                }
+                controlInputSequencer.enqueueWrite { [weak self] in await MainActor.run { _ = self?.rendererHostStorage.sendTextAsPaste(pasteText) } }
                 TerminalPerformance.logMetric(
                     "terminal_control_send", target: "session=\(launchConfiguration.sessionID)",
                     elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true, detail: "bytes=\(text.utf8.count)")
@@ -923,9 +919,7 @@
         }
 
         private func enqueueControlInputWrite(_ bytes: Data) {
-            controlInputSequencer.enqueueWrite { [weak self] in
-                await MainActor.run { self?.rendererHostStorage.sendRawBytes(bytes) }
-            }
+            controlInputSequencer.enqueueWrite { [weak self] in await MainActor.run { self?.rendererHostStorage.sendRawBytes(bytes) } }
         }
 
         private func enqueueControlSubmitCarriageReturn() {
@@ -1454,9 +1448,18 @@
             Task { [weak self] in
                 if flushSchedule == .delayed { do { try await Task.sleep(for: Self.incomingOutputCoalescingInterval) } catch { return } }
                 guard let self else { return }
-                let drainedOutput = incomingOutputBuffer.drain()
-                guard !drainedOutput.data.isEmpty else { return }
-                _ = await MainActor.run { self.appendOutput(drainedOutput.data, interactiveResync: drainedOutput.isInteractive) }
+                // Drain ON the main actor so drain and file append form one critical
+                // section. Every other drain (clearScreenAndScrollback's transcript
+                // mutation, the quiesce flush) runs on the main actor too, so this keeps
+                // output.log byte order identical to buffer order. Draining here off the
+                // main actor would let a main-actor drain+append (e.g. a clear) write
+                // first, landing these earlier bytes AFTER the clear in the transcript —
+                // a handoff replay would then resurrect the cleared screen.
+                await MainActor.run {
+                    let drainedOutput = self.incomingOutputBuffer.drain()
+                    guard !drainedOutput.data.isEmpty else { return }
+                    _ = self.appendOutput(drainedOutput.data, interactiveResync: drainedOutput.isInteractive)
+                }
             }
         }
 
