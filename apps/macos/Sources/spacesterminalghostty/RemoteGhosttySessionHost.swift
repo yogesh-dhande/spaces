@@ -48,6 +48,13 @@
             case unavailable
         }
         private var endedScrollbackState: EndedScrollbackState = .idle
+        /// Invalidates in-flight transcript loads across a relaunch. A fetch started for one ended run
+        /// (`.loading`) can still be resolving when the session relaunches and exits again; the second
+        /// exit starts a fresh `.loading` in the same enum case, so an enum-only guard would install the
+        /// first run's transcript/model under the second run. `discardEndedScrollbackIfActive` bumps this,
+        /// and every post-suspension check in `beginLoadingEndedScrollbackModel` requires an unchanged
+        /// generation before applying its result.
+        private var endedScrollbackGeneration: UInt64 = 0
         /// Monotonic local revision for replay frames, so the mirror's frame-dedupe never drops a
         /// scrolled viewport that happens to match a prior revision.
         private var endedScrollbackRevision: UInt64 = 0
@@ -127,9 +134,13 @@
                 container.layoutSubtreeIfNeeded()
             }
             // Same rule as applyRemoteState: while the ended-session replay is showing a scrolled
-            // viewport, a re-attach must not clobber it with the daemon's final frame.
+            // viewport, a re-attach must not clobber it with the daemon's final frame. But if the
+            // surface was released and recreated between detach and this attach, repaint the replay
+            // viewport so the recreated surface is not left blank.
             if !isEndedScrollbackReplayActive {
                 terminalView.update(frame: currentRenderFrameForRenderUpdate(), renderStateKey: currentRenderStateKey())
+            } else {
+                repaintEndedReplayViewportIfSurfaceEmpty()
             }
             if isInteractive && mode == .owner { sendCurrentViewportResizeIfNeeded(force: true) }
         }
@@ -167,9 +178,12 @@
 
         public func requestSurfaceRefresh() {
             requestDirectStateRefresh(reason: TerminalRemoteSessionStateReason.stateChange)
-            // Same rule as applyRemoteState: a refresh must not clobber a scrolled ended viewport.
+            // Same rule as applyRemoteState: a refresh must not clobber a scrolled ended viewport, but
+            // it must repaint the replay when the surface was released and recreated underneath it.
             if !isEndedScrollbackReplayActive {
                 terminalView.update(frame: currentRenderFrameForRenderUpdate(), renderStateKey: currentRenderStateKey())
+            } else {
+                repaintEndedReplayViewportIfSurfaceEmpty()
             }
         }
 
@@ -403,6 +417,10 @@
             if isInteractiveRuntimeStateForControl() { discardEndedScrollbackIfActive() }
             if !isEndedScrollbackReplayActive, frameForUpdate != nil || !terminalView.hasRenderedSurfaceContent {
                 terminalView.update(frame: frameForUpdate, renderStateKey: currentRenderStateKey())
+            } else if isEndedScrollbackReplayActive {
+                // The replay guard above suppresses this state's frame; repaint the replay viewport when
+                // the state update arrives on a surface that was released and recreated underneath it.
+                repaintEndedReplayViewportIfSurfaceEmpty()
             }
             let applyMS = TerminalPerformance.elapsedMS(since: applyStartedAt)
             if attachedMode == .owner { sendCurrentViewportResizeIfNeeded(force: false) }
@@ -599,17 +617,24 @@
             let appearance: ThemeAppearance = terminalView.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? .dark : .light
             let theme = ActiveTheme.descriptor.terminal(for: appearance)
             let maxBytes = TerminalScrollbackBudget.defaultMaxBytes
+            // Pin this load to the current run. If the session relaunches and exits again while the
+            // fetch is in flight, `discardEndedScrollbackIfActive` bumps the generation, so the checks
+            // below reject this stale result instead of installing it under the newer run's `.loading`.
+            let generation = endedScrollbackGeneration
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 let transcript: Data
                 do { transcript = try await transcriptProvider(maxBytes) } catch {
                     // A transport failure (timeout, daemon restarting, remote device offline) is
                     // transient: return to idle so the next scroll gesture retries the fetch.
-                    if case .loading = self.endedScrollbackState { self.endedScrollbackState = .idle }
+                    if generation == self.endedScrollbackGeneration, case .loading = self.endedScrollbackState {
+                        self.endedScrollbackState = .idle
+                    }
                     return
                 }
-                // A relaunch (session went interactive again) discards the loading state mid-fetch.
-                guard case .loading = self.endedScrollbackState else { return }
+                // A relaunch (session went interactive again) discards the loading state mid-fetch,
+                // bumping the generation; a stale-run result is rejected here.
+                guard generation == self.endedScrollbackGeneration, case .loading = self.endedScrollbackState else { return }
                 guard !transcript.isEmpty else {
                     // An empty transcript is definitive — there is nothing to replay.
                     self.endedScrollbackState = .unavailable
@@ -618,7 +643,7 @@
                 let model = await Task.detached(priority: .userInitiated) {
                     TerminalEndedSessionScrollbackModel(columns: columns, rows: rows, theme: theme, transcript: transcript)
                 }.value
-                guard case .loading(let pendingDeltaRows) = self.endedScrollbackState else { return }
+                guard generation == self.endedScrollbackGeneration, case .loading(let pendingDeltaRows) = self.endedScrollbackState else { return }
                 guard let model else {
                     self.endedScrollbackState = .unavailable
                     return
@@ -643,12 +668,36 @@
             }
         }
 
+        /// Repaints the ended-replay viewport after the mirror surface was released and recreated
+        /// (the pane controller releases the surface before reattaching an ended viewer). The
+        /// replay guard suppresses live-frame repaints, so without this the recreated surface
+        /// stays blank until the next scroll gesture.
+        private func repaintEndedReplayViewportIfSurfaceEmpty() {
+            guard !terminalView.hasRenderedSurfaceContent else { return }
+            switch endedScrollbackState {
+            case .ready(let model):
+                endedScrollbackRevision &+= 1
+                let frame = GhosttyRenderFrame(
+                    sessionRevision: endedScrollbackRevision, ownerEpoch: latestState?.renderOwnerEpoch ?? 0,
+                    snapshot: model.currentSnapshot())
+                terminalView.update(frame: frame, renderStateKey: currentRenderStateKey())
+            case .loading:
+                // No replay model yet — show the daemon's final frame until the load completes.
+                terminalView.update(frame: currentRenderFrameForRenderUpdate(), renderStateKey: currentRenderStateKey())
+            case .idle, .unavailable:
+                break
+            }
+        }
+
         /// Resets ended-scrollback state when the session becomes interactive again (a relaunch): the
         /// live render takes over, so the model is dropped (freeing its vt session), the accumulated
         /// scroll delta is reset, and a previous `.unavailable` verdict is cleared — the relaunched
-        /// session will write a fresh transcript, so a later exit must get a fresh replay attempt.
+        /// session will write a fresh transcript, so a later exit must get a fresh replay attempt. The
+        /// generation bump invalidates any transcript load still in flight for the run being discarded,
+        /// so its result cannot install under a later run's `.loading`.
         private func discardEndedScrollbackIfActive() {
             if case .idle = endedScrollbackState { return }
+            endedScrollbackGeneration &+= 1
             endedScrollbackState = .idle
             endedScrollDeltaNormalizer = TerminalScrollDeltaNormalizer()
         }
