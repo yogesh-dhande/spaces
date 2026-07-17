@@ -530,7 +530,7 @@ final class AgentNotificationEngineTests: XCTestCase {
         XCTAssertTrue(try store.pendingAgentNotifications(subscriberTerminalSessionID: "orch").isEmpty)
     }
 
-    func testExitNotificationSurvivesAgentRowDeletionAndCascadedEdge() throws {
+    func testExitNotificationSurvivesAgentRowDeletionAndDroppedEdge() throws {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
@@ -542,12 +542,13 @@ final class AgentNotificationEngineTests: XCTestCase {
             workspaceID: workspace.id, provider: .spaces, label: "Codex CLI", terminalTrackingID: "child-session", status: .spinning)
         try store.insertAgentSubscription(subscriberTerminalSessionID: "sub-session", agentSessionID: child.id, createdAt: "t")
 
-        // Chokepoint order: render/enqueue the exit line, then let handleAgentExit delete the ad-hoc row.
+        // Chokepoint order: render/enqueue the exit line, then let handleAgentExit delete the ad-hoc row —
+        // whose delete branch drops the inbound edge explicitly (the FK is RESTRICT, not CASCADE).
         try engine.childDidTransition(agent: child, transition: .exited)
         _ = try orchestrator.handleAgentExit(child)
 
         XCTAssertTrue(try store.agentWindows(workspaceID: workspace.id).first(where: { $0.id == child.id }) == nil, "Ad-hoc row is deleted on exit.")
-        XCTAssertTrue(try store.agentSubscriptions(agentSessionID: child.id).isEmpty, "The subscription edge cascades away with the row.")
+        XCTAssertTrue(try store.agentSubscriptions(agentSessionID: child.id).isEmpty, "The subscription edge is dropped explicitly with the row.")
         let pending = try store.pendingAgentNotifications(subscriberTerminalSessionID: "sub-session")
         XCTAssertEqual(pending.count, 1, "The pending line has no FK, so it outlives the deleted agent row.")
         let expectedExitBlock = """
@@ -743,6 +744,60 @@ final class AgentNotificationEngineTests: XCTestCase {
 
         // term-B subscribing to agentA (edge term-B → term-A) would close the cycle: rejected.
         XCTAssertThrowsError(try orchestrator.validateAgentSubscription(subscriberTerminalSessionID: "term-B", agentSessionID: agentA.id))
+    }
+
+    /// The subscribe contract requires hook evidence: a never-signaled ad-hoc foreground-detection row is
+    /// pure detection state the reconciler may silently demote, so it is unwatchable until it has emitted a
+    /// real hook signal. `validateAgentSubscription` rejects it with a retry-after-signal error, then admits
+    /// it once a signal lands.
+    func testSubscribeToNeverSignaledDetectionRowIsRejectedUntilSignal() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        let sessionID = "detected-session"
+        let detectionID = orchestrator.adHocDetectedAgentID(sessionID: sessionID)
+        try store.upsertAgentWindow(
+            AgentWindowRecord(
+                id: detectionID, workspaceID: workspace.id, provider: .spaces, label: "Codex",
+                terminalTarget: TerminalTargetRecord(runtimeTargetID: nil, trackingID: sessionID), sessionKey: nil, status: .idle, createdAt: "now",
+                updatedAt: "now"))
+
+        // Never-signaled detection row: subscribing is rejected and points the caller at retrying post-signal.
+        XCTAssertThrowsError(try orchestrator.validateAgentSubscription(subscriberTerminalSessionID: "watcher", agentSessionID: detectionID)) { error in
+            XCTAssertTrue(
+                error.localizedDescription.contains("has not emitted its first hook signal"),
+                "The error must tell the caller to retry after the agent signals, got: \(error.localizedDescription)")
+        }
+
+        // A real hook signal lands (a `spaces_agent_signal`-sourced event); the row is now watchable.
+        try store.appendAgentSessionEvent(
+            agentSessionID: detectionID, eventType: "working", source: "spaces_agent_signal", message: nil, createdAt: "now")
+        try orchestrator.validateAgentSubscription(subscriberTerminalSessionID: "watcher", agentSessionID: detectionID)
+    }
+
+    /// A pre-RESTRICT database with existing `agent_subscriptions` rows migrates forward without losing
+    /// them, ends with the FK as `ON DELETE RESTRICT`, and then enforces the chokepoint: a bypass delete of
+    /// a watched agent row fails loudly instead of silently stranding the watcher's notice.
+    func testMigrationToRestrictKeepsSubscriptionsAndEnforcesChokepoint() throws {
+        let dir = try makeTempDirectory()
+        let dbPath = dir.appendingPathComponent("v2-restrict.db").path
+        try createV2Database(at: dbPath, workspaceID: "workspace-1", agentID: "agent-1", terminalSessionID: "child-session")
+
+        // Opening the store runs the v2→…→current migrations, including the v6→v7 agent_subscriptions rebuild.
+        let store = try SQLiteStore(path: dbPath)
+
+        // The seeded subscription row survives the table rebuild.
+        XCTAssertEqual(
+            try store.agentSubscriptions(agentSessionID: "agent-1").map(\.subscriberTerminalSessionID), ["watcher-terminal"],
+            "The subscription row is carried through the RESTRICT rebuild intact.")
+
+        // The rebuilt foreign key is ON DELETE RESTRICT.
+        let onDelete = try store.queryRows(sql: "SELECT \"on_delete\" FROM pragma_foreign_key_list('agent_subscriptions')").first?.first
+        XCTAssertEqual(onDelete, "RESTRICT", "The migrated agent_subscriptions FK is ON DELETE RESTRICT.")
+
+        // Enforcement: deleting a watched agent row directly (bypassing the chokepoint) is rejected.
+        XCTAssertThrowsError(try store.deleteAgentWindow(id: "agent-1"), "A watched row deleted outside the chokepoint must fail under RESTRICT.")
+        XCTAssertEqual(try store.agentSubscriptions(agentSessionID: "agent-1").count, 1, "The blocked delete left the edge intact.")
     }
 
     func testMigrationFromV2AddsCoalescingPendingNotifications() throws {
@@ -950,6 +1005,8 @@ final class AgentNotificationEngineTests: XCTestCase {
             );
             INSERT INTO agent_sessions(id, workspace_id, provider, label, status, terminal_session_id, created_at, updated_at)
             VALUES ('\(agentID)', '\(workspaceID)', 'spaces', 'X', 'spinning', '\(terminalSessionID)', 'now', 'now');
+            INSERT INTO agent_subscriptions(subscriber_terminal_session_id, agent_session_id, created_at)
+            VALUES ('watcher-terminal', '\(agentID)', 'now');
             """
         var errorMessage: UnsafeMutablePointer<CChar>?
         guard sqlite3_exec(db, sql, nil, nil, &errorMessage) == SQLITE_OK else {

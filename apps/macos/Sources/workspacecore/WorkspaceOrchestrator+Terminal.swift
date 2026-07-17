@@ -138,19 +138,15 @@ extension WorkspaceOrchestrator {
     /// down that terminal's own watch state. Every caller terminates the terminal named by `sessionID`
     /// immediately before calling this — a user-closed ad-hoc shell (`stopAdHocBuiltInTerminalSession`), a
     /// removed ad-hoc terminal (`removeAdHocBuiltInTerminalSession`), or the not-yet-signaled `agent kill`
-    /// fallback (`terminateSpawnedAgentTerminalSession`) — so the terminal will never receive a
-    /// notification again. Runs the same notify-before-delete flow the coding-agent stop chokepoint uses:
-    /// each watched agent's subscribers are told it `exited` BEFORE its row is deleted (deletion cascades
-    /// the subscription edges away; the rendered pending line has no FK and survives), then
-    /// `subscriberDidExit` drops this terminal's own inbound queue and outgoing local/remote watch edges.
-    /// `subscriberDidExit` runs even when no agent row matched, because the destroyed terminal may have
-    /// been a SUBSCRIBER of other agents without owning an agent row of its own.
+    /// fallback (`terminateSpawnedAgentTerminalSession`) — so each matching row is destroyed through the
+    /// finalization chokepoint (terminal already gone, so no re-termination): its subscribers are told it
+    /// `exited` before the row is deleted, and the terminal's own inbound queue and outgoing watch edges
+    /// are torn down. A final `subscriberDidExit` runs even when no agent row matched, because the
+    /// destroyed terminal may have been a SUBSCRIBER of other agents without owning an agent row of its own.
     @discardableResult func deleteAgentRows(forBuiltInTerminalSession sessionID: String, workspaceID: String) throws -> Int {
         let matchingAgents = try store.agentWindows(workspaceID: workspaceID).filter { builtInTerminalSessionID(for: $0) == sessionID }
-        let engine = makeAgentNotificationEngine()
-        for agent in matchingAgents { try engine.childDidTransition(agent: agent, transition: .exited) }
-        for agent in matchingAgents { try store.deleteAgentWindow(id: agent.id) }
-        try engine.subscriberDidExit(subscriberTerminalSessionID: sessionID)
+        for agent in matchingAgents { try finalizeAgentRow(agent, reason: .destroyed(terminateTerminalSession: false)) }
+        try makeAgentNotificationEngine().subscriberDidExit(subscriberTerminalSessionID: sessionID)
         return matchingAgents.count
     }
 

@@ -192,14 +192,22 @@ extension SQLiteStore {
     }
 
     /// Drops every watch edge where `subscriberTerminalSessionID` is the SUBSCRIBER — the outgoing-edge
-    /// counterpart to the FK cascade a deleted agent row gets automatically for its INCOMING edges.
+    /// counterpart to explicit inbound-edge deletion for a terminated agent row.
     /// `agent_subscriptions` carries no foreign key on `subscriber_terminal_session_id` (only on the
     /// watched `agent_session_id`), so when a subscriber terminal's own agent exits, its own watches of
     /// OTHER agents survive the exit unless dropped here explicitly. Used on subscriber-exit paths
-    /// (`AgentNotificationEngine.subscriberDidExit`), never on the agent-exit path (which already gets
-    /// its incoming edges cascaded away by the row delete).
+    /// (`AgentNotificationEngine.subscriberDidExit`).
     public func deleteAgentSubscriptions(subscriberTerminalSessionID: String) throws {
         try execute(sql: "DELETE FROM agent_subscriptions WHERE subscriber_terminal_session_id = ?", bindings: [subscriberTerminalSessionID])
+    }
+
+    /// Drops every INBOUND watch edge to an agent row — the edges where `agentSessionID` is the watched
+    /// target. `agent_subscriptions.agent_session_id` is `ON DELETE RESTRICT`, so the row delete no longer
+    /// cascades these away; the termination chokepoint (`WorkspaceOrchestrator.finalizeAgentRow`) calls
+    /// this to drop them explicitly AFTER notifying the subscribers, so the delete then succeeds. A delete
+    /// that skips the chokepoint leaves these edges in place and RESTRICT makes it fail loudly.
+    public func deleteAgentSubscriptions(agentSessionID: String) throws {
+        try execute(sql: "DELETE FROM agent_subscriptions WHERE agent_session_id = ?", bindings: [agentSessionID])
     }
 
     /// Subscribers watching a given agent session (used when that agent changes state).

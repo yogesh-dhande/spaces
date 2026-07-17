@@ -923,16 +923,10 @@ public final class WorkspaceOrchestrator {
         try store.deleteRunningProcesses(workspaceID: workspace.id)
         try store.deleteWindows(workspaceID: workspace.id)
         // Stopping a workspace ends every coding agent in it. A subscriber watching one of these agents may
-        // live in ANOTHER workspace, so tell each agent's subscribers it exited BEFORE the bulk row delete
-        // cascades the subscription edges away, then tear down each stopped agent terminal's own watch state.
-        let agentNotificationEngine = makeAgentNotificationEngine()
-        for agent in workspaceAgentWindows { try agentNotificationEngine.childDidTransition(agent: agent, transition: .exited) }
-        try store.deleteAgentWindows(workspaceID: workspace.id)
-        for agent in workspaceAgentWindows {
-            if let sessionID = agent.terminalTrackingID, !sessionID.isEmpty {
-                try agentNotificationEngine.subscriberDidExit(subscriberTerminalSessionID: sessionID)
-            }
-        }
+        // live in ANOTHER workspace, so each is destroyed through the finalization chokepoint (its terminal
+        // was already terminated above): the child's subscribers are told it exited before its row is
+        // deleted, and the stopped terminal's own watch state is torn down.
+        for agent in workspaceAgentWindows { try finalizeAgentRow(agent, reason: .destroyed(terminateTerminalSession: false)) }
         try markWorkspaceStopped(workspace)
         return WorkspaceStopOutcome(skippedStopScriptBecauseWorkspaceDirectoryMissing: skippedStopScriptBecauseWorkspaceDirectoryMissing)
     }

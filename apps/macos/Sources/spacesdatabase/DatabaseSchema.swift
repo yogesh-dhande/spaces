@@ -7,20 +7,24 @@ import Foundation
 #endif
 
 public enum DatabaseSchema {
-    public static let currentVersion = 6
+    public static let currentVersion = 7
 
     /// Adds the coding-agent orchestration surface: an explicit `note` on each agent session and the
     /// `agent_subscriptions` graph. The subscriber key is a terminal session id (a subscriber may be a
-    /// plain terminal with no agent row), and the target is the agent session id so deleting an agent
-    /// row cascades its inbound subscriptions away. Named separately so both this step and the
-    /// fresh-schema SQL share one definition and can never drift apart.
+    /// plain terminal with no agent row), and the target is the agent session id. The foreign key is
+    /// `ON DELETE RESTRICT`: an agent row's inbound subscriptions are NOT cascaded away on delete but
+    /// dropped explicitly by the single termination chokepoint (`WorkspaceOrchestrator.finalizeAgentRow`)
+    /// after it has notified those subscribers the child exited. RESTRICT then makes any delete that
+    /// bypasses the chokepoint fail loudly instead of silently stranding a watcher's notice. Named
+    /// separately so both the fresh-schema SQL and the v6→v7 rebuild step share one definition and can
+    /// never drift apart.
     static let agentSubscriptionsSQL = """
             CREATE TABLE IF NOT EXISTS agent_subscriptions (
               subscriber_terminal_session_id TEXT NOT NULL,
               agent_session_id TEXT NOT NULL,
               created_at TEXT NOT NULL,
               PRIMARY KEY (subscriber_terminal_session_id, agent_session_id),
-              FOREIGN KEY (agent_session_id) REFERENCES agent_sessions(id) ON DELETE CASCADE
+              FOREIGN KEY (agent_session_id) REFERENCES agent_sessions(id) ON DELETE RESTRICT
             );
         """
 
@@ -88,11 +92,21 @@ public enum DatabaseSchema {
     public static let migrationSteps: [DatabaseMigrationStep] = [
         DatabaseMigrationStep(fromVersion: 1, toVersion: 2, description: "Add agent_sessions.note and agent_subscriptions", requiresBackup: true) {
             handle in
+            // Frozen v2 snapshot of agent_subscriptions with its original `ON DELETE CASCADE`. The latest
+            // shape (shared `agentSubscriptionsSQL`) switched this foreign key to `ON DELETE RESTRICT` at
+            // v7; creating the latest shape here would let a v1-origin database skip the v6→v7 rebuild that
+            // every v2-through-v6-origin database applies, so this step recreates the shape v2 defined.
             try migrationExecuteBatch(
                 handle,
                 sql: """
                     ALTER TABLE agent_sessions ADD COLUMN note TEXT;
-                    \(agentSubscriptionsSQL)
+                    CREATE TABLE IF NOT EXISTS agent_subscriptions (
+                      subscriber_terminal_session_id TEXT NOT NULL,
+                      agent_session_id TEXT NOT NULL,
+                      created_at TEXT NOT NULL,
+                      PRIMARY KEY (subscriber_terminal_session_id, agent_session_id),
+                      FOREIGN KEY (agent_session_id) REFERENCES agent_sessions(id) ON DELETE CASCADE
+                    );
                     """)
         },
         // Frozen snapshot of the table as v3 defined it (no `transition` column). A migration step
@@ -125,6 +139,30 @@ public enum DatabaseSchema {
         },
         DatabaseMigrationStep(fromVersion: 5, toVersion: 6, description: "Add agent_remote_watch_baselines", requiresBackup: true) { handle in
             try migrationExecuteBatch(handle, sql: agentRemoteWatchBaselinesSQL)
+        },
+        // Rebuild agent_subscriptions with `ON DELETE RESTRICT` (was CASCADE) so a delete that bypasses the
+        // termination chokepoint fails loudly instead of silently stranding a watcher's exit notice.
+        // SQLite cannot alter a foreign key in place, so the table is recreated and every row copied. The
+        // copy runs with foreign_keys ON inside the migration transaction, which is safe here: each copied
+        // row already referenced a live agent_sessions row, and no table references agent_subscriptions, so
+        // the drop/rename touches nothing else.
+        DatabaseMigrationStep(fromVersion: 6, toVersion: 7, description: "Rebuild agent_subscriptions FK as ON DELETE RESTRICT", requiresBackup: true)
+        { handle in
+            try migrationExecuteBatch(
+                handle,
+                sql: """
+                    CREATE TABLE agent_subscriptions_new (
+                      subscriber_terminal_session_id TEXT NOT NULL,
+                      agent_session_id TEXT NOT NULL,
+                      created_at TEXT NOT NULL,
+                      PRIMARY KEY (subscriber_terminal_session_id, agent_session_id),
+                      FOREIGN KEY (agent_session_id) REFERENCES agent_sessions(id) ON DELETE RESTRICT
+                    );
+                    INSERT INTO agent_subscriptions_new (subscriber_terminal_session_id, agent_session_id, created_at)
+                      SELECT subscriber_terminal_session_id, agent_session_id, created_at FROM agent_subscriptions;
+                    DROP TABLE agent_subscriptions;
+                    ALTER TABLE agent_subscriptions_new RENAME TO agent_subscriptions;
+                    """)
         },
     ]
 

@@ -6,7 +6,6 @@ extension WorkspaceOrchestrator {
     @discardableResult public func reconcileTerminalForegroundAgentClassifications() throws -> Bool {
         let liveSessions = try TerminalSessionCatalog.listLiveSessions()
         let liveSessionIDs = Set(liveSessions.map(\.sessionID))
-        let engine = makeAgentNotificationEngine()
         var didMutate = false
         for session in liveSessions where session.launchConfiguration.backend == .ghosttyEmbedded {
             let sessionID = session.sessionID
@@ -14,27 +13,25 @@ extension WorkspaceOrchestrator {
             if builtInTerminalSessionHasConfiguredOwner(ownership) { continue }
             guard let workspace = try workspaceForBuiltInTerminalSession(sessionID: sessionID, ownership: ownership) else { continue }
             if let existingRow = try store.agentWindow(workspaceID: workspace.id, terminalTrackingID: sessionID) {
-                // A live session that already has a row is normally left alone, but an ad-hoc detected
-                // agent whose foreground genuinely reverted to its own plain shell sheds its ad-hoc
-                // classification here — the one place a live session does so. How it sheds it depends on
-                // hook evidence: a row that never recorded a lifecycle signal is pure detection state and
-                // is silently demoted back to a plain terminal, but a row that HAS signaled (hooks landed
-                // after detection created the row and updated it in place) carries lifecycle history and
-                // possibly subscribers, so it must run the full hookless-exit flow — the exact ordering the
-                // codex/opencode session-end sweep uses (`reconcileExitedSessionBackedAgentRows`) and the
-                // daemon's `.exit` signal case use: render/enqueue the `exited` notice to subscribers
-                // BEFORE the row is finalized (deletion would cascade the edges away; the pending row has
-                // no FK and survives), reuse `handleAgentExit` for the finalize decision (with the terminal
-                // still live it records `.exited`, not a silent delete), then tear down the reverted
-                // terminal's own standing as a subscriber of other agents.
+                // Only a still-live-agent row is a candidate for shedding its ad-hoc classification. A row
+                // already finalized to `.done`/`.exited` (a signaled ad-hoc that recorded `.exited` here on
+                // a previous pass, its terminal still at the shell) is skipped so it is never re-entered and
+                // its subscribers never get a duplicate exited notice — the outer gate mirrored by the
+                // chokepoint's own idempotency gate.
+                switch existingRow.status {
+                case .idle, .spinning, .waiting: break
+                case .done, .exited: continue
+                }
+                // A live session that already has a live-agent row is normally left alone, but an ad-hoc
+                // detected agent whose foreground genuinely reverted to its own plain shell sheds its
+                // ad-hoc classification here — the one place a live session does so — through the
+                // finalization chokepoint. With the terminal still live, `handleAgentExit` demotes a
+                // never-signaled detection row (pure detection state, no subscribers) and records `.exited`
+                // on a signaled one (carrying lifecycle history and possibly subscribers), and the
+                // chokepoint notifies the subscribers and tears down the reverted terminal's own watch
+                // state either way.
                 if isAdHocDetectedForegroundAgent(existingRow), foregroundHasRevertedToPlainShell(session) {
-                    if try agentRowHasRecordedHookSignal(existingRow) {
-                        try engine.childDidTransition(agent: existingRow, transition: .exited)
-                        try handleAgentExit(existingRow, eventType: "exit", eventSource: "foreground_reconciler")
-                        try engine.subscriberDidExit(subscriberTerminalSessionID: sessionID)
-                    } else {
-                        try demoteAdHocDetectedForegroundAgent(existingRow)
-                    }
+                    try finalizeAgentRow(existingRow, reason: .exited(eventType: "exit", eventSource: "foreground_reconciler", environmentKeys: nil))
                     didMutate = true
                 }
                 continue
@@ -44,7 +41,7 @@ extension WorkspaceOrchestrator {
                 didMutate = true
             }
         }
-        if try reconcileExitedSessionBackedAgentRows(excludingLiveSessionIDs: liveSessionIDs, engine: engine) { didMutate = true }
+        if try reconcileExitedSessionBackedAgentRows(excludingLiveSessionIDs: liveSessionIDs) { didMutate = true }
         return didMutate
     }
 
@@ -155,9 +152,7 @@ extension WorkspaceOrchestrator {
     /// Only rows still in a live-agent status are swept, so a row already finalized here — deleted
     /// (spawned/ad-hoc) or `.done` (configured launcher) — or already `.exited` from a real signal is
     /// never re-processed and its subscribers never get a duplicate exited notice.
-    @discardableResult func reconcileExitedSessionBackedAgentRows(excludingLiveSessionIDs liveSessionIDs: Set<String>, engine: AgentNotificationEngine)
-        throws -> Bool
-    {
+    @discardableResult func reconcileExitedSessionBackedAgentRows(excludingLiveSessionIDs liveSessionIDs: Set<String>) throws -> Bool {
         var didMutate = false
         for project in try store.projects() {
             for workspace in try store.workspaces(projectID: project.id, includeArchived: false) {
@@ -179,9 +174,7 @@ extension WorkspaceOrchestrator {
                     guard let paths = try? TerminalSessionPaths.forSession(id: sessionID),
                         let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths), !runtimeState.state.isInteractive
                     else { continue }
-                    try engine.childDidTransition(agent: agent, transition: .exited)
-                    try handleAgentExit(agent, eventType: "exit", eventSource: "foreground_reconciler")
-                    try engine.subscriberDidExit(subscriberTerminalSessionID: sessionID)
+                    try finalizeAgentRow(agent, reason: .exited(eventType: "exit", eventSource: "foreground_reconciler", environmentKeys: nil))
                     didMutate = true
                 }
             }
@@ -323,7 +316,10 @@ extension WorkspaceOrchestrator {
             guard prunedTerminalTrackingKeys.contains(trackingKey) else { continue }
             if runningProcessTrackingKeys.contains(trackingKey) { continue }
             if try spacesAgentRecordIsConfiguredLauncher(workspaceID: workspaceID, record: agent) { continue }
-            try store.deleteAgentWindow(id: agent.id)
+            // The backing terminal is already gone (its tracking key was pruned), so destroy the row
+            // through the chokepoint without terminating anything: it still owes the child's subscribers an
+            // exited notice and must tear down the orphaned terminal's own watch state.
+            try finalizeAgentRow(agent, reason: .destroyed(terminateTerminalSession: false))
             pruned += 1
         }
         return pruned
@@ -357,6 +353,15 @@ extension WorkspaceOrchestrator {
     public func validateAgentSubscription(subscriberTerminalSessionID: String, agentSessionID: String) throws {
         guard let target = try store.agentWindow(id: agentSessionID) else {
             throw WorkspaceError.invalidArgument(message: "No agent session \(agentSessionID) to subscribe to.")
+        }
+        // The subscribe contract requires hook evidence: a watch edge is only legal against a hook-signaled
+        // agent. A never-signaled ad-hoc foreground-detection row is pure detection state that the reconciler
+        // may silently demote (deleting it with no exited notice), so a watcher attached to it would be owed
+        // a notice that never comes. Reject it and tell the caller to retry after the agent signals; this
+        // also keeps the silent demote provably unwatchable.
+        if isAdHocDetectedForegroundAgent(target), try !agentRowHasRecordedHookSignal(target) {
+            throw WorkspaceError.invalidArgument(
+                message: "Agent session \(agentSessionID) has not emitted its first hook signal yet; retry the subscribe after it starts working.")
         }
         guard let targetTerminalSessionID = target.terminalTrackingID else { return }
         if targetTerminalSessionID == subscriberTerminalSessionID {
@@ -422,7 +427,8 @@ extension WorkspaceOrchestrator {
                 eventType: type.rawValue, eventSource: "remote_spaces_signal", environmentKeys: event.environmentKeys)
         case .exit:
             guard let existingAgent else { return true }
-            try handleAgentExit(existingAgent, eventType: type.rawValue, eventSource: "remote_spaces_signal", environmentKeys: event.environmentKeys)
+            try finalizeAgentRow(
+                existingAgent, reason: .exited(eventType: type.rawValue, eventSource: "remote_spaces_signal", environmentKeys: event.environmentKeys))
         }
         return true
     }
@@ -497,11 +503,12 @@ extension WorkspaceOrchestrator {
         return updated
     }
 
+    /// Evicts a stale agent slot whose backing session is gone, when a relaunch reuses its launcher
+    /// identity. Destroys the row through the chokepoint (terminating any lingering terminal), so the stale
+    /// child's subscribers are told it exited and the terminal's own watch state is torn down before the
+    /// fresh session takes over.
     func removeStaleAgentWindow(_ record: AgentWindowRecord) throws {
-        terminateBuiltInTerminalSession(record.terminalTrackingID)
-        try store.deleteAgentWindow(id: record.id)
-        try removeAdHocTrackedWindowForAgent(
-            workspaceID: record.workspaceID, provider: record.provider, terminalTrackingID: record.terminalTrackingID)
+        try finalizeAgentRow(record, reason: .destroyed(terminateTerminalSession: true))
     }
 
     func removeAdHocTrackedWindowForAgent(workspaceID: String, provider: AgentProvider, terminalTrackingID: String?) throws {
@@ -682,6 +689,9 @@ extension WorkspaceOrchestrator {
                 provider: existing.provider, label: existing.label, terminalTrackingID: existing.terminalTrackingID, sessionKey: existing.sessionKey,
                 environmentKeys: environmentKeys), createdAt: nowISO8601())
         terminateBuiltInTerminalSession(existing.terminalTrackingID)
+        // Drop the row's inbound watch edges explicitly before the delete: the FK is `ON DELETE RESTRICT`,
+        // so the delete would otherwise fail. `finalizeAgentRow` notified those subscribers `exited` first.
+        try store.deleteAgentSubscriptions(agentSessionID: existing.id)
         try store.deleteAgentWindow(id: existing.id)
         try removeAdHocTrackedWindowForAgent(
             workspaceID: existing.workspaceID, provider: existing.provider, terminalTrackingID: existing.terminalTrackingID)
@@ -753,33 +763,74 @@ extension WorkspaceOrchestrator {
         }
     }
 
-    /// The single chokepoint every coding-agent stop routes through — the macOS sidebar / Device API
-    /// stop (`stopCodingAgent`), restart (`restartCodingAgent`), and `agent kill`'s hook-signaled branch
-    /// (`killAgentSession`). It owns the notify-before-delete + subscriber-teardown flow so no caller has
-    /// to: a watched child's subscribers are told it `exited` BEFORE the row is deleted, because deleting
-    /// the row cascades `agent_subscriptions` away while the rendered pending line (no FK) survives to
-    /// reach a busy subscriber; after the delete, `subscriberDidExit` drops the stopped terminal's OWN
-    /// standing as a subscriber (its inbound queue and every outgoing local/remote watch edge), since a
-    /// stopped terminal can never be a delivery target again. Restart is not special-cased: it stops the
-    /// old child here — whose subscribers are owed the exited notice — before launching a fresh
-    /// session/row. The engine delivers through the process-wide submitter the daemon installs; with none
-    /// installed (non-daemon callers, tests without subscribers) delivery is simply never attempted
-    /// because the stopped agent has no subscribers.
-    func stopCodingAgentRecord(_ record: AgentWindowRecord) throws {
+    /// How an agent-row termination should be finalized, chosen by the caller and interpreted by
+    /// `finalizeAgentRow`.
+    public enum AgentTerminationReason: Sendable {
+        /// A hard stop/destroy driven by an operator action or by the backing terminal going away: the row
+        /// is unconditionally deleted and its inbound watch edges dropped. `terminateTerminalSession` kills
+        /// the backing built-in terminal when the caller has not already done so.
+        case destroyed(terminateTerminalSession: Bool)
+        /// A lifecycle exit reported by a hook signal, a remote signal, or a device-runtime reconciler. The
+        /// delete-vs-keep decision is delegated to `handleAgentExit` (configured launcher → `.done`; a
+        /// never-signaled ad-hoc detection row on a live terminal → silent demote/delete; any other row on
+        /// a live terminal → `.exited`; a row whose terminal has ended → delete).
+        case exited(eventType: String, eventSource: String, environmentKeys: [String]?)
+    }
+
+    /// The single finalization chokepoint every agent-row termination routes through — sidebar / Device
+    /// API stop, restart, `agent kill`, workspace stop, terminal teardown, stale-slot relaunch, orphan
+    /// prune, and every hook / remote-signal / reconciler exit. Owning it in one place is what guarantees
+    /// a watched child's subscribers are always told it exited before the row goes away and that the
+    /// terminated terminal's own watch state is always torn down. In order it:
+    ///  1. gates on status for idempotency — a row already `.done`/`.exited` is never re-notified (a
+    ///     `.destroyed` reason still deletes it and tears down watch state; an `.exited` reason is a no-op),
+    ///     so a repeated reconcile pass over an already-exited row delivers no duplicate notice;
+    ///  2. renders/enqueues the `exited` notice to the row's subscribers (`childDidTransition`) while its
+    ///     inbound edges still exist — a no-op when it has no subscribers;
+    ///  3. applies the disposition: `.exited` defers to `handleAgentExit` (keep `.done`/`.exited`, demote,
+    ///     or delete — the delete branch drops the inbound edges explicitly), while `.destroyed`
+    ///     unconditionally drops the inbound edges and deletes the row (terminating the terminal first when
+    ///     asked);
+    ///  4. tears down the terminated terminal's OWN standing as a subscriber — its inbound queue and every
+    ///     outgoing local/remote watch edge (`subscriberDidExit`) — since it can never be a delivery target
+    ///     again under this session id.
+    /// Because `agent_subscriptions.agent_session_id` is `ON DELETE RESTRICT`, the inbound edges must be
+    /// dropped explicitly here; a delete that bypasses this chokepoint leaves them in place and fails
+    /// loudly. The never-signaled ad-hoc demote is a documented variant of the same door: it notifies
+    /// nothing (a never-signaled row has no subscribers — `childDidTransition` is a no-op, and per the
+    /// subscribe contract no watcher can even attach) and does NOT drop inbound edges, so a leftover edge
+    /// on such a row makes the delete throw under RESTRICT — the enforcement working. The engine is built
+    /// inside via `makeAgentNotificationEngine`; with no submitter installed (non-daemon callers, tests
+    /// without subscribers) delivery is simply never attempted because the row has no subscribers.
+    @discardableResult public func finalizeAgentRow(_ record: AgentWindowRecord, reason: AgentTerminationReason) throws -> AgentWindowRecord? {
         let engine = makeAgentNotificationEngine()
-        try engine.childDidTransition(agent: record, transition: .exited)
-        if let sessionID = record.terminalTrackingID, !sessionID.isEmpty { terminateBuiltInTerminalSession(sessionID) }
-        appendAgentSessionEvent(
-            agentSessionID: record.id, eventType: "stop", source: "orchestrator",
-            message: agentSessionEventMessage(
-                provider: record.provider, label: record.label, terminalTrackingID: record.terminalTrackingID, sessionKey: record.sessionKey),
-            createdAt: nowISO8601())
-        try store.deleteAgentWindow(id: record.id)
-        try removeAdHocTrackedWindowForAgent(
-            workspaceID: record.workspaceID, provider: record.provider, terminalTrackingID: record.terminalTrackingID)
-        if let sessionID = record.terminalTrackingID, !sessionID.isEmpty {
-            try engine.subscriberDidExit(subscriberTerminalSessionID: sessionID)
+        let alreadyFinalized = record.status == .done || record.status == .exited
+        switch reason {
+        case .destroyed(let terminateTerminalSession):
+            if !alreadyFinalized { try engine.childDidTransition(agent: record, transition: .exited) }
+            if terminateTerminalSession, let sessionID = record.terminalTrackingID, !sessionID.isEmpty { terminateBuiltInTerminalSession(sessionID) }
+            try store.deleteAgentSubscriptions(agentSessionID: record.id)
+            try store.deleteAgentWindow(id: record.id)
+            try removeAdHocTrackedWindowForAgent(
+                workspaceID: record.workspaceID, provider: record.provider, terminalTrackingID: record.terminalTrackingID)
+            if let sessionID = record.terminalTrackingID, !sessionID.isEmpty { try engine.subscriberDidExit(subscriberTerminalSessionID: sessionID) }
+            return nil
+        case .exited(let eventType, let eventSource, let environmentKeys):
+            if alreadyFinalized { return record }
+            try engine.childDidTransition(agent: record, transition: .exited)
+            let result = try handleAgentExit(record, eventType: eventType, eventSource: eventSource, environmentKeys: environmentKeys)
+            if let sessionID = record.terminalTrackingID, !sessionID.isEmpty { try engine.subscriberDidExit(subscriberTerminalSessionID: sessionID) }
+            return result
         }
+    }
+
+    /// Terminates a coding-agent record through the finalization chokepoint. A stop is a hard destroy: it
+    /// terminates the backing terminal and deletes the row (even a configured launcher's) unconditionally.
+    /// Shared by the macOS sidebar / Device API stop (`stopCodingAgent`), restart (`restartCodingAgent`,
+    /// which stops the old child here before relaunching a fresh session/row), and `agent kill`'s
+    /// hook-signaled branch (`killAgentSession`).
+    func stopCodingAgentRecord(_ record: AgentWindowRecord) throws {
+        try finalizeAgentRow(record, reason: .destroyed(terminateTerminalSession: true))
     }
 
     func restartableCodingAgentLauncher(_ record: AgentWindowRecord) throws -> AgentLauncher {

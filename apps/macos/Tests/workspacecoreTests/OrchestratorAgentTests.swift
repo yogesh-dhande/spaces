@@ -683,6 +683,9 @@ extension OrchestratorTests {
                     foregroundExecutablePath: "/opt/homebrew/bin/codex", foregroundExecutableName: "codex",
                     foregroundArgv: ["codex", "--model", "gpt-5"], foregroundDetectedAgentKind: .codex, foregroundDisplayLabel: "Codex",
                     foregroundDisplayCommand: "codex --model gpt-5"))
+            // A live session keeps its control socket for its whole lifetime, so the demote path reads the
+            // terminal as still open and preserves its window (rather than the dead-session delete).
+            XCTAssertTrue(FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data()))
             try store.upsert(
                 window: WindowRecord(
                     id: "terminal-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil, targetURL: nil,
@@ -793,7 +796,84 @@ extension OrchestratorTests {
             XCTAssertTrue(
                 try store.pendingAgentNotifications(subscriberTerminalSessionID: sessionID).isEmpty,
                 "The exited terminal's own inbound queue is dropped, not flushed into its shell.")
+
+            // A second reconcile pass sees the row already `.exited` and must NOT re-enter the shell-revert
+            // branch: no mutation, no duplicate exited notice to the subscriber, and no duplicate exit event.
+            XCTAssertFalse(
+                try orchestrator.reconcileTerminalForegroundAgentClassifications(), "A settled `.exited` shell-revert row is not re-finalized.")
+            XCTAssertEqual(recorder.delivered.count, 1, "The exited notice is delivered exactly once across repeated reconcile passes.")
+            let exitEventCount = try store.queryRows(
+                sql: "SELECT COUNT(*) FROM agent_session_events WHERE agent_session_id = ? AND event_type = 'exit'", bindings: [promoted.id]
+            ).first?.first
+            XCTAssertEqual(exitEventCount, "1", "Exactly one exit event is recorded for the shell-revert exit.")
         }
+    }
+
+    /// The termination chokepoint's `.destroyed` reason — shared by stop, kill, workspace stop, terminal
+    /// teardown, stale-slot relaunch, and orphan prune — must notify a watched child's subscribers it
+    /// exited and drop its inbound watch edge; and a delete that bypasses the chokepoint must fail loudly
+    /// under the RESTRICT foreign key. This is what makes the notify-before-delete flow enforceable rather
+    /// than conventional.
+    func testFinalizeDestroyedRowNotifiesWatcherCleansEdgesAndBlocksBypassDelete() throws {
+        let store = try makeTemporaryStore()
+        let projectDir = try makeTempDirectory().path
+        let project = makeProjectRecord(dir: projectDir)
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: projectDir)
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace)
+
+        let recorder = AgentNotificationSubmitterRecorder()
+        WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter { try recorder.submit($0, $1) }
+        defer { WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter(nil) }
+        let orchestrator = WorkspaceOrchestrator(store: store)
+
+        let child = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Codex CLI", terminalTrackingID: "child-session", status: .spinning)
+        // A plain-shell watcher (no agent row of its own) is idle and receives immediately.
+        try store.insertAgentSubscription(subscriberTerminalSessionID: "watcher", agentSessionID: child.id, createdAt: "t")
+
+        // A watched row deleted OUTSIDE the chokepoint is rejected by the RESTRICT foreign key.
+        XCTAssertThrowsError(try store.deleteAgentWindow(id: child.id), "A watched row deleted outside the chokepoint must fail loudly.")
+
+        try orchestrator.finalizeAgentRow(child, reason: .destroyed(terminateTerminalSession: false))
+
+        XCTAssertEqual(recorder.delivered.map(\.sessionID), ["watcher"])
+        XCTAssertTrue(recorder.delivered.first?.line.contains("is exited") == true, "The watcher is told the child exited.")
+        XCTAssertTrue(try store.agentSubscriptions(agentSessionID: child.id).isEmpty, "The inbound watch edge is dropped by the chokepoint.")
+        XCTAssertNil(try store.agentWindow(id: child.id), "The row is deleted through the chokepoint.")
+    }
+
+    /// The Device API signal-recording path (`recordRemoteAgentSignal`) must route its `exit` through the
+    /// same chokepoint, so a child's subscribers are told it exited and its edges are torn down — the gap
+    /// this path previously had when it called the bare exit decision without the notify/teardown wrap.
+    func testRecordRemoteAgentSignalExitNotifiesWatcherAndTearsDownEdges() throws {
+        let store = try makeTemporaryStore()
+        let projectDir = try makeTempDirectory().path
+        let project = makeProjectRecord(dir: projectDir)
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: projectDir)
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace)
+
+        let recorder = AgentNotificationSubmitterRecorder()
+        WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter { try recorder.submit($0, $1) }
+        defer { WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter(nil) }
+        let orchestrator = WorkspaceOrchestrator(store: store)
+
+        let child = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Mock Agent", terminalTrackingID: "remote-session", status: .spinning)
+        try store.insertAgentSubscription(subscriberTerminalSessionID: "watcher", agentSessionID: child.id, createdAt: "t")
+
+        let applied = try orchestrator.recordRemoteAgentSignal(
+            TerminalServiceAgentSignalEvent(
+                id: "event-exit", sessionID: "remote-session", workspaceID: workspace.id, workspacePath: workspace.dir, type: "exit",
+                provider: AgentProvider.spaces.rawValue, label: "Mock Agent", terminalTrackingID: "remote-session", environmentKeys: [],
+                createdAt: "now"))
+
+        XCTAssertTrue(applied)
+        XCTAssertEqual(recorder.delivered.map(\.sessionID), ["watcher"])
+        XCTAssertTrue(recorder.delivered.first?.line.contains("is exited") == true, "The watcher is told the remote child exited.")
+        XCTAssertTrue(try store.agentSubscriptions(agentSessionID: child.id).isEmpty, "The child's inbound edge is torn down on exit.")
+        XCTAssertNil(try store.agentWindow(id: child.id), "The dead-session row is deleted.")
     }
 
     /// An explicit hook `.exit` (or any direct `handleAgentExit`) on a signaled detection-created row whose

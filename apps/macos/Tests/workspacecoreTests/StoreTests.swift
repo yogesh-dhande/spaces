@@ -209,6 +209,18 @@ final class StoreTests: XCTestCase {
                 INSERT INTO agent_pending_notifications(
                   id, subscriber_terminal_session_id, agent_session_id, message, created_at
                 ) VALUES ('pending-1', 'subscriber-1', 'agent-1', 'preserve me', '2026-07-15T00:00:00Z');
+                CREATE TABLE agent_sessions (
+                  id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, provider TEXT NOT NULL, label TEXT,
+                  status TEXT NOT NULL DEFAULT 'idle', runtime_target_id TEXT, terminal_session_id TEXT, session_key TEXT,
+                  claimed_launcher_id TEXT, claimed_launcher_name TEXT, note TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                );
+                CREATE TABLE agent_subscriptions (
+                  subscriber_terminal_session_id TEXT NOT NULL,
+                  agent_session_id TEXT NOT NULL,
+                  created_at TEXT NOT NULL,
+                  PRIMARY KEY (subscriber_terminal_session_id, agent_session_id),
+                  FOREIGN KEY (agent_session_id) REFERENCES agent_sessions(id) ON DELETE CASCADE
+                );
                 """)
 
         try withEnvironmentValues([
@@ -278,6 +290,18 @@ final class StoreTests: XCTestCase {
                   agent_session_id TEXT NOT NULL,
                   message TEXT NOT NULL,
                   created_at TEXT NOT NULL
+                );
+                CREATE TABLE agent_sessions (
+                  id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, provider TEXT NOT NULL, label TEXT,
+                  status TEXT NOT NULL DEFAULT 'idle', runtime_target_id TEXT, terminal_session_id TEXT, session_key TEXT,
+                  claimed_launcher_id TEXT, claimed_launcher_name TEXT, note TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                );
+                CREATE TABLE agent_subscriptions (
+                  subscriber_terminal_session_id TEXT NOT NULL,
+                  agent_session_id TEXT NOT NULL,
+                  created_at TEXT NOT NULL,
+                  PRIMARY KEY (subscriber_terminal_session_id, agent_session_id),
+                  FOREIGN KEY (agent_session_id) REFERENCES agent_sessions(id) ON DELETE CASCADE
                 );
                 """)
 

@@ -72,7 +72,7 @@ final class AgentOrchestrationStoreTests: XCTestCase {
         XCTAssertEqual(afterAnnotate.updatedAt, lifecycleTimestamp)
     }
 
-    func testSubscriptionInsertListAndCascadeOnAgentDelete() throws {
+    func testSubscriptionInsertListAndRestrictBlocksBypassDelete() throws {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
@@ -88,9 +88,15 @@ final class AgentOrchestrationStoreTests: XCTestCase {
         XCTAssertEqual(try store.agentSubscriptions(agentSessionID: child.id).map(\.subscriberTerminalSessionID), ["orchestrator-session"])
         XCTAssertEqual(try store.agentSubscriptions(subscriberTerminalSessionID: "orchestrator-session").map(\.agentSessionID), [child.id])
 
-        try store.deleteAgentWindow(id: child.id)
+        // The FK is ON DELETE RESTRICT: deleting a watched row directly (bypassing the chokepoint) fails
+        // loudly instead of silently stranding the watcher's notice.
+        XCTAssertThrowsError(try store.deleteAgentWindow(id: child.id))
+        XCTAssertEqual(try store.agentSubscriptions(agentSessionID: child.id).count, 1, "The blocked delete leaves the edge intact.")
+
+        // The termination chokepoint drops the inbound edge explicitly, then deletes the row.
+        try orchestrator.finalizeAgentRow(child, reason: .destroyed(terminateTerminalSession: false))
         XCTAssertTrue(try store.agentSubscriptions(agentSessionID: child.id).isEmpty)
-        XCTAssertTrue(try store.agentSubscriptions(subscriberTerminalSessionID: "orchestrator-session").isEmpty)
+        XCTAssertNil(try store.agentWindow(id: child.id))
     }
 
     func testDeleteSubscriptionRemovesOnlyMatchingEdge() throws {
@@ -210,11 +216,12 @@ final class AgentOrchestrationStoreTests: XCTestCase {
         try store.setAgentSessionNote(id: "agent-1", note: "carried forward")
         XCTAssertEqual(try store.agentWindows(workspaceID: "workspace-1").first?.note, "carried forward")
 
-        // The new subscriptions table exists post-migration and cascades on the carried-forward row.
+        // The new subscriptions table exists post-migration and accepts an edge to the carried-forward row.
+        // Its FK migrates forward as ON DELETE RESTRICT, so a bypass delete of the watched row is rejected.
         try store.insertAgentSubscription(subscriberTerminalSessionID: "sub", agentSessionID: "agent-1", createdAt: "2026-07-14T00:01:00Z")
         XCTAssertEqual(try store.agentSubscriptions(agentSessionID: "agent-1").count, 1)
-        try store.deleteAgentWindow(id: "agent-1")
-        XCTAssertTrue(try store.agentSubscriptions(agentSessionID: "agent-1").isEmpty)
+        XCTAssertThrowsError(try store.deleteAgentWindow(id: "agent-1"))
+        XCTAssertEqual(try store.agentSubscriptions(agentSessionID: "agent-1").count, 1)
     }
 
     // MARK: - Cross-device watch edges (agent_remote_subscriptions)

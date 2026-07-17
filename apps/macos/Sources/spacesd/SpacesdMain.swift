@@ -1036,11 +1036,9 @@ import workspacecore
         // an `init` preserves a live busy agent's status (a reconnecting hook, or Claude Code's
         // SessionStart on auto-compact), so flushing on the event alone would deliver queued child events
         // into a still-working agent. `.exit` always flushes to drain its now-undeliverable queue.
+        // `.exit` never flushes: its finalization chokepoint already tore down the signaling terminal's
+        // inbound queue, so nothing remains to flush.
         let shouldFlushQueuedNotifications: Bool
-        // Set only by `.exit`: the terminal is now a bare shell (or gone), so its inbound queue must be
-        // discarded rather than flushed. Kept separate from `shouldFlushQueuedNotifications` (which every
-        // other case sets) so the two outcomes stay mutually exclusive at the call site below.
-        var shouldDiscardQueuedNotifications = false
         switch type {
         case .`init`:
             let registered = try orchestrator.registerAgentWindow(
@@ -1068,24 +1066,16 @@ import workspacecore
             shouldFlushQueuedNotifications = updated.status.leavesSubscriberIdle
         case .exit:
             guard let existingAgent else { return TerminalServiceProfileCommandResponse(message: "Agent exit ignored.") }
-            // Render and enqueue/deliver the exit notification before handleAgentExit deletes an ad-hoc
-            // agent row: that deletion cascades the subscription edges away, and the pending row (no FK)
-            // is what carries the notice past it.
-            try engine.childDidTransition(agent: existingAgent, transition: .exited)
-            try orchestrator.handleAgentExit(
-                existingAgent, eventType: type.rawValue, eventSource: "spaces_agent_signal", environmentKeys: environmentKeys)
-            // Exit always discards: the signaling terminal is now a bare shell (or gone), so anything
-            // still queued for it would submit child-event lines into a shell prompt if flushed. Unlike
-            // the other transitions, an exited terminal can never become a valid delivery target again
-            // under this session id, so the queue is dropped rather than held for a later flush, and any
-            // watch edges this terminal held as a SUBSCRIBER (of other agents) are dropped too — see
-            // `AgentNotificationEngine.subscriberDidExit`.
+            // The exit routes through the orchestrator's finalization chokepoint, which renders/enqueues the
+            // exited notice to subscribers before finalizing the row (delegating the delete-vs-`.exited`
+            // decision to `handleAgentExit`), then tears down the signaling terminal's own subscriber state:
+            // its now-undeliverable inbound queue and every outgoing watch edge it held. The signaling
+            // terminal is a bare shell (or gone) after an exit, so nothing more is flushed or discarded here.
+            try orchestrator.finalizeAgentRow(
+                existingAgent, reason: .exited(eventType: type.rawValue, eventSource: "spaces_agent_signal", environmentKeys: environmentKeys))
             shouldFlushQueuedNotifications = false
-            shouldDiscardQueuedNotifications = true
         }
-        if shouldDiscardQueuedNotifications {
-            try engine.subscriberDidExit(subscriberTerminalSessionID: sessionID)
-        } else if shouldFlushQueuedNotifications {
+        if shouldFlushQueuedNotifications {
             try engine.subscriberDidBecomeIdle(subscriberTerminalSessionID: sessionID)
         }
         postAgentEventNotification()
