@@ -548,15 +548,11 @@
         }
 
         private func enqueueControlInputWrite(_ bytes: Data) {
-            controlInputSequencer.enqueueWrite { [weak self] in
-                await MainActor.run { self?.ptyDriver.sendRawBytes(bytes) }
-            }
+            controlInputSequencer.enqueueWrite { [weak self] in await MainActor.run { self?.ptyDriver.sendRawBytes(bytes) } }
         }
 
         private func enqueueControlSubmitCarriageReturn() {
-            controlInputSequencer.enqueueSubmitCarriageReturn { [weak self] in
-                await MainActor.run { self?.ptyDriver.sendRawBytes(Data([0x0D])) }
-            }
+            controlInputSequencer.enqueueSubmitCarriageReturn { [weak self] in await MainActor.run { self?.ptyDriver.sendRawBytes(Data([0x0D])) } }
         }
 
         private func encodePastePayload(_ text: String) -> Data? {
@@ -775,7 +771,7 @@
         /// (`applyThemeAppearance(_:)`), since the headless daemon cannot read the client's OS
         /// appearance. Until a client attaches, the session uses the default (dark) appearance.
         private func makeVTSession(columns: Int, rows: Int) -> OpaquePointer? {
-            var theme = Self.vtTheme(export: ActiveTheme.descriptor.terminal(for: currentAppearance))
+            var theme = GhosttyVtSessionBridge.packTheme(ActiveTheme.descriptor.terminal(for: currentAppearance))
             return withUnsafePointer(to: &theme) { themePointer in
                 spaces_ghostty_vt_session_new(UInt16(clamping: columns), UInt16(clamping: rows), Self.maxScrollbackBytes, themePointer)
             }
@@ -788,26 +784,11 @@
             guard appearance != currentAppearance else { return }
             currentAppearance = appearance
             guard let vtSession else { return }
-            var theme = Self.vtTheme(export: ActiveTheme.descriptor.terminal(for: appearance))
+            var theme = GhosttyVtSessionBridge.packTheme(ActiveTheme.descriptor.terminal(for: appearance))
             let applied = withUnsafePointer(to: &theme) { spaces_ghostty_vt_session_set_theme(vtSession, $0) }
             guard applied else { return }
             screenStateRevision &+= 1
             forceNextBroadcastFullRenderUpdate = true
-        }
-
-        /// Packs a theme's terminal export into the C shim's theme struct (default fg/bg/cursor plus
-        /// the 16 ANSI palette entries; the shim fills 16-255 with the standard xterm ramp).
-        private static func vtTheme(export: GhosttyThemeExport) -> SpacesGhosttyVtTheme {
-            var theme = SpacesGhosttyVtTheme()
-            theme.foreground_rgb = export.foreground.packedRGB
-            theme.background_rgb = export.background.packedRGB
-            theme.cursor_rgb = export.cursorColor.packedRGB
-            withUnsafeMutablePointer(to: &theme.palette_rgb) { tuplePointer in
-                tuplePointer.withMemoryRebound(to: UInt32.self, capacity: 16) { buffer in
-                    for index in 0..<16 { buffer[index] = index < export.palette.count ? export.palette[index].packedRGB : 0 }
-                }
-            }
-            return theme
         }
 
         private func writeRuntimeState(state: TerminalSessionState) {
@@ -958,19 +939,7 @@
             var rawSnapshot = SpacesGhosttyVtSnapshot()
             guard spaces_ghostty_vt_session_copy_snapshot(vtSession, &rawSnapshot) else { throw GhosttyLinuxHeadlessSessionError.snapshotUnavailable }
             defer { spaces_ghostty_vt_snapshot_free(&rawSnapshot) }
-            let cells: [GhosttyTerminalSnapshot.Cell]
-            if let rawCells = rawSnapshot.cells, rawSnapshot.cell_count > 0 {
-                cells = UnsafeBufferPointer(start: rawCells, count: rawSnapshot.cell_count).map {
-                    GhosttyTerminalSnapshot.Cell(
-                        codepoint: $0.codepoint, foregroundRGB: $0.foreground_rgb, backgroundRGB: $0.background_rgb, flags: $0.flags)
-                }
-            } else {
-                cells = []
-            }
-            let snapshot = GhosttyTerminalSnapshot(
-                columns: Int(rawSnapshot.columns), rows: Int(rawSnapshot.rows), cursorColumn: Int(rawSnapshot.cursor_column),
-                cursorRow: Int(rawSnapshot.cursor_row), cursorVisible: rawSnapshot.cursor_visible,
-                defaultForegroundRGB: rawSnapshot.default_foreground_rgb, defaultBackgroundRGB: rawSnapshot.default_background_rgb, cells: cells)
+            let snapshot = GhosttyVtSessionBridge.snapshot(from: rawSnapshot)
             return GhosttyRenderFrame(sessionRevision: screenStateRevision, ownerEpoch: ownerEpoch, snapshot: snapshot)
         }
 

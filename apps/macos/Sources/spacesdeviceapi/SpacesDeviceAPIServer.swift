@@ -1208,6 +1208,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         case .terminalPasteImage(let payload): return try handleTerminalPasteImageRequest(payload)
         case .sendTerminalInput(let payload): return try handleSendTerminalInputRequest(payload)
         case .tailTerminalOutput(let payload): return try handleTailTerminalOutputRequest(payload)
+        case .terminalTranscript(let payload): return try handleTerminalTranscriptRequest(payload)
         case .resolveTerminalLink(let payload): return try handleResolveTerminalLinkRequest(payload, context: context)
         case .readTerminalLinkChunk(let payload): return try handleReadTerminalLinkChunkRequest(payload)
         case .subscribe, .subscribeDeviceOverview:
@@ -1425,6 +1426,27 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         }
         let output = try TerminalOutputTail.tail(path: paths.outputPath, lineCount: lineCount)
         return SpacesDeviceAPIResponse(ok: true, message: "Read terminal output.", result: .terminalOutput(.init(text: output)))
+    }
+
+    /// Read-only suffix of the session's persisted output transcript, for client-local ended-session
+    /// scrollback replay. Not interactivity-gated: it exposes the same append-only `output.log` bytes
+    /// `tailTerminalOutput` already renders, and an ended session is exactly when this is needed. The
+    /// returned suffix is capped at the smaller of the requested size and the scrollback budget.
+    private func handleTerminalTranscriptRequest(_ payload: SpacesDeviceTerminalTranscriptRequest) throws -> SpacesDeviceAPIResponse {
+        let sessionID = payload.sessionID
+        let paths = try TerminalSessionPaths.forSession(id: sessionID)
+        guard FileManager.default.fileExists(atPath: paths.outputPath) else {
+            return SpacesDeviceAPIResponse(ok: false, message: "Terminal session '\(sessionID)' has no output yet.", errorCode: .sessionNotAvailable)
+        }
+        let cap = min(max(payload.maxBytes, 0), TerminalScrollbackBudget.defaultMaxBytes)
+        let handle = try FileHandle(forReadingFrom: URL(fileURLWithPath: paths.outputPath))
+        defer { try? handle.close() }
+        let totalBytes = try handle.seekToEnd()
+        let startOffset = totalBytes > UInt64(cap) ? totalBytes - UInt64(cap) : 0
+        try handle.seek(toOffset: startOffset)
+        let data = try handle.readToEnd() ?? Data()
+        return SpacesDeviceAPIResponse(
+            ok: true, message: "Read terminal transcript.", result: .terminalTranscript(.init(data: data, totalBytes: totalBytes)))
     }
 
     private func handleTerminalPasteImageRequest(_ payload: SpacesDeviceTerminalPasteImageRequest) throws -> SpacesDeviceAPIResponse {

@@ -11,11 +11,17 @@
             _ onDisconnect: @escaping @Sendable ((any Error)?) -> Void
         ) throws -> any TerminalRemoteStateStreamClient
 
+    /// Fetches a suffix of the session's persisted output transcript (capped at `maxBytes`) for the
+    /// ended-session scrollback replay. Read-only; the caller invokes it once, lazily, on the first
+    /// scroll of an ended pane.
+    public typealias RemoteGhosttyTranscriptProvider = @Sendable (_ maxBytes: Int) async throws -> Data
+
     @MainActor public final class RemoteGhosttySessionHost: TerminalGhosttySessionHosting {
         private let launchConfiguration: TerminalSessionLaunchConfiguration
         private let paths: TerminalSessionPaths
         private let terminalServiceRequestSender: RemoteGhosttyTerminalServiceRequestSender?
         private let stateStreamSubscriber: RemoteGhosttyStateStreamSubscriber?
+        private let transcriptProvider: RemoteGhosttyTranscriptProvider?
         private let agentSignalHandler: RemoteGhosttyAgentSignalHandler?
         private let terminalView: GhosttyMirrorTerminalView
         private var latestState: GhosttyRemoteSessionStatePayload?
@@ -32,6 +38,20 @@
         private var pendingViewportResizeTask: Task<Void, Never>?
         private var resizeSerial: UInt64 = 0
         private let inputQueue = TerminalInputSerialQueue()
+        /// Lazy state for scrolling an ended pane's scrollback: `idle` until the first scroll, `loading`
+        /// while the transcript is fetched and the replay model is built off the main actor (accumulating
+        /// deltas), `ready` once the model exists, `unavailable` when there is no transcript to replay.
+        private enum EndedScrollbackState {
+            case idle
+            case loading(pendingDeltaRows: Int)
+            case ready(TerminalEndedSessionScrollbackModel)
+            case unavailable
+        }
+        private var endedScrollbackState: EndedScrollbackState = .idle
+        /// Monotonic local revision for replay frames, so the mirror's frame-dedupe never drops a
+        /// scrolled viewport that happens to match a prior revision.
+        private var endedScrollbackRevision: UInt64 = 0
+        private var endedScrollDeltaNormalizer = TerminalScrollDeltaNormalizer()
         private lazy var scrollCoalescer = TerminalScrollCoalescer(frameInterval: Self.scrollCoalescingInterval) { [weak self] batch, finish in
             guard let self else {
                 finish()
@@ -44,13 +64,14 @@
         public init(
             launchConfiguration: TerminalSessionLaunchConfiguration, paths: TerminalSessionPaths,
             terminalServiceRequestSender: RemoteGhosttyTerminalServiceRequestSender? = nil,
-            stateStreamSubscriber: RemoteGhosttyStateStreamSubscriber? = nil, agentSignalHandler: RemoteGhosttyAgentSignalHandler? = nil,
-            linkOpenHandler: (@MainActor (String) -> Void)? = nil
+            stateStreamSubscriber: RemoteGhosttyStateStreamSubscriber? = nil, transcriptProvider: RemoteGhosttyTranscriptProvider? = nil,
+            agentSignalHandler: RemoteGhosttyAgentSignalHandler? = nil, linkOpenHandler: (@MainActor (String) -> Void)? = nil
         ) {
             self.launchConfiguration = launchConfiguration
             self.paths = paths
             self.terminalServiceRequestSender = terminalServiceRequestSender
             self.stateStreamSubscriber = stateStreamSubscriber
+            self.transcriptProvider = transcriptProvider
             self.agentSignalHandler = agentSignalHandler
             terminalView = GhosttyMirrorTerminalView(launchConfiguration: launchConfiguration)
             terminalView.onOpenLink = linkOpenHandler
@@ -105,7 +126,11 @@
                 container.needsLayout = true
                 container.layoutSubtreeIfNeeded()
             }
-            terminalView.update(frame: currentRenderFrameForRenderUpdate(), renderStateKey: currentRenderStateKey())
+            // Same rule as applyRemoteState: while the ended-session replay is showing a scrolled
+            // viewport, a re-attach must not clobber it with the daemon's final frame.
+            if !isEndedScrollbackReplayActive {
+                terminalView.update(frame: currentRenderFrameForRenderUpdate(), renderStateKey: currentRenderStateKey())
+            }
             if isInteractive && mode == .owner { sendCurrentViewportResizeIfNeeded(force: true) }
         }
 
@@ -142,7 +167,10 @@
 
         public func requestSurfaceRefresh() {
             requestDirectStateRefresh(reason: TerminalRemoteSessionStateReason.stateChange)
-            terminalView.update(frame: currentRenderFrameForRenderUpdate(), renderStateKey: currentRenderStateKey())
+            // Same rule as applyRemoteState: a refresh must not clobber a scrolled ended viewport.
+            if !isEndedScrollbackReplayActive {
+                terminalView.update(frame: currentRenderFrameForRenderUpdate(), renderStateKey: currentRenderStateKey())
+            }
         }
 
         public func prepareRenderStateExport() {}
@@ -183,7 +211,9 @@
         @discardableResult public func sendScroll(
             horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32, pointerPosition: TerminalScrollPointerPosition?
         ) -> Bool {
-            guard isInteractiveRuntimeStateForControl() else { return false }
+            guard isInteractiveRuntimeStateForControl() else {
+                return scrollEndedSession(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods)
+            }
             return terminalView.sendScroll(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods, pointerPosition: pointerPosition)
         }
 
@@ -367,7 +397,11 @@
             lastSubscriptionAttemptAt = nil
             let frameForUpdate = reduction.frameToApply
             let applyStartedAt = Date()
-            if frameForUpdate != nil || !terminalView.hasRenderedSurfaceContent {
+            // A relaunch resurrects the live renderer, so drop any ended-session replay and let live
+            // frames render again. While a replay is still active for an ended session, a re-served
+            // final payload must not clobber the locally scrolled viewport.
+            if isInteractiveRuntimeStateForControl() { discardEndedScrollbackIfActive() }
+            if !isEndedScrollbackReplayActive, frameForUpdate != nil || !terminalView.hasRenderedSurfaceContent {
                 terminalView.update(frame: frameForUpdate, renderStateKey: currentRenderStateKey())
             }
             let applyMS = TerminalPerformance.elapsedMS(since: applyStartedAt)
@@ -515,9 +549,106 @@
         }
 
         private func sendRemoteScroll(horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32, pointerPosition: TerminalScrollPointerPosition?) {
-            guard isInteractiveRuntimeStateForControl(), attachedClient != nil, attachedMode == .owner else { return }
+            guard isInteractiveRuntimeStateForControl() else {
+                _ = scrollEndedSession(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods)
+                return
+            }
+            guard attachedClient != nil, attachedMode == .owner else { return }
             scrollCoalescer.append(
                 horizontal: Double(horizontal), vertical: Double(vertical), scrollMods: scrollMods, pointerPosition: pointerPosition)
+        }
+
+        // MARK: - Ended-session scrollback replay
+
+        /// Scrolls an ended pane's persisted-transcript replay. The live daemon renderer is gone once
+        /// the process exits, so scrolling can no longer be forwarded; instead the transcript is
+        /// replayed into a client-local vt session and scrolled locally. Runs under the ended pane's
+        /// forced `.viewer` final-render attach. Returns true when the scroll is accepted (routed into
+        /// the replay), false when there is nothing to scroll (no attach, or no transcript to replay).
+        @discardableResult private func scrollEndedSession(horizontal _: CGFloat, vertical: CGFloat, scrollMods: Int32) -> Bool {
+            guard attachedClient != nil else { return false }
+            let deltaRows = endedScrollDeltaNormalizer.terminalViewportDeltaRows(vertical: Double(vertical), scrollMods: scrollMods)
+            switch endedScrollbackState {
+            case .unavailable: return false
+            case .ready(let model):
+                if deltaRows != 0 { applyEndedScroll(deltaRows: deltaRows, model: model) }
+                return true
+            case .loading(let pendingDeltaRows):
+                endedScrollbackState = .loading(pendingDeltaRows: pendingDeltaRows + deltaRows)
+                return true
+            case .idle:
+                // A sub-cell nudge normalizes to zero rows; wait for a real scroll before paying to
+                // fetch and replay the transcript, but still report it as accepted.
+                guard deltaRows != 0 else { return true }
+                endedScrollbackState = .loading(pendingDeltaRows: deltaRows)
+                beginLoadingEndedScrollbackModel()
+                return true
+            }
+        }
+
+        private func beginLoadingEndedScrollbackModel() {
+            guard let transcriptProvider else {
+                endedScrollbackState = .unavailable
+                return
+            }
+            // Build at the final frame's grid so the replay wraps exactly as the daemon's final frame
+            // did; fall back to the runtime-state grid when the final frame is unavailable.
+            let finalFrame = latestState?.decodedRenderUpdate?.fullFrame
+            let columns = finalFrame?.columns ?? latestState?.runtimeState?.columns ?? 80
+            let rows = finalFrame?.rows ?? latestState?.runtimeState?.rows ?? 24
+            let appearance: ThemeAppearance = terminalView.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? .dark : .light
+            let theme = ActiveTheme.descriptor.terminal(for: appearance)
+            let maxBytes = TerminalScrollbackBudget.defaultMaxBytes
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let transcript: Data
+                do { transcript = try await transcriptProvider(maxBytes) } catch {
+                    self.failEndedScrollbackLoadIfLoading()
+                    return
+                }
+                // A relaunch (session went interactive again) discards the loading state mid-fetch.
+                guard case .loading = self.endedScrollbackState else { return }
+                guard !transcript.isEmpty else {
+                    self.failEndedScrollbackLoadIfLoading()
+                    return
+                }
+                let model = await Task.detached(priority: .userInitiated) {
+                    TerminalEndedSessionScrollbackModel(columns: columns, rows: rows, theme: theme, transcript: transcript)
+                }.value
+                guard case .loading(let pendingDeltaRows) = self.endedScrollbackState else { return }
+                guard let model else {
+                    self.endedScrollbackState = .unavailable
+                    return
+                }
+                self.endedScrollbackState = .ready(model)
+                if pendingDeltaRows != 0 { self.applyEndedScroll(deltaRows: pendingDeltaRows, model: model) }
+            }
+        }
+
+        private func failEndedScrollbackLoadIfLoading() { if case .loading = endedScrollbackState { endedScrollbackState = .unavailable } }
+
+        private func applyEndedScroll(deltaRows: Int, model: TerminalEndedSessionScrollbackModel) {
+            guard let snapshot = model.scroll(deltaRows: deltaRows) else { return }
+            endedScrollbackRevision &+= 1
+            let frame = GhosttyRenderFrame(
+                sessionRevision: endedScrollbackRevision, ownerEpoch: latestState?.renderOwnerEpoch ?? 0, snapshot: snapshot)
+            terminalView.update(frame: frame, renderStateKey: currentRenderStateKey())
+        }
+
+        private var isEndedScrollbackReplayActive: Bool {
+            switch endedScrollbackState {
+            case .loading, .ready: true
+            case .idle, .unavailable: false
+            }
+        }
+
+        /// Discards the replay when the session becomes interactive again (a relaunch): the live render
+        /// takes over, so the model is dropped (freeing its vt session) and the accumulated scroll delta
+        /// is reset.
+        private func discardEndedScrollbackIfActive() {
+            guard isEndedScrollbackReplayActive else { return }
+            endedScrollbackState = .idle
+            endedScrollDeltaNormalizer = TerminalScrollDeltaNormalizer()
         }
 
         private func enqueueRemoteScrollBatch(_ batch: TerminalScrollCoalescer.Batch, onFinished: @escaping TerminalScrollCoalescer.FinishHandler) {

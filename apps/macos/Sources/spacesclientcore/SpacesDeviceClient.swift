@@ -732,8 +732,8 @@ public enum SpacesDeviceClient {
         case .agentHooksStatus: agentHooksStatusRequestTimeoutSeconds
         case .pair, .ping, .daemonStatus, .requestDaemonRestart, .overview, .previewProject, .listDirectories, .workspaceCreateOptions,
             .updateProjectConfig, .updateWorkspaceConfig, .updateWorkspaceMetadata, .renameTerminalSession, .state, .terminalControl,
-            .terminalPasteImage, .sendTerminalInput, .tailTerminalOutput, .resolveTerminalLink, .readTerminalLinkChunk, .subscribe,
-            .subscribeDeviceOverview, .openServiceTunnel, .listAgentSessions, .annotateAgentSession:
+            .terminalPasteImage, .sendTerminalInput, .tailTerminalOutput, .terminalTranscript, .resolveTerminalLink, .readTerminalLinkChunk,
+            .subscribe, .subscribeDeviceOverview, .openServiceTunnel, .listAgentSessions, .annotateAgentSession:
             defaultRequestTimeoutSeconds
         }
     }

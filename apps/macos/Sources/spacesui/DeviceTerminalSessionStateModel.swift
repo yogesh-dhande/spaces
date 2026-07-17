@@ -173,6 +173,24 @@
             }.value
         }
 
+        /// Fetches a suffix of the session's persisted output transcript for the render host's
+        /// client-local ended-session scrollback replay. Read-only; routes through the owning device's
+        /// Device API endpoint like every other request, so it serves local and remote sessions alike.
+        func fetchTranscript(maxBytes: Int) async throws -> Data {
+            let sessionID = self.sessionID
+            let authToken = self.authToken
+            let clientApp = self.clientApp
+            let requestClient = self.requestClient
+            return try await Task.detached(priority: .userInitiated) {
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .terminalTranscript(SpacesDeviceTerminalTranscriptRequest(sessionID: sessionID, maxBytes: maxBytes)),
+                        authToken: authToken, clientApp: clientApp))
+                guard response.ok, let transcript = response.terminalTranscript else { throw SpacesDeviceClientError.unavailable(response.message) }
+                return transcript.data
+            }.value
+        }
+
         /// State-stream subscriber for the Ghostty render host. Instead of opening a
         /// second Device API stream, it attaches the host's callbacks to this model's
         /// single underlying subscription, so one stream feeds both the host renderer

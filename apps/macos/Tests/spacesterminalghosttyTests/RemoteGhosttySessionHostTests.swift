@@ -706,6 +706,62 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         XCTAssertEqual(host.debugRecordedBindingActions, ["select_all", "copy_to_clipboard", "end_search"])
     }
 
+    @MainActor func testEndedRemoteHostScrollsIntoScrollback() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let sessionID = "remote-ended-scrollback"
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: sessionID, backend: .ghosttyEmbedded, title: "fallback", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
+            createdAt: "2026-06-05T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+        // Final frame + runtime grid at 8x5 so the replay wraps like the ended pane's final frame and a
+        // scrolled viewport shows several transcript lines.
+        let runtimeState = TerminalSessionRuntimeState(
+            sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .exited, updatedAt: "2026-06-05T00:00:01Z",
+            exitedAt: "2026-06-05T00:00:01Z", title: "final-title", workingDirectory: "/tmp/final", columns: 8, rows: 5)
+        let finalText = "final-01\nfinal-02\nfinal-03\nfinal-04\nfinal-05"
+        let recorder = DirectTerminalServiceRecorder(
+            payload: GhosttyRemoteSessionStatePayload(
+                sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated, emittedAt: "2026-06-05T00:00:01Z", sessionStateRevision: 1,
+                sessionStateFlags: 1, screenStateRevision: 1, runtimeState: runtimeState, attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
+                title: "final-title", workingDirectory: "/tmp/final", outputByteCount: nil,
+                renderUpdate: try renderUpdate(text: finalText, sessionRevision: 1)))
+
+        // The session's full transcript survives in output.log: 200 CRLF-terminated numbered lines.
+        let transcript = Data((1...200).map { String(format: "row-%03d", $0) }.joined(separator: "\r\n").utf8)
+
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: launchConfiguration, paths: paths, terminalServiceRequestSender: recorder.send,
+            transcriptProvider: { _ in transcript })
+        waitForCondition("ended host renders final state") { host.snapshotText()?.contains("final-01") == true }
+
+        try host.attach(
+            client: TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-06-05T00:00:02Z"),
+            mode: .viewer, into: NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 180)))
+
+        // A positive vertical with precise deltas scrolls up into scrollback (the normalizer maps it to
+        // a negative row delta). The scroll is accepted immediately; the replay frame lands async.
+        XCTAssertTrue(host.sendScroll(horizontal: 0, vertical: 2000, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil))
+
+        waitForCondition("ended host reveals earlier scrollback lines") {
+            guard let text = host.snapshotText() else { return false }
+            return text.contains("row-0") && !text.contains("row-200") && !text.contains("final-01")
+        }
+
+        // Refresh and re-attach are how pane refreshNow paths repaint an ended pane; while the replay
+        // is showing a scrolled viewport they must not clobber it with the daemon's final frame.
+        host.requestSurfaceRefresh()
+        try host.attach(
+            client: TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-06-05T00:00:03Z"),
+            mode: .viewer, into: NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 180)))
+        guard let text = host.snapshotText() else { return XCTFail("ended host lost its rendered surface after refresh") }
+        XCTAssertTrue(text.contains("row-0"), "refresh clobbered the scrolled ended viewport: \(text)")
+        XCTAssertFalse(text.contains("final-01"), "re-attach restored the final frame over the scrolled viewport: \(text)")
+    }
+
     @MainActor func testRunningRemoteHostRejectsViewerBindingActions() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
