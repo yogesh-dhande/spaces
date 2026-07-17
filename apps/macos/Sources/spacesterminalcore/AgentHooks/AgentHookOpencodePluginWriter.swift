@@ -7,9 +7,11 @@ import Foundation
 /// user-config merge. The plugin reports lifecycle signals from inside the opencode process, running
 /// `spaces agent signal`, which reads Spaces session env vars and no-ops in other terminals.
 ///
-/// Signal mapping: plugin startup → `init`, `chat.message` hook → `working`, event-bus
-/// `permission.asked` → `blocked`, event-bus `session.idle` → `done`. opencode has no session-end
-/// event, so there is no `exit` signal.
+/// Signal mapping: plugin startup → `init`, `chat.message` and `tool.execute.before` hooks →
+/// `working`, event-bus `permission.asked` → `blocked`, event-bus `session.idle` → `done`. opencode
+/// has no session-end event, so there is no `exit` signal. `tool.execute.before` (verified against
+/// opencode 1.16) exists because answering a permission prompt resumes execution without a
+/// `chat.message`: the first tool call after the approval is what re-marks the agent working.
 enum AgentHookOpencodePluginWriter {
     static let pluginFileName = "spaces-agent-signal.js"
     private static let ownershipHeaderPrefix = "// spaces-agent-signal — managed by Spaces ("
@@ -54,6 +56,9 @@ enum AgentHookOpencodePluginWriter {
               await signal("init")
               return {
                 "chat.message": async () => {
+                  await signal("working")
+                },
+                "tool.execute.before": async () => {
                   await signal("working")
                 },
                 event: async ({ event }) => {

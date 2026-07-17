@@ -27,6 +27,12 @@ final class GhosttyTerminalLinkOpenerTests: XCTestCase {
         XCTAssertEqual(resolved?.path, "/tmp/notes.md")
     }
 
+    func testResolvedURLPassesSpacesDeepLinkThrough() {
+        XCTAssertEqual(
+            GhosttyTerminalLinkOpener.resolvedURL(for: "spaces://terminal/session-1?device=device-9"),
+            URL(string: "spaces://terminal/session-1?device=device-9"))
+    }
+
     func testResolvedURLRejectsRelativePathWithoutWorkingDirectory() {
         XCTAssertNil(GhosttyTerminalLinkOpener.resolvedURL(for: "notes.md"))
         XCTAssertNil(GhosttyTerminalLinkOpener.resolvedURL(for: "notes.md", workingDirectory: nil))
@@ -73,6 +79,16 @@ final class GhosttyTerminalLinkOpenerTests: XCTestCase {
         }
         XCTAssertTrue(handled)
         XCTAssertEqual(openedURLs, [URL(fileURLWithPath: "/tmp/project/notes.md")])
+    }
+
+    @MainActor func testOpenPassesSpacesDeepLinkToInjectedOpenURLHandler() {
+        var openedURLs: [URL] = []
+        let handled = GhosttyTerminalLinkOpener.open("spaces://terminal/session-1") { url in
+            openedURLs.append(url)
+            return true
+        }
+        XCTAssertTrue(handled)
+        XCTAssertEqual(openedURLs, [URL(string: "spaces://terminal/session-1")])
     }
 
     @MainActor func testOpenReturnsFalseWhenValueDoesNotResolve() {

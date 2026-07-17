@@ -121,6 +121,19 @@ export default function CodingAgentsDocsPage() {
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Orchestrate Agents From One Terminal</h2>
+        <p className="mt-2 text-sm leading-7 text-foreground-soft">
+          Once agents report their state, one agent — or you at a single terminal — can drive the others. <code>spaces agent list</code> and <code>spaces agent status</code> show every agent and whether it is working, blocked, or done, and <code>spaces agent annotate</code> leaves a short note on one so you remember what it was doing. Each row includes a clickable <code>spaces://terminal/&lt;id&gt;</code> link that jumps straight to that agent&apos;s pane.
+        </p>
+        <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
+          <li>• <strong>Start one that&apos;s ready.</strong> <code>spaces agent spawn --command claude</code> opens a supported agent (Claude Code, Codex, or opencode) in a new workspace terminal and waits until Spaces detects it running before returning — no hooks required. Spawn sends no prompt of its own; deliver the first prompt with <code>spaces terminal send</code> once it returns.</li>
+          <li>• <strong>Get told when one needs you.</strong> <code>spaces agent subscribe</code> watches a child agent from your terminal; when it goes blocked, done, or exits, Spaces drops a single line into your terminal with a link to open it — only while you are idle, so it never lands mid-task.</li>
+          <li>• <strong>Steer or stop it.</strong> <code>spaces agent interrupt</code> nudges an agent (sends Escape), and <code>spaces agent kill</code> ends it and its terminal.</li>
+          <li>• <strong>Across devices.</strong> These commands take <code>--device</code> to drive agents on a paired Mac or Linux box, and the same actions are available to an MCP client such as Claude Code (agent lifecycle <em>signals</em> stay off the tool surface, so an agent can read another&apos;s state but never forge it).</li>
+        </ul>
+      </article>
+
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">See Also</h2>
         <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
           <li>• <a className="text-accent hover:underline" href="/docs/cli">CLI Reference</a> — full flag list for <code>spaces agent signal</code>.</li>

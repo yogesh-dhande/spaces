@@ -37,9 +37,7 @@ struct ScreenshotMarkupPresenter: UIViewControllerRepresentable {
     let stagedScreenshots: StagedScreenshotStore
     let onFinished: @MainActor (ScreenshotMarkupOutcome) -> Void
 
-    func makeCoordinator() -> Coordinator {
-        Coordinator(item: item, stagedScreenshots: stagedScreenshots, onFinished: onFinished)
-    }
+    func makeCoordinator() -> Coordinator { Coordinator(item: item, stagedScreenshots: stagedScreenshots, onFinished: onFinished) }
 
     func makeUIViewController(context: Context) -> ScreenshotMarkupHostViewController {
         ScreenshotMarkupHostViewController(coordinator: context.coordinator)
@@ -57,10 +55,8 @@ struct ScreenshotMarkupPresenter: UIViewControllerRepresentable {
         private let stagedScreenshots: StagedScreenshotStore
         private let onFinished: @MainActor (ScreenshotMarkupOutcome) -> Void
 
-        init(
-            item: ScreenshotMarkupItem, stagedScreenshots: StagedScreenshotStore,
-            onFinished: @escaping @MainActor (ScreenshotMarkupOutcome) -> Void
-        ) {
+        init(item: ScreenshotMarkupItem, stagedScreenshots: StagedScreenshotStore, onFinished: @escaping @MainActor (ScreenshotMarkupOutcome) -> Void)
+        {
             self.item = item
             self.stagedScreenshots = stagedScreenshots
             self.onFinished = onFinished
@@ -75,16 +71,12 @@ struct ScreenshotMarkupPresenter: UIViewControllerRepresentable {
 
         func numberOfPreviewItems(in controller: QLPreviewController) -> Int { 1 }
 
-        func previewController(_ controller: QLPreviewController, previewItemAt index: Int) -> any QLPreviewItem {
-            item.fileURL as NSURL
-        }
+        func previewController(_ controller: QLPreviewController, previewItemAt index: Int) -> any QLPreviewItem { item.fileURL as NSURL }
 
         /// `.updateContents` makes the system Markup editor write annotations back into the temp-file URL
         /// in place, so re-reading it after dismissal yields the annotated PNG with no copy bookkeeping.
         /// The unannotated case needs no special handling — the original bytes stay on disk.
-        func previewController(
-            _ controller: QLPreviewController, editingModeFor previewItem: any QLPreviewItem
-        ) -> QLPreviewItemEditingMode {
+        func previewController(_ controller: QLPreviewController, editingModeFor previewItem: any QLPreviewItem) -> QLPreviewItemEditingMode {
             .updateContents
         }
 
@@ -93,19 +85,14 @@ struct ScreenshotMarkupPresenter: UIViewControllerRepresentable {
             defer { try? FileManager.default.removeItem(at: item.fileURL) }
             do {
                 let data = try Data(contentsOf: item.fileURL)
-                let screenshot = try ScreenshotStager.makeStagedScreenshot(
-                    pngData: data, sourceTitle: item.sourceTitle, capturedAt: .now)
+                let screenshot = try ScreenshotStager.makeStagedScreenshot(pngData: data, sourceTitle: item.sourceTitle, capturedAt: .now)
                 stagedScreenshots.stage(screenshot)
                 onFinished(.staged)
-            } catch {
-                onFinished(.failed(message: Self.errorMessage(for: error)))
-            }
+            } catch { onFinished(.failed(message: Self.errorMessage(for: error))) }
         }
 
         private static func errorMessage(for error: Error) -> String {
-            if case TerminalImageAttachmentValidationError.imageTooLarge = error {
-                return "Screenshot is too large after markup."
-            }
+            if case TerminalImageAttachmentValidationError.imageTooLarge = error { return "Screenshot is too large after markup." }
             return "Couldn't stage this screenshot."
         }
     }
@@ -124,10 +111,7 @@ final class ScreenshotMarkupHostViewController: UIViewController {
         super.init(nibName: nil, bundle: nil)
     }
 
-    @available(*, unavailable)
-    required init?(coder: NSCoder) {
-        fatalError("ScreenshotMarkupHostViewController is created in code only.")
-    }
+    @available(*, unavailable) required init?(coder: NSCoder) { fatalError("ScreenshotMarkupHostViewController is created in code only.") }
 
     override func viewDidLoad() {
         super.viewDidLoad()

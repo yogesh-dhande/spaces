@@ -11,14 +11,13 @@ import workspacecore
 /// identically to remote alerts.
 struct AppKitControllerAlertsBuilderTests {
     private func workspace(
-        id: String, isRunning: Bool = true, isArchived: Bool = false,
-        processRows: [SpacesDeviceWorkspaceProcessRow] = [], codingAgentRows: [SpacesDeviceWorkspaceCodingAgentRow] = []
+        id: String, isRunning: Bool = true, isArchived: Bool = false, processRows: [SpacesDeviceWorkspaceProcessRow] = [],
+        codingAgentRows: [SpacesDeviceWorkspaceCodingAgentRow] = []
     ) -> SpacesDeviceWorkspaceSummary {
         SpacesDeviceWorkspaceSummary(
-            id: id, projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main",
-            dir: "/device/\(id)", isRunning: isRunning, isArchived: isArchived, isHidden: false, isDefault: false, notes: nil, sessionCount: 0,
-            assignedPorts: [], setupState: nil, config: SpacesDeviceWorkspaceConfig(), processRows: processRows, codingAgentRows: codingAgentRows,
-            terminalRows: [])
+            id: id, projectID: "project-1", projectName: "Project", branch: "feature", baseBranch: "main", dir: "/device/\(id)", isRunning: isRunning,
+            isArchived: isArchived, isHidden: false, isDefault: false, notes: nil, sessionCount: 0, assignedPorts: [], setupState: nil,
+            config: SpacesDeviceWorkspaceConfig(), processRows: processRows, codingAgentRows: codingAgentRows, terminalRows: [])
     }
 
     private func exitedProcess(id: String, processID: String, exitedAt: String?) -> SpacesDeviceWorkspaceProcessRow {
@@ -33,9 +32,9 @@ struct AppKitControllerAlertsBuilderTests {
             runState: .running, canRun: false, canStop: true, canRestart: true)
     }
 
-    private func agent(
-        id: String, agentID: String?, activityState: SpacesDeviceCodingAgentActivityState, updatedAt: String?
-    ) -> SpacesDeviceWorkspaceCodingAgentRow {
+    private func agent(id: String, agentID: String?, activityState: SpacesDeviceCodingAgentActivityState, updatedAt: String?)
+        -> SpacesDeviceWorkspaceCodingAgentRow
+    {
         SpacesDeviceWorkspaceCodingAgentRow(
             id: id, workspaceID: "ws", name: "Codex", command: "codex", launcherID: id, agentID: agentID, sessionID: nil, isConfigured: true,
             runState: .running, activityState: activityState, updatedAt: updatedAt, canRun: false, canStop: true, canRestart: true)
@@ -48,7 +47,8 @@ struct AppKitControllerAlertsBuilderTests {
     @Test func exitedProcessOnRunningWorkspaceProducesProcessAlert() {
         let groups = AppKitController.buildOverviewAlertsGroups(
             from: overview([
-                workspace(id: "ws", processRows: [exitedProcess(id: "p1", processID: "run-1", exitedAt: "2026-06-28T10:00:00Z"), runningProcess(id: "p2")])
+                workspace(
+                    id: "ws", processRows: [exitedProcess(id: "p1", processID: "run-1", exitedAt: "2026-06-28T10:00:00Z"), runningProcess(id: "p2")])
             ]), deviceID: "local")
 
         #expect(groups.count == 1)
@@ -83,6 +83,16 @@ struct AppKitControllerAlertsBuilderTests {
         #expect(groups[0].items.count == 2)
         #expect(groups[0].items.allSatisfy { $0.agentStatus == .waiting || $0.agentStatus == .done })
         #expect(groups[0].items.first?.attentionID == "alert:local:agent:ag-2:done:2026-06-28T09:30:00Z")
+
+        // A finished agent isn't still blocking on the user, so it must render distinctly from a
+        // waiting agent by tint alone (same cpu.fill identity, green vs warning).
+        let doneItem = groups[0].items.first { $0.agentStatus == .done }
+        let waitingItem = groups[0].items.first { $0.agentStatus == .waiting }
+        #expect(doneItem?.icon == "cpu.fill")
+        #expect(doneItem?.iconTint == .success)
+        #expect(waitingItem?.icon == "cpu.fill")
+        #expect(waitingItem?.iconTint == .warning)
+        #expect(doneItem?.iconTint != waitingItem?.iconTint)
     }
 
     @Test func exitedProcessOnStoppedWorkspaceIsIgnored() {
@@ -94,8 +104,9 @@ struct AppKitControllerAlertsBuilderTests {
 
     @Test func archivedWorkspaceIsExcluded() {
         let groups = AppKitController.buildOverviewAlertsGroups(
-            from: overview([workspace(id: "ws", isArchived: true, codingAgentRows: [agent(id: "a", agentID: "ag", activityState: .waiting, updatedAt: nil)])]),
-            deviceID: "local")
+            from: overview([
+                workspace(id: "ws", isArchived: true, codingAgentRows: [agent(id: "a", agentID: "ag", activityState: .waiting, updatedAt: nil)])
+            ]), deviceID: "local")
         #expect(groups.isEmpty)
     }
 
@@ -113,9 +124,7 @@ struct AppKitControllerAlertsBuilderTests {
         // Group whose most-recent alert is newest comes first; within a group, newest exit first.
         #expect(groups.map(\.workspaceID) == ["ws-a", "ws-b"])
         #expect(
-            groups[0].items.map(\.attentionID) == [
-                "alert:local:process:new:2026-06-28T12:00:00Z", "alert:local:process:old:2026-06-28T08:00:00Z",
-            ])
+            groups[0].items.map(\.attentionID) == ["alert:local:process:new:2026-06-28T12:00:00Z", "alert:local:process:old:2026-06-28T08:00:00Z"])
     }
 
     @Test func workspaceWithoutAttentionItemsProducesNoGroup() {

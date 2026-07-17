@@ -40,17 +40,14 @@ struct StatusDot: View {
             } else if kind == .waiting {
                 Circle().fill(Theme.orange).frame(width: 8, height: 8)
             } else {
-                Circle()
-                    .strokeBorder(strokeColor, lineWidth: 1.5)
-                    .frame(width: 8, height: 8)
+                Circle().strokeBorder(strokeColor, lineWidth: 1.5).frame(width: 8, height: 8)
             }
-        }
-        .frame(width: 14, height: 14)
+        }.frame(width: 14, height: 14)
     }
 
     private var strokeColor: Color {
         switch kind {
-        case .exited: Theme.red
+        case .exited: Theme.statusFailed
         default: Theme.mutedSecondary
         }
     }
@@ -65,14 +62,8 @@ struct TypeIconTile: View {
     var foreground: Color = Theme.accentStrong
 
     var body: some View {
-        RoundedRectangle(cornerRadius: 6, style: .continuous)
-            .fill(background)
-            .frame(width: 24, height: 24)
-            .overlay(
-                Image(systemName: systemName)
-                    .font(.system(size: 12, weight: .regular))
-                    .foregroundStyle(foreground)
-            )
+        RoundedRectangle(cornerRadius: 6, style: .continuous).fill(background).frame(width: 24, height: 24).overlay(
+            Image(systemName: systemName).font(.system(size: 12, weight: .regular)).foregroundStyle(foreground))
     }
 }
 
@@ -82,12 +73,9 @@ extension TypeIconTile {
     /// share the accent tile the Mac gives its browser rows; their glyphs tell them apart.
     static func tile(for type: SpacesMobileWorkspaceRowType) -> TypeIconTile {
         switch type {
-        case .processes:
-            TypeIconTile(systemName: type.iconName, background: Theme.green.opacity(0.16), foreground: Theme.green)
-        case .codingAgents:
-            TypeIconTile(systemName: type.iconName, background: Theme.chipBg, foreground: Theme.muted)
-        case .workspaceTerminals, .browserSessions:
-            TypeIconTile(systemName: type.iconName)
+        case .processes: TypeIconTile(systemName: type.iconName, background: Theme.green.opacity(0.16), foreground: Theme.green)
+        case .codingAgents: TypeIconTile(systemName: type.iconName, background: Theme.chipBg, foreground: Theme.muted)
+        case .workspaceTerminals, .browserSessions: TypeIconTile(systemName: type.iconName)
         }
     }
 }
@@ -98,13 +86,9 @@ extension TypeIconTile {
 /// `Theme.applyPrimaryStyle` treatment.
 struct BrandPrimaryButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.system(size: 15, weight: .semibold))
-            .foregroundStyle(Theme.primaryButtonText)
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 12)
-            .background(Theme.primaryButtonFill, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .opacity(configuration.isPressed ? 0.85 : 1)
+        configuration.label.font(.system(size: 15, weight: .semibold)).foregroundStyle(Theme.primaryButtonText).frame(maxWidth: .infinity).padding(
+            .vertical, 12
+        ).background(Theme.primaryButtonFill, in: RoundedRectangle(cornerRadius: 8, style: .continuous)).opacity(configuration.isPressed ? 0.85 : 1)
     }
 }
 
@@ -116,17 +100,10 @@ struct BrandTextField: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(label)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(Theme.muted)
-            TextField(placeholder, text: $text)
-                .font(.system(size: 14))
-                .foregroundStyle(Theme.text)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-                .padding(.horizontal, 10)
-                .padding(.vertical, 8)
-                .background(Theme.surface2, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            Text(label).font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.muted)
+            TextField(placeholder, text: $text).font(.system(size: 14)).foregroundStyle(Theme.text).textInputAutocapitalization(.never)
+                .autocorrectionDisabled().padding(.horizontal, 10).padding(.vertical, 8).background(
+                    Theme.surface2, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
         }
     }
 }

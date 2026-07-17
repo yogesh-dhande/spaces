@@ -1,5 +1,6 @@
 import Dispatch
 import Foundation
+import spacesclientcore
 import spacesdevicecore
 import spacesruntimecore
 import spacesterminalcore
@@ -63,6 +64,7 @@ import workspacecore
     #endif
     private var worktreeDiscoveryService: WorktreeDiscoveryService?
     private var terminalForegroundAgentReconciler: TerminalForegroundAgentReconciler?
+    private var remoteAgentWatchService: RemoteAgentWatchService?
     private var databaseChangeObserver: NSObjectProtocol?
     #if os(Linux)
         private var databaseChangeSignalReceiver: DatabaseChangeSignalReceiver?
@@ -82,6 +84,20 @@ import workspacecore
                 Result {
                     guard let self else { throw Self.requestFailedError("spacesd is shutting down.") }
                     return try self.launchBuiltInTerminalSession(launchConfiguration)
+                }
+            }.get()
+        },
+        // Routes the remote `killAgentSession` Device API command through the same notify-then-stop flow
+        // as the local `.agentKill` (`killProfileAgentSession`): `killAgentSession` routes through the stop
+        // chokepoint that tells the child's subscribers it exited before deleting its row. Runs on the main
+        // actor because the notification engine's delivery (via the process-wide submitter the daemon
+        // installs) uses the daemon-owned terminal-send path.
+        agentSessionKiller: { [weak self] sessionID in
+            try Self.runOnMainActorSynchronously {
+                Result {
+                    guard let self else { throw Self.requestFailedError("spacesd is shutting down.") }
+                    let orchestrator = try self.makeProfileOrchestrator()
+                    return try orchestrator.killAgentSession(terminalSessionID: sessionID)
                 }
             }.get()
         }, onRestartRequested: { [weak self] in Task { @MainActor in self?.requestDaemonRestart() } })
@@ -135,6 +151,14 @@ import workspacecore
         }
         foregroundAgentReconciler.start()
         terminalForegroundAgentReconciler = foregroundAgentReconciler
+        let remoteAgentWatch = RemoteAgentWatchService(
+            databasePath: databasePath, transport: .live(clientApp: Self.daemonDeviceClientApp()),
+            deliver: { [weak self] sessionID, line in
+                guard let self else { throw Self.requestFailedError("spacesd is shutting down.") }
+                try self.submitAgentNotificationLine(sessionID: sessionID, line: line)
+            }, logError: { writeStandardError($0) })
+        remoteAgentWatch.start()
+        remoteAgentWatchService = remoteAgentWatch
         #if os(macOS)
             // The router port is a Mac-only concept: only the macOS client runs Caddy, so only it
             // pins/consumes a real listening port. Seed it alongside the router service and never on
@@ -176,6 +200,7 @@ import workspacecore
 
     private func handleDatabaseDidChangeForDeviceRuntime() {
         worktreeDiscoveryService?.refreshWatchers()
+        remoteAgentWatchService?.reconcile()
         #if os(macOS)
             processExitMonitor?.refreshObservers()
             caddyRouterService?.reconcile()
@@ -197,6 +222,17 @@ import workspacecore
         }
         WorkspaceOrchestrator.setProcessWideBuiltInTerminalSessionTerminator { [weak self] sessionID in
             Self.runOnMainActorSynchronously { self?.terminateBuiltInTerminalSession(id: sessionID) }
+        }
+        // The device-runtime reconcilers detect coding-agent exits that never fired a session-end hook
+        // (codex/opencode, SIGKILL'd claude) and notify subscribers through this submitter. They run on a
+        // detached task, so the send hops to the main actor exactly like the terminator override above.
+        WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter { [weak self] sessionID, line in
+            try Self.runOnMainActorSynchronously {
+                Result {
+                    guard let self else { throw Self.requestFailedError("spacesd is shutting down.") }
+                    try self.submitAgentNotificationLine(sessionID: sessionID, line: line)
+                }
+            }.get()
         }
         #if os(macOS)
             WorkspaceOrchestrator.setProcessWideNotificationDeliverer { title, body, subtitle in
@@ -241,6 +277,8 @@ import workspacecore
         worktreeDiscoveryService = nil
         terminalForegroundAgentReconciler?.stop()
         terminalForegroundAgentReconciler = nil
+        remoteAgentWatchService?.stop()
+        remoteAgentWatchService = nil
         #if os(macOS)
             processExitMonitor?.stop()
             processExitMonitor = nil
@@ -750,6 +788,54 @@ import workspacecore
         case .agentSignal(let payload):
             let orchestrator = try makeProfileOrchestrator()
             return try recordProfileAgentSignal(payload, orchestrator: orchestrator)
+        case .agentList(let payload):
+            let orchestrator = try makeProfileOrchestrator()
+            let rows = try orchestrator.agentSessionRows(
+                workspaceID: normalizedProfileArgument(payload.workspaceID), sessionID: normalizedProfileArgument(payload.sessionID))
+            return TerminalServiceProfileCommandResponse(message: "Listed agent sessions.", agentSessions: rows)
+        case .agentAnnotate(let payload):
+            let orchestrator = try makeProfileOrchestrator()
+            return try annotateProfileAgentSession(payload, orchestrator: orchestrator)
+        case .agentSpawn(let payload):
+            let orchestrator = try makeProfileOrchestrator()
+            return try spawnProfileAgentSession(payload, orchestrator: orchestrator)
+        case .agentKill(let payload):
+            let orchestrator = try makeProfileOrchestrator()
+            return try killProfileAgentSession(payload.sessionID, orchestrator: orchestrator)
+        case .agentSubscribe(let payload):
+            let orchestrator = try makeProfileOrchestrator()
+            return try subscribeProfileAgentSession(payload, orchestrator: orchestrator)
+        case .agentUnsubscribe(let payload):
+            let orchestrator = try makeProfileOrchestrator()
+            if let deviceID = payload.deviceID {
+                // Symmetry with subscribe: a device-qualified request naming this machine drops the *local*
+                // edge, resolving the agent row from the child's terminal session id (the device-qualified
+                // payload shape). No agent row means nothing to delete — a local edge FK-cascades with its
+                // row — so it succeeds quietly.
+                if deviceID == SpacesPairedDeviceRecord.localDeviceID {
+                    try orchestrator.unsubscribeAgentWatch(
+                        subscriberTerminalSessionID: payload.subscriberTerminalSessionID, childTerminalSessionID: payload.agentSessionID)
+                    return TerminalServiceProfileCommandResponse(message: "Unsubscribed from agent session.")
+                }
+                // A cross-device edge keys on the child's terminal session id, so it drops without a remote
+                // call — unsubscribing works even when the device is offline.
+                try orchestrator.store.deleteAgentRemoteSubscription(
+                    subscriberTerminalSessionID: payload.subscriberTerminalSessionID, deviceID: deviceID, agentSessionID: payload.agentSessionID)
+                remoteAgentWatchService?.reconcile()
+                return TerminalServiceProfileCommandResponse(
+                    message: "Unsubscribed from agent session \(payload.agentSessionID) on device \(deviceID).")
+            }
+            try orchestrator.store.deleteAgentSubscription(
+                subscriberTerminalSessionID: payload.subscriberTerminalSessionID, agentSessionID: payload.agentSessionID)
+            return TerminalServiceProfileCommandResponse(message: "Unsubscribed from agent session.")
+        case .agentConsumePendingEvents(let subscriberTerminalSessionID):
+            // The MCP piggyback drain: atomically read-and-delete this subscriber's held notifications so a
+            // busy orchestrator receives them on its next tool result. Injection (the idle path) is untouched.
+            let orchestrator = try makeProfileOrchestrator()
+            let events = try orchestrator.store.consumePendingAgentNotifications(subscriberTerminalSessionID: subscriberTerminalSessionID)
+            return TerminalServiceProfileCommandResponse(
+                message: events.isEmpty ? "No pending agent events." : "Consumed \(events.count) pending agent event(s).",
+                pendingAgentEvents: events.isEmpty ? nil : events)
         case .terminalCommand(let payload):
             let orchestrator = try makeProfileOrchestrator()
             let workspaceID = try orchestrator.resolveWorkspaceIDForTerminalCommand(explicitWorkspaceID: payload.workspaceID, cwd: payload.cwd)
@@ -888,13 +974,16 @@ import workspacecore
         case done = "done"
         case exit = "exit"
 
+        /// The status each signal maps its agent row to. The `.exit` value is not consumed on the exit
+        /// path — `handleAgentExit` owns that decision (delete, `.done`, or `.exited`) — but reads
+        /// `.exited` so the mapping stays honest.
         var status: AgentWindowStatus {
             switch self {
             case .`init`: .idle
             case .working: .spinning
             case .blocked: .waiting
             case .done: .done
-            case .exit: .idle
+            case .exit: .exited
             }
         }
 
@@ -902,6 +991,17 @@ import workspacecore
             switch self {
             case .working, .blocked, .done: true
             case .`init`, .exit: false
+            }
+        }
+
+        /// The subscriber notification this transition produces, or `nil` when it produces none. Only
+        /// blocked/done/exit wake a watcher; init and working are silent.
+        var childNotificationTransition: AgentNotificationEngine.ChildTransition? {
+            switch self {
+            case .blocked: .blocked
+            case .done: .done
+            case .exit: .exited
+            case .`init`, .working: nil
             }
         }
     }
@@ -921,21 +1021,62 @@ import workspacecore
         let canRecordSignal = existingAgent != nil || type == .`init` || (type.establishesAgentFromEvidence && signalLabel != nil)
         if !canRecordSignal { return TerminalServiceProfileCommandResponse(message: "Agent \(type.rawValue) ignored.") }
 
+        // Per-tool hooks (PreToolUse / tool.execute.before) fire `working` on every tool call. When the
+        // agent is already working the signal changes nothing, so return before building the engine or
+        // posting the GUI-refresh notification; the orchestrator enforces the same duplicate-working
+        // suppression at the store layer for every other signal surface.
+        if type == .working, existingAgent?.status == type.status {
+            return TerminalServiceProfileCommandResponse(message: "Agent \(type.rawValue) recorded.")
+        }
+
         let environmentKeys = [WorkspaceOrchestrator.terminalTrackingIDEnvVar]
+        let engine = makeAgentNotificationEngine(orchestrator: orchestrator)
+        // Whether this signal leaves the signaling terminal's own agent row idle/done, the single
+        // authority for the flush decision below. Gated on the RESULTING row status, not the event type:
+        // an `init` preserves a live busy agent's status (a reconnecting hook, or Claude Code's
+        // SessionStart on auto-compact), so flushing on the event alone would deliver queued child events
+        // into a still-working agent. `.exit` always flushes to drain its now-undeliverable queue.
+        // `.exit` never flushes: its finalization chokepoint already tore down the signaling terminal's
+        // inbound queue, so nothing remains to flush.
+        let shouldFlushQueuedNotifications: Bool
         switch type {
         case .`init`:
-            try orchestrator.registerAgentWindow(
+            let registered = try orchestrator.registerAgentWindow(
                 workspaceID: workspaceID, provider: .spaces, label: signalLabel, terminalTrackingID: sessionID,
                 status: existingAgent?.status ?? .idle, eventType: type.rawValue, eventSource: "spaces_agent_signal", environmentKeys: environmentKeys
             )
-        case .working, .blocked, .done:
-            try orchestrator.updateAgentWindowStatus(
+            // A restart-init on a previously exited row resets to idle (registerAgentWindow) and flushes;
+            // a reconnect on a live busy row stays spinning/waiting and must not.
+            shouldFlushQueuedNotifications = registered.status.leavesSubscriberIdle
+        case .working:
+            // The first `working` after `blocked` is the resume that follows a permission approval —
+            // approvals fire no hook of their own, so this transition is also what withdraws any held
+            // "is blocked" line for this child before a subscriber can receive stale misinformation.
+            let resumedFromBlocked = existingAgent?.status == .waiting
+            let updated = try orchestrator.updateAgentWindowStatus(
                 workspaceID: workspaceID, provider: .spaces, terminalTrackingID: sessionID, label: signalLabel, status: type.status,
                 eventType: type.rawValue, eventSource: "spaces_agent_signal", environmentKeys: environmentKeys)
+            if resumedFromBlocked { try engine.childDidResumeWorking(agentSessionID: updated.id) }
+            shouldFlushQueuedNotifications = updated.status.leavesSubscriberIdle
+        case .blocked, .done:
+            let updated = try orchestrator.updateAgentWindowStatus(
+                workspaceID: workspaceID, provider: .spaces, terminalTrackingID: sessionID, label: signalLabel, status: type.status,
+                eventType: type.rawValue, eventSource: "spaces_agent_signal", environmentKeys: environmentKeys)
+            if let transition = type.childNotificationTransition { try engine.childDidTransition(agent: updated, transition: transition) }
+            shouldFlushQueuedNotifications = updated.status.leavesSubscriberIdle
         case .exit:
             guard let existingAgent else { return TerminalServiceProfileCommandResponse(message: "Agent exit ignored.") }
-            try orchestrator.handleAgentExit(
-                existingAgent, eventType: type.rawValue, eventSource: "spaces_agent_signal", environmentKeys: environmentKeys)
+            // The exit routes through the orchestrator's finalization chokepoint, which renders/enqueues the
+            // exited notice to subscribers before finalizing the row (delegating the delete-vs-`.exited`
+            // decision to `handleAgentExit`), then tears down the signaling terminal's own subscriber state:
+            // its now-undeliverable inbound queue and every outgoing watch edge it held. The signaling
+            // terminal is a bare shell (or gone) after an exit, so nothing more is flushed or discarded here.
+            try orchestrator.finalizeAgentRow(
+                existingAgent, reason: .exited(eventType: type.rawValue, eventSource: "spaces_agent_signal", environmentKeys: environmentKeys))
+            shouldFlushQueuedNotifications = false
+        }
+        if shouldFlushQueuedNotifications {
+            try engine.subscriberDidBecomeIdle(subscriberTerminalSessionID: sessionID)
         }
         postAgentEventNotification()
         return TerminalServiceProfileCommandResponse(message: "Agent \(type.rawValue) recorded.")
@@ -943,6 +1084,42 @@ import workspacecore
 
     private func matchingProfileAgentWindow(workspaceID: String, sessionID: String, orchestrator: WorkspaceOrchestrator) throws -> AgentWindowRecord?
     { try orchestrator.agentWindows(workspaceID: workspaceID).first { $0.provider == .spaces && $0.terminalTrackingID == sessionID } }
+
+    /// Builds the notification engine bound to the real terminal-send path: delivery is the same
+    /// `sendProfileTerminalInput` plumbing a `terminal send` uses, via `submitAgentNotificationLine` so
+    /// the line submits reliably. A send failure throws, which the engine reads as the subscriber having
+    /// vanished (dead session) and tears the watch edge down.
+    private func makeAgentNotificationEngine(orchestrator: WorkspaceOrchestrator) -> AgentNotificationEngine {
+        AgentNotificationEngine(
+            store: orchestrator.store,
+            deliver: { [weak self] sessionID, line in
+                guard let self else { throw Self.requestFailedError("spacesd is shutting down.") }
+                try self.submitAgentNotificationLine(sessionID: sessionID, line: line)
+            },
+            // The `(<kind>)` parenthetical is the detected agent kind (claude/codex/opencode) from the
+            // child's persisted runtime state — the same identity `agentRuntimeKind` puts in an
+            // orchestration row's `agent:` field, kept off the launch title so the label is not
+            // duplicated (`smoke-hello (smoke-hello)`). Reads disk, so it works at exit time too (the row
+            // is rendered before deletion).
+            resolveAgentKind: { agent in
+                guard let terminalSessionID = agent.terminalTrackingID, let paths = try? TerminalSessionPaths.forSession(id: terminalSessionID),
+                    let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths)
+                else { return nil }
+                return runtimeState.foregroundDetectedAgentKind?.displayLabel
+            }, logError: { writeStandardError($0) })
+    }
+
+    /// Delivers a rendered notification line into a subscriber terminal and submits it with a single
+    /// `appendNewline: true` send. Submit-safety lives at the session-host send chokepoint
+    /// (`GhosttyEmbeddedSessionHost`/`GhosttyLinuxHeadlessSessionCore`): for a text payload with
+    /// `appendNewline` it writes the text and the carriage return as separate spaced writes, so an agent
+    /// TUI reads the CR as a distinct Enter keystroke and submits the line rather than treating the whole
+    /// burst as an unsubmitted paste. This helper is the shared chokepoint used by the local notification
+    /// engine wiring and the cross-device `RemoteAgentWatchService` so both submit identically. A send
+    /// failure throws, signalling the caller that the subscriber has vanished.
+    private func submitAgentNotificationLine(sessionID: String, line: String) throws {
+        _ = try sendProfileTerminalInput(TerminalServiceTerminalSendPayload(sessionID: sessionID, input: .text(line), appendNewline: true))
+    }
 
     private func profileAgentRuntimeLabel(sessionID: String) -> String? {
         guard let paths = try? TerminalSessionPaths.forSession(id: sessionID) else { return nil }
@@ -953,6 +1130,91 @@ import workspacecore
         else { return nil }
         return normalizedProfileArgument(runtimeState.foregroundDisplayLabel) ?? kind.displayLabel
     }
+
+    private func annotateProfileAgentSession(_ payload: TerminalServiceAgentAnnotatePayload, orchestrator: WorkspaceOrchestrator) throws
+        -> TerminalServiceProfileCommandResponse
+    {
+        let updated = try orchestrator.annotateAgentSession(terminalSessionID: payload.sessionID, note: payload.note)
+        return TerminalServiceProfileCommandResponse(
+            message: updated.note == nil ? "Cleared agent note." : "Annotated agent session.", agentSessions: [updated])
+    }
+
+    /// Spawns a coding-agent terminal session after gating the command against the supported-agent set:
+    /// the command must launch a supported coding agent (claude, codex, or opencode) so spawn readiness
+    /// knows which foreground kind to await. Hooks are not a prerequisite — readiness is
+    /// foreground-detection-based, polled CLI-side against the session's terminal id.
+    private func spawnProfileAgentSession(_ payload: TerminalServiceAgentSpawnPayload, orchestrator: WorkspaceOrchestrator) throws
+        -> TerminalServiceProfileCommandResponse
+    {
+        do { _ = try AgentSpawnCommandGate.resolveSpawnableAgent(command: payload.command) } catch let error as AgentSpawnCommandGate.GateError {
+            throw SpacesRuntimeError.invalidArgument(message: error.errorDescription ?? "Agent spawn command is not supported.")
+        }
+        let workspaceID = try orchestrator.resolveWorkspaceIDForTerminalCommand(explicitWorkspaceID: payload.workspaceID, cwd: payload.cwd)
+        let session = try orchestrator.createWorkspaceAgentSession(workspaceID: workspaceID, command: payload.command, title: payload.title)
+        return TerminalServiceProfileCommandResponse(message: "Started agent session.", terminalSession: session)
+    }
+
+    /// Terminates a coding-agent session addressed by its terminal session id. The orchestrator owns
+    /// the flow (`killAgentSession`): a hook-signaled child stops through the coding-agent stop path
+    /// with its subscribers told it exited first, and a not-yet-signaled session is terminated only
+    /// when it was launched as a coding agent. A session that is neither is a loud error.
+    private func killProfileAgentSession(_ sessionID: String, orchestrator: WorkspaceOrchestrator) throws -> TerminalServiceProfileCommandResponse {
+        guard try orchestrator.killAgentSession(terminalSessionID: sessionID)
+        else { throw SpacesRuntimeError.invalidArgument(message: "No agent session for terminal \(sessionID).") }
+        return TerminalServiceProfileCommandResponse(message: "Killed agent session \(sessionID).")
+    }
+
+    /// Persists a subscription edge. Same-device: validate (in the orchestrator) that the watched agent
+    /// exists and the edge keeps the subscription graph acyclic — a self-edge or any cycle-closing edge is
+    /// a loud error, since a cycle would let injected notifications chase each other around a loop.
+    /// A device-qualified request naming *this* machine (`deviceID == localDeviceID`) is normalized onto
+    /// the same-device path: it is a local watch expressed with the local device's id or name, so it is
+    /// validated like any local watch rather than recorded as a cross-device edge (which skips cycle
+    /// detection). The payload shape differs — on the device-qualified path `agentSessionID` is the
+    /// child's terminal session id — so the orchestrator resolves the agent row from that terminal id.
+    /// Cross-device (`deviceID` set to a remote device): validate the device is paired and the child has
+    /// an agent session on it (one `listAgentSessions` call), then record a cross-device edge keyed on the
+    /// child's terminal session id and nudge the watch service to open/refresh that device's stream.
+    /// Cross-device cycle detection is impossible locally — the remote's own subscription graph is not
+    /// queryable — so only the same-device acyclic invariant is enforced.
+    private func subscribeProfileAgentSession(_ payload: TerminalServiceAgentSubscriptionPayload, orchestrator: WorkspaceOrchestrator) throws
+        -> TerminalServiceProfileCommandResponse
+    {
+        if let deviceID = payload.deviceID {
+            if deviceID == SpacesPairedDeviceRecord.localDeviceID {
+                try orchestrator.subscribeAgentWatch(
+                    subscriberTerminalSessionID: payload.subscriberTerminalSessionID, childTerminalSessionID: payload.agentSessionID)
+                return TerminalServiceProfileCommandResponse(message: "Subscribed to agent session.")
+            }
+            let clientApp = Self.daemonDeviceClientApp()
+            let validatedRow = try RemoteAgentSubscriptionValidation.validate(
+                deviceID: deviceID, childTerminalSessionID: payload.agentSessionID,
+                resolveDevice: { try SpacesClientDatabase.defaultDatabase().pairedDevice(id: $0) }, deviceName: { $0.name },
+                fetchRows: { try SpacesDeviceClient.listAgentSessions(sessionID: payload.agentSessionID, device: $0, clientApp: clientApp) })
+            try orchestrator.store.insertAgentRemoteSubscription(
+                subscriberTerminalSessionID: payload.subscriberTerminalSessionID, deviceID: deviceID, agentSessionID: payload.agentSessionID,
+                createdAt: nowISO8601())
+            // Seed the watch baseline with the row validation just fetched *before* the stream's first
+            // listing can land, so a transition — or an exit — in the connect gap (seconds-to-minutes on
+            // a cold stream) is diffed against a real prior state instead of being silently absorbed.
+            // Seed before reconcile: both run synchronously on the main actor, so the seed is in place
+            // before any pull's continuation resumes (see `seedBaseline`), and reconcile then opens or
+            // refreshes the stream that pulls that first listing.
+            remoteAgentWatchService?.seedBaseline(
+                deviceID: deviceID, childTerminalSessionID: payload.agentSessionID, row: validatedRow)
+            remoteAgentWatchService?.reconcile()
+            return TerminalServiceProfileCommandResponse(message: "Subscribed to agent session \(payload.agentSessionID) on device \(deviceID).")
+        }
+        try orchestrator.validateAgentSubscription(
+            subscriberTerminalSessionID: payload.subscriberTerminalSessionID, agentSessionID: payload.agentSessionID)
+        try orchestrator.store.insertAgentSubscription(
+            subscriberTerminalSessionID: payload.subscriberTerminalSessionID, agentSessionID: payload.agentSessionID, createdAt: nowISO8601())
+        return TerminalServiceProfileCommandResponse(message: "Subscribed to agent session.")
+    }
+
+    /// The daemon's own Device API client identity when it acts as a device client (subscribe validation
+    /// and the watch service). Reads paired-device credentials the same way the CLI and Mac app do.
+    private static func daemonDeviceClientApp() -> SpacesDeviceClientApp { SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short) }
 
     private func postAgentEventNotification() {
         #if os(macOS)
@@ -1429,12 +1691,13 @@ private final class MainActorSyncBox<T>: @unchecked Sendable { var value: T? }
 
     init(
         builtInTerminalSessionTerminator: WorkspaceOrchestrator.BuiltInTerminalSessionTerminator? = nil,
-        builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher? = nil, onRestartRequested: (@Sendable () -> Void)? = nil
+        builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher? = nil,
+        agentSessionKiller: (@Sendable (String) throws -> Bool)? = nil, onRestartRequested: (@Sendable () -> Void)? = nil
     ) {
         #if canImport(spacesdeviceapi)
             supervisor = SpacesDeviceAPISupervisor(
                 builtInTerminalSessionTerminator: builtInTerminalSessionTerminator, builtInTerminalSessionLauncher: builtInTerminalSessionLauncher,
-                onRestartRequested: onRestartRequested)
+                agentSessionKiller: agentSessionKiller, onRestartRequested: onRestartRequested)
         #endif
     }
 

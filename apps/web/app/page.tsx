@@ -25,7 +25,7 @@ type Pillar = {
   hrefLabel?: string;
 };
 
-// The five things Spaces manages for you — the centerpiece of the page.
+// The six things Spaces manages for you — the centerpiece of the page.
 const pillars: Pillar[] = [
   {
     title: "Agents",
@@ -104,6 +104,22 @@ const pillars: Pillar[] = [
       </svg>
     ),
   },
+  {
+    title: "Mac & iPhone",
+    description:
+      "Two full clients, not an app and an accessory. Each one pairs straight to the machines it drives — your iPhone talks directly to a Mac or a cloud Linux box, with nothing in the middle to leave running.",
+    href: "#mobile",
+    hrefLabel: "See both clients",
+    icon: (
+      <svg viewBox="0 0 20 20" fill="none" aria-hidden className="h-5 w-5">
+        <rect x="1.5" y="4" width="11" height="8" rx="1.2" stroke="currentColor" strokeWidth="1.5" />
+        <path d="M4.5 15h5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+        <path d="M7 12v3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+        <rect x="13.5" y="8" width="5" height="9.5" rx="1.2" stroke="currentColor" strokeWidth="1.5" />
+        <path d="M15.6 15.6h1.3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+      </svg>
+    ),
+  },
 ];
 
 type Feature = {
@@ -160,7 +176,7 @@ const keyFeatures: Feature[] = [
   {
     title: "Take any session to your iPhone",
     description:
-      "Pair the Spaces iOS app and your terminal sessions come with you. Pick up the same live session on your phone — watch a build, check a coding agent, or send a command — then step back to your Mac without losing your place.",
+      "The iOS app is a full client, not a remote for your Mac. It pairs directly with any device running Spaces — your Mac, or a cloud Linux box with no Mac involved — so you can pick up the same live session, watch a build, check a coding agent, or send a command, then step back to your desk without losing your place.",
   },
   {
     title: "Launch and teardown on demand",
@@ -212,7 +228,7 @@ const faqItems: FaqItem[] = [
     ),
   },
   {
-    question: "Can I use it with CLI coding agents like Claude Code or Codex CLI?",
+    question: "Can I use it with CLI coding agents like Claude Code, Codex, or opencode?",
     answer: (
       <>
         Yes. Open a terminal inside any workspace with <Key>⌘⌥T</Key> and start
@@ -262,12 +278,15 @@ const faqItems: FaqItem[] = [
     question: "Is there a mobile app?",
     answer: (
       <>
-        Coming soon! The Spaces iOS app pairs with your Mac by scanning a QR code. From
-        your phone you can browse a workspace&apos;s live terminal sessions, watch
-        a coding agent&apos;s output, or start new sessions even while
-        you&apos;re away from your Mac. See the{" "}
+        Coming soon! The Spaces iOS app is a full client in its own right, not a
+        remote for the desktop app. Your Mac&apos;s Devices settings shows a
+        pairing QR code for any machine it&apos;s connected to — itself, or a
+        Linux box — and scanning one pairs your phone with that machine
+        directly. From then on the phone talks to it on its own: browse its live
+        terminal sessions, watch a coding agent&apos;s output, or start new
+        sessions, with no Mac in the path. See the{" "}
         <Link href="/docs/ios" className="text-accent hover:underline">
-          iOS companion
+          iOS app
         </Link>{" "}
         docs.
       </>
@@ -601,66 +620,6 @@ export default function HomePage() {
         </div>
       </section>
 
-      {/* ── Ports & proxy ── */}
-      <section id="proxy" className="border-t border-line/70">
-        <div className="mx-auto w-full max-w-7xl px-6 py-20 md:py-24">
-          <div className="max-w-3xl">
-            <h2 className="mt-5 text-[clamp(1.5rem,3.5vw,2.3rem)] font-semibold leading-[1.15] tracking-[-0.01em]">
-              One localhost, one cookie jar, <span className="text-accent">endless conflicts. Solved.</span>
-            </h2>
-            <p className="mt-5 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
-              Three worktrees, one <code>localhost</code>: the ports collide, and since browsers scope
-              cookies to hostname (not port), logging into one logs you into all three. Spaces routes each
-              workspace through its own hostname, so every branch gets its own port and its own cookie jar.
-            </p>
-          </div>
-
-          <div className="mt-14 grid gap-6 lg:grid-cols-2">
-            <ComparisonColumn tone="negative" label="Plain localhost" items={localhostPains} />
-            <ComparisonColumn tone="accent" label="Spaces with Caddy Reverse Proxy" items={spacesFixes} />
-          </div>
-        </div>
-      </section>
-
-      {/* ── Built for the keyboard ── */}
-      <section className="border-t border-line/70">
-        <div className="mx-auto w-full max-w-7xl px-6 py-24">
-          <div className="max-w-3xl">
-            <h2 className="text-[clamp(1.5rem,3.5vw,2.3rem)] font-semibold leading-[1.15] tracking-[-0.01em]">
-              Built for <span className="text-accent">the keyboard</span>
-            </h2>
-            <p className="mt-5 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
-              Context switching is a keystroke, not a window hunt. Focus any
-              session (browser or terminal) in the active workspace, cycle
-              through just that workspace&apos;s sessions to stay in flow, or
-              pull any window across every workspace from the command palette,
-              all without lifting your hands off the keyboard. <Link href="/docs/shortcuts" className="text-accent hover:underline">
-                Every shortcut is configurable.
-              </Link>
-            </p>
-            <p className="mt-6 flex flex-wrap items-center gap-x-2.5 gap-y-2 text-sm text-foreground-soft">
-              <Key>⌘1–0</Key>
-              <span>focus</span>
-              <Key>⌘⌥]</Key>
-              <span>cycle</span>
-              <Key>⌘⌥-</Key>
-              <span>command palette</span>
-            </p>
-          </div>
-
-          <figure className="mt-12 overflow-hidden rounded-sm border border-line/80 bg-surface/70 p-2 md:p-3">
-            <video
-              src="/media/demo_nav_palette.mp4"
-              autoPlay
-              loop
-              muted
-              playsInline
-              className="h-auto w-full rounded-sm"
-            />
-          </figure>
-        </div>
-      </section>
-
       {/* ── Remote machines ── */}
       <section id="remote" className="border-t border-line/70">
         <div className="mx-auto w-full max-w-7xl px-6 py-20 md:py-24">
@@ -698,6 +657,70 @@ export default function HomePage() {
         </div>
       </section>
 
+      {/* ── Agent orchestration ── */}
+      <section id="orchestrate" className="border-t border-line/70 bg-background-soft/40">
+        <div className="mx-auto w-full max-w-7xl px-6 py-20 md:py-24">
+          <div className="max-w-3xl">
+            <h2 className="mt-5 text-[clamp(1.5rem,3.5vw,2.3rem)] font-semibold leading-[1.15] tracking-[-0.01em]">
+              Coordinate all work via{" "}
+              <span className="text-accent whitespace-nowrap">one orchestrator agent</span>
+            </h2>
+            <p className="mt-5 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
+              Use the Spaces MCP to put a single agent in front of everything you have going — a fix
+              in this repo, a feature on that branch, an experiment on the Linux
+              box. Subagents can use any harness or model so you get the right tool for the job. 
+              Just prompt it to teach your workflow.
+            </p>
+            <p className="mt-5 text-base leading-7 text-foreground-soft md:text-lg md:leading-8"> 
+              No more juggling between agent sessions!
+            </p>
+            
+          </div>
+
+          <div className="mt-14 grid gap-10 lg:grid-cols-[1.1fr_0.9fr] lg:items-center">
+            <OrchestrationDiagram />
+
+            <div className="rounded-sm border border-accent-2/45 bg-[color:color-mix(in_oklab,var(--accent-2)_8%,var(--surface))] p-6 md:p-8">
+              <p className="inline-flex items-center gap-2 font-mono text-[0.7rem] uppercase tracking-[0.18em] text-accent-2">
+                <span className="h-1.5 w-1.5 rounded-full bg-accent-2" />
+                Cross-harness · cross-model · cross-device
+              </p>
+              <p className="mt-4 text-lg font-semibold leading-snug tracking-tight text-foreground md:text-xl">
+                The right agent for every piece of work.
+              </p>
+              <ul className="mt-4 space-y-3 text-sm leading-6 text-foreground-soft md:text-base md:leading-7">
+                <li>
+                  <strong className="font-semibold text-foreground">Mix harnesses.</strong>{" "}
+                  Claude Code, Codex, and opencode — any of them can lead, any can
+                  be a child.
+                </li>
+                <li>
+                  <strong className="font-semibold text-foreground">Mix models.</strong>{" "}
+                  Each agent runs whatever model its harness supports, so you pick
+                  the right brain for each job.
+                </li>
+                <li>
+                  <strong className="font-semibold text-foreground">Mix machines.</strong>{" "}
+                  Children run wherever you have them — a cloud Linux box does the
+                  heavy lifting while you drive from your Mac.
+                </li>
+              </ul>
+              <p className="mt-5 text-sm leading-6 text-foreground-soft md:text-base md:leading-7">
+                Every child is a real terminal in the app. Alerts surface whoever
+                needs you, and one shortcut jumps you to any agent&apos;s pane.
+              </p>
+              <Link
+                href="/docs/orchestration"
+                className="mt-6 inline-flex items-center gap-1.5 text-sm font-semibold text-accent transition-colors hover:underline"
+              >
+                Read the orchestration guide
+                <span aria-hidden>→</span>
+              </Link>
+            </div>
+          </div>
+        </div>
+      </section>
+
       {/* ── Take it with you (mobile) ── */}
       <section id="mobile" className="border-t border-line/70 bg-background-soft/60">
         <div className="mx-auto w-full max-w-7xl px-6 py-20 md:py-24">
@@ -712,15 +735,16 @@ export default function HomePage() {
                 Remote control <span className="text-accent whitespace-nowrap">from your iPhone</span>
               </h2>
               <p className="mt-5 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
-                Pair the Spaces iOS app with a QR code. Browse live terminal
-                sessions across your workspaces, watch an agent that&apos;s
-                working or waiting, type into the same shell, and run or restart
-                processes — from your phone.
+                Pair the Spaces iOS app with a QR code and it talks to that
+                machine directly — your Mac, or a cloud Linux box. Browse live terminal sessions across your
+                workspaces, watch an agent that&apos;s working or waiting, type
+                into the same shell, and run or restart processes.
               </p>
               <p className="mt-4 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
-                Sessions run in the Spaces daemon, so they keep running even if
-                the Mac app quits — and your phone works whether or not the app
-                is open.
+                Nothing routes through the desktop app. Sessions live in the
+                Spaces daemon on the machine that owns them, so your phone
+                reaches them whether the Mac app is open, closed, or crashed —
+                and reaches a Linux box even while your Mac is asleep.
               </p>
               <Link
                 href="/docs/ios"
@@ -731,17 +755,89 @@ export default function HomePage() {
               </Link>
             </div>
 
-            <MediaPlaceholder
-              label="iOS app — live session list & terminal"
-              aspect="aspect-[4/3]"
-            >
-              <PhoneGlyph />
-            </MediaPlaceholder>
+            <div className="mx-auto grid w-full max-w-[34rem] grid-cols-2 gap-4 sm:gap-6">
+              <figure className="overflow-hidden rounded-sm border border-line/80 bg-surface/70 shadow-[0_40px_100px_-60px_color-mix(in_oklab,var(--ink)_55%,transparent)]">
+                <img
+                  src="/media/ios-sessions.png"
+                  alt="The Spaces iOS app listing live sessions per workspace — browser tabs, terminals, and a running agent — with restart, stop, and new-terminal controls"
+                  className="h-auto w-full"
+                  loading="lazy"
+                />
+              </figure>
+              <figure className="overflow-hidden rounded-sm border border-line/80 bg-surface/70 shadow-[0_40px_100px_-60px_color-mix(in_oklab,var(--ink)_55%,transparent)]">
+                <img
+                  src="/media/ios-terminal.png"
+                  alt="A live coding-agent terminal session open in the Spaces iOS app, with a terminal key row for typing into the same shell"
+                  className="h-auto w-full"
+                  loading="lazy"
+                />
+              </figure>
+            </div>
           </div>
         </div>
       </section>
 
-      {/* ── Capabilities index ── */}
+      {/* ── Sessions that keep running (tmux-style persistence) ── */}
+      <section id="proxy" className="border-t border-line/70">
+        <div className="mx-auto w-full max-w-7xl px-6 py-20 md:py-24">
+          <div className="max-w-3xl">
+            <h2 className="mt-5 text-[clamp(1.5rem,3.5vw,2.3rem)] font-semibold leading-[1.15] tracking-[-0.01em]">
+              One localhost, one cookie jar, <span className="text-accent">endless conflicts. Solved.</span>
+            </h2>
+            <p className="mt-5 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
+              Three worktrees, one <code>localhost</code>: the ports collide, and since browsers scope
+              cookies to hostname (not port), logging into one logs you into all three. Spaces routes each
+              workspace through its own hostname, so every branch gets its own port and its own cookie jar.
+            </p>
+          </div>
+
+          <div className="mt-14 grid gap-6 lg:grid-cols-2">
+            <ComparisonColumn tone="negative" label="Plain localhost" items={localhostPains} />
+            <ComparisonColumn tone="accent" label="Spaces with Caddy Reverse Proxy" items={spacesFixes} />
+          </div>
+        </div>
+      </section>
+
+      {/* ── Built for the keyboard ── */}
+      <section className="border-t border-line/70">
+        <div className="mx-auto w-full max-w-7xl px-6 py-24">
+          <div className="max-w-3xl">
+            <h2 className="text-[clamp(1.5rem,3.5vw,2.3rem)] font-semibold leading-[1.15] tracking-[-0.01em]">
+              Built for <span className="text-accent">the keyboard</span>
+            </h2>
+            <p className="mt-5 text-base leading-7 text-foreground-soft md:text-lg md:leading-8">
+              Context switching is a keystroke, not a window hunt. Focus any
+              session (browser or terminal) in the active workspace, cycle
+              through just that workspace&apos;s windows to stay in flow, or
+              jump to any window of any workspace from the global command palette,
+              all without lifting your hands off the keyboard. <Link href="/docs/shortcuts" className="text-accent hover:underline">
+                Every shortcut is configurable.
+              </Link>
+            </p>
+            <p className="mt-6 flex flex-wrap items-center gap-x-2.5 gap-y-2 text-sm text-foreground-soft">
+              <Key>⌘1–0</Key>
+              <span>focus</span>
+              <Key>⌘⌥]</Key>
+              <span>cycle</span>
+              <Key>⌘⌥-</Key>
+              <span>command palette</span>
+            </p>
+          </div>
+
+          <figure className="mt-12 overflow-hidden rounded-sm border border-line/80 bg-surface/70 p-2 md:p-3">
+            <video
+              src="/media/demo_nav_palette.mp4"
+              autoPlay
+              loop
+              muted
+              playsInline
+              className="h-auto w-full rounded-sm"
+            />
+          </figure>
+        </div>
+      </section>
+
+      {/* ── FAQ ── */}
       <section id="features" className="border-t border-line/70">
         <div className="mx-auto w-full max-w-7xl px-6 py-20 md:py-24">
           <div className="flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
@@ -758,7 +854,7 @@ export default function HomePage() {
         </div>
       </section>
 
-      {/* ── FAQ ── */}
+      {/* ── Ports & proxy ── */}
       <section id="faq" className="border-t border-line/70 bg-background-soft/40">
         <div className="mx-auto w-full max-w-7xl px-6 py-20 md:py-24">
           <div className="max-w-3xl">
@@ -909,6 +1005,132 @@ function RemoteDiagram() {
     </figure>
   );
 }
+
+// Diagram for the orchestration section: you converse with one orchestrator
+// agent, which fans real feature work out to child agents grouped inside the
+// machine each one runs on.
+function OrchestrationDiagram() {
+  const machines: {
+    name: string;
+    agents: { harness: string; model?: string; task: string }[];
+  }[] = [
+    {
+      name: "MacBook",
+      agents: [
+        { harness: "claude", model: "opus", task: "Redesign settings UI" },
+        { harness: "opencode", task: "Research auth libraries" },
+      ],
+    },
+    {
+      name: "Linux box",
+      agents: [
+        { harness: "codex", model: "gpt-5.6-sol", task: "Refactor sync backend" },
+      ],
+    },
+  ];
+  return (
+    <figure className="rounded-sm border border-line/80 bg-surface/50 p-6 md:p-10">
+      <div className="flex flex-col items-center gap-2 sm:flex-row sm:items-center sm:justify-center sm:gap-0">
+        {/* You ↔ orchestrator: prompts flow down, results and questions come back */}
+        <div className="flex flex-col items-center">
+          <div className="w-full max-w-[11rem] rounded-sm border border-accent-2/50 bg-accent-2/10 px-6 py-3 text-center">
+            <p className="font-mono text-[0.62rem] uppercase tracking-[0.16em] text-accent-2">
+              You
+            </p>
+          </div>
+          <div className="flex flex-col items-center gap-1 py-1 text-foreground-soft">
+            <svg width="34" height="30" viewBox="0 0 34 30" aria-hidden="true">
+              <line x1="12" y1="2" x2="12" y2="24" stroke="currentColor" strokeWidth="1" />
+              <path d="M12 29 L8.5 23 L15.5 23 Z" fill="currentColor" />
+              <line x1="22" y1="28" x2="22" y2="6" stroke="currentColor" strokeWidth="1" />
+              <path d="M22 1 L18.5 7 L25.5 7 Z" fill="currentColor" />
+            </svg>
+            <p className="font-mono text-[0.56rem] uppercase tracking-[0.12em]">
+              prompts ↓ · results ↑
+            </p>
+          </div>
+          {/* The elbow into the machine rail leaves from the orchestrator box
+              itself (sm+); the invisible leading spacer mirrors it so the box
+              stays centered under the You box. */}
+          <div className="flex items-center">
+            <span aria-hidden className="hidden w-7 sm:block" />
+            <div className="rounded-sm border border-accent/45 bg-accent/10 px-5 py-3 text-center">
+              <p className="font-mono text-[0.62rem] uppercase tracking-[0.16em] text-accent">
+                Orchestrator agent
+              </p>
+            </div>
+            <span aria-hidden className="hidden h-px w-7 bg-line/80 sm:block" />
+          </div>
+        </div>
+
+        {/* Machine branches: rows touch (no gap) so the vertical rail segments
+            in each row's connector cell join into one continuous rail. */}
+        <div className="flex w-full flex-col sm:w-auto">
+          {machines.map((machine, i) => (
+            <div
+              key={machine.name}
+              className="flex flex-col items-center sm:flex-row sm:items-stretch"
+            >
+              {/* Connector: horizontal tick into the card at its vertical
+                  center, plus the rail segment for this row (bottom half on
+                  the first row, top half on the last). */}
+              <div aria-hidden className="relative hidden w-7 sm:block">
+                <span className="absolute left-0 right-0 top-1/2 h-px bg-line/80" />
+                <span
+                  className={`absolute left-0 w-px bg-line/80 ${
+                    i === 0 ? "top-1/2 bottom-0" : "top-0 bottom-1/2"
+                  }`}
+                />
+              </div>
+              {/* Vertical drop for the stacked mobile layout */}
+              <span aria-hidden className="h-5 w-px bg-line/80 sm:hidden" />
+              <div className="w-full py-2 sm:max-w-[24rem]">
+                <div className="overflow-hidden rounded-sm border border-line/80 bg-background/40">
+                  <div className="flex items-center gap-2 border-b border-line/80 bg-surface/90 px-3 py-2">
+                    <span className="h-1.5 w-1.5 rounded-full bg-accent/80" />
+                    <p className="font-mono text-[0.58rem] uppercase tracking-[0.14em] text-foreground-soft">
+                      {machine.name}
+                    </p>
+                  </div>
+                  <div
+                    className={`grid gap-2.5 p-3 ${
+                      machine.agents.length > 1 ? "sm:grid-cols-2" : ""
+                    }`}
+                  >
+                    {machine.agents.map((agent) => (
+                      <div
+                        key={agent.harness}
+                        className="rounded-sm border border-line/80 px-3 py-2.5 text-center"
+                      >
+                        <p className="text-sm font-semibold tracking-tight text-foreground">
+                          {agent.harness}
+                          {agent.model && (
+                            <span className="ml-1.5 font-mono text-[0.58rem] font-normal uppercase tracking-[0.1em] text-accent">
+                              {agent.model}
+                            </span>
+                          )}
+                        </p>
+                        <p className="mt-1 text-xs leading-5 text-foreground-soft">
+                          {agent.task}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+      <figcaption className="mt-8 text-center font-mono text-[0.7rem] uppercase tracking-[0.16em] text-foreground-soft">
+        One orchestrator runs the fleet of agents across all machines
+      </figcaption>
+    </figure>
+  );
+}
+
+// Diagram for the persistence section: the Spaces app detaches, but the
+// device daemon keeps every terminal and agent session alive for reattach.
 
 // A muted keycap used inside the app mocks, distinct from the amber marketing
 // <Key>. Mirrors the subtle shortcut chips in the real sidebar.
@@ -1151,57 +1373,6 @@ function ComparisonColumn({
         ))}
       </ul>
     </div>
-  );
-}
-
-function MediaPlaceholder({
-  label,
-  aspect,
-  children,
-}: {
-  label: string;
-  aspect: string;
-  children?: React.ReactNode;
-}) {
-  return (
-    <figure
-      className={`relative flex ${aspect} w-full items-center justify-center overflow-hidden rounded-sm border border-dashed border-line bg-surface/40`}
-    >
-      <div className="flex flex-col items-center gap-4 px-6 text-center text-foreground-soft">
-        {children}
-        <figcaption className="font-mono text-[0.7rem] uppercase tracking-[0.16em]">
-          {label}
-        </figcaption>
-      </div>
-    </figure>
-  );
-}
-
-function PhoneGlyph() {
-  return (
-    <svg viewBox="0 0 48 48" fill="none" aria-hidden className="h-12 w-12 text-line">
-      <rect
-        x="15"
-        y="6"
-        width="18"
-        height="36"
-        rx="3.5"
-        stroke="currentColor"
-        strokeWidth="1.75"
-      />
-      <path
-        d="M21 10h6"
-        stroke="currentColor"
-        strokeWidth="1.75"
-        strokeLinecap="round"
-      />
-      <path
-        d="M20 20h8M20 25h8M20 30h5"
-        stroke="color-mix(in oklab, var(--accent) 70%, transparent)"
-        strokeWidth="1.75"
-        strokeLinecap="round"
-      />
-    </svg>
   );
 }
 

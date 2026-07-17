@@ -21,7 +21,10 @@ public enum AgentHookCommand {
     /// SPACES_HOOK_VERSION. Bump by hand whenever `signalCommand`, the opencode plugin body, or an
     /// agent's event bindings change. A config carrying an older number reads back as `.outdated`,
     /// which is what re-offers the update to a user whose hooks a previous Spaces release installed.
-    public static let hookVersion = 1
+    ///
+    /// v2: per-tool `working` bindings (Claude/Codex `PreToolUse`, opencode `tool.execute.before`) so
+    /// an agent resuming after a permission approval leaves `blocked`.
+    public static let hookVersion = 2
 
     /// Version-less ownership token. Every Spaces-owned entry, of every version, contains it.
     ///
@@ -30,8 +33,8 @@ public enum AgentHookCommand {
     /// entry in place and append a second one beside it on every reinstall.
     public static let marker = "spaces-agent-hook"
 
-    /// The trailing comment actually written: `spaces-agent-hook v1`. `marker` is a prefix of it, so
-    /// `isSpacesOwned` keeps matching every version.
+    /// The trailing comment actually written: `spaces-agent-hook v<hookVersion>`. `marker` is a prefix
+    /// of it, so `isSpacesOwned` keeps matching every version.
     static func versionedMarker(_ version: Int = hookVersion) -> String { "\(marker) v\(version)" }
 
     /// Builds the `spaces agent signal` invocation for `event`.

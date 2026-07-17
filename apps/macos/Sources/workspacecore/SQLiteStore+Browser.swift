@@ -12,8 +12,7 @@ extension SQLiteStore {
                     sql: """
                         INSERT INTO workspace_browser_sessions(workspace_id, name, url, order_index)
                         VALUES (?, ?, ?, ?)
-                        """,
-                    bindings: [workspaceID, session.name ?? "", session.url ?? "", String(index)])
+                        """, bindings: [workspaceID, session.name ?? "", session.url ?? "", String(index)])
             }
         }
     }
@@ -26,8 +25,6 @@ extension SQLiteStore {
                 WHERE workspace_id = ?
                 ORDER BY order_index
                 """, bindings: [workspaceID])
-        return rows.map { row in
-            BrowserSession(name: row[0].isEmpty ? nil : row[0], url: row[1].isEmpty ? nil : row[1])
-        }
+        return rows.map { row in BrowserSession(name: row[0].isEmpty ? nil : row[0], url: row[1].isEmpty ? nil : row[1]) }
     }
 }

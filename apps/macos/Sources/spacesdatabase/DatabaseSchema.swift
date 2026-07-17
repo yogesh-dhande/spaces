@@ -7,9 +7,164 @@ import Foundation
 #endif
 
 public enum DatabaseSchema {
-    public static let currentVersion = 1
+    public static let currentVersion = 7
 
-    public static let migrationSteps: [DatabaseMigrationStep] = []
+    /// Adds the coding-agent orchestration surface: an explicit `note` on each agent session and the
+    /// `agent_subscriptions` graph. The subscriber key is a terminal session id (a subscriber may be a
+    /// plain terminal with no agent row), and the target is the agent session id. The foreign key is
+    /// `ON DELETE RESTRICT`: an agent row's inbound subscriptions are NOT cascaded away on delete but
+    /// dropped explicitly by the single termination chokepoint (`WorkspaceOrchestrator.finalizeAgentRow`)
+    /// after it has notified those subscribers the child exited. RESTRICT then makes any delete that
+    /// bypasses the chokepoint fail loudly instead of silently stranding a watcher's notice. Named
+    /// separately so both the fresh-schema SQL and the v6→v7 rebuild step share one definition and can
+    /// never drift apart.
+    static let agentSubscriptionsSQL = """
+            CREATE TABLE IF NOT EXISTS agent_subscriptions (
+              subscriber_terminal_session_id TEXT NOT NULL,
+              agent_session_id TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              PRIMARY KEY (subscriber_terminal_session_id, agent_session_id),
+              FOREIGN KEY (agent_session_id) REFERENCES agent_sessions(id) ON DELETE RESTRICT
+            );
+        """
+
+    /// Queue of coalesced notification lines held for a busy subscriber until it goes idle: one row per
+    /// (subscriber terminal, watched agent). Deliberately has NO foreign key to `agent_sessions` — an
+    /// exit notification must outlive the agent row (`handleAgentExit` deletes ad-hoc rows before the
+    /// subscriber ever reads it), and the `message` is fully rendered at enqueue time, so the row needs
+    /// nothing from the agent table after insert. The unique index makes `INSERT OR REPLACE` coalesce
+    /// repeated transitions of the same child down to a single latest-state line. `transition` records
+    /// the transition word the rendered message carries (`blocked`/`done`/`exited`) so a child that
+    /// resumes working can have exactly its held `blocked` line withdrawn structurally, never by
+    /// matching message text. This is the latest shape, shared by the fresh schema and the v4→v5 step's
+    /// ALTER target; the v2→v3 step keeps its own frozen historical snapshot.
+    static let agentPendingNotificationsSQL = """
+            CREATE TABLE IF NOT EXISTS agent_pending_notifications (
+              id TEXT PRIMARY KEY,
+              subscriber_terminal_session_id TEXT NOT NULL,
+              agent_session_id TEXT NOT NULL,
+              message TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              transition TEXT NOT NULL DEFAULT ''
+            );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_pending_per_target
+              ON agent_pending_notifications(subscriber_terminal_session_id, agent_session_id);
+        """
+
+    /// Cross-device watch edges: a local subscriber terminal watches a coding-agent session that lives on
+    /// a paired device (`device_id`). `agent_session_id` holds the watched child's terminal session id on
+    /// that device (the stable cross-device handle, not a local row id). Deliberately has NO foreign key —
+    /// the watched agent lives on another device's database, so there is nothing local to reference. The
+    /// watch service on this device drives the lifecycle: when the watched agent exits (its row leaves the
+    /// remote listing) the notification line is delivered and the edge is dropped. Keyed on (subscriber,
+    /// device, agent) so a terminal watches the same remote agent through exactly one edge. Named
+    /// separately so this step and the fresh-schema SQL share one definition and can never drift apart.
+    static let agentRemoteSubscriptionsSQL = """
+            CREATE TABLE IF NOT EXISTS agent_remote_subscriptions (
+              subscriber_terminal_session_id TEXT NOT NULL,
+              device_id TEXT NOT NULL,
+              agent_session_id TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              PRIMARY KEY (subscriber_terminal_session_id, device_id, agent_session_id)
+            );
+        """
+
+    /// The remote agent watch's per-device baseline: the last-seen `listAgentSessions` row of each
+    /// watched child, keyed by device and by the child's terminal session id on that device. The watch
+    /// service diffs fresh listings against this baseline to recover blocked/done/exited transitions;
+    /// persisting it lets a restarted daemon deliver transitions that happened while it was down
+    /// (including an exit, whose row is simply absent from the first post-restart listing). `row_json`
+    /// is the encoded wire row — the baseline needs the full row to render an exited line after the
+    /// agent is gone, and a row that fails to decode simply re-seeds silently. Deliberately has NO
+    /// foreign key: rows mirror `agent_remote_subscriptions` edges, whose lifecycle the watch service
+    /// drives. Named separately so this step and the fresh-schema SQL share one definition and can
+    /// never drift apart.
+    static let agentRemoteWatchBaselinesSQL = """
+            CREATE TABLE IF NOT EXISTS agent_remote_watch_baselines (
+              device_id TEXT NOT NULL,
+              agent_session_id TEXT NOT NULL,
+              row_json TEXT NOT NULL,
+              PRIMARY KEY (device_id, agent_session_id)
+            );
+        """
+
+    public static let migrationSteps: [DatabaseMigrationStep] = [
+        DatabaseMigrationStep(fromVersion: 1, toVersion: 2, description: "Add agent_sessions.note and agent_subscriptions", requiresBackup: true) {
+            handle in
+            // Frozen v2 snapshot of agent_subscriptions with its original `ON DELETE CASCADE`. The latest
+            // shape (shared `agentSubscriptionsSQL`) switched this foreign key to `ON DELETE RESTRICT` at
+            // v7; creating the latest shape here would let a v1-origin database skip the v6→v7 rebuild that
+            // every v2-through-v6-origin database applies, so this step recreates the shape v2 defined.
+            try migrationExecuteBatch(
+                handle,
+                sql: """
+                    ALTER TABLE agent_sessions ADD COLUMN note TEXT;
+                    CREATE TABLE IF NOT EXISTS agent_subscriptions (
+                      subscriber_terminal_session_id TEXT NOT NULL,
+                      agent_session_id TEXT NOT NULL,
+                      created_at TEXT NOT NULL,
+                      PRIMARY KEY (subscriber_terminal_session_id, agent_session_id),
+                      FOREIGN KEY (agent_session_id) REFERENCES agent_sessions(id) ON DELETE CASCADE
+                    );
+                    """)
+        },
+        // Frozen snapshot of the table as v3 defined it (no `transition` column). A migration step
+        // creates the shape of its target version, never the latest one — sharing the latest SQL here
+        // would make the later v4→v5 ALTER fail with a duplicate column on databases upgrading from v2.
+        DatabaseMigrationStep(fromVersion: 2, toVersion: 3, description: "Add agent_pending_notifications", requiresBackup: true) { handle in
+            try migrationExecuteBatch(
+                handle,
+                sql: """
+                    CREATE TABLE IF NOT EXISTS agent_pending_notifications (
+                      id TEXT PRIMARY KEY,
+                      subscriber_terminal_session_id TEXT NOT NULL,
+                      agent_session_id TEXT NOT NULL,
+                      message TEXT NOT NULL,
+                      created_at TEXT NOT NULL
+                    );
+
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_pending_per_target
+                      ON agent_pending_notifications(subscriber_terminal_session_id, agent_session_id);
+                    """)
+        },
+        DatabaseMigrationStep(fromVersion: 3, toVersion: 4, description: "Add agent_remote_subscriptions", requiresBackup: true) { handle in
+            try migrationExecuteBatch(handle, sql: agentRemoteSubscriptionsSQL)
+        },
+        // Pre-v5 held rows carry the empty-string default: they are never matched by the
+        // blocked-targeted withdrawal and simply flush as before, so no data is lost or reinterpreted.
+        DatabaseMigrationStep(fromVersion: 4, toVersion: 5, description: "Add agent_pending_notifications.transition", requiresBackup: true) {
+            handle in
+            try migrationExecuteBatch(handle, sql: "ALTER TABLE agent_pending_notifications ADD COLUMN transition TEXT NOT NULL DEFAULT '';")
+        },
+        DatabaseMigrationStep(fromVersion: 5, toVersion: 6, description: "Add agent_remote_watch_baselines", requiresBackup: true) { handle in
+            try migrationExecuteBatch(handle, sql: agentRemoteWatchBaselinesSQL)
+        },
+        // Rebuild agent_subscriptions with `ON DELETE RESTRICT` (was CASCADE) so a delete that bypasses the
+        // termination chokepoint fails loudly instead of silently stranding a watcher's exit notice.
+        // SQLite cannot alter a foreign key in place, so the table is recreated and every row copied. The
+        // copy runs with foreign_keys ON inside the migration transaction, which is safe here: each copied
+        // row already referenced a live agent_sessions row, and no table references agent_subscriptions, so
+        // the drop/rename touches nothing else.
+        DatabaseMigrationStep(fromVersion: 6, toVersion: 7, description: "Rebuild agent_subscriptions FK as ON DELETE RESTRICT", requiresBackup: true)
+        { handle in
+            try migrationExecuteBatch(
+                handle,
+                sql: """
+                    CREATE TABLE agent_subscriptions_new (
+                      subscriber_terminal_session_id TEXT NOT NULL,
+                      agent_session_id TEXT NOT NULL,
+                      created_at TEXT NOT NULL,
+                      PRIMARY KEY (subscriber_terminal_session_id, agent_session_id),
+                      FOREIGN KEY (agent_session_id) REFERENCES agent_sessions(id) ON DELETE RESTRICT
+                    );
+                    INSERT INTO agent_subscriptions_new (subscriber_terminal_session_id, agent_session_id, created_at)
+                      SELECT subscriber_terminal_session_id, agent_session_id, created_at FROM agent_subscriptions;
+                    DROP TABLE agent_subscriptions;
+                    ALTER TABLE agent_subscriptions_new RENAME TO agent_subscriptions;
+                    """)
+        },
+    ]
 
     static let terminalRemoteSessionStateSQL = """
             CREATE TABLE IF NOT EXISTS terminal_remote_session_states (
@@ -311,11 +466,20 @@ public enum DatabaseSchema {
               session_key TEXT,
               claimed_launcher_id TEXT,
               claimed_launcher_name TEXT,
+              note TEXT,
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL,
               FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
               FOREIGN KEY (runtime_target_id) REFERENCES runtime_targets(id) ON DELETE SET NULL
             );
+
+            \(agentSubscriptionsSQL)
+
+            \(agentPendingNotificationsSQL)
+
+            \(agentRemoteSubscriptionsSQL)
+
+            \(agentRemoteWatchBaselinesSQL)
 
             CREATE TABLE IF NOT EXISTS agent_session_events (
               id TEXT PRIMARY KEY,

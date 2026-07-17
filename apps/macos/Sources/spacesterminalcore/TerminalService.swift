@@ -98,31 +98,19 @@ import Foundation
             // loser exited, but both raced TerminalServiceTLSIdentityStore generation, which can
             // leave the surviving listener serving a certificate that no longer matches the
             // fingerprint pairing advertised — after which every pinned Device API connect hangs
-            // to its timeout. One launcher holds the flock; everyone else waits on it while
-            // pinging, then adopts the daemon the winner started.
-            let launchLockPath = socketPath + ".launch.lock"
+            // to its timeout. One launcher holds the flock; everyone else waits on it, then
+            // adopts the daemon the winner started. Lock wait is intentionally outside the
+            // startup timeout because a profile migration may hold this same lock while it
+            // creates a database backup.
+            let launchLockPath = try TerminalServicePaths.launchLockPath()
             let lockDescriptor = open(launchLockPath, O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
             guard lockDescriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
             defer { close(lockDescriptor) }
 
-            let deadline = Date().addingTimeInterval(timeout)
-            while flock(lockDescriptor, LOCK_EX | LOCK_NB) != 0 {
-                if FileManager.default.fileExists(atPath: socketPath), let response = try? pingResponse(timeout: 1), response.ok {
-                    if requireWireCompatibility { try assertDaemonWireCompatible(response) }
-                    TerminalPerformance.logMetric(
-                        "terminal_service_ensure_running", target: "socket=\(socketPath)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
-                        success: true, detail: "launched=0 adopted=1")
-                    return false
-                }
-                guard Date() < deadline else {
-                    TerminalPerformance.logMetric(
-                        "terminal_service_ensure_running", target: "socket=\(socketPath)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
-                        success: false, detail: "launched=0 lock_wait_timeout=1")
-                    throw TerminalServiceError.serviceStartupTimedOut(try resolveExecutableURL().path)
-                }
-                Thread.sleep(forTimeInterval: 0.05)
-            }
+            while flock(lockDescriptor, LOCK_EX) != 0 { guard errno == EINTR else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) } }
             defer { flock(lockDescriptor, LOCK_UN) }
+
+            let deadline = Date().addingTimeInterval(timeout)
 
             // The lock winner may be adopting a daemon another launcher finished starting first.
             if FileManager.default.fileExists(atPath: socketPath), let response = try? pingResponse(timeout: 1), response.ok {

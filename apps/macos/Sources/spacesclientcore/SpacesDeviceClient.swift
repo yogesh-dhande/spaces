@@ -567,10 +567,68 @@ public enum SpacesDeviceClient {
         return output
     }
 
+    /// Spawns a coding agent on a paired device (`spaces agent spawn --device`). Returns the created
+    /// session id (via the mutation result) so the caller polls readiness with `listAgentSessions`; the
+    /// daemon runs the same supported-agent hook gate as the local spawn before creating the session.
+    @discardableResult public static func spawnAgentSession(
+        workspaceID: String, command: String, title: String? = nil, device: SpacesPairedDeviceRecord,
+        clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
+    ) throws -> SpacesDeviceAPIResponse {
+        try request(
+            .init(command: .spawnAgentSession(.init(workspaceID: workspaceID, command: command, title: title))), device: device, clientApp: clientApp,
+            profile: profile)
+    }
+
+    /// Coding-agent sessions on a paired device (`spaces agent list/status --device`), also used for
+    /// remote spawn-readiness polling. `workspaceID`/`sessionID` narrow the listing; both optional.
+    public static func listAgentSessions(
+        workspaceID: String? = nil, sessionID: String? = nil, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
+        profile: SpacesProfile? = nil
+    ) throws -> [SpacesDeviceAgentSessionRow] {
+        let response = try request(
+            .init(command: .listAgentSessions(.init(workspaceID: workspaceID, sessionID: sessionID))), device: device, clientApp: clientApp,
+            profile: profile)
+        return response.agentSessions ?? []
+    }
+
+    /// Sets (or clears, with an empty note) a coding-agent session's note on a paired device
+    /// (`spaces agent annotate --device`). Returns the updated row.
+    @discardableResult public static func annotateAgentSession(
+        sessionID: String, note: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
+        profile: SpacesProfile? = nil
+    ) throws -> [SpacesDeviceAgentSessionRow] {
+        let response = try request(
+            .init(command: .annotateAgentSession(.init(sessionID: sessionID, note: note))), device: device, clientApp: clientApp, profile: profile)
+        return response.agentSessions ?? []
+    }
+
+    /// Kills a coding-agent session on a paired device by its child terminal session id (`spaces agent
+    /// kill --device`). The daemon routes through its `killAgentSession` flow, which handles both a
+    /// hook-signaled child (its subscribers told it exited before the row is deleted) and a
+    /// not-yet-signaled `.agent`-kind session (terminated), so the client makes one call for both cases.
+    @discardableResult public static func killAgentSession(
+        sessionID: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
+    ) throws -> SpacesDeviceAPIResponse {
+        try request(.init(command: .killAgentSession(.init(sessionID: sessionID))), device: device, clientApp: clientApp, profile: profile)
+    }
+
     /// Terminal sessions on a paired device, read from the overview (`spaces terminal list --device`).
     public static func terminalSessions(
         device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
     ) throws -> [SpacesDeviceTerminalSessionSummary] { try overview(device: device, clientApp: clientApp, profile: profile).overview.sessions }
+
+    /// Projects on a paired device, read from the overview (`spaces project list --device`). Reuses the
+    /// overview the sidebar already loads rather than a dedicated listing command.
+    public static func projects(device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil)
+        throws -> [SpacesDeviceProjectSummary]
+    { try overview(device: device, clientApp: clientApp, profile: profile).overview.projects }
+
+    /// Workspaces on a paired device, read from the overview (`spaces workspace list --device`). The
+    /// overview carries only active workspaces, so this never includes archived ones (see the CLI, which
+    /// rejects `--include-archived` with `--device` rather than silently returning a filtered subset).
+    public static func workspaces(
+        device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
+    ) throws -> [SpacesDeviceWorkspaceSummary] { try overview(device: device, clientApp: clientApp, profile: profile).overview.workspaces }
 
     /// Reads a device's Device API credentials (pinned TLS certificate fingerprint and auth token),
     /// transparently re-bootstrapping the local device when its token is missing; the re-bootstrap also
@@ -668,13 +726,14 @@ public enum SpacesDeviceClient {
         switch command {
         case .createProject, .previewGitProject, .deleteProject, .importProject, .exportProject, .createWorkspace, .launchWorkspace, .stopWorkspace,
             .restartWorkspace, .archiveWorkspace, .runWorkspaceSetup, .openWorkspaceTerminal, .stopWorkspaceTerminal, .runWorkspaceProcess,
-            .stopWorkspaceProcess, .restartWorkspaceProcess, .runCodingAgent, .stopCodingAgent, .restartCodingAgent, .installAgentHooks:
+            .stopWorkspaceProcess, .restartWorkspaceProcess, .runCodingAgent, .stopCodingAgent, .restartCodingAgent, .installAgentHooks,
+            .spawnAgentSession, .killAgentSession:
             longRunningMutationTimeoutSeconds
         case .agentHooksStatus: agentHooksStatusRequestTimeoutSeconds
         case .pair, .ping, .daemonStatus, .requestDaemonRestart, .overview, .previewProject, .listDirectories, .workspaceCreateOptions,
             .updateProjectConfig, .updateWorkspaceConfig, .updateWorkspaceMetadata, .renameTerminalSession, .state, .terminalControl,
             .terminalPasteImage, .sendTerminalInput, .tailTerminalOutput, .resolveTerminalLink, .readTerminalLinkChunk, .subscribe,
-            .subscribeDeviceOverview, .openServiceTunnel:
+            .subscribeDeviceOverview, .openServiceTunnel, .listAgentSessions, .annotateAgentSession:
             defaultRequestTimeoutSeconds
         }
     }

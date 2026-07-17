@@ -10,9 +10,8 @@ final class TerminalOverviewSignalTests: XCTestCase {
     /// an in-process observer registered on that name.
     func testPostDeliversToInProcessObserver() {
         let received = expectation(description: "overview signal delivered")
-        let observer = NotificationCenter.default.addObserver(
-            forName: TerminalOverviewSignal.name, object: nil, queue: nil
-        ) { _ in received.fulfill() }
+        let observer = NotificationCenter.default.addObserver(forName: TerminalOverviewSignal.name, object: nil, queue: nil) { _ in received.fulfill()
+        }
         defer { NotificationCenter.default.removeObserver(observer) }
 
         TerminalOverviewSignal.post()

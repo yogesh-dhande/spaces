@@ -164,6 +164,7 @@ let executableTargets: [Target] = [
             "spacesdevicecore",
             "spacesruntimecore",
             "spacesdeviceapi",
+            "spacesclientcore",
         ],
         path: "Sources/spacesd"
     ),

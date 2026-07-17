@@ -85,8 +85,8 @@
             terminalView.acceptsTerminalInput = isInteractive && mode == .owner
             terminalView.onSendText = { [weak self] text, asPaste in self?.sendRemoteInput(text, asPaste: asPaste) }
             terminalView.onSendKey = { [weak self] key in self?.sendRemoteKey(key) }
-            terminalView.onSendScroll = { [weak self] horizontal, vertical, scrollMods in
-                self?.sendRemoteScroll(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods)
+            terminalView.onSendScroll = { [weak self] horizontal, vertical, scrollMods, pointerPosition in
+                self?.sendRemoteScroll(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods, pointerPosition: pointerPosition)
             }
             terminalView.onViewportSizeChanged = { [weak self] columns, rows in self?.handleViewportSizeChange(columns: columns, rows: rows) }
 
@@ -180,9 +180,11 @@
             return terminalView.performBindingAction(action)
         }
 
-        @discardableResult public func sendScroll(horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32) -> Bool {
+        @discardableResult public func sendScroll(
+            horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32, pointerPosition: TerminalScrollPointerPosition?
+        ) -> Bool {
             guard isInteractiveRuntimeStateForControl() else { return false }
-            return terminalView.sendScroll(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods)
+            return terminalView.sendScroll(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods, pointerPosition: pointerPosition)
         }
 
         @discardableResult public func clearScreenAndScrollback() -> Bool {
@@ -512,9 +514,10 @@
             }
         }
 
-        private func sendRemoteScroll(horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32) {
+        private func sendRemoteScroll(horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32, pointerPosition: TerminalScrollPointerPosition?) {
             guard isInteractiveRuntimeStateForControl(), attachedClient != nil, attachedMode == .owner else { return }
-            scrollCoalescer.append(horizontal: Double(horizontal), vertical: Double(vertical), scrollMods: scrollMods)
+            scrollCoalescer.append(
+                horizontal: Double(horizontal), vertical: Double(vertical), scrollMods: scrollMods, pointerPosition: pointerPosition)
         }
 
         private func enqueueRemoteScrollBatch(_ batch: TerminalScrollCoalescer.Batch, onFinished: @escaping TerminalScrollCoalescer.FinishHandler) {
@@ -535,8 +538,9 @@
                         command: .scroll(
                             .init(
                                 clientID: clientID, ownerEpoch: ownerEpoch, scrollHorizontal: batch.horizontal, scrollVertical: batch.vertical,
-                                scrollMods: batch.scrollMods == 0 ? nil : batch.scrollMods))), sessionID: sessionID, socketPath: socketPath,
-                    requestSender: requestSender)
+                                scrollMods: batch.scrollMods == 0 ? nil : batch.scrollMods, scrollPointerX: batch.pointerPosition?.x,
+                                scrollPointerY: batch.pointerPosition?.y, scrollPointerMods: batch.pointerPosition?.mods))), sessionID: sessionID,
+                    socketPath: socketPath, requestSender: requestSender)
                 if shouldRefreshAfterControl { Task { @MainActor [weak self] in self?.requestDirectStateRefresh(reason: "scroll") } }
             }
         }

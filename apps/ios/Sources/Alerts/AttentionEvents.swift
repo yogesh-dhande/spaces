@@ -53,8 +53,7 @@ enum SpacesMobileAttention {
         var events: [SpacesMobileAttentionEvent] = []
         var representedSessionIDs: Set<String> = []
         let sessionByID = Dictionary(uniqueKeysWithValues: overview.sessions.map { ($0.id, $0) })
-        let invisibleWorkspaceIDs = Set(
-            overview.workspaces.lazy.filter { $0.isArchived || $0.isHidden }.map(\.id))
+        let invisibleWorkspaceIDs = Set(overview.workspaces.lazy.filter { $0.isArchived || $0.isHidden }.map(\.id))
 
         for workspace in overview.workspaces where !workspace.isArchived && !workspace.isHidden {
             for agent in workspace.codingAgentRows {
@@ -63,13 +62,14 @@ enum SpacesMobileAttention {
                 switch agent.activityState {
                 case .waiting: kind = .waitingForInput
                 case .done: kind = .finished
-                case .idle, .spinning: kind = nil
+                // Exited raises no attention event: the agent is gone, nothing needs the user.
+                case .idle, .spinning, .exited: kind = nil
                 }
                 guard let kind, let date = date(fromISO8601: agent.updatedAt) else { continue }
                 events.append(
                     SpacesMobileAttentionEvent(
-                        sourceID: "agent:\(agent.id)", kind: kind, date: date, title: agent.name, rowType: .codingAgents,
-                        sessionID: agent.sessionID, workspaceID: workspace.id))
+                        sourceID: "agent:\(agent.id)", kind: kind, date: date, title: agent.name, rowType: .codingAgents, sessionID: agent.sessionID,
+                        workspaceID: workspace.id))
             }
 
             for process in workspace.processRows {
@@ -83,9 +83,7 @@ enum SpacesMobileAttention {
 
             for terminal in workspace.terminalRows {
                 if let sessionID = terminal.sessionID { representedSessionIDs.insert(sessionID) }
-                guard terminal.runState == .exited, let sessionID = terminal.sessionID,
-                    let session = sessionByID[sessionID]
-                else { continue }
+                guard terminal.runState == .exited, let sessionID = terminal.sessionID, let session = sessionByID[sessionID] else { continue }
                 guard let kind = terminalKind(for: session.state), let date = date(fromISO8601: session.updatedAt) else { continue }
                 events.append(
                     SpacesMobileAttentionEvent(
@@ -97,9 +95,7 @@ enum SpacesMobileAttention {
         // Loose sessions: the same dedupe rule as the home tab's terminal groups — a session already
         // represented by a workspace row is that row's event (or non-event), never a second one.
         for session in overview.sessions
-        where session.rowKind == .liveSession && !representedSessionIDs.contains(session.id)
-            && !invisibleWorkspaceIDs.contains(session.workspaceID)
-        {
+        where session.rowKind == .liveSession && !representedSessionIDs.contains(session.id) && !invisibleWorkspaceIDs.contains(session.workspaceID) {
             guard let kind = terminalKind(for: session.state), let date = date(fromISO8601: session.updatedAt) else { continue }
             events.append(
                 SpacesMobileAttentionEvent(
@@ -121,14 +117,10 @@ enum SpacesMobileAttention {
             let workspace = workspaceByID[workspaceID]
             let sampleSession = events.compactMap { $0.sessionID.flatMap { sessionByID[$0] } }.first
             return SpacesMobileAttentionGroup(
-                workspaceID: workspaceID,
-                workspaceDisplayName: workspace?.displayName ?? sampleSession?.workspaceTitle ?? "Unassigned",
-                projectName: workspace?.projectName ?? sampleSession?.projectName ?? "Unassigned",
-                isGitWorkspace: workspace?.isGitWorkspace ?? false,
-                events: events.sorted { $0.date > $1.date }
-            )
-        }
-        .sorted { lhs, rhs in
+                workspaceID: workspaceID, workspaceDisplayName: workspace?.displayName ?? sampleSession?.workspaceTitle ?? "Unassigned",
+                projectName: workspace?.projectName ?? sampleSession?.projectName ?? "Unassigned", isGitWorkspace: workspace?.isGitWorkspace ?? false,
+                events: events.sorted { $0.date > $1.date })
+        }.sorted { lhs, rhs in
             guard let lhsNewest = lhs.events.first?.date, let rhsNewest = rhs.events.first?.date else { return false }
             if lhsNewest != rhsNewest { return lhsNewest > rhsNewest }
             return lhs.workspaceID < rhs.workspaceID

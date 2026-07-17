@@ -25,28 +25,18 @@ struct TerminalMarkdownArtifactView: View {
                 if let renderedDocument {
                     TerminalWebArtifactView(load: .htmlString(renderedDocument))
                 } else if didFailToLoad {
-                    TerminalArtifactFailureView(message: "This Markdown file couldn't be read.") {
-                        loadDocument()
-                    }
+                    TerminalArtifactFailureView(message: "This Markdown file couldn't be read.") { loadDocument() }
                 } else {
-                    ProgressView()
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .background(Color(uiColor: .systemBackground))
+                    ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity).background(Color(uiColor: .systemBackground))
                 }
-            case .raw:
-                TerminalTextArtifactView(url: url)
+            case .raw: TerminalTextArtifactView(url: url)
             }
-        }
-        .task { loadDocument() }
-        .toolbar {
+        }.task { loadDocument() }.toolbar {
             ToolbarItem(placement: .principal) {
                 Picker("Display", selection: $mode) {
                     Text("Rendered").tag(Mode.rendered)
                     Text("Raw").tag(Mode.raw)
-                }
-                .pickerStyle(.segmented)
-                .frame(maxWidth: 220)
-                .accessibilityIdentifier("terminal.markdown.modePicker")
+                }.pickerStyle(.segmented).frame(maxWidth: 220).accessibilityIdentifier("terminal.markdown.modePicker")
             }
         }
     }
@@ -116,31 +106,18 @@ enum TerminalMarkdownDocument {
     /// separator escapes guarantee the result can never contain a literal `</script>` (or `<!--`) that
     /// would prematurely close the script context or be invalid as a JS string.
     static func javaScriptStringLiteral(for source: String) -> String {
-        guard let data = try? JSONEncoder().encode(source),
-            let json = String(data: data, encoding: .utf8)
-        else {
-            return "\"\""
-        }
-        return json
-            .replacingOccurrences(of: "<", with: "\\u003c")
-            .replacingOccurrences(of: ">", with: "\\u003e")
-            .replacingOccurrences(of: "&", with: "\\u0026")
-            .replacingOccurrences(of: "\u{2028}", with: "\\u2028")
-            .replacingOccurrences(of: "\u{2029}", with: "\\u2029")
+        guard let data = try? JSONEncoder().encode(source), let json = String(data: data, encoding: .utf8) else { return "\"\"" }
+        return json.replacingOccurrences(of: "<", with: "\\u003c").replacingOccurrences(of: ">", with: "\\u003e").replacingOccurrences(
+            of: "&", with: "\\u0026"
+        ).replacingOccurrences(of: "\u{2028}", with: "\\u2028").replacingOccurrences(of: "\u{2029}", with: "\\u2029")
     }
 
-    private static func bundledMarkdownItJS() -> String {
-        bundleResourceString(forResource: "markdown-it.min", withExtension: "js")
-    }
+    private static func bundledMarkdownItJS() -> String { bundleResourceString(forResource: "markdown-it.min", withExtension: "js") }
 
-    private static func bundledCSS() -> String {
-        bundleResourceString(forResource: "terminal-markdown", withExtension: "css")
-    }
+    private static func bundledCSS() -> String { bundleResourceString(forResource: "terminal-markdown", withExtension: "css") }
 
     private static func bundleResourceString(forResource name: String, withExtension ext: String) -> String {
-        guard let url = Bundle.main.url(forResource: name, withExtension: ext),
-            let contents = try? String(contentsOf: url, encoding: .utf8)
-        else {
+        guard let url = Bundle.main.url(forResource: name, withExtension: ext), let contents = try? String(contentsOf: url, encoding: .utf8) else {
             return ""
         }
         return contents

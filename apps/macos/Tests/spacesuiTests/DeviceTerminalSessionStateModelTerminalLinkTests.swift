@@ -18,31 +18,29 @@ import workspacecore
 /// these tests instead prove the model maps `TerminalServiceCommand` <-> `SpacesDeviceAPIRequest`
 /// correctly, including the failure path and the `artifactKind` field carried in Step 1.
 ///
-/// Mutates the process-global `SPACES_DB_PATH` env var that backs `SpacesProfile`/`SQLiteStore`
-/// resolution, so the suite runs serialized (mirroring `AppKitControllerWindowSummonTests`). This is the
-/// only env var the suite still needs to pin: `handleResolveTerminalLinkRequest` opens the client DB to
-/// load workspace roots for every local-file link (including the absolute-path fixture below), and
-/// pinning `SPACES_DB_PATH` keeps that off the developer's real database. `SPACES_RUNTIME_DIR` (which
-/// backs `TerminalSessionPaths` session launch/runtime-state lookups) is deliberately left untouched:
-/// the local-file test below resolves an absolute-path link, which the resolver never anchors against a
-/// session's working directory, so no session state is written or read and there is nothing to race
-/// against `AppKitControllerWindowSummonTests`' own `SPACES_RUNTIME_DIR` mutation. Relative-path
-/// anchoring (the case that *does* need session state) is covered hermetically by the resolver's own
-/// unit tests in `spacescliTests`.
+/// Mutates the process-global profile environment, so the suite runs serialized (mirroring
+/// `AppKitControllerWindowSummonTests`). `handleResolveTerminalLinkRequest` opens the profile database
+/// to load workspace roots for every local-file link. Pinning both the database and runtime directory
+/// keeps that access off the developer's profile and gives this temporary profile its own daemon lock.
+/// Relative-path anchoring is covered hermetically by the resolver's own unit tests in `spacescliTests`.
 @Suite(.serialized) final class DeviceTerminalSessionStateModelTerminalLinkTests {
     private let originalDatabasePath: String?
+    private let originalRuntimeDirectory: String?
     private let profileRoot: URL
 
     init() throws {
         originalDatabasePath = ProcessInfo.processInfo.environment["SPACES_DB_PATH"]
+        originalRuntimeDirectory = ProcessInfo.processInfo.environment["SPACES_RUNTIME_DIR"]
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         profileRoot = root
         setenv("SPACES_DB_PATH", root.appendingPathComponent("spaces.db").path, 1)
+        setenv("SPACES_RUNTIME_DIR", root.appendingPathComponent("runtime", isDirectory: true).path, 1)
     }
 
     deinit {
         if let originalDatabasePath { setenv("SPACES_DB_PATH", originalDatabasePath, 1) } else { unsetenv("SPACES_DB_PATH") }
+        if let originalRuntimeDirectory { setenv("SPACES_RUNTIME_DIR", originalRuntimeDirectory, 1) } else { unsetenv("SPACES_RUNTIME_DIR") }
         try? FileManager.default.removeItem(at: profileRoot)
     }
 
@@ -88,9 +86,7 @@ import workspacecore
             // Absolute, under the resolver's fixed `/tmp` allowlist, and cleaned up below. Deliberately
             // literal `/tmp`, not `FileManager.default.temporaryDirectory` (`/var/folders/...`, which the
             // resolver does not allowlist). Being absolute means resolution never needs the session's
-            // working directory, so this test writes no launch configuration and needs no session/runtime
-            // state at all — see the suite doc comment for why that keeps it hermetic against other
-            // suites' `SPACES_RUNTIME_DIR` mutations.
+            // working directory, so this test writes no launch configuration or session state.
             let fixtureDir = URL(fileURLWithPath: "/tmp", isDirectory: true).appendingPathComponent(UUID().uuidString, isDirectory: true)
             try FileManager.default.createDirectory(at: fixtureDir, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: fixtureDir) }

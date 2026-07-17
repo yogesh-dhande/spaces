@@ -10,8 +10,8 @@ public enum GhosttyThemeConfigGenerator {
     /// Regenerates the config for the active profile and returns the root config file path.
     /// Called at every embedded-app start so the files always reflect the shipped theme values.
     public static func writeConfiguration(theme: ThemeDescriptor) throws -> String {
-        let root = URL(fileURLWithPath: try SpacesProfile.current().rootDirectory, isDirectory: true)
-            .appendingPathComponent("ghostty", isDirectory: true)
+        let root = URL(fileURLWithPath: try SpacesProfile.current().rootDirectory, isDirectory: true).appendingPathComponent(
+            "ghostty", isDirectory: true)
         let themesDirectory = root.appendingPathComponent("themes", isDirectory: true)
         try FileManager.default.createDirectory(at: themesDirectory, withIntermediateDirectories: true)
 
@@ -41,12 +41,9 @@ public enum GhosttyThemeConfigGenerator {
     /// One Ghostty theme file (background/foreground, cursor, selection, 16-color palette).
     static func themeFileContents(_ terminal: GhosttyThemeExport) -> String {
         var lines = [
-            "background = \(terminal.background.hexRGB)",
-            "foreground = \(terminal.foreground.hexRGB)",
-            "cursor-color = \(terminal.cursorColor.hexRGB)",
-            "cursor-text = \(terminal.cursorText.hexRGB)",
-            "selection-background = \(terminal.selectionBackground.hexRGB)",
-            "selection-foreground = \(terminal.selectionForeground.hexRGB)",
+            "background = \(terminal.background.hexRGB)", "foreground = \(terminal.foreground.hexRGB)",
+            "cursor-color = \(terminal.cursorColor.hexRGB)", "cursor-text = \(terminal.cursorText.hexRGB)",
+            "selection-background = \(terminal.selectionBackground.hexRGB)", "selection-foreground = \(terminal.selectionForeground.hexRGB)",
         ]
         lines.append(contentsOf: terminal.palette.enumerated().map { index, color in "palette = \(index)=\(color.hexRGB)" })
         return lines.joined(separator: "\n") + "\n"

@@ -133,12 +133,14 @@ Image paste (`terminalPasteImage`) is an image-only extension of the owner input
 
 Tail returns recent output including lines that scrolled above the current prompt, so an agent that sent a command through `sendTerminalInput` can read the result.
 
+For sessions identified as coding agents, tail removes a faint inline completion beginning at the visible cursor before plain-text formatting, following only Ghostty-marked soft wraps. Ordinary terminal sessions do not apply this filter. Tail preserves all other screen content, including real text after the cursor and status, help, menu, and dialog rows below it.
+
 ## Scroll Rendering
 
-Scroll stays inside the active-owner control boundary. Requests carry Ghostty scroll modifier bits for precise deltas and momentum phases.
+Scroll stays inside the active-owner control boundary. Requests carry Ghostty scroll modifier bits for precise deltas and momentum phases, plus the latest pointer position as normalized top-left viewport coordinates. The daemon maps the normalized position through its current Ghostty surface size and scale before dispatching the scroll, so application mouse reports remain accurate across Mac and iOS display scales.
 
-- macOS forwards AppKit trackpad and wheel deltas as native scroll deltas, coalesced to display-frame cadence. Ghostty owns scrollback, alternate-screen behavior, momentum interpretation, and viewport state, which is why this path has the highest fidelity.
-- iOS forwards touch-derived deltas through the same coalescing and renders the authoritative published frame.
+- macOS forwards AppKit trackpad and wheel deltas with the event location and current mouse modifiers, coalesced to display-frame cadence. Ghostty owns scrollback, alternate-screen behavior, application mouse reporting, momentum interpretation, and viewport state.
+- iOS forwards touch-derived deltas with the latest touch location through the same coalescing, retains the lift-off location for momentum, and renders the authoritative published frame.
 - Linux headless owners have only the VT viewport API, so `TerminalScrollDeltaNormalizer` reproduces Ghostty's native precise-delta behavior. macOS and iOS share one `TerminalScrollModifiers` bit encoding so the owner sees a single wire contract.
 
 ## Ghostty Compatibility Boundary

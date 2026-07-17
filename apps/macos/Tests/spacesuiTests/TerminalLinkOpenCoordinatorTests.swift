@@ -3,18 +3,19 @@ import Testing
 import spacesdevicecore
 import spacesterminalcore
 import spacesterminalghostty
+import spacesterminalui
 
 @testable import spacesui
 
 /// Exercises `TerminalLinkOpenCoordinator`'s routing of clicked terminal links: web/loopback/local/remote
 /// dispatch, the remote fetch-and-open flow with its cache, and click supersession. The coordinator's
-/// three collaborators are faked — a recording banner (`TerminalLinkActivityBannerPresenting`), a recording
+/// three collaborators are faked — a recording banner (`TerminalPaneBannerPresenting`), a recording
 /// artifact registry (real `TerminalArtifactHandlerRegistry` with capturing handlers), and a scripted
 /// request sender — so no AppKit view tree, browser, or Device API connection is involved.
 @MainActor struct TerminalLinkOpenCoordinatorTests {
     // MARK: - Fakes
 
-    @MainActor private final class RecordingBanner: TerminalLinkActivityBannerPresenting {
+    @MainActor private final class RecordingBanner: TerminalPaneBannerPresenting {
         var progressMessages: [String] = []
         var errorMessages: [String] = []
         var noticeMessages: [String] = []
@@ -28,6 +29,11 @@ import spacesterminalghostty
         func showError(_ message: String) { errorMessages.append(message) }
         func showNotice(_ message: String) { noticeMessages.append(message) }
         func dismiss() { dismissCount += 1 }
+        // The link coordinator never touches the pane's own persistent notice; these exist only to
+        // satisfy the protocol.
+        func showPersistent(message _: String) {}
+        func clearPersistent() {}
+        func flash() {}
     }
 
     @MainActor private final class OpenRecorder {
@@ -104,12 +110,13 @@ import spacesterminalghostty
 
     private func makeCoordinator(
         isLocalDevice: Bool, workingDirectory: String? = nil, sender: FakeLinkSender = FakeLinkSender(), banner: RecordingBanner,
-        recorder: OpenRecorder, sessionID: String = "session-\(UUID().uuidString)", deviceID: String? = nil
+        recorder: OpenRecorder, sessionID: String = "session-\(UUID().uuidString)", deviceID: String? = nil,
+        onSpacesTerminalLink: @escaping @MainActor (SpacesTerminalDeepLink) -> Void = { _ in }
     ) -> TerminalLinkOpenCoordinator {
         TerminalLinkOpenCoordinator(
             sessionID: sessionID, deviceID: deviceID ?? (isLocalDevice ? "local" : "remote-\(UUID().uuidString)"), isLocalDevice: isLocalDevice,
             workingDirectoryProvider: { workingDirectory }, requestSender: { [sender] request in try sender.send(request) },
-            registry: recorder.makeRegistry(), banner: banner)
+            registry: recorder.makeRegistry(), banner: banner, openSpacesTerminalLink: onSpacesTerminalLink)
     }
 
     private func metadata(
@@ -168,6 +175,57 @@ import spacesterminalghostty
 
         #expect(recorder.opens.isEmpty)
         #expect(banner.noticeMessages == [TerminalLinkOpenCoordinator.loopbackRemoteNotice])
+    }
+
+    @Test func spacesTerminalDeepLinkRoutesToInAppHandlerWithoutOpeningArtifact() {
+        let banner = RecordingBanner()
+        let recorder = OpenRecorder()
+        var routed: [SpacesTerminalDeepLink] = []
+        let coordinator = makeCoordinator(isLocalDevice: true, banner: banner, recorder: recorder, onSpacesTerminalLink: { routed.append($0) })
+
+        coordinator.openLink("spaces://terminal/session-1?device=device-9")
+
+        #expect(routed == [SpacesTerminalDeepLink(sessionID: "session-1", deviceID: "device-9")])
+        #expect(recorder.opens.isEmpty)
+        #expect(banner.errorMessages.isEmpty)
+        #expect(banner.noticeMessages.isEmpty)
+    }
+
+    @Test func remotePaneQualifiesUnqualifiedDeepLinkWithPaneDevice() {
+        let banner = RecordingBanner()
+        let recorder = OpenRecorder()
+        var routed: [SpacesTerminalDeepLink] = []
+        let coordinator = makeCoordinator(
+            isLocalDevice: false, banner: banner, recorder: recorder, deviceID: "pane-device", onSpacesTerminalLink: { routed.append($0) })
+
+        // A remote daemon prints same-device links unqualified because it can't know its own paired id.
+        coordinator.openLink("spaces://terminal/session-7")
+
+        #expect(routed == [SpacesTerminalDeepLink(sessionID: "session-7", deviceID: "pane-device")])
+    }
+
+    @Test func remotePaneKeepsExplicitDeepLinkQualifier() {
+        let banner = RecordingBanner()
+        let recorder = OpenRecorder()
+        var routed: [SpacesTerminalDeepLink] = []
+        let coordinator = makeCoordinator(
+            isLocalDevice: false, banner: banner, recorder: recorder, deviceID: "pane-device", onSpacesTerminalLink: { routed.append($0) })
+
+        coordinator.openLink("spaces://terminal/session-7?device=other-device")
+
+        #expect(routed == [SpacesTerminalDeepLink(sessionID: "session-7", deviceID: "other-device")])
+    }
+
+    @Test func localPaneLeavesUnqualifiedDeepLinkNil() {
+        let banner = RecordingBanner()
+        let recorder = OpenRecorder()
+        var routed: [SpacesTerminalDeepLink] = []
+        let coordinator = makeCoordinator(
+            isLocalDevice: true, banner: banner, recorder: recorder, deviceID: "local", onSpacesTerminalLink: { routed.append($0) })
+
+        coordinator.openLink("spaces://terminal/session-7")
+
+        #expect(routed == [SpacesTerminalDeepLink(sessionID: "session-7", deviceID: nil)])
     }
 
     @Test func localFileLinkResolvesRelativePathAndOpens() throws {

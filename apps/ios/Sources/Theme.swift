@@ -45,6 +45,9 @@ enum Theme {
     static let green = dynamic(light: (58, 158, 95), dark: (76, 208, 122))
     static let red = dynamic(light: (198, 58, 47), dark: (255, 107, 96))
     static let orange = dynamic(light: (208, 122, 26), dark: (245, 167, 66))
+    /// The one tint for a stopped runtime target, matching the Mac sidebar's exited rows. Distinct
+    /// from `red`, which stays for attention marks that are not a stopped target.
+    static let statusFailed = dynamic(light: (186, 67, 111), dark: (255, 111, 91), lightAlpha: 0.95, darkAlpha: 0.95)
 
     // MARK: Chips & tiles
 
@@ -55,22 +58,13 @@ enum Theme {
 
     // MARK: Helpers
 
-    private static func dynamic(
-        light: (Int, Int, Int),
-        dark: (Int, Int, Int),
-        lightAlpha: CGFloat = 1,
-        darkAlpha: CGFloat = 1
-    ) -> Color {
-        Color(uiColor: UIColor { traits in
-            let isDark = traits.userInterfaceStyle == .dark
-            let rgb = isDark ? dark : light
-            let alpha = isDark ? darkAlpha : lightAlpha
-            return UIColor(
-                red: CGFloat(rgb.0) / 255,
-                green: CGFloat(rgb.1) / 255,
-                blue: CGFloat(rgb.2) / 255,
-                alpha: alpha
-            )
-        })
+    private static func dynamic(light: (Int, Int, Int), dark: (Int, Int, Int), lightAlpha: CGFloat = 1, darkAlpha: CGFloat = 1) -> Color {
+        Color(
+            uiColor: UIColor { traits in
+                let isDark = traits.userInterfaceStyle == .dark
+                let rgb = isDark ? dark : light
+                let alpha = isDark ? darkAlpha : lightAlpha
+                return UIColor(red: CGFloat(rgb.0) / 255, green: CGFloat(rgb.1) / 255, blue: CGFloat(rgb.2) / 255, alpha: alpha)
+            })
     }
 }

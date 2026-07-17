@@ -1,6 +1,7 @@
 #if canImport(AppKit)
     import AppKit
     import Foundation
+    import spacesdevicecore
 
     public enum GhosttyTerminalLinkOpener {
         /// Resolves a raw terminal link string (as reported by libghostty's OSC 8 / URL-detection
@@ -18,6 +19,10 @@
             if let candidate = URL(string: trimmed), let scheme = candidate.scheme?.lowercased() {
                 switch scheme {
                 case "http", "https": return candidate
+                case SpacesTerminalDeepLink.scheme:
+                    // A Spaces deep link is passed through untouched so the fallback opener (used where
+                    // no per-pane coordinator is wired) can hand it to the OS scheme handler.
+                    return candidate
                 case "file":
                     guard isLocalFileURLHost(candidate.host) else { return nil }
                     return URL(fileURLWithPath: candidate.path).standardizedFileURL
@@ -42,9 +47,15 @@
             guard let url = resolvedURL(for: value, workingDirectory: workingDirectory) else { return false }
             if let openURL { return openURL(url) }
 
-            let registry = TerminalArtifactHandlerRegistry.defaultRegistry()
-            if let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" { return registry.open(url, as: .webURL) }
-            return registry.openLocalFile(at: url)
+            if let scheme = url.scheme?.lowercased() {
+                // A Spaces deep link goes to the OS, which routes it to this app's registered
+                // `spaces` scheme handler (`application(_:open:)`); it must never be forced into a
+                // browser or treated as a local file.
+                if scheme == SpacesTerminalDeepLink.scheme { return NSWorkspace.shared.open(url) }
+                let registry = TerminalArtifactHandlerRegistry.defaultRegistry()
+                if scheme == "http" || scheme == "https" { return registry.open(url, as: .webURL) }
+            }
+            return TerminalArtifactHandlerRegistry.defaultRegistry().openLocalFile(at: url)
         }
 
         private static func isLocalFileURLHost(_ host: String?) -> Bool {

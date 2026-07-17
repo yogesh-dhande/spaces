@@ -24,6 +24,11 @@ public final class WorkspaceOrchestrator {
     /// cannot show OS notifications (no app bundle), so it installs a process-wide
     /// override that forwards to the client instead of delivering directly.
     public typealias NotificationDeliverer = @Sendable (String, String, String?) -> Void
+    /// `(subscriberTerminalSessionID, line)`. Submits a rendered coding-agent notification line into a
+    /// subscriber terminal. The device-runtime reconcilers build plain orchestrators on a detached task
+    /// and cannot reach the daemon's terminal-send path directly, so the daemon installs a process-wide
+    /// override that routes to the same send chokepoint its request-path notification engine uses.
+    public typealias AgentNotificationLineSubmitter = @Sendable (String, String) throws -> Void
 
     public static let terminalTrackingIDEnvVar = "SPACES_TERMINAL_TRACKING_ID"
     #if canImport(UserNotifications)
@@ -32,6 +37,7 @@ public final class WorkspaceOrchestrator {
     private static let builtInTerminalSessionLauncherOverrideStore = LockedBox<BuiltInTerminalSessionLauncher?>(nil)
     private static let builtInTerminalSessionTerminatorOverrideStore = LockedBox<BuiltInTerminalSessionTerminator?>(nil)
     private static let notificationDelivererOverrideStore = LockedBox<NotificationDeliverer?>(nil)
+    static let agentNotificationLineSubmitterOverrideStore = LockedBox<AgentNotificationLineSubmitter?>(nil)
 
     public struct WorkspaceStopOutcome: Sendable {
         public let skippedStopScriptBecauseWorkspaceDirectoryMissing: Bool
@@ -104,6 +110,32 @@ public final class WorkspaceOrchestrator {
     /// created without an explicit one. The daemon sets this to forward notifications
     /// to the client, since a bundle-less daemon cannot post OS notifications.
     public static func setProcessWideNotificationDeliverer(_ deliverer: NotificationDeliverer?) { notificationDelivererOverrideStore.set(deliverer) }
+
+    /// Installs a process-wide submitter for coding-agent notification lines. The daemon sets this to
+    /// the same terminal-send chokepoint its request-path notification engine uses, so a child agent
+    /// whose exit is detected by reconciliation (no session-end hook fired) notifies its subscribers
+    /// identically to the hook-signaled exit path.
+    public static func setProcessWideAgentNotificationLineSubmitter(_ submitter: AgentNotificationLineSubmitter?) {
+        agentNotificationLineSubmitterOverrideStore.set(submitter)
+    }
+
+    /// Builds the notification engine the device-runtime reconcilers use to tell subscribers a coding
+    /// agent exited when reconciliation — not a hook — detected the exit. Delivery routes through the
+    /// process-wide submitter the daemon installs; with none installed (non-daemon callers, tests that
+    /// build an engine directly) delivery throws, which the engine reads as a vanished subscriber and
+    /// which is unreachable when the agent has no subscribers. The `(<kind>)` parenthetical reuses the
+    /// same runtime-state resolution `agent list` uses.
+    func makeAgentNotificationEngine() -> AgentNotificationEngine {
+        let submitter = Self.agentNotificationLineSubmitterOverrideStore.get()
+        return AgentNotificationEngine(
+            store: store,
+            deliver: { sessionID, line in
+                guard let submitter else { throw WorkspaceError.invalidArgument(message: "No agent notification submitter is configured.") }
+                try submitter(sessionID, line)
+            },
+            resolveAgentKind: { [self] agent in agent.terminalTrackingID.flatMap { agentRuntimeKind(terminalSessionID: $0) } },
+            logError: { Self.writeStandardError($0) })
+    }
 
     struct ResolvedBrowserSession {
         let index: Int
@@ -854,7 +886,8 @@ public final class WorkspaceOrchestrator {
                 terminateProcessGroup(pid: pid)
             }
         }
-        for agent in try store.agentWindows(workspaceID: workspace.id) {
+        let workspaceAgentWindows = try store.agentWindows(workspaceID: workspace.id)
+        for agent in workspaceAgentWindows {
             if let sessionID = agent.terminalTrackingID, !sessionID.isEmpty {
                 terminateBuiltInTerminalSession(sessionID)
                 closedBuiltInTerminalSessionIDs.insert(sessionID)
@@ -889,7 +922,11 @@ public final class WorkspaceOrchestrator {
         if waitForTerminalExit { waitForBuiltInTerminalSessionsToExit(closedBuiltInTerminalSessionIDs) }
         try store.deleteRunningProcesses(workspaceID: workspace.id)
         try store.deleteWindows(workspaceID: workspace.id)
-        try store.deleteAgentWindows(workspaceID: workspace.id)
+        // Stopping a workspace ends every coding agent in it. A subscriber watching one of these agents may
+        // live in ANOTHER workspace, so each is destroyed through the finalization chokepoint (its terminal
+        // was already terminated above): the child's subscribers are told it exited before its row is
+        // deleted, and the stopped terminal's own watch state is torn down.
+        for agent in workspaceAgentWindows { try finalizeAgentRow(agent, reason: .destroyed(terminateTerminalSession: false)) }
         try markWorkspaceStopped(workspace)
         return WorkspaceStopOutcome(skippedStopScriptBecauseWorkspaceDirectoryMissing: skippedStopScriptBecauseWorkspaceDirectoryMissing)
     }
@@ -905,8 +942,9 @@ public final class WorkspaceOrchestrator {
     private func archiveWorkspaceUnlocked(workspaceID: String, deleteLocalBranch: Bool, deleteRemoteBranch: Bool) throws -> WorkspaceArchiveOutcome {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         guard !workspace.isDefault else { throw WorkspaceError.invalidArgument(message: "Default workspace cannot be archived.") }
+        // `stopWorkspaceUnlocked` already deleted this workspace's agent rows (notifying subscribers and
+        // tearing down watch state) under the same lifecycle lock, so archive does not repeat the delete.
         _ = try stopWorkspaceUnlocked(workspaceID: workspaceID, waitForTerminalExit: false)
-        try store.deleteAgentWindows(workspaceID: workspaceID)
         if project.isGitRepo {
             do { try git.removeWorktree(path: project.dir, worktreePath: workspace.dir) } catch { if !isMissingWorktreeError(error) { throw error } }
         }
@@ -1151,15 +1189,43 @@ public final class WorkspaceOrchestrator {
     {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         guard !workspace.isArchived else { throw WorkspaceError.invalidArgument(message: "Workspace is archived.") }
-        let assignedPorts = try store.workspacePortsAssigned(workspaceID: workspaceID)
+        let trimmedCommand = command?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let rawCommand = (trimmedCommand?.isEmpty == false) ? command! : interactiveShellCommand(cwd: workspace.dir)
+        return try launchWorkspaceCommandSession(
+            project: project, workspace: workspace, title: title, rawCommand: rawCommand, kind: .shell,
+            defaultTitle: try generatedAdHocTerminalWindowName(workspaceID: workspace.id))
+    }
+
+    /// Creates an ad-hoc coding-agent terminal session. Mirrors `createWorkspaceTerminalSession` but
+    /// launches with `kind: .agent` and a required command. The `.agent` kind is load-bearing: it is
+    /// the deterministic label evidence the daemon's signal chokepoint needs to accept a non-`init`
+    /// first signal, so a coding agent (e.g. Codex) that emits `working` before `init` still registers.
+    /// The default title is the matched coding agent's display name (or the command's executable
+    /// basename when no supported agent matches — spawn's hook gate has already ensured one does).
+    @discardableResult public func createWorkspaceAgentSession(workspaceID: String, command: String, title: String?) throws
+        -> TerminalServiceSessionSummary
+    {
+        let (project, workspace) = try resolveWorkspace(id: workspaceID)
+        guard !workspace.isArchived else { throw WorkspaceError.invalidArgument(message: "Workspace is archived.") }
+        let trimmedCommand = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedCommand.isEmpty else { throw WorkspaceError.invalidArgument(message: "Agent command is required.") }
+        let defaultTitle =
+            SupportedCodingAgentHook.matching(command: command)?.displayName
+            ?? (SupportedCodingAgentHook.executableToken(inCommand: command).map { ($0 as NSString).lastPathComponent } ?? "Agent")
+        return try launchWorkspaceCommandSession(
+            project: project, workspace: workspace, title: title, rawCommand: command, kind: .agent, defaultTitle: defaultTitle)
+    }
+
+    /// Shared launch path for ad-hoc command and agent sessions: builds the workspace environment,
+    /// prefixes the shell command, persists the tracked terminal window, and marks the workspace
+    /// running. The only per-caller differences are the launch `kind` and the fallback title.
+    @discardableResult private func launchWorkspaceCommandSession(
+        project: ProjectRecord, workspace: WorkspaceRecord, title: String?, rawCommand: String, kind: TerminalSessionKind, defaultTitle: String
+    ) throws -> TerminalServiceSessionSummary {
+        let assignedPorts = try store.workspacePortsAssigned(workspaceID: workspace.id)
         let sessionID = UUID().uuidString
         let trimmedTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let sessionTitle: String
-        if let trimmedTitle, !trimmedTitle.isEmpty {
-            sessionTitle = trimmedTitle
-        } else {
-            sessionTitle = try generatedAdHocTerminalWindowName(workspaceID: workspace.id)
-        }
+        let sessionTitle = (trimmedTitle?.isEmpty == false) ? trimmedTitle! : defaultTitle
         let runtimeManifest = workspaceRuntimeManifest(project: project, workspace: workspace, assignedPorts: assignedPorts)
         let env = terminalLaunchEnvironment(
             base: buildWorkspaceEnv(
@@ -1167,16 +1233,10 @@ public final class WorkspaceOrchestrator {
                 runtimeManifest: runtimeManifest
             ).merging([Self.terminalTrackingIDEnvVar: sessionID]) { _, new in new }, includeInheritedPath: false, includeProfileEnvironment: true)
         let shellPath = terminalShellPathOverride() ?? "/bin/zsh"
-        let rawCommand: String
-        if let command, !command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            rawCommand = command
-        } else {
-            rawCommand = interactiveShellCommand(cwd: workspace.dir)
-        }
         let launchCommand = commandPrefixedWithShellEnvironment(rawCommand, env: env)
         let launchConfiguration = TerminalSessionLaunchConfiguration(
             sessionID: sessionID, backend: .ghosttyEmbedded, lifetimePolicy: .persistent, title: sessionTitle, workingDirectory: workspace.dir,
-            shell: shellPath, command: launchCommand, createdAt: nowISO8601(), workspaceID: workspace.id, kind: .shell)
+            shell: shellPath, command: launchCommand, createdAt: nowISO8601(), workspaceID: workspace.id, kind: kind)
 
         let session = try builtInTerminalSessionLauncher(launchConfiguration)
         let windowRecordID = UUID().uuidString
@@ -2230,13 +2290,16 @@ public final class WorkspaceOrchestrator {
         case done = "done"
         case exit = "exit"
 
+        /// The status each signal maps its agent row to. The `.exit` value is not consumed on the exit
+        /// path — `handleAgentExit` owns that decision (delete, `.done`, or `.exited`) — but reads
+        /// `.exited` so the mapping stays honest.
         var status: AgentWindowStatus {
             switch self {
             case .`init`: .idle
             case .working: .spinning
             case .blocked: .waiting
             case .done: .done
-            case .exit: .idle
+            case .exit: .exited
             }
         }
 

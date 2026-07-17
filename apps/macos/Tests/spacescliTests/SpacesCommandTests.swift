@@ -3,6 +3,7 @@ import Darwin
 import Foundation
 import XCTest
 import spacesdeviceapi
+import spacesdevicecore
 import spacesterminalcore
 import spacesterminalghostty
 
@@ -11,11 +12,59 @@ import spacesterminalghostty
 final class SpacesCommandTests: XCTestCase {
     func testProjectListParses() throws { XCTAssertNoThrow(try ProjectListCommand.parse([])) }
 
+    func testDiscoveryAndLifecycleCommandsParseDeviceSelector() throws {
+        XCTAssertEqual(try ProjectListCommand.parse(["--device", "phone"]).device, "phone")
+        XCTAssertEqual(try WorkspaceListCommand.parse(["--device", "phone"]).device, "phone")
+        XCTAssertEqual(try WorkspaceCreateCommand.parse(["--project", "project-1", "--branch", "feature/a", "--device", "phone"]).device, "phone")
+        XCTAssertEqual(try WorkspaceStartCommand.parse(["--workspace", "workspace-1", "--device", "phone"]).device, "phone")
+        XCTAssertEqual(try WorkspaceRestartCommand.parse(["--workspace", "workspace-1", "--device", "phone"]).device, "phone")
+    }
+
+    func testWorkspaceListRejectsIncludeArchivedWithDevice() throws {
+        // The include-archived guard runs before device resolution, so it fails deterministically
+        // without a paired device — the device overview cannot carry archived workspaces.
+        let command = try WorkspaceListCommand.parse(["--device", "phone", "--include-archived"])
+        XCTAssertThrowsError(try command.run()) { error in
+            XCTAssertTrue("\(error)".contains("--include-archived is not supported with --device"), "\(error)")
+        }
+    }
+
     func testWorkspaceListParsesProjectFilter() throws {
         let command = try WorkspaceListCommand.parse(["--project", "project-1", "--include-archived"])
 
         XCTAssertEqual(command.project, "project-1")
         XCTAssertTrue(command.includeArchived)
+    }
+
+    func testProjectListRowRendersColumnsFromLocalAndDeviceSummaries() {
+        let local = TerminalServiceProfileProjectSummary(
+            id: "project-1", name: "Spaces", dir: "/repos/spaces", isGitRepo: true, defaultBranch: "main")
+        let remote = SpacesDeviceProjectSummary(id: "project-1", name: "Spaces", dir: "/repos/spaces", isGitRepo: true, defaultBranch: "main")
+
+        let expected = "project-1\tname=Spaces\tdir=/repos/spaces"
+        XCTAssertEqual(projectListRow(local), expected)
+        XCTAssertEqual(projectListRow(remote), expected)
+    }
+
+    func testWorkspaceListRowRendersColumnsFromLocalAndDeviceSummaries() {
+        let local = TerminalServiceProfileWorkspaceRecord(
+            id: "workspace-1", projectID: "project-1", dir: "/repos/spaces/ws", dirname: nil, branch: "feature", baseBranch: "main", isDefault: false,
+            isArchived: false, isHidden: false, isRunning: true, lastLaunchedAt: nil, notes: nil)
+        let remote = SpacesDeviceWorkspaceSummary(
+            id: "workspace-1", projectID: "project-1", projectName: "Spaces", branch: "feature", baseBranch: "main", dir: "/repos/spaces/ws",
+            isRunning: true, isArchived: false, isHidden: false, isDefault: false, sessionCount: 0)
+
+        let expected = "workspace-1\tproject=project-1\tbranch=feature\trunning=true\tname=feature"
+        XCTAssertEqual(workspaceListRow(local), expected)
+        XCTAssertEqual(workspaceListRow(remote), expected)
+    }
+
+    func testWorkspaceListRowRendersFolderNameAndDashForNonGitWorkspace() {
+        let remote = SpacesDeviceWorkspaceSummary(
+            id: "workspace-2", projectID: "project-2", projectName: "Tools", branch: nil, baseBranch: nil, dir: "/repos/tools", isRunning: false,
+            isArchived: false, isHidden: false, isDefault: true, sessionCount: 0)
+
+        XCTAssertEqual(workspaceListRow(remote), "workspace-2\tproject=project-2\tbranch=-\trunning=false\tname=tools")
     }
 
     func testWorkspaceCreateParsesDeviceScopedArguments() throws {
@@ -94,10 +143,16 @@ final class SpacesCommandTests: XCTestCase {
         XCTAssertEqual(context?.sessionID, "session-env")
     }
 
-    /// Hook installation and status are owned by the app and the daemon, never the CLI or MCP.
-    func testAgentCommandExposesSignalOnly() {
+    /// Signal, plus the read/annotate orchestration surface. Hook installation and status stay owned by
+    /// the app and the daemon, never the CLI or MCP.
+    func testAgentCommandExposesSignalAndOrchestrationCommands() {
         let subcommands = AgentCommand.configuration.subcommands.map { String(describing: $0) }
-        XCTAssertEqual(subcommands, ["AgentSignalCommand"])
+        XCTAssertEqual(
+            subcommands,
+            [
+                "AgentSignalCommand", "AgentListCommand", "AgentStatusCommand", "AgentAnnotateCommand", "AgentSpawnCommand", "AgentInterruptCommand",
+                "AgentKillCommand", "AgentSubscribeCommand", "AgentUnsubscribeCommand",
+            ])
         XCTAssertThrowsError(try AgentCommand.parseAsRoot(["hooks", "status"]))
     }
 
@@ -148,9 +203,12 @@ final class SpacesCommandTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let originalOverride = ProcessInfo.processInfo.environment["SPACES_DB_PATH"]
+        let originalRuntimeDirectory = ProcessInfo.processInfo.environment["SPACES_RUNTIME_DIR"]
         setenv("SPACES_DB_PATH", root.appendingPathComponent("spaces.db").path, 1)
+        setenv("SPACES_RUNTIME_DIR", root.appendingPathComponent("runtime", isDirectory: true).path, 1)
         defer {
             if let originalOverride { setenv("SPACES_DB_PATH", originalOverride, 1) } else { unsetenv("SPACES_DB_PATH") }
+            if let originalRuntimeDirectory { setenv("SPACES_RUNTIME_DIR", originalRuntimeDirectory, 1) } else { unsetenv("SPACES_RUNTIME_DIR") }
             try? FileManager.default.removeItem(at: root)
         }
 
@@ -167,9 +225,12 @@ final class SpacesCommandTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let originalOverride = ProcessInfo.processInfo.environment["SPACES_DB_PATH"]
+        let originalRuntimeDirectory = ProcessInfo.processInfo.environment["SPACES_RUNTIME_DIR"]
         setenv("SPACES_DB_PATH", root.appendingPathComponent("spaces.db").path, 1)
+        setenv("SPACES_RUNTIME_DIR", root.appendingPathComponent("runtime", isDirectory: true).path, 1)
         defer {
             if let originalOverride { setenv("SPACES_DB_PATH", originalOverride, 1) } else { unsetenv("SPACES_DB_PATH") }
+            if let originalRuntimeDirectory { setenv("SPACES_RUNTIME_DIR", originalRuntimeDirectory, 1) } else { unsetenv("SPACES_RUNTIME_DIR") }
             try? FileManager.default.removeItem(at: root)
         }
 
@@ -338,8 +399,11 @@ final class SpacesCommandTests: XCTestCase {
             names,
             [
                 "spaces_project_list", "spaces_workspace_list", "spaces_workspace_create", "spaces_workspace_start", "spaces_workspace_restart",
-                "spaces_terminal_list", "spaces_terminal_tail", "spaces_terminal_send", "spaces_device_list",
+                "spaces_terminal_list", "spaces_terminal_tail", "spaces_terminal_send", "spaces_agent_list", "spaces_agent_status",
+                "spaces_agent_annotate", "spaces_agent_spawn", "spaces_agent_interrupt", "spaces_agent_kill", "spaces_agent_subscribe",
+                "spaces_agent_unsubscribe", "spaces_device_list",
             ])
+        // `agent signal` is CLI-only forever: an orchestrating agent may read peers' status but must not forge it.
         XCTAssertFalse(names.contains("spaces_agent_signal"))
 
         let createTool = try XCTUnwrap(tools.first { ($0["name"] as? String) == "spaces_workspace_create" })
@@ -356,6 +420,45 @@ final class SpacesCommandTests: XCTestCase {
         let sendProperties = try XCTUnwrap(sendSchema["properties"] as? [String: Any])
         XCTAssertNotNil(sendProperties["bytes"])
         XCTAssertEqual(sendSchema["oneOf"] as? [[String: [String]]], [["required": ["text"]], ["required": ["bytes"]]])
+    }
+
+    func testMCPStdioFramingIsNewlineDelimited() throws {
+        // Drive the server with the MCP stdio handshake: initialize, the client's post-initialize
+        // notification (no id, no response expected), then tools/list — all newline-delimited.
+        let requests = [
+            #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}"#,
+            #"{"jsonrpc":"2.0","method":"notifications/initialized"}"#, #"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+        ]
+
+        let inputPipe = Pipe()
+        let outputPipe = Pipe()
+        inputPipe.fileHandleForWriting.write(Data((requests.joined(separator: "\n") + "\n").utf8))
+        try inputPipe.fileHandleForWriting.close()
+
+        let server = SpacesMCPStdioServer(input: inputPipe.fileHandleForReading, output: outputPipe.fileHandleForWriting)
+        try server.run()
+        try outputPipe.fileHandleForWriting.close()
+
+        let outputText = String(decoding: outputPipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        // The notification draws no reply, so initialize + tools/list produce exactly two lines, each a
+        // single compact JSON message with no embedded newline.
+        let lines = outputText.split(separator: "\n", omittingEmptySubsequences: false).filter { !$0.isEmpty }
+        XCTAssertEqual(lines.count, 2)
+
+        let initialize = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(lines[0].utf8)) as? [String: Any])
+        XCTAssertEqual(initialize["id"] as? Int, 1)
+        let initializeResult = try XCTUnwrap(initialize["result"] as? [String: Any])
+        XCTAssertEqual((initializeResult["serverInfo"] as? [String: Any])?["name"] as? String, "spaces")
+
+        let toolsList = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(lines[1].utf8)) as? [String: Any])
+        XCTAssertEqual(toolsList["id"] as? Int, 2)
+        let tools = try XCTUnwrap((toolsList["result"] as? [String: Any])?["tools"] as? [[String: Any]])
+        let names = Set(tools.compactMap { $0["name"] as? String })
+        let agentTools = [
+            "spaces_agent_list", "spaces_agent_status", "spaces_agent_annotate", "spaces_agent_spawn", "spaces_agent_interrupt", "spaces_agent_kill",
+            "spaces_agent_subscribe", "spaces_agent_unsubscribe",
+        ]
+        XCTAssertTrue(agentTools.allSatisfy(names.contains), "expected all agent tools, got \(names.sorted())")
     }
 
     func testMCPTerminalInputMapsTextAndBytesToTypedInput() throws {

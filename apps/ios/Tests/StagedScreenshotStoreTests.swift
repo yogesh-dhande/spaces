@@ -4,8 +4,7 @@
     import spacesterminalcore
     @testable import SpacesMobile
 
-    @MainActor
-    final class StagedScreenshotStoreTests: XCTestCase {
+    @MainActor final class StagedScreenshotStoreTests: XCTestCase {
         private func makeThumbnail() -> UIImage {
             UIGraphicsImageRenderer(size: CGSize(width: 1, height: 1)).image { context in
                 UIColor.black.setFill()
@@ -15,11 +14,8 @@
 
         private func makeScreenshot(sourceTitle: String = "shell") -> StagedScreenshot {
             StagedScreenshot(
-                payload: TerminalImageAttachmentPayload(fileExtension: "png", imageData: Data([0x01, 0x02])),
-                thumbnail: makeThumbnail(),
-                capturedAt: Date(),
-                sourceTitle: sourceTitle
-            )
+                payload: TerminalImageAttachmentPayload(fileExtension: "png", imageData: Data([0x01, 0x02])), thumbnail: makeThumbnail(),
+                capturedAt: Date(), sourceTitle: sourceTitle)
         }
 
         func testStagedIsNilInitially() {

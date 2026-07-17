@@ -1,12 +1,13 @@
 # Spaces
 
-Manage parallel coding sessions
+Manage parallel coding sessions across all of your devices
 
 [Download](https://github.com/yogesh-dhande/spaces/releases/latest) · [Website](https://usespaces.dev) · [Docs](https://usespaces.dev/docs)
 
 ## Features
 
 - **Projects and workspaces** — a project is any directory, Git or not; a workspace is one feature, branch, or experiment inside it, backed by a Git worktree or a separate clone. Keeps parallel work separate instead of stashing and switching branches in one checkout.
+- **Agent orchestration** — one coding agent runs a fleet of child agents through the [Spaces MCP server](https://usespaces.dev/docs/orchestration), each child in its own isolated worktree, across harnesses, models, and machines. Delegate a big task and coordinate the whole team from a single terminal.
 - **Agent notifications and an alerts view** — [coding agents](https://usespaces.dev/docs/coding-agents) report when they are working, blocked on a human, or done, aggregated with exited processes across every workspace. Tells you which agent needs attention without opening each terminal.
 - **Built-in terminals** powered by [libghostty](https://github.com/ghostty-org/ghostty)
 - **Managed ports and processes** — declare named services and processes once; each workspace gets its own dynamically assigned ports, exposed as `$SPACES_<SERVICE>_PORT`. Several checkouts of the same app run side by side without port conflicts or hand-edited `.env` files.

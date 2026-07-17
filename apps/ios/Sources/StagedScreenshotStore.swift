@@ -18,16 +18,12 @@ struct StagedScreenshot {
 @MainActor @Observable final class StagedScreenshotStore {
     private(set) var staged: StagedScreenshot?
 
-    func stage(_ screenshot: StagedScreenshot) {
-        staged = screenshot
-    }
+    func stage(_ screenshot: StagedScreenshot) { staged = screenshot }
 
     func take() -> StagedScreenshot? {
         defer { staged = nil }
         return staged
     }
 
-    func clear() {
-        staged = nil
-    }
+    func clear() { staged = nil }
 }

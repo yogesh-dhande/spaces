@@ -11,13 +11,9 @@ struct SelectedTerminalSessionRoute: Identifiable, Hashable {
 
     var id: String { session.id }
 
-    static func == (lhs: SelectedTerminalSessionRoute, rhs: SelectedTerminalSessionRoute) -> Bool {
-        lhs.id == rhs.id
-    }
+    static func == (lhs: SelectedTerminalSessionRoute, rhs: SelectedTerminalSessionRoute) -> Bool { lhs.id == rhs.id }
 
-    func hash(into hasher: inout Hasher) {
-        hasher.combine(id)
-    }
+    func hash(into hasher: inout Hasher) { hasher.combine(id) }
 }
 
 struct PendingTerminalLaunch: Identifiable, Sendable, Hashable {
@@ -56,13 +52,9 @@ struct PendingTerminalLaunch: Identifiable, Sendable, Hashable {
         workspaceID = workspace.id
     }
 
-    static func == (lhs: PendingTerminalLaunch, rhs: PendingTerminalLaunch) -> Bool {
-        lhs.id == rhs.id
-    }
+    static func == (lhs: PendingTerminalLaunch, rhs: PendingTerminalLaunch) -> Bool { lhs.id == rhs.id }
 
-    func hash(into hasher: inout Hasher) {
-        hasher.combine(id)
-    }
+    func hash(into hasher: inout Hasher) { hasher.combine(id) }
 }
 
 extension PendingTerminalLaunch.Action {
@@ -98,74 +90,42 @@ struct TerminalLaunchPendingView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            topOverlay
-                .padding(.horizontal, 8)
-                .padding(.top, 4)
-                .padding(.bottom, 4)
+            topOverlay.padding(.horizontal, 8).padding(.top, 4).padding(.bottom, 4)
 
             VStack(spacing: 18) {
                 Spacer(minLength: 0)
-                Image(systemName: launch.systemImage)
-                    .font(.system(size: 34, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.82))
-                ProgressView()
-                    .tint(.white)
-                Text(launch.action.progressLabel)
-                    .font(.body.monospaced())
-                    .foregroundStyle(.white.opacity(0.88))
-                    .multilineTextAlignment(.center)
-                Text(launch.detail)
-                    .font(.footnote.monospaced())
-                    .foregroundStyle(.white.opacity(0.56))
-                    .lineLimit(2)
-                    .truncationMode(.middle)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 28)
+                Image(systemName: launch.systemImage).font(.system(size: 34, weight: .semibold)).foregroundStyle(.white.opacity(0.82))
+                ProgressView().tint(.white)
+                Text(launch.action.progressLabel).font(.body.monospaced()).foregroundStyle(.white.opacity(0.88)).multilineTextAlignment(.center)
+                Text(launch.detail).font(.footnote.monospaced()).foregroundStyle(.white.opacity(0.56)).lineLimit(2).truncationMode(.middle)
+                    .multilineTextAlignment(.center).padding(.horizontal, 28)
                 Spacer(minLength: 0)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
-        .background(Self.surfaceBackground.ignoresSafeArea())
-        .toolbar(.hidden, for: .navigationBar)
-        .task(id: launch.id) {
+            }.frame(maxWidth: .infinity, maxHeight: .infinity)
+        }.background(Self.surfaceBackground.ignoresSafeArea()).toolbar(.hidden, for: .navigationBar).task(id: launch.id) {
             guard !hasStarted else { return }
             hasStarted = true
             let session = await runLaunch()
             guard !Task.isCancelled else { return }
             await onSessionReady(session)
-        }
-        .accessibilityIdentifier("terminal.launch.\(launch.id)")
+        }.accessibilityIdentifier("terminal.launch.\(launch.id)")
     }
 
     private var topOverlay: some View {
         HStack(spacing: 8) {
             Button(action: onBack) {
-                Image(systemName: "chevron.left")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.white)
-                    .frame(height: Self.chromeControlHeight)
-                    .padding(.horizontal, 12)
-                    .background(
-                        Capsule()
-                            .fill(.black.opacity(0.28))
-                            .overlay(Capsule().strokeBorder(.white.opacity(0.10), lineWidth: 1))
-                    )
-            }
-            .accessibilityIdentifier("terminal.launch.back")
-            .accessibilityLabel("Back")
+                Image(systemName: "chevron.left").font(.subheadline.weight(.semibold)).foregroundStyle(.white).frame(height: Self.chromeControlHeight)
+                    .padding(.horizontal, 12).background(
+                        Capsule().fill(.black.opacity(0.28)).overlay(Capsule().strokeBorder(.white.opacity(0.10), lineWidth: 1)))
+            }.accessibilityIdentifier("terminal.launch.back").accessibilityLabel("Back")
 
             Spacer(minLength: 0)
 
-            Text(launch.title)
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(.white)
-                .lineLimit(1)
-                .accessibilityIdentifier("terminal.launch.title")
+            Text(launch.title).font(.subheadline.weight(.semibold)).foregroundStyle(.white).lineLimit(1).accessibilityIdentifier(
+                "terminal.launch.title")
 
             Spacer(minLength: 0)
             Color.clear.frame(width: Self.chromeControlHeight, height: 1)
-        }
-        .frame(height: Self.chromeControlHeight)
+        }.frame(height: Self.chromeControlHeight)
     }
 
     private func runLaunch() async -> SpacesDeviceTerminalSessionSummary? {
@@ -201,59 +161,42 @@ struct TerminalSessionNavigationModifier: ViewModifier {
     private var activeRouteID: String? { selectedSession?.id ?? pendingTerminalLaunch?.id }
 
     func body(content: Content) -> some View {
-        content
-            .navigationDestination(item: $selectedSession) { route in
-                TerminalDetailView(
-                    session: route.session,
-                    settings: model.settings,
-                    appModel: model,
-                    onAuthenticationRequired: { message in
-                        pendingAuthenticationMessage = message
-                        selectedSession = nil
-                    },
-                    onSessionChanged: { session in
-                        selectedSession = SelectedTerminalSessionRoute(session: session)
-                    }
-                ) {
+        content.navigationDestination(item: $selectedSession) { route in
+            TerminalDetailView(
+                session: route.session, settings: model.settings, appModel: model,
+                onAuthenticationRequired: { message in
+                    pendingAuthenticationMessage = message
                     selectedSession = nil
-                }
-                .id(route.id)
+                }, onSessionChanged: { session in selectedSession = SelectedTerminalSessionRoute(session: session) }
+            ) { selectedSession = nil }.id(route.id)
+        }.navigationDestination(item: $pendingTerminalLaunch) { launch in
+            TerminalLaunchPendingView(launch: launch, model: model) { session in
+                pendingTerminalLaunch = nil
+                if let session { selectedSession = SelectedTerminalSessionRoute(session: session) }
+            } onBack: {
+                pendingTerminalLaunch = nil
             }
-            .navigationDestination(item: $pendingTerminalLaunch) { launch in
-                TerminalLaunchPendingView(launch: launch, model: model) { session in
-                    pendingTerminalLaunch = nil
-                    if let session {
-                        selectedSession = SelectedTerminalSessionRoute(session: session)
-                    }
-                } onBack: {
-                    pendingTerminalLaunch = nil
-                }
+        }.onChange(of: activeRouteID) { oldValue, newValue in
+            if oldValue != nil, newValue == nil { onTerminalDismissed?() }
+            guard newValue == nil, let message = pendingAuthenticationMessage else { return }
+            pendingAuthenticationMessage = nil
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(300))
+                model.handleAuthenticationFailure(message: message)
             }
-            .onChange(of: activeRouteID) { oldValue, newValue in
-                if oldValue != nil, newValue == nil {
-                    onTerminalDismissed?()
-                }
-                guard newValue == nil, let message = pendingAuthenticationMessage else { return }
-                pendingAuthenticationMessage = nil
-                Task { @MainActor in
-                    try? await Task.sleep(for: .milliseconds(300))
-                    model.handleAuthenticationFailure(message: message)
-                }
-            }
+        }
     }
 }
 
 extension View {
     func terminalSessionNavigation(
-        model: SpacesMobileAppModel,
-        selectedSession: Binding<SelectedTerminalSessionRoute?>,
-        pendingTerminalLaunch: Binding<PendingTerminalLaunch?>,
+        model: SpacesMobileAppModel, selectedSession: Binding<SelectedTerminalSessionRoute?>, pendingTerminalLaunch: Binding<PendingTerminalLaunch?>,
         onTerminalDismissed: (@MainActor () -> Void)? = nil
     ) -> some View {
         modifier(
             TerminalSessionNavigationModifier(
-                model: model, selectedSession: selectedSession, pendingTerminalLaunch: pendingTerminalLaunch,
-                onTerminalDismissed: onTerminalDismissed))
+                model: model, selectedSession: selectedSession, pendingTerminalLaunch: pendingTerminalLaunch, onTerminalDismissed: onTerminalDismissed
+            ))
     }
 }
 
@@ -270,12 +213,8 @@ struct OverviewPollingModifier: ViewModifier {
 
     private var taskID: String {
         [
-            scenePhase == .active ? "active" : "inactive",
-            model.selectedTab == tab ? "visible" : "hidden",
-            activeDetailRouteID ?? "list",
-            model.activeDeviceID ?? "no-device",
-            model.settings.isPaired ? "paired" : "unpaired",
-            "\(refreshGeneration)",
+            scenePhase == .active ? "active" : "inactive", model.selectedTab == tab ? "visible" : "hidden", activeDetailRouteID ?? "list",
+            model.activeDeviceID ?? "no-device", model.settings.isPaired ? "paired" : "unpaired", "\(refreshGeneration)",
         ].joined(separator: "|")
     }
 
@@ -291,20 +230,11 @@ struct OverviewPollingModifier: ViewModifier {
         }
     }
 
-    private var shouldPoll: Bool {
-        scenePhase == .active && model.selectedTab == tab && activeDetailRouteID == nil && model.settings.isPaired
-    }
+    private var shouldPoll: Bool { scenePhase == .active && model.selectedTab == tab && activeDetailRouteID == nil && model.settings.isPaired }
 }
 
 extension View {
-    func overviewPolling(
-        model: SpacesMobileAppModel,
-        tab: SpacesMobileTab,
-        activeDetailRouteID: String?,
-        refreshGeneration: Int = 0
-    ) -> some View {
-        modifier(
-            OverviewPollingModifier(
-                model: model, tab: tab, activeDetailRouteID: activeDetailRouteID, refreshGeneration: refreshGeneration))
+    func overviewPolling(model: SpacesMobileAppModel, tab: SpacesMobileTab, activeDetailRouteID: String?, refreshGeneration: Int = 0) -> some View {
+        modifier(OverviewPollingModifier(model: model, tab: tab, activeDetailRouteID: activeDetailRouteID, refreshGeneration: refreshGeneration))
     }
 }

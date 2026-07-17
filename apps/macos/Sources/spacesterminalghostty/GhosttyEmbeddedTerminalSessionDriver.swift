@@ -87,6 +87,7 @@
         private var sessionStateDeliveryScheduled = false
         private var debugRefreshRequestCountValue = 0
         private var debugLastScrollModsValue: Int32 = 0
+        private var surfaceScaleFactor = 1.0
 
         var onActionEvent: (@MainActor (GhosttyActionEvent) -> Void)?
         var onSurfaceClosed: (@MainActor () -> Void)?
@@ -187,6 +188,7 @@
             let hostPTY = HostManagedPTYTerminalSessionDriver(launchConfiguration: launchConfiguration)
             let hostView = headlessSurfaceHostView()
             let scaleFactor = Double(NSScreen.main?.backingScaleFactor ?? 2.0)
+            surfaceScaleFactor = scaleFactor
 
             var sessionConfig = ghostty_session_config_new()
             sessionConfig.surface.platform_tag = GHOSTTY_PLATFORM_MACOS
@@ -467,9 +469,21 @@
             return resolvedSize.columns == targetColumns && resolvedSize.rows == targetRows
         }
 
-        @discardableResult func sendScroll(horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32 = 0) -> Bool {
-            guard let surface else { return false }
+        @discardableResult func sendScroll(
+            horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32 = 0, pointerPosition: TerminalScrollPointerPosition? = nil
+        ) -> Bool {
+            guard let session, let surface else { return false }
             debugLastScrollModsValue = scrollMods
+            if let pointerPosition {
+                guard pointerPosition.isValid else { return false }
+                let size = ghostty_session_size(session)
+                let widthPixels = max(Double(size.width_px), 1)
+                let heightPixels = max(Double(size.height_px), 1)
+                let xPixels = min(pointerPosition.x * widthPixels, widthPixels - 1)
+                let yPixels = min(pointerPosition.y * heightPixels, heightPixels - 1)
+                ghostty_surface_mouse_pos(
+                    surface, xPixels / surfaceScaleFactor, yPixels / surfaceScaleFactor, ghostty_input_mods_e(pointerPosition.mods))
+            }
             ghostty_surface_mouse_scroll(surface, Double(horizontal), Double(vertical), scrollMods)
             requestSurfaceRefresh()
             return true

@@ -266,6 +266,9 @@ public enum SpacesDeviceCodingAgentActivityState: String, Codable, Sendable, Equ
     case spinning
     case waiting
     case done
+    /// The agent process ended while its terminal session stayed open. Mirrors `AgentWindowStatus.exited`
+    /// over the wire; behaves like `idle` (no alert, not active) but reads as a distinct, gone state.
+    case exited
 }
 
 public struct SpacesDeviceWorkspaceProcessRow: Codable, Sendable, Equatable, Identifiable {
@@ -528,13 +531,20 @@ public struct SpacesDeviceTerminalSessionSummary: Codable, Sendable, Equatable, 
     public let rowKind: SpacesDeviceTerminalSessionRowKind
     public let rowSourceID: String?
     public let hasFinalRender: Bool
+    /// Raw value of the coding-agent kind the daemon's foreground classifier reports for this session's
+    /// live runtime state, or nil when none is detected. Carries the daemon's foreground detection over
+    /// the wire so a remote `spaces agent spawn` can poll detection-based readiness (the local CLI reads
+    /// the same detection from `.terminalList`); it reports a detected kind even before the session's
+    /// first hook signal, when no agent-orchestration row exists yet.
+    public let foregroundDetectedAgentKind: String?
 
     public init(
         id: String, title: String, workingDirectory: String, shell: String, command: String?, state: TerminalSessionState,
         backend: TerminalSessionBackendKind, lifetimePolicy: TerminalSessionLifetimePolicy, servicePID: Int32, childPID: Int32?, workspaceID: String,
         workspaceTitle: String?, projectID: String?, projectName: String?, createdAt: String, updatedAt: String, isControlAvailable: Bool,
         isSubscriptionAvailable: Bool, attachmentSnapshot: TerminalSessionAttachmentSnapshot,
-        rowKind: SpacesDeviceTerminalSessionRowKind = .liveSession, rowSourceID: String? = nil, hasFinalRender: Bool = false
+        rowKind: SpacesDeviceTerminalSessionRowKind = .liveSession, rowSourceID: String? = nil, hasFinalRender: Bool = false,
+        foregroundDetectedAgentKind: String? = nil
     ) {
         self.id = id
         self.title = title
@@ -558,6 +568,7 @@ public struct SpacesDeviceTerminalSessionSummary: Codable, Sendable, Equatable, 
         self.rowKind = rowKind
         self.rowSourceID = rowSourceID
         self.hasFinalRender = hasFinalRender
+        self.foregroundDetectedAgentKind = foregroundDetectedAgentKind
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -583,6 +594,7 @@ public struct SpacesDeviceTerminalSessionSummary: Codable, Sendable, Equatable, 
         case rowKind
         case rowSourceID
         case hasFinalRender
+        case foregroundDetectedAgentKind
     }
 
     public init(from decoder: any Decoder) throws {
@@ -610,6 +622,7 @@ public struct SpacesDeviceTerminalSessionSummary: Codable, Sendable, Equatable, 
         rowKind = try container.decodeIfPresent(SpacesDeviceTerminalSessionRowKind.self, forKey: .rowKind) ?? .liveSession
         rowSourceID = try container.decodeIfPresent(String.self, forKey: .rowSourceID)
         hasFinalRender = try container.decodeIfPresent(Bool.self, forKey: .hasFinalRender) ?? false
+        foregroundDetectedAgentKind = try container.decodeIfPresent(String.self, forKey: .foregroundDetectedAgentKind)
     }
 }
 
@@ -1085,6 +1098,9 @@ public struct SpacesDeviceTerminalControlRequest: Codable, Sendable, Equatable {
     public let scrollHorizontal: Double?
     public let scrollVertical: Double?
     public let scrollMods: Int32?
+    public let scrollPointerX: Double?
+    public let scrollPointerY: Double?
+    public let scrollPointerMods: UInt32?
     public let appendNewline: Bool
     public let asPaste: Bool
     /// The attaching client's OS appearance (light/dark), carried on `attach` so a remote daemon can render
@@ -1096,7 +1112,8 @@ public struct SpacesDeviceTerminalControlRequest: Codable, Sendable, Equatable {
         action: SpacesDeviceTerminalControlAction, sessionID: String, clientID: String? = nil, client: TerminalClient? = nil,
         attachmentMode: TerminalAttachmentMode? = nil, text: String? = nil, key: String? = nil, columns: Int? = nil, rows: Int? = nil,
         ownerEpoch: UInt64? = nil, resizeSerial: UInt64? = nil, scrollHorizontal: Double? = nil, scrollVertical: Double? = nil,
-        scrollMods: Int32? = nil, appendNewline: Bool = false, asPaste: Bool = false, appearance: ThemeAppearance? = nil
+        scrollMods: Int32? = nil, scrollPointerX: Double? = nil, scrollPointerY: Double? = nil, scrollPointerMods: UInt32? = nil,
+        appendNewline: Bool = false, asPaste: Bool = false, appearance: ThemeAppearance? = nil
     ) {
         self.action = action
         self.sessionID = sessionID
@@ -1112,6 +1129,9 @@ public struct SpacesDeviceTerminalControlRequest: Codable, Sendable, Equatable {
         self.scrollHorizontal = scrollHorizontal
         self.scrollVertical = scrollVertical
         self.scrollMods = scrollMods
+        self.scrollPointerX = scrollPointerX
+        self.scrollPointerY = scrollPointerY
+        self.scrollPointerMods = scrollPointerMods
         self.appendNewline = appendNewline
         self.asPaste = asPaste
         self.appearance = appearance
@@ -1183,6 +1203,132 @@ public struct SpacesDeviceServiceTunnelRequest: Codable, Sendable, Equatable {
     }
 }
 
+/// Spawns a coding-agent terminal session on a paired device (`spaces agent spawn --device`). Unlike
+/// the local profile spawn, `workspaceID` is required: a remote client has no shared working directory
+/// to infer the owning workspace from, so it must name the workspace explicitly. The daemon gates
+/// `command` against the supported-agent hook set before spawning, identical to the local path.
+public struct SpacesDeviceSpawnAgentSessionRequest: Codable, Sendable, Equatable {
+    public let workspaceID: String
+    public let command: String
+    public let title: String?
+
+    public init(workspaceID: String, command: String, title: String? = nil) {
+        self.workspaceID = workspaceID
+        self.command = command
+        self.title = title
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case workspaceID
+        case command
+        case title
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        workspaceID = try container.decode(String.self, forKey: .workspaceID)
+        command = try container.decode(String.self, forKey: .command)
+        title = try container.decodeIfPresent(String.self, forKey: .title)
+    }
+}
+
+/// Lists coding-agent sessions on a paired device (`spaces agent list/status --device`), and drives
+/// remote spawn-readiness polling. `workspaceID` narrows to one workspace; `sessionID` narrows to the
+/// agent bound to that terminal tracking id. Both optional: omitting them lists every agent.
+public struct SpacesDeviceListAgentSessionsRequest: Codable, Sendable, Equatable {
+    public let workspaceID: String?
+    public let sessionID: String?
+
+    public init(workspaceID: String? = nil, sessionID: String? = nil) {
+        self.workspaceID = workspaceID
+        self.sessionID = sessionID
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case workspaceID
+        case sessionID
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        workspaceID = try container.decodeIfPresent(String.self, forKey: .workspaceID)
+        sessionID = try container.decodeIfPresent(String.self, forKey: .sessionID)
+    }
+}
+
+/// Sets (or clears, with an empty note) a coding-agent session's explicit note on a paired device
+/// (`spaces agent annotate --device`). `sessionID` is the agent's terminal tracking id.
+public struct SpacesDeviceAnnotateAgentSessionRequest: Codable, Sendable, Equatable {
+    public let sessionID: String
+    public let note: String
+
+    public init(sessionID: String, note: String) {
+        self.sessionID = sessionID
+        self.note = note
+    }
+}
+
+/// Kills a coding-agent session on a paired device by its child terminal session id (`spaces agent kill
+/// --device`). Routes through the daemon's `killAgentSession` flow, which mirrors the local `.agentKill`
+/// path exactly: a hook-signaled child is told it exited (its subscribers notified) before the stop
+/// deletes its row, and a not-yet-signaled `.agent`-kind session is terminated. Unlike
+/// `stopWorkspaceTerminal`, no `workspaceID` is carried — the daemon resolves the owning workspace
+/// itself, and a pre-signal session has no agent row to resolve it from anyway.
+public struct SpacesDeviceKillAgentSessionRequest: Codable, Sendable, Equatable {
+    public let sessionID: String
+
+    public init(sessionID: String) { self.sessionID = sessionID }
+}
+
+/// One coding-agent session as reported to orchestration clients over the Device API
+/// (`listAgentSessions`/`annotateAgentSession`). Mirrors `TerminalServiceAgentSessionRow`: the agent's
+/// live status, its explicit note, the full project/workspace context, and `lastSignalAt` — the
+/// readiness marker, nil until the agent's hooks emit their first lifecycle signal.
+public struct SpacesDeviceAgentSessionRow: Codable, Sendable, Equatable {
+    public let id: String
+    public let terminalSessionID: String?
+    public let agent: String?
+    public let label: String?
+    public let status: String
+    public let note: String?
+    public let projectID: String
+    public let projectName: String
+    public let workspaceID: String
+    public let workspaceName: String
+    /// Absolute path to the workspace's directory (worktree), so an orchestrator can locate it on disk.
+    public let workspaceDir: String
+    public let branch: String?
+    public let updatedAt: String
+    public let lastSignalAt: String?
+
+    public init(
+        id: String, terminalSessionID: String?, agent: String?, label: String?, status: String, note: String?, projectID: String, projectName: String,
+        workspaceID: String, workspaceName: String, workspaceDir: String, branch: String?, updatedAt: String, lastSignalAt: String?
+    ) {
+        self.id = id
+        self.terminalSessionID = terminalSessionID
+        self.agent = agent
+        self.label = label
+        self.status = status
+        self.note = note
+        self.projectID = projectID
+        self.projectName = projectName
+        self.workspaceID = workspaceID
+        self.workspaceName = workspaceName
+        self.workspaceDir = workspaceDir
+        self.branch = branch
+        self.updatedAt = updatedAt
+        self.lastSignalAt = lastSignalAt
+    }
+}
+
+/// Wraps the agent-session rows returned by `listAgentSessions`/`annotateAgentSession`.
+public struct SpacesDeviceAgentSessionsResult: Codable, Sendable, Equatable {
+    public let rows: [SpacesDeviceAgentSessionRow]
+
+    public init(rows: [SpacesDeviceAgentSessionRow]) { self.rows = rows }
+}
+
 public enum SpacesDeviceAPICommand: Sendable, Equatable {
     case pair(SpacesDevicePairRequest)
     case ping
@@ -1237,6 +1383,18 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
     case agentHooksStatus
     /// Idempotently installs Spaces lifecycle hooks for the requested coding agents on the daemon host.
     case installAgentHooks(SpacesDeviceInstallAgentHooksRequest)
+    /// Spawns a coding-agent terminal session on the daemon host after the same hook gate as the local
+    /// spawn, then returns the created session so the client can poll readiness. Remote ad-hoc-command
+    /// session creation, the Device API's missing spawn primitive.
+    case spawnAgentSession(SpacesDeviceSpawnAgentSessionRequest)
+    /// Lists coding-agent sessions on the daemon host (orchestration list/status + remote readiness).
+    case listAgentSessions(SpacesDeviceListAgentSessionsRequest)
+    /// Sets or clears a coding-agent session's explicit note on the daemon host.
+    case annotateAgentSession(SpacesDeviceAnnotateAgentSessionRequest)
+    /// Kills a coding-agent session on the daemon host by its child terminal session id, the remote
+    /// counterpart of the local `.agentKill` command. Routes through the daemon's `killAgentSession`
+    /// flow so a hook-signaled child's subscribers are told it exited before its row is deleted.
+    case killAgentSession(SpacesDeviceKillAgentSessionRequest)
     /// Hijacks the connection into a raw byte tunnel to a workspace service after one `ok` response line.
     case openServiceTunnel(SpacesDeviceServiceTunnelRequest)
 
@@ -1284,6 +1442,10 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
         case .subscribeDeviceOverview: "subscribeDeviceOverview"
         case .agentHooksStatus: "agentHooksStatus"
         case .installAgentHooks: "installAgentHooks"
+        case .spawnAgentSession: "spawnAgentSession"
+        case .listAgentSessions: "listAgentSessions"
+        case .annotateAgentSession: "annotateAgentSession"
+        case .killAgentSession: "killAgentSession"
         case .openServiceTunnel: "openServiceTunnel"
         }
     }
@@ -1346,7 +1508,7 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
     var isSafeToReplayAfterConnectionFailure: Bool {
         switch self {
         case .ping, .daemonStatus, .overview, .previewProject, .previewGitProject, .listDirectories, .workspaceCreateOptions, .state,
-            .resolveTerminalLink, .readTerminalLinkChunk, .tailTerminalOutput, .agentHooksStatus:
+            .resolveTerminalLink, .readTerminalLinkChunk, .tailTerminalOutput, .agentHooksStatus, .listAgentSessions:
             true
         default: false
         }
@@ -1397,6 +1559,10 @@ extension SpacesDeviceAPICommand: Codable {
         case subscribeDeviceOverview
         case agentHooksStatus
         case installAgentHooks
+        case spawnAgentSession
+        case listAgentSessions
+        case annotateAgentSession
+        case killAgentSession
         case openServiceTunnel
     }
 
@@ -1464,6 +1630,11 @@ extension SpacesDeviceAPICommand: Codable {
             _ = try container.decode(SpacesDeviceAPIEmptyPayload.self, forKey: key)
             self = .agentHooksStatus
         case .installAgentHooks: self = .installAgentHooks(try container.decode(SpacesDeviceInstallAgentHooksRequest.self, forKey: key))
+        case .spawnAgentSession: self = .spawnAgentSession(try container.decode(SpacesDeviceSpawnAgentSessionRequest.self, forKey: key))
+        case .listAgentSessions: self = .listAgentSessions(try container.decode(SpacesDeviceListAgentSessionsRequest.self, forKey: key))
+        case .annotateAgentSession: self = .annotateAgentSession(try container.decode(SpacesDeviceAnnotateAgentSessionRequest.self, forKey: key))
+        case .killAgentSession:
+            self = .killAgentSession(try container.decode(SpacesDeviceKillAgentSessionRequest.self, forKey: key))
         case .openServiceTunnel: self = .openServiceTunnel(try container.decode(SpacesDeviceServiceTunnelRequest.self, forKey: key))
         }
     }
@@ -1513,6 +1684,10 @@ extension SpacesDeviceAPICommand: Codable {
         case .subscribeDeviceOverview: try container.encode(SpacesDeviceAPIEmptyPayload(), forKey: .subscribeDeviceOverview)
         case .agentHooksStatus: try container.encode(SpacesDeviceAPIEmptyPayload(), forKey: .agentHooksStatus)
         case .installAgentHooks(let payload): try container.encode(payload, forKey: .installAgentHooks)
+        case .spawnAgentSession(let payload): try container.encode(payload, forKey: .spawnAgentSession)
+        case .listAgentSessions(let payload): try container.encode(payload, forKey: .listAgentSessions)
+        case .annotateAgentSession(let payload): try container.encode(payload, forKey: .annotateAgentSession)
+        case .killAgentSession(let payload): try container.encode(payload, forKey: .killAgentSession)
         case .openServiceTunnel(let payload): try container.encode(payload, forKey: .openServiceTunnel)
         }
     }
@@ -1570,6 +1745,7 @@ public enum SpacesDeviceAPIResult: Sendable, Equatable {
     case terminalOutput(SpacesDeviceTerminalOutputResult)
     case agentHooksStatus(SpacesAgentHooksStatusPayload)
     case agentHooksInstall(AgentHookInstallOutcome)
+    case agentSessions(SpacesDeviceAgentSessionsResult)
 }
 
 extension SpacesDeviceAPIResult: Codable {
@@ -1588,6 +1764,7 @@ extension SpacesDeviceAPIResult: Codable {
         case terminalOutput
         case agentHooksStatus
         case agentHooksInstall
+        case agentSessions
     }
 
     public init(from decoder: any Decoder) throws {
@@ -1611,6 +1788,7 @@ extension SpacesDeviceAPIResult: Codable {
         case .terminalOutput: self = .terminalOutput(try container.decode(SpacesDeviceTerminalOutputResult.self, forKey: key))
         case .agentHooksStatus: self = .agentHooksStatus(try container.decode(SpacesAgentHooksStatusPayload.self, forKey: key))
         case .agentHooksInstall: self = .agentHooksInstall(try container.decode(AgentHookInstallOutcome.self, forKey: key))
+        case .agentSessions: self = .agentSessions(try container.decode(SpacesDeviceAgentSessionsResult.self, forKey: key))
         }
     }
 
@@ -1631,6 +1809,7 @@ extension SpacesDeviceAPIResult: Codable {
         case .terminalOutput(let payload): try container.encode(payload, forKey: .terminalOutput)
         case .agentHooksStatus(let payload): try container.encode(payload, forKey: .agentHooksStatus)
         case .agentHooksInstall(let payload): try container.encode(payload, forKey: .agentHooksInstall)
+        case .agentSessions(let payload): try container.encode(payload, forKey: .agentSessions)
         }
     }
 }
@@ -1692,6 +1871,8 @@ public struct SpacesDeviceAPIResponse: Codable, Sendable, Equatable {
     public var agentHooksStatus: SpacesAgentHooksStatusPayload? { if case .agentHooksStatus(let payload) = result { payload } else { nil } }
 
     public var agentHooksInstall: AgentHookInstallOutcome? { if case .agentHooksInstall(let payload) = result { payload } else { nil } }
+
+    public var agentSessions: [SpacesDeviceAgentSessionRow]? { if case .agentSessions(let payload) = result { payload.rows } else { nil } }
 }
 
 public enum SpacesDeviceAPICodec {

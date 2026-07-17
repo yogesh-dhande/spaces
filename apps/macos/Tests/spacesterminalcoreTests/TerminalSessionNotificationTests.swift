@@ -1,6 +1,5 @@
 import Foundation
 import XCTest
-
 import spacesterminalcore
 
 final class TerminalSessionNotificationTests: XCTestCase {
