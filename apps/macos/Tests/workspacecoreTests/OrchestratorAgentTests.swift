@@ -582,6 +582,10 @@ extension OrchestratorTests {
             XCTAssertTrue(try orchestrator.reconcileTerminalForegroundAgentClassifications())
             let promotedAgent = try XCTUnwrap(store.agentWindows(workspaceID: workspace.id).first)
             XCTAssertEqual(promotedAgent.id, "terminal-agent-\(sessionID)")
+            // This row is pure detection state — no hook lifecycle signal ever landed on it — which is
+            // exactly what makes a silent demote (delete) safe. A signaled row would take the `.exited`
+            // exit path instead (see `...RecordsExitedForSignaledAdHocAgentOnShellRevert`).
+            XCTAssertNil(try store.lastAgentSignalAt(agentSessionID: promotedAgent.id))
 
             // The detected process ends but the shell terminal itself stays live — the foreground sample
             // reverts to a plain shell rather than the session exiting.
@@ -596,6 +600,138 @@ extension OrchestratorTests {
             let survivingWindow = try XCTUnwrap(store.windows(workspaceID: workspace.id).first)
             XCTAssertEqual(survivingWindow.terminalTrackingID, sessionID, "Demotion must not delete the still-live terminal window.")
             XCTAssertNil(survivingWindow.detail, "Demotion clears the agent-command detail written onto the shared terminal window.")
+        }
+    }
+
+    /// A detection-created ad-hoc row that has SINCE recorded a hook lifecycle signal is no longer pure
+    /// detection state: it has subscribers owed an `exited` notice. When its foreground reverts to a plain
+    /// shell, the reconciler must run the full hookless-exit flow — deliver the exited notice, record the
+    /// row `.exited` (not silently delete it), and tear down the reverted terminal's own outgoing watch
+    /// edges and pending queue — instead of the silent demote a never-signaled row gets.
+    func testReconcileTerminalForegroundAgentClassificationsRecordsExitedForSignaledAdHocAgentOnShellRevert() throws {
+        let root = try makeTempDirectory()
+        let dbPath = root.appendingPathComponent("spaces.db").path
+        let store = try SQLiteStore(path: dbPath)
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
+        let sessionID = "ad-hoc-signaled-agent-shell-revert"
+        let subscriberSessionID = "orchestrator-subscriber"
+
+        let recorder = AgentNotificationSubmitterRecorder()
+        WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter { try recorder.submit($0, $1) }
+        defer { WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter(nil) }
+
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
+            let paths = try TerminalSessionPaths.forSession(id: sessionID)
+            try writeTerminalSessionFixture(
+                sessionID: sessionID, workspace: workspace, kind: .shell,
+                runtimeState: TerminalSessionRuntimeState(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 123, state: .running,
+                    updatedAt: "2026-06-06T00:00:00Z", title: "shell-1", workingDirectory: workspace.dir, foregroundPID: 123,
+                    foregroundExecutablePath: "/opt/homebrew/bin/codex", foregroundExecutableName: "codex", foregroundArgv: ["codex"],
+                    foregroundDetectedAgentKind: .codex, foregroundDisplayLabel: "Codex", foregroundDisplayCommand: "codex"))
+            // A live terminal (control socket present) so `handleAgentExit` reads the session as still open
+            // and records `.exited` rather than deleting the row as a fully-gone session.
+            XCTAssertTrue(FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data()))
+            try store.upsert(
+                window: WindowRecord(
+                    id: "terminal-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell-1", detail: nil, targetURL: nil,
+                    terminalTrackingID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+
+            XCTAssertTrue(try orchestrator.reconcileTerminalForegroundAgentClassifications())
+            let promoted = try XCTUnwrap(store.agentWindows(workspaceID: workspace.id).first)
+            XCTAssertEqual(promoted.id, "terminal-agent-\(sessionID)")
+
+            // A real hook signal lands on the detection row through the daemon signal path, updating it in
+            // place (its detection id is preserved). The row is now signal-established.
+            _ = try orchestrator.updateAgentWindowStatus(
+                workspaceID: workspace.id, provider: .spaces, terminalTrackingID: sessionID, status: .spinning, eventType: "working",
+                eventSource: "spaces_agent_signal")
+            XCTAssertNotNil(try store.lastAgentSignalAt(agentSessionID: promoted.id))
+
+            // A plain-shell subscriber (no agent row of its own) is idle and receives immediately.
+            try store.insertAgentSubscription(subscriberTerminalSessionID: subscriberSessionID, agentSessionID: promoted.id, createdAt: "t")
+            // The exiting terminal itself was ALSO watching another agent and holds a queued line; both its
+            // outgoing edge and its inbound queue must be torn down when it sheds its agent identity.
+            let otherAgent = try orchestrator.registerAgentWindow(
+                workspaceID: workspace.id, provider: .spaces, label: "Watcher", terminalTrackingID: "other-agent-session", status: .idle)
+            try store.insertAgentSubscription(subscriberTerminalSessionID: sessionID, agentSessionID: otherAgent.id, createdAt: "t")
+            try store.upsertPendingAgentNotification(
+                subscriberTerminalSessionID: sessionID, agentSessionID: otherAgent.id, transition: "blocked", message: "held", createdAt: "t")
+
+            // The detected process ends but the shell terminal stays live — the foreground reverts to zsh.
+            try TerminalSessionPersistence.writeRuntimeState(
+                TerminalSessionRuntimeState(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 456, state: .running,
+                    updatedAt: "2026-06-06T00:00:10Z", title: "shell-1", workingDirectory: workspace.dir, foregroundPID: 456,
+                    foregroundExecutablePath: "/bin/zsh", foregroundExecutableName: "zsh", foregroundArgv: ["zsh"]), paths: paths)
+
+            XCTAssertTrue(try orchestrator.reconcileTerminalForegroundAgentClassifications())
+
+            XCTAssertEqual(
+                try store.agentWindow(id: promoted.id)?.status, .exited,
+                "A signaled detection row is recorded `.exited`, not silently deleted.")
+            XCTAssertEqual(recorder.delivered.map(\.sessionID), [subscriberSessionID])
+            XCTAssertTrue(
+                recorder.delivered.first?.line.contains("is exited") == true,
+                "The subscriber must be told the child exited, got: \(recorder.delivered.first?.line ?? "nothing")")
+            XCTAssertTrue(
+                try store.agentSubscriptions(subscriberTerminalSessionID: sessionID).isEmpty,
+                "The exited terminal's own outgoing watch edges are torn down.")
+            XCTAssertTrue(
+                try store.pendingAgentNotifications(subscriberTerminalSessionID: sessionID).isEmpty,
+                "The exited terminal's own inbound queue is dropped, not flushed into its shell.")
+        }
+    }
+
+    /// An explicit hook `.exit` (or any direct `handleAgentExit`) on a signaled detection-created row whose
+    /// terminal is still live must record the row `.exited` — the demote branch deliberately does not claim
+    /// it, so the exited display state and the restart-reuse flush cue are preserved.
+    func testHandleAgentExitRecordsExitedForSignaledAdHocDetectedAgentOnLiveTerminal() throws {
+        let root = try makeTempDirectory()
+        let dbPath = root.appendingPathComponent("spaces.db").path
+        let store = try SQLiteStore(path: dbPath)
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
+        let sessionID = "ad-hoc-signaled-agent-explicit-exit"
+
+        try withEnv(name: "SPACES_DB_PATH", value: dbPath) {
+            let paths = try TerminalSessionPaths.forSession(id: sessionID)
+            try writeTerminalSessionFixture(
+                sessionID: sessionID, workspace: workspace, kind: .shell,
+                runtimeState: TerminalSessionRuntimeState(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 123, state: .running,
+                    updatedAt: "2026-06-06T00:00:00Z", title: "codex", workingDirectory: workspace.dir, foregroundPID: 123,
+                    foregroundExecutablePath: "/opt/homebrew/bin/codex", foregroundExecutableName: "codex", foregroundArgv: ["codex"],
+                    foregroundDetectedAgentKind: .codex, foregroundDisplayLabel: "Codex", foregroundDisplayCommand: "codex"))
+            XCTAssertTrue(FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data()))
+            try store.upsert(
+                window: WindowRecord(
+                    id: "terminal-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "codex", detail: nil, targetURL: nil,
+                    terminalTrackingID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+
+            XCTAssertTrue(try orchestrator.reconcileTerminalForegroundAgentClassifications())
+            let promoted = try XCTUnwrap(store.agentWindows(workspaceID: workspace.id).first)
+            XCTAssertEqual(promoted.id, "terminal-agent-\(sessionID)")
+
+            _ = try orchestrator.updateAgentWindowStatus(
+                workspaceID: workspace.id, provider: .spaces, terminalTrackingID: sessionID, status: .spinning, eventType: "working",
+                eventSource: "spaces_agent_signal")
+            let signaled = try XCTUnwrap(store.agentWindow(id: promoted.id))
+            XCTAssertNotNil(try store.lastAgentSignalAt(agentSessionID: promoted.id))
+
+            let result = try orchestrator.handleAgentExit(signaled, eventType: "exit", eventSource: "spaces_agent_signal")
+
+            XCTAssertEqual(result?.status, .exited)
+            XCTAssertEqual(
+                try store.agentWindow(id: promoted.id)?.status, .exited,
+                "A signaled detection row on a live terminal records `.exited`, not a silent delete.")
         }
     }
 
@@ -1129,4 +1265,11 @@ extension OrchestratorTests {
         XCTAssertEqual(record.label, "Claude-2")
     }
 
+}
+
+/// Captures the lines the process-wide agent-notification submitter is asked to deliver, so a reconcile
+/// path that routes through `makeAgentNotificationEngine()` can be asserted against without a live daemon.
+private final class AgentNotificationSubmitterRecorder: @unchecked Sendable {
+    private(set) var delivered: [(sessionID: String, line: String)] = []
+    func submit(_ sessionID: String, _ line: String) throws { delivered.append((sessionID: sessionID, line: line)) }
 }

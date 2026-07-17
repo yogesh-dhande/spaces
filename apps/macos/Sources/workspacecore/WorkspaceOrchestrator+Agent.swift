@@ -6,6 +6,7 @@ extension WorkspaceOrchestrator {
     @discardableResult public func reconcileTerminalForegroundAgentClassifications() throws -> Bool {
         let liveSessions = try TerminalSessionCatalog.listLiveSessions()
         let liveSessionIDs = Set(liveSessions.map(\.sessionID))
+        let engine = makeAgentNotificationEngine()
         var didMutate = false
         for session in liveSessions where session.launchConfiguration.backend == .ghosttyEmbedded {
             let sessionID = session.sessionID
@@ -14,10 +15,26 @@ extension WorkspaceOrchestrator {
             guard let workspace = try workspaceForBuiltInTerminalSession(sessionID: sessionID, ownership: ownership) else { continue }
             if let existingRow = try store.agentWindow(workspaceID: workspace.id, terminalTrackingID: sessionID) {
                 // A live session that already has a row is normally left alone, but an ad-hoc detected
-                // agent whose foreground genuinely reverted to its own plain shell is demoted back to a
-                // plain terminal here — the one place a live session sheds its ad-hoc classification.
+                // agent whose foreground genuinely reverted to its own plain shell sheds its ad-hoc
+                // classification here — the one place a live session does so. How it sheds it depends on
+                // hook evidence: a row that never recorded a lifecycle signal is pure detection state and
+                // is silently demoted back to a plain terminal, but a row that HAS signaled (hooks landed
+                // after detection created the row and updated it in place) carries lifecycle history and
+                // possibly subscribers, so it must run the full hookless-exit flow — the exact ordering the
+                // codex/opencode session-end sweep uses (`reconcileExitedSpawnedAgentRows`) and the
+                // daemon's `.exit` signal case use: render/enqueue the `exited` notice to subscribers
+                // BEFORE the row is finalized (deletion would cascade the edges away; the pending row has
+                // no FK and survives), reuse `handleAgentExit` for the finalize decision (with the terminal
+                // still live it records `.exited`, not a silent delete), then tear down the reverted
+                // terminal's own standing as a subscriber of other agents.
                 if isAdHocDetectedForegroundAgent(existingRow), foregroundHasRevertedToPlainShell(session) {
-                    try demoteAdHocDetectedForegroundAgent(existingRow)
+                    if try agentRowHasRecordedHookSignal(existingRow) {
+                        try engine.childDidTransition(agent: existingRow, transition: .exited)
+                        try handleAgentExit(existingRow, eventType: "exit", eventSource: "foreground_reconciler")
+                        try engine.subscriberDidExit(subscriberTerminalSessionID: sessionID)
+                    } else {
+                        try demoteAdHocDetectedForegroundAgent(existingRow)
+                    }
                     didMutate = true
                 }
                 continue
@@ -28,7 +45,7 @@ extension WorkspaceOrchestrator {
             }
         }
         if try reconcileExitedAdHocForegroundAgentRows(excludingLiveSessionIDs: liveSessionIDs) { didMutate = true }
-        if try reconcileExitedSpawnedAgentRows(excludingLiveSessionIDs: liveSessionIDs, engine: makeAgentNotificationEngine()) { didMutate = true }
+        if try reconcileExitedSpawnedAgentRows(excludingLiveSessionIDs: liveSessionIDs, engine: engine) { didMutate = true }
         return didMutate
     }
 
@@ -80,10 +97,29 @@ extension WorkspaceOrchestrator {
 
     /// True when `record` is an ad-hoc coding-agent row that foreground detection promoted from a plain
     /// terminal (id == `adHocDetectedAgentID(sessionID)`), as opposed to an explicitly spawned or
-    /// configured-launcher agent. Only these are demoted back to plain terminals on agent exit.
+    /// configured-launcher agent. This is pure id-provenance: it stays true even after hook signals land
+    /// on the row, because a signal updates the detection row in place and preserves its id. Provenance
+    /// alone is NOT sufficient to demote — that additionally requires no hook evidence
+    /// (`agentRowHasRecordedHookSignal`), since a signaled detection row must exit through the
+    /// `.exited`/notify path rather than a silent delete.
     func isAdHocDetectedForegroundAgent(_ record: AgentWindowRecord) -> Bool {
         guard record.provider == .spaces, let sessionID = builtInAgentSessionID(for: record) else { return false }
         return record.id == adHocDetectedAgentID(sessionID: sessionID)
+    }
+
+    /// Whether this agent row has ever recorded a real hook lifecycle signal (`spaces_agent_signal`), as
+    /// opposed to being pure foreground-detection state. This is the gate on demoting an ad-hoc
+    /// detection-created row back to a plain terminal: foreground detection creates the row BEFORE the
+    /// agent's first hook fires (always for hookless codex/opencode, whose first signal is `working`; a
+    /// race for claude), and later `init`/status signals update that same row in place, preserving its
+    /// detection id — so `isAdHocDetectedForegroundAgent` cannot distinguish a never-signaled row (safe to
+    /// silently demote and delete) from one that has since gained lifecycle history and possibly
+    /// subscribers. Deleting a signaled row silently would drop the `exited` notice its subscribers are
+    /// owed and lose the restart-reuse flush cue, so a signaled row must instead take the signaled-agent
+    /// exit path (record `.exited`, notify subscribers). Foreground-detection events are a different
+    /// source and are deliberately excluded by `lastAgentSignalAt`.
+    func agentRowHasRecordedHookSignal(_ record: AgentWindowRecord) throws -> Bool {
+        try store.lastAgentSignalAt(agentSessionID: record.id) != nil
     }
 
     /// Reverts a foreground-detection promotion: removes the ad-hoc agent row and clears the agent-command
@@ -630,9 +666,13 @@ extension WorkspaceOrchestrator {
         let sessionBackedSpacesAgent = builtInAgentSessionID(for: existing) != nil
         let existingSessionIsLive = sessionBackedSpacesAgent && builtInAgentSessionIsStillLive(existing)
         if existingSessionIsLive {
-            if isAdHocDetectedForegroundAgent(existing) {
-                // Foreground-detected agent's process ended but its shell terminal is still live: demote
-                // to a plain terminal rather than keeping a phantom "exited" coding-agent row on the shell.
+            if isAdHocDetectedForegroundAgent(existing), try !agentRowHasRecordedHookSignal(existing) {
+                // Foreground-detected agent's process ended but its shell terminal is still live, and the
+                // row never recorded a hook signal — pure detection state with no lifecycle history or
+                // subscribers, so demote to a plain terminal rather than keeping a phantom "exited"
+                // coding-agent row on the shell. A detection row that HAS signaled is deliberately NOT
+                // claimed here: it falls through to the live-terminal `.exited` branch below so its
+                // subscribers get the exited notice and a restart can reuse the row.
                 try demoteAdHocDetectedForegroundAgent(existing)
                 return nil
             }
