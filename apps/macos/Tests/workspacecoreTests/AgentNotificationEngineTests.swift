@@ -216,6 +216,32 @@ final class AgentNotificationEngineTests: XCTestCase {
         XCTAssertTrue(branchLine.allSatisfy { !forbidden.contains($0) }, "branch line must not carry shell metacharacters, got: \(branchLine)")
     }
 
+    /// A lone unmatched quote or a trailing backslash in a free-text field would leave a plain-shell
+    /// subscriber stuck in a `quote>`/`dquote>` continuation prompt, which then swallows the rest of the
+    /// block (and anything submitted after it) as further input. Guards that apostrophes, double quotes,
+    /// and backslashes never reach a rendered line.
+    func testRenderBlockNeutralizesQuotesAndBackslashesInNote() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        let recorder = DeliveryRecorder()
+        let engine = makeEngine(store: store, recorder: recorder, kind: "claude")
+
+        let child = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Claude Code CLI", terminalTrackingID: "child-session", status: .waiting)
+        try store.setAgentSessionNote(id: child.id, note: #"don't say "hi" \"#)
+        try store.insertAgentSubscription(subscriberTerminalSessionID: "orchestrator-session", agentSessionID: child.id, createdAt: "t")
+        let noted = try XCTUnwrap(store.agentWindow(id: child.id))
+
+        try engine.childDidTransition(agent: noted, transition: .blocked)
+
+        let line = try XCTUnwrap(recorder.delivered.first?.line)
+        let noteLine = try XCTUnwrap(line.split(separator: "\n").first { $0.contains("note:") })
+        let forbidden = Set("\"'\\")
+        XCTAssertTrue(noteLine.allSatisfy { !forbidden.contains($0) }, "note line must not carry quotes or backslashes, got: \(noteLine)")
+        XCTAssertEqual(noteLine, "  note: dont say hi ")
+    }
+
     /// `subscriberDidExit` is the exit-path counterpart to `subscriberDidBecomeIdle`: for a terminal that
     /// can no longer consume child-event lines (its own agent just exited), it drops the queue instead of
     /// flushing it, AND — since neither watch-edge table has a foreign key on the subscriber column —
@@ -574,7 +600,10 @@ final class AgentNotificationEngineTests: XCTestCase {
         XCTAssertEqual(try store.pendingAgentNotifications(subscriberTerminalSessionID: "sub-session").count, 1)
     }
 
-    func testFailedImmediateDeliveryDropsSubscriptionEdge() throws {
+    /// A failed immediate delivery means the subscriber terminal itself is dead, not just that one watch
+    /// edge: the teardown is subscriber-wide, so an unrelated remote watch the same dead subscriber holds
+    /// is dropped in the same call, exactly as `subscriberDidExit` would do on an explicit exit signal.
+    func testFailedImmediateDeliveryTearsDownSubscriberWideIncludingUnrelatedRemoteEdge() throws {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
@@ -585,14 +614,81 @@ final class AgentNotificationEngineTests: XCTestCase {
         let child = try orchestrator.registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "child-session", status: .waiting)
         try store.insertAgentSubscription(subscriberTerminalSessionID: "dead-sub", agentSessionID: child.id, createdAt: "t")
+        // An unrelated remote watch the same dead subscriber holds, untouched by the local transition below.
+        try store.insertAgentRemoteSubscription(subscriberTerminalSessionID: "dead-sub", deviceID: "dev-1", agentSessionID: "remote-term", createdAt: "t")
 
         try engine.childDidTransition(agent: child, transition: .blocked)
 
         XCTAssertTrue(recorder.delivered.isEmpty)
-        XCTAssertTrue(try store.agentSubscriptions(agentSessionID: child.id).isEmpty, "A dead subscriber's watch edge is torn down.")
+        XCTAssertTrue(
+            try store.agentSubscriptions(subscriberTerminalSessionID: "dead-sub").isEmpty,
+            "A dead subscriber's own local watch edge is torn down.")
+        XCTAssertTrue(
+            try store.agentRemoteSubscriptions(subscriberTerminalSessionID: "dead-sub").isEmpty,
+            "A dead subscriber's unrelated remote watch edge is torn down too — the whole subscriber is gone, not just the failing edge.")
     }
 
-    func testFailedQueueFlushDropsPendingAndSubscription() throws {
+    /// The remote-transition immediate-delivery path shares the same subscriber-wide teardown: a failed
+    /// delivery to a subscriber watching a paired-device agent tears down that subscriber's local edges too.
+    func testFailedRemoteImmediateDeliveryTearsDownSubscriberWideIncludingLocalEdge() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        let recorder = DeliveryRecorder()
+        recorder.failingSessionIDs = ["dead-orch"]
+        let engine = makeEngine(store: store, recorder: recorder)
+
+        let otherChild = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "other-child", status: .waiting)
+        try store.insertAgentSubscription(subscriberTerminalSessionID: "dead-orch", agentSessionID: otherChild.id, createdAt: "t")
+        try store.insertAgentRemoteSubscription(
+            subscriberTerminalSessionID: "dead-orch", deviceID: "dev-1", agentSessionID: "remote-term", createdAt: "t")
+        let row = makeRemoteRow(terminalSessionID: "remote-term", label: "Remote CLI", note: nil, status: "done")
+
+        try engine.remoteChildDidTransition(deviceID: "dev-1", terminalSessionID: "remote-term", row: row, transition: .exited)
+
+        XCTAssertTrue(recorder.delivered.isEmpty)
+        XCTAssertTrue(
+            try store.agentRemoteSubscriptions(subscriberTerminalSessionID: "dead-orch").isEmpty,
+            "The failing cross-device watch edge is torn down.")
+        XCTAssertTrue(
+            try store.agentSubscriptions(subscriberTerminalSessionID: "dead-orch").isEmpty,
+            "The same dead subscriber's unrelated local watch edge is torn down too.")
+    }
+
+    /// A dead subscriber's failed delivery must never affect delivery to the SAME child's other
+    /// subscribers: `childDidTransition` snapshots the subscriber list before delivering, and the
+    /// subscriber-wide teardown for one dead subscriber runs entirely within its own loop iteration.
+    func testOneSubscriberFailingDeliveryDoesNotAffectAnotherSubscriberOfTheSameChild() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        let recorder = DeliveryRecorder()
+        recorder.failingSessionIDs = ["dead-sub"]
+        let engine = makeEngine(store: store, recorder: recorder, kind: "claude")
+
+        let child = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Claude Code CLI", terminalTrackingID: "child-session", status: .waiting)
+        try store.insertAgentSubscription(subscriberTerminalSessionID: "dead-sub", agentSessionID: child.id, createdAt: "t0")
+        try store.insertAgentSubscription(subscriberTerminalSessionID: "alive-sub", agentSessionID: child.id, createdAt: "t1")
+
+        try engine.childDidTransition(agent: child, transition: .blocked)
+
+        XCTAssertEqual(recorder.delivered.map(\.sessionID), ["alive-sub"], "The live subscriber still receives its line.")
+        XCTAssertTrue(
+            try store.agentSubscriptions(subscriberTerminalSessionID: "dead-sub").isEmpty, "The dead subscriber's own edge is torn down.")
+        XCTAssertFalse(
+            try store.agentSubscriptions(subscriberTerminalSessionID: "alive-sub").isEmpty,
+            "The live subscriber's edge to the same child must survive.")
+    }
+
+    /// The flush path's failure handling is subscriber-wide too: the first failing row in the queue tears
+    /// down every trace of the subscriber — both local and remote outgoing edges, and every remaining
+    /// pending row (including a queued row of cross-device origin, whose `agentSessionID` is the remote
+    /// child's terminal session id rather than a local agent row id, so a single-edge drop keyed on that id
+    /// would silently no-op against `agent_subscriptions`) — and the flush loop stops rather than
+    /// attempting the remaining rows against a subscriber that is already known to be gone.
+    func testFailedQueueFlushTearsDownSubscriberWideAndPurgesRemainingPendingRows() throws {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
@@ -604,14 +700,23 @@ final class AgentNotificationEngineTests: XCTestCase {
         let child = try orchestrator.registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "child-session", status: .spinning)
         try store.insertAgentSubscription(subscriberTerminalSessionID: "dead-sub", agentSessionID: child.id, createdAt: "t")
+        try store.insertAgentRemoteSubscription(subscriberTerminalSessionID: "dead-sub", deviceID: "dev-1", agentSessionID: "remote-term", createdAt: "t")
 
+        // Two rows land on the busy subscriber's queue: one local-origin, one cross-device-origin.
         try engine.childDidTransition(agent: child, transition: .blocked)
-        XCTAssertEqual(try store.pendingAgentNotifications(subscriberTerminalSessionID: "dead-sub").count, 1)
+        let remoteRow = makeRemoteRow(terminalSessionID: "remote-term", label: "Remote CLI", note: nil, status: "done")
+        try engine.remoteChildDidTransition(deviceID: "dev-1", terminalSessionID: "remote-term", row: remoteRow, transition: .done)
+        XCTAssertEqual(try store.pendingAgentNotifications(subscriberTerminalSessionID: "dead-sub").count, 2)
 
         try engine.subscriberDidBecomeIdle(subscriberTerminalSessionID: "dead-sub")
 
-        XCTAssertTrue(try store.pendingAgentNotifications(subscriberTerminalSessionID: "dead-sub").isEmpty)
-        XCTAssertTrue(try store.agentSubscriptions(agentSessionID: child.id).isEmpty)
+        XCTAssertTrue(recorder.delivered.isEmpty, "The first row's failure stops the flush before any row is delivered.")
+        XCTAssertTrue(
+            try store.pendingAgentNotifications(subscriberTerminalSessionID: "dead-sub").isEmpty,
+            "Every remaining pending row, including the cross-device-origin one, is purged by the teardown.")
+        XCTAssertTrue(try store.agentSubscriptions(subscriberTerminalSessionID: "dead-sub").isEmpty, "The local watch edge is torn down.")
+        XCTAssertTrue(
+            try store.agentRemoteSubscriptions(subscriberTerminalSessionID: "dead-sub").isEmpty, "The remote watch edge is torn down.")
     }
 
     func testSelfSubscriptionIsRejected() throws {

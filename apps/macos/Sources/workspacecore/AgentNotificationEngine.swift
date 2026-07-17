@@ -64,10 +64,8 @@ public struct AgentNotificationEngine {
         guard !subscriptions.isEmpty else { return }
         let line = try renderLine(agent: agent, transition: transition)
         for subscription in subscriptions {
-            let subscriberID = subscription.subscriberTerminalSessionID
-            try deliverOrQueue(subscriberTerminalSessionID: subscriberID, agentSessionID: agent.id, transition: transition, line: line) {
-                try? self.store.deleteAgentSubscription(subscriberTerminalSessionID: subscriberID, agentSessionID: agent.id)
-            }
+            try deliverOrQueue(
+                subscriberTerminalSessionID: subscription.subscriberTerminalSessionID, agentSessionID: agent.id, transition: transition, line: line)
         }
     }
 
@@ -95,26 +93,27 @@ public struct AgentNotificationEngine {
         guard !subscribers.isEmpty else { return }
         let line = renderRemoteLine(terminalSessionID: terminalSessionID, row: row, deviceID: deviceID, transition: transition)
         for subscriberID in subscribers {
-            try deliverOrQueue(subscriberTerminalSessionID: subscriberID, agentSessionID: terminalSessionID, transition: transition, line: line) {
-                try? self.store.deleteAgentRemoteSubscription(
-                    subscriberTerminalSessionID: subscriberID, deviceID: deviceID, agentSessionID: terminalSessionID)
-            }
+            try deliverOrQueue(subscriberTerminalSessionID: subscriberID, agentSessionID: terminalSessionID, transition: transition, line: line)
         }
     }
 
     /// Delivers a rendered line now when the subscriber is idle, otherwise coalesces it onto the
-    /// subscriber's pending queue. On a failed immediate delivery the subscriber has vanished, so the
-    /// caller-supplied `dropEdge` tears down the originating watch edge (local or cross-device). Shared by
-    /// the local and remote transition paths so both gate and queue identically.
-    private func deliverOrQueue(
-        subscriberTerminalSessionID subscriberID: String, agentSessionID: String, transition: ChildTransition, line: String, dropEdge: () -> Void
-    ) throws {
+    /// subscriber's pending queue. On a failed immediate delivery the subscriber terminal is dead — the
+    /// same fact `subscriberDidExit` is built to handle — so the failure is treated as that subscriber
+    /// having exited: every trace of it as a subscriber (queued inbound lines, and every OUTGOING local
+    /// and cross-device watch edge it holds, not just the one that just failed) is torn down in one call,
+    /// matching the exit path exactly. The teardown is best-effort (`try?`): a store error while cleaning
+    /// up a dead subscriber must not abort delivery to this child's OTHER subscribers still left in the
+    /// caller's loop. Shared by the local and remote transition paths so both gate and queue identically.
+    private func deliverOrQueue(subscriberTerminalSessionID subscriberID: String, agentSessionID: String, transition: ChildTransition, line: String)
+        throws
+    {
         if try subscriberIsIdle(terminalSessionID: subscriberID) {
             do { try deliver(subscriberID, line) } catch {
                 logError(
                     "spaces: agent notification delivery failed subscriber=\(subscriberID) agent=\(agentSessionID) error=\(error.localizedDescription)\n"
                 )
-                dropEdge()
+                try? subscriberDidExit(subscriberTerminalSessionID: subscriberID)
             }
         } else {
             try store.upsertPendingAgentNotification(
@@ -124,13 +123,21 @@ public struct AgentNotificationEngine {
     }
 
     /// A subscriber terminal became idle (or exited). Flush its queued notifications in enqueue order,
-    /// delivering each once. Every flushed row is removed whether delivery succeeds (delivered-once) or
-    /// fails (the subscriber vanished — the edge is dropped too), so a subscriber never re-receives a
-    /// line and a dead one never accumulates undeliverable state.
+    /// delivering each once (delivered-once: a successfully delivered row is deleted immediately and never
+    /// re-attempted). The first delivery failure means the subscriber terminal is dead, not just that one
+    /// queued row: the loop stops right there and hands off to `subscriberDidExit`, which purges every
+    /// still-pending row for this subscriber — including the one that just failed, which is why this loop
+    /// never deletes that row itself — and tears down every outgoing watch edge the subscriber holds, so a
+    /// dead subscriber never accumulates undeliverable state on a later child transition either.
     public func subscriberDidBecomeIdle(subscriberTerminalSessionID: String) throws {
         for pending in try store.pendingAgentNotifications(subscriberTerminalSessionID: subscriberTerminalSessionID) {
-            _ = attemptDelivery(
-                subscriberTerminalSessionID: subscriberTerminalSessionID, agentSessionID: pending.agentSessionID, line: pending.message)
+            guard
+                attemptDelivery(
+                    subscriberTerminalSessionID: subscriberTerminalSessionID, agentSessionID: pending.agentSessionID, line: pending.message)
+            else {
+                try? subscriberDidExit(subscriberTerminalSessionID: subscriberTerminalSessionID)
+                return
+            }
             try store.deletePendingAgentNotification(id: pending.id)
         }
     }
@@ -167,13 +174,11 @@ public struct AgentNotificationEngine {
         return agent.status.leavesSubscriberIdle
     }
 
-    /// Flush-path delivery: delivers a queued line, logging and dropping the same-device subscription edge
-    /// on failure. Returns whether delivery succeeded; the pending row itself is deleted by the caller
-    /// regardless. A failed delivery means the subscriber session is gone. A flushed row may have a
-    /// cross-device origin (its `agentSessionID` is then a remote child's terminal session id); dropping a
-    /// local edge for it is a harmless no-op, and the remote edge is torn down by the watch service on its
-    /// next failed delivery — the flush path has no `deviceID` to identify the remote edge here.
-    @discardableResult private func attemptDelivery(subscriberTerminalSessionID: String, agentSessionID: String, line: String) -> Bool {
+    /// Flush-path delivery: attempts one queued line and reports whether it landed, logging on failure.
+    /// Does no store mutation itself — the caller (`subscriberDidBecomeIdle`) owns cleanup, deleting just
+    /// this row on success or tearing down the whole subscriber via `subscriberDidExit` on failure, since a
+    /// failed delivery means the subscriber terminal itself is gone, not just this one row.
+    private func attemptDelivery(subscriberTerminalSessionID: String, agentSessionID: String, line: String) -> Bool {
         do {
             try deliver(subscriberTerminalSessionID, line)
             return true
@@ -181,7 +186,6 @@ public struct AgentNotificationEngine {
             logError(
                 "spaces: agent notification delivery failed subscriber=\(subscriberTerminalSessionID) agent=\(agentSessionID) error=\(error.localizedDescription)\n"
             )
-            try? store.deleteAgentSubscription(subscriberTerminalSessionID: subscriberTerminalSessionID, agentSessionID: agentSessionID)
             return false
         }
     }
@@ -254,12 +258,17 @@ public struct AgentNotificationEngine {
     /// submitted (with Enter) into a plain-shell subscriber. A shell executes such a line, so any
     /// value originating from a watched agent (note/branch/label/project/workspace/kind) must not be
     /// able to smuggle command substitution (`$(...)`, backticks), command separators (`;`, `|`, `&`),
-    /// or redirects (`<`, `>`) — each of these runs even inside an otherwise-failing command. Control
-    /// characters (including newlines) are dropped too so a value cannot forge a new continuation line
-    /// or inject terminal control sequences. The value is otherwise preserved for readability in the
-    /// agent-TUI subscribers that are the primary consumer.
+    /// or redirects (`<`, `>`) — each of these runs even inside an otherwise-failing command. Quotes
+    /// (`"`, `'`) and backslashes are stripped too: this is not about execution risk (the fields are
+    /// interpolated with no surrounding quoting of our own) but about a lone unmatched quote or a
+    /// trailing backslash leaving the subscriber shell in a `quote>`/`dquote>` continuation prompt,
+    /// which swallows every remaining line of the block — and any block submitted after it — as further
+    /// input to the stuck command. Control characters (including newlines) are dropped too so a value
+    /// cannot forge a new continuation line or inject terminal control sequences. The value is otherwise
+    /// preserved for readability in the agent-TUI subscribers that are the primary consumer; stripping
+    /// an apostrophe means a note like "don't" renders as "dont", an accepted readability cost.
     private static func shellSafeNotificationField(_ value: String) -> String {
-        let forbidden = Set("$`;|&<>()".unicodeScalars)
+        let forbidden = Set("$`;|&<>()\"'\\".unicodeScalars)
         let filtered = value.unicodeScalars.filter { scalar in
             !forbidden.contains(scalar) && !CharacterSet.controlCharacters.contains(scalar)
         }

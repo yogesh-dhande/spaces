@@ -242,7 +242,7 @@ struct AgentListCommand: ParsableCommand {
             let record = try SpacesPairedDeviceSelection.resolve(device)
             let rows = try SpacesDeviceClient.listAgentSessions(workspaceID: workspace, device: record, clientApp: cliDeviceClientApp())
             if json {
-                try context.output.emitJSON(rows)
+                try context.output.emitJSON(rows.map { AgentSessionRowJSON($0, deviceID: record.id) })
                 return
             }
             if rows.isEmpty {
@@ -254,7 +254,7 @@ struct AgentListCommand: ParsableCommand {
         }
         let rows = try TerminalService.sendProfileCommand(.agentList(.init(workspaceID: workspace))).agentSessions ?? []
         if json {
-            try context.output.emitJSON(rows)
+            try context.output.emitJSON(rows.map { AgentSessionRowJSON($0) })
             return
         }
         if rows.isEmpty {
@@ -280,7 +280,7 @@ struct AgentStatusCommand: ParsableCommand {
             guard let row = try SpacesDeviceClient.listAgentSessions(sessionID: sessionID, device: record, clientApp: cliDeviceClientApp()).first
             else { throw ValidationError("No agent session for terminal \(sessionID) on \(record.name).") }
             if json {
-                try context.output.emitJSON(row)
+                try context.output.emitJSON(AgentSessionRowJSON(row, deviceID: record.id))
                 return
             }
             context.output.emit(agentSessionRow(row, deviceID: record.id))
@@ -291,7 +291,7 @@ struct AgentStatusCommand: ParsableCommand {
             throw ValidationError("No agent session for terminal \(sessionID).")
         }
         if json {
-            try context.output.emitJSON(row)
+            try context.output.emitJSON(AgentSessionRowJSON(row))
             return
         }
         context.output.emit(agentSessionRow(row))

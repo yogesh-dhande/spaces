@@ -191,6 +191,43 @@ import spacesterminalui
         #expect(banner.noticeMessages.isEmpty)
     }
 
+    @Test func remotePaneQualifiesUnqualifiedDeepLinkWithPaneDevice() {
+        let banner = RecordingBanner()
+        let recorder = OpenRecorder()
+        var routed: [SpacesTerminalDeepLink] = []
+        let coordinator = makeCoordinator(
+            isLocalDevice: false, banner: banner, recorder: recorder, deviceID: "pane-device", onSpacesTerminalLink: { routed.append($0) })
+
+        // A remote daemon prints same-device links unqualified because it can't know its own paired id.
+        coordinator.openLink("spaces://terminal/session-7")
+
+        #expect(routed == [SpacesTerminalDeepLink(sessionID: "session-7", deviceID: "pane-device")])
+    }
+
+    @Test func remotePaneKeepsExplicitDeepLinkQualifier() {
+        let banner = RecordingBanner()
+        let recorder = OpenRecorder()
+        var routed: [SpacesTerminalDeepLink] = []
+        let coordinator = makeCoordinator(
+            isLocalDevice: false, banner: banner, recorder: recorder, deviceID: "pane-device", onSpacesTerminalLink: { routed.append($0) })
+
+        coordinator.openLink("spaces://terminal/session-7?device=other-device")
+
+        #expect(routed == [SpacesTerminalDeepLink(sessionID: "session-7", deviceID: "other-device")])
+    }
+
+    @Test func localPaneLeavesUnqualifiedDeepLinkNil() {
+        let banner = RecordingBanner()
+        let recorder = OpenRecorder()
+        var routed: [SpacesTerminalDeepLink] = []
+        let coordinator = makeCoordinator(
+            isLocalDevice: true, banner: banner, recorder: recorder, deviceID: "local", onSpacesTerminalLink: { routed.append($0) })
+
+        coordinator.openLink("spaces://terminal/session-7")
+
+        #expect(routed == [SpacesTerminalDeepLink(sessionID: "session-7", deviceID: nil)])
+    }
+
     @Test func localFileLinkResolvesRelativePathAndOpens() throws {
         let workingDirectory = try makeTempDirectory()
         let subdirectory = workingDirectory.appendingPathComponent("nested", isDirectory: true)
