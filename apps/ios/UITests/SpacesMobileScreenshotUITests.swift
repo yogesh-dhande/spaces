@@ -1,16 +1,14 @@
 import Foundation
-import StoreKitTest
 import XCTest
 
 /// Stages the app on a chosen screen and holds it there so a host process can capture App Store
 /// screenshots with `xcrun simctl io <udid> screenshot` while this test idles. It performs no
 /// screenshot capture itself — navigation only. See docs/dev.md for the exact invocation.
+///
+/// The paywall screenshot (`SPACES_MOBILE_SCREENSHOT_PAYWALL=1`) relies on the scheme's Test-action
+/// StoreKit configuration to supply the local product catalog, so the paywall renders its real price
+/// line; nothing StoreKit-specific is needed here.
 final class SpacesMobileScreenshotUITests: XCTestCase {
-    /// Retained for the paywall screenshot only, so the local StoreKit test environment it installs
-    /// stays active for the launched app's whole lifetime (an `SKTestSession` reverts StoreKit to its
-    /// default state once deallocated).
-    private var storeTestSession: SKTestSession?
-
     override func setUpWithError() throws {
         continueAfterFailure = false
     }
@@ -25,15 +23,11 @@ final class SpacesMobileScreenshotUITests: XCTestCase {
         let configuration = try ScreenshotUITestConfiguration.load(environment: environment)
         let showsPaywall = environment["SPACES_MOBILE_SCREENSHOT_PAYWALL"] == "1"
 
-        if showsPaywall {
-            try startStoreTestSession()
-        }
-
         let app = XCUIApplication()
         applyLaunchEnvironment(to: app, configuration: configuration, includePaywallBypass: !showsPaywall)
         app.launch()
         XCUIDevice.shared.orientation = .portrait
-        RunLoop.current.run(until: Date().addingTimeInterval(1))
+        RunLoop.current.run(until: Date().addingTimeInterval(2))
 
         // The paywall gates the whole app shell, so there is no tab bar to navigate while it is
         // showing: the screenshot is just the paywall itself, held idle below.
@@ -51,20 +45,6 @@ final class SpacesMobileScreenshotUITests: XCTestCase {
 
         let holdSeconds = environment["SPACES_MOBILE_SCREENSHOT_HOLD_SECONDS"].flatMap(Double.init) ?? 45
         RunLoop.current.run(until: Date().addingTimeInterval(max(holdSeconds, 0)))
-    }
-
-    /// Installs a local StoreKit test environment from the bundled `SpacesMobile.storekit`
-    /// configuration before the app launches, so the paywall's price line resolves against a real
-    /// product catalog. This is needed because the scheme's StoreKit configuration is attached only
-    /// to the Run action, so a `test-without-building` launch (which runs under the Test action)
-    /// would otherwise reach no StoreKit products at all. `SKTestSession(configurationFileNamed:)`
-    /// finds the file because `SpacesMobile.storekit` is bundled as a resource of the
-    /// `SpacesMobileUITests` target (see `apps/ios/project.yml`).
-    private func startStoreTestSession() throws {
-        let session = try SKTestSession(configurationFileNamed: "SpacesMobile")
-        session.clearTransactions()
-        session.disableDialogs = true
-        storeTestSession = session
     }
 
     private func applyLaunchEnvironment(
@@ -88,11 +68,20 @@ final class SpacesMobileScreenshotUITests: XCTestCase {
     }
 
     private func selectTab(_ tab: ScreenshotTab, in app: XCUIApplication, timeout: TimeInterval) -> Bool {
+        let predicate = NSPredicate(format: "label == %@", tab.label)
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
-            let tabBarButton = app.tabBars.buttons[tab.label]
-            if tabBarButton.exists, tabBarButton.isHittable {
-                tabBarButton.tap()
+            // iPhone renders a bottom tab bar whose buttons are hittable. iPad renders the same tabs
+            // as a top bar whose buttons are nested and report `isHittable == false`, so fall back to
+            // tapping the button's center coordinate, which works regardless of hittability.
+            for scope in [app.tabBars.buttons, app.buttons] {
+                let button = scope.matching(predicate).firstMatch
+                guard button.exists else { continue }
+                if button.isHittable {
+                    button.tap()
+                } else {
+                    button.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+                }
                 return true
             }
             RunLoop.current.run(until: Date().addingTimeInterval(0.2))

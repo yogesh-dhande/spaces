@@ -443,9 +443,9 @@ xcodebuild \
   -only-testing:SpacesMobileUITests/SpacesMobileScreenshotUITests \
   build-for-testing
 
-SPACES_MOBILE_UI_TEST_CONFIG_PATH="$UI_TEST_CONFIG" \
-SPACES_MOBILE_SCREENSHOT_TAB=agents \
-SPACES_MOBILE_SCREENSHOT_HOLD_SECONDS=45 \
+TEST_RUNNER_SPACES_MOBILE_UI_TEST_CONFIG_PATH="$UI_TEST_CONFIG" \
+TEST_RUNNER_SPACES_MOBILE_SCREENSHOT_TAB=agents \
+TEST_RUNNER_SPACES_MOBILE_SCREENSHOT_HOLD_SECONDS=45 \
 xcodebuild \
   -project apps/ios/SpacesMobile.xcodeproj \
   -scheme SpacesMobile \
@@ -453,13 +453,13 @@ xcodebuild \
   -derivedDataPath apps/macos/.build/ios-derived-data \
   -only-testing:SpacesMobileUITests/SpacesMobileScreenshotUITests/testScreenshotStaging \
   test-without-building &
-sleep 20 && xcrun simctl io "$IPHONE_UDID" screenshot /tmp/agents-tab.png
+sleep 33 && xcrun simctl io "$IPHONE_UDID" screenshot /tmp/agents-tab.png
 wait
 ```
 
-The test reads the same `SPACES_MOBILE_UI_TEST_CONFIG_PATH` config file (and default path) as `SpacesMobileUITests`, but only needs its `host`, `port`, `authToken`, `certificateFingerprint`, and `installationID` fields; build `$UI_TEST_CONFIG` from the mobile-demo stack's printed `deviceAPIHost`/`deviceAPIPort` plus the matching device entry (`ipad` or `iphone`) in `<demo root>/pairing.json`. Screenshot env vars are passed as plain, non-`TEST_RUNNER_`-prefixed names in the invoking shell — the same form `SPACES_MOBILE_UI_TEST_CONFIG_PATH` already relies on for `xcodebuild test-without-building` against an iOS Simulator destination.
+The test reads the same `SPACES_MOBILE_UI_TEST_CONFIG_PATH` config file (and default path) as `SpacesMobileUITests`, but only needs its `host`, `port`, `authToken`, `certificateFingerprint`, and `installationID` fields; build `$UI_TEST_CONFIG` from the mobile-demo stack's printed `deviceAPIHost`/`deviceAPIPort` plus the matching device entry (`ipad` or `iphone`) in `<demo root>/pairing.json`. Each screenshot env var must carry the `TEST_RUNNER_` prefix: `xcodebuild` forwards a prefixed variable to the in-simulator test runner with the prefix stripped, and a bare variable does not reach it. Connect a hardware keyboard for the simulator (`defaults write com.apple.iphonesimulator ConnectHardwareKeyboard -bool true`) so terminal screens capture without the software keyboard covering the lower half.
 
-`SPACES_MOBILE_SCREENSHOT_TAB` selects `alerts`, `spaces`, `agents`, or `settings`. `SPACES_MOBILE_SCREENSHOT_OPEN_ROW`, honored only with `SPACES_MOBILE_SCREENSHOT_TAB=spaces`, taps the first Spaces row whose visible title contains the given text, opening its terminal detail. `SPACES_MOBILE_SCREENSHOT_PAYWALL=1` launches the app without the paywall bypass so `PaywallView` renders — for the App Store Connect subscription-review screenshot — instead of navigating tabs. The scheme's StoreKit configuration is attached to the Run action only, not the Test action, so a `test-without-building` launch would otherwise reach no StoreKit products at all; the test instead opens its own `SKTestSession` from the bundled `SpacesMobile.storekit` (added as a `SpacesMobileUITests` resource so `SKTestSession(configurationFileNamed:)` can find it) before launching the app, with `clearTransactions()` and `disableDialogs = true` so no purchase UI or stale entitlement interferes, and the paywall renders the real price line from that session's product catalog.
+`SPACES_MOBILE_SCREENSHOT_TAB` selects `alerts`, `spaces`, `agents`, or `settings`. `SPACES_MOBILE_SCREENSHOT_OPEN_ROW`, honored only with `SPACES_MOBILE_SCREENSHOT_TAB=spaces`, taps the first Spaces row whose visible title contains the given text, opening its terminal detail. `SPACES_MOBILE_SCREENSHOT_PAYWALL=1` launches the app without the paywall bypass so `PaywallView` renders — for the App Store Connect subscription-review screenshot — instead of navigating tabs. In the simulator the paywall's price line stays on its loading state because StoreKit has no product catalog without App Store Connect (the scheme's Run-action StoreKit configuration is not applied to a `test-without-building` UI-test launch); the real price and trial length render on TestFlight and production builds, where StoreKit serves the live product, so capture the final subscription-review screenshot from a real build.
 
 For targeted mobile E2E runs, use `--scenario`:
 

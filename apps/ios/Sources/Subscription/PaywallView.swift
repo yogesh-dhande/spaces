@@ -37,9 +37,12 @@ struct PaywallView: View {
 
     private var header: some View {
         VStack(spacing: 12) {
-            Image(systemName: "rectangle.stack.fill")
-                .font(.system(size: 40, weight: .semibold))
-                .foregroundStyle(Theme.accent)
+            Image("Logo")
+                .resizable()
+                .interpolation(.high)
+                .aspectRatio(contentMode: .fit)
+                .frame(width: 72, height: 72)
+                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
             Text("Spaces")
                 .font(.system(size: 30, weight: .bold))
                 .foregroundStyle(Theme.text)
