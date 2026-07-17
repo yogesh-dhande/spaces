@@ -201,8 +201,24 @@ extension WorkspaceOrchestrator {
         let normalizedDir = normalizePath(dir)
         if let project = try store.project(dir: normalizedDir) {
             let workspaces = try store.workspaces(projectID: project.id, includeArchived: true)
-            try removeManagedGitWorktreesIfNeeded(project: project, workspaces: workspaces)
+            // Finalize every coding-agent row in the project through the termination chokepoint BEFORE the
+            // bulk store delete. `agent_subscriptions.agent_session_id` is `ON DELETE RESTRICT`, so
+            // `deleteProject`'s raw `DELETE FROM agent_sessions` throws if the scope still holds any agent
+            // row with inbound watch edges — including an `.exited`-kept row whose watcher (possibly in
+            // another, surviving project) has not unsubscribed. Routing each row through `.destroyed`
+            // delivers the exited notice those outside watchers are owed, drops the inbound edges (so the
+            // delete succeeds), terminates the agent's backing terminal, and tears down each terminal's own
+            // outgoing watch state.
+            for workspace in workspaces {
+                for agent in try store.agentWindows(workspaceID: workspace.id) {
+                    try finalizeAgentRow(agent, reason: .destroyed(terminateTerminalSession: true))
+                }
+            }
+            // Mutate the database BEFORE any irreversible filesystem work: a RESTRICT/consistency failure
+            // then surfaces while the worktrees still exist, instead of after they were already removed from
+            // disk and the project left half-deleted.
             try store.deleteProject(id: project.id)
+            try removeManagedGitWorktreesIfNeeded(project: project, workspaces: workspaces)
             try removeManagedGitWorkspaceDirectoriesIfNeeded(project: project)
             try removeManagedProjectDirectoryIfNeeded(project: project)
         }

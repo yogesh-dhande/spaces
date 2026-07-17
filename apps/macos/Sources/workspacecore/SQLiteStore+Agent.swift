@@ -246,6 +246,35 @@ extension SQLiteStore {
         return value
     }
 
+    /// Whether this agent session's CURRENT life has a recorded `exit` lifecycle event — the persisted,
+    /// unambiguous fact that its exit was already delivered through the termination chokepoint. Exit
+    /// finalization (`WorkspaceOrchestrator.handleAgentExit` → `recordAgentExitStatus`, and the delete
+    /// branch) always appends an `event_type = 'exit'` row, and that event survives on a row the
+    /// finalization keeps: a configured launcher held at `.done`, or a live-terminal row held at `.exited`.
+    /// A live agent sitting `.done` after merely completing a turn has only `done` transition events, never
+    /// an `exit` event, so this is what distinguishes a launcher whose exit was already notified from one
+    /// that is still running between turns — a distinction `.done` status alone cannot make.
+    ///
+    /// The fact is scoped to the row's current life: a kept row is REUSED when a fresh agent starts in the
+    /// same terminal (the restart-reuse reset in `registerAgentWindow` preserves the row id, and both the
+    /// daemon and remote init paths record an `init` event on it), so the previous life's `exit` event must
+    /// not mark the reincarnated, live agent as finalized — that would silently suppress the new life's
+    /// exited notice on kill/sweep. An `exit` therefore only counts when no `init` event was recorded after
+    /// it. Ordering uses `rowid` (insertion order), not the `created_at` strings, so two events appended in
+    /// the same second cannot tie.
+    public func agentSessionHasRecordedExitEvent(agentSessionID: String) throws -> Bool {
+        guard
+            let row = try queryRow(
+                sql: """
+                    SELECT COALESCE(MAX(CASE WHEN event_type = 'exit' THEN rowid END), 0),
+                           COALESCE(MAX(CASE WHEN event_type = 'init' THEN rowid END), 0)
+                    FROM agent_session_events
+                    WHERE agent_session_id = ?
+                    """, bindings: [agentSessionID]), row.count >= 2, let lastExitRowID = Int64(row[0]), let lastInitRowID = Int64(row[1])
+        else { return false }
+        return lastExitRowID > 0 && lastExitRowID > lastInitRowID
+    }
+
     private func decodeAgentSubscription(row: [String]) -> AgentSubscriptionRecord? {
         guard row.count >= 3 else { return nil }
         return AgentSubscriptionRecord(subscriberTerminalSessionID: row[0], agentSessionID: row[1], createdAt: row[2])

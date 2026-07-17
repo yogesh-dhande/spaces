@@ -104,6 +104,92 @@ final class ExitedSpawnedAgentReconcileTests: XCTestCase {
         XCTAssertEqual(recorder.delivered.count, 1, "the idempotent sweep must not re-deliver an exited notice on a later pass")
     }
 
+    /// A hookless coding agent (codex/opencode) that completed a turn sits `.done`; if its terminal is then
+    /// closed no exit hook fires. The sweep must still finalize such a `.done` row — `.done` is not a
+    /// finalized fact without a recorded exit event — delivering the exited notice its subscribers are owed
+    /// and clearing its edges before deleting the dead row, and a second pass over the now-gone row stays
+    /// silent. Before the finalized-fact change the sweep skipped every `.done` row, leaving this one stale
+    /// forever and its watchers never told it exited.
+    func testExitedHooklessDoneAgentRowIsFinalizedAndSubscriberToldItExited() throws {
+        let store = try makeTemporaryStore()
+        let recorder = DeliveryRecorder()
+        WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter { try recorder.deliver($0, $1) }
+        defer { WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter(nil) }
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+
+        let sessionID = UUID().uuidString
+        try writeEndedTerminalSession(sessionID: sessionID, workspaceID: workspace.id, workspaceDir: workspace.dir, kind: .shell)
+        // A hookless agent that finished a turn: `.done`, but with no recorded exit event.
+        let agent = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Codex CLI", terminalTrackingID: sessionID, status: .done)
+        XCTAssertFalse(try store.agentSessionHasRecordedExitEvent(agentSessionID: agent.id), "a turn-complete .done row is not yet finalized")
+        // A plain-shell subscriber terminal with no agent row of its own counts as idle: it receives now.
+        try store.insertAgentSubscription(subscriberTerminalSessionID: "orchestrator-session", agentSessionID: agent.id, createdAt: "t")
+
+        let didMutate = try orchestrator.reconcileExitedSessionBackedAgentRows(excludingLiveSessionIDs: [])
+
+        XCTAssertTrue(didMutate)
+        XCTAssertNil(try store.agentWindow(id: agent.id), "the dead hookless .done row is finalized (deleted) by handleAgentExit")
+        XCTAssertEqual(recorder.delivered.map(\.sessionID), ["orchestrator-session"])
+        XCTAssertTrue(
+            recorder.delivered.first?.line.contains("is exited") == true,
+            "the subscriber must be told the child exited, got: \(recorder.delivered.first?.line ?? "nothing")")
+        XCTAssertTrue(try store.agentSubscriptions(agentSessionID: agent.id).isEmpty, "the dead row's inbound edge is dropped")
+
+        // A second pass finds no live-status row for the deleted session, so it re-notifies nothing.
+        let secondPassMutated = try orchestrator.reconcileExitedSessionBackedAgentRows(excludingLiveSessionIDs: [])
+        XCTAssertFalse(secondPassMutated)
+        XCTAssertEqual(recorder.delivered.count, 1, "the idempotent sweep must not re-deliver an exited notice on a later pass")
+    }
+
+    /// A reincarnated row (a fresh agent's `init` reused a kept, previously-exited row) must be sweepable
+    /// again: when the NEW life's terminal dies hookless, the sweep finalizes it with a fresh exited
+    /// notice. The previous life's exit event must not keep the row permanently "finalized" — that would
+    /// leave the new life's death silent and the row stale. A further pass over the re-finalized row
+    /// stays silent.
+    func testSweepFinalizesReincarnatedRowWhoseNewLifeTerminalDiedHookless() throws {
+        let store = try makeTemporaryStore()
+        let recorder = DeliveryRecorder()
+        WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter { try recorder.deliver($0, $1) }
+        defer { WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter(nil) }
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        try store.setWorkspaceAgentLaunchers(workspaceID: workspace.id, launchers: [AgentLauncher(name: "Codex", command: "codex")])
+
+        // Life 1: a configured launcher exits — row kept `.done` with a recorded exit event, watcher
+        // notified once (the kept row retains its inbound edge).
+        let sessionID = UUID().uuidString
+        let agent = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: sessionID, status: .spinning,
+            claimedLauncherName: "Codex")
+        try store.insertAgentSubscription(subscriberTerminalSessionID: "orchestrator-session", agentSessionID: agent.id, createdAt: "t")
+        _ = try orchestrator.finalizeAgentRow(agent, reason: .exited(eventType: "exit", eventSource: "spaces_agent_signal", environmentKeys: nil))
+        XCTAssertEqual(recorder.delivered.count, 1, "life 1's exit is notified once")
+
+        // Life 2: a fresh agent inits in the same terminal (same row id, an `init` event recorded), then
+        // its terminal dies without any exit hook.
+        let reincarnated = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: sessionID,
+            status: try XCTUnwrap(try store.agentWindow(id: agent.id)).status, eventType: "init", eventSource: "spaces_agent_signal")
+        XCTAssertEqual(reincarnated.id, agent.id, "the restart-reuse init reuses the same row id")
+        try writeEndedTerminalSession(sessionID: sessionID, workspaceID: workspace.id, workspaceDir: workspace.dir, kind: .agent)
+
+        let didMutate = try orchestrator.reconcileExitedSessionBackedAgentRows(excludingLiveSessionIDs: [])
+
+        XCTAssertTrue(didMutate, "the reincarnated row is sweepable again — the old life's exit event no longer blocks it")
+        XCTAssertEqual(recorder.delivered.map(\.sessionID), ["orchestrator-session", "orchestrator-session"])
+        XCTAssertTrue(
+            recorder.delivered.last?.line.contains("is exited") == true,
+            "the subscriber must be told the NEW life exited, got: \(recorder.delivered.last?.line ?? "nothing")")
+
+        // The sweep re-finalized the launcher row (`.done` + a fresh exit event after the init), so a
+        // further pass re-notifies nothing.
+        let thirdPassMutated = try orchestrator.reconcileExitedSessionBackedAgentRows(excludingLiveSessionIDs: [])
+        XCTAssertFalse(thirdPassMutated)
+        XCTAssertEqual(recorder.delivered.count, 2, "exactly one notice per life, none re-delivered")
+    }
+
     // MARK: - Fixtures
 
     private func makeProjectAndWorkspace(store: SQLiteStore) throws -> (ProjectRecord, WorkspaceRecord) {

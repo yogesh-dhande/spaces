@@ -13,15 +13,14 @@ extension WorkspaceOrchestrator {
             if builtInTerminalSessionHasConfiguredOwner(ownership) { continue }
             guard let workspace = try workspaceForBuiltInTerminalSession(sessionID: sessionID, ownership: ownership) else { continue }
             if let existingRow = try store.agentWindow(workspaceID: workspace.id, terminalTrackingID: sessionID) {
-                // Only a still-live-agent row is a candidate for shedding its ad-hoc classification. A row
-                // already finalized to `.done`/`.exited` (a signaled ad-hoc that recorded `.exited` here on
-                // a previous pass, its terminal still at the shell) is skipped so it is never re-entered and
-                // its subscribers never get a duplicate exited notice — the outer gate mirrored by the
-                // chokepoint's own idempotency gate.
-                switch existingRow.status {
-                case .idle, .spinning, .waiting: break
-                case .done, .exited: continue
-                }
+                // A row already finalized (its exit delivered — `.exited`, or an exit event recorded on a
+                // previous pass) is skipped so it is never re-entered and its subscribers never get a
+                // duplicate exited notice — the outer gate mirrored by the chokepoint's own idempotency
+                // gate. A live turn-complete `.done` row is deliberately NOT skipped: it is not finalized,
+                // and if its foreground has genuinely reverted to a plain shell the agent quit after its
+                // turn, so the block below finalizes it (with the exited notice) rather than leaving a
+                // stale coding-agent row on the shell.
+                if try agentRowIsFinalized(existingRow) { continue }
                 // A live session that already has a live-agent row is normally left alone, but an ad-hoc
                 // detected agent whose foreground genuinely reverted to its own plain shell sheds its
                 // ad-hoc classification here — the one place a live session does so — through the
@@ -118,6 +117,27 @@ extension WorkspaceOrchestrator {
         try store.lastAgentSignalAt(agentSessionID: record.id) != nil
     }
 
+    /// Whether this agent row is already finalized — its exit has been delivered — so a termination path
+    /// must neither re-notify its subscribers nor re-run its exit disposition. Finalized means either the
+    /// `.exited` status (a kept live-terminal exit) OR a recorded `exit` event
+    /// (`agentSessionHasRecordedExitEvent`). The recorded-event half is load-bearing: a configured
+    /// launcher's exit is finalized to `.done` (`handleAgentExit`), and `.done` is ALSO the resting state
+    /// a live launcher returns to after every completed turn, so status alone cannot tell an
+    /// already-notified launcher exit from a live agent between turns. Keying on the persisted exit event
+    /// instead means the most common kill scenario — an orchestrator killing a child that is sitting
+    /// `.done` after finishing — is correctly seen as NOT finalized and still delivers exactly one exited
+    /// notice, while a launcher whose exit was already delivered is never re-notified. Both halves are
+    /// scoped to the row's CURRENT life across the restart-reuse reset (a fresh agent's `init` on the same
+    /// terminal reuses the row id): the status half because that reset moves `.exited` back to `.idle`, and
+    /// the event half because `agentSessionHasRecordedExitEvent` discounts an `exit` event once a later
+    /// `init` event lands — so a reincarnated live agent is finalizable again and its kill/sweep delivers a
+    /// fresh exited notice. The single finalized-fact predicate shared by the chokepoint's idempotency gate
+    /// and both reconciler gates.
+    func agentRowIsFinalized(_ record: AgentWindowRecord) throws -> Bool {
+        if record.status == .exited { return true }
+        return try store.agentSessionHasRecordedExitEvent(agentSessionID: record.id)
+    }
+
     /// Reverts a foreground-detection promotion: removes the ad-hoc agent row and clears the agent-command
     /// detail it wrote onto the shared terminal window, WITHOUT terminating the terminal session or deleting
     /// its window — the shell is still live and must remain as a plain terminal. Used when the detected agent
@@ -149,18 +169,24 @@ extension WorkspaceOrchestrator {
     /// dead non-launcher session is deleted by `handleAgentExit`, so it disappears from listings and a
     /// remote overview diffs the row's disappearance as `exited`, matching the local `.exited` notice.
     ///
-    /// Only rows still in a live-agent status are swept, so a row already finalized here — deleted
-    /// (spawned/ad-hoc) or `.done` (configured launcher) — or already `.exited` from a real signal is
-    /// never re-processed and its subscribers never get a duplicate exited notice.
+    /// Only rows not yet finalized are swept (`agentRowIsFinalized`): a row already deleted (spawned/ad-hoc)
+    /// or held `.exited`, and a configured launcher held `.done` that already recorded its `exit` event, is
+    /// never re-processed and its subscribers never get a duplicate exited notice. A live launcher sitting
+    /// `.done` between turns has no exit event yet, so it is not treated as finalized — but the liveness
+    /// check below leaves it untouched while its session is alive; only once its terminal has ended does
+    /// this sweep finalize it and deliver the notice.
     @discardableResult func reconcileExitedSessionBackedAgentRows(excludingLiveSessionIDs liveSessionIDs: Set<String>) throws -> Bool {
         var didMutate = false
         for project in try store.projects() {
             for workspace in try store.workspaces(projectID: project.id, includeArchived: false) {
                 for agent in try store.agentWindows(workspaceID: workspace.id) where agent.provider == .spaces {
-                    switch agent.status {
-                    case .idle, .spinning, .waiting: break
-                    case .done, .exited: continue
-                    }
+                    // Skip only rows already finalized (their exit delivered — `.exited`, or an exit event
+                    // recorded on a previous pass). A live turn-complete `.done` row is NOT finalized: a
+                    // hookless codex/opencode agent that completed a turn and then had its terminal closed
+                    // sits `.done` with no exit event, and this sweep must finalize it (delivering the
+                    // exited notice) rather than leaving it stale forever. A still-live `.done` row is
+                    // filtered by the liveness and runtime-state checks below.
+                    if try agentRowIsFinalized(agent) { continue }
                     guard let sessionID = builtInTerminalSessionID(for: agent), !liveSessionIDs.contains(sessionID) else { continue }
                     // A `.shell`-launch-kind row is only ever an ad-hoc foreground-detected agent, which
                     // `handleAgentExit` deletes once its shell is gone; `.agent` is a spawned/launcher
@@ -782,9 +808,12 @@ extension WorkspaceOrchestrator {
     /// prune, and every hook / remote-signal / reconciler exit. Owning it in one place is what guarantees
     /// a watched child's subscribers are always told it exited before the row goes away and that the
     /// terminated terminal's own watch state is always torn down. In order it:
-    ///  1. gates on status for idempotency — a row already `.done`/`.exited` is never re-notified (a
-    ///     `.destroyed` reason still deletes it and tears down watch state; an `.exited` reason is a no-op),
-    ///     so a repeated reconcile pass over an already-exited row delivers no duplicate notice;
+    ///  1. gates on the finalized fact for idempotency (`agentRowIsFinalized` — status `.exited`, or a
+    ///     recorded `exit` event) — an already-finalized row is never re-notified (a `.destroyed` reason
+    ///     still deletes it and tears down watch state; an `.exited` reason is a no-op), so a repeated
+    ///     reconcile pass over an already-exited row delivers no duplicate notice. Keying on the recorded
+    ///     exit event, not `.done` status, is what lets killing a live agent that is merely resting `.done`
+    ///     between turns still deliver its one exited notice;
     ///  2. renders/enqueues the `exited` notice to the row's subscribers (`childDidTransition`) while its
     ///     inbound edges still exist — a no-op when it has no subscribers;
     ///  3. applies the disposition: `.exited` defers to `handleAgentExit` (keep `.done`/`.exited`, demote,
@@ -804,7 +833,7 @@ extension WorkspaceOrchestrator {
     /// without subscribers) delivery is simply never attempted because the row has no subscribers.
     @discardableResult public func finalizeAgentRow(_ record: AgentWindowRecord, reason: AgentTerminationReason) throws -> AgentWindowRecord? {
         let engine = makeAgentNotificationEngine()
-        let alreadyFinalized = record.status == .done || record.status == .exited
+        let alreadyFinalized = try agentRowIsFinalized(record)
         switch reason {
         case .destroyed(let terminateTerminalSession):
             if !alreadyFinalized { try engine.childDidTransition(agent: record, transition: .exited) }
