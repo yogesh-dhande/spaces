@@ -13,7 +13,7 @@ public final class SpacesSQLiteDatabase {
     private let busyRetryAttempts = 10
     private let busyRetryDelaySeconds: TimeInterval = 0.02
 
-    public init(path: String) throws {
+    public init(path: String, withMigrationAuthorization: (() throws -> Void) throws -> Void = { try $0() }) throws {
         databasePath = path
         let directory = URL(fileURLWithPath: path).deletingLastPathComponent()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -33,7 +33,7 @@ public final class SpacesSQLiteDatabase {
                 domain: "spaces.database", code: 1, userInfo: [NSLocalizedDescriptionKey: "Failed configuring sqlite busy timeout: \(message)"])
         }
         try configureConnectionPragmas()
-        try initializeSchema()
+        try initializeSchema(withMigrationAuthorization: withMigrationAuthorization)
     }
 
     deinit { sqlite3_close(db) }
@@ -95,14 +95,15 @@ public final class SpacesSQLiteDatabase {
 
     private func createSchema() throws { try executeBatch(sql: DatabaseSchema.latestSchemaSQL) }
 
-    private func initializeSchema() throws {
+    private func initializeSchema(withMigrationAuthorization: (() throws -> Void) throws -> Void) throws {
         let migrator = DatabaseMigrator(
             currentSchemaVersion: DatabaseSchema.currentVersion, steps: DatabaseSchema.migrationSteps,
             backupManager: DatabaseBackupManager(databaseURL: URL(fileURLWithPath: databasePath)))
         try migrator.migrateIfNeeded(
-            existingTables: try userTableNames(), schemaVersion: try schemaVersionValue(), databasePath: databasePath, databaseHandle: db,
-            createFreshSchema: { try self.createSchema() }, setSchemaVersion: { try self.setSchemaVersion($0) },
-            withTransaction: { try self.withImmediateTransaction($0) }, validateIntegrity: { try self.validateIntegrity() })
+            databasePath: databasePath, databaseHandle: db, readExistingTables: { try self.userTableNames() },
+            readSchemaVersion: { try self.schemaVersionValue() }, createFreshSchema: { try self.createSchema() },
+            setSchemaVersion: { try self.setSchemaVersion($0) }, withTransaction: { try self.withImmediateTransaction($0) },
+            validateIntegrity: { try self.validateIntegrity() }, withMigrationAuthorization: withMigrationAuthorization)
     }
 
     private func schemaVersionValue() throws -> Int? {

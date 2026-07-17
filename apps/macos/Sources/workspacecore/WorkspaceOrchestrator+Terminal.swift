@@ -25,6 +25,35 @@ extension WorkspaceOrchestrator {
         }
     }
 
+    /// Terminates a spawned coding-agent terminal session by id and tears down its tracked window and
+    /// agent rows — the not-yet-signaled fallback inside `killAgentSession`, which both the local
+    /// `.agentKill` command and the remote `killAgentSession` Device API command route through when the
+    /// session has no agent row for `stopCodingAgent` to target. Only a session launched with the
+    /// `.agent` kind (`agent spawn`, an agent launcher)
+    /// qualifies: `agent kill` addresses coding agents, and without the kind gate a mistyped or wrong
+    /// session id naming an ordinary shell or process terminal would silently destroy it. Returns
+    /// false for a non-agent or untracked session, which the caller surfaces as a loud error rather
+    /// than a silent no-op.
+    @discardableResult public func terminateSpawnedAgentTerminalSession(sessionID: String) throws -> Bool {
+        guard let sessionID = normalizedTerminalSessionID(sessionID) else { return false }
+        let ownership = try builtInTerminalSessionOwnership(sessionID: sessionID)
+        guard ownership.launchKind == .agent else { return false }
+        guard
+            let workspaceID = ownership.processWorkspaceID ?? ownership.agentWorkspaceID ?? ownership.terminalWindowWorkspaceID
+                ?? ownership.launchWorkspaceID
+        else { return false }
+        return try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
+            let matchingWindowIDs = try store.windows(workspaceID: workspaceID).filter {
+                $0.roleValue == .terminal && terminalHost(for: $0.app) == .spaces && terminalSessionID(for: $0) == sessionID
+            }.map(\.id)
+            terminateBuiltInTerminalSession(sessionID)
+            for windowID in matchingWindowIDs { try store.deleteWindow(id: windowID) }
+            try deleteAgentRows(forBuiltInTerminalSession: sessionID, workspaceID: workspaceID)
+            try clearWorkspaceRunningIfNoTrackedRuntimeIndicators(workspaceID: workspaceID)
+            return true
+        }
+    }
+
     @discardableResult public func removeAdHocBuiltInTerminalSession(sessionID: String) throws -> Bool {
         guard let sessionID = normalizedTerminalSessionID(sessionID) else { return false }
         let ownership = try builtInTerminalSessionOwnership(sessionID: sessionID)
@@ -105,9 +134,19 @@ extension WorkspaceOrchestrator {
         }
     }
 
+    /// Finalizes the agent rows bound to a built-in terminal session that is being destroyed and tears
+    /// down that terminal's own watch state. Every caller terminates the terminal named by `sessionID`
+    /// immediately before calling this — a user-closed ad-hoc shell (`stopAdHocBuiltInTerminalSession`), a
+    /// removed ad-hoc terminal (`removeAdHocBuiltInTerminalSession`), or the not-yet-signaled `agent kill`
+    /// fallback (`terminateSpawnedAgentTerminalSession`) — so each matching row is destroyed through the
+    /// finalization chokepoint (terminal already gone, so no re-termination): its subscribers are told it
+    /// `exited` before the row is deleted, and the terminal's own inbound queue and outgoing watch edges
+    /// are torn down. A final `subscriberDidExit` runs even when no agent row matched, because the
+    /// destroyed terminal may have been a SUBSCRIBER of other agents without owning an agent row of its own.
     @discardableResult func deleteAgentRows(forBuiltInTerminalSession sessionID: String, workspaceID: String) throws -> Int {
         let matchingAgents = try store.agentWindows(workspaceID: workspaceID).filter { builtInTerminalSessionID(for: $0) == sessionID }
-        for agent in matchingAgents { try store.deleteAgentWindow(id: agent.id) }
+        for agent in matchingAgents { try finalizeAgentRow(agent, reason: .destroyed(terminateTerminalSession: false)) }
+        try makeAgentNotificationEngine().subscriberDidExit(subscriberTerminalSessionID: sessionID)
         return matchingAgents.count
     }
 

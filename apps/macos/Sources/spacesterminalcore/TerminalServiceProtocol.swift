@@ -321,6 +321,85 @@ public struct TerminalServiceProfileWorkspaceRecord: Codable, Sendable, Equatabl
     }
 }
 
+/// One coding-agent session as reported to orchestration clients (`agent list`/`status`). Carries the
+/// agent's live status, its explicit note, and the full project/workspace context an orchestrator needs
+/// to reason about and reach the agent (`terminalSessionID` is the target for `terminal send`, deep
+/// links, and subscriptions). `lastSignalAt` is the readiness marker: `nil` until the agent's hooks
+/// emit their first lifecycle signal.
+public struct TerminalServiceAgentSessionRow: Codable, Sendable, Equatable {
+    public let id: String
+    public let terminalSessionID: String?
+    public let agent: String?
+    public let label: String?
+    public let status: String
+    public let note: String?
+    public let projectID: String
+    public let projectName: String
+    public let workspaceID: String
+    public let workspaceName: String
+    /// Absolute path to the workspace's directory (worktree), so an orchestrator can locate it on disk.
+    public let workspaceDir: String
+    public let branch: String?
+    public let updatedAt: String
+    public let lastSignalAt: String?
+
+    public init(
+        id: String, terminalSessionID: String?, agent: String?, label: String?, status: String, note: String?, projectID: String, projectName: String,
+        workspaceID: String, workspaceName: String, workspaceDir: String, branch: String?, updatedAt: String, lastSignalAt: String?
+    ) {
+        self.id = id
+        self.terminalSessionID = terminalSessionID
+        self.agent = agent
+        self.label = label
+        self.status = status
+        self.note = note
+        self.projectID = projectID
+        self.projectName = projectName
+        self.workspaceID = workspaceID
+        self.workspaceName = workspaceName
+        self.workspaceDir = workspaceDir
+        self.branch = branch
+        self.updatedAt = updatedAt
+        self.lastSignalAt = lastSignalAt
+    }
+}
+
+/// The structured outcome of an agent spawn, carried on a spawn command response so a client (the MCP
+/// tool) can read the spawned terminal session id, detected agent, target device, whether the spawning
+/// terminal was auto-subscribed, and the rendered `open` deep link directly, instead of parsing them back
+/// out of the prose guidance message. Mirrors the CLI's `AgentSpawnResult`, which lives in the CLI target
+/// and computes `open`; the MCP server passes that already-computed value through unchanged so the two
+/// can't diverge.
+///
+/// Despite living in this shared wire-type module, this struct is populated only by the MCP server: the
+/// daemon's own response to an `.agentSpawn` profile command carries `terminalSession`, never `agentSpawn`
+/// (see `SpacesdMain.spawnProfileAgentSession`). That makes it safe to widen directly with `open` — unlike
+/// `TerminalServiceAgentSessionRow`/`SpacesDeviceAgentSessionRow`, which the daemon and Device API do
+/// populate and decode, so an `open` field there stays out in the CLI-only `AgentSessionRowJSON` wrapper
+/// instead.
+public struct TerminalServiceAgentSpawnResult: Codable, Sendable, Equatable {
+    public let terminalSessionID: String
+    public let workspaceID: String?
+    public let detectedAgent: String
+    /// nil for a local spawn; the paired device's id for a remote one (it qualifies the deep link).
+    public let deviceID: String?
+    /// False when the child had no agent row yet at spawn return (rows appear on the first hook signal),
+    /// so no watch edge was recorded; the caller subscribes explicitly once the agent signals.
+    public let subscribed: Bool
+    /// Rendered `spaces://terminal/<session-id>` deep link, device-qualified when `deviceID` is set —
+    /// identical to the CLI `AgentSpawnResult.open` value this field carries verbatim.
+    public let open: String
+
+    public init(terminalSessionID: String, workspaceID: String?, detectedAgent: String, deviceID: String?, subscribed: Bool, open: String) {
+        self.terminalSessionID = terminalSessionID
+        self.workspaceID = workspaceID
+        self.detectedAgent = detectedAgent
+        self.deviceID = deviceID
+        self.subscribed = subscribed
+        self.open = open
+    }
+}
+
 public struct TerminalServiceProfileCommandResponse: Codable, Sendable, Equatable {
     public let message: String
     public let projects: [TerminalServiceProfileProjectSummary]?
@@ -329,11 +408,19 @@ public struct TerminalServiceProfileCommandResponse: Codable, Sendable, Equatabl
     public let terminalSessions: [TerminalServiceSessionSummary]?
     public let terminalSession: TerminalServiceSessionSummary?
     public let terminalOutput: String?
+    public let agentSessions: [TerminalServiceAgentSessionRow]?
+    public let agentSpawn: TerminalServiceAgentSpawnResult?
+    /// Rendered notification blocks a watched child queued for this terminal while it was busy, drained
+    /// and attached to the response of the orchestrator's next `spaces_*` MCP tool call (the busy-time
+    /// counterpart to idle injection). Nil/omitted unless the piggyback path drained at least one row;
+    /// carried only on the MCP piggyback path, so every other command leaves it nil.
+    public let pendingAgentEvents: [String]?
 
     public init(
         message: String, projects: [TerminalServiceProfileProjectSummary]? = nil, workspaces: [TerminalServiceProfileWorkspaceRecord]? = nil,
         workspace: TerminalServiceProfileWorkspaceRecord? = nil, terminalSessions: [TerminalServiceSessionSummary]? = nil,
-        terminalSession: TerminalServiceSessionSummary? = nil, terminalOutput: String? = nil
+        terminalSession: TerminalServiceSessionSummary? = nil, terminalOutput: String? = nil, agentSessions: [TerminalServiceAgentSessionRow]? = nil,
+        agentSpawn: TerminalServiceAgentSpawnResult? = nil, pendingAgentEvents: [String]? = nil
     ) {
         self.message = message
         self.projects = projects
@@ -342,6 +429,20 @@ public struct TerminalServiceProfileCommandResponse: Codable, Sendable, Equatabl
         self.terminalSessions = terminalSessions
         self.terminalSession = terminalSession
         self.terminalOutput = terminalOutput
+        self.agentSessions = agentSessions
+        self.agentSpawn = agentSpawn
+        self.pendingAgentEvents = pendingAgentEvents
+    }
+
+    /// Returns a copy with `pendingAgentEvents` attached, or `self` unchanged when there is nothing to
+    /// attach. Used at the MCP tools/call chokepoint so a successful tool response can carry a busy
+    /// orchestrator's drained child events without the caller reconstructing every field.
+    public func addingPendingAgentEvents(_ events: [String]?) -> TerminalServiceProfileCommandResponse {
+        guard let events, !events.isEmpty else { return self }
+        return TerminalServiceProfileCommandResponse(
+            message: message, projects: projects, workspaces: workspaces, workspace: workspace, terminalSessions: terminalSessions,
+            terminalSession: terminalSession, terminalOutput: terminalOutput, agentSessions: agentSessions, agentSpawn: agentSpawn,
+            pendingAgentEvents: events)
     }
 }
 

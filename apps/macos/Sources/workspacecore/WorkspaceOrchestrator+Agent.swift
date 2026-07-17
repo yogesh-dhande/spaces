@@ -12,14 +12,53 @@ extension WorkspaceOrchestrator {
             let ownership = try builtInTerminalSessionOwnership(sessionID: sessionID)
             if builtInTerminalSessionHasConfiguredOwner(ownership) { continue }
             guard let workspace = try workspaceForBuiltInTerminalSession(sessionID: sessionID, ownership: ownership) else { continue }
-            if try store.agentWindow(workspaceID: workspace.id, terminalTrackingID: sessionID) != nil { continue }
+            if let existingRow = try store.agentWindow(workspaceID: workspace.id, terminalTrackingID: sessionID) {
+                // A row already finalized (its exit delivered — `.exited`, or an exit event recorded on a
+                // previous pass) is skipped so it is never re-entered and its subscribers never get a
+                // duplicate exited notice — the outer gate mirrored by the chokepoint's own idempotency
+                // gate. A live turn-complete `.done` row is deliberately NOT skipped: it is not finalized,
+                // and if its foreground has genuinely reverted to a plain shell the agent quit after its
+                // turn, so the block below finalizes it (with the exited notice) rather than leaving a
+                // stale coding-agent row on the shell.
+                if try agentRowIsFinalized(existingRow) { continue }
+                // A live session that already has a live-agent row is normally left alone, but an ad-hoc
+                // detected agent whose foreground genuinely reverted to its own plain shell sheds its
+                // ad-hoc classification here — the one place a live session does so — through the
+                // finalization chokepoint. With the terminal still live, `handleAgentExit` demotes a
+                // never-signaled detection row (pure detection state, no subscribers) and records `.exited`
+                // on a signaled one (carrying lifecycle history and possibly subscribers), and the
+                // chokepoint notifies the subscribers and tears down the reverted terminal's own watch
+                // state either way.
+                if isAdHocDetectedForegroundAgent(existingRow), foregroundHasRevertedToPlainShell(session) {
+                    try finalizeAgentRow(existingRow, reason: .exited(eventType: "exit", eventSource: "foreground_reconciler", environmentKeys: nil))
+                    didMutate = true
+                }
+                continue
+            }
             if let detectedAgent = adHocDetectedForegroundAgent(from: session.runtimeState) {
                 try insertAdHocDetectedAgent(detectedAgent: detectedAgent, workspace: workspace, sessionID: sessionID)
                 didMutate = true
             }
         }
-        if try reconcileExitedAdHocForegroundAgentRows(excludingLiveSessionIDs: liveSessionIDs) { didMutate = true }
+        if try reconcileExitedSessionBackedAgentRows(excludingLiveSessionIDs: liveSessionIDs) { didMutate = true }
         return didMutate
+    }
+
+    /// True only when a live session's foreground process is confirmed to be its own configured
+    /// interactive shell (no program running in it at all), as opposed to `foregroundDetectedAgentKind`
+    /// merely being nil. That nil case is ambiguous on its own: it also covers a foreground sample that
+    /// hasn't landed yet (`foregroundExecutableName` nil, e.g. right after a reconnect) and an
+    /// unclassified but still-running program (`python3 agent.py`) — neither of those is the detected
+    /// agent process exiting, and demoting on either would drop a still-active coding-agent row. Only a
+    /// foreground executable name that matches the session's own launch-configured shell basename is
+    /// unambiguous evidence the terminal is back at a bare prompt.
+    func foregroundHasRevertedToPlainShell(_ session: TerminalSessionCatalogEntry) -> Bool {
+        guard session.runtimeState.foregroundDetectedAgentKind == nil,
+            let executableName = session.runtimeState.foregroundExecutableName?.trimmingCharacters(in: .whitespacesAndNewlines),
+            !executableName.isEmpty
+        else { return false }
+        let shellBasename = URL(fileURLWithPath: session.launchConfiguration.shell).lastPathComponent
+        return executableName == shellBasename
     }
 
     func adHocDetectedForegroundAgent(from runtimeState: TerminalSessionRuntimeState) -> (label: String, displayCommand: String?)? {
@@ -51,21 +90,118 @@ extension WorkspaceOrchestrator {
 
     func adHocDetectedAgentID(sessionID: String) -> String { "terminal-agent-\(sessionID)" }
 
-    @discardableResult func reconcileExitedAdHocForegroundAgentRows(excludingLiveSessionIDs liveSessionIDs: Set<String>) throws -> Bool {
+    /// True when `record` is an ad-hoc coding-agent row that foreground detection promoted from a plain
+    /// terminal (id == `adHocDetectedAgentID(sessionID)`), as opposed to an explicitly spawned or
+    /// configured-launcher agent. This is pure id-provenance: it stays true even after hook signals land
+    /// on the row, because a signal updates the detection row in place and preserves its id. Provenance
+    /// alone is NOT sufficient to demote — that additionally requires no hook evidence
+    /// (`agentRowHasRecordedHookSignal`), since a signaled detection row must exit through the
+    /// `.exited`/notify path rather than a silent delete.
+    func isAdHocDetectedForegroundAgent(_ record: AgentWindowRecord) -> Bool {
+        guard record.provider == .spaces, let sessionID = builtInAgentSessionID(for: record) else { return false }
+        return record.id == adHocDetectedAgentID(sessionID: sessionID)
+    }
+
+    /// Whether this agent row has ever recorded a real hook lifecycle signal (`spaces_agent_signal`), as
+    /// opposed to being pure foreground-detection state. This is the gate on demoting an ad-hoc
+    /// detection-created row back to a plain terminal: foreground detection creates the row BEFORE the
+    /// agent's first hook fires (always for hookless codex/opencode, whose first signal is `working`; a
+    /// race for claude), and later `init`/status signals update that same row in place, preserving its
+    /// detection id — so `isAdHocDetectedForegroundAgent` cannot distinguish a never-signaled row (safe to
+    /// silently demote and delete) from one that has since gained lifecycle history and possibly
+    /// subscribers. Deleting a signaled row silently would drop the `exited` notice its subscribers are
+    /// owed and lose the restart-reuse flush cue, so a signaled row must instead take the signaled-agent
+    /// exit path (record `.exited`, notify subscribers). Foreground-detection events are a different
+    /// source and are deliberately excluded by `lastAgentSignalAt`.
+    func agentRowHasRecordedHookSignal(_ record: AgentWindowRecord) throws -> Bool {
+        try store.lastAgentSignalAt(agentSessionID: record.id) != nil
+    }
+
+    /// Whether this agent row is already finalized — its exit has been delivered — so a termination path
+    /// must neither re-notify its subscribers nor re-run its exit disposition. Finalized means either the
+    /// `.exited` status (a kept live-terminal exit) OR a recorded `exit` event
+    /// (`agentSessionHasRecordedExitEvent`). The recorded-event half is load-bearing: a configured
+    /// launcher's exit is finalized to `.done` (`handleAgentExit`), and `.done` is ALSO the resting state
+    /// a live launcher returns to after every completed turn, so status alone cannot tell an
+    /// already-notified launcher exit from a live agent between turns. Keying on the persisted exit event
+    /// instead means the most common kill scenario — an orchestrator killing a child that is sitting
+    /// `.done` after finishing — is correctly seen as NOT finalized and still delivers exactly one exited
+    /// notice, while a launcher whose exit was already delivered is never re-notified. Both halves are
+    /// scoped to the row's CURRENT life across the restart-reuse reset (a fresh agent's `init` on the same
+    /// terminal reuses the row id): the status half because that reset moves `.exited` back to `.idle`, and
+    /// the event half because `agentSessionHasRecordedExitEvent` discounts an `exit` event once a later
+    /// `init` event lands — so a reincarnated live agent is finalizable again and its kill/sweep delivers a
+    /// fresh exited notice. The single finalized-fact predicate shared by the chokepoint's idempotency gate
+    /// and both reconciler gates.
+    func agentRowIsFinalized(_ record: AgentWindowRecord) throws -> Bool {
+        if record.status == .exited { return true }
+        return try store.agentSessionHasRecordedExitEvent(agentSessionID: record.id)
+    }
+
+    /// Reverts a foreground-detection promotion: removes the ad-hoc agent row and clears the agent-command
+    /// detail it wrote onto the shared terminal window, WITHOUT terminating the terminal session or deleting
+    /// its window — the shell is still live and must remain as a plain terminal. Used when the detected agent
+    /// process exits but the terminal stays open, so the session stops being counted as a coding agent.
+    func demoteAdHocDetectedForegroundAgent(_ record: AgentWindowRecord) throws {
+        _ = try? updateAdHocAgentRuntimeTargetDetail(record, displayCommand: nil)
+        try store.deleteAgentWindow(id: record.id)
+    }
+
+    /// Finalizes coding-agent rows whose backing built-in terminal session has ended without any exit
+    /// signal — the state codex and opencode (which provide no session-end hook) and a SIGKILL'd claude
+    /// leave behind. It covers both session provenances that back a Spaces agent row:
+    ///  - explicitly spawned/configured `.agent`-launch-kind sessions (`agent spawn`, a launcher), and
+    ///  - ad-hoc foreground-detected agents running in a `.shell`-launch-kind terminal the user closed.
+    ///
+    /// Such a row would otherwise stay `spinning`/`waiting` forever and its subscribers would never learn
+    /// the child exited. For each such row this runs the real exit flow the hook-signaled `.exit` case
+    /// uses: render/enqueue the `exited` notice to subscribers BEFORE `handleAgentExit` deletes the row —
+    /// deletion cascades the subscription edges away, and the pending row (no FK) is what carries the
+    /// notice past that — then reuse `handleAgentExit` for the delete-vs-`.done` decision, then tear down
+    /// the dead terminal's own standing as a subscriber (its inbound queue and any outgoing watch edges —
+    /// see `AgentNotificationEngine.subscriberDidExit`), since an exited terminal can never be a delivery
+    /// target again.
+    ///
+    /// The `.shell` case was previously a separate sweep that silently wrote `.done` on the dead row (a
+    /// path predating the `.exited` status): that raised a spurious "finished" alert for an agent that was
+    /// actually terminated with its shell, delivered no exited notice, and leaked the closed terminal's
+    /// watch edges. Unifying it here makes a dead ad-hoc `.shell` row take the identical exit flow — a
+    /// dead non-launcher session is deleted by `handleAgentExit`, so it disappears from listings and a
+    /// remote overview diffs the row's disappearance as `exited`, matching the local `.exited` notice.
+    ///
+    /// Only rows not yet finalized are swept (`agentRowIsFinalized`): a row already deleted (spawned/ad-hoc)
+    /// or held `.exited`, and a configured launcher held `.done` that already recorded its `exit` event, is
+    /// never re-processed and its subscribers never get a duplicate exited notice. A live launcher sitting
+    /// `.done` between turns has no exit event yet, so it is not treated as finalized — but the liveness
+    /// check below leaves it untouched while its session is alive; only once its terminal has ended does
+    /// this sweep finalize it and deliver the notice.
+    @discardableResult func reconcileExitedSessionBackedAgentRows(excludingLiveSessionIDs liveSessionIDs: Set<String>) throws -> Bool {
         var didMutate = false
         for project in try store.projects() {
             for workspace in try store.workspaces(projectID: project.id, includeArchived: false) {
                 for agent in try store.agentWindows(workspaceID: workspace.id) where agent.provider == .spaces {
+                    // Skip only rows already finalized (their exit delivered — `.exited`, or an exit event
+                    // recorded on a previous pass). A live turn-complete `.done` row is NOT finalized: a
+                    // hookless codex/opencode agent that completed a turn and then had its terminal closed
+                    // sits `.done` with no exit event, and this sweep must finalize it (delivering the
+                    // exited notice) rather than leaving it stale forever. A still-live `.done` row is
+                    // filtered by the liveness and runtime-state checks below.
+                    if try agentRowIsFinalized(agent) { continue }
                     guard let sessionID = builtInTerminalSessionID(for: agent), !liveSessionIDs.contains(sessionID) else { continue }
-                    guard let launchConfiguration = terminalSessionLaunchConfiguration(sessionID: sessionID), launchConfiguration.kind == .shell
+                    // A `.shell`-launch-kind row is only ever an ad-hoc foreground-detected agent, which
+                    // `handleAgentExit` deletes once its shell is gone; `.agent` is a spawned/launcher
+                    // session. Any other launch kind is not a coding agent and is left alone.
+                    guard let launchConfiguration = terminalSessionLaunchConfiguration(sessionID: sessionID),
+                        launchConfiguration.kind == .agent || launchConfiguration.kind == .shell
                     else { continue }
+                    // Finalize only on unambiguous evidence the session ended: a present runtime state that
+                    // is non-interactive. A missing runtime-state file is ambiguous (e.g. a just-launched
+                    // session before its first write) and is left for a later sweep.
                     guard let paths = try? TerminalSessionPaths.forSession(id: sessionID),
                         let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths), !runtimeState.state.isInteractive
                     else { continue }
-                    if agent.status != .done {
-                        try store.updateAgentWindowStatus(id: agent.id, status: .done, updatedAt: nowISO8601())
-                        didMutate = true
-                    }
+                    try finalizeAgentRow(agent, reason: .exited(eventType: "exit", eventSource: "foreground_reconciler", environmentKeys: nil))
+                    didMutate = true
                 }
             }
         }
@@ -206,7 +342,10 @@ extension WorkspaceOrchestrator {
             guard prunedTerminalTrackingKeys.contains(trackingKey) else { continue }
             if runningProcessTrackingKeys.contains(trackingKey) { continue }
             if try spacesAgentRecordIsConfiguredLauncher(workspaceID: workspaceID, record: agent) { continue }
-            try store.deleteAgentWindow(id: agent.id)
+            // The backing terminal is already gone (its tracking key was pruned), so destroy the row
+            // through the chokepoint without terminating anything: it still owes the child's subscribers an
+            // exited notice and must tear down the orphaned terminal's own watch state.
+            try finalizeAgentRow(agent, reason: .destroyed(terminateTerminalSession: false))
             pruned += 1
         }
         return pruned
@@ -215,6 +354,83 @@ extension WorkspaceOrchestrator {
     // MARK: - Agent Windows
 
     public func agentWindows(workspaceID: String) throws -> [AgentWindowRecord] { try store.agentWindows(workspaceID: workspaceID) }
+
+    /// Locates the Spaces coding-agent session bound to a terminal tracking id, scanning every
+    /// workspace. Orchestration commands (`agent kill`) address agents by terminal session id without
+    /// knowing the owning workspace, so this resolves the `(workspaceID, record)` pair for the caller.
+    /// Returns `nil` when no Spaces agent row is bound to that terminal session yet — agent rows only
+    /// appear on the first hook signal, so a just-spawned agent has none.
+    public func resolveSpacesAgentSession(terminalSessionID: String) throws -> (workspaceID: String, record: AgentWindowRecord)? {
+        for (workspaceID, agents) in try store.agentWindowsByWorkspace() {
+            if let record = agents.first(where: { $0.provider == .spaces && $0.terminalTrackingID == terminalSessionID }) {
+                return (workspaceID, record)
+            }
+        }
+        return nil
+    }
+
+    /// Validates that subscribing `subscriberTerminalSessionID` to the agent row `agentSessionID` is a
+    /// legal watch edge before it is persisted: the agent must exist, must not run in the subscriber's
+    /// own terminal (a self-edge), and must not close a cycle in the subscription graph. The graph's
+    /// nodes are terminal session ids; each edge points subscriber → the watched agent's terminal. A
+    /// cycle would let injected notifications chase each other around a loop, so this walks existing
+    /// edges outward from the target's terminal (following each terminal's own subscriptions) and errors
+    /// if the walk reaches the subscriber. Deterministic and total: the walk visits each terminal once.
+    public func validateAgentSubscription(subscriberTerminalSessionID: String, agentSessionID: String) throws {
+        guard let target = try store.agentWindow(id: agentSessionID) else {
+            throw WorkspaceError.invalidArgument(message: "No agent session \(agentSessionID) to subscribe to.")
+        }
+        // The subscribe contract requires hook evidence: a watch edge is only legal against a hook-signaled
+        // agent. A never-signaled ad-hoc foreground-detection row is pure detection state that the reconciler
+        // may silently demote (deleting it with no exited notice), so a watcher attached to it would be owed
+        // a notice that never comes. Reject it and tell the caller to retry after the agent signals; this
+        // also keeps the silent demote provably unwatchable.
+        if isAdHocDetectedForegroundAgent(target), try !agentRowHasRecordedHookSignal(target) {
+            throw WorkspaceError.invalidArgument(
+                message: "Agent session \(agentSessionID) has not emitted its first hook signal yet; retry the subscribe after it starts working.")
+        }
+        guard let targetTerminalSessionID = target.terminalTrackingID else { return }
+        if targetTerminalSessionID == subscriberTerminalSessionID {
+            throw WorkspaceError.invalidArgument(message: "A terminal cannot subscribe to a coding agent running in itself.")
+        }
+        var visited: Set<String> = []
+        var frontier = [targetTerminalSessionID]
+        while let terminal = frontier.popLast() {
+            guard visited.insert(terminal).inserted else { continue }
+            for edge in try store.agentSubscriptions(subscriberTerminalSessionID: terminal) {
+                guard let nextTerminal = try store.agentWindow(id: edge.agentSessionID)?.terminalTrackingID else { continue }
+                if nextTerminal == subscriberTerminalSessionID {
+                    throw WorkspaceError.invalidArgument(message: "Subscribing would create a notification cycle between these terminals.")
+                }
+                frontier.append(nextTerminal)
+            }
+        }
+    }
+
+    /// Records a same-device watch edge addressed by the child's *terminal session id* — the id a CLI or
+    /// device caller holds — rather than the agent row id. A device-qualified subscribe naming this
+    /// machine (`--device` resolving to the local device) is normalized onto this path so it is validated
+    /// like a plain local watch instead of taking the cross-device path that skips cycle detection. The
+    /// child's terminal session id is resolved to its agent row (as `killAgentSession` does), the edge is
+    /// checked for a self-edge or any cycle (`validateAgentSubscription`), and only then persisted.
+    /// Throws when no agent session is bound to that terminal yet.
+    public func subscribeAgentWatch(subscriberTerminalSessionID: String, childTerminalSessionID: String) throws {
+        guard let match = try resolveSpacesAgentSession(terminalSessionID: childTerminalSessionID) else {
+            throw WorkspaceError.invalidArgument(message: "No agent session for terminal \(childTerminalSessionID).")
+        }
+        try validateAgentSubscription(subscriberTerminalSessionID: subscriberTerminalSessionID, agentSessionID: match.record.id)
+        try store.insertAgentSubscription(
+            subscriberTerminalSessionID: subscriberTerminalSessionID, agentSessionID: match.record.id, createdAt: nowISO8601())
+    }
+
+    /// Removes the same-device watch edge addressed by the child's *terminal session id*. Resolves the
+    /// agent row bound to that terminal and deletes the subscriber's edge to it. When no agent row is
+    /// bound to the child terminal this is a quiet success: a local edge FK-cascades away with its agent
+    /// row, so there is nothing left to delete.
+    public func unsubscribeAgentWatch(subscriberTerminalSessionID: String, childTerminalSessionID: String) throws {
+        guard let match = try resolveSpacesAgentSession(terminalSessionID: childTerminalSessionID) else { return }
+        try store.deleteAgentSubscription(subscriberTerminalSessionID: subscriberTerminalSessionID, agentSessionID: match.record.id)
+    }
 
     @discardableResult public func recordRemoteAgentSignal(_ event: TerminalServiceAgentSignalEvent) throws -> Bool {
         guard let type = RemoteAgentSignalType(rawValue: event.type), let provider = AgentProvider(rawValue: event.provider) else { return false }
@@ -237,7 +453,8 @@ extension WorkspaceOrchestrator {
                 eventType: type.rawValue, eventSource: "remote_spaces_signal", environmentKeys: event.environmentKeys)
         case .exit:
             guard let existingAgent else { return true }
-            try handleAgentExit(existingAgent, eventType: type.rawValue, eventSource: "remote_spaces_signal", environmentKeys: event.environmentKeys)
+            try finalizeAgentRow(
+                existingAgent, reason: .exited(eventType: type.rawValue, eventSource: "remote_spaces_signal", environmentKeys: event.environmentKeys))
         }
         return true
     }
@@ -312,11 +529,12 @@ extension WorkspaceOrchestrator {
         return updated
     }
 
+    /// Evicts a stale agent slot whose backing session is gone, when a relaunch reuses its launcher
+    /// identity. Destroys the row through the chokepoint (terminating any lingering terminal), so the stale
+    /// child's subscribers are told it exited and the terminal's own watch state is torn down before the
+    /// fresh session takes over.
     func removeStaleAgentWindow(_ record: AgentWindowRecord) throws {
-        terminateBuiltInTerminalSession(record.terminalTrackingID)
-        try store.deleteAgentWindow(id: record.id)
-        try removeAdHocTrackedWindowForAgent(
-            workspaceID: record.workspaceID, provider: record.provider, terminalTrackingID: record.terminalTrackingID)
+        try finalizeAgentRow(record, reason: .destroyed(terminateTerminalSession: true))
     }
 
     func removeAdHocTrackedWindowForAgent(workspaceID: String, provider: AgentProvider, terminalTrackingID: String?) throws {
@@ -372,6 +590,12 @@ extension WorkspaceOrchestrator {
         let existingAgentWindows = try store.agentWindows(workspaceID: workspaceID)
         let trackedWindow = try ensureTrackedWindowExistsForAgent(
             workspaceID: workspaceID, provider: provider, label: label, terminalTrackingID: terminalTrackingID)
+        // The `init` signal re-registers a terminal's agent row and preserves its current status so a
+        // reconnect never disturbs a live agent. But an `init` on a terminal whose previous agent
+        // `.exited` means a fresh agent is reusing that terminal, so its status resets to `.idle` rather
+        // than staying `.exited`. This is the single chokepoint for that restart-reuse reset, shared by
+        // the daemon and remote signal init paths (both pass the preserved `existing.status`).
+        let resolvedStatus: AgentWindowStatus = status == .exited ? .idle : status
         if let existing = try matchingAgentWindow(workspaceID: workspaceID, terminalTrackingID: terminalTrackingID, sessionKey: sessionKey) {
             let resolvedClaimedLauncherName = claimedLauncherName ?? existing.claimedLauncherName
             let resolvedLabel = try uniqueAgentFocusLabel(
@@ -383,7 +607,8 @@ extension WorkspaceOrchestrator {
                 terminalTarget: TerminalTargetRecord(
                     runtimeTargetID: existing.runtimeTargetID ?? trackedWindow?.id, trackingID: terminalTrackingID ?? existing.terminalTrackingID),
                 sessionKey: sessionKey ?? existing.sessionKey, claimedLauncherID: claimedLauncherID ?? existing.claimedLauncherID,
-                claimedLauncherName: resolvedClaimedLauncherName, status: status, createdAt: existing.createdAt, updatedAt: now)
+                claimedLauncherName: resolvedClaimedLauncherName, status: resolvedStatus, note: existing.note, createdAt: existing.createdAt,
+                updatedAt: now)
             try validateWorkspaceFocusNames(
                 workspaceID: workspaceID, processes: try store.workspaceProcesses(workspaceID: workspaceID),
                 browserSessions: try store.workspaceBrowserSessions(workspaceID: workspaceID),
@@ -400,7 +625,7 @@ extension WorkspaceOrchestrator {
         let record = AgentWindowRecord(
             id: UUID().uuidString, workspaceID: workspaceID, provider: provider, label: resolvedLabel, runtimeTargetID: trackedWindow?.id,
             terminalTarget: TerminalTargetRecord(runtimeTargetID: trackedWindow?.id, trackingID: terminalTrackingID), sessionKey: sessionKey,
-            claimedLauncherID: claimedLauncherID, claimedLauncherName: claimedLauncherName, status: status, createdAt: now, updatedAt: now)
+            claimedLauncherID: claimedLauncherID, claimedLauncherName: claimedLauncherName, status: resolvedStatus, createdAt: now, updatedAt: now)
         try validateWorkspaceFocusNames(
             workspaceID: workspaceID, processes: try store.workspaceProcesses(workspaceID: workspaceID),
             browserSessions: try store.workspaceBrowserSessions(workspaceID: workspaceID), agentWindows: existingAgentWindows + [record])
@@ -418,11 +643,16 @@ extension WorkspaceOrchestrator {
         status: AgentWindowStatus, claimedLauncherName: String? = nil, eventType: String? = nil, eventSource: String = "orchestrator",
         environmentKeys: [String]? = nil
     ) throws -> AgentWindowRecord {
+        let existing = try matchingAgentWindow(workspaceID: workspaceID, terminalTrackingID: terminalTrackingID, sessionKey: sessionKey)
+        // Per-tool hooks make an active agent signal `working` on every tool call. A signal that would
+        // keep the row spinning is a pure no-op: no `agent_session_events` row (the event log records
+        // state transitions, not tool calls) and no row rewrite — `updated_at` deliberately stays the
+        // time the agent *entered* working, so it reads as the transition time, not tool-call recency.
+        if let existing, status == .spinning, existing.status == .spinning { return existing }
         let now = nowISO8601()
         let allAgentWindows = try store.agentWindows(workspaceID: workspaceID)
         let trackedWindow = try ensureTrackedWindowExistsForAgent(
             workspaceID: workspaceID, provider: provider, label: label, terminalTrackingID: terminalTrackingID)
-        let existing = try matchingAgentWindow(workspaceID: workspaceID, terminalTrackingID: terminalTrackingID, sessionKey: sessionKey)
         if let existing {
             let resolvedClaimedLauncherName = claimedLauncherName ?? existing.claimedLauncherName
             let resolvedLabel = try uniqueAgentFocusLabel(
@@ -434,7 +664,7 @@ extension WorkspaceOrchestrator {
                 terminalTarget: TerminalTargetRecord(
                     runtimeTargetID: existing.runtimeTargetID ?? trackedWindow?.id, trackingID: terminalTrackingID ?? existing.terminalTrackingID),
                 sessionKey: sessionKey ?? existing.sessionKey, claimedLauncherID: existing.claimedLauncherID,
-                claimedLauncherName: resolvedClaimedLauncherName, status: status, createdAt: existing.createdAt, updatedAt: now)
+                claimedLauncherName: resolvedClaimedLauncherName, status: status, note: existing.note, createdAt: existing.createdAt, updatedAt: now)
             try validateWorkspaceFocusNames(
                 workspaceID: workspaceID, processes: try store.workspaceProcesses(workspaceID: workspaceID),
                 browserSessions: try store.workspaceBrowserSessions(workspaceID: workspaceID),
@@ -463,8 +693,21 @@ extension WorkspaceOrchestrator {
         let sessionBackedSpacesAgent = builtInAgentSessionID(for: existing) != nil
         let existingSessionIsLive = sessionBackedSpacesAgent && builtInAgentSessionIsStillLive(existing)
         if existingSessionIsLive {
+            if isAdHocDetectedForegroundAgent(existing), try !agentRowHasRecordedHookSignal(existing) {
+                // Foreground-detected agent's process ended but its shell terminal is still live, and the
+                // row never recorded a hook signal — pure detection state with no lifecycle history or
+                // subscribers, so demote to a plain terminal rather than keeping a phantom "exited"
+                // coding-agent row on the shell. A detection row that HAS signaled is deliberately NOT
+                // claimed here: it falls through to the live-terminal `.exited` branch below so its
+                // subscribers get the exited notice and a restart can reuse the row.
+                try demoteAdHocDetectedForegroundAgent(existing)
+                return nil
+            }
+            // The agent process ended but its terminal session is still open, so keep the row and mark it
+            // `exited` (not `idle`): the terminal stays addressable and a restart reuses it, while remote
+            // watchers see a real exit transition instead of a status change they treat as "not started".
             return try recordAgentExitStatus(
-                existing, status: .idle, eventType: eventType, eventSource: eventSource, environmentKeys: environmentKeys)
+                existing, status: .exited, eventType: eventType, eventSource: eventSource, environmentKeys: environmentKeys)
         }
         appendAgentSessionEvent(
             agentSessionID: existing.id, eventType: eventType, source: eventSource,
@@ -472,6 +715,9 @@ extension WorkspaceOrchestrator {
                 provider: existing.provider, label: existing.label, terminalTrackingID: existing.terminalTrackingID, sessionKey: existing.sessionKey,
                 environmentKeys: environmentKeys), createdAt: nowISO8601())
         terminateBuiltInTerminalSession(existing.terminalTrackingID)
+        // Drop the row's inbound watch edges explicitly before the delete: the FK is `ON DELETE RESTRICT`,
+        // so the delete would otherwise fail. `finalizeAgentRow` notified those subscribers `exited` first.
+        try store.deleteAgentSubscriptions(agentSessionID: existing.id)
         try store.deleteAgentWindow(id: existing.id)
         try removeAdHocTrackedWindowForAgent(
             workspaceID: existing.workspaceID, provider: existing.provider, terminalTrackingID: existing.terminalTrackingID)
@@ -489,7 +735,7 @@ extension WorkspaceOrchestrator {
         let updated = AgentWindowRecord(
             id: existing.id, workspaceID: existing.workspaceID, provider: existing.provider, label: existing.label,
             runtimeTargetID: existing.runtimeTargetID, terminalTarget: terminalTarget, sessionKey: existing.sessionKey,
-            claimedLauncherID: existing.claimedLauncherID, claimedLauncherName: existing.claimedLauncherName, status: status,
+            claimedLauncherID: existing.claimedLauncherID, claimedLauncherName: existing.claimedLauncherName, status: status, note: existing.note,
             createdAt: existing.createdAt, updatedAt: now)
         try store.upsertAgentWindow(updated)
         appendAgentSessionEvent(
@@ -508,6 +754,29 @@ extension WorkspaceOrchestrator {
         }
     }
 
+    /// Terminates a coding-agent session addressed by its terminal session id — the shared local
+    /// implementation of `spaces agent kill` (`.agentKill`). Both branches route through a stop chokepoint
+    /// that already owns the notify-before-delete + subscriber-teardown flow, so the kill path adds no
+    /// notification of its own and never double-notifies:
+    ///  - A hook-signaled child (one with an agent row) stops through `stopCodingAgent` →
+    ///    `stopCodingAgentRecord`, which tells the child's subscribers it exited before deleting the row
+    ///    (whose FK cascade would otherwise drop the subscription edges silently) and tears down the
+    ///    stopped terminal's own inbound queue and outgoing watch edges.
+    ///  - A not-yet-signaled `.agent` session (no agent row) goes through
+    ///    `terminateSpawnedAgentTerminalSession` → `deleteAgentRows`, which destroys the terminal and runs
+    ///    `subscriberDidExit` for it even though no agent row existed — the killed terminal may itself have
+    ///    been a SUBSCRIBER of other agents (subscribing does not require a live agent row), so its own
+    ///    outgoing watch edges and inbound queue must still be torn down. Its `.agent` launch-kind gate
+    ///    refuses ordinary shell and process terminals.
+    /// Returns false when the id names neither, for the caller to surface loudly.
+    public func killAgentSession(terminalSessionID: String) throws -> Bool {
+        if let match = try resolveSpacesAgentSession(terminalSessionID: terminalSessionID) {
+            try stopCodingAgent(workspaceID: match.workspaceID, agentID: match.record.id)
+            return true
+        }
+        return try terminateSpawnedAgentTerminalSession(sessionID: terminalSessionID)
+    }
+
     @discardableResult public func restartCodingAgent(workspaceID: String, agentID: String) throws -> AgentWindowRecord {
         try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
             try requireWorkspaceSetupSucceeded(workspaceID: workspaceID)
@@ -520,16 +789,77 @@ extension WorkspaceOrchestrator {
         }
     }
 
+    /// How an agent-row termination should be finalized, chosen by the caller and interpreted by
+    /// `finalizeAgentRow`.
+    public enum AgentTerminationReason: Sendable {
+        /// A hard stop/destroy driven by an operator action or by the backing terminal going away: the row
+        /// is unconditionally deleted and its inbound watch edges dropped. `terminateTerminalSession` kills
+        /// the backing built-in terminal when the caller has not already done so.
+        case destroyed(terminateTerminalSession: Bool)
+        /// A lifecycle exit reported by a hook signal, a remote signal, or a device-runtime reconciler. The
+        /// delete-vs-keep decision is delegated to `handleAgentExit` (configured launcher → `.done`; a
+        /// never-signaled ad-hoc detection row on a live terminal → silent demote/delete; any other row on
+        /// a live terminal → `.exited`; a row whose terminal has ended → delete).
+        case exited(eventType: String, eventSource: String, environmentKeys: [String]?)
+    }
+
+    /// The single finalization chokepoint every agent-row termination routes through — sidebar / Device
+    /// API stop, restart, `agent kill`, workspace stop, terminal teardown, stale-slot relaunch, orphan
+    /// prune, and every hook / remote-signal / reconciler exit. Owning it in one place is what guarantees
+    /// a watched child's subscribers are always told it exited before the row goes away and that the
+    /// terminated terminal's own watch state is always torn down. In order it:
+    ///  1. gates on the finalized fact for idempotency (`agentRowIsFinalized` — status `.exited`, or a
+    ///     recorded `exit` event) — an already-finalized row is never re-notified (a `.destroyed` reason
+    ///     still deletes it and tears down watch state; an `.exited` reason is a no-op), so a repeated
+    ///     reconcile pass over an already-exited row delivers no duplicate notice. Keying on the recorded
+    ///     exit event, not `.done` status, is what lets killing a live agent that is merely resting `.done`
+    ///     between turns still deliver its one exited notice;
+    ///  2. renders/enqueues the `exited` notice to the row's subscribers (`childDidTransition`) while its
+    ///     inbound edges still exist — a no-op when it has no subscribers;
+    ///  3. applies the disposition: `.exited` defers to `handleAgentExit` (keep `.done`/`.exited`, demote,
+    ///     or delete — the delete branch drops the inbound edges explicitly), while `.destroyed`
+    ///     unconditionally drops the inbound edges and deletes the row (terminating the terminal first when
+    ///     asked);
+    ///  4. tears down the terminated terminal's OWN standing as a subscriber — its inbound queue and every
+    ///     outgoing local/remote watch edge (`subscriberDidExit`) — since it can never be a delivery target
+    ///     again under this session id.
+    /// Because `agent_subscriptions.agent_session_id` is `ON DELETE RESTRICT`, the inbound edges must be
+    /// dropped explicitly here; a delete that bypasses this chokepoint leaves them in place and fails
+    /// loudly. The never-signaled ad-hoc demote is a documented variant of the same door: it notifies
+    /// nothing (a never-signaled row has no subscribers — `childDidTransition` is a no-op, and per the
+    /// subscribe contract no watcher can even attach) and does NOT drop inbound edges, so a leftover edge
+    /// on such a row makes the delete throw under RESTRICT — the enforcement working. The engine is built
+    /// inside via `makeAgentNotificationEngine`; with no submitter installed (non-daemon callers, tests
+    /// without subscribers) delivery is simply never attempted because the row has no subscribers.
+    @discardableResult public func finalizeAgentRow(_ record: AgentWindowRecord, reason: AgentTerminationReason) throws -> AgentWindowRecord? {
+        let engine = makeAgentNotificationEngine()
+        let alreadyFinalized = try agentRowIsFinalized(record)
+        switch reason {
+        case .destroyed(let terminateTerminalSession):
+            if !alreadyFinalized { try engine.childDidTransition(agent: record, transition: .exited) }
+            if terminateTerminalSession, let sessionID = record.terminalTrackingID, !sessionID.isEmpty { terminateBuiltInTerminalSession(sessionID) }
+            try store.deleteAgentSubscriptions(agentSessionID: record.id)
+            try store.deleteAgentWindow(id: record.id)
+            try removeAdHocTrackedWindowForAgent(
+                workspaceID: record.workspaceID, provider: record.provider, terminalTrackingID: record.terminalTrackingID)
+            if let sessionID = record.terminalTrackingID, !sessionID.isEmpty { try engine.subscriberDidExit(subscriberTerminalSessionID: sessionID) }
+            return nil
+        case .exited(let eventType, let eventSource, let environmentKeys):
+            if alreadyFinalized { return record }
+            try engine.childDidTransition(agent: record, transition: .exited)
+            let result = try handleAgentExit(record, eventType: eventType, eventSource: eventSource, environmentKeys: environmentKeys)
+            if let sessionID = record.terminalTrackingID, !sessionID.isEmpty { try engine.subscriberDidExit(subscriberTerminalSessionID: sessionID) }
+            return result
+        }
+    }
+
+    /// Terminates a coding-agent record through the finalization chokepoint. A stop is a hard destroy: it
+    /// terminates the backing terminal and deletes the row (even a configured launcher's) unconditionally.
+    /// Shared by the macOS sidebar / Device API stop (`stopCodingAgent`), restart (`restartCodingAgent`,
+    /// which stops the old child here before relaunching a fresh session/row), and `agent kill`'s
+    /// hook-signaled branch (`killAgentSession`).
     func stopCodingAgentRecord(_ record: AgentWindowRecord) throws {
-        if let sessionID = record.terminalTrackingID, !sessionID.isEmpty { terminateBuiltInTerminalSession(sessionID) }
-        appendAgentSessionEvent(
-            agentSessionID: record.id, eventType: "stop", source: "orchestrator",
-            message: agentSessionEventMessage(
-                provider: record.provider, label: record.label, terminalTrackingID: record.terminalTrackingID, sessionKey: record.sessionKey),
-            createdAt: nowISO8601())
-        try store.deleteAgentWindow(id: record.id)
-        try removeAdHocTrackedWindowForAgent(
-            workspaceID: record.workspaceID, provider: record.provider, terminalTrackingID: record.terminalTrackingID)
+        try finalizeAgentRow(record, reason: .destroyed(terminateTerminalSession: true))
     }
 
     func restartableCodingAgentLauncher(_ record: AgentWindowRecord) throws -> AgentLauncher {
@@ -647,6 +977,86 @@ extension WorkspaceOrchestrator {
         case .sessionRequest: return true
         case .unavailable: return false
         }
+    }
+
+    // MARK: - Orchestration rows (shared by the profile command surface and the Device API)
+
+    /// Trims an optional string to nil when empty, matching the daemon's `normalizedProfileArgument`
+    /// normalization so the shared orchestration rows carry exactly the values the profile surface did.
+    private func trimmedOrNilAgentField(_ value: String?) -> String? {
+        guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else { return nil }
+        return value
+    }
+
+    /// The coding agent's detected kind (claude/codex/opencode) for a terminal session — the `agent:`
+    /// field of an orchestration row — read only from the session's persisted foreground runtime state,
+    /// never the `.agent` launch title. This is the machine-readable identity remote notification
+    /// rendering uses as the `(<kind>)` parenthetical; keeping it off the launch title is what prevents a
+    /// "Reviewer (Reviewer)" duplication and preserves the claude/codex/opencode identity in listings.
+    /// Nil until a kind is detected, which renders honestly as "coding agent" downstream.
+    func agentRuntimeKind(terminalSessionID: String) -> String? {
+        guard let paths = try? TerminalSessionPaths.forSession(id: terminalSessionID),
+            let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths)
+        else { return nil }
+        return runtimeState.foregroundDetectedAgentKind?.displayLabel
+    }
+
+    /// Builds the orchestration view of coding-agent sessions shared by the local `agent list`/`status`
+    /// profile command and the Device API `listAgentSessions` handler, so both surfaces report identical
+    /// rows. `workspaceID` narrows to one workspace; `sessionID` narrows to the agent bound to that
+    /// terminal tracking id (single-agent `status` and readiness polling). `lastSignalAt` is the
+    /// readiness marker: nil until the agent's hooks emit their first lifecycle signal.
+    public func agentSessionRows(workspaceID: String? = nil, sessionID: String? = nil) throws -> [TerminalServiceAgentSessionRow] {
+        var rows: [TerminalServiceAgentSessionRow] = []
+        for project in try store.projects() {
+            for workspace in try store.workspaces(projectID: project.id, includeArchived: true) {
+                if let workspaceID, workspace.id != workspaceID { continue }
+                for agent in try store.agentWindows(workspaceID: workspace.id) where agent.provider == .spaces {
+                    let terminalSessionID = trimmedOrNilAgentField(agent.terminalTrackingID)
+                    if let sessionID, terminalSessionID != sessionID { continue }
+                    // `agent:` carries the detected kind (claude/codex/opencode), never the launch title;
+                    // `label:` carries the row's stored label — the workspace-unique visible name, which
+                    // signals keep fresh and collisions uniquify ("Reviewer 2"), so two children never
+                    // report the same label. Collapsing kind and label made remote rendering emit
+                    // "Reviewer (Reviewer)" and dropped the kind from listings.
+                    let detectedKind = terminalSessionID.flatMap { agentRuntimeKind(terminalSessionID: $0) }
+                    rows.append(
+                        TerminalServiceAgentSessionRow(
+                            id: agent.id, terminalSessionID: terminalSessionID, agent: detectedKind,
+                            label: trimmedOrNilAgentField(agent.label), status: agent.status.rawValue,
+                            note: trimmedOrNilAgentField(agent.note),
+                            projectID: project.id, projectName: project.name, workspaceID: workspace.id, workspaceName: workspace.displayName,
+                            workspaceDir: workspace.dir, branch: trimmedOrNilAgentField(workspace.branch), updatedAt: agent.updatedAt,
+                            lastSignalAt: try store.lastAgentSignalAt(agentSessionID: agent.id)))
+                }
+            }
+        }
+        return rows
+    }
+
+    /// Sets (or clears, with an empty note) a coding-agent session's explicit note, addressed by its
+    /// terminal session id, and returns the updated row. Shared by the profile `agentAnnotate` command
+    /// and the Device API `annotateAgentSession` handler so both sanitize identically. Errors loudly
+    /// when no agent row is bound to the session yet (annotation requires a hook-signaled agent).
+    @discardableResult public func annotateAgentSession(terminalSessionID: String, note: String) throws -> TerminalServiceAgentSessionRow {
+        guard let target = try agentSessionRows(sessionID: terminalSessionID).first else {
+            throw WorkspaceError.invalidArgument(
+                message: "No agent session for terminal \(terminalSessionID). Annotate requires an active coding-agent session (hook-signaled).")
+        }
+        let sanitized = Self.sanitizedAgentNote(note)
+        try store.setAgentSessionNote(id: target.id, note: sanitized.isEmpty ? nil : sanitized)
+        guard let updated = try agentSessionRows(sessionID: terminalSessionID).first else {
+            throw WorkspaceError.invalidArgument(message: "No agent session for terminal \(terminalSessionID).")
+        }
+        return updated
+    }
+
+    /// Notes are single-line, bounded, plain text: control characters (including any embedded newlines)
+    /// are removed so an annotation can never inject terminal control sequences or break the one-line
+    /// injection format, then the result is trimmed and capped.
+    public static func sanitizedAgentNote(_ note: String) -> String {
+        let stripped = String(note.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) })
+        return String(stripped.trimmingCharacters(in: .whitespacesAndNewlines).prefix(500))
     }
 
 }

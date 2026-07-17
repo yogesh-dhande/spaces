@@ -35,26 +35,18 @@ enum PanelLayoutEngine {
     /// target order for cycling.
     static func allPanes(in layout: PanelLayout) -> [Pane] { layout.tabs.flatMap { panes(in: $0) } }
 
-    static func orderedTerminalSessionIDs(in layout: PanelLayout) -> [String] {
-        allPanes(in: layout).compactMap { $0.content.terminalSessionID }
-    }
+    static func orderedTerminalSessionIDs(in layout: PanelLayout) -> [String] { allPanes(in: layout).compactMap { $0.content.terminalSessionID } }
 
-    static func pane(withID paneID: String, in layout: PanelLayout) -> Pane? {
-        allPanes(in: layout).first { $0.id == paneID }
-    }
+    static func pane(withID paneID: String, in layout: PanelLayout) -> Pane? { allPanes(in: layout).first { $0.id == paneID } }
 
     /// The tab and pane holding a given content descriptor, if any.
     static func location(of content: PaneContentDescriptor, in layout: PanelLayout) -> (tabID: String, paneID: String)? {
-        for tab in layout.tabs {
-            if let pane = panes(in: tab).first(where: { $0.content == content }) { return (tab.id, pane.id) }
-        }
+        for tab in layout.tabs { if let pane = panes(in: tab).first(where: { $0.content == content }) { return (tab.id, pane.id) } }
         return nil
     }
 
     static func location(ofPaneID paneID: String, in layout: PanelLayout) -> (tabID: String, paneID: String)? {
-        for tab in layout.tabs {
-            if panes(in: tab).contains(where: { $0.id == paneID }) { return (tab.id, paneID) }
-        }
+        for tab in layout.tabs { if panes(in: tab).contains(where: { $0.id == paneID }) { return (tab.id, paneID) } }
         return nil
     }
 
@@ -94,9 +86,9 @@ enum PanelLayoutEngine {
         return normalized(layout)
     }
 
-    private static func inserting(
-        newPane: Pane, near paneID: String, direction: PaneSplitDirection, newSplitID: String, in node: PaneNode
-    ) -> PaneNode? {
+    private static func inserting(newPane: Pane, near paneID: String, direction: PaneSplitDirection, newSplitID: String, in node: PaneNode)
+        -> PaneNode?
+    {
         switch node {
         case .leaf(let pane):
             guard pane.id == paneID else { return nil }
@@ -155,8 +147,7 @@ enum PanelLayoutEngine {
     /// Returns the node with the pane removed, nil when the node becomes empty.
     private static func removing(paneID: String, from node: PaneNode) -> PaneNode? {
         switch node {
-        case .leaf(let pane):
-            return pane.id == paneID ? nil : node
+        case .leaf(let pane): return pane.id == paneID ? nil : node
         case .split(var split):
             for (index, child) in split.children.enumerated() {
                 guard panes(in: child).contains(where: { $0.id == paneID }) else { continue }

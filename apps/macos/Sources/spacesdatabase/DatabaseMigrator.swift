@@ -6,6 +6,19 @@ import Foundation
     import SQLite3
 #endif
 
+/// Runs a multi-statement SQL batch on the raw connection handed to a migration step's `apply`
+/// closure. Migration steps operate on the bare `OpaquePointer` (the migrator owns the surrounding
+/// transaction), so they cannot reach `SpacesSQLiteDatabase.execute`; this mirrors its `sqlite3_exec`
+/// error surfacing.
+func migrationExecuteBatch(_ handle: OpaquePointer, sql: String) throws {
+    var errorMessage: UnsafeMutablePointer<CChar>?
+    if sqlite3_exec(handle, sql, nil, nil, &errorMessage) != SQLITE_OK {
+        let message = errorMessage.map { String(cString: $0) } ?? String(cString: sqlite3_errmsg(handle))
+        if let errorMessage { sqlite3_free(errorMessage) }
+        throw SpacesDatabaseError.migrationFailed(message: message)
+    }
+}
+
 public struct DatabaseMigrationStep: Sendable {
     public let fromVersion: Int
     public let toVersion: Int
@@ -36,52 +49,68 @@ public struct DatabaseMigrator: Sendable {
     }
 
     public func migrateIfNeeded(
-        existingTables: [String], schemaVersion: Int?, databasePath: String, databaseHandle: OpaquePointer,
-        createFreshSchema: @escaping () throws -> Void, setSchemaVersion: @escaping (Int) throws -> Void,
-        withTransaction: (() throws -> Void) throws -> Void, validateIntegrity: @escaping () throws -> Void
+        databasePath: String, databaseHandle: OpaquePointer, readExistingTables: @escaping () throws -> [String],
+        readSchemaVersion: @escaping () throws -> Int?, createFreshSchema: @escaping () throws -> Void,
+        setSchemaVersion: @escaping (Int) throws -> Void, withTransaction: @escaping (() throws -> Void) throws -> Void,
+        validateIntegrity: @escaping () throws -> Void, withMigrationAuthorization: (() throws -> Void) throws -> Void = { try $0() }
     ) throws {
-        if existingTables.isEmpty {
-            try withTransaction {
-                try createFreshSchema()
-                try setSchemaVersion(currentSchemaVersion)
-            }
-            try validateIntegrity()
-            return
+        let initialTables = try readExistingTables()
+        let initialVersion = try readSchemaVersion()
+        guard initialTables.isEmpty || initialVersion != currentSchemaVersion else { return }
+        if !initialTables.isEmpty, let initialVersion, initialVersion > currentSchemaVersion {
+            throw SpacesDatabaseError.migrationFailed(message: "Unsupported database schema version \(initialVersion) at \(databasePath).")
         }
 
-        guard var version = schemaVersion else {
-            throw SpacesDatabaseError.migrationFailed(message: "Unsupported database schema at \(databasePath): missing migration_state marker.")
-        }
-        guard version <= currentSchemaVersion else {
-            throw SpacesDatabaseError.migrationFailed(message: "Unsupported database schema version \(version) at \(databasePath).")
-        }
-        guard version < currentSchemaVersion else { return }
+        try withMigrationAuthorization {
+            // Authorization may wait for another helper to finish creating or upgrading this
+            // database. Re-read both values under the lock so this connection adopts that work
+            // instead of replaying a stale schema decision.
+            let existingTables = try readExistingTables()
+            let schemaVersion = try readSchemaVersion()
 
-        var backupURL: URL?
-        while version < currentSchemaVersion {
-            // Upgrades run serially: every intermediate version's step applies in order, so a
-            // missing step means the database cannot reach the current version at all.
-            guard let step = steps.first(where: { $0.fromVersion == version }) else {
-                throw SpacesDatabaseError.migrationFailed(
-                    message: "No migration step exists from schema version \(version); cannot reach version \(currentSchemaVersion).")
-            }
-
-            do {
-                if backupURL == nil, step.requiresBackup {
-                    backupURL = try backupManager.createMigrationBackup(
-                        sourceHandle: databaseHandle, fromVersion: step.fromVersion, toVersion: currentSchemaVersion)
-                }
+            if existingTables.isEmpty {
                 try withTransaction {
-                    try step.apply(databaseHandle)
-                    try setSchemaVersion(step.toVersion)
+                    try createFreshSchema()
+                    try setSchemaVersion(currentSchemaVersion)
                 }
-            } catch { throw migrationError(for: step, underlying: error, backupURL: backupURL) }
-            version = step.toVersion
-        }
+                try validateIntegrity()
+                return
+            }
 
-        do { try validateIntegrity() } catch {
-            let backupMessage = backupURL.map { " A pre-migration backup was saved to \($0.path)." } ?? ""
-            throw SpacesDatabaseError.migrationFailed(message: "Database migration integrity check failed for \(databasePath).\(backupMessage)")
+            guard var version = schemaVersion else {
+                throw SpacesDatabaseError.migrationFailed(message: "Unsupported database schema at \(databasePath): missing migration_state marker.")
+            }
+            guard version <= currentSchemaVersion else {
+                throw SpacesDatabaseError.migrationFailed(message: "Unsupported database schema version \(version) at \(databasePath).")
+            }
+            guard version < currentSchemaVersion else { return }
+
+            var backupURL: URL?
+            while version < currentSchemaVersion {
+                // Upgrades run serially: every intermediate version's step applies in order, so a
+                // missing step means the database cannot reach the current version at all.
+                guard let step = steps.first(where: { $0.fromVersion == version }) else {
+                    throw SpacesDatabaseError.migrationFailed(
+                        message: "No migration step exists from schema version \(version); cannot reach version \(currentSchemaVersion).")
+                }
+
+                do {
+                    if backupURL == nil, step.requiresBackup {
+                        backupURL = try backupManager.createMigrationBackup(
+                            sourceHandle: databaseHandle, fromVersion: step.fromVersion, toVersion: currentSchemaVersion)
+                    }
+                    try withTransaction {
+                        try step.apply(databaseHandle)
+                        try setSchemaVersion(step.toVersion)
+                    }
+                } catch { throw migrationError(for: step, underlying: error, backupURL: backupURL) }
+                version = step.toVersion
+            }
+
+            do { try validateIntegrity() } catch {
+                let backupMessage = backupURL.map { " A pre-migration backup was saved to \($0.path)." } ?? ""
+                throw SpacesDatabaseError.migrationFailed(message: "Database migration integrity check failed for \(databasePath).\(backupMessage)")
+            }
         }
     }
 

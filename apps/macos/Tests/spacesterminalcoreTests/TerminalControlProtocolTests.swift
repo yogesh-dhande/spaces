@@ -12,7 +12,8 @@ final class TerminalControlProtocolTests: XCTestCase {
         let request = TerminalControlRequest(
             command: "attach", authToken: "SECRET", text: "hello", bytes: Data([0, 10, 255]), clientID: "client-1", client: client,
             attachmentMode: .viewer, lineCount: 20, columns: 80, rows: 24, ownerEpoch: 7, resizeSerial: 3, scrollHorizontal: 1.5,
-            scrollVertical: -2.5, scrollMods: 7, appendNewline: true, asPaste: true, appearance: .light)
+            scrollVertical: -2.5, scrollMods: 7, scrollPointerX: 0.25, scrollPointerY: 0.75, scrollPointerMods: 9, appendNewline: true, asPaste: true,
+            appearance: .light)
         let response = TerminalControlResponse(ok: true, message: "ok")
 
         let decoded = try TerminalControlCodec.decodeRequest(TerminalControlCodec.encodeRequest(request))
@@ -60,6 +61,9 @@ final class TerminalControlProtocolTests: XCTestCase {
         XCTAssertEqual(request.scrollHorizontal, 1.5)
         XCTAssertEqual(request.scrollVertical, -2.5)
         XCTAssertNil(request.scrollMods)
+        XCTAssertNil(request.scrollPointerX)
+        XCTAssertNil(request.scrollPointerY)
+        XCTAssertNil(request.scrollPointerMods)
     }
 
     func testTypedCommandWrapperPreservesWireShape() throws {

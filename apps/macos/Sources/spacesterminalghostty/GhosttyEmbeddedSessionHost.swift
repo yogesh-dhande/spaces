@@ -39,7 +39,8 @@
         func pasteClipboardContents() -> Bool
         @discardableResult func sendTextAsPaste(_ text: String) -> Bool
         @discardableResult func performBindingAction(_ action: String) -> Bool
-        @discardableResult func sendScroll(horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32) -> Bool
+        @discardableResult func sendScroll(horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32, pointerPosition: TerminalScrollPointerPosition?)
+            -> Bool
         @discardableResult func clearScreenAndScrollback() -> Bool
         var debugSearchState: GhosttyTerminalSearchDebugState { get }
         var debugSurfaceRefreshRequestCount: Int { get }
@@ -50,7 +51,11 @@
 
     extension TerminalGhosttyRendererHosting {
         @discardableResult public func sendScroll(horizontal: CGFloat, vertical: CGFloat) -> Bool {
-            sendScroll(horizontal: horizontal, vertical: vertical, scrollMods: 0)
+            sendScroll(horizontal: horizontal, vertical: vertical, scrollMods: 0, pointerPosition: nil)
+        }
+
+        @discardableResult public func sendScroll(horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32) -> Bool {
+            sendScroll(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods, pointerPosition: nil)
         }
     }
 
@@ -163,9 +168,9 @@
             return sessionDriver.performBindingAction(action)
         }
 
-        @discardableResult public func sendScroll(horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32) -> Bool {
-            sessionDriver.sendScroll(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods)
-        }
+        @discardableResult public func sendScroll(
+            horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32, pointerPosition: TerminalScrollPointerPosition?
+        ) -> Bool { sessionDriver.sendScroll(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods, pointerPosition: pointerPosition) }
 
         @discardableResult public func clearScreenAndScrollback() -> Bool { clearScreenAndScrollbackAction() }
 
@@ -260,6 +265,10 @@
 
         private let controlQueue: DispatchQueue
         private let stateStreamQueue: DispatchQueue
+        /// Orders every control-request input write (send text/bytes/paste, key) for this session and
+        /// spaces submit carriage returns so they read as lone Enter keystrokes; see
+        /// `TerminalControlInputSequencer`.
+        private let controlInputSequencer = TerminalControlInputSequencer()
         private let sessionDriver: GhosttyEmbeddedTerminalSessionDriver
         private lazy var rendererHostStorage = GhosttyHeadlessRendererHost(
             sessionDriver: sessionDriver, clearScreenAndScrollbackAction: { [weak self] in self?.clearScreenAndScrollback() ?? false })
@@ -869,25 +878,53 @@
                     return TerminalControlResponse(ok: false, message: "Paste input requires text payload.", errorCode: .invalidArgument)
                 }
                 if request.appendNewline { text.append("\n") }
+                guard !text.isEmpty else { return TerminalControlResponse(ok: false, message: "Missing input payload.", errorCode: .invalidArgument) }
                 markLocalOwnerCommandInputOutputResyncPending()
-                guard rendererHostStorage.sendTextAsPaste(text) else {
-                    return TerminalControlResponse(ok: false, message: "Missing input payload.", errorCode: .invalidArgument)
-                }
+                let pasteText = text
+                controlInputSequencer.enqueueWrite { [weak self] in await MainActor.run { _ = self?.rendererHostStorage.sendTextAsPaste(pasteText) } }
                 TerminalPerformance.logMetric(
                     "terminal_control_send", target: "session=\(launchConfiguration.sessionID)",
                     elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true, detail: "bytes=\(text.utf8.count)")
                 return TerminalControlResponse(ok: true, message: "Sent input.")
             } else {
-                guard var payload = request.inputPayload else {
+                guard let payload = request.inputPayload else {
                     return TerminalControlResponse(ok: false, message: "Missing input payload.", errorCode: .invalidArgument)
                 }
-                if request.appendNewline { payload.append(0x0A) }
                 markLocalOwnerCommandInputOutputResyncPending()
-                rendererHostStorage.sendRawBytes(payload)
+                // Submit-safe send: a text payload with appendNewline is a "submit" (type this, press Enter).
+                // Agent TUIs (Claude Code, Codex) treat text bytes immediately followed by the carriage
+                // return, arriving in one PTY read burst, as a pasted block and leave it unsubmitted in the
+                // composer. So the text (which may itself contain newlines, e.g. a multi-line notification)
+                // is written first, and the CR (0x0D) is written as a separate burst after a short delay so
+                // the TUI reads it as a distinct Enter keystroke that submits. Enter is a CR because shells
+                // and Claude Code accept LF or CR while Codex submits only on CR. An empty text with
+                // appendNewline is a bare Enter (e.g. answering a TUI dialog): send the CR immediately, there
+                // is nothing to separate. Byte payloads are opaque input rather than composer text, so they
+                // keep the single inline write. Writes land shortly after the response through the
+                // sequencer, which keeps the text+CR pair ordered against every later input write.
+                let isTextPayload = request.bytes == nil
+                if request.appendNewline, isTextPayload, !payload.isEmpty {
+                    enqueueControlInputWrite(payload)
+                    enqueueControlSubmitCarriageReturn()
+                } else {
+                    var bytes = payload
+                    if request.appendNewline { bytes.append(0x0D) }
+                    enqueueControlInputWrite(bytes)
+                }
                 TerminalPerformance.logMetric(
                     "terminal_control_send", target: "session=\(launchConfiguration.sessionID)",
                     elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true, detail: "bytes=\(payload.count)")
                 return TerminalControlResponse(ok: true, message: "Sent input.")
+            }
+        }
+
+        private func enqueueControlInputWrite(_ bytes: Data) {
+            controlInputSequencer.enqueueWrite { [weak self] in await MainActor.run { self?.rendererHostStorage.sendRawBytes(bytes) } }
+        }
+
+        private func enqueueControlSubmitCarriageReturn() {
+            controlInputSequencer.enqueueSubmitCarriageReturn { [weak self] in
+                await MainActor.run { self?.rendererHostStorage.sendRawBytes(Data([0x0D])) }
             }
         }
 
@@ -908,7 +945,7 @@
                 return TerminalControlResponse(ok: false, message: "Unsupported terminal key.", errorCode: .invalidArgument)
             }
             if bytes.contains(0x0D) { markLocalOwnerCommandInputOutputResyncPending() }
-            rendererHostStorage.sendRawBytes(Data(bytes))
+            enqueueControlInputWrite(Data(bytes))
             TerminalPerformance.logMetric(
                 "terminal_control_key", target: "session=\(launchConfiguration.sessionID)",
                 elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true, detail: "key=\(key)")
@@ -944,6 +981,19 @@
             let horizontal = CGFloat(request.scrollHorizontal ?? 0)
             let vertical = CGFloat(request.scrollVertical ?? 0)
             let scrollMods = request.scrollMods ?? 0
+            let pointerPosition: TerminalScrollPointerPosition?
+            switch (request.scrollPointerX, request.scrollPointerY, request.scrollPointerMods) {
+            case (nil, nil, nil): pointerPosition = nil
+            case (let x?, let y?, let mods):
+                let position = TerminalScrollPointerPosition(x: x, y: y, mods: mods ?? 0)
+                guard position.isValid else {
+                    return TerminalControlResponse(ok: false, message: "Invalid terminal scroll pointer position.", errorCode: .invalidArgument)
+                }
+                pointerPosition = position
+            default:
+                return TerminalControlResponse(
+                    ok: false, message: "Terminal scroll pointer coordinates must be provided together.", errorCode: .invalidArgument)
+            }
             guard horizontal != 0 || vertical != 0 || scrollMods != 0 else {
                 return TerminalControlResponse(ok: true, message: "Ignored zero scroll delta.")
             }
@@ -952,7 +1002,8 @@
                 logMobileTakeoverPerformance(
                     name: "owner_input_activity", attributes: ["owner_kind": ownerClient.kind.rawValue, "interactive": "1", "input_kind": "scroll"])
             }
-            let scrolled = rendererHostStorage.sendScroll(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods)
+            let scrolled = rendererHostStorage.sendScroll(
+                horizontal: horizontal, vertical: vertical, scrollMods: scrollMods, pointerPosition: pointerPosition)
             if scrolled { broadcastCurrentState(reason: TerminalRemoteSessionStateReason.scroll) }
             TerminalPerformance.logMetric(
                 "terminal_control_scroll", target: "session=\(launchConfiguration.sessionID)",
@@ -1786,8 +1837,10 @@
 
         @discardableResult public func performBindingAction(_ action: String) -> Bool { core.rendererHost.performBindingAction(action) }
 
-        @discardableResult public func sendScroll(horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32) -> Bool {
-            core.rendererHost.sendScroll(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods)
+        @discardableResult public func sendScroll(
+            horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32, pointerPosition: TerminalScrollPointerPosition?
+        ) -> Bool {
+            core.rendererHost.sendScroll(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods, pointerPosition: pointerPosition)
         }
 
         @discardableResult public func clearScreenAndScrollback() -> Bool { core.rendererHost.clearScreenAndScrollback() }

@@ -17,6 +17,9 @@ public struct TerminalControlRequest: Codable, Sendable, Equatable {
     public let scrollHorizontal: Double?
     public let scrollVertical: Double?
     public let scrollMods: Int32?
+    public let scrollPointerX: Double?
+    public let scrollPointerY: Double?
+    public let scrollPointerMods: UInt32?
     public let appendNewline: Bool
     public let asPaste: Bool
     /// The attaching client's OS appearance (light/dark). Carried on `attach` so a remote daemon can
@@ -27,7 +30,8 @@ public struct TerminalControlRequest: Codable, Sendable, Equatable {
         command: String, authToken: String? = nil, text: String? = nil, bytes: Data? = nil, key: String? = nil, clientID: String? = nil,
         client: TerminalClient? = nil, attachmentMode: TerminalAttachmentMode? = nil, lineCount: Int? = nil, columns: Int? = nil, rows: Int? = nil,
         ownerEpoch: UInt64? = nil, resizeSerial: UInt64? = nil, scrollHorizontal: Double? = nil, scrollVertical: Double? = nil,
-        scrollMods: Int32? = nil, appendNewline: Bool = false, asPaste: Bool = false, appearance: ThemeAppearance? = nil
+        scrollMods: Int32? = nil, scrollPointerX: Double? = nil, scrollPointerY: Double? = nil, scrollPointerMods: UInt32? = nil,
+        appendNewline: Bool = false, asPaste: Bool = false, appearance: ThemeAppearance? = nil
     ) {
         self.command = command
         self.authToken = authToken
@@ -45,6 +49,9 @@ public struct TerminalControlRequest: Codable, Sendable, Equatable {
         self.scrollHorizontal = scrollHorizontal
         self.scrollVertical = scrollVertical
         self.scrollMods = scrollMods
+        self.scrollPointerX = scrollPointerX
+        self.scrollPointerY = scrollPointerY
+        self.scrollPointerMods = scrollPointerMods
         self.appendNewline = appendNewline
         self.asPaste = asPaste
         self.appearance = appearance
@@ -73,7 +80,8 @@ public struct TerminalControlRequest: Codable, Sendable, Equatable {
         case .scroll(let payload):
             self.init(
                 command: command.name, authToken: authToken, clientID: payload.clientID, ownerEpoch: payload.ownerEpoch,
-                scrollHorizontal: payload.scrollHorizontal, scrollVertical: payload.scrollVertical, scrollMods: payload.scrollMods)
+                scrollHorizontal: payload.scrollHorizontal, scrollVertical: payload.scrollVertical, scrollMods: payload.scrollMods,
+                scrollPointerX: payload.scrollPointerX, scrollPointerY: payload.scrollPointerY, scrollPointerMods: payload.scrollPointerMods)
         case .setAppearance(let payload):
             self.init(command: command.name, authToken: authToken, clientID: payload.clientID, appearance: payload.appearance)
         case .unsupported(let name): self.init(command: name, authToken: authToken)
@@ -97,6 +105,9 @@ public struct TerminalControlRequest: Codable, Sendable, Equatable {
         case scrollHorizontal
         case scrollVertical
         case scrollMods
+        case scrollPointerX
+        case scrollPointerY
+        case scrollPointerMods
         case appendNewline
         case asPaste
         case appearance
@@ -120,6 +131,9 @@ public struct TerminalControlRequest: Codable, Sendable, Equatable {
         scrollHorizontal = try container.decodeIfPresent(Double.self, forKey: .scrollHorizontal)
         scrollVertical = try container.decodeIfPresent(Double.self, forKey: .scrollVertical)
         scrollMods = try container.decodeIfPresent(Int32.self, forKey: .scrollMods)
+        scrollPointerX = try container.decodeIfPresent(Double.self, forKey: .scrollPointerX)
+        scrollPointerY = try container.decodeIfPresent(Double.self, forKey: .scrollPointerY)
+        scrollPointerMods = try container.decodeIfPresent(UInt32.self, forKey: .scrollPointerMods)
         appendNewline = try container.decodeIfPresent(Bool.self, forKey: .appendNewline) ?? false
         asPaste = try container.decodeIfPresent(Bool.self, forKey: .asPaste) ?? false
         appearance = try container.decodeIfPresent(ThemeAppearance.self, forKey: .appearance)
@@ -143,6 +157,9 @@ public struct TerminalControlRequest: Codable, Sendable, Equatable {
         try container.encodeIfPresent(scrollHorizontal, forKey: .scrollHorizontal)
         try container.encodeIfPresent(scrollVertical, forKey: .scrollVertical)
         try container.encodeIfPresent(scrollMods, forKey: .scrollMods)
+        try container.encodeIfPresent(scrollPointerX, forKey: .scrollPointerX)
+        try container.encodeIfPresent(scrollPointerY, forKey: .scrollPointerY)
+        try container.encodeIfPresent(scrollPointerMods, forKey: .scrollPointerMods)
         try container.encode(appendNewline, forKey: .appendNewline)
         try container.encode(asPaste, forKey: .asPaste)
         try container.encodeIfPresent(appearance, forKey: .appearance)
@@ -247,13 +264,22 @@ public struct TerminalControlScrollPayload: Sendable, Equatable {
     public let scrollHorizontal: Double?
     public let scrollVertical: Double?
     public let scrollMods: Int32?
+    public let scrollPointerX: Double?
+    public let scrollPointerY: Double?
+    public let scrollPointerMods: UInt32?
 
-    public init(clientID: String?, ownerEpoch: UInt64?, scrollHorizontal: Double?, scrollVertical: Double?, scrollMods: Int32?) {
+    public init(
+        clientID: String?, ownerEpoch: UInt64?, scrollHorizontal: Double?, scrollVertical: Double?, scrollMods: Int32?, scrollPointerX: Double? = nil,
+        scrollPointerY: Double? = nil, scrollPointerMods: UInt32? = nil
+    ) {
         self.clientID = clientID
         self.ownerEpoch = ownerEpoch
         self.scrollHorizontal = scrollHorizontal
         self.scrollVertical = scrollVertical
         self.scrollMods = scrollMods
+        self.scrollPointerX = scrollPointerX
+        self.scrollPointerY = scrollPointerY
+        self.scrollPointerMods = scrollPointerMods
     }
 }
 
@@ -294,7 +320,8 @@ public enum TerminalControlCommand: Sendable, Equatable {
             self = .scroll(
                 TerminalControlScrollPayload(
                     clientID: request.clientID, ownerEpoch: request.ownerEpoch, scrollHorizontal: request.scrollHorizontal,
-                    scrollVertical: request.scrollVertical, scrollMods: request.scrollMods))
+                    scrollVertical: request.scrollVertical, scrollMods: request.scrollMods, scrollPointerX: request.scrollPointerX,
+                    scrollPointerY: request.scrollPointerY, scrollPointerMods: request.scrollPointerMods))
         case "setAppearance": self = .setAppearance(TerminalControlSetAppearancePayload(clientID: request.clientID, appearance: request.appearance))
         default: self = .unsupported(request.command)
         }

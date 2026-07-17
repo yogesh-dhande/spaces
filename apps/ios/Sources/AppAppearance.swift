@@ -9,9 +9,7 @@ enum AppAppearanceStorage {
 
     /// The appearance mode the app is currently persisting, for non-View callers (the terminal
     /// viewer model) that need it without an `@AppStorage` binding.
-    static var current: AppAppearanceMode {
-        AppAppearanceMode(persistedRawValue: UserDefaults.standard.string(forKey: key))
-    }
+    static var current: AppAppearanceMode { AppAppearanceMode(persistedRawValue: UserDefaults.standard.string(forKey: key)) }
 }
 
 extension AppAppearanceMode {

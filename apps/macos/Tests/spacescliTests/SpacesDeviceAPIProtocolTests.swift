@@ -70,6 +70,59 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
         XCTAssertNil(try SpacesDeviceAPICodec.decodeResponse(jsonWithoutErrorCode).errorCode)
     }
 
+    func testSpawnAgentSessionRequestRoundTripsAndIsNotReplaySafe() throws {
+        let request = SpacesDeviceAPIRequest(
+            command: .spawnAgentSession(.init(workspaceID: "workspace-1", command: "codex --yolo", title: "Reviewer")), authToken: "SECRET")
+
+        XCTAssertEqual(request.commandName, "spawnAgentSession")
+        // A spawn creates a session; a replayed spawn after an ambiguous failure could start two.
+        XCTAssertFalse(request.isSafeToReplayAfterConnectionFailure)
+        XCTAssertEqual(try SpacesDeviceAPICodec.decodeRequest(SpacesDeviceAPICodec.encodeRequest(request)), request)
+    }
+
+    func testListAgentSessionsRequestRoundTripsAndIsReplaySafe() throws {
+        let request = SpacesDeviceAPIRequest(command: .listAgentSessions(.init(sessionID: "agent-session")), authToken: "SECRET")
+
+        XCTAssertEqual(request.commandName, "listAgentSessions")
+        // A read-only listing (also the remote readiness poll) is safe to replay.
+        XCTAssertTrue(request.isSafeToReplayAfterConnectionFailure)
+        XCTAssertEqual(try SpacesDeviceAPICodec.decodeRequest(SpacesDeviceAPICodec.encodeRequest(request)), request)
+    }
+
+    func testAnnotateAgentSessionRequestRoundTripsAndIsNotReplaySafe() throws {
+        let request = SpacesDeviceAPIRequest(
+            command: .annotateAgentSession(.init(sessionID: "agent-session", note: "review auth")), authToken: "SECRET")
+
+        XCTAssertEqual(request.commandName, "annotateAgentSession")
+        XCTAssertFalse(request.isSafeToReplayAfterConnectionFailure)
+        XCTAssertEqual(try SpacesDeviceAPICodec.decodeRequest(SpacesDeviceAPICodec.encodeRequest(request)), request)
+    }
+
+    func testKillAgentSessionRequestRoundTripsAndIsNotReplaySafe() throws {
+        let request = SpacesDeviceAPIRequest(command: .killAgentSession(.init(sessionID: "agent-session")), authToken: "SECRET")
+
+        XCTAssertEqual(request.commandName, "killAgentSession")
+        // Killing a session is a mutation; a replay after an ambiguous failure could kill a session
+        // reusing the id, so it is not replay-safe.
+        XCTAssertFalse(request.isSafeToReplayAfterConnectionFailure)
+        XCTAssertEqual(try SpacesDeviceAPICodec.decodeRequest(SpacesDeviceAPICodec.encodeRequest(request)), request)
+    }
+
+    func testAgentSessionsResultRoundTripsThroughResponse() throws {
+        let row = SpacesDeviceAgentSessionRow(
+            id: "agent-1", terminalSessionID: "session-1", agent: "Claude Code CLI", label: "Claude Code CLI", status: "waiting", note: "review auth",
+            projectID: "project-1", projectName: "Spaces", workspaceID: "workspace-1", workspaceName: "feature",
+            workspaceDir: "/repo/workspaces/feature", branch: "feature", updatedAt: "2026-07-14T00:00:00Z", lastSignalAt: "2026-07-14T00:00:01Z")
+        let response = SpacesDeviceAPIResponse(ok: true, message: "Listed agent sessions.", result: .agentSessions(.init(rows: [row])))
+
+        let decoded = try SpacesDeviceAPICodec.decodeResponse(SpacesDeviceAPICodec.encodeResponse(response))
+
+        XCTAssertEqual(decoded, response)
+        XCTAssertEqual(decoded.agentSessions?.first, row)
+        XCTAssertEqual(decoded.agentSessions?.first?.note, "review auth")
+        XCTAssertEqual(decoded.agentSessions?.first?.lastSignalAt, "2026-07-14T00:00:01Z")
+    }
+
     func testDeviceOverviewStreamCodecRoundTripsPayload() throws {
         let payload = SpacesDeviceOverviewPayload(workspaces: [], sessions: [])
         let line = try SpacesDeviceOverviewStreamCodec.encodeLine(payload)
@@ -170,7 +223,7 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
             command: .terminalControl(
                 .init(
                     action: .scroll, sessionID: "session-1", clientID: "ios-client", ownerEpoch: 3, scrollHorizontal: 1.5, scrollVertical: -2.5,
-                    scrollMods: 7)), authToken: "SECRET")
+                    scrollMods: 7, scrollPointerX: 0.25, scrollPointerY: 0.75, scrollPointerMods: 9)), authToken: "SECRET")
 
         XCTAssertEqual(try SpacesDeviceAPICodec.decodeRequest(SpacesDeviceAPICodec.encodeRequest(request)), request)
     }
@@ -250,7 +303,7 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
             backend: .ghosttyEmbedded, lifetimePolicy: .persistent, servicePID: 123, childPID: 456, workspaceID: "workspace-1",
             workspaceTitle: "Feature", projectID: "project-1", projectName: "Project", createdAt: "2026-01-01T00:00:00Z",
             updatedAt: "2026-01-01T00:00:01Z", isControlAvailable: true, isSubscriptionAvailable: true,
-            attachmentSnapshot: TerminalSessionAttachmentSnapshot())
+            attachmentSnapshot: TerminalSessionAttachmentSnapshot(), foregroundDetectedAgentKind: "codex")
         let overview = SpacesDeviceOverviewPayload(
             workspaces: [
                 SpacesDeviceWorkspaceSummary(
@@ -266,6 +319,7 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
         XCTAssertEqual(decoded.overview?.workspaces.first?.terminalRows.first, terminalRow)
         XCTAssertEqual(decoded.overview?.sessions.first?.shell, "/bin/zsh")
         XCTAssertEqual(decoded.overview?.sessions.first?.command, "npm run dev")
+        XCTAssertEqual(decoded.overview?.sessions.first?.foregroundDetectedAgentKind, "codex")
         let encodedResponse = try SpacesDeviceAPICodec.encodeResponse(SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview)))
         XCTAssertFalse(String(data: encodedResponse, encoding: .utf8)?.contains("authToken") == true)
     }
@@ -392,6 +446,19 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
         XCTAssertNil(SpacesDeviceTerminalLinkClassifier.route(for: "mailto:x@y.z"))
         XCTAssertNil(SpacesDeviceTerminalLinkClassifier.route(for: ""))
         XCTAssertNil(SpacesDeviceTerminalLinkClassifier.route(for: "   "))
+    }
+
+    func testTerminalLinkRouteClassifiesSpacesTerminalDeepLinks() {
+        XCTAssertEqual(
+            SpacesDeviceTerminalLinkClassifier.route(for: "spaces://terminal/session-1"),
+            .spacesTerminal(SpacesTerminalDeepLink(sessionID: "session-1")))
+        XCTAssertEqual(
+            SpacesDeviceTerminalLinkClassifier.route(for: "spaces://terminal/session-1?device=device-9"),
+            .spacesTerminal(SpacesTerminalDeepLink(sessionID: "session-1", deviceID: "device-9")))
+        // Malformed `spaces://` links (pairing host, missing or multi-segment path) are not routable.
+        XCTAssertNil(SpacesDeviceTerminalLinkClassifier.route(for: "spaces://pair?code=abc"))
+        XCTAssertNil(SpacesDeviceTerminalLinkClassifier.route(for: "spaces://terminal"))
+        XCTAssertNil(SpacesDeviceTerminalLinkClassifier.route(for: "spaces://terminal/session-1/extra"))
     }
 
     func testTerminalLinkClassifierIsLoopbackHost() {

@@ -72,6 +72,10 @@
 
         private let controlQueue: DispatchQueue
         private let stateStreamQueue: DispatchQueue
+        /// Orders every control-request input write (send text/bytes/paste, key) for this session and
+        /// spaces submit carriage returns so they read as lone Enter keystrokes; see
+        /// `TerminalControlInputSequencer`.
+        private let controlInputSequencer = TerminalControlInputSequencer()
         private let ptyDriver: HostManagedPTYTerminalSessionDriver
         private let outputDeliveryFence = GhosttyLinuxHandoffOutputDeliveryFence()
         private var controlServer: TerminalControlServer?
@@ -521,16 +525,38 @@
                     return TerminalControlResponse(ok: false, message: "Unable to encode paste input.", errorCode: .internalError)
                 }
                 markLocalOwnerCommandInputOutputResyncPending()
-                ptyDriver.sendRawBytes(payload)
+                enqueueControlInputWrite(payload)
                 return TerminalControlResponse(ok: true, message: "Sent input.")
             }
-            guard var payload = request.inputPayload else {
+            guard let payload = request.inputPayload else {
                 return TerminalControlResponse(ok: false, message: "Missing input payload.", errorCode: .invalidArgument)
             }
-            if request.appendNewline { payload.append(0x0A) }
             markLocalOwnerCommandInputOutputResyncPending()
-            ptyDriver.sendRawBytes(payload)
+            // Submit-safe two-write split for text payloads; see GhosttyEmbeddedSessionHost for the
+            // paste-heuristic rationale and TerminalControlInputSequencer for the ordering guarantee. A
+            // bare Enter (empty text) and opaque byte payloads keep the single (still sequenced) write.
+            let isTextPayload = request.bytes == nil
+            if request.appendNewline, isTextPayload, !payload.isEmpty {
+                enqueueControlInputWrite(payload)
+                enqueueControlSubmitCarriageReturn()
+            } else {
+                var bytes = payload
+                if request.appendNewline { bytes.append(0x0D) }
+                enqueueControlInputWrite(bytes)
+            }
             return TerminalControlResponse(ok: true, message: "Sent input.")
+        }
+
+        private func enqueueControlInputWrite(_ bytes: Data) {
+            controlInputSequencer.enqueueWrite { [weak self] in
+                await MainActor.run { self?.ptyDriver.sendRawBytes(bytes) }
+            }
+        }
+
+        private func enqueueControlSubmitCarriageReturn() {
+            controlInputSequencer.enqueueSubmitCarriageReturn { [weak self] in
+                await MainActor.run { self?.ptyDriver.sendRawBytes(Data([0x0D])) }
+            }
         }
 
         private func encodePastePayload(_ text: String) -> Data? {
@@ -557,7 +583,7 @@
                 return TerminalControlResponse(ok: false, message: "Unsupported terminal key.", errorCode: .invalidArgument)
             }
             if bytes.contains(0x0D) { markLocalOwnerCommandInputOutputResyncPending() }
-            ptyDriver.sendRawBytes(Data(bytes))
+            enqueueControlInputWrite(Data(bytes))
             return TerminalControlResponse(ok: true, message: "Sent key.")
         }
 

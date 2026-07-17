@@ -20,74 +20,42 @@
         var body: some View {
             VStack(spacing: 0) {
                 statusHeader
-                Rectangle()
-                    .fill(Theme.border)
-                    .frame(height: 1)
+                Rectangle().fill(Theme.border).frame(height: 1)
                 if let smokeURL = model.smokeURL {
                     WebProbeView(
-                        url: smokeURL,
-                        reloadToken: reloadToken,
-                        onCommit: { model.recordNavigationCommit() },
-                        onFail: { model.recordNavigationFailure($0) }
-                    )
+                        url: smokeURL, reloadToken: reloadToken, onCommit: { model.recordNavigationCommit() },
+                        onFail: { model.recordNavigationFailure($0) })
                 } else {
-                    Color.clear
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    Color.clear.frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
-            }
-            .background(Theme.bg)
-            .navigationTitle("Browser Proxy Smoke Test")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .primaryAction) {
-                    Button("Retry") { retry() }
-                }
-            }
-            .task { model.start() }
-            .onDisappear { model.stop() }
+            }.background(Theme.bg).navigationTitle("Browser Proxy Smoke Test").navigationBarTitleDisplayMode(.inline).toolbar {
+                ToolbarItem(placement: .primaryAction) { Button("Retry") { retry() } }
+            }.task { model.start() }.onDisappear { model.stop() }
         }
 
         private var statusHeader: some View {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 8) {
                     StatusDot(kind: statusDotKind)
-                    Text(statusTitle)
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(Theme.text)
+                    Text(statusTitle).font(.system(size: 15, weight: .semibold)).foregroundStyle(Theme.text)
                     Spacer(minLength: 0)
                 }
-                Text(statusDetailText)
-                    .font(.footnote)
-                    .foregroundStyle(Theme.muted)
-                if let listenerErrorMessage = model.listenerErrorMessage {
-                    Text(listenerErrorMessage)
-                        .font(.footnote)
-                        .foregroundStyle(Theme.red)
-                }
-                if case let .failed(domain, code, description) = model.navigationOutcome {
-                    Text("\(domain) (\(code)): \(description)")
-                        .font(.footnote.monospaced())
-                        .foregroundStyle(Theme.red)
+                Text(statusDetailText).font(.footnote).foregroundStyle(Theme.muted)
+                if let listenerErrorMessage = model.listenerErrorMessage { Text(listenerErrorMessage).font(.footnote).foregroundStyle(Theme.red) }
+                if case .failed(let domain, let code, let description) = model.navigationOutcome {
+                    Text("\(domain) (\(code)): \(description)").font(.footnote.monospaced()).foregroundStyle(Theme.red)
                 }
                 HStack(spacing: 8) {
                     Text(model.sawExpectedHost ? "Host header seen" : "Host header not seen")
                     Text("·")
                     Text(navigationStatusText)
-                }
-                .font(.system(size: 11))
-                .foregroundStyle(Theme.muted)
-            }
-            .padding(14)
-            .background(Theme.surface)
+                }.font(.system(size: 11)).foregroundStyle(Theme.muted)
+            }.padding(14).background(Theme.surface)
         }
 
-        private var isPassing: Bool {
-            model.sawExpectedHost && model.navigationOutcome == .committed
-        }
+        private var isPassing: Bool { model.sawExpectedHost && model.navigationOutcome == .committed }
 
-        private var isFailing: Bool {
-            model.listenerErrorMessage != nil || isNavigationFailed
-        }
+        private var isFailing: Bool { model.listenerErrorMessage != nil || isNavigationFailed }
 
         private var isNavigationFailed: Bool {
             if case .failed = model.navigationOutcome { return true }
@@ -137,9 +105,7 @@
         let onCommit: @MainActor @Sendable () -> Void
         let onFail: @MainActor @Sendable (Error) -> Void
 
-        func makeCoordinator() -> Coordinator {
-            Coordinator(onCommit: onCommit, onFail: onFail)
-        }
+        func makeCoordinator() -> Coordinator { Coordinator(onCommit: onCommit, onFail: onFail) }
 
         func makeUIView(context: Context) -> WKWebView {
             let webView = WKWebView(frame: .zero)
@@ -165,17 +131,11 @@
                 self.onFail = onFail
             }
 
-            func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
-                onCommit()
-            }
+            func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) { onCommit() }
 
-            func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-                onFail(error)
-            }
+            func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { onFail(error) }
 
-            func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-                onFail(error)
-            }
+            func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { onFail(error) }
         }
     }
 
@@ -184,15 +144,11 @@
     /// off the main thread; each one hops back via `Task { @MainActor in }`
     /// before touching model state, since this class is `@MainActor`-isolated
     /// (Swift 6 strict concurrency, no `DispatchQueue.main.async`).
-    @MainActor
-    @Observable
-    final class BrowserProxySmokeTestModel {
+    @MainActor @Observable final class BrowserProxySmokeTestModel {
         static let hostname = "smoke.abc123.localhost"
         static let expectedHostHeader = "Host: \(hostname)"
 
-        static func makeSmokeURL(port: NWEndpoint.Port) -> URL {
-            URL(string: "http://\(hostname):\(port.rawValue)/")!
-        }
+        static func makeSmokeURL(port: NWEndpoint.Port) -> URL { URL(string: "http://\(hostname):\(port.rawValue)/")! }
 
         enum NavigationOutcome: Equatable {
             case pending
@@ -236,9 +192,7 @@
                 }
                 self.listener = listener
                 listener.start(queue: .main)
-            } catch {
-                listenerErrorMessage = "Failed to start listener: \(error.localizedDescription)"
-            }
+            } catch { listenerErrorMessage = "Failed to start listener: \(error.localizedDescription)" }
         }
 
         func stop() {
@@ -246,25 +200,17 @@
             listener?.newConnectionHandler = nil
             listener?.cancel()
             listener = nil
-            for connection in connectionsByID.values {
-                connection.cancel()
-            }
+            for connection in connectionsByID.values { connection.cancel() }
             connectionsByID.removeAll()
             listenerPort = nil
             smokeURL = nil
         }
 
-        func recordNavigationCommit() {
-            navigationOutcome = .committed
-        }
+        func recordNavigationCommit() { navigationOutcome = .committed }
 
         func recordNavigationFailure(_ error: Error) {
             let nsError = error as NSError
-            navigationOutcome = .failed(
-                domain: nsError.domain,
-                code: nsError.code,
-                description: nsError.localizedDescription
-            )
+            navigationOutcome = .failed(domain: nsError.domain, code: nsError.code, description: nsError.localizedDescription)
         }
 
         private func handleListenerState(_ state: NWListener.State) {
@@ -291,10 +237,8 @@
                 }
                 listenerPort = port
                 smokeURL = Self.makeSmokeURL(port: port)
-            case .setup, .cancelled:
-                break
-            @unknown default:
-                break
+            case .setup, .cancelled: break
+            @unknown default: break
             }
         }
 
@@ -310,9 +254,7 @@
             connectionsByID[id] = connection
             connection.stateUpdateHandler = { [weak self] state in
                 guard let self else { return }
-                if case .failed = state {
-                    Task { @MainActor in self.removeConnection(id) }
-                }
+                if case .failed = state { Task { @MainActor in self.removeConnection(id) } }
             }
             connection.start(queue: .main)
             connection.receive(minimumIncompleteLength: 1, maximumLength: 16_384) { [weak self] data, _, _, _ in
@@ -325,20 +267,15 @@
             // The connection may already have been torn down (e.g. peer reset) by the
             // time this hops back onto the main actor; ignore stale callbacks.
             guard connectionsByID[id] != nil else { return }
-            if let data, let head = String(data: data, encoding: .utf8), head.contains(Self.expectedHostHeader) {
-                sawExpectedHost = true
-            }
+            if let data, let head = String(data: data, encoding: .utf8), head.contains(Self.expectedHostHeader) { sawExpectedHost = true }
             respond(on: connection, id: id)
         }
 
         private func respond(on connection: NWConnection, id: ObjectIdentifier) {
             let body = "<h1>smoke ok</h1>"
-            let response = "HTTP/1.1 200 OK\r\n"
-                + "Content-Type: text/html; charset=utf-8\r\n"
-                + "Content-Length: \(body.utf8.count)\r\n"
-                + "Connection: close\r\n"
-                + "\r\n"
-                + body
+            let response =
+                "HTTP/1.1 200 OK\r\n" + "Content-Type: text/html; charset=utf-8\r\n" + "Content-Length: \(body.utf8.count)\r\n"
+                + "Connection: close\r\n" + "\r\n" + body
             connection.send(
                 content: Data(response.utf8),
                 completion: .contentProcessed { [weak self] _ in
@@ -347,14 +284,9 @@
                         return
                     }
                     Task { @MainActor in self.removeConnection(id) }
-                }
-            )
+                })
         }
 
-        private func removeConnection(_ id: ObjectIdentifier) {
-            if let connection = connectionsByID.removeValue(forKey: id) {
-                connection.cancel()
-            }
-        }
+        private func removeConnection(_ id: ObjectIdentifier) { if let connection = connectionsByID.removeValue(forKey: id) { connection.cancel() } }
     }
 #endif

@@ -5,22 +5,27 @@ import XCTest
 
 final class TerminalOutputTailTests: XCTestCase {
     private var originalDatabasePath: String?
+    private var originalRuntimeDirectory: String?
     private var databaseRoot: URL?
 
     override func setUpWithError() throws {
         try super.setUpWithError()
         originalDatabasePath = ProcessInfo.processInfo.environment["SPACES_DB_PATH"]
+        originalRuntimeDirectory = ProcessInfo.processInfo.environment["SPACES_RUNTIME_DIR"]
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         databaseRoot = root
         setenv("SPACES_DB_PATH", root.appendingPathComponent("spaces.db").path, 1)
+        setenv("SPACES_RUNTIME_DIR", root.appendingPathComponent("runtime", isDirectory: true).path, 1)
     }
 
     override func tearDownWithError() throws {
         if let originalDatabasePath { setenv("SPACES_DB_PATH", originalDatabasePath, 1) } else { unsetenv("SPACES_DB_PATH") }
+        if let originalRuntimeDirectory { setenv("SPACES_RUNTIME_DIR", originalRuntimeDirectory, 1) } else { unsetenv("SPACES_RUNTIME_DIR") }
         if let databaseRoot { try? FileManager.default.removeItem(at: databaseRoot) }
         databaseRoot = nil
         originalDatabasePath = nil
+        originalRuntimeDirectory = nil
         try super.tearDownWithError()
     }
 
@@ -150,6 +155,87 @@ final class TerminalOutputTailTests: XCTestCase {
         XCTAssertEqual(tailed, "EFGH\nIJ")
     }
 
+    func testTailSuppressesCodexInlineSuggestionAndPreservesStatusAfterCursor() throws {
+        let escape = "\u{001B}"
+        let output =
+            "\(escape)[2J\(escape)[1;1Hcompleted output" + "\(escape)[5;1H› \(escape)[2mWrite tests for @filename\(escape)[22m"
+            + "\(escape)[7;1Hgpt-5.6-sol medium · Context 92% left · main" + "\(escape)[5;3H\(escape)[?25h"
+
+        let tailed = try renderedTail(output, columns: 80, rows: 8)
+
+        XCTAssertTrue(tailed.contains("completed output"), tailed)
+        XCTAssertTrue(tailed.contains("›"), tailed)
+        XCTAssertFalse(tailed.contains("Write tests for @filename"), tailed)
+        XCTAssertTrue(tailed.contains("gpt-5.6-sol medium · Context 92% left · main"), tailed)
+    }
+
+    func testTailSuppressesOnlyClaudeInlineSuggestionRun() throws {
+        let escape = "\u{001B}"
+        let output =
+            "\(escape)[2J\(escape)[1;1Hanalysis complete"
+            + "\(escape)[4;1H❯ \(escape)[2mShow me a preview of the running app\(escape)[22m queued input"
+            + "\(escape)[6;3H\(escape)[2mautocomplete option\(escape)[22m" + "\(escape)[8;1Hyogesh@Mac demo | Fable 5 | ctx 40%"
+            + "\(escape)[4;3H\(escape)[?25h"
+
+        let tailed = try renderedTail(output, columns: 80, rows: 9)
+
+        XCTAssertFalse(tailed.contains("Show me a preview of the running app"), tailed)
+        XCTAssertTrue(tailed.contains("queued input"), tailed)
+        XCTAssertTrue(tailed.contains("autocomplete option"), tailed)
+        XCTAssertTrue(tailed.contains("yogesh@Mac demo | Fable 5 | ctx 40%"), tailed)
+    }
+
+    func testTailPreservesNormalUnsubmittedTextAtAndAfterCursor() throws {
+        let escape = "\u{001B}"
+        let output = "\(escape)[2J\(escape)[3;1H❯ keep-this-real-text" + "\(escape)[7;1Hstatus remains useful" + "\(escape)[3;8H\(escape)[?25h"
+
+        let tailed = try renderedTail(output, columns: 60, rows: 8)
+
+        XCTAssertTrue(tailed.contains("❯ keep-this-real-text"), tailed)
+        XCTAssertTrue(tailed.contains("status remains useful"), tailed)
+    }
+
+    func testTailPreservesFaintTextWhenCursorIsHidden() throws {
+        let escape = "\u{001B}"
+        let output = "\(escape)[2J\(escape)[3;1H❯ \(escape)[2mpermission dialog instruction\(escape)[22m" + "\(escape)[3;3H\(escape)[?25l"
+
+        let tailed = try renderedTail(output, columns: 60, rows: 6)
+
+        XCTAssertTrue(tailed.contains("permission dialog instruction"), tailed)
+    }
+
+    func testTailSuppressesSoftWrappedInlineSuggestionWithoutRemovingFollowingRows() throws {
+        let escape = "\u{001B}"
+        let output =
+            "\(escape)[2J\(escape)[2;1H› \(escape)[2mabcdefghijklmno\(escape)[22m" + "\(escape)[6;1Hstatus below" + "\(escape)[2;3H\(escape)[?25h"
+
+        let tailed = try renderedTail(output, columns: 12, rows: 7)
+
+        XCTAssertTrue(tailed.contains("›"), tailed)
+        XCTAssertFalse(tailed.contains("abcdefghij"), tailed)
+        XCTAssertFalse(tailed.contains("klmno"), tailed)
+        XCTAssertTrue(tailed.contains("status below"), tailed)
+    }
+
+    func testTailPreservesFaintTextUnderCursorInOrdinaryTerminalSession() throws {
+        let escape = "\u{001B}"
+        let output = "\(escape)[2J\(escape)[3;1H\(escape)[2mreal dim editor content\(escape)[22m" + "\(escape)[3;1H\(escape)[?25h"
+
+        let tailed = try renderedTail(output, columns: 60, rows: 6, sessionKind: .shell, detectedAgentKind: nil)
+
+        XCTAssertTrue(tailed.contains("real dim editor content"), tailed)
+    }
+
+    func testTailSuppressesSuggestionForDedicatedAgentSessionWithoutForegroundClassification() throws {
+        let escape = "\u{001B}"
+        let output = "\(escape)[2J\(escape)[3;1H› \(escape)[2magent launch suggestion\(escape)[22m" + "\(escape)[3;3H\(escape)[?25h"
+
+        let tailed = try renderedTail(output, columns: 60, rows: 6, sessionKind: .agent, detectedAgentKind: nil)
+
+        XCTAssertTrue(tailed.contains("›"), tailed)
+        XCTAssertFalse(tailed.contains("agent launch suggestion"), tailed)
+    }
+
     func testStableTranscriptCollapsesPromptEOLMarkArtifactIntoPromptLine() throws {
         let transcript = try TerminalOutputTail.stableTranscript(from: promptEOLMarkFixtureOutput(), columns: 80, rows: 24)
 
@@ -218,5 +304,26 @@ final class TerminalOutputTailTests: XCTestCase {
             + "\u{001B}[2C\u{001B}[90mailscale\u{001B}[39m" + clearSuggestion + "\u{001B}[?2004l\r\r\n" + "t not found\r\n"
             + "\u{001B}[0m\u{001B}[27m\u{001B}[24m\u{001B}[J" + "shell % \u{001B}[K\u{001B}[?2004h"
         return Data(output.utf8)
+    }
+
+    private func renderedTail(
+        _ output: String, columns: Int, rows: Int, lineCount: Int = 20, sessionKind: TerminalSessionKind = .shell,
+        detectedAgentKind: TerminalDetectedAgentKind? = .opencode
+    ) throws -> String {
+        let sessionRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: sessionRoot, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: sessionRoot) }
+        let paths = TerminalSessionPaths(rootDirectory: sessionRoot.path)
+        let sessionID = UUID().uuidString
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            TerminalSessionLaunchConfiguration(
+                sessionID: sessionID, title: "Tail fixture", workingDirectory: sessionRoot.path, shell: "/bin/zsh", command: nil,
+                createdAt: "2026-07-15T00:00:00Z", workspaceID: "tail-fixture-workspace", kind: sessionKind), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            TerminalSessionRuntimeState(
+                sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-07-15T00:00:00Z",
+                columns: columns, rows: rows, foregroundDetectedAgentKind: detectedAgentKind), paths: paths)
+        try Data(output.utf8).write(to: URL(fileURLWithPath: paths.outputPath))
+        return try TerminalOutputTail.tail(path: paths.outputPath, lineCount: lineCount)
     }
 }

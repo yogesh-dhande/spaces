@@ -78,7 +78,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
-    enum AlertsIconTint: Sendable {
+    enum AlertsIconTint: Sendable, Equatable {
         case browser
         case terminal
         case code
@@ -1380,6 +1380,124 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
+    // MARK: - Spaces URL scheme (`spaces://`)
+
+    /// System entry point for the registered `spaces` URL scheme (declared in `CFBundleURLTypes`).
+    /// Terminal deep links focus a session; a pairing link (iOS-only flow) is redirected loudly
+    /// instead of being silently dropped; anything else is an unrecognized link.
+    public func application(_ application: NSApplication, open urls: [URL]) { for url in urls { handleIncomingSpacesURL(url) } }
+
+    private func handleIncomingSpacesURL(_ url: URL) {
+        if let link = SpacesTerminalDeepLink.parse(url) {
+            handleTerminalDeepLink(link)
+            return
+        }
+        if url.scheme == SpacesDevicePairingLink.scheme, url.host == SpacesDevicePairingLink.host {
+            presentSpacesLinkAlert(
+                title: "Pair from your phone",
+                message: "Pairing links open in the Spaces app on your iPhone or iPad, not on this Mac. Scan or tap the link there to pair a device.")
+            return
+        }
+        presentSpacesLinkAlert(title: "Unrecognized Spaces link", message: "Spaces didn't recognize “\(url.absoluteString)”.")
+    }
+
+    /// Where a `spaces://terminal/…` deep link's session lives. A link with no `device` (or the local
+    /// device id) is `local`; any other paired device id is `remote`. The classification is a pure
+    /// function of the link so it can be exercised without an AppKitController instance.
+    enum TerminalDeepLinkTarget: Equatable {
+        case local(sessionID: String)
+        case remote(sessionID: String, deviceID: String)
+    }
+
+    nonisolated static func terminalDeepLinkTarget(for link: SpacesTerminalDeepLink) -> TerminalDeepLinkTarget {
+        if let deviceID = link.deviceID, deviceID != SpacesPairedDeviceRecord.localDeviceID {
+            return .remote(sessionID: link.sessionID, deviceID: deviceID)
+        }
+        return .local(sessionID: link.sessionID)
+    }
+
+    /// Focuses the terminal session named by a `spaces://terminal/…` deep link. Shared by the OS URL
+    /// handler and in-terminal `spaces://` clicks so both take one path. A link with no `device` (or
+    /// the local device id) opens the pane here on the exact route `terminal show` uses (owner mode);
+    /// a device-qualified link for another paired device opens that session's remote-attached pane on
+    /// the same path a sidebar/window open takes. An unknown session is surfaced loudly.
+    func handleTerminalDeepLink(_ link: SpacesTerminalDeepLink) {
+        switch Self.terminalDeepLinkTarget(for: link) {
+        case .local(let sessionID):
+            let focusRequestID = UUID().uuidString
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let opened = await self.openTerminalSessionPane(sessionID: sessionID, mode: .owner, requestID: focusRequestID)
+                if !opened { self.presentTerminalDeepLinkUnknownSessionAlert(sessionID: sessionID) }
+            }
+        case .remote(let sessionID, let deviceID): openRemoteTerminalDeepLink(sessionID: sessionID, deviceID: deviceID)
+        }
+    }
+
+    /// Opens (or focuses) a device-qualified deep link's session on its paired remote device, reusing
+    /// the same remote-attached pane path a sidebar or window open takes. Resolves the paired device
+    /// record, then the session on that device (its loaded overview first, else a Device API overview
+    /// query), and opens the pane with the session's owning device pinned so it attaches remotely. An
+    /// unpaired/unreachable device or a session the device doesn't have surfaces a loud, specific alert.
+    private func openRemoteTerminalDeepLink(sessionID: String, deviceID: String) {
+        guard let device = deviceForMutation(deviceID: deviceID) else {
+            presentTerminalDeepLinkUnknownDeviceAlert(deviceID: deviceID)
+            return
+        }
+        let focusRequestID = UUID().uuidString
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            guard let match = await self.resolveRemoteTerminalSessionMatch(sessionID: sessionID, device: device) else {
+                self.presentTerminalDeepLinkRemoteSessionNotFoundAlert(sessionID: sessionID, deviceName: device.name)
+                return
+            }
+            let opened = await self.openTerminalSessionPane(
+                sessionID: sessionID, mode: .owner, requestID: focusRequestID, resolvedRequest: Self.terminalSessionPaneOpenRequest(from: match))
+            if !opened { self.presentTerminalDeepLinkRemoteSessionNotFoundAlert(sessionID: sessionID, deviceName: device.name) }
+        }
+    }
+
+    /// Resolves a session's overview summary on a specific paired device: the device's loaded overview
+    /// when it already carries the session, otherwise a fresh off-main Device API overview query (the
+    /// same seam the cold local resolve uses). Returns nil when that device has no such session.
+    private func resolveRemoteTerminalSessionMatch(sessionID: String, device: SpacesPairedDeviceRecord) async -> TerminalSessionSummaryMatch? {
+        if let summary = deviceSection(id: device.id)?.overview?.sessions.first(where: { $0.id == sessionID }) {
+            return TerminalSessionSummaryMatch(device: device, summary: summary)
+        }
+        let clientApp = SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)
+        return await Self.resolveSessionSummaryMatchOffMain(sessionID: sessionID, device: device, clientApp: clientApp)
+    }
+
+    private func presentTerminalDeepLinkUnknownDeviceAlert(deviceID: String) {
+        if let pairedDevice = try? clientDatabase().pairedDevice(id: deviceID) {
+            presentSpacesLinkAlert(
+                title: "Device unavailable",
+                message: "Spaces can't reach “\(pairedDevice.name)” right now. Make sure it's connected, then open the link again.")
+        } else {
+            presentSpacesLinkAlert(title: "Unknown device", message: "This link points to a device (\(deviceID)) that isn't paired with this Mac.")
+        }
+    }
+
+    private func presentTerminalDeepLinkRemoteSessionNotFoundAlert(sessionID: String, deviceName: String) {
+        presentSpacesLinkAlert(
+            title: "Terminal session not found",
+            message: "Spaces couldn't find a terminal session with id “\(sessionID)” on “\(deviceName)”. It may have already exited.")
+    }
+
+    private func presentTerminalDeepLinkUnknownSessionAlert(sessionID: String) {
+        presentSpacesLinkAlert(
+            title: "Terminal session not found",
+            message: "Spaces couldn't find a terminal session with id “\(sessionID)” on this Mac. It may have already exited.")
+    }
+
+    private func presentSpacesLinkAlert(title: String, message: String) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+    }
+
     @objc private nonisolated func handleCloseTerminalSessionWindowIPC(_ notification: Notification) {
         let object = notification.object as? String
         guard let sessionID = notification.userInfo?[IPCNotification.terminalSessionIDUserInfoKey] as? String else { return }
@@ -1656,10 +1774,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             return request
         }
         guard let match = await resolveSessionSummaryMatch(sessionID: sessionID) else { return nil }
+        return Self.terminalSessionPaneOpenRequest(from: match)
+    }
+
+    /// The pane open request for a session resolved to its owning device, pinning `deviceID` so the
+    /// pane attaches to that device — remote or local — regardless of the request's later workspace
+    /// device lookup. Shared by the cold-resolve path and the remote deep-link open.
+    nonisolated static func terminalSessionPaneOpenRequest(from match: TerminalSessionSummaryMatch) -> DeviceTerminalOpenRequest {
         let summary = match.summary
         return DeviceTerminalOpenRequest(
-            workspaceID: summary.workspaceID, deviceID: match.device.id, sessionID: sessionID, title: summary.title,
-            workingDirectory: summary.workingDirectory, kind: Self.terminalSessionKind(rowKind: summary.rowKind), shell: summary.shell,
+            workspaceID: summary.workspaceID, deviceID: match.device.id, sessionID: summary.id, title: summary.title,
+            workingDirectory: summary.workingDirectory, kind: terminalSessionKind(rowKind: summary.rowKind), shell: summary.shell,
             command: summary.command, initialState: summary.state, servicePID: summary.servicePID, childPID: summary.childPID,
             createdAt: summary.createdAt, updatedAt: summary.updatedAt)
     }
@@ -1671,12 +1796,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// after the pane opens. The pane's own attach otherwise stays a viewer when another
     /// client owns, which would leave ownership unchanged. Emits the `terminal_window_summon`
     /// perf metric the E2E harness parses.
-    @discardableResult private func openTerminalSessionPane(sessionID: String, mode: TerminalAttachmentMode, requestID: String? = nil) async -> Bool {
+    /// `resolvedRequest`, when provided, skips the internal session→device resolution: the remote
+    /// deep-link open resolves the request against the link's explicitly named device (so it never
+    /// falls back to the local device the way the session-id-only resolve does) and hands it in here,
+    /// reusing this one open/focus + owner-reclaim + metric path.
+    @discardableResult private func openTerminalSessionPane(
+        sessionID: String, mode: TerminalAttachmentMode, requestID: String? = nil, resolvedRequest: DeviceTerminalOpenRequest? = nil
+    ) async -> Bool {
         let startedAt = Date()
         let requestDetail = requestID.map { " request_id=\($0)" } ?? ""
         cancelDeferredExternalWindowHide()
         let reusedExistingPane = panelCoordinator.placement(forSessionID: sessionID) != nil
-        guard let request = await resolveTerminalSessionPaneOpenRequest(sessionID: sessionID) else {
+        let resolved: DeviceTerminalOpenRequest?
+        if let resolvedRequest { resolved = resolvedRequest } else { resolved = await resolveTerminalSessionPaneOpenRequest(sessionID: sessionID) }
+        guard let request = resolved else {
             logPerfMetric(
                 "terminal_window_summon", target: "session=\(sessionID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: false,
                 detail: "mode=\(mode.rawValue) route=pane reason=resolve_nil\(requestDetail)")
@@ -1861,7 +1994,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                         runtimeState: stateModel?.currentRuntimeState ?? payload?.runtimeState, streamedWorkingDirectory: payload?.workingDirectory,
                         launchWorkingDirectory: stateModel?.currentLaunchConfiguration?.workingDirectory,
                         requestWorkingDirectory: request.workingDirectory)
-                }, requestSender: requestSender, banner: TerminalLinkActivityBanner(hostView: pane.view))
+                }, requestSender: requestSender, banner: pane.banner,
+                openSpacesTerminalLink: { [weak self] link in self?.handleTerminalDeepLink(link) })
             linkOpenBox.coordinator = linkOpenCoordinator
             return TerminalPaneContentController(
                 descriptor: .terminalSession(deviceID: resolvedDeviceID, sessionID: sessionID), workspaceID: request.workspaceID,
@@ -1949,7 +2083,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             action: action, sessionID: sessionID, clientID: request.clientID, client: request.client, attachmentMode: request.attachmentMode,
             text: request.text, key: request.key, columns: request.columns, rows: request.rows, ownerEpoch: request.ownerEpoch,
             resizeSerial: request.resizeSerial, scrollHorizontal: request.scrollHorizontal, scrollVertical: request.scrollVertical,
-            scrollMods: request.scrollMods, appendNewline: request.appendNewline, asPaste: request.asPaste, appearance: request.appearance)
+            scrollMods: request.scrollMods, scrollPointerX: request.scrollPointerX, scrollPointerY: request.scrollPointerY,
+            scrollPointerMods: request.scrollPointerMods, appendNewline: request.appendNewline, asPaste: request.asPaste,
+            appearance: request.appearance)
     }
 
     /// Issues a terminal control request to the session's owning device and returns
@@ -2629,10 +2765,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             }
             for agent in workspace.codingAgentRows where agent.activityState == .waiting || agent.activityState == .done {
                 let eventDate = agent.updatedAt.flatMap { iso8601Formatter.date(from: $0) }
+                // Both states keep the cpu.fill agent identity; the tint alone carries the state —
+                // `waiting` (blocked on the user) is the warning orange, `done` the success green
+                // matching the status dots — so a finished agent doesn't read as still needing attention.
+                let iconTint: AlertsIconTint = agent.activityState == .done ? .success : .warning
                 items.append(
                     AlertsAttentionEntry(
                         attentionID: "alert:\(deviceID):agent:\(agent.agentID ?? agent.id):\(agent.activityState.rawValue):\(agent.updatedAt ?? "")",
-                        icon: "cpu.fill", iconTint: .warning, label: agent.name, detail: nil, shortcut: "", processStatus: nil,
+                        icon: "cpu.fill", iconTint: iconTint, label: agent.name, detail: nil, shortcut: "", processStatus: nil,
                         agentStatus: AgentWindowStatus(rawValue: agent.activityState.rawValue), countsTowardBadge: true, eventDate: eventDate,
                         // The alert is for an existing waiting/done agent, so activating it must focus that
                         // agent's session — not `.workspaceAgentLauncher`, which resolves to a fresh launch and
@@ -2919,6 +3059,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         case .spinning: return .spinning
         case .waiting: return .waiting
         case .done: return .done
+        case .exited: return .exited
         }
     }
 
@@ -6480,6 +6621,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 case .done:
                     statusIconName = "circle.fill"
                     statusColor = .systemGreen
+                case .exited:
+                    // Agent gone, terminal alive: hollow dimmed dot, distinct from idle's filled dot.
+                    statusIconName = "circle"
+                    statusColor = .tertiaryLabelColor
                 default:
                     statusIconName = "circle.fill"
                     statusColor = .tertiaryLabelColor
@@ -10582,6 +10727,7 @@ struct CommandPaletteItem: Sendable {
             case .waiting: return RowPrimitives.statusDot(.waiting)
             case .done: return RowPrimitives.statusDot(.running)
             case .idle: return RowPrimitives.statusDot(.idle)
+            case .exited: return RowPrimitives.statusDot(.exited)
             }
         }
     }

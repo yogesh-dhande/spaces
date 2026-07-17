@@ -194,11 +194,27 @@ extension TerminalSessionPaneViewController {
             _ = ghosttyRendererHost?.performBindingAction("end_search")
             return true
         }
+        if isTypingIntoEndedSession(event) {
+            // The pane still shows the session's final render, so typing looks like it should work.
+            // Pulse the banner that already explains why it doesn't, rather than swallowing the key:
+            // the event stays unconsumed exactly as before, so nothing about routing changes.
+            banner.flash()
+            return false
+        }
         guard visibleRenderer == .ghosttyOwner else { return false }
         if isFieldEditorFirstResponder { return false }
         guard isInteractiveRuntimeState(lastObservedRuntimeState) else { return false }
         if isImagePasteKeyEvent(event), pasteImageFromPasteboardIfPresent() { return true }
         return ghosttyRendererHost?.handleKeyEvent(event, for: client.id) ?? false
+    }
+
+    /// True when this key event is the user trying to type into a session that has already exited or
+    /// failed. Command-modified keys are excluded: Cmd+C/Cmd+F still work on a final render, so they
+    /// are legitimate actions on a dead pane rather than a mistake worth flagging.
+    private func isTypingIntoEndedSession(_ event: NSEvent) -> Bool {
+        guard isExplicitlyNonInteractiveRuntimeState(lastObservedRuntimeState) else { return false }
+        guard !isFieldEditorFirstResponder else { return false }
+        return !event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.command)
     }
 
     private func isImagePasteKeyEvent(_ event: NSEvent) -> Bool {

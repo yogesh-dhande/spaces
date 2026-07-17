@@ -27,7 +27,7 @@ export default function CliReferencePage() {
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Overview</h2>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Use <Cmd>spaces</Cmd> when automation needs to inspect projects or workspaces, create host-scoped workspaces, launch workspace runtime, report coding-agent lifecycle state, or control Spaces terminal sessions. To expose these actions to an MCP client such as Claude Code, see the <a className="text-accent hover:underline" href="/docs/mcp">Model Context Protocol</a> reference.
+          Use <Cmd>spaces</Cmd> when automation needs to inspect projects or workspaces, create host-scoped workspaces, launch workspace runtime, report coding-agent lifecycle state, or control Spaces terminal sessions. To expose these actions to an MCP client such as Claude Code, Codex, or opencode, see the <a className="text-accent hover:underline" href="/docs/mcp">Model Context Protocol</a> reference.
         </p>
         <CodeBlock>{`spaces --version
 spaces project list
@@ -47,27 +47,28 @@ spaces agent signal blocked`}</CodeBlock>
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Projects</h2>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          <Cmd>spaces project list</Cmd> prints the projects in the active profile.
+          <Cmd>spaces project list</Cmd> prints the projects in the active profile, or on a paired device with <Cmd>--device</Cmd>.
         </p>
-        <CodeBlock>{`spaces project list`}</CodeBlock>
+        <CodeBlock>{`spaces project list [--device <name-or-id>]`}</CodeBlock>
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">Workspaces</h2>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Workspace commands list, create, start, and restart workspaces on the same-machine daemon.
+          Workspace commands list, create, start, and restart workspaces on the same-machine daemon, or on a paired device with <Cmd>--device</Cmd> so an orchestrator can discover and prepare work before spawning agents there. A remote listing reads the device overview, so it shows only active workspaces and <Cmd>--include-archived</Cmd> is not accepted with <Cmd>--device</Cmd>.
         </p>
-        <CodeBlock>{`spaces workspace list [--project <project-id>] [--include-archived]
-spaces workspace create --project <project-id> --branch <branch> [--base-branch <branch>] [--existing-branch]
-spaces workspace start --workspace <workspace-id>
-spaces workspace restart --workspace <workspace-id>`}</CodeBlock>
+        <CodeBlock>{`spaces workspace list [--project <project-id>] [--include-archived] [--device <name-or-id>]
+spaces workspace create --project <project-id> --branch <branch> [--base-branch <branch>] [--existing-branch] [--device <name-or-id>]
+spaces workspace start --workspace <workspace-id> [--device <name-or-id>]
+spaces workspace restart --workspace <workspace-id> [--device <name-or-id>]`}</CodeBlock>
         <ul className="mt-3 space-y-1">
           <Flag name="--project <id>" description="Project filter for list; project ID for workspace creation." />
-          <Flag name="--include-archived" description="Includes archived workspaces in list output." />
+          <Flag name="--include-archived" description="Includes archived workspaces in list output. Not supported with --device." />
           <Flag name="--branch <branch>" description="Workspace branch for creation." />
           <Flag name="--base-branch <branch>" description="Base branch. Defaults to the project default branch, then main or master." />
           <Flag name="--existing-branch" description="Uses an existing branch instead of creating one." />
           <Flag name="--workspace <id>" description="Workspace ID for runtime commands." />
+          <Flag name="--device <name-or-id>" description="Paired device selector for list, create, start, and restart. Defaults to this machine." />
         </ul>
       </article>
 
@@ -82,6 +83,9 @@ spaces terminal send text <session-id> <text> [--newline] [--device <name-or-id>
 spaces terminal send bytes <session-id> <byte> [<byte>...] [--device <name-or-id>]
 spaces terminal tail <session-id> [--lines <count>] [--device <name-or-id>]
 spaces terminal show <session-id>`}</CodeBlock>
+        <p className="mt-3 text-sm leading-7 text-foreground-soft">
+          Tail reconstructs rendered terminal output. For identified coding-agent sessions, it omits an inline suggestion at the cursor while preserving status lines, dialogs, menus, and real input. Ordinary terminal sessions preserve faint text at the cursor.
+        </p>
         <ul className="mt-3 space-y-1">
           <Flag name="--device <name-or-id>" description="Paired device selector for list, send, and tail. Defaults to this machine's local sessions." />
           <Flag name="--workspace <id>" description="Workspace ID for terminal command; omit inside a workspace." />
@@ -114,6 +118,24 @@ spaces agent signal exit`}</CodeBlock>
         </p>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           Agent labels come from configured launcher names or the terminal runtime when it identifies known Codex, Claude Code, and opencode foreground commands.
+        </p>
+      </article>
+
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Agent Orchestration</h2>
+        <p className="mt-3 text-sm leading-7 text-foreground-soft">
+          Beyond reporting state, the CLI lets one terminal drive other coding agents. <Cmd>spaces agent list</Cmd> and <Cmd>spaces agent status</Cmd> show tracked agents (add <Cmd>--json</Cmd> for machine output); <Cmd>spaces agent annotate</Cmd> leaves a note. <Cmd>spaces agent spawn</Cmd> starts a supported agent (claude, codex, or opencode) in a new workspace terminal and blocks until Spaces detects it running — no hooks required. Spawn delivers no prompt: once it returns, send the first prompt with <Cmd>spaces terminal send</Cmd>. <Cmd>spaces agent subscribe</Cmd> watches a child and injects a clickable notice block into your terminal when it goes blocked, done, or exits. <Cmd>spaces agent interrupt</Cmd> and <Cmd>spaces agent kill</Cmd> steer or stop a child; kill refuses a session that is not a coding agent. Every command except <Cmd>signal</Cmd> accepts <Cmd>--device</Cmd> to target a paired device (remote spawn requires <Cmd>--workspace</Cmd>).
+        </p>
+        <CodeBlock>{`spaces agent list [--workspace <id>] [--json]
+spaces agent status [--session <id>] [--json]
+spaces agent annotate "waiting on review" [--session <id>]
+spaces agent spawn --command claude [--workspace <id>] [--timeout <s>]
+spaces agent subscribe <child-session> [--subscriber <id>] [--device <name>]
+spaces agent unsubscribe <child-session> [--subscriber <id>] [--device <name>]
+spaces agent interrupt <session>
+spaces agent kill <session>`}</CodeBlock>
+        <p className="mt-3 text-sm leading-7 text-foreground-soft">
+          Subscriptions can watch a child on this device or, with <Cmd>--device</Cmd>, on a paired one. Notices are delivered only while the subscriber is idle, so one never lands mid-task, and a subscription that would form a watch cycle is rejected. The same actions are available to an MCP client, but <code>spaces agent signal</code> is deliberately never an MCP tool.
         </p>
       </article>
 

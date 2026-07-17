@@ -339,9 +339,10 @@ private func supervisorTestTLSIdentity() throws -> TerminalServiceTLSIdentity {
                 try Self.sendDeviceAPIRequest(
                     SpacesDeviceAPIRequest(
                         command: .terminalControl(
-                            .init(action: .scroll, sessionID: sessionID, clientID: "ios-client", ownerEpoch: 12, scrollVertical: 24, scrollMods: 7)),
-                        authToken: authToken, clientApp: clientApp), port: server.listeningPort,
-                    certificateFingerprint: identity.certificateFingerprint)
+                            .init(
+                                action: .scroll, sessionID: sessionID, clientID: "ios-client", ownerEpoch: 12, scrollVertical: 24, scrollMods: 7,
+                                scrollPointerX: 0.25, scrollPointerY: 0.75, scrollPointerMods: 9)), authToken: authToken, clientApp: clientApp),
+                    port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
             }.value
 
             XCTAssertTrue(acceptedScrollResponse.ok)
@@ -351,6 +352,9 @@ private func supervisorTestTLSIdentity() throws -> TerminalServiceTLSIdentity {
             XCTAssertEqual(forwardedScroll.ownerEpoch, 12)
             XCTAssertEqual(forwardedScroll.scrollVertical, 24)
             XCTAssertEqual(forwardedScroll.scrollMods, 7)
+            XCTAssertEqual(forwardedScroll.scrollPointerX, 0.25)
+            XCTAssertEqual(forwardedScroll.scrollPointerY, 0.75)
+            XCTAssertEqual(forwardedScroll.scrollPointerMods, 9)
         }
     }
 

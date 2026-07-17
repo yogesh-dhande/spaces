@@ -106,6 +106,50 @@ final class TerminalServiceProtocolTests: XCTestCase {
         XCTAssertNil(try TerminalServiceCodec.decodeResponse(successData).errorCode)
     }
 
+    func testProfileCommandResponseCarriesStructuredAgentSpawnResult() throws {
+        // The spawn command response carries the structured outcome (the MCP tool encodes this response
+        // as its result), so a client reads the session id / detected agent / subscribed flag from fields
+        // instead of parsing the prose message.
+        let response = TerminalServiceProfileCommandResponse(
+            message: "Started agent session term-9 (detected codex).",
+            agentSpawn: TerminalServiceAgentSpawnResult(
+                terminalSessionID: "term-9", workspaceID: "workspace-1", detectedAgent: "codex", deviceID: nil, subscribed: false,
+                open: "spaces://terminal/term-9"))
+        let encoded = try TerminalServiceCodec.encodeResponse(TerminalServiceResponse(ok: true, message: "ok", profile: response))
+        let json = String(decoding: encoded, as: UTF8.self)
+        XCTAssertTrue(json.contains(#""terminalSessionID":"term-9""#))
+        XCTAssertTrue(json.contains(#""detectedAgent":"codex""#))
+        XCTAssertTrue(json.contains(#""subscribed":false"#))
+        // JSONEncoder escapes forward slashes by default, so the deep link reads back with `\/`.
+        XCTAssertTrue(json.contains(#""open":"spaces:\/\/terminal\/term-9""#))
+        XCTAssertEqual(try TerminalServiceCodec.decodeResponse(encoded).profile, response)
+
+        // A response without a spawn outcome omits the field entirely.
+        let plain = try TerminalServiceCodec.encodeResponse(
+            TerminalServiceResponse(ok: true, message: "ok", profile: TerminalServiceProfileCommandResponse(message: "Listed.")))
+        XCTAssertFalse(String(decoding: plain, as: UTF8.self).contains("agentSpawn"))
+    }
+
+    func testProfileCommandResponseCarriesPendingAgentEvents() throws {
+        // The MCP tools/call chokepoint attaches a busy orchestrator's drained child events to the tool
+        // result, so a client reads them from `pendingAgentEvents` — the busy-time counterpart to idle
+        // injection. The field is present only when the piggyback drained a row, and omitted otherwise.
+        let response = TerminalServiceProfileCommandResponse(message: "Listed agent sessions.").addingPendingAgentEvents([
+            "[spaces] A (claude) is blocked", "[spaces] B (codex) is done",
+        ])
+        let encoded = try JSONEncoder().encode(response)
+        let json = String(decoding: encoded, as: UTF8.self)
+        XCTAssertTrue(json.contains(#""pendingAgentEvents""#))
+        XCTAssertTrue(json.contains(#""[spaces] A (claude) is blocked""#))
+        XCTAssertEqual(try JSONDecoder().decode(TerminalServiceProfileCommandResponse.self, from: encoded), response)
+
+        // Nothing to attach leaves the response unchanged and the field omitted (nil or empty alike).
+        for events: [String]? in [nil, []] {
+            let plain = try JSONEncoder().encode(TerminalServiceProfileCommandResponse(message: "Listed.").addingPendingAgentEvents(events))
+            XCTAssertFalse(String(decoding: plain, as: UTF8.self).contains("pendingAgentEvents"))
+        }
+    }
+
     func testResponseDecodesNilErrorCodeWhenAbsentFromJSON() throws {
         let json = #"{"ok":false,"message":"Terminal session 'abc' is not running."}"#.data(using: .utf8)!
         XCTAssertNil(try TerminalServiceCodec.decodeResponse(json).errorCode)
@@ -140,6 +184,13 @@ final class TerminalServiceProtocolTests: XCTestCase {
             .workspaceCreate(.init(projectID: "project-1", branch: "feature")), .workspaceStart(workspaceID: "workspace-1"),
             .workspaceRestart(workspaceID: "workspace-1"),
             .agentSignal(.init(workspaceID: "workspace-1", terminalSessionID: "session-1", event: "blocked")),
+            .agentList(.init(workspaceID: "workspace-1", sessionID: "session-1")), .agentList(.init()),
+            .agentAnnotate(.init(sessionID: "session-1", note: "review the auth flow")), .agentAnnotate(.init(sessionID: "session-1", note: "")),
+            .agentSpawn(.init(cwd: "/tmp/work", workspaceID: "workspace-1", command: "claude", title: "Claude Code")),
+            .agentSpawn(.init(cwd: "/tmp/work", command: "codex --yolo")), .agentKill(.init(sessionID: "session-1")),
+            .agentSubscribe(.init(subscriberTerminalSessionID: "orchestrator-session", agentSessionID: "agent-1")),
+            .agentUnsubscribe(.init(subscriberTerminalSessionID: "orchestrator-session", agentSessionID: "agent-1")),
+            .agentConsumePendingEvents(subscriberTerminalSessionID: "orchestrator-session"),
             .terminalSend(.init(sessionID: "session-1", input: .text("hello"), appendNewline: true)),
             .terminalSend(.init(sessionID: "session-1", input: .bytes(Data([0, 10, 255])))),
             .terminalTail(.init(sessionID: "session-1", lineCount: 40)), .terminalTail(.init(sessionID: "session-1")),
@@ -152,6 +203,58 @@ final class TerminalServiceProtocolTests: XCTestCase {
             let decoded = try decoder.decode(TerminalServiceProfileCommand.self, from: encoder.encode(command))
             XCTAssertEqual(decoded, command)
         }
+    }
+
+    func testAgentSessionRowResponseRoundTrips() throws {
+        let response = TerminalServiceProfileCommandResponse(
+            message: "Listed agent sessions.",
+            agentSessions: [
+                TerminalServiceAgentSessionRow(
+                    id: "agent-1", terminalSessionID: "session-1", agent: "Claude Code CLI", label: "Claude Code CLI", status: "waiting",
+                    note: "review the auth flow", projectID: "project-1", projectName: "Spaces", workspaceID: "workspace-1", workspaceName: "feature",
+                    workspaceDir: "/repo/workspaces/feature", branch: "feature", updatedAt: "2026-07-14T00:00:00Z",
+                    lastSignalAt: "2026-07-14T00:00:00Z"),
+                TerminalServiceAgentSessionRow(
+                    id: "agent-2", terminalSessionID: "session-2", agent: nil, label: nil, status: "idle", note: nil, projectID: "project-1",
+                    projectName: "Spaces", workspaceID: "workspace-1", workspaceName: "feature", workspaceDir: "/repo/workspaces/feature",
+                    branch: nil, updatedAt: "2026-07-14T00:00:00Z", lastSignalAt: nil),
+            ])
+        let decoded = try JSONDecoder().decode(TerminalServiceProfileCommandResponse.self, from: JSONEncoder().encode(response))
+        XCTAssertEqual(decoded, response)
+    }
+
+    func testAgentAnnotatePayloadRejectsEmptySessionButKeepsEmptyNote() throws {
+        let decoder = JSONDecoder()
+        // An empty note is a valid clear request; an empty session id is not.
+        XCTAssertEqual(
+            try decoder.decode(TerminalServiceProfileCommand.self, from: Data(#"{"agentAnnotate":{"sessionID":"session-1","note":""}}"#.utf8)),
+            .agentAnnotate(.init(sessionID: "session-1", note: "")))
+        XCTAssertThrowsError(
+            try decoder.decode(TerminalServiceProfileCommand.self, from: Data(#"{"agentAnnotate":{"sessionID":"  ","note":"hi"}}"#.utf8)))
+    }
+
+    func testAgentSpawnPayloadRequiresCwdAndCommand() throws {
+        let decoder = JSONDecoder()
+        XCTAssertEqual(
+            try decoder.decode(TerminalServiceProfileCommand.self, from: Data(#"{"agentSpawn":{"cwd":"/tmp","command":"claude"}}"#.utf8)),
+            .agentSpawn(.init(cwd: "/tmp", command: "claude")))
+        // A blank command is not a spawnable agent command.
+        XCTAssertThrowsError(
+            try decoder.decode(TerminalServiceProfileCommand.self, from: Data(#"{"agentSpawn":{"cwd":"/tmp","command":"  "}}"#.utf8)))
+        XCTAssertThrowsError(
+            try decoder.decode(TerminalServiceProfileCommand.self, from: Data(#"{"agentSpawn":{"cwd":"","command":"claude"}}"#.utf8)))
+    }
+
+    func testAgentSubscriptionPayloadRequiresBothEndpoints() throws {
+        let decoder = JSONDecoder()
+        XCTAssertThrowsError(
+            try decoder.decode(
+                TerminalServiceProfileCommand.self, from: Data(#"{"agentSubscribe":{"subscriberTerminalSessionID":"sub","agentSessionID":""}}"#.utf8))
+        )
+        XCTAssertThrowsError(
+            try decoder.decode(
+                TerminalServiceProfileCommand.self,
+                from: Data(#"{"agentSubscribe":{"subscriberTerminalSessionID":"","agentSessionID":"agent-1"}}"#.utf8)))
     }
 
     func testProfileCommandDecodeNormalizesRequiredStringsAndRejectsEmpty() throws {

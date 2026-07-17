@@ -46,9 +46,7 @@
             var parser = BrowserProxyHTTPHeadParser()
             let filler = String(repeating: "a", count: BrowserProxyHTTPHeadParser.maxHeadBytes + 16)
             let bytes = Data("GET / HTTP/1.1\r\nX-Big: \(filler)".utf8)
-            XCTAssertThrowsError(try parser.append(bytes)) { error in
-                XCTAssertEqual(error as? BrowserProxyHTTPHeadParser.ParseError, .headTooLarge)
-            }
+            XCTAssertThrowsError(try parser.append(bytes)) { error in XCTAssertEqual(error as? BrowserProxyHTTPHeadParser.ParseError, .headTooLarge) }
         }
 
         func testHeadRejectsHeaderTerminatorThatCrossesSizeCap() {
@@ -59,9 +57,7 @@
             XCTAssertGreaterThan(fillerLength, 0)
             let bytes = Data((prefix + String(repeating: "a", count: fillerLength) + terminator).utf8)
 
-            XCTAssertThrowsError(try parser.append(bytes)) { error in
-                XCTAssertEqual(error as? BrowserProxyHTTPHeadParser.ParseError, .headTooLarge)
-            }
+            XCTAssertThrowsError(try parser.append(bytes)) { error in XCTAssertEqual(error as? BrowserProxyHTTPHeadParser.ParseError, .headTooLarge) }
             XCTAssertFalse(parser.isComplete)
         }
 
@@ -75,19 +71,13 @@
         func testHeadReadsAndStripsProxyCookie() throws {
             var parser = BrowserProxyHTTPHeadParser()
             let request =
-                "POST /submit HTTP/1.1\r\n"
-                + "Host: web.feature.localhost\r\n"
-                + "Cookie: app=keep; \(BrowserProxyRequest.cookieName)=secret-token; theme=dark\r\n"
-                + "Content-Length: 5\r\n"
-                + "\r\n"
-                + "hello"
+                "POST /submit HTTP/1.1\r\n" + "Host: web.feature.localhost\r\n"
+                + "Cookie: app=keep; \(BrowserProxyRequest.cookieName)=secret-token; theme=dark\r\n" + "Content-Length: 5\r\n" + "\r\n" + "hello"
 
             try parser.append(Data(request.utf8))
 
             XCTAssertEqual(parser.cookieValue(named: BrowserProxyRequest.cookieName), "secret-token")
-            let sanitized = String(
-                decoding: parser.consumedBytes(droppingCookieNamed: BrowserProxyRequest.cookieName),
-                as: UTF8.self)
+            let sanitized = String(decoding: parser.consumedBytes(droppingCookieNamed: BrowserProxyRequest.cookieName), as: UTF8.self)
             XCTAssertTrue(sanitized.contains("Cookie: app=keep; theme=dark"))
             XCTAssertFalse(sanitized.contains(BrowserProxyRequest.cookieName))
             XCTAssertTrue(sanitized.hasSuffix("\r\n\r\nhello"))
@@ -96,20 +86,14 @@
         func testHeadForcesConnectionCloseWhenSanitizingNormalRequest() throws {
             var parser = BrowserProxyHTTPHeadParser()
             let request =
-                "GET / HTTP/1.1\r\n"
-                + "Host: web.feature.localhost\r\n"
-                + "Connection: keep-alive\r\n"
-                + "Proxy-Connection: keep-alive\r\n"
-                + "Keep-Alive: timeout=60\r\n"
-                + "Cookie: \(BrowserProxyRequest.cookieName)=secret-token; app=keep\r\n"
-                + "\r\n"
+                "GET / HTTP/1.1\r\n" + "Host: web.feature.localhost\r\n" + "Connection: keep-alive\r\n" + "Proxy-Connection: keep-alive\r\n"
+                + "Keep-Alive: timeout=60\r\n" + "Cookie: \(BrowserProxyRequest.cookieName)=secret-token; app=keep\r\n" + "\r\n"
 
             try parser.append(Data(request.utf8))
 
             XCTAssertFalse(parser.isUpgradeRequest)
             let sanitized = String(
-                decoding: parser.consumedBytes(droppingCookieNamed: BrowserProxyRequest.cookieName, forcingConnectionClose: true),
-                as: UTF8.self)
+                decoding: parser.consumedBytes(droppingCookieNamed: BrowserProxyRequest.cookieName, forcingConnectionClose: true), as: UTF8.self)
             XCTAssertTrue(sanitized.contains("Connection: close"))
             XCTAssertTrue(sanitized.contains("Cookie: app=keep"))
             XCTAssertFalse(sanitized.contains("Connection: keep-alive"))
@@ -121,20 +105,14 @@
         func testHeadPreservesUpgradeHeadersWhenSanitizingUpgradeRequest() throws {
             var parser = BrowserProxyHTTPHeadParser()
             let request =
-                "GET /socket HTTP/1.1\r\n"
-                + "Host: web.feature.localhost\r\n"
-                + "Connection: keep-alive, Upgrade\r\n"
-                + "Upgrade: websocket\r\n"
-                + "Cookie: \(BrowserProxyRequest.cookieName)=secret-token; app=keep\r\n"
-                + "\r\n"
+                "GET /socket HTTP/1.1\r\n" + "Host: web.feature.localhost\r\n" + "Connection: keep-alive, Upgrade\r\n" + "Upgrade: websocket\r\n"
+                + "Cookie: \(BrowserProxyRequest.cookieName)=secret-token; app=keep\r\n" + "\r\n"
 
             try parser.append(Data(request.utf8))
 
             XCTAssertTrue(parser.isUpgradeRequest)
             let sanitized = String(
-                decoding: parser.consumedBytes(
-                    droppingCookieNamed: BrowserProxyRequest.cookieName,
-                    forcingConnectionClose: !parser.isUpgradeRequest),
+                decoding: parser.consumedBytes(droppingCookieNamed: BrowserProxyRequest.cookieName, forcingConnectionClose: !parser.isUpgradeRequest),
                 as: UTF8.self)
             XCTAssertTrue(sanitized.contains("Connection: keep-alive, Upgrade"))
             XCTAssertTrue(sanitized.contains("Upgrade: websocket"))
@@ -147,16 +125,9 @@
             var parser = BrowserProxyHTTPHeadParser()
             let chunkedBody = "5\r\nhello\r\n0\r\n\r\n"
             let request =
-                "POST /upload HTTP/1.1\r\n"
-                + "Host: web.feature.localhost\r\n"
-                + "Transfer-Encoding: chunked\r\n"
-                + "Cookie: \(BrowserProxyRequest.cookieName)=secret-token; app=keep\r\n"
-                + "\r\n"
-                + chunkedBody
-                + "GET /second HTTP/1.1\r\n"
-                + "Host: web.feature.localhost\r\n"
-                + "Cookie: \(BrowserProxyRequest.cookieName)=secret-token\r\n"
-                + "\r\n"
+                "POST /upload HTTP/1.1\r\n" + "Host: web.feature.localhost\r\n" + "Transfer-Encoding: chunked\r\n"
+                + "Cookie: \(BrowserProxyRequest.cookieName)=secret-token; app=keep\r\n" + "\r\n" + chunkedBody + "GET /second HTTP/1.1\r\n"
+                + "Host: web.feature.localhost\r\n" + "Cookie: \(BrowserProxyRequest.cookieName)=secret-token\r\n" + "\r\n"
 
             try parser.append(Data(request.utf8))
 
@@ -166,9 +137,7 @@
             XCTAssertEqual(progress.forwardedByteCount, Data(chunkedBody.utf8).count)
             let sanitized = String(
                 decoding: parser.consumedBytes(
-                    droppingCookieNamed: BrowserProxyRequest.cookieName,
-                    forcingConnectionClose: true,
-                    bodyLimit: progress.forwardedByteCount),
+                    droppingCookieNamed: BrowserProxyRequest.cookieName, forcingConnectionClose: true, bodyLimit: progress.forwardedByteCount),
                 as: UTF8.self)
             XCTAssertTrue(sanitized.contains("POST /upload"))
             XCTAssertTrue(sanitized.contains(chunkedBody))
@@ -310,8 +279,7 @@
 
             let response = try await sendRequest(
                 port: proxyPort, host: "web.feature.localhost:\(proxyPort)", path: "/index.html",
-                cookieHeader: "app=keep; \(BrowserProxyRequest.cookieName)=\(authToken)",
-                connectionHeader: "keep-alive")
+                cookieHeader: "app=keep; \(BrowserProxyRequest.cookieName)=\(authToken)", connectionHeader: "keep-alive")
 
             XCTAssertTrue(response.head.contains("200"), "expected 200 status, got: \(response.head) body: \(response.body)")
             XCTAssertTrue(response.body.contains("hello-from-service"))
@@ -347,16 +315,10 @@
             defer { Task { await proxy.stop() } }
 
             let rawRequest =
-                "GET /first HTTP/1.1\r\n"
-                + "Host: web.feature.localhost:\(proxyPort)\r\n"
-                + "Cookie: app=keep; \(BrowserProxyRequest.cookieName)=\(authToken)\r\n"
-                + "Connection: keep-alive\r\n"
-                + "\r\n"
-                + "GET /second HTTP/1.1\r\n"
-                + "Host: web.feature.localhost:\(proxyPort)\r\n"
-                + "Cookie: \(BrowserProxyRequest.cookieName)=\(authToken)\r\n"
-                + "Connection: close\r\n"
-                + "\r\n"
+                "GET /first HTTP/1.1\r\n" + "Host: web.feature.localhost:\(proxyPort)\r\n"
+                + "Cookie: app=keep; \(BrowserProxyRequest.cookieName)=\(authToken)\r\n" + "Connection: keep-alive\r\n" + "\r\n"
+                + "GET /second HTTP/1.1\r\n" + "Host: web.feature.localhost:\(proxyPort)\r\n"
+                + "Cookie: \(BrowserProxyRequest.cookieName)=\(authToken)\r\n" + "Connection: close\r\n" + "\r\n"
 
             let response = try await sendRawRequest(port: proxyPort, request: rawRequest)
 
@@ -387,18 +349,10 @@
             defer { Task { await proxy.stop() } }
 
             let rawRequest =
-                "POST /upload HTTP/1.1\r\n"
-                + "Host: web.feature.localhost:\(proxyPort)\r\n"
-                + "Transfer-Encoding: chunked\r\n"
-                + "Cookie: app=keep; \(BrowserProxyRequest.cookieName)=\(authToken)\r\n"
-                + "Connection: keep-alive\r\n"
-                + "\r\n"
-                + "5\r\nhello\r\n0\r\n\r\n"
-                + "GET /second HTTP/1.1\r\n"
-                + "Host: web.feature.localhost:\(proxyPort)\r\n"
-                + "Cookie: \(BrowserProxyRequest.cookieName)=\(authToken)\r\n"
-                + "Connection: close\r\n"
-                + "\r\n"
+                "POST /upload HTTP/1.1\r\n" + "Host: web.feature.localhost:\(proxyPort)\r\n" + "Transfer-Encoding: chunked\r\n"
+                + "Cookie: app=keep; \(BrowserProxyRequest.cookieName)=\(authToken)\r\n" + "Connection: keep-alive\r\n" + "\r\n"
+                + "5\r\nhello\r\n0\r\n\r\n" + "GET /second HTTP/1.1\r\n" + "Host: web.feature.localhost:\(proxyPort)\r\n"
+                + "Cookie: \(BrowserProxyRequest.cookieName)=\(authToken)\r\n" + "Connection: close\r\n" + "\r\n"
 
             let response = try await sendRawRequest(port: proxyPort, request: rawRequest)
 
@@ -419,11 +373,7 @@
             let proxyPort = UInt16.random(in: 49_152...65_500)
             let proxy = SpacesMobileBrowserProxy(port: proxyPort, installationID: "install-1", dialer: dialer)
 
-            await withTaskGroup(of: Void.self) { group in
-                for _ in 0..<8 {
-                    group.addTask { await proxy.start() }
-                }
-            }
+            await withTaskGroup(of: Void.self) { group in for _ in 0..<8 { group.addTask { await proxy.start() } } }
             defer { Task { await proxy.stop() } }
 
             let status = await proxyStatus(proxy)
@@ -461,8 +411,8 @@
             defer { Task { await proxy.stop() } }
 
             let response = try await sendRequest(
-                port: proxyPort, host: "web.feature.localhost:\(proxyPort)", path: "/",
-                cookieHeader: "\(BrowserProxyRequest.cookieName)=\(authToken)")
+                port: proxyPort, host: "web.feature.localhost:\(proxyPort)", path: "/", cookieHeader: "\(BrowserProxyRequest.cookieName)=\(authToken)"
+            )
 
             XCTAssertTrue(response.head.contains("503"), "expected 503 status, got: \(response.head)")
             XCTAssertTrue(response.body.contains("web"))
@@ -493,8 +443,8 @@
 
         private func makeOverview(serviceName: String, url: String, branch: String, workspaceID: String) -> SpacesDeviceOverviewPayload {
             let workspace = SpacesDeviceWorkspaceSummary(
-                id: workspaceID, projectID: "project-1", projectName: "Project", branch: branch, baseBranch: "main",
-                dir: "/repo/\(branch)", isRunning: true, isArchived: false, isHidden: false, isDefault: false, sessionCount: 0,
+                id: workspaceID, projectID: "project-1", projectName: "Project", branch: branch, baseBranch: "main", dir: "/repo/\(branch)",
+                isRunning: true, isArchived: false, isHidden: false, isDefault: false, sessionCount: 0,
                 assignedPorts: [SpacesDeviceAssignedPort(name: serviceName, port: 3_000, url: url)])
             return SpacesDeviceOverviewPayload(
                 projects: [], workspaces: [workspace], sessions: [],
@@ -503,17 +453,11 @@
                     protocolVersion: SpacesWireProtocol.version))
         }
 
-        private func proxyStatus(_ proxy: SpacesMobileBrowserProxy) async -> BrowserProxyStatus {
-            await MainActor.run { proxy.runtimeState.status }
-        }
+        private func proxyStatus(_ proxy: SpacesMobileBrowserProxy) async -> BrowserProxyStatus { await MainActor.run { proxy.runtimeState.status } }
 
-        private func sendRequest(
-            port: UInt16,
-            host: String,
-            path: String,
-            cookieHeader: String? = nil,
-            connectionHeader: String = "close"
-        ) async throws -> (head: String, body: String) {
+        private func sendRequest(port: UInt16, host: String, path: String, cookieHeader: String? = nil, connectionHeader: String = "close")
+            async throws -> (head: String, body: String)
+        {
             guard let nwPort = NWEndpoint.Port(rawValue: port) else { throw XCTSkip("invalid port") }
             let connection = NWConnection(host: .ipv4(.loopback), port: nwPort, using: .tcp)
             let queue = DispatchQueue(label: "browser.proxy.test.client")
@@ -558,9 +502,7 @@
 
         private func splitResponse(_ data: Data) -> (head: String, body: String) {
             let text = String(decoding: data, as: UTF8.self)
-            if let range = text.range(of: "\r\n\r\n") {
-                return (String(text[..<range.lowerBound]), String(text[range.upperBound...]))
-            }
+            if let range = text.range(of: "\r\n\r\n") { return (String(text[..<range.lowerBound]), String(text[range.upperBound...])) }
             return (text, "")
         }
     }
@@ -589,8 +531,7 @@
             requested.append(target)
             lock.unlock()
             switch behavior {
-            case .fail(let error):
-                throw error
+            case .fail(let error): throw error
             case .connect(let port):
                 guard let nwPort = NWEndpoint.Port(rawValue: port) else { throw BrowserTunnelError(code: .invalidArgument, message: "bad port") }
                 let connection = NWConnection(host: .ipv4(.loopback), port: nwPort, using: .tcp)
@@ -631,9 +572,7 @@
         }
 
         func start() async throws -> UInt16 {
-            listener.newConnectionHandler = { [weak self] connection in
-                self?.handle(connection)
-            }
+            listener.newConnectionHandler = { [weak self] connection in self?.handle(connection) }
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
                 let resume = BrowserProxyOneShot(continuation)
                 listener.stateUpdateHandler = { state in
@@ -645,9 +584,7 @@
                 }
                 listener.start(queue: queue)
             }
-            guard let port = listener.port?.rawValue else {
-                throw BrowserTunnelError(code: nil, message: "service has no port")
-            }
+            guard let port = listener.port?.rawValue else { throw BrowserTunnelError(code: nil, message: "service has no port") }
             return port
         }
 
@@ -678,8 +615,7 @@
                     lock.lock()
                     receivedBytes = next
                     lock.unlock()
-                    let response =
-                        "HTTP/1.1 200 OK\r\nContent-Length: \(responseBody.utf8.count)\r\nConnection: close\r\n\r\n\(responseBody)"
+                    let response = "HTTP/1.1 200 OK\r\nContent-Length: \(responseBody.utf8.count)\r\nConnection: close\r\n\r\n\(responseBody)"
                     // `.finalMessage` sends a TCP FIN after the response so the relay observes EOF.
                     connection.send(
                         content: Data(response.utf8), contentContext: .finalMessage, isComplete: true,

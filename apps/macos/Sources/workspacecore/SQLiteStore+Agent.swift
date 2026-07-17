@@ -1,5 +1,6 @@
 import Foundation
 import spacesdatabase
+import spacesdevicecore
 import spacesterminalcore
 import systembridge
 
@@ -23,6 +24,7 @@ extension SQLiteStore {
         COALESCE(agent_sessions.claimed_launcher_id, ''),
         COALESCE(agent_sessions.claimed_launcher_name, ''),
         agent_sessions.status,
+        agent_sessions.note,
         agent_sessions.created_at,
         agent_sessions.updated_at
         """
@@ -34,9 +36,9 @@ extension SQLiteStore {
             try execute(
                 sql: """
                         INSERT INTO agent_sessions(
-                          id, workspace_id, provider, label, status, runtime_target_id, terminal_session_id, session_key, claimed_launcher_id, claimed_launcher_name, created_at, updated_at
+                          id, workspace_id, provider, label, status, runtime_target_id, terminal_session_id, session_key, claimed_launcher_id, claimed_launcher_name, note, created_at, updated_at
                         )
-                        VALUES (?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, ?)
+                        VALUES (?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, ?)
                         ON CONFLICT(id) DO UPDATE SET
                           workspace_id = excluded.workspace_id,
                           provider = excluded.provider,
@@ -47,12 +49,13 @@ extension SQLiteStore {
                           session_key = excluded.session_key,
                           claimed_launcher_id = COALESCE(excluded.claimed_launcher_id, agent_sessions.claimed_launcher_id),
                           claimed_launcher_name = excluded.claimed_launcher_name,
+                          note = COALESCE(excluded.note, agent_sessions.note),
                           updated_at = excluded.updated_at
                     """,
                 bindings: [
                     record.id, record.workspaceID, record.provider.rawValue, record.label ?? "", record.status.rawValue, runtimeTargetID ?? "",
                     terminalSessionID ?? "", record.sessionKey ?? "", record.claimedLauncherID ?? "", record.claimedLauncherName ?? "",
-                    record.createdAt, record.updatedAt,
+                    record.note ?? "", record.createdAt, record.updatedAt,
                 ])
         }
     }
@@ -156,12 +159,359 @@ extension SQLiteStore {
 
     public func deleteAgentWindow(id: String) throws { try execute(sql: "DELETE FROM agent_sessions WHERE id = ?", bindings: [id]) }
 
+    /// Sets (or, with an empty `note`, clears) an agent session's explicit annotation. The note is
+    /// written directly here rather than through `upsertAgentWindow` so a status signal — which upserts
+    /// with a nil note and therefore preserves the stored one — never clobbers an annotation.
+    /// Updates only the note column. `updated_at` tracks when an agent entered its current lifecycle
+    /// state (read as the alert event timestamp by clients such as iOS Alerts), so annotating must not
+    /// touch it or a stale blocked/finished event would appear to have just occurred.
+    public func setAgentSessionNote(id: String, note: String?) throws {
+        try execute(sql: "UPDATE agent_sessions SET note = NULLIF(?, '') WHERE id = ?", bindings: [note ?? "", id])
+    }
+
+    /// Whether an agent session row with this id exists in any workspace. Used to validate a
+    /// subscription target before persisting the edge, since the subscriber references an agent row by
+    /// id rather than by a workspace-scoped lookup.
+    public func agentWindowExists(id: String) throws -> Bool {
+        try queryRow(sql: "SELECT 1 FROM agent_sessions WHERE id = ? LIMIT 1", bindings: [id]) != nil
+    }
+
+    public func insertAgentSubscription(subscriberTerminalSessionID: String, agentSessionID: String, createdAt: String) throws {
+        try execute(
+            sql: """
+                INSERT INTO agent_subscriptions(subscriber_terminal_session_id, agent_session_id, created_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(subscriber_terminal_session_id, agent_session_id) DO NOTHING
+                """, bindings: [subscriberTerminalSessionID, agentSessionID, createdAt])
+    }
+
+    public func deleteAgentSubscription(subscriberTerminalSessionID: String, agentSessionID: String) throws {
+        try execute(
+            sql: "DELETE FROM agent_subscriptions WHERE subscriber_terminal_session_id = ? AND agent_session_id = ?",
+            bindings: [subscriberTerminalSessionID, agentSessionID])
+    }
+
+    /// Drops every watch edge where `subscriberTerminalSessionID` is the SUBSCRIBER — the outgoing-edge
+    /// counterpart to explicit inbound-edge deletion for a terminated agent row.
+    /// `agent_subscriptions` carries no foreign key on `subscriber_terminal_session_id` (only on the
+    /// watched `agent_session_id`), so when a subscriber terminal's own agent exits, its own watches of
+    /// OTHER agents survive the exit unless dropped here explicitly. Used on subscriber-exit paths
+    /// (`AgentNotificationEngine.subscriberDidExit`).
+    public func deleteAgentSubscriptions(subscriberTerminalSessionID: String) throws {
+        try execute(sql: "DELETE FROM agent_subscriptions WHERE subscriber_terminal_session_id = ?", bindings: [subscriberTerminalSessionID])
+    }
+
+    /// Drops every INBOUND watch edge to an agent row — the edges where `agentSessionID` is the watched
+    /// target. `agent_subscriptions.agent_session_id` is `ON DELETE RESTRICT`, so the row delete no longer
+    /// cascades these away; the termination chokepoint (`WorkspaceOrchestrator.finalizeAgentRow`) calls
+    /// this to drop them explicitly AFTER notifying the subscribers, so the delete then succeeds. A delete
+    /// that skips the chokepoint leaves these edges in place and RESTRICT makes it fail loudly.
+    public func deleteAgentSubscriptions(agentSessionID: String) throws {
+        try execute(sql: "DELETE FROM agent_subscriptions WHERE agent_session_id = ?", bindings: [agentSessionID])
+    }
+
+    /// Subscribers watching a given agent session (used when that agent changes state).
+    public func agentSubscriptions(agentSessionID: String) throws -> [AgentSubscriptionRecord] {
+        try queryRows(
+            sql: """
+                SELECT subscriber_terminal_session_id, agent_session_id, created_at
+                FROM agent_subscriptions
+                WHERE agent_session_id = ?
+                ORDER BY created_at
+                """, bindings: [agentSessionID]
+        ).compactMap(decodeAgentSubscription)
+    }
+
+    /// Agent sessions a given terminal session is watching (used when that subscriber goes idle).
+    public func agentSubscriptions(subscriberTerminalSessionID: String) throws -> [AgentSubscriptionRecord] {
+        try queryRows(
+            sql: """
+                SELECT subscriber_terminal_session_id, agent_session_id, created_at
+                FROM agent_subscriptions
+                WHERE subscriber_terminal_session_id = ?
+                ORDER BY created_at
+                """, bindings: [subscriberTerminalSessionID]
+        ).compactMap(decodeAgentSubscription)
+    }
+
+    /// Timestamp of the most recent hook-sourced lifecycle signal for an agent session, or `nil` when it
+    /// has never been signaled. Readiness is defined by a real `spaces_agent_signal` event, so
+    /// foreground-detection events (a different source) are deliberately excluded.
+    public func lastAgentSignalAt(agentSessionID: String) throws -> String? {
+        guard
+            let value = try queryRow(
+                sql: "SELECT MAX(created_at) FROM agent_session_events WHERE agent_session_id = ? AND source = 'spaces_agent_signal'",
+                bindings: [agentSessionID])?.first, !value.isEmpty
+        else { return nil }
+        return value
+    }
+
+    /// Whether this agent session's CURRENT life has a recorded `exit` lifecycle event — the persisted,
+    /// unambiguous fact that its exit was already delivered through the termination chokepoint. Exit
+    /// finalization (`WorkspaceOrchestrator.handleAgentExit` → `recordAgentExitStatus`, and the delete
+    /// branch) always appends an `event_type = 'exit'` row, and that event survives on a row the
+    /// finalization keeps: a configured launcher held at `.done`, or a live-terminal row held at `.exited`.
+    /// A live agent sitting `.done` after merely completing a turn has only `done` transition events, never
+    /// an `exit` event, so this is what distinguishes a launcher whose exit was already notified from one
+    /// that is still running between turns — a distinction `.done` status alone cannot make.
+    ///
+    /// The fact is scoped to the row's current life: a kept row is REUSED when a fresh agent starts in the
+    /// same terminal (the restart-reuse reset in `registerAgentWindow` preserves the row id, and both the
+    /// daemon and remote init paths record an `init` event on it), so the previous life's `exit` event must
+    /// not mark the reincarnated, live agent as finalized — that would silently suppress the new life's
+    /// exited notice on kill/sweep. An `exit` therefore only counts when no `init` event was recorded after
+    /// it. Ordering uses `rowid` (insertion order), not the `created_at` strings, so two events appended in
+    /// the same second cannot tie.
+    public func agentSessionHasRecordedExitEvent(agentSessionID: String) throws -> Bool {
+        guard
+            let row = try queryRow(
+                sql: """
+                    SELECT COALESCE(MAX(CASE WHEN event_type = 'exit' THEN rowid END), 0),
+                           COALESCE(MAX(CASE WHEN event_type = 'init' THEN rowid END), 0)
+                    FROM agent_session_events
+                    WHERE agent_session_id = ?
+                    """, bindings: [agentSessionID]), row.count >= 2, let lastExitRowID = Int64(row[0]), let lastInitRowID = Int64(row[1])
+        else { return false }
+        return lastExitRowID > 0 && lastExitRowID > lastInitRowID
+    }
+
+    private func decodeAgentSubscription(row: [String]) -> AgentSubscriptionRecord? {
+        guard row.count >= 3 else { return nil }
+        return AgentSubscriptionRecord(subscriberTerminalSessionID: row[0], agentSessionID: row[1], createdAt: row[2])
+    }
+
+    // MARK: - Cross-device watch edges (agent_remote_subscriptions)
+
+    public func insertAgentRemoteSubscription(subscriberTerminalSessionID: String, deviceID: String, agentSessionID: String, createdAt: String) throws
+    {
+        try execute(
+            sql: """
+                INSERT INTO agent_remote_subscriptions(subscriber_terminal_session_id, device_id, agent_session_id, created_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(subscriber_terminal_session_id, device_id, agent_session_id) DO NOTHING
+                """, bindings: [subscriberTerminalSessionID, deviceID, agentSessionID, createdAt])
+    }
+
+    public func deleteAgentRemoteSubscription(subscriberTerminalSessionID: String, deviceID: String, agentSessionID: String) throws {
+        try execute(
+            sql: """
+                DELETE FROM agent_remote_subscriptions
+                WHERE subscriber_terminal_session_id = ? AND device_id = ? AND agent_session_id = ?
+                """, bindings: [subscriberTerminalSessionID, deviceID, agentSessionID])
+    }
+
+    /// Drops every subscriber's edge to one remote agent — used when the watch service sees that agent
+    /// exit (its row left the remote listing), after the terminating line has been delivered.
+    public func deleteAgentRemoteSubscriptions(deviceID: String, agentSessionID: String) throws {
+        try execute(sql: "DELETE FROM agent_remote_subscriptions WHERE device_id = ? AND agent_session_id = ?", bindings: [deviceID, agentSessionID])
+    }
+
+    /// Drops every cross-device watch edge where `subscriberTerminalSessionID` is the SUBSCRIBER — the
+    /// remote counterpart of `deleteAgentSubscriptions(subscriberTerminalSessionID:)`, used on the same
+    /// subscriber-exit path so a local terminal that just exited never keeps a paired device's overview
+    /// stream open for edges that can never deliver again. `agent_remote_subscriptions` has no foreign
+    /// key at all (the watched agent lives on another device's database), so nothing else drops these.
+    public func deleteAgentRemoteSubscriptions(subscriberTerminalSessionID: String) throws {
+        try execute(
+            sql: "DELETE FROM agent_remote_subscriptions WHERE subscriber_terminal_session_id = ?", bindings: [subscriberTerminalSessionID])
+    }
+
+    /// Remote agents a given local terminal is watching (used when that subscriber goes idle to flush its
+    /// queue — the flush path is shared with local subscriptions and keys only on the subscriber).
+    public func agentRemoteSubscriptions(subscriberTerminalSessionID: String) throws -> [AgentRemoteSubscriptionRecord] {
+        try queryRows(
+            sql: """
+                SELECT subscriber_terminal_session_id, device_id, agent_session_id, created_at
+                FROM agent_remote_subscriptions
+                WHERE subscriber_terminal_session_id = ?
+                ORDER BY created_at
+                """, bindings: [subscriberTerminalSessionID]
+        ).compactMap(decodeAgentRemoteSubscription)
+    }
+
+    /// Every watch edge pointed at a given device (used by the watch service to compute the set of remote
+    /// agents to diff for that device's overview stream).
+    public func agentRemoteSubscriptions(deviceID: String) throws -> [AgentRemoteSubscriptionRecord] {
+        try queryRows(
+            sql: """
+                SELECT subscriber_terminal_session_id, device_id, agent_session_id, created_at
+                FROM agent_remote_subscriptions
+                WHERE device_id = ?
+                ORDER BY created_at
+                """, bindings: [deviceID]
+        ).compactMap(decodeAgentRemoteSubscription)
+    }
+
+    /// The subscriber terminal ids watching one remote agent (used to fan a transition out to watchers).
+    public func agentRemoteSubscribers(deviceID: String, agentSessionID: String) throws -> [String] {
+        try queryRows(
+            sql: """
+                SELECT subscriber_terminal_session_id
+                FROM agent_remote_subscriptions
+                WHERE device_id = ? AND agent_session_id = ?
+                ORDER BY created_at
+                """, bindings: [deviceID, agentSessionID]
+        ).compactMap { $0.first }
+    }
+
+    /// Distinct device ids with at least one watch edge — the set of paired devices the watch service
+    /// keeps an overview stream open to.
+    public func agentRemoteSubscriptionDeviceIDs() throws -> [String] {
+        try queryRows(sql: "SELECT DISTINCT device_id FROM agent_remote_subscriptions ORDER BY device_id").compactMap { $0.first }
+    }
+
+    private func decodeAgentRemoteSubscription(row: [String]) -> AgentRemoteSubscriptionRecord? {
+        guard row.count >= 4 else { return nil }
+        return AgentRemoteSubscriptionRecord(subscriberTerminalSessionID: row[0], deviceID: row[1], agentSessionID: row[2], createdAt: row[3])
+    }
+
+    // MARK: - Remote watch baselines (agent_remote_watch_baselines)
+
+    /// Replaces one device's persisted watch baseline with `baseline` (watched child terminal session
+    /// id → last-seen listing row) in a single transaction, so a reader never observes a half-replaced
+    /// device. The watch service mirrors its in-memory baseline here on every change, which is what
+    /// lets a restarted daemon diff its first listing against the state the previous run had reported.
+    public func replaceAgentRemoteWatchBaseline(deviceID: String, baseline: [String: SpacesDeviceAgentSessionRow]) throws {
+        let encoder = JSONEncoder()
+        let encoded = try baseline.map { (agentSessionID, row) in (agentSessionID, String(decoding: try encoder.encode(row), as: UTF8.self)) }
+        try withTransaction {
+            try execute(sql: "DELETE FROM agent_remote_watch_baselines WHERE device_id = ?", bindings: [deviceID])
+            for (agentSessionID, rowJSON) in encoded {
+                try execute(
+                    sql: "INSERT INTO agent_remote_watch_baselines(device_id, agent_session_id, row_json) VALUES (?, ?, ?)",
+                    bindings: [deviceID, agentSessionID, rowJSON])
+            }
+        }
+    }
+
+    /// Every device's persisted watch baseline, in the shape the watch service holds in memory. A row
+    /// whose JSON no longer decodes is skipped — the watch then seeds that child silently, exactly as
+    /// if it had never been observed.
+    public func agentRemoteWatchBaselines() throws -> [String: [String: SpacesDeviceAgentSessionRow]] {
+        let decoder = JSONDecoder()
+        var baselines: [String: [String: SpacesDeviceAgentSessionRow]] = [:]
+        for row in try queryRows(sql: "SELECT device_id, agent_session_id, row_json FROM agent_remote_watch_baselines") {
+            guard row.count >= 3, let decoded = try? decoder.decode(SpacesDeviceAgentSessionRow.self, from: Data(row[2].utf8)) else { continue }
+            baselines[row[0], default: [:]][row[1]] = decoded
+        }
+        return baselines
+    }
+
+    /// Retires one device's persisted watch baseline — the device's last watch edge was removed or the
+    /// device unpaired, so a later watch of it must start fresh instead of diffing against dead state.
+    public func deleteAgentRemoteWatchBaseline(deviceID: String) throws {
+        try execute(sql: "DELETE FROM agent_remote_watch_baselines WHERE device_id = ?", bindings: [deviceID])
+    }
+
+    /// The Spaces agent row bound to a terminal session id, searched across every workspace. Returns
+    /// `nil` when the terminal has no agent row — a plain shell terminal, which the notification engine
+    /// treats as idle. Orchestration reaches an agent by terminal session id (subscriptions key on it)
+    /// without knowing the owning workspace, hence the unscoped lookup.
+    public func agentWindowByTerminalSession(terminalSessionID: String) throws -> AgentWindowRecord? {
+        guard
+            let row = try queryRow(
+                sql: """
+                    SELECT
+                      \(Self.agentWindowColumns)
+                    FROM agent_sessions
+                    LEFT JOIN runtime_targets ON runtime_targets.id = agent_sessions.runtime_target_id
+                    WHERE agent_sessions.terminal_session_id = ? OR runtime_targets.tracking_id = ?
+                    LIMIT 1
+                    """, bindings: [terminalSessionID, terminalSessionID])
+        else { return nil }
+        return decodeAgentWindow(row: row)
+    }
+
+    /// The agent row with this id (across every workspace), or `nil` when absent. Subscription
+    /// validation resolves the watched agent by its row id to read the terminal it is bound to.
+    public func agentWindow(id: String) throws -> AgentWindowRecord? {
+        guard
+            let row = try queryRow(
+                sql: """
+                    SELECT
+                      \(Self.agentWindowColumns)
+                    FROM agent_sessions
+                    LEFT JOIN runtime_targets ON runtime_targets.id = agent_sessions.runtime_target_id
+                    WHERE agent_sessions.id = ?
+                    LIMIT 1
+                    """, bindings: [id])
+        else { return nil }
+        return decodeAgentWindow(row: row)
+    }
+
+    /// Enqueues (or coalesces onto) the pending notification for a (subscriber, agent) pair. `INSERT OR
+    /// REPLACE` on the unique index replaces any existing pending line for the same pair, so a child that
+    /// goes blocked then done while its subscriber is busy leaves exactly one row rendering the latest
+    /// state. `transition` is the transition word the rendered `message` carries (`blocked`/`done`/
+    /// `exited`) — the structural key a resume uses to withdraw held blocked lines. A fresh `id` is
+    /// generated on every write like the other event stores.
+    public func upsertPendingAgentNotification(
+        subscriberTerminalSessionID: String, agentSessionID: String, transition: String, message: String, createdAt: String
+    ) throws {
+        try execute(
+            sql: """
+                INSERT OR REPLACE INTO agent_pending_notifications(id, subscriber_terminal_session_id, agent_session_id, transition, message, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """, bindings: [UUID().uuidString, subscriberTerminalSessionID, agentSessionID, transition, message, createdAt])
+    }
+
+    /// Pending notifications for a subscriber terminal in enqueue order, flushed when it goes idle.
+    public func pendingAgentNotifications(subscriberTerminalSessionID: String) throws -> [AgentPendingNotificationRecord] {
+        try queryRows(
+            sql: """
+                SELECT id, subscriber_terminal_session_id, agent_session_id, message, created_at
+                FROM agent_pending_notifications
+                WHERE subscriber_terminal_session_id = ?
+                ORDER BY created_at, rowid
+                """, bindings: [subscriberTerminalSessionID]
+        ).compactMap(decodePendingAgentNotification)
+    }
+
+    public func deletePendingAgentNotification(id: String) throws {
+        try execute(sql: "DELETE FROM agent_pending_notifications WHERE id = ?", bindings: [id])
+    }
+
+    /// Atomically drains a subscriber terminal's held notifications: reads its pending rows in `created_at`
+    /// order and deletes them in one `BEGIN IMMEDIATE` transaction, returning the rendered messages. This is
+    /// the MCP piggyback path — a busy orchestrator (whose idle-flush has therefore not run) picks its
+    /// watched children's held events up on the response of its next tool call. Reusing the same
+    /// `pendingAgentNotifications` SELECT the idle-flush path (`AgentNotificationEngine.subscriberDidBecomeIdle`)
+    /// reads, then deleting the whole set inside the transaction on the store's single connection, is what
+    /// keeps the two delivery paths from ever handing out the same row twice: whichever runs first removes
+    /// the rows atomically before the other can observe them, and both delete as they deliver.
+    public func consumePendingAgentNotifications(subscriberTerminalSessionID: String) throws -> [String] {
+        try withTransaction {
+            let pending = try pendingAgentNotifications(subscriberTerminalSessionID: subscriberTerminalSessionID)
+            guard !pending.isEmpty else { return [] }
+            try deletePendingAgentNotifications(subscriberTerminalSessionID: subscriberTerminalSessionID)
+            return pending.map(\.message)
+        }
+    }
+
+    public func deletePendingAgentNotifications(subscriberTerminalSessionID: String) throws {
+        try execute(sql: "DELETE FROM agent_pending_notifications WHERE subscriber_terminal_session_id = ?", bindings: [subscriberTerminalSessionID])
+    }
+
+    /// Withdraws every subscriber's held line for one watched agent when that line renders `transition`.
+    /// Used when a blocked child resumes working: its held `blocked` lines (across all subscribers) are
+    /// misinformation, while `done`/`exited` lines are terminal facts and are never passed here.
+    public func deletePendingAgentNotifications(agentSessionID: String, transition: String) throws {
+        try execute(
+            sql: "DELETE FROM agent_pending_notifications WHERE agent_session_id = ? AND transition = ?", bindings: [agentSessionID, transition])
+    }
+
+    private func decodePendingAgentNotification(row: [String]) -> AgentPendingNotificationRecord? {
+        guard row.count >= 5 else { return nil }
+        return AgentPendingNotificationRecord(
+            id: row[0], subscriberTerminalSessionID: row[1], agentSessionID: row[2], message: row[3], createdAt: row[4])
+    }
+
     public func deleteAgentWindowsByProvider(workspaceID: String, provider: AgentProvider) throws {
         try execute(sql: "DELETE FROM agent_sessions WHERE workspace_id = ? AND provider = ?", bindings: [workspaceID, provider.rawValue])
     }
 
     func decodeAgentWindow(row: [String]) -> AgentWindowRecord? {
-        guard row.count >= 16 else { return nil }
+        guard row.count >= 17 else { return nil }
         guard let provider = AgentProvider(rawValue: row[2]) else { return nil }
         let terminalSessionID = row[9].isEmpty ? nil : row[9]
         let status = AgentWindowStatus(rawValue: row[13]) ?? .idle
@@ -172,7 +522,8 @@ extension SQLiteStore {
         return AgentWindowRecord(
             id: row[0], workspaceID: row[1], provider: provider, label: row[3].isEmpty ? nil : row[3], runtimeTargetID: row[4].isEmpty ? nil : row[4],
             terminalTarget: terminalTarget, sessionKey: row[10].isEmpty ? nil : row[10], claimedLauncherID: row[11].isEmpty ? nil : row[11],
-            claimedLauncherName: row[12].isEmpty ? nil : row[12], status: status, createdAt: row[14], updatedAt: row[15])
+            claimedLauncherName: row[12].isEmpty ? nil : row[12], status: status, note: row[14].isEmpty ? nil : row[14], createdAt: row[15],
+            updatedAt: row[16])
     }
 
     func spacesAgentTerminalSessionID(_ record: AgentWindowRecord) -> String? {

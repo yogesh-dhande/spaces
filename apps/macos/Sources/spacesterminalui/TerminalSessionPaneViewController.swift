@@ -59,6 +59,10 @@ private final class NotificationObserverBag: @unchecked Sendable {
 
     /// Root view owning the whole pane content tree; hosts embed this view.
     public let view = NSView()
+    /// The pane's single top-trailing banner. The pane drives its persistent notice (session ended
+    /// or failed); the host hands the same instance to this pane's `TerminalLinkOpenCoordinator` for
+    /// transient link activity, so the two can never fight over the corner.
+    public private(set) lazy var banner = TerminalPaneBanner(hostView: view)
     /// The window currently hosting the pane's view. Pane behavior that depends on
     /// window state (key/main status, first responder) reads it through here so the
     /// pane stays window-independent.
@@ -571,6 +575,7 @@ private final class NotificationObserverBag: @unchecked Sendable {
                 updateInputOwnershipUI(isOwner: isOwner, isInteractive: isInteractive && canAttachToRuntime)
                 rendererLabel.stringValue = rendererMode.statusSummary
             }
+            updateEndedBanner(runtimeState: runtimeState)
             guard visibleRenderer != .ghosttyOwner else {
                 restoreGhosttyOwnerInputFocusIfReady()
                 completeOwnershipTransitionIfNeeded(target: .owner, renderer: "owner_surface")

@@ -21,25 +21,18 @@ struct WorkspaceControlBar: View {
         HStack(spacing: 8) {
             if workspace.isRunning {
                 WorkspaceControlButton(
-                    title: "Restart", systemImage: "arrow.clockwise", tint: Theme.muted,
-                    identifier: "workspace.restart.\(workspace.id)", action: onRestart)
+                    title: "Restart", systemImage: "arrow.clockwise", tint: Theme.muted, identifier: "workspace.restart.\(workspace.id)",
+                    action: onRestart)
                 WorkspaceControlButton(
-                    title: "Stop", systemImage: "stop.fill", tint: Theme.red,
-                    identifier: "workspace.stop.\(workspace.id)", action: onStop)
+                    title: "Stop", systemImage: "stop.fill", tint: Theme.red, identifier: "workspace.stop.\(workspace.id)", action: onStop)
             } else {
                 WorkspaceControlButton(
-                    title: "Start", systemImage: "play.fill", tint: Theme.accent,
-                    identifier: "workspace.start.\(workspace.id)", action: onStart)
+                    title: "Start", systemImage: "play.fill", tint: Theme.accent, identifier: "workspace.start.\(workspace.id)", action: onStart)
             }
             WorkspaceControlButton(
-                title: "Terminal", systemImage: "plus", tint: Theme.muted,
-                identifier: "workspace.newTerminal.\(workspace.id)", action: onNewTerminal)
+                title: "Terminal", systemImage: "plus", tint: Theme.muted, identifier: "workspace.newTerminal.\(workspace.id)", action: onNewTerminal)
             Spacer(minLength: 0)
-        }
-        .disabled(isMutating)
-        .opacity(isMutating ? 0.5 : 1)
-        .padding(.horizontal, 20)
-        .padding(.top, 8)
+        }.disabled(isMutating).opacity(isMutating ? 0.5 : 1).padding(.horizontal, 20).padding(.top, 8)
     }
 }
 
@@ -55,19 +48,11 @@ private struct WorkspaceControlButton: View {
     var body: some View {
         Button(action: action) {
             HStack(spacing: 4) {
-                Image(systemName: systemImage)
-                    .font(.system(size: 10, weight: .semibold))
-                Text(title)
-                    .font(.system(size: 12, weight: .medium))
-            }
-            .foregroundStyle(tint)
-            .padding(.horizontal, 9)
-            .padding(.vertical, 5)
-            .background(Theme.surface2, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).strokeBorder(Theme.border, lineWidth: 1))
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityIdentifier(identifier)
+                Image(systemName: systemImage).font(.system(size: 10, weight: .semibold))
+                Text(title).font(.system(size: 12, weight: .medium))
+            }.foregroundStyle(tint).padding(.horizontal, 9).padding(.vertical, 5).background(
+                Theme.surface2, in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+            ).overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).strokeBorder(Theme.border, lineWidth: 1)).contentShape(Rectangle())
+        }.buttonStyle(.plain).accessibilityIdentifier(identifier)
     }
 }

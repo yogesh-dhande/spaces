@@ -67,6 +67,15 @@ public final class TerminalServiceInstanceLock {
         try? fileManager.removeItem(atPath: path)
     }
 
+    /// Returns the live daemon pid recorded by the profile lock, or `nil` when the lock is absent,
+    /// stale, or unreadable. The database migration guard uses the existing instance lock so a newer
+    /// helper can recognize an older running daemon without requiring that daemon to implement a new
+    /// handshake first.
+    public static func activeOwnerProcessID(path: String) throws -> Int32? {
+        guard let record = try existingRecord(path: path), processIsAlive(record.pid) else { return nil }
+        return record.pid
+    }
+
     private static func removeStaleLockIfNeeded(path: String, fileManager: FileManager) throws -> Bool {
         guard let record = try existingRecord(path: path) else {
             try? fileManager.removeItem(atPath: path)

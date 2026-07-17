@@ -9,7 +9,11 @@ if ! swift format --help >/dev/null 2>&1; then
   exit 1
 fi
 
-staged_files="$(git diff --cached --name-only --diff-filter=ACMR | grep '^apps/macos/\(Sources\|Tests\)/.*\.swift$' || true)"
+staged_files="$(
+  git diff --cached --name-only --diff-filter=ACMR \
+    | grep '^apps/\(macos\|ios\)/\(Sources\|Tests\|UITests\)/.*\.swift$' \
+    || true
+)"
 
 if [ -z "$staged_files" ]; then
   exit 0
@@ -17,7 +21,7 @@ fi
 
 echo "$staged_files" | while IFS= read -r file; do
   [ -n "$file" ] || continue
-  swift format format --in-place "$file"
+  swift format format --configuration "$repo_root/.swift-format" --in-place "$file"
 done
 
 echo "$staged_files" | while IFS= read -r file; do

@@ -26,15 +26,10 @@ struct ConnectionSettingsView: View {
     let onSave: (SpacesMobileConnectionSettings, String) -> Void
 
     init(
-        initialSettings: SpacesMobileConnectionSettings,
-        initialPairingLink: SpacesDevicePairingLink? = nil,
-        pairedDevices: [SpacesMobilePairedDeviceRecord] = [],
-        activeDeviceID: String? = nil,
-        noticeMessage: String? = nil,
-        onPairingLinkConsumed: @escaping () -> Void = {},
-        onSelectDevice: @escaping (String) -> Void = { _ in },
-        onRemoveDevice: @escaping (String) -> Void = { _ in },
-        onRenameDevice: @escaping (String, String) -> Void = { _, _ in },
+        initialSettings: SpacesMobileConnectionSettings, initialPairingLink: SpacesDevicePairingLink? = nil,
+        pairedDevices: [SpacesMobilePairedDeviceRecord] = [], activeDeviceID: String? = nil, noticeMessage: String? = nil,
+        onPairingLinkConsumed: @escaping () -> Void = {}, onSelectDevice: @escaping (String) -> Void = { _ in },
+        onRemoveDevice: @escaping (String) -> Void = { _ in }, onRenameDevice: @escaping (String, String) -> Void = { _, _ in },
         onSave: @escaping (SpacesMobileConnectionSettings, String) -> Void
     ) {
         _settings = State(initialValue: initialSettings)
@@ -51,13 +46,7 @@ struct ConnectionSettingsView: View {
 
     var body: some View {
         Form {
-            if !pairedDevices.isEmpty {
-                Section("Connected Devices") {
-                    ForEach(pairedDevices) { device in
-                        deviceRow(device)
-                    }
-                }
-            }
+            if !pairedDevices.isEmpty { Section("Connected Devices") { ForEach(pairedDevices) { device in deviceRow(device) } } }
 
             Section {
                 Button {
@@ -69,40 +58,19 @@ struct ConnectionSettingsView: View {
                             Text("Pairing…")
                         }
                     } else {
-                        Label(
-                            "Scan QR Code to Pair",
-                            systemImage: "qrcode.viewfinder"
-                        )
+                        Label("Scan QR Code to Pair", systemImage: "qrcode.viewfinder")
                     }
-                }
-                .disabled(isPairing)
+                }.disabled(isPairing)
 
-                if let noticeMessage {
-                    Text(noticeMessage)
-                        .font(.footnote)
-                        .foregroundStyle(.orange)
-                }
-                if let errorMessage {
-                    Text(errorMessage)
-                        .font(.footnote)
-                        .foregroundStyle(.red)
-                }
+                if let noticeMessage { Text(noticeMessage).font(.footnote).foregroundStyle(.orange) }
+                if let errorMessage { Text(errorMessage).font(.footnote).foregroundStyle(.red) }
 
                 #if DEBUG
-                    Section("Debug") {
-                        NavigationLink("Browser Proxy Smoke Test") {
-                            BrowserProxySmokeTestView()
-                        }
-                    }
+                    Section("Debug") { NavigationLink("Browser Proxy Smoke Test") { BrowserProxySmokeTestView() } }
                 #endif
             }
-        }
-        .navigationTitle("Paired Devices")
-        .navigationBarTitleDisplayMode(.inline)
-        .tint(Theme.accent)
-        .alert(
-            pendingPairingLink.map { "Pair with \($0.name)?" } ?? "Pair Device?",
-            isPresented: $isConfirmingPairing
+        }.navigationTitle("Paired Devices").navigationBarTitleDisplayMode(.inline).tint(Theme.accent).alert(
+            pendingPairingLink.map { "Pair with \($0.name)?" } ?? "Pair Device?", isPresented: $isConfirmingPairing
         ) {
             Button("Pair") {
                 guard let pendingPairingLink else { return }
@@ -110,14 +78,9 @@ struct ConnectionSettingsView: View {
             }
             Button("Cancel", role: .cancel) { pendingPairingLink = nil }
         } message: {
-            if let pendingPairingLink {
-                Text("\(pendingPairingLink.host):\(pendingPairingLink.port)")
-            }
-        }
-        .confirmationDialog(
-            devicePendingRemoval.map { "Remove \($0.name)?" } ?? "Remove Device?",
-            isPresented: removalConfirmationBinding,
-            titleVisibility: .visible,
+            if let pendingPairingLink { Text("\(pendingPairingLink.host):\(pendingPairingLink.port)") }
+        }.confirmationDialog(
+            devicePendingRemoval.map { "Remove \($0.name)?" } ?? "Remove Device?", isPresented: removalConfirmationBinding, titleVisibility: .visible,
             presenting: devicePendingRemoval
         ) { device in
             Button("Remove Device", role: .destructive) {
@@ -125,28 +88,15 @@ struct ConnectionSettingsView: View {
                 devicePendingRemoval = nil
             }
             Button("Cancel", role: .cancel) { devicePendingRemoval = nil }
-        }
-        .fullScreenCover(isPresented: $isShowingScanner) {
-            QRCodeScannerView { payload in
-                handleScannedPayload(payload)
-            }
-        }
-        .task {
+        }.fullScreenCover(isPresented: $isShowingScanner) { QRCodeScannerView { payload in handleScannedPayload(payload) } }.task {
             applyIncomingPairingLink(initialPairingLink)
-        }
-        .onChange(of: initialPairingLink) { _, newValue in
-            applyIncomingPairingLink(newValue)
-        }
+        }.onChange(of: initialPairingLink) { _, newValue in applyIncomingPairingLink(newValue) }
     }
 
     @ViewBuilder private func deviceRow(_ device: SpacesMobilePairedDeviceRecord) -> some View {
         if renamingDeviceID == device.id {
-            TextField("Device name", text: $renameText)
-                .focused($isRenameFieldFocused)
-                .submitLabel(.done)
-                .onSubmit { commitRename(for: device) }
-                .onAppear { isRenameFieldFocused = true }
-                .onDisappear { commitRename(for: device) }
+            TextField("Device name", text: $renameText).focused($isRenameFieldFocused).submitLabel(.done).onSubmit { commitRename(for: device) }
+                .onAppear { isRenameFieldFocused = true }.onDisappear { commitRename(for: device) }
         } else {
             HStack(spacing: 10) {
                 Button {
@@ -156,13 +106,9 @@ struct ConnectionSettingsView: View {
                     onSelectDevice(device.id)
                 } label: {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(device.name)
-                            .foregroundStyle(.primary)
-                        Text("\(device.host):\(device.port)")
-                            .font(.caption.monospaced())
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
+                        Text(device.name).foregroundStyle(.primary)
+                        Text("\(device.host):\(device.port)").font(.caption.monospaced()).foregroundStyle(.secondary).lineLimit(1).truncationMode(
+                            .middle)
                     }
                 }
                 Spacer(minLength: 0)
@@ -170,10 +116,8 @@ struct ConnectionSettingsView: View {
                     devicePendingRemoval = device
                 } label: {
                     Image(systemName: "trash")
-                }
-                .buttonStyle(.borderless)
-            }
-            .contextMenu {
+                }.buttonStyle(.borderless)
+            }.contextMenu {
                 Button {
                     beginRename(for: device)
                 } label: {
@@ -204,16 +148,11 @@ struct ConnectionSettingsView: View {
         guard renamingDeviceID == device.id else { return }
         let trimmed = renameText.trimmingCharacters(in: .whitespacesAndNewlines)
         renamingDeviceID = nil
-        if !trimmed.isEmpty, trimmed != device.name {
-            onRenameDevice(device.id, trimmed)
-        }
+        if !trimmed.isEmpty, trimmed != device.name { onRenameDevice(device.id, trimmed) }
     }
 
     private var removalConfirmationBinding: Binding<Bool> {
-        Binding(
-            get: { devicePendingRemoval != nil },
-            set: { if !$0 { devicePendingRemoval = nil } }
-        )
+        Binding(get: { devicePendingRemoval != nil }, set: { if !$0 { devicePendingRemoval = nil } })
     }
 
     @MainActor private func applyIncomingPairingLink(_ pairingLink: SpacesDevicePairingLink?) {
@@ -229,9 +168,7 @@ struct ConnectionSettingsView: View {
             pendingPairingLink = try SpacesDevicePairingLink.parse(payload)
             errorMessage = nil
             isConfirmingPairing = true
-        } catch {
-            errorMessage = error.localizedDescription
-        }
+        } catch { errorMessage = error.localizedDescription }
     }
 
     @MainActor private func pairDevice(using pairingLink: SpacesDevicePairingLink) async {
@@ -246,9 +183,7 @@ struct ConnectionSettingsView: View {
             let bridgeClient = SpacesDeviceAPIClient(settings: pairedSettings)
             let commandChannel = bridgeClient.makeCommandChannel()
             let issuedAuthToken: String
-            do {
-                issuedAuthToken = try await bridgeClient.pair(pairingLink: pairingLink, commandChannel: commandChannel)
-            } catch {
+            do { issuedAuthToken = try await bridgeClient.pair(pairingLink: pairingLink, commandChannel: commandChannel) } catch {
                 await commandChannel.close()
                 throw error
             }
@@ -259,8 +194,6 @@ struct ConnectionSettingsView: View {
             errorMessage = nil
             onSave(pairedSettings, pairingLink.name)
             dismiss()
-        } catch {
-            errorMessage = error.localizedDescription
-        }
+        } catch { errorMessage = error.localizedDescription }
     }
 }

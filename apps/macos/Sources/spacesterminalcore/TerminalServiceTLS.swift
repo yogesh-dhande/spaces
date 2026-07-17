@@ -435,9 +435,7 @@ public enum TerminalServiceTLSError: LocalizedError, Equatable {
 
             private func sendResponseAndClose(_ response: TerminalServiceResponse) { sendResponse(response, closeAfterSend: true) }
 
-            private static func shouldCloseAfterResponse(_ response: TerminalServiceResponse) -> Bool {
-                response.closesConnectionAfterDelivery
-            }
+            private static func shouldCloseAfterResponse(_ response: TerminalServiceResponse) -> Bool { response.closesConnectionAfterDelivery }
 
             private func startStreamRelay(socketPath: String) {
                 do {
@@ -925,9 +923,7 @@ public enum TerminalServiceTLSError: LocalizedError, Equatable {
             }
         }
 
-        private static func shouldCloseAfterResponse(_ response: TerminalServiceResponse) -> Bool {
-            response.closesConnectionAfterDelivery
-        }
+        private static func shouldCloseAfterResponse(_ response: TerminalServiceResponse) -> Bool { response.closesConnectionAfterDelivery }
 
         private static func writeTLSResponse(_ data: Data, ssl: OpaquePointer) throws {
             try data.withUnsafeBytes { rawBuffer in
@@ -959,9 +955,9 @@ public enum TerminalServiceTLSError: LocalizedError, Equatable {
         /// to `expectedFingerprint`. On a pin failure the verify block reports the reason through
         /// `pinFailure` and then rejects the handshake; callers use `pinFailure` to record the
         /// error and unblock their connection semaphore.
-        public static func makePinnedTLSParameters(
-            expectedFingerprint: String, pinFailure: @escaping @Sendable (TerminalServiceTLSError) -> Void
-        ) -> NWParameters {
+        public static func makePinnedTLSParameters(expectedFingerprint: String, pinFailure: @escaping @Sendable (TerminalServiceTLSError) -> Void)
+            -> NWParameters
+        {
             let tlsOptions = NWProtocolTLS.Options()
             let securityOptions = tlsOptions.securityProtocolOptions
             sec_protocol_options_set_min_tls_protocol_version(securityOptions, .TLSv12)

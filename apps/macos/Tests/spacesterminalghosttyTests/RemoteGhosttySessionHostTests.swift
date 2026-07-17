@@ -9,6 +9,7 @@ import spacesterminalcore
 
 final class RemoteGhosttySessionHostTests: XCTestCase {
     private var originalDatabasePath: String?
+    private var originalRuntimeDirectory: String?
     private var databaseRoot: URL?
     private final class DirectTerminalServiceRecorder: @unchecked Sendable {
         private let lock = NSLock()
@@ -51,17 +52,21 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
     override func setUpWithError() throws {
         try super.setUpWithError()
         originalDatabasePath = ProcessInfo.processInfo.environment["SPACES_DB_PATH"]
+        originalRuntimeDirectory = ProcessInfo.processInfo.environment["SPACES_RUNTIME_DIR"]
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         databaseRoot = root
         setenv("SPACES_DB_PATH", root.appendingPathComponent("spaces.db").path, 1)
+        setenv("SPACES_RUNTIME_DIR", root.appendingPathComponent("runtime", isDirectory: true).path, 1)
     }
 
     override func tearDownWithError() throws {
         if let originalDatabasePath { setenv("SPACES_DB_PATH", originalDatabasePath, 1) } else { unsetenv("SPACES_DB_PATH") }
+        if let originalRuntimeDirectory { setenv("SPACES_RUNTIME_DIR", originalRuntimeDirectory, 1) } else { unsetenv("SPACES_RUNTIME_DIR") }
         if let databaseRoot { try? FileManager.default.removeItem(at: databaseRoot) }
         databaseRoot = nil
         originalDatabasePath = nil
+        originalRuntimeDirectory = nil
         try super.tearDownWithError()
     }
 
@@ -154,9 +159,11 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         container.addSubview(view)
 
         let position = GhosttyMirrorTerminalView.ghosttyMousePosition(for: NSPoint(x: 60, y: 70), in: view)
+        let scrollPosition = GhosttyMirrorTerminalView.scrollPointerPosition(for: NSPoint(x: 60, y: 70), in: view, mods: mods)
 
         XCTAssertEqual(position.x, 50, accuracy: 0.01)
         XCTAssertEqual(position.y, 50, accuracy: 0.01)
+        XCTAssertEqual(scrollPosition, .init(x: 0.25, y: 0.5, mods: mods))
     }
 
     @MainActor func testRemoteMirrorSuppressesFocusOnlyMouseClickBeforeForwarding() throws {

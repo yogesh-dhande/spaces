@@ -48,19 +48,27 @@ public enum SupportedCodingAgentHook: String, CaseIterable, Sendable, Codable {
 
     /// Claude and Codex use the same JSON hook shape; these are their event → signal bindings.
     /// opencode uses a plugin file instead and returns an empty list.
+    ///
+    /// `PreToolUse` → `working` exists because approving a permission prompt resumes execution without
+    /// firing any hook (an approval is not a `UserPromptSubmit`): without it a `blocked` agent would
+    /// stay `waiting` until its next Stop even while actively running tools. The first tool call after
+    /// an approval re-marks the agent working; the daemon suppresses the repeat signals every
+    /// subsequent tool call produces.
     var jsonEventBindings: [AgentHookJSONWriter.EventBinding] {
         switch self {
         case .claudeCode:
             [
                 .init(eventName: "SessionStart", event: .initialize), .init(eventName: "UserPromptSubmit", event: .working),
-                .init(eventName: "PermissionRequest", event: .blocked), .init(eventName: "Stop", event: .done),
-                .init(eventName: "SessionEnd", event: .exit),
+                .init(eventName: "PreToolUse", event: .working), .init(eventName: "PermissionRequest", event: .blocked),
+                .init(eventName: "Stop", event: .done), .init(eventName: "SessionEnd", event: .exit),
             ]
         case .codex:
-            // Codex has no session-end event, so no `exit` binding.
+            // Codex has no session-end event, so no `exit` binding. Its hooks feature accepts the
+            // Claude-compatible event set including PreToolUse (verified against codex-cli 0.144).
             [
                 .init(eventName: "SessionStart", event: .initialize), .init(eventName: "UserPromptSubmit", event: .working),
-                .init(eventName: "PermissionRequest", event: .blocked), .init(eventName: "Stop", event: .done),
+                .init(eventName: "PreToolUse", event: .working), .init(eventName: "PermissionRequest", event: .blocked),
+                .init(eventName: "Stop", event: .done),
             ]
         case .opencode: []
         }

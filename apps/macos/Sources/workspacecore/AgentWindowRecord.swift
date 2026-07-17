@@ -11,13 +11,17 @@ public struct AgentWindowRecord: Codable, Sendable {
     public let claimedLauncherID: String?
     public let claimedLauncherName: String?
     public let status: AgentWindowStatus
+    /// Explicit, user-authored annotation for orchestration (`spaces agent annotate`). It is never
+    /// derived from prompts or terminal output, and survives status signals — only the annotate path
+    /// clears or replaces it.
+    public let note: String?
     public let createdAt: String
     public let updatedAt: String
 
     public init(
         id: String, workspaceID: String, provider: AgentProvider, label: String?, runtimeTargetID: String? = nil,
         terminalTarget: TerminalTargetRecord? = nil, sessionKey: String? = nil, claimedLauncherID: String? = nil, claimedLauncherName: String? = nil,
-        status: AgentWindowStatus, createdAt: String, updatedAt: String
+        status: AgentWindowStatus, note: String? = nil, createdAt: String, updatedAt: String
     ) {
         self.id = id
         self.workspaceID = workspaceID
@@ -29,6 +33,7 @@ public struct AgentWindowRecord: Codable, Sendable {
         self.claimedLauncherID = claimedLauncherID
         self.claimedLauncherName = claimedLauncherName
         self.status = status
+        self.note = note
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }

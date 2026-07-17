@@ -139,9 +139,13 @@ public final class SQLiteStore {
             currentSchemaVersion: DatabaseSchema.currentVersion, steps: DatabaseSchema.migrationSteps,
             backupManager: DatabaseBackupManager(databaseURL: URL(fileURLWithPath: databasePath)))
         try migrator.migrateIfNeeded(
-            existingTables: try userTableNames(), schemaVersion: try schemaVersionValue(), databasePath: databasePath, databaseHandle: db,
-            createFreshSchema: { try self.createSchema() }, setSchemaVersion: { try self.setSchemaVersion($0) },
-            withTransaction: { try self.withImmediateTransaction($0) }, validateIntegrity: { try self.validateIntegrity() })
+            databasePath: databasePath, databaseHandle: db, readExistingTables: { try self.userTableNames() },
+            readSchemaVersion: { try self.schemaVersionValue() }, createFreshSchema: { try self.createSchema() },
+            setSchemaVersion: { try self.setSchemaVersion($0) }, withTransaction: { try self.withImmediateTransaction($0) },
+            validateIntegrity: { try self.validateIntegrity() },
+            withMigrationAuthorization: { migration in
+                try ProfileDatabaseMigrationGuard.withMigrationAuthorization(databasePath: self.databasePath, migration)
+            })
     }
 
     private func schemaVersionValue() throws -> Int? {

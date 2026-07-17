@@ -8,10 +8,8 @@ struct TerminalTextArtifactView: View {
     let url: URL
 
     var body: some View {
-        TerminalTextArtifactTextView(text: TerminalTextArtifact.displayText(fileURL: url))
-            .background(Color(uiColor: .systemBackground))
-            .ignoresSafeArea(edges: .bottom)
-            .accessibilityIdentifier("terminal.textArtifact")
+        TerminalTextArtifactTextView(text: TerminalTextArtifact.displayText(fileURL: url)).background(Color(uiColor: .systemBackground))
+            .ignoresSafeArea(edges: .bottom).accessibilityIdentifier("terminal.textArtifact")
     }
 }
 
@@ -34,9 +32,7 @@ enum TerminalTextArtifact {
 
     /// Decodes bytes as UTF-8, substituting the replacement character for invalid sequences instead of
     /// throwing, so binary or mislabeled content still renders as (garbled but safe) text.
-    static func lossyString(from data: Data) -> String {
-        String(decoding: data, as: UTF8.self)
-    }
+    static func lossyString(from data: Data) -> String { String(decoding: data, as: UTF8.self) }
 
     /// Passes text through unchanged when it is within the display cap; otherwise returns the leading
     /// `displayCharacterLimit` characters followed by a visible truncation footer.
@@ -66,9 +62,5 @@ private struct TerminalTextArtifactTextView: UIViewRepresentable {
         return textView
     }
 
-    func updateUIView(_ textView: UITextView, context: Context) {
-        if textView.text != text {
-            textView.text = text
-        }
-    }
+    func updateUIView(_ textView: UITextView, context: Context) { if textView.text != text { textView.text = text } }
 }

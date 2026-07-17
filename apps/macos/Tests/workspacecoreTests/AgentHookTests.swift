@@ -222,7 +222,7 @@ final class AgentHookTests: XCTestCase {
         XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
     }
 
-    func testHandleAgentExitKeepsLiveAdHocSpacesSessionIdleWithoutPersistingSignalWindowID() throws {
+    func testHandleAgentExitMarksLiveAdHocSpacesSessionExitedWithoutPersistingSignalWindowID() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces-test.db").path
         let store = try SQLiteStore(path: dbPath)
@@ -243,7 +243,9 @@ final class AgentHookTests: XCTestCase {
         let result = try withSpacesProfileEnvironment(dbPath: dbPath) { try orchestrator.handleAgentExit(agent) }
 
         let record = try XCTUnwrap(result)
-        XCTAssertEqual(record.status, .idle)
+        // The agent process is gone but its terminal session is still live: the row survives and records
+        // `.exited` (not `.idle`, which would read as "no agent started here yet").
+        XCTAssertEqual(record.status, .exited)
         XCTAssertEqual(record.terminalTrackingID, sessionID)
         let storedAgent = try XCTUnwrap(try store.agentWindows(workspaceID: workspace.id).first)
         XCTAssertEqual(storedAgent.terminalTrackingID, sessionID)
@@ -251,6 +253,63 @@ final class AgentHookTests: XCTestCase {
         XCTAssertEqual(trackedWindow.terminalTrackingID, sessionID)
         XCTAssertTrue(closeCapture.sessionIDs.isEmpty)
         XCTAssertTrue(terminateCapture.sessionIDs.isEmpty)
+    }
+
+    /// An `init` signal preserves a row's status across a reconnect, but a terminal whose previous agent
+    /// `.exited` and now inits again is running a fresh agent reusing that terminal, so `registerAgentWindow`
+    /// (the shared chokepoint for both the daemon and remote init paths) resets `.exited` to `.idle`.
+    func testRegisterAgentWindowResetsExitedRowToIdleOnInit() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+
+        let agent = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Codex CLI", terminalTrackingID: "reused-session", sessionKey: "thread-1",
+            status: .spinning)
+        try store.updateAgentWindowStatus(id: agent.id, status: .exited, updatedAt: "now")
+
+        // The init path re-registers preserving the existing (now `.exited`) status.
+        let reinit = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Codex CLI", terminalTrackingID: "reused-session", sessionKey: "thread-1",
+            status: .exited, eventType: "init")
+
+        XCTAssertEqual(reinit.status, .idle)
+        XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).first?.status, .idle)
+        // The daemon flushes queued child notifications when this resulting status leaves the subscriber
+        // idle: a restart-on-exited lands at idle and correctly flushes.
+        XCTAssertTrue(reinit.status.leavesSubscriberIdle)
+    }
+
+    /// The daemon's flush-on-signal decision reads the status `registerAgentWindow` returns. An `init`
+    /// that preserves a live busy agent's `.spinning` (a reconnecting hook, or Claude Code's SessionStart
+    /// on auto-compact) must keep the row busy so queued child events are NOT flushed into a still-working
+    /// agent. Paired with the exited→idle reset test, this pins both arms of the resulting-status gate.
+    func testRegisterAgentWindowInitPreservesSpinningStatusSoSubscriberStaysBusy() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+
+        _ = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Codex CLI", terminalTrackingID: "live-session", sessionKey: "thread-1",
+            status: .spinning)
+        // A reconnecting init re-registers preserving the existing (still `.spinning`) status.
+        let reinit = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Codex CLI", terminalTrackingID: "live-session", sessionKey: "thread-1",
+            status: .spinning, eventType: "init")
+
+        XCTAssertEqual(reinit.status, .spinning)
+        XCTAssertFalse(reinit.status.leavesSubscriberIdle, "a still-spinning row must not trigger a queued-notification flush")
+    }
+
+    /// The single authority for the flush decision (shared by the daemon signal path and the notification
+    /// engine's live idle check): only idle and done leave a subscriber ready to receive queued lines.
+    /// Exited is a bare shell — its queue must wait for a new agent to init and reset it to idle.
+    func testAgentWindowStatusLeavesSubscriberIdleIsIdleAndDoneOnly() {
+        XCTAssertTrue(AgentWindowStatus.idle.leavesSubscriberIdle)
+        XCTAssertTrue(AgentWindowStatus.done.leavesSubscriberIdle)
+        XCTAssertFalse(AgentWindowStatus.spinning.leavesSubscriberIdle)
+        XCTAssertFalse(AgentWindowStatus.waiting.leavesSubscriberIdle)
+        XCTAssertFalse(AgentWindowStatus.exited.leavesSubscriberIdle)
     }
 
     func testHandleAgentExitKeepsClosedConfiguredSpacesAgentRow() throws {

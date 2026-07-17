@@ -53,15 +53,9 @@ enum TerminalUIPasteboardImageReader {
     /// `UIImage` as PNG when the pasteboard only exposes an image object. Reading the data here does
     /// trigger the iOS paste prompt, so call it only in response to an explicit paste action.
     static func readImage(from pasteboard: UIPasteboard = .general) -> TerminalUIPasteboardImageReadResult {
-        if let pngData = pasteboard.data(forPasteboardType: UTType.png.identifier) {
-            return validatedImage(data: pngData, fileExtension: "png")
-        }
-        if let jpegData = pasteboard.data(forPasteboardType: UTType.jpeg.identifier) {
-            return validatedImage(data: jpegData, fileExtension: "jpg")
-        }
-        if let heicData = pasteboard.data(forPasteboardType: UTType.heic.identifier) {
-            return validatedImage(data: heicData, fileExtension: "heic")
-        }
+        if let pngData = pasteboard.data(forPasteboardType: UTType.png.identifier) { return validatedImage(data: pngData, fileExtension: "png") }
+        if let jpegData = pasteboard.data(forPasteboardType: UTType.jpeg.identifier) { return validatedImage(data: jpegData, fileExtension: "jpg") }
+        if let heicData = pasteboard.data(forPasteboardType: UTType.heic.identifier) { return validatedImage(data: heicData, fileExtension: "heic") }
         guard let image = pasteboard.image else { return .noImage }
         guard let pngData = image.pngData() else { return .rejected(unreadableImageMessage) }
         return validatedImage(data: pngData, fileExtension: "png")
@@ -72,9 +66,7 @@ enum TerminalUIPasteboardImageReader {
             let payload = try TerminalImageAttachmentPayload.validated(fileExtension: fileExtension, imageData: data)
             guard let image = UIImage(data: payload.imageData) else { return .rejected(unreadableImageMessage) }
             return .image(TerminalComposerAttachment(payload: payload, thumbnail: image, sourceLabel: "Clipboard"))
-        } catch TerminalImageAttachmentValidationError.imageTooLarge {
-            return .rejected(oversizedImageMessage)
-        } catch {
+        } catch TerminalImageAttachmentValidationError.imageTooLarge { return .rejected(oversizedImageMessage) } catch {
             return .rejected(unreadableImageMessage)
         }
     }

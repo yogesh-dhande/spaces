@@ -35,6 +35,8 @@ public enum TerminalServicePaths {
         return socketRoot.appendingPathComponent("\(lockName).lock", isDirectory: false).path
     }
 
+    static func launchLockPath(fileManager: FileManager = .default) throws -> String { "\(try socketPath(fileManager: fileManager)).launch.lock" }
+
     public static func logPath(fileManager: FileManager = .default) throws -> String {
         let root = try terminalRootDirectory(fileManager: fileManager)
         return root.appendingPathComponent("service.log", isDirectory: false).path
@@ -58,4 +60,5 @@ public enum TerminalServicePaths {
         for byte in rootPath.utf8 { hash = ((hash << 5) &+ hash) &+ UInt64(byte) }
         return String(format: "%016llx", hash)
     }
+
 }

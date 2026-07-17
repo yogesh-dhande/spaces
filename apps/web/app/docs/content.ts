@@ -62,7 +62,13 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/coding-agents",
     title: "Coding Agents",
     summary:
-      "Track Claude Code, Codex, opencode, and other coding agents per workspace. Spaces offers to install lifecycle hooks for detected agent CLIs so each session reports its state automatically.",
+      "Track Claude Code, Codex, opencode, and other coding agents per workspace, and drive several of them from a single terminal — list, spawn, annotate, subscribe for blocked/done alerts, interrupt, and kill. Spaces offers to install lifecycle hooks for detected agent CLIs so each session reports its state automatically.",
+  },
+  {
+    href: "/docs/orchestration",
+    title: "Agent Orchestration",
+    summary:
+      "Talk to one agent to get all your work done: a lead agent spawns children in isolated worktrees across harnesses, models, and machines, and coordinates them to a verified finish. Includes the copy-paste orchestrator prompt.",
   },
   {
     href: "/docs/shortcuts",
@@ -92,13 +98,13 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/mcp",
     title: "Model Context Protocol",
     summary:
-      "Connect an MCP client such as Claude Code or Codex to the spaces mcp server so it can list and drive your projects, workspaces, and Spaces terminals.",
+      "Connect an MCP client such as Claude Code, Codex, or opencode to the spaces mcp server so it can list and drive your projects, workspaces, and Spaces terminals.",
   },
   {
     href: "/docs/ios",
-    title: "iOS Companion",
+    title: "iOS App",
     summary:
-      "Pair the Spaces iOS app with a Mac or Linux device to browse live terminal sessions, watch coding agents, run workspace processes, open browser sessions in an in-app web view, and create workspaces from your phone.",
+      "Pair the Spaces iOS app directly with a Mac or Linux device — no desktop app in between — to browse live terminal sessions, watch coding agents, run workspace processes, open browser sessions in an in-app web view, and create workspaces from your phone.",
   },
 ];
 

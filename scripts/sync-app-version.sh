@@ -165,6 +165,17 @@ info_plist.write_text(
     <string>AppIcon</string>
     <key>NSAppleEventsUsageDescription</key>
     <string>Spaces opens and focuses your workspace browser sessions in Google Chrome.</string>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>dev.usespaces.spaces</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>spaces</string>
+            </array>
+        </dict>
+    </array>
 </dict>
 </plist>
 """,

@@ -90,7 +90,7 @@ import Foundation
         public let onViewportSizeChanged: @MainActor (Int, Int) -> Void
         public let onSendText: @MainActor (String, Bool) -> Void
         public let onSendKey: @MainActor (String) -> Void
-        public let onSendScroll: @MainActor (Double, Double, Int32) -> Void
+        public let onSendScroll: @MainActor (Double, Double, Int32, TerminalScrollPointerPosition?) -> Void
         public let onOpenLink: @MainActor (String) -> Void
         public let onOpenComposer: (@MainActor () -> Void)?
 
@@ -99,7 +99,8 @@ import Foundation
             isVisible: Bool, acceptsInput: Bool, isBusy: Bool, onInputReadinessChanged: @escaping @MainActor (Bool) -> Void = { _ in },
             onScrollGestureApplied: (@MainActor () -> Void)? = nil, onRenderedTextChanged: (@MainActor (String) -> Void)? = nil,
             onViewportSizeChanged: @escaping @MainActor (Int, Int) -> Void, onSendText: @escaping @MainActor (String, Bool) -> Void,
-            onSendKey: @escaping @MainActor (String) -> Void, onSendScroll: @escaping @MainActor (Double, Double, Int32) -> Void = { _, _, _ in },
+            onSendKey: @escaping @MainActor (String) -> Void,
+            onSendScroll: @escaping @MainActor (Double, Double, Int32, TerminalScrollPointerPosition?) -> Void = { _, _, _, _ in },
             onOpenLink: @escaping @MainActor (String) -> Void = { _ in }, onOpenComposer: (@MainActor () -> Void)? = nil
         ) {
             self.ownerEpoch = ownerEpoch
@@ -127,7 +128,9 @@ import Foundation
             hostView.onViewportSizeChanged = { columns, rows in _ = Task { @MainActor in onViewportSizeChanged(columns, rows) } }
             hostView.onSendText = { text, asPaste in _ = Task { @MainActor in onSendText(text, asPaste) } }
             hostView.onSendKey = { key in _ = Task { @MainActor in onSendKey(key) } }
-            hostView.onSendScroll = { horizontal, vertical, scrollMods in _ = Task { @MainActor in onSendScroll(horizontal, vertical, scrollMods) } }
+            hostView.onSendScroll = { horizontal, vertical, scrollMods, pointerPosition in
+                _ = Task { @MainActor in onSendScroll(horizontal, vertical, scrollMods, pointerPosition) }
+            }
             hostView.onOpenLink = { link in _ = Task { @MainActor in onOpenLink(link) } }
             hostView.onOpenComposer = onOpenComposer.map { callback in { _ = Task { @MainActor in callback() } } }
             hostView.onRenderedTextChanged = onRenderedTextChanged.map { callback in { text in _ = Task { @MainActor in callback(text) } } }
@@ -224,6 +227,7 @@ import Foundation
         private var momentumDisplayLink: CADisplayLink?
         private var momentumVelocity = CGPoint.zero
         private var lastMomentumTimestamp: CFTimeInterval = 0
+        private var lastScrollPointerPosition: TerminalScrollPointerPosition?
         private var pendingAccessoryModifiers: Set<AccessoryModifier> = []
         private var suppressesSoftwareKeyboard = false
         private var tapLinkProbeDepth = 0
@@ -247,7 +251,7 @@ import Foundation
         public var onViewportSizeChanged: ((Int, Int) -> Void)?
         public var onSendText: ((String, Bool) -> Void)?
         public var onSendKey: ((String) -> Void)?
-        public var onSendScroll: ((Double, Double, Int32) -> Void)?
+        public var onSendScroll: ((Double, Double, Int32, TerminalScrollPointerPosition?) -> Void)?
         public var onOpenLink: ((String) -> Void)?
         public var onOpenComposer: (() -> Void)?
         public var onRenderedTextChanged: ((String) -> Void)? {
@@ -503,7 +507,8 @@ import Foundation
         ) -> Bool {
             sendScroll(
                 horizontal: horizontal, vertical: vertical,
-                scrollMods: Self.makeScrollMods(hasPreciseDeltas: hasPreciseDeltas, momentumState: momentumState))
+                scrollMods: Self.makeScrollMods(hasPreciseDeltas: hasPreciseDeltas, momentumState: momentumState),
+                pointerPosition: location.flatMap(scrollPointerPosition))
         }
 
         public static func makeScrollMods(hasPreciseDeltas: Bool, momentumState: UIGestureRecognizer.State) -> Int32 {
@@ -536,6 +541,7 @@ import Foundation
                 didScrollDuringCurrentPan = false
                 lastScrollTranslation = recognizer.translation(in: self)
                 stopMomentum()
+                lastScrollPointerPosition = scrollPointerPosition(for: recognizer.location(in: self))
                 beginScrollInteraction()
             case .changed:
                 let translation = recognizer.translation(in: self)
@@ -543,21 +549,31 @@ import Foundation
                 lastScrollTranslation = translation
                 let scrollDelta = GhosttyRemoteTerminalScrollMapper.scrollDelta(forPanDelta: delta, scaleFactor: Double(window?.screen.scale ?? 1))
                 let scrollMods = Self.makeScrollMods(hasPreciseDeltas: true, momentumState: .changed)
-                if sendScroll(horizontal: scrollDelta.x, vertical: scrollDelta.y, scrollMods: scrollMods) { didScrollDuringCurrentPan = true }
+                lastScrollPointerPosition = scrollPointerPosition(for: recognizer.location(in: self))
+                if sendScroll(horizontal: scrollDelta.x, vertical: scrollDelta.y, scrollMods: scrollMods, pointerPosition: lastScrollPointerPosition)
+                {
+                    didScrollDuringCurrentPan = true
+                }
             case .ended:
+                lastScrollPointerPosition = scrollPointerPosition(for: recognizer.location(in: self)) ?? lastScrollPointerPosition
                 if didScrollDuringCurrentPan {
-                    _ = sendScroll(horizontal: 0, vertical: 0, scrollMods: Self.makeScrollMods(hasPreciseDeltas: true, momentumState: .ended))
+                    _ = sendScroll(
+                        horizontal: 0, vertical: 0, scrollMods: Self.makeScrollMods(hasPreciseDeltas: true, momentumState: .ended),
+                        pointerPosition: lastScrollPointerPosition)
                 }
                 if didScrollDuringCurrentPan { onScrollGestureApplied?() }
                 let velocity = GhosttyRemoteTerminalScrollMapper.clampedMomentumVelocity(recognizer.velocity(in: self))
                 if GhosttyRemoteTerminalScrollMapper.shouldContinueMomentum(velocity: velocity) {
                     startMomentum(velocity: velocity)
                 } else {
+                    lastScrollPointerPosition = nil
                     endScrollInteraction()
                 }
             case .cancelled, .failed:
                 if didScrollDuringCurrentPan {
-                    _ = sendScroll(horizontal: 0, vertical: 0, scrollMods: Self.makeScrollMods(hasPreciseDeltas: true, momentumState: .cancelled))
+                    _ = sendScroll(
+                        horizontal: 0, vertical: 0, scrollMods: Self.makeScrollMods(hasPreciseDeltas: true, momentumState: .cancelled),
+                        pointerPosition: lastScrollPointerPosition)
                 }
                 if didScrollDuringCurrentPan { onScrollGestureApplied?() }
                 stopMomentum()
@@ -572,7 +588,9 @@ import Foundation
             lastMomentumTimestamp = timestamp
             let delta = GhosttyRemoteTerminalScrollMapper.momentumFrameDelta(
                 velocity: momentumVelocity, elapsed: elapsed, scaleFactor: Double(window?.screen.scale ?? 1))
-            _ = sendScroll(horizontal: delta.x, vertical: delta.y, scrollMods: Self.makeScrollMods(hasPreciseDeltas: true, momentumState: .changed))
+            _ = sendScroll(
+                horizontal: delta.x, vertical: delta.y, scrollMods: Self.makeScrollMods(hasPreciseDeltas: true, momentumState: .changed),
+                pointerPosition: lastScrollPointerPosition)
             momentumVelocity = GhosttyRemoteTerminalScrollMapper.decayedMomentumVelocity(
                 momentumVelocity, elapsed: elapsed, decelerationRate: UIScrollView.DecelerationRate.normal.rawValue)
             if !GhosttyRemoteTerminalScrollMapper.shouldContinueMomentum(velocity: momentumVelocity) { stopMomentum() }
@@ -590,12 +608,15 @@ import Foundation
         private func stopMomentum() {
             let hadMomentum = momentumDisplayLink != nil
             if hadMomentum {
-                _ = sendScroll(horizontal: 0, vertical: 0, scrollMods: Self.makeScrollMods(hasPreciseDeltas: true, momentumState: .ended))
+                _ = sendScroll(
+                    horizontal: 0, vertical: 0, scrollMods: Self.makeScrollMods(hasPreciseDeltas: true, momentumState: .ended),
+                    pointerPosition: lastScrollPointerPosition)
             }
             momentumDisplayLink?.invalidate()
             momentumDisplayLink = nil
             momentumVelocity = .zero
             lastMomentumTimestamp = 0
+            lastScrollPointerPosition = nil
             if hadMomentum { endScrollInteraction() }
         }
 
@@ -922,8 +943,17 @@ import Foundation
             return (columns: columns, rows: min(rows, visibleRows))
         }
 
-        @discardableResult private func sendScroll(horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32) -> Bool {
-            onSendScroll?(Double(horizontal), Double(vertical), scrollMods)
+        private func scrollPointerPosition(for location: CGPoint) -> TerminalScrollPointerPosition? {
+            let renderBounds = visibleRenderBounds()
+            return TerminalScrollPointerPosition.normalized(
+                x: Double(location.x - renderBounds.minX), y: Double(location.y - renderBounds.minY), width: Double(renderBounds.width),
+                height: Double(renderBounds.height))
+        }
+
+        @discardableResult private func sendScroll(
+            horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32, pointerPosition: TerminalScrollPointerPosition?
+        ) -> Bool {
+            onSendScroll?(Double(horizontal), Double(vertical), scrollMods, pointerPosition)
             return horizontal != 0 || vertical != 0
         }
 

@@ -34,9 +34,7 @@ extension TerminalSessionPaneViewController {
 
     /// Marks the pane hidden while it stays alive (its tab switched away): drops owner
     /// focus without detaching, so switching back is instant.
-    public func hideEmbedded() {
-        syncGhosttyOwnerFocus(reason: "embedded_hidden", requestWindowFocus: false, focused: false)
-    }
+    public func hideEmbedded() { syncGhosttyOwnerFocus(reason: "embedded_hidden", requestWindowFocus: false, focused: false) }
 
     /// Whether `responder` lives inside this pane's view tree. Drives focused-pane
     /// tracking from window first-responder changes.

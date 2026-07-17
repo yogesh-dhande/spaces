@@ -1,11 +1,11 @@
-import Darwin
 import CryptoKit
+import Darwin
 import Foundation
 import Observation
 import UIKit
 import spacesdevicecore
-import spacesterminalmobileghostty
 import spacesterminalcore
+import spacesterminalmobileghostty
 
 private let terminalViewerTraceEnabled = ProcessInfo.processInfo.environment["SPACES_MOBILE_TERMINAL_TRACE"] == "1"
 
@@ -36,9 +36,7 @@ enum TerminalViewerPhase: Equatable {
     case viewingOtherOwner
 }
 
-private enum TerminalLinkPreviewRequestError: Error {
-    case stale
-}
+private enum TerminalLinkPreviewRequestError: Error { case stale }
 
 /// What a resolved terminal link previews as. Every case carries the on-device URL the sheet renders:
 /// a local cache file for `quickLook`/`text`/`markdown`/`htmlFile`, or the original remote URL for
@@ -52,8 +50,7 @@ enum TerminalLinkPreviewContent: Equatable {
 
     var url: URL {
         switch self {
-        case .quickLook(let url), .text(let url), .markdown(let url), .htmlFile(let url), .webPage(let url):
-            return url
+        case .quickLook(let url), .text(let url), .markdown(let url), .htmlFile(let url), .webPage(let url): return url
         }
     }
 
@@ -95,6 +92,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     let session: SpacesDeviceTerminalSessionSummary
     let settings: SpacesMobileConnectionSettings
     private let onAuthenticationRequired: @MainActor @Sendable (String) -> Void
+    private let onOpenTerminalDeepLink: @MainActor @Sendable (SpacesTerminalDeepLink) -> Void
 
     var latestState: GhosttyRemoteSessionStatePayload?
     var isConnecting = false
@@ -182,7 +180,8 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     private var reportedOwnerReadyEpochID: String?
     private var reportedOwnerNonblankEpochID: String?
     private var hasRetriedEndedStateAfterStreamClose = false
-    @ObservationIgnored private lazy var scrollCoalescer = TerminalScrollCoalescer(frameInterval: Self.scrollCoalescingInterval) { [weak self] batch, finish in
+    @ObservationIgnored private lazy var scrollCoalescer = TerminalScrollCoalescer(frameInterval: Self.scrollCoalescingInterval) {
+        [weak self] batch, finish in
         guard let self else {
             finish()
             return
@@ -209,8 +208,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     /// storage before rendering, unlike image/video/PDF which QuickLook streams from disk; this caps
     /// that download so an oversized log file can't stall the preview or balloon device storage.
     private static let textPreviewByteCountLimit: Int64 = 4 * 1024 * 1024
-    private static let loopbackLinkNoticeMessage =
-        "This address runs on the session's host machine and isn't reachable from this device yet."
+    private static let loopbackLinkNoticeMessage = "This address runs on the session's host machine and isn't reachable from this device yet."
 
     /// Which step of the composed-send burst (see `enqueueComposedInputSend`) a failure occurred in, so
     /// `finishComposedSend` can surface a message that matches what actually happened rather than always
@@ -222,17 +220,16 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     }
 
     init(
-        session: SpacesDeviceTerminalSessionSummary,
-        settings: SpacesMobileConnectionSettings,
+        session: SpacesDeviceTerminalSessionSummary, settings: SpacesMobileConnectionSettings,
         onAuthenticationRequired: @escaping @MainActor @Sendable (String) -> Void,
-        bridgeClient: SpacesDeviceAPIClient? = nil,
+        onOpenTerminalDeepLink: @escaping @MainActor @Sendable (SpacesTerminalDeepLink) -> Void, bridgeClient: SpacesDeviceAPIClient? = nil,
         remoteMediaDownloader: @escaping @Sendable (URL, SpacesDeviceTerminalLinkArtifactKind) async throws -> URL = TerminalViewerModel
-            .defaultRemoteMediaDownloader,
-        linkPreviewCacheDirectory: URL? = nil
+            .defaultRemoteMediaDownloader, linkPreviewCacheDirectory: URL? = nil
     ) {
         self.session = session
         self.settings = settings
         self.onAuthenticationRequired = onAuthenticationRequired
+        self.onOpenTerminalDeepLink = onOpenTerminalDeepLink
         let resolvedBridgeClient = bridgeClient ?? SpacesDeviceAPIClient(settings: settings)
         self.bridgeClient = resolvedBridgeClient
         commandChannel = resolvedBridgeClient.makeCommandChannel()
@@ -247,23 +244,14 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         TerminalClient(
             kind: .remoteViewer,
             identity: TerminalClientIdentity(
-                label: UIDevice.current.name,
-                hostName: nil,
-                deviceName: UIDevice.current.name,
-                networkAddress: settings.trimmedHost
-            ),
-            connectedAt: ISO8601DateFormatter().string(from: Date())
-        )
+                label: UIDevice.current.name, hostName: nil, deviceName: UIDevice.current.name, networkAddress: settings.trimmedHost),
+            connectedAt: ISO8601DateFormatter().string(from: Date()))
     }
 
     nonisolated static func defaultRemoteMediaDownloader(_ url: URL, expectedArtifactKind: SpacesDeviceTerminalLinkArtifactKind) async throws -> URL {
         let (downloadedURL, response) = try await URLSession.shared.download(from: url)
         do {
-            return try validatedRemoteMediaDownloadURL(
-                downloadedURL,
-                response: response,
-                expectedArtifactKind: expectedArtifactKind,
-                sourceURL: url)
+            return try validatedRemoteMediaDownloadURL(downloadedURL, response: response, expectedArtifactKind: expectedArtifactKind, sourceURL: url)
         } catch {
             try? FileManager.default.removeItem(at: downloadedURL)
             throw error
@@ -279,10 +267,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     /// to confirm the promised artifact kind; a conflicting specific type such as an HTML sign-in page
     /// still fails before caching.
     nonisolated static func validatedRemoteMediaDownloadURL(
-        _ downloadedURL: URL,
-        response: URLResponse,
-        expectedArtifactKind: SpacesDeviceTerminalLinkArtifactKind,
-        sourceURL: URL? = nil
+        _ downloadedURL: URL, response: URLResponse, expectedArtifactKind: SpacesDeviceTerminalLinkArtifactKind, sourceURL: URL? = nil
     ) throws -> URL {
         guard response.url?.scheme?.lowercased() == "https" else {
             throw SpacesDeviceAPIClientError.requestFailed("The media link redirected to a non-HTTPS URL.")
@@ -294,37 +279,22 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             throw SpacesDeviceAPIClientError.requestFailed("The media link returned HTTP status \(httpResponse.statusCode).")
         }
         let mimeType = httpResponse.mimeType?.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard downloadedArtifactKindMatches(
-            contentType: mimeType?.isEmpty == false ? mimeType : nil,
-            responseURL: response.url,
-            sourceURL: sourceURL,
-            expectedArtifactKind: expectedArtifactKind
-        ) else {
-            throw SpacesDeviceAPIClientError.requestFailed("The media link did not return \(expectedArtifactKind.previewNoun) content.")
-        }
+        guard
+            downloadedArtifactKindMatches(
+                contentType: mimeType?.isEmpty == false ? mimeType : nil, responseURL: response.url, sourceURL: sourceURL,
+                expectedArtifactKind: expectedArtifactKind)
+        else { throw SpacesDeviceAPIClientError.requestFailed("The media link did not return \(expectedArtifactKind.previewNoun) content.") }
         return downloadedURL
     }
 
     private nonisolated static func downloadedArtifactKindMatches(
-        contentType: String?,
-        responseURL: URL?,
-        sourceURL: URL?,
-        expectedArtifactKind: SpacesDeviceTerminalLinkArtifactKind
+        contentType: String?, responseURL: URL?, sourceURL: URL?, expectedArtifactKind: SpacesDeviceTerminalLinkArtifactKind
     ) -> Bool {
-        let responseKind = contentType.flatMap {
-            SpacesDeviceTerminalLinkClassifier.artifactKind(contentType: $0, pathExtension: nil)
-        }
+        let responseKind = contentType.flatMap { SpacesDeviceTerminalLinkClassifier.artifactKind(contentType: $0, pathExtension: nil) }
         if responseKind == expectedArtifactKind { return true }
-        guard resolvedExtensionMatchesExpectedArtifactKind(
-            responseURL: responseURL,
-            sourceURL: sourceURL,
-            expectedArtifactKind: expectedArtifactKind)
-        else {
-            return false
-        }
-        guard let responseKind else {
-            return contentType.map(isGenericDownloadContentType) ?? true
-        }
+        guard resolvedExtensionMatchesExpectedArtifactKind(responseURL: responseURL, sourceURL: sourceURL, expectedArtifactKind: expectedArtifactKind)
+        else { return false }
+        guard let responseKind else { return contentType.map(isGenericDownloadContentType) ?? true }
         return responseKind == .text && Self.isTextFamilyArtifact(expectedArtifactKind)
     }
 
@@ -332,17 +302,13 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         let lowercased = contentType.lowercased()
         let baseType = lowercased.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? lowercased
         switch baseType.trimmingCharacters(in: .whitespacesAndNewlines) {
-        case "application/octet-stream", "binary/octet-stream", "application/x-download", "application/force-download":
-            return true
-        default:
-            return false
+        case "application/octet-stream", "binary/octet-stream", "application/x-download", "application/force-download": return true
+        default: return false
         }
     }
 
     private nonisolated static func resolvedExtensionMatchesExpectedArtifactKind(
-        responseURL: URL?,
-        sourceURL: URL?,
-        expectedArtifactKind: SpacesDeviceTerminalLinkArtifactKind
+        responseURL: URL?, sourceURL: URL?, expectedArtifactKind: SpacesDeviceTerminalLinkArtifactKind
     ) -> Bool {
         [responseURL, sourceURL].contains { url in
             guard let url else { return false }
@@ -360,33 +326,19 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     var latestScreenStateRevision: UInt64? { latestState?.screenStateRevision }
     var snapshotText: String? { latestState?.renderText }
     var renderStateKey: String {
-        if let ownerRenderEpochState {
-            return "owner|\(ownerRenderEpochState.id)"
-        }
+        if let ownerRenderEpochState { return "owner|\(ownerRenderEpochState.id)" }
         if let endedRender { return "ended|\(endedRender.id)" }
         return "status"
     }
     var showsTerminalSurface: Bool { isOwner || ownerRenderEpochState != nil || endedRender != nil }
     var shouldPresentLiveSurface: Bool { showsTerminalSurface }
     var visibleText: String {
-        if shouldRenderEndedTerminalSurface, let snapshotText = latestState?.renderText {
-            return snapshotText
-        }
-        if isSessionUnavailable {
-            return "This terminal session is no longer available.\nReturn to Terminals to open the current live session."
-        }
-        if renderModeValue == .ended {
-            return "This terminal session ended before a final render was available."
-        }
-        if renderModeValue == .ownerBootstrapping {
-            return "Preparing terminal…"
-        }
-        if isStartingState {
-            return "Preparing terminal…"
-        }
-        if isTakingOver {
-            return "Attempting takeover…"
-        }
+        if shouldRenderEndedTerminalSurface, let snapshotText = latestState?.renderText { return snapshotText }
+        if isSessionUnavailable { return "This terminal session is no longer available.\nReturn to Terminals to open the current live session." }
+        if renderModeValue == .ended { return "This terminal session ended before a final render was available." }
+        if renderModeValue == .ownerBootstrapping { return "Preparing terminal…" }
+        if isStartingState { return "Preparing terminal…" }
+        if isTakingOver { return "Attempting takeover…" }
         let ownerLabel = activeOwnerDisplayLabel ?? "another client"
         return "Live terminal rendering is limited to the active owner.\nCurrent owner: \(ownerLabel)"
     }
@@ -418,10 +370,8 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     var isPreparingInput: Bool {
         switch phase {
         case .connecting(owner: true), .ownerBusy: return true
-        case .ownerInteractive, .ownerSynchronizing:
-            return ownerRenderEpochState == nil || !isInputSurfaceReady
-        case .unavailable, .ended, .starting, .connecting(owner: false), .takingOver, .viewingOtherOwner:
-            return false
+        case .ownerInteractive, .ownerSynchronizing: return ownerRenderEpochState == nil || !isInputSurfaceReady
+        case .unavailable, .ended, .starting, .connecting(owner: false), .takingOver, .viewingOtherOwner: return false
         }
     }
     var viewportColumns: Int? { viewportSize?.columns }
@@ -449,9 +399,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         hasRetriedEndedStateAfterStreamClose = false
         trace("start")
         if isEndedState {
-            reconnectTask = Task { [weak self] in
-                await self?.loadEndedState()
-            }
+            reconnectTask = Task { [weak self] in await self?.loadEndedState() }
             return
         }
         scheduleReconnect(after: .zero)
@@ -460,17 +408,13 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     func stop() {
         guard let stopContext = beginStop() else { return }
         trace("stop")
-        Task {
-            await detachForStop(
-                using: stopContext.channel, shouldDetach: stopContext.shouldDetach, timeout: Self.dismissalDetachTimeout)
-        }
+        Task { await detachForStop(using: stopContext.channel, shouldDetach: stopContext.shouldDetach, timeout: Self.dismissalDetachTimeout) }
     }
 
     func prepareForBackNavigation() async {
         guard let stopContext = beginStop() else { return }
         trace("back_detach_begin")
-        await detachForStop(
-            using: stopContext.channel, shouldDetach: stopContext.shouldDetach, timeout: Self.dismissalDetachTimeout)
+        await detachForStop(using: stopContext.channel, shouldDetach: stopContext.shouldDetach, timeout: Self.dismissalDetachTimeout)
         trace("back_detach_end")
     }
 
@@ -515,15 +459,12 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         return (commandChannel, shouldDetach)
     }
 
-
     private func detachForStop(using currentChannel: SpacesDeviceAPICommandChannel, shouldDetach: Bool, timeout: Duration) async {
         if shouldDetach {
             do {
                 try await detachTerminal(timeout: timeout, commandChannel: currentChannel)
                 trace("detach_success")
-            } catch {
-                trace("detach_failure error=\(sanitizedTraceDetail(error.localizedDescription))")
-            }
+            } catch { trace("detach_failure error=\(sanitizedTraceDetail(error.localizedDescription))") }
         }
         await currentChannel.close()
     }
@@ -544,9 +485,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
 
     private var renderModeValue: TerminalViewerRenderMode {
         if isEndedState { return .ended }
-        if isOwner {
-            return hasConfirmedOwnerInputReadiness && ownerRenderEpochState != nil ? .ownerLive : .ownerBootstrapping
-        }
+        if isOwner { return hasConfirmedOwnerInputReadiness && ownerRenderEpochState != nil ? .ownerLive : .ownerBootstrapping }
         return .status
     }
 
@@ -563,9 +502,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         do {
             let takeoverState = try await takeOverTerminal(timeout: Self.inputRequestTimeout)
             if let takeoverState { applyLatestState(takeoverState) }
-            if !isOwner {
-                await refreshLatestState(timeout: Self.inputRequestTimeout, ignoreTransientTimeout: true, reason: "takeover_confirmation")
-            }
+            if !isOwner { await refreshLatestState(timeout: Self.inputRequestTimeout, ignoreTransientTimeout: true, reason: "takeover_confirmation") }
             errorMessage = nil
             if !isOwner {
                 isAwaitingTakeoverConfirmation = false
@@ -686,7 +623,8 @@ extension SpacesDeviceTerminalLinkArtifactKind {
 
     private func enqueueComposedInputSend(text: String, payloads: [TerminalImageAttachmentPayload], attachmentIDs: [UUID]) {
         let detail = "text_bytes=\(text.utf8.count) attachments=\(payloads.count)"
-        logPerformanceEvent(name: "input_command_enqueue", count: detail.utf8.count, attributes: inputCommandAttributes(kind: "composer_send", detail: detail))
+        logPerformanceEvent(
+            name: "input_command_enqueue", count: detail.utf8.count, attributes: inputCommandAttributes(kind: "composer_send", detail: detail))
         // A dedicated enqueue (rather than the generic `enqueueInputSend`) because the composer owns its
         // own completion: a partial failure must surface via `composerErrorMessage` and preserve the draft
         // rather than the generic `errorMessage` path, and success must clear the draft — while still
@@ -703,32 +641,24 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             // arguments to the typed text, and the risky large upload happens after the cheap text
             // send. A separator space follows the text (when images follow) and separates images.
             if hasText {
-                do {
-                    try await self.performSendTextRequest(text + (payloads.isEmpty ? "" : " "), asPaste: true)
-                } catch {
+                do { try await self.performSendTextRequest(text + (payloads.isEmpty ? "" : " "), asPaste: true) } catch {
                     await MainActor.run { self.finishComposedSend(with: error, failedStep: .text) }
                     return
                 }
             }
             for (index, payload) in payloads.enumerated() {
                 if index > 0 {
-                    do {
-                        try await self.performSendTextRequest(" ", asPaste: true)
-                    } catch {
+                    do { try await self.performSendTextRequest(" ", asPaste: true) } catch {
                         await MainActor.run { self.finishComposedSend(with: error, failedStep: .image) }
                         return
                     }
                 }
-                do {
-                    try await self.performPasteImageRequest(payload)
-                } catch {
+                do { try await self.performPasteImageRequest(payload) } catch {
                     await MainActor.run { self.finishComposedSend(with: error, failedStep: .image) }
                     return
                 }
             }
-            do {
-                try await self.performSendKeyRequest("enter")
-            } catch {
+            do { try await self.performSendKeyRequest("enter") } catch {
                 await MainActor.run { self.finishComposedSend(with: error, failedStep: .enter) }
                 return
             }
@@ -737,17 +667,12 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     }
 
     private func finishComposedSend(
-        with error: Error?,
-        failedStep: ComposedSendStep? = nil,
-        sentDraftText: String? = nil,
-        sentAttachmentIDs: [UUID] = []
+        with error: Error?, failedStep: ComposedSendStep? = nil, sentDraftText: String? = nil, sentAttachmentIDs: [UUID] = []
     ) {
         isSendingComposedMessage = false
         guard let error else {
             writeE2EEventIfNeeded(kind: "composer_send_success", detail: nil)
-            if composerDraftText == sentDraftText {
-                composerDraftText = ""
-            }
+            if composerDraftText == sentDraftText { composerDraftText = "" }
             let sentAttachmentIDs = Set(sentAttachmentIDs)
             composerAttachments.removeAll { sentAttachmentIDs.contains($0.id) }
             composerErrorMessage = nil
@@ -764,12 +689,9 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             return
         }
         switch failedStep {
-        case .text:
-            composerErrorMessage = "Couldn't send the message. Nothing was submitted."
-        case .enter:
-            composerErrorMessage = "The message was sent but couldn't be submitted. Retrying will send the whole message again."
-        case .image, nil:
-            composerErrorMessage = "Couldn't send an image. Nothing was submitted — the terminal line may contain partial text."
+        case .text: composerErrorMessage = "Couldn't send the message. Nothing was submitted."
+        case .enter: composerErrorMessage = "The message was sent but couldn't be submitted. Retrying will send the whole message again."
+        case .image, nil: composerErrorMessage = "Couldn't send an image. Nothing was submitted — the terminal line may contain partial text."
         }
     }
 
@@ -791,14 +713,8 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         try await performRequestUsingInputChannel {
             [bridgeClient, sessionID = session.id, clientID = remoteClient.id, ownerEpoch, payload] commandChannel in
             try await bridgeClient.pasteImage(
-                sessionID: sessionID,
-                clientID: clientID,
-                ownerEpoch: ownerEpoch,
-                fileExtension: payload.fileExtension,
-                imageData: payload.imageData,
-                timeout: Self.pasteImageRequestTimeout,
-                commandChannel: commandChannel
-            )
+                sessionID: sessionID, clientID: clientID, ownerEpoch: ownerEpoch, fileExtension: payload.fileExtension, imageData: payload.imageData,
+                timeout: Self.pasteImageRequestTimeout, commandChannel: commandChannel)
         }
     }
 
@@ -811,23 +727,19 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         guard appearance != lastAppearanceSentToSession else { return }
         lastAppearanceSentToSession = appearance
         trace("send_appearance value=\(appearance == .dark ? "dark" : "light")")
-        do {
-            try await bridgeClient.setAppearance(sessionID: session.id, clientID: remoteClient.id, appearance: appearance)
-        } catch {
+        do { try await bridgeClient.setAppearance(sessionID: session.id, clientID: remoteClient.id, appearance: appearance) } catch {
             trace("send_appearance_failure error=\(sanitizedTraceDetail(error.localizedDescription))")
         }
     }
 
-    func sendScroll(horizontal: Double, vertical: Double, scrollMods: Int32 = 0) async {
+    func sendScroll(horizontal: Double, vertical: Double, scrollMods: Int32 = 0, pointerPosition: TerminalScrollPointerPosition? = nil) async {
         guard isOwner else { return }
         guard keepsTerminalInputSurfaceActive else { return }
         flushBufferedInputText()
-        scrollCoalescer.append(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods)
+        scrollCoalescer.append(horizontal: horizontal, vertical: vertical, scrollMods: scrollMods, pointerPosition: pointerPosition)
     }
 
-    func flushPendingScroll() {
-        scrollCoalescer.flush()
-    }
+    func flushPendingScroll() { scrollCoalescer.flush() }
 
     func dismissLinkPreview() {
         invalidateLinkPreviewRequests()
@@ -855,6 +767,15 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             linkNotice = Self.loopbackLinkNoticeMessage
             return
         }
+        if case .spacesTerminal(let deepLink) = route {
+            // A spaces://terminal/… link tapped inside the terminal is an in-app navigation, not an
+            // external artifact: focus the linked session through the same navigator RootTabView uses
+            // for these links, instead of round-tripping to the daemon resolver (which rejects the scheme).
+            cancelAndClearLinkPreviewState()
+            linkNotice = nil
+            onOpenTerminalDeepLink(deepLink)
+            return
+        }
         linkNotice = nil
 
         let requestGeneration = beginLinkPreviewRequest()
@@ -866,15 +787,10 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             let previewCommandChannel = bridgeClient.makeCommandChannel()
             defer { Task { await previewCommandChannel.close() } }
             let metadata = try await bridgeClient.resolveTerminalLink(
-                sessionID: session.id,
-                link: normalizedLink,
-                commandChannel: previewCommandChannel)
+                sessionID: session.id, link: normalizedLink, commandChannel: previewCommandChannel)
             try Task.checkCancellation()
             try ensureCurrentLinkPreviewRequest(requestGeneration)
-            try await handleResolvedTerminalLink(
-                metadata,
-                commandChannel: previewCommandChannel,
-                requestGeneration: requestGeneration)
+            try await handleResolvedTerminalLink(metadata, commandChannel: previewCommandChannel, requestGeneration: requestGeneration)
         } catch {
             if error is TerminalLinkPreviewRequestError { return }
             if Task.isCancelled { return }
@@ -891,13 +807,8 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         guard reportedOwnerNonblankEpochID != ownerRenderEpochState.id else { return }
         reportedOwnerNonblankEpochID = ownerRenderEpochState.id
         logPerformanceEvent(
-            name: "owner_first_nonblank_render",
-            count: text.utf8.count,
-            attributes: [
-                "epoch_id": ownerRenderEpochState.id,
-                "render_mode": renderMode,
-            ]
-        )
+            name: "owner_first_nonblank_render", count: text.utf8.count,
+            attributes: ["epoch_id": ownerRenderEpochState.id, "render_mode": renderMode])
     }
 
     private func bufferInputText(_ text: String) {
@@ -910,9 +821,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         bufferedInputFlushTask = Task { [weak self] in
             try? await Task.sleep(for: Self.inputBatchDelay)
             guard !Task.isCancelled else { return }
-            await MainActor.run {
-                self?.flushBufferedInputTextFromTask()
-            }
+            await MainActor.run { self?.flushBufferedInputTextFromTask() }
         }
     }
 
@@ -938,57 +847,38 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         try await performRequestUsingInputChannel {
             [bridgeClient, sessionID = session.id, clientID = remoteClient.id, ownerEpoch, appendNewline, asPaste] commandChannel in
             try await bridgeClient.sendText(
-                sessionID: sessionID,
-                clientID: clientID,
-                text: text,
-                ownerEpoch: ownerEpoch,
-                appendNewline: appendNewline,
-                asPaste: asPaste,
-                timeout: Self.inputRequestTimeout,
-                commandChannel: commandChannel
-            )
+                sessionID: sessionID, clientID: clientID, text: text, ownerEpoch: ownerEpoch, appendNewline: appendNewline, asPaste: asPaste,
+                timeout: Self.inputRequestTimeout, commandChannel: commandChannel)
         }
     }
 
     private func performSendKeyRequest(_ key: String) async throws {
         let ownerEpoch = currentOwnerEpoch
         if TerminalKeyInput.hostAction(for: key) == .clearScreenAndScrollback {
-            try await performRequestUsingInputChannel { [bridgeClient, sessionID = session.id, clientID = remoteClient.id, ownerEpoch] commandChannel in
+            try await performRequestUsingInputChannel {
+                [bridgeClient, sessionID = session.id, clientID = remoteClient.id, ownerEpoch] commandChannel in
                 try await bridgeClient.clearScreen(
-                    sessionID: sessionID,
-                    clientID: clientID,
-                    ownerEpoch: ownerEpoch,
-                    timeout: Self.inputRequestTimeout,
-                    commandChannel: commandChannel
-                )
+                    sessionID: sessionID, clientID: clientID, ownerEpoch: ownerEpoch, timeout: Self.inputRequestTimeout,
+                    commandChannel: commandChannel)
             }
             return
         }
         try await performRequestUsingInputChannel { [bridgeClient, sessionID = session.id, clientID = remoteClient.id, ownerEpoch] commandChannel in
             try await bridgeClient.sendKey(
-                sessionID: sessionID,
-                clientID: clientID,
-                key: key,
-                ownerEpoch: ownerEpoch,
-                timeout: Self.inputRequestTimeout,
-                commandChannel: commandChannel
-            )
+                sessionID: sessionID, clientID: clientID, key: key, ownerEpoch: ownerEpoch, timeout: Self.inputRequestTimeout,
+                commandChannel: commandChannel)
         }
     }
 
-    private func performSendScrollRequest(horizontal: Double, vertical: Double, scrollMods: Int32) async throws {
+    private func performSendScrollRequest(horizontal: Double, vertical: Double, scrollMods: Int32, pointerPosition: TerminalScrollPointerPosition?)
+        async throws
+    {
         let ownerEpoch = currentOwnerEpoch
         try await performRequestUsingInputChannel { [bridgeClient, sessionID = session.id, clientID = remoteClient.id, ownerEpoch] commandChannel in
             try await bridgeClient.scroll(
-                sessionID: sessionID,
-                clientID: clientID,
-                horizontal: horizontal,
-                vertical: vertical,
-                ownerEpoch: ownerEpoch,
-                scrollMods: scrollMods == 0 ? nil : scrollMods,
-                timeout: Self.inputRequestTimeout,
-                commandChannel: commandChannel
-            )
+                sessionID: sessionID, clientID: clientID, horizontal: horizontal, vertical: vertical, ownerEpoch: ownerEpoch,
+                scrollMods: scrollMods == 0 ? nil : scrollMods, pointerPosition: pointerPosition, timeout: Self.inputRequestTimeout,
+                commandChannel: commandChannel)
         }
     }
 
@@ -1000,16 +890,13 @@ extension SpacesDeviceTerminalLinkArtifactKind {
                 return
             }
             defer { Task { @MainActor in onFinished() } }
-            try await self.performSendScrollRequest(horizontal: batch.horizontal, vertical: batch.vertical, scrollMods: batch.scrollMods)
+            try await self.performSendScrollRequest(
+                horizontal: batch.horizontal, vertical: batch.vertical, scrollMods: batch.scrollMods, pointerPosition: batch.pointerPosition)
         }
     }
 
-    private func performRequestUsingInputChannel(
-        _ request: @escaping @Sendable (SpacesDeviceAPICommandChannel) async throws -> Void
-    ) async throws {
-        do {
-            try await request(commandChannel)
-        } catch {
+    private func performRequestUsingInputChannel(_ request: @escaping @Sendable (SpacesDeviceAPICommandChannel) async throws -> Void) async throws {
+        do { try await request(commandChannel) } catch {
             guard Self.isTransientInputTransportError(error) else { throw error }
             replaceCommandChannel()
             try await Task.sleep(for: .milliseconds(120))
@@ -1017,11 +904,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         }
     }
 
-    private func enqueueInputSend(
-        kind: String,
-        detail: String,
-        _ request: @escaping @Sendable () async throws -> Void
-    ) {
+    private func enqueueInputSend(kind: String, detail: String, _ request: @escaping @Sendable () async throws -> Void) {
         let enqueuedAt = Date()
         logPerformanceEvent(name: "input_command_enqueue", count: detail.utf8.count, attributes: inputCommandAttributes(kind: kind, detail: detail))
         inputSendQueue.enqueue(priority: .userInitiated) { [weak self, enqueuedAt] in
@@ -1030,11 +913,8 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             do {
                 await MainActor.run {
                     self.logPerformanceEvent(
-                        name: "input_command_rpc_begin",
-                        elapsedMS: TerminalPerformance.elapsedMS(since: enqueuedAt),
-                        count: detail.utf8.count,
-                        attributes: self.inputCommandAttributes(kind: kind, detail: detail)
-                    )
+                        name: "input_command_rpc_begin", elapsedMS: TerminalPerformance.elapsedMS(since: enqueuedAt), count: detail.utf8.count,
+                        attributes: self.inputCommandAttributes(kind: kind, detail: detail))
                     self.writeE2EEventIfNeeded(kind: "\(kind)_begin", detail: detail)
                 }
                 try await request()
@@ -1064,10 +944,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     }
 
     private func inputCommandAttributes(kind: String, detail: String) -> [String: String] {
-        [
-            "input_kind": kind,
-            "input_bytes": String(detail.utf8.count),
-        ]
+        ["input_kind": kind, "input_bytes": String(detail.utf8.count)]
     }
 
     private func handleInputSendError(_ error: Error) {
@@ -1079,18 +956,14 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     private func routeInputSendRecovery(_ error: Error) -> Bool {
         if handleAuthenticationFailure(error) { return true }
         if Self.isTerminalNoLongerLiveError(error) {
-            Task { [weak self] in
-                await self?.recoverEndedStateAfterTerminalStopped(error, reason: "input_terminal_stopped")
-            }
+            Task { [weak self] in await self?.recoverEndedStateAfterTerminalStopped(error, reason: "input_terminal_stopped") }
             return true
         }
         return false
     }
 
     private func handleResolvedTerminalLink(
-        _ metadata: SpacesDeviceTerminalLinkMetadata,
-        commandChannel: SpacesDeviceAPICommandChannel?,
-        requestGeneration: UInt64
+        _ metadata: SpacesDeviceTerminalLinkMetadata, commandChannel: SpacesDeviceAPICommandChannel?, requestGeneration: UInt64
     ) async throws {
         try ensureCurrentLinkPreviewRequest(requestGeneration)
         switch metadata.source {
@@ -1115,8 +988,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             try ensureCurrentLinkPreviewRequest(requestGeneration)
             linkPreviewErrorMessage = nil
             linkPreview = TerminalLinkPreview(
-                id: metadata.id, title: metadata.displayName, kind: artifactKind,
-                content: Self.previewContent(for: artifactKind, fileURL: localURL))
+                id: metadata.id, title: metadata.displayName, kind: artifactKind, content: Self.previewContent(for: artifactKind, fileURL: localURL))
         case .localFile:
             guard let artifactKind = metadata.artifactKind else {
                 throw SpacesDeviceAPIClientError.requestFailed("Only image, video, PDF, Markdown, text, and HTML files can be previewed on iOS.")
@@ -1125,15 +997,11 @@ extension SpacesDeviceTerminalLinkArtifactKind {
                 linkPreviewErrorMessage = "\(metadata.displayName) is too large to preview on this device."
                 return
             }
-            let localURL = try await downloadLocalPreview(
-                metadata: metadata,
-                commandChannel: commandChannel,
-                requestGeneration: requestGeneration)
+            let localURL = try await downloadLocalPreview(metadata: metadata, commandChannel: commandChannel, requestGeneration: requestGeneration)
             try ensureCurrentLinkPreviewRequest(requestGeneration)
             linkPreviewErrorMessage = nil
             linkPreview = TerminalLinkPreview(
-                id: metadata.id, title: metadata.displayName, kind: artifactKind,
-                content: Self.previewContent(for: artifactKind, fileURL: localURL))
+                id: metadata.id, title: metadata.displayName, kind: artifactKind, content: Self.previewContent(for: artifactKind, fileURL: localURL))
         }
     }
 
@@ -1170,33 +1038,20 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     }
 
     private func downloadExternalPreview(
-        metadata: SpacesDeviceTerminalLinkMetadata,
-        url: URL,
-        artifactKind: SpacesDeviceTerminalLinkArtifactKind,
-        requestGeneration: UInt64
+        metadata: SpacesDeviceTerminalLinkMetadata, url: URL, artifactKind: SpacesDeviceTerminalLinkArtifactKind, requestGeneration: UInt64
     ) async throws -> URL {
         try ensureCurrentLinkPreviewRequest(requestGeneration)
         let downloadTask = Task { try await remoteMediaDownloader(url, artifactKind) }
         externalLinkPreviewDownloadTask = downloadTask
-        defer {
-            if isCurrentLinkPreviewRequest(requestGeneration) {
-                externalLinkPreviewDownloadTask = nil
-            }
-        }
+        defer { if isCurrentLinkPreviewRequest(requestGeneration) { externalLinkPreviewDownloadTask = nil } }
 
         let downloadedURL: URL
-        do {
-            downloadedURL = try await downloadTask.value
-        } catch {
+        do { downloadedURL = try await downloadTask.value } catch {
             if error is CancellationError { throw TerminalLinkPreviewRequestError.stale }
             throw error
         }
         var didMoveDownloadedFile = false
-        defer {
-            if !didMoveDownloadedFile {
-                try? FileManager.default.removeItem(at: downloadedURL)
-            }
-        }
+        defer { if !didMoveDownloadedFile { try? FileManager.default.removeItem(at: downloadedURL) } }
         try ensureCurrentLinkPreviewRequest(requestGeneration)
         if try exceedsTextPreviewSizeCap(artifactKind: artifactKind, fileURL: downloadedURL) {
             throw SpacesDeviceAPIClientError.requestFailed("\(metadata.displayName) is too large to preview on this device.")
@@ -1221,40 +1076,25 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     /// generation check after the transfer completes stays as an explicit guard so a request superseded in
     /// the instant between the last chunk and this function returning still can't publish a stale preview.
     private func downloadLocalPreview(
-        metadata: SpacesDeviceTerminalLinkMetadata,
-        commandChannel: SpacesDeviceAPICommandChannel?,
-        requestGeneration: UInt64
+        metadata: SpacesDeviceTerminalLinkMetadata, commandChannel: SpacesDeviceAPICommandChannel?, requestGeneration: UInt64
     ) async throws -> URL {
         try ensureCurrentLinkPreviewRequest(requestGeneration)
         let localURL = try previewCacheURL(for: metadata)
         let temporaryURL = temporaryPreviewDownloadURL(for: localURL)
         var didMoveTemporaryFile = false
-        defer {
-            if !didMoveTemporaryFile {
-                try? FileManager.default.removeItem(at: temporaryURL)
-            }
-        }
+        defer { if !didMoveTemporaryFile { try? FileManager.default.removeItem(at: temporaryURL) } }
 
         let downloadTask = Task { [bridgeClient, sessionID = session.id] in
-            try await SpacesDeviceTerminalLinkChunkTransfer.download(
-                linkID: metadata.id,
-                expectedByteCount: metadata.byteCount,
-                to: temporaryURL
-            ) { offset, limit in
+            try await SpacesDeviceTerminalLinkChunkTransfer.download(linkID: metadata.id, expectedByteCount: metadata.byteCount, to: temporaryURL) {
+                offset, limit in
                 try await bridgeClient.readTerminalLinkChunk(
                     sessionID: sessionID, linkID: metadata.id, offset: offset, limit: limit, commandChannel: commandChannel)
             }
         }
         localLinkPreviewDownloadTask = downloadTask
-        defer {
-            if isCurrentLinkPreviewRequest(requestGeneration) {
-                localLinkPreviewDownloadTask = nil
-            }
-        }
+        defer { if isCurrentLinkPreviewRequest(requestGeneration) { localLinkPreviewDownloadTask = nil } }
 
-        do {
-            _ = try await downloadTask.value
-        } catch {
+        do { _ = try await downloadTask.value } catch {
             if error is CancellationError { throw TerminalLinkPreviewRequestError.stale }
             throw error
         }
@@ -1271,8 +1111,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         try FileManager.default.createDirectory(at: linkPreviewCacheDirectory, withIntermediateDirectories: true)
         let fallbackExtension = URL(fileURLWithPath: metadata.displayName).pathExtension
         let fileExtension = SpacesDeviceTerminalLinkClassifier.preferredFilenameExtension(
-            contentType: metadata.contentType,
-            fallback: fallbackExtension)
+            contentType: metadata.contentType, fallback: fallbackExtension)
         let identity = Data("\(session.id)\u{0}\(metadata.id)".utf8)
         let digest = SHA256.hash(data: identity).map { String(format: "%02x", $0) }.joined()
         return linkPreviewCacheDirectory.appendingPathComponent("\(digest).\(fileExtension)")
@@ -1312,18 +1151,16 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         isPreparingLinkPreview = false
     }
 
-    private func isCurrentLinkPreviewRequest(_ requestGeneration: UInt64) -> Bool {
-        linkPreviewRequestGeneration == requestGeneration
-    }
+    private func isCurrentLinkPreviewRequest(_ requestGeneration: UInt64) -> Bool { linkPreviewRequestGeneration == requestGeneration }
 
     private func ensureCurrentLinkPreviewRequest(_ requestGeneration: UInt64) throws {
         guard isCurrentLinkPreviewRequest(requestGeneration) else { throw TerminalLinkPreviewRequestError.stale }
     }
 
     private func cleanupStalePreviewCache(now: Date = Date()) {
-        guard let files = try? FileManager.default.contentsOfDirectory(
-            at: linkPreviewCacheDirectory,
-            includingPropertiesForKeys: [.contentModificationDateKey])
+        guard
+            let files = try? FileManager.default.contentsOfDirectory(
+                at: linkPreviewCacheDirectory, includingPropertiesForKeys: [.contentModificationDateKey])
         else { return }
         let cutoff = now.addingTimeInterval(-24 * 60 * 60)
         for file in files {
@@ -1346,9 +1183,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         trace("schedule_reconnect delay_ms=\(Self.traceDurationMilliseconds(delay)) silent=\(shouldReconnectSilently ? 1 : 0)")
         reconnectTask?.cancel()
         reconnectTask = Task { [weak self] in
-            if delay > .zero {
-                try? await Task.sleep(for: delay)
-            }
+            if delay > .zero { try? await Task.sleep(for: delay) }
             guard !Task.isCancelled else { return }
             await self?.connect()
         }
@@ -1366,20 +1201,11 @@ extension SpacesDeviceTerminalLinkArtifactKind {
 
         let reconnectSilently = shouldReconnectSilently
         trace("connect_begin silent=\(reconnectSilently ? 1 : 0) attach_before_subscribe=\(shouldAttachBeforeSubscribing ? 1 : 0)")
-        if reconnectSilently {
-            isConnecting = false
-        } else {
-            isConnecting = true
-        }
+        if reconnectSilently { isConnecting = false } else { isConnecting = true }
         do {
             if shouldAttachBeforeSubscribing {
                 let attachAppearance = AppAppearanceStorage.current.resolvedThemeAppearance
-                try await bridgeClient.attach(
-                    sessionID: session.id,
-                    client: remoteClient,
-                    mode: .viewer,
-                    appearance: attachAppearance
-                )
+                try await bridgeClient.attach(sessionID: session.id, client: remoteClient, mode: .viewer, appearance: attachAppearance)
                 hasAttachedToSession = true
                 lastAppearanceSentToSession = attachAppearance
                 trace("connect_attach_success")
@@ -1388,19 +1214,16 @@ extension SpacesDeviceTerminalLinkArtifactKind {
                 guard let self else { return }
                 applyLatestState(payload)
             } onDisconnect: { [weak self] error in
-                Task { @MainActor [weak self] in
-                    await self?.handleDisconnect(error)
-                }
+                Task { @MainActor [weak self] in await self?.handleDisconnect(error) }
             }
             streamHandle = handle
             errorMessage = nil
             reconnectTask = nil
             trace("connect_subscribe_success")
             if !isOwner {
-                let refreshedState = await refreshLatestState(timeout: Self.stateRequestTimeout, ignoreTransientTimeout: true, reason: "connect_bootstrap")
-                if refreshedState == nil, !isOwner, !isStopping {
-                    isConnecting = false
-                }
+                let refreshedState = await refreshLatestState(
+                    timeout: Self.stateRequestTimeout, ignoreTransientTimeout: true, reason: "connect_bootstrap")
+                if refreshedState == nil, !isOwner, !isStopping { isConnecting = false }
             }
         } catch {
             reconnectTask = nil
@@ -1410,24 +1233,13 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         }
     }
 
-    @discardableResult
-    private func refreshLatestState(
-        timeout: Duration = .seconds(3),
-        ignoreTransientTimeout: Bool = false,
-        applyToLatestState: Bool = true,
-        reason: String = "state_refresh"
-    ) async
-        -> GhosttyRemoteSessionStatePayload?
-    {
+    @discardableResult private func refreshLatestState(
+        timeout: Duration = .seconds(3), ignoreTransientTimeout: Bool = false, applyToLatestState: Bool = true, reason: String = "state_refresh"
+    ) async -> GhosttyRemoteSessionStatePayload? {
         trace(
             "fetch_state_begin timeout_ms=\(Self.traceDurationMilliseconds(timeout)) ignore_transient_timeout=\(ignoreTransientTimeout ? 1 : 0) reason=\(reason)"
         )
-        logPerformanceEvent(
-            name: "explicit_state_refresh_begin",
-            attributes: [
-                "reason": reason,
-            ]
-        )
+        logPerformanceEvent(name: "explicit_state_refresh_begin", attributes: ["reason": reason])
         let startedAt = Date()
         do {
             let fetchedState = try await fetchTerminalState(timeout: timeout)
@@ -1435,14 +1247,8 @@ extension SpacesDeviceTerminalLinkArtifactKind {
                 "fetch_state_success reason=\(fetchedState.reason) runtime=\(traceSize(columns: fetchedState.runtimeState?.columns, rows: fetchedState.runtimeState?.rows)) frame=\(traceSize(columns: fetchedState.renderSnapshot?.columns, rows: fetchedState.renderSnapshot?.rows)) owner=\(traceOwnerID(fetchedState.attachmentSnapshot))"
             )
             logPerformanceEvent(
-                name: "explicit_state_refresh_end",
-                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
-                count: fetchedState.outputByteCount,
-                attributes: [
-                    "reason": reason,
-                    "render_update": fetchedState.renderUpdate == nil ? "0" : "1",
-                ]
-            )
+                name: "explicit_state_refresh_end", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), count: fetchedState.outputByteCount,
+                attributes: ["reason": reason, "render_update": fetchedState.renderUpdate == nil ? "0" : "1"])
             if applyToLatestState { applyLatestState(fetchedState) }
             return fetchedState
         } catch {
@@ -1450,12 +1256,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
                 "fetch_state_failure error=\(sanitizedTraceDetail(error.localizedDescription)) ignore_transient_timeout=\(ignoreTransientTimeout ? 1 : 0) reason=\(reason)"
             )
             logPerformanceEvent(
-                name: "explicit_state_refresh_failure",
-                elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
-                attributes: [
-                    "reason": reason,
-                ]
-            )
+                name: "explicit_state_refresh_failure", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), attributes: ["reason": reason])
             if ignoreTransientTimeout, Self.isTransientReconnectError(error) {
                 errorMessage = nil
                 return nil
@@ -1499,22 +1300,14 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         }
         if let error {
             if handleAuthenticationFailure(error) { return }
-            if await retryStartingStateIfLaunchIsNotReady(error, reason: "disconnect_starting_launch_not_ready") {
-                return
-            }
-            if await recoverEndedStateIfLiveStreamIsMissing(error, reason: "disconnect_missing_live_stream") {
-                return
-            }
+            if await retryStartingStateIfLaunchIsNotReady(error, reason: "disconnect_starting_launch_not_ready") { return }
+            if await recoverEndedStateIfLiveStreamIsMissing(error, reason: "disconnect_missing_live_stream") { return }
             if let unavailableMessage = unavailableMessage(for: error) {
                 isSessionUnavailable = true
                 errorMessage = unavailableMessage
                 return
             }
-            if Self.isTransientReconnectError(error), latestState != nil {
-                errorMessage = nil
-            } else {
-                errorMessage = error.localizedDescription
-            }
+            if Self.isTransientReconnectError(error), latestState != nil { errorMessage = nil } else { errorMessage = error.localizedDescription }
         }
         scheduleReconnect(after: reconnectSilently ? Self.silentReconnectDelay : .seconds(1))
     }
@@ -1522,25 +1315,15 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     private func handleConnectError(_ error: Error) async {
         trace("connect_error error=\(sanitizedTraceDetail(error.localizedDescription)) silent=\(shouldReconnectSilently ? 1 : 0)")
         if handleAuthenticationFailure(error) { return }
-        if await retryStartingStateIfLaunchIsNotReady(error, reason: "connect_starting_launch_not_ready") {
-            return
-        }
-        if await recoverStartingStateAfterTerminalStopped(error, reason: "connect_starting_terminal_stopped") {
-            return
-        }
-        if await recoverEndedStateIfLiveStreamIsMissing(error, reason: "connect_missing_live_stream") {
-            return
-        }
+        if await retryStartingStateIfLaunchIsNotReady(error, reason: "connect_starting_launch_not_ready") { return }
+        if await recoverStartingStateAfterTerminalStopped(error, reason: "connect_starting_terminal_stopped") { return }
+        if await recoverEndedStateIfLiveStreamIsMissing(error, reason: "connect_missing_live_stream") { return }
         if let unavailableMessage = unavailableMessage(for: error) {
             isSessionUnavailable = true
             errorMessage = unavailableMessage
             return
         }
-        if Self.isTransientReconnectError(error), latestState != nil {
-            errorMessage = nil
-        } else {
-            errorMessage = error.localizedDescription
-        }
+        if Self.isTransientReconnectError(error), latestState != nil { errorMessage = nil } else { errorMessage = error.localizedDescription }
         scheduleReconnect(after: shouldReconnectSilently ? Self.silentReconnectDelay : .seconds(1))
     }
 
@@ -1549,11 +1332,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         trace("missing_live_stream_state_refresh reason=\(reason)")
         isBusy = false
         isConnecting = true
-        let refreshedState = await refreshLatestState(
-            timeout: Self.stateRequestTimeout,
-            ignoreTransientTimeout: true,
-            reason: reason
-        )
+        let refreshedState = await refreshLatestState(timeout: Self.stateRequestTimeout, ignoreTransientTimeout: true, reason: reason)
         isConnecting = false
         guard let refreshedState else { return false }
         if refreshedState.reason == TerminalRemoteSessionStateReason.terminated || Self.isEndedRuntimeState(refreshedState.runtimeState?.state) {
@@ -1586,11 +1365,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         trace("terminal_stopped_state_refresh reason=\(reason)")
         isBusy = false
         isConnecting = true
-        let refreshedState = await refreshLatestState(
-            timeout: Self.stateRequestTimeout,
-            ignoreTransientTimeout: true,
-            reason: reason
-        )
+        let refreshedState = await refreshLatestState(timeout: Self.stateRequestTimeout, ignoreTransientTimeout: true, reason: reason)
         isConnecting = false
         guard let refreshedState else { return false }
         if refreshedState.reason == TerminalRemoteSessionStateReason.terminated || Self.isEndedRuntimeState(refreshedState.runtimeState?.state) {
@@ -1612,9 +1387,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         return Self.isEndedRuntimeState(state)
     }
 
-    private var isStartingState: Bool {
-        (latestState?.runtimeState?.state ?? session.state) == .starting
-    }
+    private var isStartingState: Bool { (latestState?.runtimeState?.state ?? session.state) == .starting }
 
     private static func isEndedRuntimeState(_ state: TerminalSessionState?) -> Bool {
         guard let state else { return false }
@@ -1628,8 +1401,8 @@ extension SpacesDeviceTerminalLinkArtifactKind {
 
     private var activeOwnerDisplayLabel: String? {
         guard let ownerAttachment = attachmentSnapshot.attachments.first(where: { $0.mode == .owner && $0.detachedAt == nil }) else { return nil }
-        return attachmentSnapshot.clients.first(where: { $0.id == ownerAttachment.clientID })?.identity.deviceName
-            ?? attachmentSnapshot.clients.first(where: { $0.id == ownerAttachment.clientID })?.identity.hostName
+        return attachmentSnapshot.clients.first(where: { $0.id == ownerAttachment.clientID })?.identity.deviceName ?? attachmentSnapshot.clients
+            .first(where: { $0.id == ownerAttachment.clientID })?.identity.hostName
             ?? attachmentSnapshot.clients.first(where: { $0.id == ownerAttachment.clientID })?.identity.label
     }
 
@@ -1642,9 +1415,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         guard state == .running else { return }
         hasAttemptedAutomaticTakeover = true
         trace("auto_takeover_begin")
-        Task { [weak self] in
-            await self?.takeOver()
-        }
+        Task { [weak self] in await self?.takeOver() }
     }
 
     private var isWithinOwnerRecoveryGracePeriod: Bool {
@@ -1665,7 +1436,9 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             trace("ownership_sync_reschedule_after_current")
             return
         }
-        trace("schedule_ownership_sync viewport=\(traceSize(columns: viewportSize?.columns, rows: viewportSize?.rows)) runtime=\(traceSize(columns: latestState?.runtimeState?.columns, rows: latestState?.runtimeState?.rows))")
+        trace(
+            "schedule_ownership_sync viewport=\(traceSize(columns: viewportSize?.columns, rows: viewportSize?.rows)) runtime=\(traceSize(columns: latestState?.runtimeState?.columns, rows: latestState?.runtimeState?.rows))"
+        )
         startOwnershipSynchronization()
     }
 
@@ -1699,26 +1472,23 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         logPerformanceEvent(
             name: "resize_reconciliation_begin",
             attributes: [
-                "viewport_columns": String(targetViewportSize?.columns ?? 0),
-                "viewport_rows": String(targetViewportSize?.rows ?? 0),
-                "runtime_columns": String(latestState?.runtimeState?.columns ?? 0),
-                "runtime_rows": String(latestState?.runtimeState?.rows ?? 0),
-            ]
-        )
+                "viewport_columns": String(targetViewportSize?.columns ?? 0), "viewport_rows": String(targetViewportSize?.rows ?? 0),
+                "runtime_columns": String(latestState?.runtimeState?.columns ?? 0), "runtime_rows": String(latestState?.runtimeState?.rows ?? 0),
+            ])
         let startedAt = Date()
-        trace("ownership_sync_begin viewport=\(traceSize(columns: targetViewportSize?.columns, rows: targetViewportSize?.rows)) runtime_before=\(traceSize(columns: latestState?.runtimeState?.columns, rows: latestState?.runtimeState?.rows))")
+        trace(
+            "ownership_sync_begin viewport=\(traceSize(columns: targetViewportSize?.columns, rows: targetViewportSize?.rows)) runtime_before=\(traceSize(columns: latestState?.runtimeState?.columns, rows: latestState?.runtimeState?.rows))"
+        )
         await synchronizeOwnershipState(targetViewportSize: targetViewportSize)
         logPerformanceEvent(
-            name: "resize_reconciliation_end",
-            elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
+            name: "resize_reconciliation_end", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
             attributes: [
-                "viewport_columns": String(targetViewportSize?.columns ?? 0),
-                "viewport_rows": String(targetViewportSize?.rows ?? 0),
-                "runtime_columns": String(latestState?.runtimeState?.columns ?? 0),
-                "runtime_rows": String(latestState?.runtimeState?.rows ?? 0),
-            ]
+                "viewport_columns": String(targetViewportSize?.columns ?? 0), "viewport_rows": String(targetViewportSize?.rows ?? 0),
+                "runtime_columns": String(latestState?.runtimeState?.columns ?? 0), "runtime_rows": String(latestState?.runtimeState?.rows ?? 0),
+            ])
+        trace(
+            "ownership_sync_end runtime_after=\(traceSize(columns: latestState?.runtimeState?.columns, rows: latestState?.runtimeState?.rows)) owner=\(isOwner ? 1 : 0)"
         )
-        trace("ownership_sync_end runtime_after=\(traceSize(columns: latestState?.runtimeState?.columns, rows: latestState?.runtimeState?.rows)) owner=\(isOwner ? 1 : 0)")
         shouldScheduleFollowUp = shouldResynchronizeOwnership(afterTargeting: targetViewportSize)
     }
 
@@ -1753,20 +1523,14 @@ extension SpacesDeviceTerminalLinkArtifactKind {
                     resizeSerial &+= 1
                     let currentResizeSerial = resizeSerial
                     try await bridgeClient.resize(
-                        sessionID: session.id,
-                        clientID: remoteClient.id,
-                        columns: targetViewportSize.columns,
-                        rows: targetViewportSize.rows,
-                        ownerEpoch: currentOwnerEpoch,
-                        resizeSerial: currentResizeSerial,
-                        timeout: Self.inputRequestTimeout
-                    )
+                        sessionID: session.id, clientID: remoteClient.id, columns: targetViewportSize.columns, rows: targetViewportSize.rows,
+                        ownerEpoch: currentOwnerEpoch, resizeSerial: currentResizeSerial, timeout: Self.inputRequestTimeout)
                     trace("ownership_resize_success columns=\(targetViewportSize.columns) rows=\(targetViewportSize.rows)")
                 } catch {
-                    trace("ownership_resize_failure columns=\(targetViewportSize.columns) rows=\(targetViewportSize.rows) error=\(sanitizedTraceDetail(error.localizedDescription))")
-                    if await recoverEndedStateAfterTerminalStopped(error, reason: "ownership_resize_terminal_stopped") {
-                        return
-                    }
+                    trace(
+                        "ownership_resize_failure columns=\(targetViewportSize.columns) rows=\(targetViewportSize.rows) error=\(sanitizedTraceDetail(error.localizedDescription))"
+                    )
+                    if await recoverEndedStateAfterTerminalStopped(error, reason: "ownership_resize_terminal_stopped") { return }
                     if !Self.isTransientReconnectError(error) {
                         if handleAuthenticationFailure(error) { return }
                         errorMessage = error.localizedDescription
@@ -1781,11 +1545,8 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             stateWaitTargetViewportSize = nil
         }
         let streamedState = await awaitOwnerStateFromStream(
-            targetViewportSize: stateWaitTargetViewportSize,
-            previousEmittedAt: previousEmittedAt,
-            previousScreenRevision: previousScreenRevision,
-            previousRuntimeSize: previousRuntimeSize
-        )
+            targetViewportSize: stateWaitTargetViewportSize, previousEmittedAt: previousEmittedAt, previousScreenRevision: previousScreenRevision,
+            previousRuntimeSize: previousRuntimeSize)
         guard isOwner else { return }
         if ownerRenderEpochState == nil {
             if streamedState != nil {
@@ -1799,19 +1560,14 @@ extension SpacesDeviceTerminalLinkArtifactKind {
                 return
             }
             let refreshedState = await refreshLatestState(
-                timeout: Self.stateRequestTimeout,
-                ignoreTransientTimeout: true,
-                reason: "owner_bootstrap_refresh"
+                timeout: Self.stateRequestTimeout, ignoreTransientTimeout: true, reason: "owner_bootstrap_refresh")
+            trace(
+                "ownership_sync_using_fetched_state render_update=\(refreshedState?.renderUpdate == nil ? 0 : 1) output_bytes=\(refreshedState?.outputByteCount ?? 0)"
             )
-            trace("ownership_sync_using_fetched_state render_update=\(refreshedState?.renderUpdate == nil ? 0 : 1) output_bytes=\(refreshedState?.outputByteCount ?? 0)")
             let fallbackState: GhosttyRemoteSessionStatePayload? =
                 if hasUsableOwnerBootstrapState(refreshedState, targetViewportSize: targetViewportSize) {
                     refreshedState
-                } else if hasUsableOwnerBootstrapState(latestState, targetViewportSize: targetViewportSize) {
-                    latestState
-                } else {
-                    nil
-                }
+                } else if hasUsableOwnerBootstrapState(latestState, targetViewportSize: targetViewportSize) { latestState } else { nil }
             beginOwnerRenderEpoch(from: fallbackState)
         }
     }
@@ -1824,9 +1580,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     }
 
     private func awaitOwnerStateFromStream(
-        targetViewportSize: (columns: Int, rows: Int)?,
-        previousEmittedAt: String?,
-        previousScreenRevision: UInt64?,
+        targetViewportSize: (columns: Int, rows: Int)?, previousEmittedAt: String?, previousScreenRevision: UInt64?,
         previousRuntimeSize: (Int?, Int?)?
     ) async -> GhosttyRemoteSessionStatePayload? {
         guard targetViewportSize != nil else { return latestState }
@@ -1834,12 +1588,8 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             guard isOwner else { return nil }
             if let latestState,
                 ownerStateLooksFresh(
-                    latestState,
-                    targetViewportSize: targetViewportSize,
-                    previousEmittedAt: previousEmittedAt,
-                    previousScreenRevision: previousScreenRevision,
-                    previousRuntimeSize: previousRuntimeSize
-                )
+                    latestState, targetViewportSize: targetViewportSize, previousEmittedAt: previousEmittedAt,
+                    previousScreenRevision: previousScreenRevision, previousRuntimeSize: previousRuntimeSize)
             {
                 return latestState
             }
@@ -1849,19 +1599,15 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     }
 
     private func ownerStateLooksFresh(
-        _ payload: GhosttyRemoteSessionStatePayload,
-        targetViewportSize: (columns: Int, rows: Int)?,
-        previousEmittedAt: String?,
-        previousScreenRevision: UInt64?,
-        previousRuntimeSize: (Int?, Int?)?
+        _ payload: GhosttyRemoteSessionStatePayload, targetViewportSize: (columns: Int, rows: Int)?, previousEmittedAt: String?,
+        previousScreenRevision: UInt64?, previousRuntimeSize: (Int?, Int?)?
     ) -> Bool {
         guard hasUsableOwnerBootstrapState(payload, targetViewportSize: targetViewportSize) else { return false }
         if let targetViewportSize {
             let runtimeColumns = payload.runtimeState?.columns
             let runtimeRows = payload.runtimeState?.rows
             let matchesTargetViewport = runtimeColumns == targetViewportSize.columns && runtimeRows == targetViewportSize.rows
-            let runtimeChanged =
-                runtimeColumns != previousRuntimeSize?.0 || runtimeRows != previousRuntimeSize?.1
+            let runtimeChanged = runtimeColumns != previousRuntimeSize?.0 || runtimeRows != previousRuntimeSize?.1
             let emittedChanged = payload.emittedAt != previousEmittedAt
             let screenRevisionChanged = payload.screenStateRevision != previousScreenRevision
             return matchesTargetViewport && (runtimeChanged || emittedChanged || screenRevisionChanged)
@@ -1869,14 +1615,11 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         return payload.emittedAt != previousEmittedAt || payload.screenStateRevision != previousScreenRevision
     }
 
-    private func hasUsableOwnerBootstrapState(
-        _ payload: GhosttyRemoteSessionStatePayload?,
-        targetViewportSize: (columns: Int, rows: Int)? = nil
-    ) -> Bool {
+    private func hasUsableOwnerBootstrapState(_ payload: GhosttyRemoteSessionStatePayload?, targetViewportSize: (columns: Int, rows: Int)? = nil)
+        -> Bool
+    {
         TerminalRemoteSessionStatePolicy.hasUsableOwnerBootstrapState(
-            payload,
-            viewportColumns: targetViewportSize?.columns,
-            viewportRows: targetViewportSize?.rows)
+            payload, viewportColumns: targetViewportSize?.columns, viewportRows: targetViewportSize?.rows)
     }
 
     private func unavailableMessage(for error: Error) -> String? {
@@ -1889,11 +1632,9 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         // Kept on the message: the daemon's `.sessionNotAvailable` code is coarser than this iOS
         // distinction — it also covers a still-starting session with no live state stream yet — so
         // branching on it would show "session ended" for a session that is merely not ready.
-        case SpacesDeviceAPIClientError.requestFailed(let message, _),
-             SpacesDeviceAPIClientError.streamFailed(let message, _):
+        case SpacesDeviceAPIClientError.requestFailed(let message, _), SpacesDeviceAPIClientError.streamFailed(let message, _):
             return message.localizedStandardContains("terminal session") && message.localizedStandardContains("is not available")
-        default:
-            return false
+        default: return false
         }
     }
 
@@ -1930,45 +1671,36 @@ extension SpacesDeviceTerminalLinkArtifactKind {
 
     private static func isTransientInputTransportError(_ error: Error) -> Bool {
         if let code = transientPOSIXErrorCode(error),
-            code == Int(EAGAIN) || code == Int(EWOULDBLOCK) || code == Int(ETIMEDOUT) || code == Int(ECONNRESET)
-                || code == Int(ECONNABORTED) || code == Int(EPIPE) || code == Int(ECONNREFUSED) || code == Int(EBADF)
-                || code == Int(ENOTSOCK)
+            code == Int(EAGAIN) || code == Int(EWOULDBLOCK) || code == Int(ETIMEDOUT) || code == Int(ECONNRESET) || code == Int(ECONNABORTED)
+                || code == Int(EPIPE) || code == Int(ECONNREFUSED) || code == Int(EBADF) || code == Int(ENOTSOCK)
         {
             return true
         }
         switch error {
-        case SpacesDeviceAPIClientError.requestTimedOut:
-            return true
+        case SpacesDeviceAPIClientError.requestTimedOut: return true
         case SpacesDeviceAPIClientError.requestFailed(let message, _):
-            return message.localizedStandardContains("cancelled")
-                || message.localizedStandardContains("timed out")
+            return message.localizedStandardContains("cancelled") || message.localizedStandardContains("timed out")
                 || message.localizedStandardContains("The operation couldn’t be completed. Operation timed out")
-                || message.localizedStandardContains("temporarily unavailable")
-                || message.localizedStandardContains("bad file descriptor")
+                || message.localizedStandardContains("temporarily unavailable") || message.localizedStandardContains("bad file descriptor")
                 || message.localizedStandardContains("socket operation on non-socket")
-        default:
-            return false
+        default: return false
         }
     }
 
     private static func isTransientReconnectError(_ error: Error) -> Bool {
         if let code = transientPOSIXErrorCode(error),
-            code == Int(EAGAIN) || code == Int(EWOULDBLOCK) || code == Int(ETIMEDOUT) || code == Int(ECONNRESET)
-                || code == Int(ECONNABORTED) || code == Int(EPIPE) || code == Int(ECONNREFUSED)
+            code == Int(EAGAIN) || code == Int(EWOULDBLOCK) || code == Int(ETIMEDOUT) || code == Int(ECONNRESET) || code == Int(ECONNABORTED)
+                || code == Int(EPIPE) || code == Int(ECONNREFUSED)
         {
             return true
         }
         switch error {
-        case SpacesDeviceAPIClientError.requestTimedOut:
-            return true
-        case SpacesDeviceAPIClientError.requestFailed(let message, _),
-             SpacesDeviceAPIClientError.streamFailed(let message, _):
-            return message.localizedStandardContains("cancelled")
-                || message.localizedStandardContains("timed out")
+        case SpacesDeviceAPIClientError.requestTimedOut: return true
+        case SpacesDeviceAPIClientError.requestFailed(let message, _), SpacesDeviceAPIClientError.streamFailed(let message, _):
+            return message.localizedStandardContains("cancelled") || message.localizedStandardContains("timed out")
                 || message.localizedStandardContains("The operation couldn’t be completed. Operation timed out")
                 || message.localizedStandardContains("temporarily unavailable")
-        default:
-            return false
+        default: return false
         }
     }
 
@@ -1976,11 +1708,9 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         switch error {
         // Kept on the message: "no live state stream" shares the daemon's `.sessionNotAvailable` code
         // with an ended/unavailable session, so the code cannot single out the still-starting case.
-        case SpacesDeviceAPIClientError.requestFailed(let message, _),
-             SpacesDeviceAPIClientError.streamFailed(let message, _):
+        case SpacesDeviceAPIClientError.requestFailed(let message, _), SpacesDeviceAPIClientError.streamFailed(let message, _):
             return message.localizedStandardContains("no live state stream")
-        default:
-            return false
+        default: return false
         }
     }
 
@@ -1990,15 +1720,13 @@ extension SpacesDeviceTerminalLinkArtifactKind {
 
     private static func isTerminalNoLongerLiveError(_ error: Error) -> Bool {
         switch error {
-        case SpacesDeviceAPIClientError.requestFailed(let message, let code),
-             SpacesDeviceAPIClientError.streamFailed(let message, let code):
+        case SpacesDeviceAPIClientError.requestFailed(let message, let code), SpacesDeviceAPIClientError.streamFailed(let message, let code):
             // The daemon's `.sessionNotRunning` maps 1:1 to "is not running" / "is not live", so branch
             // on the code when the response carries one and fall back to the message otherwise.
             if let code { return code == .sessionNotRunning }
             return message.localizedStandardContains("terminal session")
                 && (message.localizedStandardContains("not running") || message.localizedStandardContains("not live"))
-        default:
-            return false
+        default: return false
         }
     }
 
@@ -2022,34 +1750,21 @@ extension SpacesDeviceTerminalLinkArtifactKind {
 
     private func activeAttachmentExists(in snapshot: TerminalSessionAttachmentSnapshot?) -> Bool {
         guard let snapshot else { return false }
-        return snapshot.attachments.contains { attachment in
-            attachment.clientID == remoteClient.id && attachment.detachedAt == nil
-        }
+        return snapshot.attachments.contains { attachment in attachment.clientID == remoteClient.id && attachment.detachedAt == nil }
     }
 
     private func payloadByClearingScreenState(_ payload: GhosttyRemoteSessionStatePayload) -> GhosttyRemoteSessionStatePayload {
         GhosttyRemoteSessionStatePayload(
-            sessionID: payload.sessionID,
-            reason: payload.reason,
-            emittedAt: payload.emittedAt,
-            sessionStateRevision: payload.sessionStateRevision,
-            sessionStateFlags: payload.sessionStateFlags,
-            screenStateRevision: nil,
-            runtimeState: payload.runtimeState,
-            attachmentSnapshot: payload.attachmentSnapshot,
-            title: payload.title,
-            workingDirectory: payload.workingDirectory,
-            outputByteCount: payload.outputByteCount,
-            outputEndByteOffset: payload.outputEndByteOffset,
-            renderUpdate: nil
-        )
+            sessionID: payload.sessionID, reason: payload.reason, emittedAt: payload.emittedAt, sessionStateRevision: payload.sessionStateRevision,
+            sessionStateFlags: payload.sessionStateFlags, screenStateRevision: nil, runtimeState: payload.runtimeState,
+            attachmentSnapshot: payload.attachmentSnapshot, title: payload.title, workingDirectory: payload.workingDirectory,
+            outputByteCount: payload.outputByteCount, outputEndByteOffset: payload.outputEndByteOffset, renderUpdate: nil)
     }
 
     private func applyLatestState(_ incomingPayload: GhosttyRemoteSessionStatePayload) {
         let applyStartedAt = Date()
         let decodeStartedAt = Date()
-        let reduction = stateReducer.reduce(
-            incomingPayload: incomingPayload, previousPayload: latestState, requestResyncOnApplyFailure: true)
+        let reduction = stateReducer.reduce(incomingPayload: incomingPayload, previousPayload: latestState, requestResyncOnApplyFailure: true)
         let payload = reduction.payload
         let decodedFrame = reduction.frameToApply
         let decodedUpdate = reduction.decodedUpdate
@@ -2092,11 +1807,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         }
         let isOwnerAfterMerge = isOwner
         if isOwnerAfterMerge, payload.renderSnapshot != nil {
-            if ownerRenderEpochState == nil || !wasOwner {
-                beginOwnerRenderEpoch(from: payload)
-            } else {
-                updateOwnerRenderSnapshot(from: payload)
-            }
+            if ownerRenderEpochState == nil || !wasOwner { beginOwnerRenderEpoch(from: payload) } else { updateOwnerRenderSnapshot(from: payload) }
         }
         if isOwnerAfterMerge, wasTakingOver {
             isAwaitingTakeoverConfirmation = false
@@ -2104,9 +1815,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             trace("takeover_confirmed_by_stream")
         }
         if !isOwnerAfterMerge {
-            if wasOwner, !isEndedState, let latestState {
-                self.latestState = payloadByClearingScreenState(latestState)
-            }
+            if wasOwner, !isEndedState, let latestState { self.latestState = payloadByClearingScreenState(latestState) }
             if wasOwner { stateReducer.resetRenderUpdateBaseline() }
             hasConfirmedOwnerInputReadiness = false
             isInputSurfaceReady = false
@@ -2124,25 +1833,16 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         isConnecting = false
         let emittedAt = GhosttyRemoteSessionStateTimestamp.date(from: payload.emittedAt) ?? Date()
         var renderUpdateAttributes = GhosttyRenderFrameMetrics.attributes(
-            reason: payload.reason,
-            frame: decodedFrame,
-            frameByteCount: incomingPayload.renderUpdate?.count,
-            decodeMS: decodeMS,
-            outputByteCount: payload.outputByteCount,
-            screenStateRevision: payload.screenStateRevision,
+            reason: payload.reason, frame: decodedFrame, frameByteCount: incomingPayload.renderUpdate?.count, decodeMS: decodeMS,
+            outputByteCount: payload.outputByteCount, screenStateRevision: payload.screenStateRevision,
             dropped: incomingPayload.renderUpdate == nil ? nil : decodedFrame == nil,
             dropReason: reduction.dropReason ?? (incomingPayload.renderUpdate != nil && decodedFrame == nil ? "decode_failed" : nil),
-            renderMode: renderMode,
-            frameKind: decodedUpdate?.frameKindMetricValue,
-            baseRevision: decodedUpdate?.baseRevision,
+            renderMode: renderMode, frameKind: decodedUpdate?.frameKindMetricValue, baseRevision: decodedUpdate?.baseRevision,
             targetRevision: decodedUpdate?.targetRevision ?? payload.screenStateRevision,
             appliedRevision: decodedFrame == nil && incomingPayload.renderUpdate != nil ? nil : payload.screenStateRevision,
-            applyMS: TerminalPerformance.elapsedMS(since: applyStartedAt),
-            operationCount: decodedUpdate?.operationCount,
-            changedCellCount: decodedUpdate?.changedCellCount,
-            scrollOperationCount: decodedUpdate?.scrollOperationCount,
-            fullFrameFallbackReason: decodedUpdate?.fallbackReason,
-            droppedDeltaCount: reduction.dropReason == nil ? nil : 1,
+            applyMS: TerminalPerformance.elapsedMS(since: applyStartedAt), operationCount: decodedUpdate?.operationCount,
+            changedCellCount: decodedUpdate?.changedCellCount, scrollOperationCount: decodedUpdate?.scrollOperationCount,
+            fullFrameFallbackReason: decodedUpdate?.fallbackReason, droppedDeltaCount: reduction.dropReason == nil ? nil : 1,
             resyncCount: reduction.didRequestResync ? 1 : nil)
         renderUpdateAttributes["owner_before"] = wasOwner ? "1" : "0"
         renderUpdateAttributes["owner_after"] = isOwnerAfterMerge ? "1" : "0"
@@ -2150,12 +1850,11 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         renderUpdateAttributes["render_update"] = incomingPayload.renderUpdate == nil ? "0" : "1"
         renderUpdateAttributes["render_update_bytes"] = String(incomingPayload.renderUpdate?.count ?? 0)
         logPerformanceEvent(
-            name: "render_frame_payload_receive",
-            elapsedMS: TerminalPerformance.elapsedMS(since: emittedAt),
-            count: incomingPayload.renderUpdate?.count,
-            attributes: renderUpdateAttributes)
+            name: "render_frame_payload_receive", elapsedMS: TerminalPerformance.elapsedMS(since: emittedAt),
+            count: incomingPayload.renderUpdate?.count, attributes: renderUpdateAttributes)
         trace(
-            "apply_state reason=\(payload.reason) owner_before=\(wasOwner ? 1 : 0) owner_after=\(isOwnerAfterMerge ? 1 : 0) awaiting_takeover=\(isAwaitingTakeoverConfirmation ? 1 : 0) runtime=\(traceSize(columns: latestState?.runtimeState?.columns, rows: latestState?.runtimeState?.rows)) frame=\(traceSize(columns: latestState?.renderSnapshot?.columns, rows: latestState?.renderSnapshot?.rows)) screen_revision=\(latestState?.screenStateRevision.map(String.init) ?? "nil") owner_client=\(traceOwnerID(latestState?.attachmentSnapshot))")
+            "apply_state reason=\(payload.reason) owner_before=\(wasOwner ? 1 : 0) owner_after=\(isOwnerAfterMerge ? 1 : 0) awaiting_takeover=\(isAwaitingTakeoverConfirmation ? 1 : 0) runtime=\(traceSize(columns: latestState?.runtimeState?.columns, rows: latestState?.runtimeState?.rows)) frame=\(traceSize(columns: latestState?.renderSnapshot?.columns, rows: latestState?.renderSnapshot?.rows)) screen_revision=\(latestState?.screenStateRevision.map(String.init) ?? "nil") owner_client=\(traceOwnerID(latestState?.attachmentSnapshot))"
+        )
         if isOwnerAfterMerge, !wasOwner || ownerRenderEpochState == nil {
             beginOwnerRecoveryGracePeriod()
             scheduleOwnershipSynchronization()
@@ -2197,45 +1896,22 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         hasConfirmedOwnerInputReadiness = true
         if reportedOwnerReadyEpochID != ownerRenderEpochState.id {
             reportedOwnerReadyEpochID = ownerRenderEpochState.id
-            logPerformanceEvent(
-                name: "owner_first_input_ready",
-                attributes: [
-                    "epoch_id": ownerRenderEpochState.id,
-                    "render_mode": renderMode,
-                ]
-            )
+            logPerformanceEvent(name: "owner_first_input_ready", attributes: ["epoch_id": ownerRenderEpochState.id, "render_mode": renderMode])
         }
     }
 
     private func writeE2EEventIfNeeded(kind: String, detail: String?) {
         guard e2eConfig.isEnabled, e2eConfig.matches(sessionID: session.id) else { return }
         SpacesMobileE2EDumpWriter.appendEvent(
-            .init(
-                sessionID: session.id,
-                kind: kind,
-                detail: detail,
-                emittedAt: ISO8601DateFormatter().string(from: Date())
-            ),
-            config: e2eConfig
-        )
+            .init(sessionID: session.id, kind: kind, detail: detail, emittedAt: ISO8601DateFormatter().string(from: Date())), config: e2eConfig)
     }
 
     private func logPerformanceEvent(name: String, elapsedMS: Int? = nil, count: Int? = nil, attributes: [String: String] = [:]) {
         SpacesDeviceTerminalPerformanceLogger.emit(
-            .init(
-                sessionID: session.id,
-                source: "ios-viewer",
-                name: name,
-                elapsedMS: elapsedMS,
-                count: count,
-                attributes: attributes
-            )
-        )
+            .init(sessionID: session.id, source: "ios-viewer", name: name, elapsedMS: elapsedMS, count: count, attributes: attributes))
     }
 
-    private func trace(_ message: @autoclosure () -> String) {
-        terminalViewerTrace(session.id, message())
-    }
+    private func trace(_ message: @autoclosure () -> String) { terminalViewerTrace(session.id, message()) }
 
     private func traceSize(columns: Int?, rows: Int?) -> String {
         guard let columns, let rows else { return "nil" }
@@ -2246,13 +1922,9 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         snapshot?.attachments.first(where: { $0.mode == .owner && $0.detachedAt == nil })?.clientID ?? "nil"
     }
 
-    private func sanitizedTraceDetail(_ value: String) -> String {
-        value.replacingOccurrences(of: "\n", with: "\\n")
-    }
+    private func sanitizedTraceDetail(_ value: String) -> String { value.replacingOccurrences(of: "\n", with: "\\n") }
 
-    private static func sanitizedPerformanceDetail(_ value: String) -> String {
-        value.replacingOccurrences(of: "\n", with: "\\n")
-    }
+    private static func sanitizedPerformanceDetail(_ value: String) -> String { value.replacingOccurrences(of: "\n", with: "\\n") }
 
     private static func traceDurationMilliseconds(_ duration: Duration) -> Int {
         let components = duration.components
@@ -2269,23 +1941,14 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         hasConfirmedOwnerInputReadiness = false
         let epochID = ownerRenderEpochID(for: payload)
         ownerRenderEpochState = GhosttyRemoteTerminalOwnerEpoch(
-            sessionID: session.id,
-            id: epochID,
-            ownerEpoch: payload.renderOwnerEpoch ?? 0,
-            bootstrapSnapshot: bootstrapSnapshot
-        )
-        trace(
-            "owner_render_epoch_begin id=\(epochID) snapshot=1"
-        )
+            sessionID: session.id, id: epochID, ownerEpoch: payload.renderOwnerEpoch ?? 0, bootstrapSnapshot: bootstrapSnapshot)
+        trace("owner_render_epoch_begin id=\(epochID) snapshot=1")
         logPerformanceEvent(
             name: "owner_bootstrap_state_received",
             attributes: [
-                "epoch_id": epochID,
-                "payload_reason": payload.reason,
-                "snapshot_columns": String(bootstrapSnapshot.columns),
+                "epoch_id": epochID, "payload_reason": payload.reason, "snapshot_columns": String(bootstrapSnapshot.columns),
                 "snapshot_rows": String(bootstrapSnapshot.rows),
-            ]
-        )
+            ])
         if isInputSurfaceReady { handleOwnerInputSurfaceReady() }
     }
 
@@ -2293,20 +1956,13 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         guard let ownerRenderEpochState, let snapshot = payload.renderSnapshot else { return }
         guard ownerRenderEpochState.bootstrapSnapshot != snapshot else { return }
         self.ownerRenderEpochState = GhosttyRemoteTerminalOwnerEpoch(
-            sessionID: ownerRenderEpochState.sessionID,
-            id: ownerRenderEpochState.id,
-            ownerEpoch: payload.renderOwnerEpoch ?? ownerRenderEpochState.ownerEpoch,
-            bootstrapSnapshot: snapshot
-        )
-        trace(
-            "owner_render_snapshot_update id=\(ownerRenderEpochState.id) snapshot=1"
-        )
+            sessionID: ownerRenderEpochState.sessionID, id: ownerRenderEpochState.id,
+            ownerEpoch: payload.renderOwnerEpoch ?? ownerRenderEpochState.ownerEpoch, bootstrapSnapshot: snapshot)
+        trace("owner_render_snapshot_update id=\(ownerRenderEpochState.id) snapshot=1")
     }
 
     private static func hasVisibleRenderedContent(_ text: String) -> Bool {
-        text.unicodeScalars.contains { scalar in
-            scalar != "\u{00A0}" && !CharacterSet.whitespacesAndNewlines.contains(scalar)
-        }
+        text.unicodeScalars.contains { scalar in scalar != "\u{00A0}" && !CharacterSet.whitespacesAndNewlines.contains(scalar) }
     }
 
     private func ownerRenderEpochID(for payload: GhosttyRemoteSessionStatePayload) -> String {
@@ -2317,9 +1973,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         return "owner|\(ownerEpoch)|\(payload.emittedAt)|\(screenRevision)|\(runtimeColumns)x\(runtimeRows)"
     }
 
-    private var currentOwnerEpoch: UInt64? {
-        ownerRenderEpochState?.ownerEpoch ?? latestState?.renderOwnerEpoch
-    }
+    private var currentOwnerEpoch: UInt64? { ownerRenderEpochState?.ownerEpoch ?? latestState?.renderOwnerEpoch }
 
     private func endedRenderID(for snapshot: GhosttyTerminalSnapshot) -> String {
         let screenRevision = latestState?.screenStateRevision ?? 0
@@ -2331,25 +1985,17 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     /// Sets the same preconditions the real owner-bootstrap path establishes: this client owns the
     /// session, input readiness is confirmed, and an owner render epoch carries `ownerEpoch`.
     func configureOwnerInteractiveForTesting(ownerEpoch: UInt64) {
-        let ownerAttachment = TerminalAttachment(
-            sessionID: session.id, clientID: remoteClient.id, mode: .owner, attachedAt: "2026-01-01T00:00:00Z")
+        let ownerAttachment = TerminalAttachment(sessionID: session.id, clientID: remoteClient.id, mode: .owner, attachedAt: "2026-01-01T00:00:00Z")
         let runtime = TerminalSessionRuntimeState(
             sessionID: session.id, servicePID: 100, childPID: 200, state: .running, updatedAt: "2026-01-01T00:00:00Z")
         latestState = GhosttyRemoteSessionStatePayload(
-            sessionID: session.id,
-            reason: TerminalRemoteSessionStateReason.initial,
-            emittedAt: "2026-01-01T00:00:00Z",
-            sessionStateRevision: nil,
-            sessionStateFlags: nil,
-            screenStateRevision: nil,
-            runtimeState: runtime,
-            attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [remoteClient], attachments: [ownerAttachment]),
-            title: session.title,
-            workingDirectory: session.workingDirectory,
-            outputByteCount: 0)
+            sessionID: session.id, reason: TerminalRemoteSessionStateReason.initial, emittedAt: "2026-01-01T00:00:00Z", sessionStateRevision: nil,
+            sessionStateFlags: nil, screenStateRevision: nil, runtimeState: runtime,
+            attachmentSnapshot: TerminalSessionAttachmentSnapshot(clients: [remoteClient], attachments: [ownerAttachment]), title: session.title,
+            workingDirectory: session.workingDirectory, outputByteCount: 0)
         let bootstrapSnapshot = GhosttyTerminalSnapshot(
-            columns: 80, rows: 24, cursorColumn: 0, cursorRow: 0, cursorVisible: true,
-            defaultForegroundRGB: 0xFFFF_FFFF, defaultBackgroundRGB: 0, cells: [])
+            columns: 80, rows: 24, cursorColumn: 0, cursorRow: 0, cursorVisible: true, defaultForegroundRGB: 0xFFFF_FFFF, defaultBackgroundRGB: 0,
+            cells: [])
         ownerRenderEpochState = GhosttyRemoteTerminalOwnerEpoch(
             sessionID: session.id, id: "owner|test", ownerEpoch: ownerEpoch, bootstrapSnapshot: bootstrapSnapshot)
         hasAttachedToSession = true

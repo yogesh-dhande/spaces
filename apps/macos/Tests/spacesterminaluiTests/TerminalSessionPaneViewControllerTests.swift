@@ -69,22 +69,27 @@ func persistenceBackedDetachAction(_ paths: TerminalSessionPaths) -> @Sendable (
 
 final class TerminalSessionPaneViewControllerTests: XCTestCase {
     private var originalDatabasePath: String?
+    private var originalRuntimeDirectory: String?
     private var databaseRoot: URL?
 
     override func setUpWithError() throws {
         try super.setUpWithError()
         originalDatabasePath = ProcessInfo.processInfo.environment["SPACES_DB_PATH"]
+        originalRuntimeDirectory = ProcessInfo.processInfo.environment["SPACES_RUNTIME_DIR"]
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         databaseRoot = root
         setenv("SPACES_DB_PATH", root.appendingPathComponent("spaces.db").path, 1)
+        setenv("SPACES_RUNTIME_DIR", root.appendingPathComponent("runtime", isDirectory: true).path, 1)
     }
 
     override func tearDownWithError() throws {
         if let originalDatabasePath { setenv("SPACES_DB_PATH", originalDatabasePath, 1) } else { unsetenv("SPACES_DB_PATH") }
+        if let originalRuntimeDirectory { setenv("SPACES_RUNTIME_DIR", originalRuntimeDirectory, 1) } else { unsetenv("SPACES_RUNTIME_DIR") }
         if let databaseRoot { try? FileManager.default.removeItem(at: databaseRoot) }
         databaseRoot = nil
         originalDatabasePath = nil
+        originalRuntimeDirectory = nil
         try super.tearDownWithError()
     }
 
@@ -163,8 +168,11 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
             }
             return true
         }
-        @discardableResult func sendScroll(horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32) -> Bool {
+        @discardableResult func sendScroll(horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32, pointerPosition: TerminalScrollPointerPosition?)
+            -> Bool
+        {
             _ = scrollMods
+            _ = pointerPosition
             debugSurfaceRefreshRequestCount += 1
             return true
         }
@@ -2934,5 +2942,163 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         XCTAssertTrue(snapshot.attachments.contains { $0.clientID == firstClientID && $0.detachedAt != nil })
         XCTAssertEqual(reopenedController.displayTitle, "backend")
         XCTAssertEqual(reopenedController.debugRendererSummary, "Renderer: ghostty-mirror")
+    }
+
+    // MARK: - Ended-session banner
+
+    /// Seeds a ghostty-embedded session whose final render is available, in the given runtime state.
+    @MainActor private func makeBannerController(sessionID: String, state: TerminalSessionState, root: URL) throws
+        -> TerminalSessionPaneViewController
+    {
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try FileManager.default.createDirectory(atPath: paths.rootDirectory, withIntermediateDirectories: true)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: sessionID, backend: .ghosttyEmbedded, title: "banner", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
+                createdAt: "2026-05-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: state, updatedAt: "2026-05-09T00:00:01Z"),
+            paths: paths)
+        let host = FakeGhosttySessionHost()
+        host.snapshotValue = ghosttySnapshot(text: "final output")
+        let controller = makeGhosttyController(sessionID: sessionID, paths: paths, host: host)
+        controller.showEmbedded(focus: true)
+        return controller
+    }
+
+    /// A pane whose session exited keeps rendering the frozen final Ghostty frame, which is
+    /// indistinguishable from a live terminal. The banner is what tells the user it is dead.
+    @MainActor func testExitedSessionShowsReadOnlyBanner() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let controller = try makeBannerController(sessionID: "session-banner-exited", state: .exited, root: root)
+
+        XCTAssertTrue(controller.debugBannerVisible)
+        XCTAssertEqual(controller.debugBannerMessage, "Session ended. This pane is read-only.")
+    }
+
+    /// A session that died on its own reads as a failure, not as a clean exit the user asked for.
+    @MainActor func testFailedSessionShowsFailedBanner() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let controller = try makeBannerController(sessionID: "session-banner-failed", state: .failed, root: root)
+
+        XCTAssertTrue(controller.debugBannerVisible)
+        XCTAssertEqual(controller.debugBannerMessage, "Session failed. The process stopped unexpectedly.")
+    }
+
+    @MainActor func testRunningSessionShowsNoBanner() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let controller = try makeBannerController(sessionID: "session-banner-running", state: .running, root: root)
+
+        XCTAssertFalse(controller.debugBannerVisible)
+        XCTAssertFalse(controller.debugBannerHasPersistentNotice)
+    }
+
+    /// The case the feature exists for: the user is looking at a live pane when the shell exits
+    /// under them. The banner has to appear on that transition, not only on a pane opened afterward.
+    @MainActor func testBannerAppearsWhenRunningSessionExitsUnderOpenPane() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let controller = try makeBannerController(sessionID: "session-banner-transition", state: .running, root: root)
+        XCTAssertFalse(controller.debugBannerVisible)
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(
+                sessionID: "session-banner-transition", backend: .ghosttyEmbedded, servicePID: 1, childPID: nil, state: .exited,
+                updatedAt: "2026-05-09T00:00:02Z"), paths: paths)
+        controller.debugSimulateRuntimeStateDidChange()
+
+        XCTAssertTrue(controller.debugBannerVisible)
+        XCTAssertEqual(controller.debugBannerMessage, "Session ended. This pane is read-only.")
+    }
+
+    /// A restarted session must not keep claiming to be dead.
+    @MainActor func testBannerClearsWhenSessionBecomesRunningAgain() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let controller = try makeBannerController(sessionID: "session-banner-revive", state: .exited, root: root)
+        XCTAssertTrue(controller.debugBannerVisible)
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(
+                sessionID: "session-banner-revive", backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running,
+                updatedAt: "2026-05-09T00:00:03Z"), paths: paths)
+        controller.debugSimulateRuntimeStateDidChange()
+
+        XCTAssertFalse(controller.debugBannerVisible)
+    }
+
+    /// Typing into a dead pane stays unconsumed — the pulse is emphasis only and must not start
+    /// swallowing keys that previously fell through.
+    @MainActor func testTypingIntoEndedSessionIsNotConsumed() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let controller = try makeBannerController(sessionID: "session-banner-typing", state: .exited, root: root)
+
+        XCTAssertFalse(controller.handleKeyEvent(try keyEvent(keyCode: kVK_ANSI_A, characters: "a", modifiers: [])))
+        XCTAssertTrue(controller.debugBannerVisible)
+    }
+}
+
+/// Exercises `TerminalPaneBanner`'s two state layers. The pane's persistent notice and the link
+/// coordinator's transient banners share one instance, so precedence between them is a contract
+/// worth pinning: a transient banner wins while it is up, and dismissing it restores the persistent
+/// notice instead of leaving the pane looking interactive again.
+final class TerminalPaneBannerTests: XCTestCase {
+    @MainActor private func makeBanner() -> (TerminalPaneBanner, NSView) {
+        let host = NSView(frame: NSRect(x: 0, y: 0, width: 600, height: 400))
+        return (TerminalPaneBanner(hostView: host), host)
+    }
+
+    @MainActor func testPersistentNoticeShowsUntilCleared() {
+        let (banner, _) = makeBanner()
+        XCTAssertFalse(banner.debugIsVisible)
+
+        banner.showPersistent(message: "Session ended.")
+        XCTAssertTrue(banner.debugIsVisible)
+        XCTAssertEqual(banner.debugMessage, "Session ended.")
+
+        banner.clearPersistent()
+        XCTAssertFalse(banner.debugIsVisible)
+    }
+
+    @MainActor func testTransientBannerOverridesPersistentNoticeAndRestoresItOnDismiss() {
+        let (banner, _) = makeBanner()
+        banner.showPersistent(message: "Session ended.")
+
+        banner.showProgress(message: "Fetching link…") {}
+        XCTAssertEqual(banner.debugMessage, "Fetching link…")
+
+        banner.dismiss()
+        XCTAssertTrue(banner.debugIsVisible)
+        XCTAssertEqual(banner.debugMessage, "Session ended.")
+    }
+
+    @MainActor func testDismissHidesBannerWhenNoPersistentNoticeIsSet() {
+        let (banner, _) = makeBanner()
+        banner.showNotice("Heads up.")
+        XCTAssertTrue(banner.debugIsVisible)
+
+        banner.dismiss()
+        XCTAssertFalse(banner.debugIsVisible)
+    }
+
+    /// Clearing the pane's notice while a link fetch is on screen must not yank the transient
+    /// banner out from under it.
+    @MainActor func testClearingPersistentNoticeLeavesActiveTransientBannerUp() {
+        let (banner, _) = makeBanner()
+        banner.showPersistent(message: "Session ended.")
+        banner.showProgress(message: "Fetching link…") {}
+
+        banner.clearPersistent()
+        XCTAssertTrue(banner.debugIsVisible)
+        XCTAssertEqual(banner.debugMessage, "Fetching link…")
+
+        banner.dismiss()
+        XCTAssertFalse(banner.debugIsVisible)
     }
 }

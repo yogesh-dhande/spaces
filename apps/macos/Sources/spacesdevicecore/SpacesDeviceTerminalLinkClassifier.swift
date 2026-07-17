@@ -164,6 +164,12 @@ public enum SpacesDeviceTerminalLinkClassifier {
         switch scheme {
         case "http", "https": return isLoopbackHost(url.host) ? .loopbackURL(url) : .webURL(url)
         case "file": return .fileLink(trimmed)
+        case SpacesTerminalDeepLink.scheme:
+            // Ghostty reports click kind `.unknown` for both regex-detected and OSC 8 links, so a
+            // `spaces://` link is classified purely by its scheme here. A malformed link (wrong host
+            // or path shape) is not routable and yields `nil` rather than a misdirected open.
+            guard let link = SpacesTerminalDeepLink.parse(url) else { return nil }
+            return .spacesTerminal(link)
         default: return nil
         }
     }
@@ -201,4 +207,8 @@ public enum SpacesDeviceTerminalLinkRoute: Equatable, Sendable {
     /// here — the caller passes the raw string to `SpacesDeviceTerminalLinkResolver`, which expands
     /// `~` and relative paths against the session's home and working directory.
     case fileLink(String)
+    /// A `spaces://terminal/<session-id>[?device=<id>]` deep link to a Spaces terminal session. The
+    /// client focuses the session's pane in-app (no OS round trip); a device-qualified link opens the
+    /// session in a remote-attached pane on the device that owns it.
+    case spacesTerminal(SpacesTerminalDeepLink)
 }

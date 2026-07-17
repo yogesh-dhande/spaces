@@ -4,51 +4,29 @@ import ImageIO
 import XCTest
 
 final class SpacesMobileUITests: XCTestCase {
-    override func setUpWithError() throws {
-        continueAfterFailure = false
-    }
+    override func setUpWithError() throws { continueAfterFailure = false }
 
-    func testTerminalTakeOverFromList() throws {
-        try runTerminalTakeOverScenario()
-    }
+    func testTerminalTakeOverFromList() throws { try runTerminalTakeOverScenario() }
 
-    func testTerminalTakeOverAfterMacRetakeover() throws {
-        try runTerminalTakeOverScenario()
-    }
+    func testTerminalTakeOverAfterMacRetakeover() throws { try runTerminalTakeOverScenario() }
 
-    func testTerminalTakeOverAfterTwoMacRetakeovers() throws {
-        try runTerminalTakeOverScenario()
-    }
+    func testTerminalTakeOverAfterTwoMacRetakeovers() throws { try runTerminalTakeOverScenario() }
 
-    func testTerminalTakeOverRoundTripWithCommands() throws {
-        try runTerminalTakeOverScenario()
-    }
+    func testTerminalTakeOverRoundTripWithCommands() throws { try runTerminalTakeOverScenario() }
 
-    func testTerminalTakeOverAcrossTwoSessionsFromList() throws {
-        try runTerminalTakeOverScenario()
-    }
+    func testTerminalTakeOverAcrossTwoSessionsFromList() throws { try runTerminalTakeOverScenario() }
 
-    func testTerminalInterruptShowsFinalFrameAndKeepsSecondSessionLive() throws {
-        try runTerminalInterruptFinalFrameScenario()
-    }
+    func testTerminalInterruptShowsFinalFrameAndKeepsSecondSessionLive() throws { try runTerminalInterruptFinalFrameScenario() }
 
-    func testTerminalTakeOverReopenSameSessionFromList() throws {
-        try runTerminalTakeOverScenario()
-    }
+    func testTerminalTakeOverReopenSameSessionFromList() throws { try runTerminalTakeOverScenario() }
 
-    func testTerminalTapLocalImagePathOpensPreview() throws {
-        try runTerminalLinkPreviewScenario()
-    }
+    func testTerminalTapLocalImagePathOpensPreview() throws { try runTerminalLinkPreviewScenario() }
 
     func testAttachedAppConfigurationDoesNotRequireCertificateFingerprint() throws {
         let configURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: false)
         defer { try? FileManager.default.removeItem(at: configURL) }
         let payload: [String: Any] = [
-            "sessionID": "session-1",
-            "host": "127.0.0.1",
-            "port": 47_847,
-            "authToken": "token",
-            "installationID": "installation",
+            "sessionID": "session-1", "host": "127.0.0.1", "port": 47_847, "authToken": "token", "installationID": "installation",
             "attachToExistingApp": true,
         ]
         let data = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
@@ -67,16 +45,9 @@ final class SpacesMobileUITests: XCTestCase {
         RunLoop.current.run(until: Date().addingTimeInterval(1))
 
         try returnToTerminalList(in: app)
-        if configuration.proceedTakeOverPath != nil {
-            waitForMarkerIfNeeded(configuration.proceedTakeOverPath, timeout: 60)
-        }
+        if configuration.proceedTakeOverPath != nil { waitForMarkerIfNeeded(configuration.proceedTakeOverPath, timeout: 60) }
         try takeOverSessionFromList(
-            in: app,
-            configuration: configuration,
-            sessionID: configuration.sessionID,
-            timeout: 20,
-            context: "initial takeover"
-        )
+            in: app, configuration: configuration, sessionID: configuration.sessionID, timeout: 20, context: "initial takeover")
 
         captureScreenshot(app, name: "post-takeover-immediate", filePath: configuration.immediateScreenshotPath)
         RunLoop.current.run(until: Date().addingTimeInterval(2))
@@ -87,10 +58,7 @@ final class SpacesMobileUITests: XCTestCase {
         captureScreenshot(app, name: "post-takeover-plus-6s", filePath: configuration.longDelayScreenshotPath)
         if let secondarySessionID = configuration.secondarySessionID {
             try takeOverSessionsAcrossListCycles(
-                in: app,
-                configuration: configuration,
-                sessionIDs: [secondarySessionID, configuration.sessionID, secondarySessionID]
-            )
+                in: app, configuration: configuration, sessionIDs: [secondarySessionID, configuration.sessionID, secondarySessionID])
             return
         }
         if configuration.scrollbackSwipeCount > 0 {
@@ -108,8 +76,7 @@ final class SpacesMobileUITests: XCTestCase {
             waitForMarkerIfNeeded(configuration.firstCommandCompletedPath, timeout: 20)
             XCTAssertTrue(
                 waitForOwnerReadyState(in: app, configuration: configuration, timeout: 1),
-                "Owner-ready badge did not return promptly after first iOS command"
-            )
+                "Owner-ready badge did not return promptly after first iOS command")
             assertOwnerReadyStable(in: app, configuration: configuration, duration: 1, context: "after first iOS command")
             guard waitForVisibleTerminalContentIfNeeded(in: app, configuration: configuration, context: "after first iOS command", timeout: 4) else {
                 return
@@ -123,17 +90,10 @@ final class SpacesMobileUITests: XCTestCase {
                 waitForMarkerIfNeeded(configuration.secondCommandCompletedPath, timeout: 20)
                 XCTAssertTrue(
                     waitForOwnerReadyState(in: app, configuration: configuration, timeout: 1),
-                    "Owner-ready badge did not return promptly after second iOS command"
-                )
+                    "Owner-ready badge did not return promptly after second iOS command")
                 assertOwnerReadyStable(in: app, configuration: configuration, duration: 1, context: "after second iOS command")
-                guard waitForVisibleTerminalContentIfNeeded(
-                    in: app,
-                    configuration: configuration,
-                    context: "after second iOS command",
-                    timeout: 4
-                ) else {
-                    return
-                }
+                guard waitForVisibleTerminalContentIfNeeded(in: app, configuration: configuration, context: "after second iOS command", timeout: 4)
+                else { return }
                 captureScreenshot(app, name: "post-ios-second-command", filePath: configuration.postSecondCommandScreenshotPath)
                 writeMarkerIfNeeded(configuration.secondCommandObservedPath)
             }
@@ -142,12 +102,7 @@ final class SpacesMobileUITests: XCTestCase {
         if let proceedFinishPath = configuration.proceedFinishPath {
             waitForMarkerIfNeeded(proceedFinishPath, timeout: 30)
             for attemptIndex in 0..<configuration.manualRetakeoverAttempts {
-                guard tapButton(
-                    in: app,
-                    identifier: "terminal.takeover",
-                    fallbackLabel: "Take Over",
-                    timeout: 20
-                ) else {
+                guard tapButton(in: app, identifier: "terminal.takeover", fallbackLabel: "Take Over", timeout: 20) else {
                     XCTFail("Timed out waiting for Take Over button after Mac retakeover")
                     return
                 }
@@ -157,22 +112,13 @@ final class SpacesMobileUITests: XCTestCase {
                 }
                 XCTAssertTrue(
                     waitForOwnerReadyState(in: app, configuration: configuration, timeout: 5),
-                    "Owner-ready badge did not return promptly after mobile retakeover attempt \(attemptIndex + 1)"
-                )
+                    "Owner-ready badge did not return promptly after mobile retakeover attempt \(attemptIndex + 1)")
                 assertOwnerReadyStable(
-                    in: app,
-                    configuration: configuration,
-                    duration: 1,
-                    context: "after mobile retakeover attempt \(attemptIndex + 1)"
-                )
-                guard waitForVisibleTerminalContentIfNeeded(
-                    in: app,
-                    configuration: configuration,
-                    context: "after mobile retakeover attempt \(attemptIndex + 1)",
-                    timeout: 4
-                ) else {
-                    return
-                }
+                    in: app, configuration: configuration, duration: 1, context: "after mobile retakeover attempt \(attemptIndex + 1)")
+                guard
+                    waitForVisibleTerminalContentIfNeeded(
+                        in: app, configuration: configuration, context: "after mobile retakeover attempt \(attemptIndex + 1)", timeout: 4)
+                else { return }
                 writeMarkerIfNeeded(configuration.manualRetakeoverObservedPath(for: attemptIndex))
                 if attemptIndex + 1 < configuration.manualRetakeoverAttempts {
                     waitForMarkerIfNeeded(configuration.manualRetakeoverContinuePath(for: attemptIndex), timeout: 30)
@@ -180,20 +126,11 @@ final class SpacesMobileUITests: XCTestCase {
             }
             if let finalMacRetakeoverRequestPath = configuration.finalMacRetakeoverRequestPath {
                 waitForMarkerIfNeeded(finalMacRetakeoverRequestPath, timeout: 30)
-                guard waitForButton(
-                    in: app,
-                    identifier: "terminal.takeover",
-                    fallbackLabel: "Take Over",
-                    timeout: 20
-                ) != nil else {
+                guard waitForButton(in: app, identifier: "terminal.takeover", fallbackLabel: "Take Over", timeout: 20) != nil else {
                     XCTFail("Timed out waiting for Take Over button after the final Mac retakeover")
                     return
                 }
-                captureScreenshot(
-                    app,
-                    name: "post-final-mac-retakeover",
-                    filePath: configuration.postFinalMacRetakeoverScreenshotPath
-                )
+                captureScreenshot(app, name: "post-final-mac-retakeover", filePath: configuration.postFinalMacRetakeoverScreenshotPath)
                 writeMarkerIfNeeded(configuration.finalMacRetakeoverObservedPath)
             }
             captureScreenshot(app, name: "post-mac-retakeover", filePath: configuration.finalScreenshotPath)
@@ -208,38 +145,27 @@ final class SpacesMobileUITests: XCTestCase {
 
         try returnToTerminalList(in: app)
         try takeOverSessionFromList(
-            in: app,
-            configuration: configuration,
-            sessionID: configuration.sessionID,
-            timeout: 20,
-            context: "interrupt primary"
-        )
-        guard waitForVisibleTerminalContentIfNeeded(in: app, configuration: configuration, context: "before interrupt", timeout: 8) else {
-            return
-        }
+            in: app, configuration: configuration, sessionID: configuration.sessionID, timeout: 20, context: "interrupt primary")
+        guard waitForVisibleTerminalContentIfNeeded(in: app, configuration: configuration, context: "before interrupt", timeout: 8) else { return }
         XCTAssertNotNil(
             waitForRenderDump(configuration: configuration, timeout: 20) { dump in
-                dump.sessionID == configuration.sessionID
-                    && dump.isOwner
-                    && dump.combinedText.contains(configuration.expectedInterruptedText)
-            },
-            "The interrupted session did not render the expected pre-interrupt marker"
-        )
+                dump.sessionID == configuration.sessionID && dump.isOwner && dump.combinedText.contains(configuration.expectedInterruptedText)
+            }, "The interrupted session did not render the expected pre-interrupt marker")
 
         try writeE2ECommandRequest(configuration: configuration, key: "ctrl+c")
         XCTAssertTrue(
             waitForE2EEvent(configuration: configuration, kind: "e2e_command_request_consumed", detailContains: "key=ctrl+c", timeout: 10),
-            "The app did not consume the ctrl+c E2E key request"
-        )
+            "The app did not consume the ctrl+c E2E key request")
 
-        guard let endedDump = waitForRenderDump(configuration: configuration, timeout: 45, predicate: { dump in
-            dump.sessionID == configuration.sessionID
-                && dump.renderMode == "ended"
-                && dump.showsTerminalSurface
-                && !dump.hasError
-                && dump.combinedText.contains(configuration.expectedInterruptedText)
-                && !dump.combinedText.localizedStandardContains("final render was available")
-        }) else {
+        guard
+            let endedDump = waitForRenderDump(
+                configuration: configuration, timeout: 45,
+                predicate: { dump in
+                    dump.sessionID == configuration.sessionID && dump.renderMode == "ended" && dump.showsTerminalSurface && !dump.hasError
+                        && dump.combinedText.contains(configuration.expectedInterruptedText)
+                        && !dump.combinedText.localizedStandardContains("final render was available")
+                })
+        else {
             XCTFail("Timed out waiting for the interrupted session final render")
             return
         }
@@ -251,12 +177,7 @@ final class SpacesMobileUITests: XCTestCase {
         guard let secondarySessionID = configuration.secondarySessionID else { return }
         try returnToTerminalList(in: app)
         try takeOverSessionFromList(
-            in: app,
-            configuration: configuration,
-            sessionID: secondarySessionID,
-            timeout: 20,
-            context: "post-interrupt secondary"
-        )
+            in: app, configuration: configuration, sessionID: secondarySessionID, timeout: 20, context: "post-interrupt secondary")
         let secondaryDetail = app.descendants(matching: .any)["terminal.detail.\(secondarySessionID)"]
         XCTAssertTrue(secondaryDetail.exists, "Secondary terminal detail disappeared after primary interrupt")
         XCTAssertFalse(app.staticTexts["This terminal session ended before a final render was available."].exists)
@@ -264,12 +185,9 @@ final class SpacesMobileUITests: XCTestCase {
         if !configuration.expectedSecondaryText.isEmpty {
             XCTAssertNotNil(
                 waitForRenderDump(configuration: configuration, timeout: 20) { dump in
-                    dump.sessionID == secondarySessionID
-                        && dump.renderMode != "ended"
+                    dump.sessionID == secondarySessionID && dump.renderMode != "ended"
                         && dump.combinedText.contains(configuration.expectedSecondaryText)
-                },
-                "The secondary session did not render the expected post-interrupt marker"
-            )
+                }, "The secondary session did not render the expected post-interrupt marker")
         }
         captureScreenshot(app, name: "post-interrupt-secondary-live", filePath: configuration.finalScreenshotPath)
     }
@@ -281,26 +199,16 @@ final class SpacesMobileUITests: XCTestCase {
         RunLoop.current.run(until: Date().addingTimeInterval(1))
 
         try takeOverSessionFromList(
-            in: app,
-            configuration: configuration,
-            sessionID: configuration.sessionID,
-            timeout: 20,
-            context: "terminal link preview"
-        )
+            in: app, configuration: configuration, sessionID: configuration.sessionID, timeout: 20, context: "terminal link preview")
         let linkText = configuration.terminalLinkText
         XCTAssertFalse(linkText.isEmpty, "Missing terminal link text in UI test configuration")
-        XCTAssertTrue(
-            tapTerminalText(linkText, in: app, configuration: configuration, timeout: 20),
-            "Unable to tap terminal text \(linkText)"
-        )
+        XCTAssertTrue(tapTerminalText(linkText, in: app, configuration: configuration, timeout: 20), "Unable to tap terminal text \(linkText)")
         XCTAssertTrue(
             waitForE2EEvent(configuration: configuration, kind: "open_link", detailContains: linkText, timeout: 10),
-            "The terminal did not report opening \(linkText)"
-        )
+            "The terminal did not report opening \(linkText)")
         XCTAssertTrue(
             waitForLinkPreview(in: app, configuration: configuration, title: configuration.expectedLinkPreviewTitle, timeout: 20),
-            "The terminal link preview did not appear for \(linkText). \(previewStateDescription(configuration: configuration))"
-        )
+            "The terminal link preview did not appear for \(linkText). \(previewStateDescription(configuration: configuration))")
         captureScreenshot(app, name: "terminal-link-preview", filePath: configuration.linkPreviewScreenshotPath)
     }
 
@@ -331,19 +239,13 @@ final class SpacesMobileUITests: XCTestCase {
         app.launchEnvironment["SPACES_MOBILE_TEST_AUTH_TOKEN"] = configuration.authToken
         app.launchEnvironment["SPACES_MOBILE_TEST_CERTIFICATE_FINGERPRINT"] = configuration.certificateFingerprint
         app.launchEnvironment["SPACES_MOBILE_TEST_INSTALLATION_ID"] = configuration.installationID
-        if let deviceSeedJSON = configuration.deviceSeedJSON {
-            app.launchEnvironment["SPACES_MOBILE_TEST_DEVICE_SEED_JSON"] = deviceSeedJSON
-        }
+        if let deviceSeedJSON = configuration.deviceSeedJSON { app.launchEnvironment["SPACES_MOBILE_TEST_DEVICE_SEED_JSON"] = deviceSeedJSON }
         app.launchEnvironment["SPACES_MOBILE_E2E_TARGET_SESSION_ID"] = configuration.sessionID
         if let secondarySessionID = configuration.secondarySessionID {
             app.launchEnvironment["SPACES_MOBILE_E2E_SECONDARY_SESSION_ID"] = secondarySessionID
         }
-        if let renderDumpPath = configuration.renderDumpPath {
-            app.launchEnvironment["SPACES_MOBILE_E2E_RENDER_DUMP_PATH"] = renderDumpPath
-        }
-        if let eventLogPath = configuration.eventLogPath {
-            app.launchEnvironment["SPACES_MOBILE_E2E_EVENT_LOG_PATH"] = eventLogPath
-        }
+        if let renderDumpPath = configuration.renderDumpPath { app.launchEnvironment["SPACES_MOBILE_E2E_RENDER_DUMP_PATH"] = renderDumpPath }
+        if let eventLogPath = configuration.eventLogPath { app.launchEnvironment["SPACES_MOBILE_E2E_EVENT_LOG_PATH"] = eventLogPath }
     }
 
     private func waitForButton(in app: XCUIApplication, identifier: String, fallbackLabel: String, timeout: TimeInterval) -> XCUIElement? {
@@ -354,9 +256,7 @@ final class SpacesMobileUITests: XCTestCase {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             let candidates = [
-                app.buttons[identifier],
-                app.descendants(matching: .any)[identifier],
-                app.buttons[fallbackLabel],
+                app.buttons[identifier], app.descendants(matching: .any)[identifier], app.buttons[fallbackLabel],
                 app.descendants(matching: .any)[fallbackLabel],
             ]
             for candidate in candidates where candidate.exists {
@@ -372,16 +272,11 @@ final class SpacesMobileUITests: XCTestCase {
 
     private func focusTerminalSurface(in app: XCUIApplication) {
         let terminalSurface = app.otherElements["terminal.surface"]
-        if terminalSurface.waitForExistence(timeout: 2) {
-            terminalSurface.tap()
-        }
+        if terminalSurface.waitForExistence(timeout: 2) { terminalSurface.tap() }
     }
 
     private func waitForVisibleTerminalContentIfNeeded(
-        in app: XCUIApplication,
-        configuration: UITestConfiguration,
-        context: String,
-        timeout: TimeInterval
+        in app: XCUIApplication, configuration: UITestConfiguration, context: String, timeout: TimeInterval
     ) -> Bool {
         let requiredInkBands = configuration.minimumVisibleTerminalInkBands
         let maximumTopBlankRatio = configuration.maximumTerminalTopBlankRatio
@@ -400,9 +295,7 @@ final class SpacesMobileUITests: XCTestCase {
                 let hasAcceptableTopBlank =
                     maximumTopBlankRatio <= 0
                     || metrics.firstInkRow.map { Double($0) / Double(max(metrics.height, 1)) <= maximumTopBlankRatio } == true
-                if hasEnoughInk, hasAcceptableTopBlank {
-                    return true
-                }
+                if hasEnoughInk, hasAcceptableTopBlank { return true }
             }
             RunLoop.current.run(until: Date().addingTimeInterval(0.3))
         }
@@ -416,8 +309,7 @@ final class SpacesMobileUITests: XCTestCase {
         XCTFail(
             "Terminal surface did not visibly render enough content \(context). "
                 + "requiredInkBands=\(requiredInkBands) maximumTopBlankRatio=\(maximumTopBlankRatio) "
-                + "lastMetrics=\(String(describing: lastMetrics))"
-        )
+                + "lastMetrics=\(String(describing: lastMetrics))")
         return false
     }
 
@@ -427,15 +319,14 @@ final class SpacesMobileUITests: XCTestCase {
         return surface
     }
 
-    private func tapTerminalText(
-        _ target: String,
-        in app: XCUIApplication,
-        configuration: UITestConfiguration,
-        timeout: TimeInterval
-    ) -> Bool {
-        guard let dump = waitForRenderDump(configuration: configuration, timeout: timeout, predicate: { dump in
-            isOwnerReady(dump, expectedSessionID: configuration.sessionID) && terminalTextContains(target, in: dump.renderedText)
-        }) else { return false }
+    private func tapTerminalText(_ target: String, in app: XCUIApplication, configuration: UITestConfiguration, timeout: TimeInterval) -> Bool {
+        guard
+            let dump = waitForRenderDump(
+                configuration: configuration, timeout: timeout,
+                predicate: { dump in
+                    isOwnerReady(dump, expectedSessionID: configuration.sessionID) && terminalTextContains(target, in: dump.renderedText)
+                })
+        else { return false }
         let lines = dump.renderedText.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         guard let columns = dump.viewportColumns, columns > 0 else { return false }
         let configuredRows = dump.viewportRows ?? lines.count
@@ -447,12 +338,7 @@ final class SpacesMobileUITests: XCTestCase {
             surface.coordinate(withNormalizedOffset: CGVector(dx: normalizedX, dy: normalizedY)).tap()
             return true
         }
-        return tapTerminalSurfaceFallback(
-            in: app,
-            configuration: configuration,
-            normalizedX: normalizedX,
-            normalizedY: normalizedY
-        )
+        return tapTerminalSurfaceFallback(in: app, configuration: configuration, normalizedX: normalizedX, normalizedY: normalizedY)
     }
 
     private func terminalTextContains(_ target: String, in renderedText: String) -> Bool {
@@ -461,12 +347,7 @@ final class SpacesMobileUITests: XCTestCase {
         return terminalTextTapLocation(target, lines: lines, rows: lines.count, columns: 1_000) != nil
     }
 
-    private func terminalTextTapLocation(
-        _ target: String,
-        lines: [String],
-        rows: Int,
-        columns: Int
-    ) -> (row: Int, x: Double)? {
+    private func terminalTextTapLocation(_ target: String, lines: [String], rows: Int, columns: Int) -> (row: Int, x: Double)? {
         for (row, line) in lines.enumerated() where row < rows {
             guard let range = line.range(of: target) else { continue }
             let column = line.distance(from: line.startIndex, to: range.lowerBound)
@@ -502,49 +383,31 @@ final class SpacesMobileUITests: XCTestCase {
         return nil
     }
 
-    private func tapTerminalSurfaceFallback(
-        in app: XCUIApplication,
-        configuration: UITestConfiguration,
-        normalizedX: Double,
-        normalizedY: Double
-    ) -> Bool {
+    private func tapTerminalSurfaceFallback(in app: XCUIApplication, configuration: UITestConfiguration, normalizedX: Double, normalizedY: Double)
+        -> Bool
+    {
         let appFrame = app.frame
         guard appFrame.width > 1, appFrame.height > 1 else { return false }
 
         let terminalTextView = app.textViews.firstMatch
         var frame =
-            terminalTextView.exists && terminalTextView.frame.width > 1 && terminalTextView.frame.height > 1
-            ? terminalTextView.frame
-            : appFrame
+            terminalTextView.exists && terminalTextView.frame.width > 1 && terminalTextView.frame.height > 1 ? terminalTextView.frame : appFrame
         if frame == appFrame {
             let ownerBadge = app.otherElements["terminal.ownerBadge"]
             let ownerText = app.staticTexts["Owner"]
-            let chromeBottom = [ownerBadge, ownerText]
-                .filter { $0.exists && $0.frame.height > 1 }
-                .map(\.frame.maxY)
-                .max()
+            let chromeBottom = [ownerBadge, ownerText].filter { $0.exists && $0.frame.height > 1 }.map(\.frame.maxY).max()
             let terminalTop = max(chromeBottom.map { $0 + 8 } ?? (frame.minY + 48), frame.minY)
-            if terminalTop < frame.maxY - 1 {
-                frame = CGRect(x: frame.minX, y: terminalTop, width: frame.width, height: frame.maxY - terminalTop)
-            }
+            if terminalTop < frame.maxY - 1 { frame = CGRect(x: frame.minX, y: terminalTop, width: frame.width, height: frame.maxY - terminalTop) }
         }
 
         guard frame.width > 1, frame.height > 1 else { return false }
-        let point = CGPoint(
-            x: frame.minX + CGFloat(normalizedX) * frame.width,
-            y: frame.minY + CGFloat(normalizedY) * frame.height
-        )
+        let point = CGPoint(x: frame.minX + CGFloat(normalizedX) * frame.width, y: frame.minY + CGFloat(normalizedY) * frame.height)
         let offset = CGVector(dx: point.x - appFrame.minX, dy: point.y - appFrame.minY)
         app.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0)).withOffset(offset).tap()
         return true
     }
 
-    private func waitForLinkPreview(
-        in app: XCUIApplication,
-        configuration: UITestConfiguration,
-        title: String,
-        timeout: TimeInterval
-    ) -> Bool {
+    private func waitForLinkPreview(in app: XCUIApplication, configuration: UITestConfiguration, title: String, timeout: TimeInterval) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             if hasVisibleLinkPreview(in: app, title: title) { return true }
@@ -560,8 +423,7 @@ final class SpacesMobileUITests: XCTestCase {
     }
 
     private func hasVisibleLinkPreview(in app: XCUIApplication, title: String) -> Bool {
-        app.descendants(matching: .any)["terminal.linkPreview"].exists
-            || (!title.isEmpty && app.navigationBars[title].exists)
+        app.descendants(matching: .any)["terminal.linkPreview"].exists || (!title.isEmpty && app.navigationBars[title].exists)
             || app.buttons["Open In"].exists
     }
 
@@ -570,13 +432,14 @@ final class SpacesMobileUITests: XCTestCase {
         if let error = dump.linkPreviewErrorMessage?.trimmingCharacters(in: .whitespacesAndNewlines), !error.isEmpty {
             return "Preview error: \(error)"
         }
-        return "Latest preview state: preparing=\(dump.isPreparingLinkPreview) title=\(dump.linkPreviewTitle ?? "") artifactKind=\(dump.linkPreviewArtifactKind ?? "")."
+        return
+            "Latest preview state: preparing=\(dump.isPreparingLinkPreview) title=\(dump.linkPreviewTitle ?? "") artifactKind=\(dump.linkPreviewArtifactKind ?? "")."
     }
 
     private static func terminalSurfaceInkMetrics(from pngData: Data, isFullAppScreenshot: Bool) -> TerminalSurfaceInkMetrics? {
-        guard let source = CGImageSourceCreateWithData(pngData as CFData, nil),
-            let image = CGImageSourceCreateImageAtIndex(source, 0, nil)
-        else { return nil }
+        guard let source = CGImageSourceCreateWithData(pngData as CFData, nil), let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+            return nil
+        }
         let width = image.width
         let height = image.height
         guard width > 0, height > 0 else { return nil }
@@ -586,14 +449,7 @@ final class SpacesMobileUITests: XCTestCase {
         let bitmapInfo = CGBitmapInfo.byteOrder32Big.rawValue | CGImageAlphaInfo.premultipliedLast.rawValue
         guard
             let context = CGContext(
-                data: &pixels,
-                width: width,
-                height: height,
-                bitsPerComponent: 8,
-                bytesPerRow: width * 4,
-                space: colorSpace,
-                bitmapInfo: bitmapInfo
-            )
+                data: &pixels, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4, space: colorSpace, bitmapInfo: bitmapInfo)
         else { return nil }
         context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
 
@@ -614,61 +470,35 @@ final class SpacesMobileUITests: XCTestCase {
                 let blue = Int(pixels[offset + 2])
                 let alpha = Int(pixels[offset + 3])
                 let luminance = (299 * red + 587 * green + 114 * blue) / 1000
-                if alpha > 20, luminance > 70 {
-                    rowBrightPixels += 1
-                }
+                if alpha > 20, luminance > 70 { rowBrightPixels += 1 }
             }
             brightPixels += rowBrightPixels
             let rowHasInk = rowBrightPixels > rowInkThreshold
             if rowHasInk {
-                if firstInkRow == nil {
-                    firstInkRow = y - firstRow
-                }
+                if firstInkRow == nil { firstInkRow = y - firstRow }
                 inkRows += 1
-                if !previousRowHadInk {
-                    inkBands += 1
-                }
+                if !previousRowHadInk { inkBands += 1 }
             }
             previousRowHadInk = rowHasInk
         }
         return TerminalSurfaceInkMetrics(
-            width: width,
-            height: lastRow - firstRow,
-            brightPixels: brightPixels,
-            inkRows: inkRows,
-            inkBands: inkBands,
-            firstInkRow: firstInkRow
-        )
+            width: width, height: lastRow - firstRow, brightPixels: brightPixels, inkRows: inkRows, inkBands: inkBands, firstInkRow: firstInkRow)
     }
 
-    private func takeOverSessionsAcrossListCycles(
-        in app: XCUIApplication,
-        configuration: UITestConfiguration,
-        sessionIDs: [String]
-    ) throws {
+    private func takeOverSessionsAcrossListCycles(in app: XCUIApplication, configuration: UITestConfiguration, sessionIDs: [String]) throws {
         for (index, sessionID) in sessionIDs.enumerated() {
             try returnToTerminalList(in: app)
-            try takeOverSessionFromList(
-                in: app,
-                configuration: configuration,
-                sessionID: sessionID,
-                timeout: 20,
-                context: "list cycle \(index + 1)"
-            )
+            try takeOverSessionFromList(in: app, configuration: configuration, sessionID: sessionID, timeout: 20, context: "list cycle \(index + 1)")
         }
         captureScreenshot(app, name: "post-second-session-takeover", filePath: configuration.finalScreenshotPath)
     }
 
     private func returnToTerminalList(in app: XCUIApplication) throws {
-        if isTerminalListVisible(in: app) {
-            return
-        }
+        if isTerminalListVisible(in: app) { return }
 
         if let backControl = waitForElement(
-            primary: app.buttons["terminal.back"],
-            fallback: app.descendants(matching: .any)["terminal.back"],
-            timeout: 4
-        ) {
+            primary: app.buttons["terminal.back"], fallback: app.descendants(matching: .any)["terminal.back"], timeout: 4)
+        {
             backControl.tap()
         } else {
             app.coordinate(withNormalizedOffset: CGVector(dx: 0.09, dy: 0.11)).tap()
@@ -680,9 +510,7 @@ final class SpacesMobileUITests: XCTestCase {
     private func waitForTerminalList(in app: XCUIApplication, timeout: TimeInterval) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
-            if isTerminalListVisible(in: app) {
-                return true
-            }
+            if isTerminalListVisible(in: app) { return true }
             RunLoop.current.run(until: Date().addingTimeInterval(0.2))
         }
         return false
@@ -697,49 +525,33 @@ final class SpacesMobileUITests: XCTestCase {
         let deadline = Date().addingTimeInterval(timeout)
         let scrollView = app.scrollViews.firstMatch
         while Date() < deadline {
-            if row.exists, row.isEnabled, row.isHittable {
-                return true
-            }
-            if scrollView.exists {
-                scrollView.swipeUp()
-            } else {
-                app.swipeUp()
-            }
+            if row.exists, row.isEnabled, row.isHittable { return true }
+            if scrollView.exists { scrollView.swipeUp() } else { app.swipeUp() }
             RunLoop.current.run(until: Date().addingTimeInterval(0.4))
         }
         return row.exists && row.isEnabled && row.isHittable
     }
 
     private func takeOverSessionFromList(
-        in app: XCUIApplication,
-        configuration: UITestConfiguration,
-        sessionID: String,
-        timeout: TimeInterval,
-        context: String
+        in app: XCUIApplication, configuration: UITestConfiguration, sessionID: String, timeout: TimeInterval, context: String
     ) throws {
         let sessionRow = app.buttons["terminal.row.\(sessionID)"]
         XCTAssertTrue(sessionRow.waitForExistence(timeout: timeout), "Terminal row \(sessionID) did not reappear during \(context)")
-        XCTAssertTrue(
-            revealTerminalRow(sessionRow, in: app, timeout: 8),
-            "Terminal row \(sessionID) was not ready for interaction during \(context)"
-        )
+        XCTAssertTrue(revealTerminalRow(sessionRow, in: app, timeout: 8), "Terminal row \(sessionID) was not ready for interaction during \(context)")
         sessionRow.tap()
 
         let sessionDetail = app.descendants(matching: .any)["terminal.detail.\(sessionID)"]
         if !sessionDetail.waitForExistence(timeout: 8) {
             captureScreenshot(
-                app,
-                name: "terminal-detail-missing-\(context)",
-                filePath: configuration.renderDumpPath.map { "\(($0 as NSString).deletingLastPathComponent)/terminal-detail-missing.png" }
-            )
+                app, name: "terminal-detail-missing-\(context)",
+                filePath: configuration.renderDumpPath.map { "\(($0 as NSString).deletingLastPathComponent)/terminal-detail-missing.png" })
             XCTFail("Terminal detail \(sessionID) did not appear during \(context)")
             return
         }
         if !waitForOwnerState(in: app, configuration: configuration, sessionID: sessionID, timeout: 4) {
             XCTAssertTrue(
                 tapButton(in: app, identifier: "terminal.takeover", fallbackLabel: "Take Over", timeout: 8),
-                "Timed out waiting for Take Over button during \(context)"
-            )
+                "Timed out waiting for Take Over button during \(context)")
         }
 
         guard waitForOwnerState(in: app, configuration: configuration, sessionID: sessionID, timeout: 45) else {
@@ -748,15 +560,10 @@ final class SpacesMobileUITests: XCTestCase {
         }
         XCTAssertTrue(
             waitForOwnerReadyState(in: app, configuration: configuration, sessionID: sessionID, timeout: 10),
-            "Owner-ready state did not return promptly after taking over session \(sessionID) during \(context)"
-        )
+            "Owner-ready state did not return promptly after taking over session \(sessionID) during \(context)")
         assertOwnerReadyStable(
-            in: app,
-            configuration: configuration,
-            sessionID: sessionID,
-            duration: 1,
-            context: "after taking over session \(sessionID) during \(context)"
-        )
+            in: app, configuration: configuration, sessionID: sessionID, duration: 1,
+            context: "after taking over session \(sessionID) during \(context)")
     }
 
     private func performScrollback(in app: XCUIApplication, configuration: UITestConfiguration) {
@@ -770,24 +577,15 @@ final class SpacesMobileUITests: XCTestCase {
         }
     }
 
-    private func waitForStaticText(
-        in app: XCUIApplication,
-        identifier: String,
-        fallbackLabel: String,
-        timeout: TimeInterval
-    ) -> XCUIElement? {
+    private func waitForStaticText(in app: XCUIApplication, identifier: String, fallbackLabel: String, timeout: TimeInterval) -> XCUIElement? {
         waitForElement(primary: app.staticTexts[identifier], fallback: app.staticTexts[fallbackLabel], timeout: timeout)
     }
 
     private func waitForElement(primary: XCUIElement, fallback: XCUIElement, timeout: TimeInterval) -> XCUIElement? {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
-            if primary.exists {
-                return primary
-            }
-            if fallback.exists {
-                return fallback
-            }
+            if primary.exists { return primary }
+            if fallback.exists { return fallback }
             RunLoop.current.run(until: Date().addingTimeInterval(0.2))
         }
         return nil
@@ -797,10 +595,8 @@ final class SpacesMobileUITests: XCTestCase {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             switch app.state {
-            case .runningForeground:
-                return true
-            default:
-                RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+            case .runningForeground: return true
+            default: RunLoop.current.run(until: Date().addingTimeInterval(0.2))
             }
         }
         return false
@@ -810,33 +606,23 @@ final class SpacesMobileUITests: XCTestCase {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             let ownerBadge = app.otherElements["terminal.ownerBadge"]
-            if ownerBadge.exists {
-                return ownerBadge
-            }
+            if ownerBadge.exists { return ownerBadge }
             let ownerPreparing = app.descendants(matching: .any)["terminal.ownerPreparing"]
-            if ownerPreparing.exists {
-                return ownerPreparing
-            }
+            if ownerPreparing.exists { return ownerPreparing }
             let ownerText = app.staticTexts["Owner"]
-            if ownerText.exists {
-                return ownerText
-            }
+            if ownerText.exists { return ownerText }
             RunLoop.current.run(until: Date().addingTimeInterval(0.2))
         }
         return nil
     }
 
-    private func waitForOwnerState(
-        in app: XCUIApplication,
-        configuration: UITestConfiguration,
-        sessionID: String? = nil,
-        timeout: TimeInterval
-    ) -> Bool {
+    private func waitForOwnerState(in app: XCUIApplication, configuration: UITestConfiguration, sessionID: String? = nil, timeout: TimeInterval)
+        -> Bool
+    {
         let expectedSessionID = sessionID ?? configuration.sessionID
         if configuration.renderDumpPath != nil {
             return waitForRenderDump(configuration: configuration, timeout: timeout) { dump in
-                dump.sessionID == expectedSessionID
-                    && dump.isOwner
+                dump.sessionID == expectedSessionID && dump.isOwner
                     && (dump.showsTerminalSurface || dump.renderMode.hasPrefix("owner") || dump.renderMode == "ghostty-mirror")
             } != nil
         }
@@ -846,20 +632,15 @@ final class SpacesMobileUITests: XCTestCase {
     private func waitForOwnerReadyState(in app: XCUIApplication, timeout: TimeInterval) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
-            if isShowingOwnerReadyState(in: app) && !isShowingPreparingInput(in: app) {
-                return true
-            }
+            if isShowingOwnerReadyState(in: app) && !isShowingPreparingInput(in: app) { return true }
             RunLoop.current.run(until: Date().addingTimeInterval(0.2))
         }
         return false
     }
 
-    private func waitForOwnerReadyState(
-        in app: XCUIApplication,
-        configuration: UITestConfiguration,
-        sessionID: String? = nil,
-        timeout: TimeInterval
-    ) -> Bool {
+    private func waitForOwnerReadyState(in app: XCUIApplication, configuration: UITestConfiguration, sessionID: String? = nil, timeout: TimeInterval)
+        -> Bool
+    {
         let expectedSessionID = sessionID ?? configuration.sessionID
         if configuration.renderDumpPath != nil {
             return waitForRenderDump(configuration: configuration, timeout: timeout) { dump in
@@ -879,11 +660,7 @@ final class SpacesMobileUITests: XCTestCase {
     }
 
     private func assertOwnerReadyStable(
-        in app: XCUIApplication,
-        configuration: UITestConfiguration,
-        sessionID: String? = nil,
-        duration: TimeInterval,
-        context: String
+        in app: XCUIApplication, configuration: UITestConfiguration, sessionID: String? = nil, duration: TimeInterval, context: String
     ) {
         if configuration.renderDumpPath == nil {
             assertOwnerReadyStable(in: app, duration: duration, context: context)
@@ -906,32 +683,20 @@ final class SpacesMobileUITests: XCTestCase {
     }
 
     private func isShowingPreparingInput(in app: XCUIApplication) -> Bool {
-        if app.descendants(matching: .any)["terminal.ownerPreparing"].exists {
-            return true
-        }
+        if app.descendants(matching: .any)["terminal.ownerPreparing"].exists { return true }
         return false
     }
 
-    private func waitForRenderDump(
-        configuration: UITestConfiguration,
-        timeout: TimeInterval,
-        predicate: (UITestRenderDump) -> Bool
-    ) -> UITestRenderDump? {
+    private func waitForRenderDump(configuration: UITestConfiguration, timeout: TimeInterval, predicate: (UITestRenderDump) -> Bool)
+        -> UITestRenderDump?
+    {
         guard configuration.renderDumpPath != nil else { return nil }
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
-            if let dump = latestRenderDump(configuration: configuration),
-                predicate(dump)
-            {
-                return dump
-            }
+            if let dump = latestRenderDump(configuration: configuration), predicate(dump) { return dump }
             RunLoop.current.run(until: Date().addingTimeInterval(0.2))
         }
-        if let dump = latestRenderDump(configuration: configuration),
-            predicate(dump)
-        {
-            return dump
-        }
+        if let dump = latestRenderDump(configuration: configuration), predicate(dump) { return dump }
         return nil
     }
 
@@ -943,11 +708,7 @@ final class SpacesMobileUITests: XCTestCase {
     }
 
     private func isOwnerReady(_ dump: UITestRenderDump, expectedSessionID: String) -> Bool {
-        dump.sessionID == expectedSessionID
-            && dump.isOwner
-            && dump.showsTerminalSurface
-            && dump.isInputSurfaceReady
-            && !dump.isBusy
+        dump.sessionID == expectedSessionID && dump.isOwner && dump.showsTerminalSurface && dump.isInputSurfaceReady && !dump.isBusy
             && !dump.isPreparingInput
     }
 
@@ -962,9 +723,7 @@ final class SpacesMobileUITests: XCTestCase {
         do {
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             try screenshot.pngRepresentation.write(to: url, options: [.atomic])
-        } catch {
-            XCTFail("Failed to write screenshot \(name) to \(filePath): \(error)")
-        }
+        } catch { XCTFail("Failed to write screenshot \(name) to \(filePath): \(error)") }
     }
 
     private func waitForMarkerIfNeeded(_ path: String?, timeout: TimeInterval) {
@@ -972,9 +731,7 @@ final class SpacesMobileUITests: XCTestCase {
         let url = URL(fileURLWithPath: path)
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
-            if FileManager.default.fileExists(atPath: url.path) {
-                return
-            }
+            if FileManager.default.fileExists(atPath: url.path) { return }
             RunLoop.current.run(until: Date().addingTimeInterval(0.2))
         }
         XCTFail("Timed out waiting for marker file at \(path)")
@@ -986,9 +743,7 @@ final class SpacesMobileUITests: XCTestCase {
         do {
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             try "ready\n".write(to: url, atomically: true, encoding: .utf8)
-        } catch {
-            XCTFail("Failed writing marker file at \(path): \(error)")
-        }
+        } catch { XCTFail("Failed writing marker file at \(path): \(error)") }
     }
 
     private func writeE2ECommandRequest(configuration: UITestConfiguration, key: String) throws {
@@ -998,28 +753,17 @@ final class SpacesMobileUITests: XCTestCase {
         }
         let requestURL = URL(fileURLWithPath: "\(eventLogPath).command-request.json")
         try FileManager.default.createDirectory(at: requestURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        let payload: [String: Any] = [
-            "id": "ui-key-\(Int(Date().timeIntervalSince1970 * 1000))",
-            "key": key,
-            "sendEnter": false,
-        ]
+        let payload: [String: Any] = ["id": "ui-key-\(Int(Date().timeIntervalSince1970 * 1000))", "key": key, "sendEnter": false]
         let data = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
         try data.write(to: requestURL, options: [.atomic])
     }
 
-    private func waitForE2EEvent(
-        configuration: UITestConfiguration,
-        kind: String,
-        detailContains: String,
-        timeout: TimeInterval
-    ) -> Bool {
+    private func waitForE2EEvent(configuration: UITestConfiguration, kind: String, detailContains: String, timeout: TimeInterval) -> Bool {
         guard let eventLogPath = configuration.eventLogPath else { return false }
         let url = URL(fileURLWithPath: eventLogPath)
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
-            if e2eEventExists(at: url, kind: kind, detailContains: detailContains) {
-                return true
-            }
+            if e2eEventExists(at: url, kind: kind, detailContains: detailContains) { return true }
             RunLoop.current.run(until: Date().addingTimeInterval(0.2))
         }
         return e2eEventExists(at: url, kind: kind, detailContains: detailContains)
@@ -1028,10 +772,8 @@ final class SpacesMobileUITests: XCTestCase {
     private func e2eEventExists(at url: URL, kind: String, detailContains: String) -> Bool {
         guard let data = try? Data(contentsOf: url), let text = String(data: data, encoding: .utf8) else { return false }
         for line in text.split(separator: "\n") {
-            guard let lineData = String(line).data(using: .utf8),
-                let event = try? JSONDecoder().decode(UITestE2EEvent.self, from: lineData),
-                event.kind == kind,
-                event.detail?.contains(detailContains) == true
+            guard let lineData = String(line).data(using: .utf8), let event = try? JSONDecoder().decode(UITestE2EEvent.self, from: lineData),
+                event.kind == kind, event.detail?.contains(detailContains) == true
             else { continue }
             return true
         }
@@ -1046,9 +788,7 @@ final class SpacesMobileUITests: XCTestCase {
             try FileManager.default.createDirectory(at: targetURL.deletingLastPathComponent(), withIntermediateDirectories: true)
             let data = try Data(contentsOf: sourceURL)
             try data.write(to: targetURL, options: [.atomic])
-        } catch {
-            XCTFail("Failed copying render dump to \(path): \(error)")
-        }
+        } catch { XCTFail("Failed copying render dump to \(path): \(error)") }
     }
 
 }
@@ -1106,27 +846,21 @@ private struct UITestConfiguration: Decodable {
     let bundleID: String
 
     var deviceSeedJSON: String? {
-        guard !host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              (1...65_535).contains(port),
-              !authToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              !certificateFingerprint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        guard !host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, (1...65_535).contains(port),
+            !authToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+            !certificateFingerprint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         else { return nil }
 
         let payload: [String: Any] = [
             "activeDeviceID": deviceID ?? "",
             "devices": [
                 [
-                    "id": deviceID ?? "",
-                    "name": deviceName ?? "This Mac",
-                    "host": host,
-                    "port": port,
-                    "authToken": authToken,
+                    "id": deviceID ?? "", "name": deviceName ?? "This Mac", "host": host, "port": port, "authToken": authToken,
                     "certificateFingerprint": certificateFingerprint,
-                ],
+                ]
             ],
         ]
-        guard JSONSerialization.isValidJSONObject(payload),
-              let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
+        guard JSONSerialization.isValidJSONObject(payload), let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
         else { return nil }
         return String(data: data, encoding: .utf8)
     }
@@ -1250,14 +984,8 @@ private struct UITestConfiguration: Decodable {
         let configPath = environment["SPACES_MOBILE_UI_TEST_CONFIG_PATH"] ?? defaultConfigPath
         let url = URL(fileURLWithPath: configPath)
         let data: Data
-        do {
-            data = try Data(contentsOf: url)
-        } catch {
-            throw UITestConfigurationError.missingConfigFile(configPath)
-        }
-        do {
-            return try JSONDecoder().decode(Self.self, from: data)
-        } catch {
+        do { data = try Data(contentsOf: url) } catch { throw UITestConfigurationError.missingConfigFile(configPath) }
+        do { return try JSONDecoder().decode(Self.self, from: data) } catch {
             throw UITestConfigurationError.invalidConfigFile(configPath, error.localizedDescription)
         }
     }
@@ -1326,9 +1054,7 @@ private struct UITestRenderDump: Decodable, CustomStringConvertible {
         renderStateKey = try container.decode(String.self, forKey: .renderStateKey)
     }
 
-    var combinedText: String {
-        [renderedText, snapshotText ?? "", visibleText].joined(separator: "\n")
-    }
+    var combinedText: String { [renderedText, snapshotText ?? "", visibleText].joined(separator: "\n") }
 
     var hasError: Bool {
         guard let errorMessage else { return false }
@@ -1349,22 +1075,12 @@ private struct UITestRenderDump: Decodable, CustomStringConvertible {
 
     var description: String {
         [
-            "sessionID=\(sessionID)",
-            "renderMode=\(renderMode)",
-            "isOwner=\(isOwner)",
-            "showsTerminalSurface=\(showsTerminalSurface)",
-            "isBusy=\(isBusy)",
-            "isPreparingInput=\(isPreparingInput)",
-            "isInputSurfaceReady=\(isInputSurfaceReady)",
-            "viewport=\(viewportColumns.map(String.init) ?? "?")x\(viewportRows.map(String.init) ?? "?")",
-            "errorMessage=\(errorMessage ?? "")",
-            "isPreparingLinkPreview=\(isPreparingLinkPreview)",
-            "linkPreviewTitle=\(linkPreviewTitle ?? "")",
-            "linkPreviewArtifactKind=\(linkPreviewArtifactKind ?? "")",
-            "linkPreviewErrorMessage=\(linkPreviewErrorMessage ?? "")",
-            "visibleText=\(visibleText)",
-            "snapshotTextLength=\(snapshotText?.count ?? 0)",
-            "renderedTextLength=\(renderedText.count)",
+            "sessionID=\(sessionID)", "renderMode=\(renderMode)", "isOwner=\(isOwner)", "showsTerminalSurface=\(showsTerminalSurface)",
+            "isBusy=\(isBusy)", "isPreparingInput=\(isPreparingInput)", "isInputSurfaceReady=\(isInputSurfaceReady)",
+            "viewport=\(viewportColumns.map(String.init) ?? "?")x\(viewportRows.map(String.init) ?? "?")", "errorMessage=\(errorMessage ?? "")",
+            "isPreparingLinkPreview=\(isPreparingLinkPreview)", "linkPreviewTitle=\(linkPreviewTitle ?? "")",
+            "linkPreviewArtifactKind=\(linkPreviewArtifactKind ?? "")", "linkPreviewErrorMessage=\(linkPreviewErrorMessage ?? "")",
+            "visibleText=\(visibleText)", "snapshotTextLength=\(snapshotText?.count ?? 0)", "renderedTextLength=\(renderedText.count)",
             "renderStateKey=\(renderStateKey)",
         ].joined(separator: " ")
     }
@@ -1395,10 +1111,8 @@ private enum UITestConfigurationError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .missingConfigFile(let path):
-            return "Missing UI test config file at \(path)"
-        case .invalidConfigFile(let path, let message):
-            return "Invalid UI test config file at \(path): \(message)"
+        case .missingConfigFile(let path): return "Missing UI test config file at \(path)"
+        case .invalidConfigFile(let path, let message): return "Invalid UI test config file at \(path): \(message)"
         }
     }
 }

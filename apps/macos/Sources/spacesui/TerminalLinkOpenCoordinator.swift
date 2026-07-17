@@ -5,6 +5,7 @@
     import spacesdevicecore
     import spacesterminalcore
     import spacesterminalghostty
+    import spacesterminalui
 
     /// Late-bound holder wiring a terminal pane's Ghostty link handler to its coordinator.
     ///
@@ -29,6 +30,11 @@
     ///   type/path restrictions, deliberately preserving macOS "open anything local" semantics.
     /// - file link on a remote device: resolved and fetched over the Device API into a temp cache, then
     ///   opened by artifact category. A second click supersedes an in-flight fetch.
+    /// - `spaces://terminal/…` deep link: focused in-app through the host's shared handler (same path as
+    ///   the OS URL handler), so a click never leaves the app. An unqualified link (no `?device=`) means
+    ///   "the device this text came from": remote daemons always print same-device links unqualified
+    ///   because a device can't know the client-side id it is paired under, so on a remote pane the link
+    ///   is stamped with the pane's own device before routing.
     @MainActor final class TerminalLinkOpenCoordinator {
         private struct LinkOpenError: LocalizedError {
             let message: String
@@ -43,7 +49,11 @@
         private let workingDirectoryProvider: @MainActor () -> String?
         private let requestSender: RemoteGhosttyTerminalServiceRequestSender
         private let registry: TerminalArtifactHandlerRegistry
-        private let banner: any TerminalLinkActivityBannerPresenting
+        private let banner: any TerminalPaneBannerPresenting
+        /// Focuses a clicked `spaces://terminal/…` session in-app (no OS round trip). The host
+        /// (`AppKitController`) owns the same device-resolution + focus path the URL handler uses, so
+        /// both entry points share one behavior and one other-device alert.
+        private let openSpacesTerminalLink: @MainActor (SpacesTerminalDeepLink) -> Void
 
         /// Bumped on every click. An async fetch captures the value at its start and abandons its result
         /// if a newer click has since superseded it, so a stale resolve/download never opens a file or
@@ -61,7 +71,7 @@
         init(
             sessionID: String, deviceID: String, isLocalDevice: Bool, workingDirectoryProvider: @escaping @MainActor () -> String?,
             requestSender: @escaping RemoteGhosttyTerminalServiceRequestSender, registry: TerminalArtifactHandlerRegistry = .defaultRegistry(),
-            banner: any TerminalLinkActivityBannerPresenting
+            banner: any TerminalPaneBannerPresenting, openSpacesTerminalLink: @escaping @MainActor (SpacesTerminalDeepLink) -> Void
         ) {
             self.sessionID = sessionID
             self.deviceID = deviceID
@@ -70,6 +80,7 @@
             self.requestSender = requestSender
             self.registry = registry
             self.banner = banner
+            self.openSpacesTerminalLink = openSpacesTerminalLink
         }
 
         deinit { MainActor.assumeIsolated { activeTask?.cancel() } }
@@ -84,7 +95,18 @@
             case .webURL(let url): _ = registry.open(url, as: .webURL)
             case .loopbackURL(let url): if isLocalDevice { _ = registry.open(url, as: .webURL) } else { banner.showNotice(Self.loopbackRemoteNotice) }
             case .fileLink(let raw): if isLocalDevice { openLocalFileLink(raw) } else { startRemoteFileOpen(raw) }
+            case .spacesTerminal(let link): openSpacesTerminalLink(qualifiedDeepLink(link))
             }
+        }
+
+        /// Qualifies a clicked terminal deep link with the device the clicked text came from. An
+        /// unqualified `spaces://terminal/<id>` (no `?device=`) means "this pane's device": remote
+        /// daemons print same-device links unqualified because a device can't know the client-side id it
+        /// is paired under. An explicit qualifier is always honored, and on a local pane a nil qualifier
+        /// already resolves to this Mac, so only a remote pane's unqualified link needs stamping.
+        private func qualifiedDeepLink(_ link: SpacesTerminalDeepLink) -> SpacesTerminalDeepLink {
+            guard link.deviceID == nil, !isLocalDevice else { return link }
+            return SpacesTerminalDeepLink(sessionID: link.sessionID, deviceID: deviceID)
         }
 
         /// Cancels any in-flight remote fetch, invalidates its generation, and hides the banner.

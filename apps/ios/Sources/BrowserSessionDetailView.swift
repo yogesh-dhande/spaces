@@ -34,89 +34,61 @@ struct BrowserSessionDetailView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            topOverlay
-                .padding(.horizontal, 8)
-                .padding(.top, 4)
-                .padding(.bottom, 4)
+            topOverlay.padding(.horizontal, 8).padding(.top, 4).padding(.bottom, 4)
 
             progressBar
 
             ZStack {
                 BrowserSessionWebView(request: request, model: model)
-                if let loadErrorMessage = model.loadErrorMessage {
-                    errorState(loadErrorMessage)
-                }
-            }
-            .overlay(alignment: .bottom) {
+                if let loadErrorMessage = model.loadErrorMessage { errorState(loadErrorMessage) }
+            }.overlay(alignment: .bottom) {
                 if let toast {
-                    toastBanner(toast)
-                        .padding(.horizontal, 16)
-                        .padding(.bottom, 12)
-                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                    toastBanner(toast).padding(.horizontal, 16).padding(.bottom, 12).transition(.move(edge: .bottom).combined(with: .opacity))
                 }
             }
 
             bottomToolbar
-        }
-        .background(Self.surfaceBackground.ignoresSafeArea())
-        .accessibilityIdentifier("browserSession.detail")
-        .toolbar(.hidden, for: .navigationBar)
-        .fullScreenCover(item: $markupItem) { item in
-            ScreenshotMarkupPresenter(item: item, stagedScreenshots: stagedScreenshots) { outcome in
-                markupItem = nil
-                switch outcome {
-                case .staged:
-                    showToast("Screenshot staged — insert it from a terminal", isError: false)
-                case .failed(let message):
-                    showToast(message, isError: true)
-                }
+        }.background(Self.surfaceBackground.ignoresSafeArea()).accessibilityIdentifier("browserSession.detail").toolbar(.hidden, for: .navigationBar)
+            .fullScreenCover(item: $markupItem) { item in
+                ScreenshotMarkupPresenter(item: item, stagedScreenshots: stagedScreenshots) { outcome in
+                    markupItem = nil
+                    switch outcome {
+                    case .staged: showToast("Screenshot staged — insert it from a terminal", isError: false)
+                    case .failed(let message): showToast(message, isError: true)
+                    }
+                }.ignoresSafeArea()
+            }.task(id: toast?.id) {
+                guard toast != nil else { return }
+                try? await Task.sleep(for: .seconds(2.5))
+                guard !Task.isCancelled else { return }
+                withAnimation { toast = nil }
             }
-            .ignoresSafeArea()
-        }
-        .task(id: toast?.id) {
-            guard toast != nil else { return }
-            try? await Task.sleep(for: .seconds(2.5))
-            guard !Task.isCancelled else { return }
-            withAnimation { toast = nil }
-        }
     }
 
     private var topOverlay: some View {
         HStack(spacing: 8) {
             chromeButton(accessibilityIdentifier: "browserSession.back", accessibilityLabel: "Back", action: onBack) {
-                Image(systemName: "chevron.left")
-                    .font(.subheadline.weight(.semibold))
+                Image(systemName: "chevron.left").font(.subheadline.weight(.semibold))
             }
 
             Spacer(minLength: 0)
 
             VStack(spacing: 1) {
-                Text(title)
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.white)
-                    .lineLimit(1)
-                Text(subtitle)
-                    .font(.caption2)
-                    .foregroundStyle(.white.opacity(0.56))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+                Text(title).font(.subheadline.weight(.semibold)).foregroundStyle(.white).lineLimit(1)
+                Text(subtitle).font(.caption2).foregroundStyle(.white.opacity(0.56)).lineLimit(1).truncationMode(.middle)
             }
 
             Spacer(minLength: 0)
             Color.clear.frame(width: Self.chromeControlHeight, height: 1)
-        }
-        .frame(height: Self.chromeControlHeight)
+        }.frame(height: Self.chromeControlHeight)
     }
 
     /// Thin indeterminate-looking progress bar tracking `WKWebView.estimatedProgress`, shown only while
     /// a navigation is in flight.
     @ViewBuilder private var progressBar: some View {
         if model.isLoading {
-            ProgressView(value: model.progress)
-                .progressViewStyle(.linear)
-                .tint(Theme.accent)
-                .frame(height: 2)
-                .accessibilityIdentifier("browserSession.progress")
+            ProgressView(value: model.progress).progressViewStyle(.linear).tint(Theme.accent).frame(height: 2).accessibilityIdentifier(
+                "browserSession.progress")
         }
     }
 
@@ -124,15 +96,11 @@ struct BrowserSessionDetailView: View {
         HStack(spacing: 24) {
             toolbarButton(
                 systemName: "chevron.left", accessibilityLabel: "Back", identifier: "browserSession.navigateBack", isEnabled: model.canGoBack
-            ) {
-                model.goBack?()
-            }
+            ) { model.goBack?() }
             toolbarButton(
                 systemName: "chevron.right", accessibilityLabel: "Forward", identifier: "browserSession.navigateForward",
                 isEnabled: model.canGoForward
-            ) {
-                model.goForward?()
-            }
+            ) { model.goForward?() }
             toolbarButton(systemName: "arrow.clockwise", accessibilityLabel: "Reload", identifier: "browserSession.reload", isEnabled: true) {
                 model.reload?()
             }
@@ -140,28 +108,17 @@ struct BrowserSessionDetailView: View {
             toolbarButton(
                 systemName: "camera.viewfinder", accessibilityLabel: "Screenshot", identifier: "browserSession.screenshot",
                 isEnabled: model.loadErrorMessage == nil && !isCapturingScreenshot
-            ) {
-                captureScreenshot()
-            }
-        }
-        .padding(.horizontal, 18)
-        .padding(.vertical, 8)
-        .background(Color.black.opacity(0.28))
+            ) { captureScreenshot() }
+        }.padding(.horizontal, 18).padding(.vertical, 8).background(Color.black.opacity(0.28))
     }
 
-    private func toolbarButton(
-        systemName: String, accessibilityLabel: String, identifier: String, isEnabled: Bool, action: @escaping () -> Void
-    ) -> some View {
+    private func toolbarButton(systemName: String, accessibilityLabel: String, identifier: String, isEnabled: Bool, action: @escaping () -> Void)
+        -> some View
+    {
         Button(action: action) {
-            Image(systemName: systemName)
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(isEnabled ? .white : .white.opacity(0.28))
-                .frame(width: Self.chromeControlHeight, height: Self.chromeControlHeight)
-        }
-        .buttonStyle(.plain)
-        .disabled(!isEnabled)
-        .accessibilityLabel(accessibilityLabel)
-        .accessibilityIdentifier(identifier)
+            Image(systemName: systemName).font(.system(size: 15, weight: .semibold)).foregroundStyle(isEnabled ? .white : .white.opacity(0.28)).frame(
+                width: Self.chromeControlHeight, height: Self.chromeControlHeight)
+        }.buttonStyle(.plain).disabled(!isEnabled).accessibilityLabel(accessibilityLabel).accessibilityIdentifier(identifier)
     }
 
     /// Captures the web view's visible viewport, then routes the result back through `handleCapturedSnapshot`
@@ -171,13 +128,10 @@ struct BrowserSessionDetailView: View {
     private func captureScreenshot() {
         guard let capture = model.captureSnapshot else { return }
         isCapturingScreenshot = true
-        capture { image in
-            handleCapturedSnapshot(image)
-        }
+        capture { image in handleCapturedSnapshot(image) }
     }
 
-    @MainActor
-    private func handleCapturedSnapshot(_ image: UIImage?) {
+    @MainActor private func handleCapturedSnapshot(_ image: UIImage?) {
         isCapturingScreenshot = false
         guard let image, let pngData = image.pngData() else {
             showToast("Couldn't capture this page.", isError: true)
@@ -193,9 +147,7 @@ struct BrowserSessionDetailView: View {
             return
         }
         let fileURL = FileManager.default.temporaryDirectory.appending(path: "spaces-screenshot-\(UUID().uuidString).png")
-        do {
-            try pngData.write(to: fileURL)
-        } catch {
+        do { try pngData.write(to: fileURL) } catch {
             showToast("Couldn't prepare this screenshot.", isError: true)
             return
         }
@@ -203,32 +155,20 @@ struct BrowserSessionDetailView: View {
     }
 
     static func screenshotErrorMessage(_ error: Error) -> String {
-        if case TerminalImageAttachmentValidationError.imageTooLarge = error {
-            return "Screenshot is too large to stage."
-        }
+        if case TerminalImageAttachmentValidationError.imageTooLarge = error { return "Screenshot is too large to stage." }
         return "Couldn't stage this screenshot."
     }
 
-    private func showToast(_ text: String, isError: Bool) {
-        withAnimation { toast = ScreenshotToast(text: text, isError: isError) }
-    }
+    private func showToast(_ text: String, isError: Bool) { withAnimation { toast = ScreenshotToast(text: text, isError: isError) } }
 
     private func toastBanner(_ toast: ScreenshotToast) -> some View {
         HStack(spacing: 8) {
-            Image(systemName: toast.isError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
-                .font(.system(size: 13, weight: .semibold))
+            Image(systemName: toast.isError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill").font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(toast.isError ? Theme.orange : .white)
-            Text(toast.text)
-                .font(.footnote.weight(.medium))
-                .foregroundStyle(.white)
-                .lineLimit(2)
-                .multilineTextAlignment(.leading)
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        .background(Capsule().fill(Color.black.opacity(0.82)))
-        .overlay(Capsule().strokeBorder(.white.opacity(0.12), lineWidth: 1))
-        .accessibilityIdentifier("browserSession.screenshotToast")
+            Text(toast.text).font(.footnote.weight(.medium)).foregroundStyle(.white).lineLimit(2).multilineTextAlignment(.leading)
+        }.padding(.horizontal, 14).padding(.vertical, 10).background(Capsule().fill(Color.black.opacity(0.82))).overlay(
+            Capsule().strokeBorder(.white.opacity(0.12), lineWidth: 1)
+        ).accessibilityIdentifier("browserSession.screenshotToast")
     }
 
     /// Shown only for a transport-level failure (e.g. the on-device proxy listener never bound). A
@@ -237,50 +177,22 @@ struct BrowserSessionDetailView: View {
     private func errorState(_ message: String) -> some View {
         VStack(spacing: 14) {
             Spacer(minLength: 0)
-            Image(systemName: "wifi.exclamationmark")
-                .font(.system(size: 30, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.82))
-            Text("Couldn't load this page")
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(.white)
-            Text(message)
-                .font(.footnote)
-                .foregroundStyle(.white.opacity(0.6))
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 28)
-            Button("Retry") {
-                model.retry?()
-            }
-            .buttonStyle(BrandPrimaryButtonStyle())
-            .frame(width: 140)
-            .accessibilityIdentifier("browserSession.retry")
+            Image(systemName: "wifi.exclamationmark").font(.system(size: 30, weight: .semibold)).foregroundStyle(.white.opacity(0.82))
+            Text("Couldn't load this page").font(.subheadline.weight(.semibold)).foregroundStyle(.white)
+            Text(message).font(.footnote).foregroundStyle(.white.opacity(0.6)).multilineTextAlignment(.center).padding(.horizontal, 28)
+            Button("Retry") { model.retry?() }.buttonStyle(BrandPrimaryButtonStyle()).frame(width: 140).accessibilityIdentifier(
+                "browserSession.retry")
             Spacer(minLength: 0)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Self.surfaceBackground)
-        .accessibilityIdentifier("browserSession.error")
+        }.frame(maxWidth: .infinity, maxHeight: .infinity).background(Self.surfaceBackground).accessibilityIdentifier("browserSession.error")
     }
 
     private func chromeButton<Label: View>(
-        accessibilityIdentifier: String,
-        accessibilityLabel: String,
-        action: @escaping () -> Void,
-        @ViewBuilder label: () -> Label
+        accessibilityIdentifier: String, accessibilityLabel: String, action: @escaping () -> Void, @ViewBuilder label: () -> Label
     ) -> some View {
         Button(action: action) {
-            label()
-                .foregroundStyle(.white)
-                .frame(height: Self.chromeControlHeight)
-                .padding(.horizontal, 18)
-                .background(
-                    Capsule()
-                        .fill(.black.opacity(0.28))
-                        .overlay(Capsule().strokeBorder(.white.opacity(0.10), lineWidth: 1))
-                )
-        }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(accessibilityLabel)
-        .accessibilityIdentifier(accessibilityIdentifier)
+            label().foregroundStyle(.white).frame(height: Self.chromeControlHeight).padding(.horizontal, 18).background(
+                Capsule().fill(.black.opacity(0.28)).overlay(Capsule().strokeBorder(.white.opacity(0.10), lineWidth: 1)))
+        }.accessibilityElement(children: .ignore).accessibilityLabel(accessibilityLabel).accessibilityIdentifier(accessibilityIdentifier)
     }
 }
 
@@ -288,9 +200,7 @@ struct BrowserSessionDetailView: View {
 /// (the `UIViewRepresentable`) keeps this in sync via KVO on the live web view and wires the
 /// back/forward/reload/retry closures onto it, so `BrowserSessionDetailView` never needs to hold a
 /// `WKWebView` reference of its own.
-@MainActor
-@Observable
-final class BrowserSessionDetailViewModel {
+@MainActor @Observable final class BrowserSessionDetailViewModel {
     var isLoading = false
     var progress: Double = 0
     var canGoBack = false
@@ -323,9 +233,7 @@ private struct BrowserSessionWebView: UIViewRepresentable {
     let request: BrowserProxyRequest
     let model: BrowserSessionDetailViewModel
 
-    func makeCoordinator() -> Coordinator {
-        Coordinator(model: model)
-    }
+    func makeCoordinator() -> Coordinator { Coordinator(model: model) }
 
     func makeUIView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
@@ -336,9 +244,7 @@ private struct BrowserSessionWebView: UIViewRepresentable {
         return webView
     }
 
-    func updateUIView(_ webView: WKWebView, context: Context) {
-        context.coordinator.load(request, on: webView)
-    }
+    func updateUIView(_ webView: WKWebView, context: Context) { context.coordinator.load(request, on: webView) }
 
     /// Owns the KVO observers and navigation delegate callbacks. Network/WebKit callbacks are not
     /// guaranteed actor-isolated at the call site, so every callback hops onto the main actor before
@@ -351,9 +257,7 @@ private struct BrowserSessionWebView: UIViewRepresentable {
         private var loadGeneration = 0
         private var observations: [NSKeyValueObservation] = []
 
-        init(model: BrowserSessionDetailViewModel) {
-            self.model = model
-        }
+        init(model: BrowserSessionDetailViewModel) { self.model = model }
 
         func attach(to webView: WKWebView, initialRequest: BrowserProxyRequest) {
             model.goBack = { [weak webView] in webView?.goBack() }
@@ -367,9 +271,7 @@ private struct BrowserSessionWebView: UIViewRepresentable {
                 // `takeSnapshot(with: nil)` captures the visible viewport. Its completion handler is
                 // already `@MainActor`, so the image is delivered to our (also main-actor) completion
                 // directly — no hop needed, unlike the KVO callbacks above.
-                webView.takeSnapshot(with: nil) { image, _ in
-                    completion(image)
-                }
+                webView.takeSnapshot(with: nil) { image, _ in completion(image) }
             }
             model.retry = { [weak self, weak webView] in
                 guard let webView, let request = self?.loadedRequest else { return }
@@ -417,13 +319,9 @@ private struct BrowserSessionWebView: UIViewRepresentable {
             Task { @MainActor [weak self] in self?.model.loadErrorMessage = nil }
         }
 
-        func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-            handleFailure(error)
-        }
+        func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { handleFailure(error) }
 
-        func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-            handleFailure(error)
-        }
+        func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { handleFailure(error) }
 
         /// Only a transport-level failure reaches here (see the type doc comment); a routed request the
         /// proxy can't fulfill renders as a normal committed page instead.

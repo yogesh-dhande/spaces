@@ -17,38 +17,33 @@ import Testing
     @Test func prefersHelperPathWhenPresent() {
         let resolved = MCPClientConfiguration.resolvedCLIPath(
             fileManager: StubFileManager(executablePaths: ["/Users/test/.spaces/bin/spaces", "/usr/local/bin/spaces"]),
-            bundleResourceCLIPath: "/Applications/Spaces.app/Contents/Resources/spaces",
-            homeDirectoryPath: "/Users/test")
+            bundleResourceCLIPath: "/Applications/Spaces.app/Contents/Resources/spaces", homeDirectoryPath: "/Users/test")
         #expect(resolved == "/Users/test/.spaces/bin/spaces")
     }
 
     @Test func fallsBackToBundleThenSystemPath() {
         let bundlePath = "/Applications/Spaces.app/Contents/Resources/spaces"
         let bundleResolved = MCPClientConfiguration.resolvedCLIPath(
-            fileManager: StubFileManager(executablePaths: [bundlePath, "/usr/local/bin/spaces"]),
-            bundleResourceCLIPath: bundlePath,
+            fileManager: StubFileManager(executablePaths: [bundlePath, "/usr/local/bin/spaces"]), bundleResourceCLIPath: bundlePath,
             homeDirectoryPath: "/Users/test")
         #expect(bundleResolved == bundlePath)
 
         let systemResolved = MCPClientConfiguration.resolvedCLIPath(
-            fileManager: StubFileManager(executablePaths: ["/usr/local/bin/spaces"]),
-            bundleResourceCLIPath: bundlePath,
+            fileManager: StubFileManager(executablePaths: ["/usr/local/bin/spaces"]), bundleResourceCLIPath: bundlePath,
             homeDirectoryPath: "/Users/test")
         #expect(systemResolved == "/usr/local/bin/spaces")
     }
 
     @Test func fallsBackToHelperPathWhenNothingInstalled() {
         let resolved = MCPClientConfiguration.resolvedCLIPath(
-            fileManager: StubFileManager(executablePaths: []),
-            bundleResourceCLIPath: nil,
-            homeDirectoryPath: "/Users/test")
+            fileManager: StubFileManager(executablePaths: []), bundleResourceCLIPath: nil, homeDirectoryPath: "/Users/test")
         #expect(resolved == "/Users/test/.spaces/bin/spaces")
     }
 
-    @Test func buildsClaudeCodeAddCommand() {
+    @Test func buildsClaudeCodeAddCommandUserScoped() {
         #expect(
             MCPClientConfiguration.claudeCodeAddCommand(cliPath: "/usr/local/bin/spaces")
-                == "claude mcp add spaces -- /usr/local/bin/spaces mcp")
+                == "claude mcp add spaces -s user -- /usr/local/bin/spaces mcp")
     }
 
     @Test func buildsCodexConfigTOML() {
@@ -60,8 +55,20 @@ import Testing
         #expect(MCPClientConfiguration.codexConfigTOML(cliPath: "/usr/local/bin/spaces") == expected)
     }
 
+    @Test func buildsOpencodeConfigJSON() throws {
+        let snippet = MCPClientConfiguration.opencodeConfigJSON(cliPath: "/usr/local/bin/spaces")
+        let object = try #require(try JSONSerialization.jsonObject(with: Data(snippet.utf8)) as? [String: Any])
+        let mcp = try #require(object["mcp"] as? [String: Any])
+        let spaces = try #require(mcp["spaces"] as? [String: Any])
+        #expect(spaces["type"] as? String == "local")
+        #expect(spaces["command"] as? [String] == ["/usr/local/bin/spaces", "mcp"])
+        #expect(spaces["enabled"] as? Bool == true)
+    }
+
     @Test func clientSnippetsMatchConfiguration() {
-        #expect(MCPClient.claudeCode.configSnippet(cliPath: "/usr/local/bin/spaces") == "claude mcp add spaces -- /usr/local/bin/spaces mcp")
+        #expect(MCPClient.allCases == [.claudeCode, .codexCLI, .opencode])
+        #expect(MCPClient.claudeCode.configSnippet(cliPath: "/usr/local/bin/spaces") == "claude mcp add spaces -s user -- /usr/local/bin/spaces mcp")
         #expect(MCPClient.codexCLI.configSnippet(cliPath: "/usr/local/bin/spaces").hasPrefix("[mcp_servers.spaces]"))
+        #expect(MCPClient.opencode.configSnippet(cliPath: "/usr/local/bin/spaces").contains("\"type\": \"local\""))
     }
 }

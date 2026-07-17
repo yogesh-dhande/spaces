@@ -533,6 +533,8 @@ import workspacecore
         case .waiting: return makeStatusImage(symbol: "exclamationmark.triangle.fill", color: .systemOrange, accessibilityLabel: status.rawValue)
         case .done: return makeStatusImage(symbol: "circle.fill", color: .systemGreen, accessibilityLabel: status.rawValue)
         case .idle: return makeStatusImage(symbol: "circle.fill", color: .tertiaryLabelColor, accessibilityLabel: status.rawValue)
+        // Exited: hollow dimmed dot, distinct from idle's filled dot — the agent is gone but the terminal survives.
+        case .exited: return makeStatusImage(symbol: "circle", color: .tertiaryLabelColor, accessibilityLabel: status.rawValue)
         }
     }
 

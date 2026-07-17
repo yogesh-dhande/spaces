@@ -20,8 +20,7 @@ public enum TerminalOverviewSignal {
         NotificationCenter.default.post(name: name, object: nil)
         #if os(macOS)
             guard let object = (try? (profile ?? SpacesProfile.current()))?.ipcNotificationObject else { return }
-            DistributedNotificationCenter.default().postNotificationName(
-                name, object: object, userInfo: nil, options: [.deliverImmediately])
+            DistributedNotificationCenter.default().postNotificationName(name, object: object, userInfo: nil, options: [.deliverImmediately])
         #endif
     }
 }

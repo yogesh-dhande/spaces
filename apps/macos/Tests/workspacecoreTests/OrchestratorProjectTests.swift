@@ -112,6 +112,50 @@ extension OrchestratorTests {
         XCTAssertFalse(FileManager.default.fileExists(atPath: projectWorkspaceRoot.path))
     }
 
+    /// removeProject mutates the database BEFORE removing git worktrees from disk, and finalizes every
+    /// coding agent through the chokepoint first. With a watched agent present — which pre-fix made the bulk
+    /// `agent_sessions` delete throw under RESTRICT, and threw it AFTER the worktrees had already been
+    /// removed (worktree removal ran first) — the reordered, finalize-first path completes cleanly: the
+    /// outside watcher is told the child exited, and both the database rows and the worktree are gone.
+    func testRemoveProjectDeletesDatabaseBeforeWorktreesWithWatchedAgent() throws {
+        let fixture = try makeTempGitRepo(name: "managed-watched")
+        let root = try makeTempDirectory()
+        let projectsRoot = root.appendingPathComponent("repos", isDirectory: true)
+        let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
+        let store = try makeTemporaryStore()
+
+        final class Recorder: @unchecked Sendable {
+            private(set) var delivered: [(sessionID: String, line: String)] = []
+            func submit(_ sessionID: String, _ line: String) throws { delivered.append((sessionID: sessionID, line: line)) }
+        }
+        let recorder = Recorder()
+        WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter { try recorder.submit($0, $1) }
+        defer { WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter(nil) }
+
+        let orchestrator = WorkspaceOrchestrator(
+            store: store, projectsRootDirectory: projectsRoot, workspacesRootDirectory: workspacesRoot, builtInTerminalWindowCloser: { _ in },
+            builtInTerminalSessionTerminator: { _ in })
+        let project = try orchestrator.addProject(gitURL: fixture.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id, branch: "feature")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: workspace.dir))
+
+        let child = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "child-session", status: .waiting)
+        // A watcher terminal OUTSIDE the deleted project (a plain shell) is owed the exit notice.
+        try store.insertAgentSubscription(subscriberTerminalSessionID: "watcher-session", agentSessionID: child.id, createdAt: "t")
+
+        try orchestrator.removeProject(dir: project.dir)
+
+        XCTAssertNil(try store.project(id: project.id), "the project rows are deleted")
+        XCTAssertTrue(try store.agentWindows(workspaceID: workspace.id).isEmpty, "the agent rows are gone")
+        XCTAssertTrue(try store.agentSubscriptions(agentSessionID: child.id).isEmpty, "no inbound edges remain")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: workspace.dir), "the git worktree was removed from disk")
+        XCTAssertEqual(recorder.delivered.map(\.sessionID), ["watcher-session"])
+        XCTAssertTrue(
+            recorder.delivered.first?.line.contains("is exited") == true,
+            "the outside watcher must be told the child exited, got: \(recorder.delivered.first?.line ?? "nothing")")
+    }
+
     // Tests remove project does not delete unmanaged project directory but deletes managed workspace directories by arranging representative inputs and asserting the expected result.
     func testRemoveProjectDoesNotDeleteUnmanagedProjectDirectoryButDeletesManagedWorkspaceDirectories() throws {
         let projectDir = try makeTempDirectory()

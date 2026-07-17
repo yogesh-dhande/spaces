@@ -49,8 +49,7 @@ enum SpacesMobileAgentGrouping {
         var entriesByKind: [SpacesMobileAgentGroupKind: [SpacesMobileAgentEntry]] = [:]
         for workspace in overview.workspaces where !workspace.isArchived && !workspace.isHidden {
             for agent in workspace.codingAgentRows {
-                let entry = SpacesMobileAgentEntry(
-                    row: agent, workspaceDisplayName: workspace.displayName, projectName: workspace.projectName)
+                let entry = SpacesMobileAgentEntry(row: agent, workspaceDisplayName: workspace.displayName, projectName: workspace.projectName)
                 entriesByKind[kind(for: agent), default: []].append(entry)
             }
         }
@@ -62,6 +61,9 @@ enum SpacesMobileAgentGrouping {
 
     static func kind(for agent: SpacesDeviceWorkspaceCodingAgentRow) -> SpacesMobileAgentGroupKind {
         if agent.activityState == .waiting { return .waiting }
+        // An exited agent still owns an interactive terminal (runState `.running`), but the agent process
+        // is gone — it belongs in "Not running", not the Running band.
+        if agent.activityState == .exited { return .notRunning }
         if agent.runState == .running { return .running }
         return .notRunning
     }

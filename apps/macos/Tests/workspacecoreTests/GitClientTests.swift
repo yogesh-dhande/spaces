@@ -487,10 +487,13 @@ final class GitClientTests: XCTestCase {
         XCTAssertNil(info.branchName)
     }
 
-    // Tests WorktreeInfo.branchName returns the raw branch string when it contains no slash separator by arranging representative inputs and asserting the expected result.
-    func testWorktreeInfoBranchNameReturnsRawStringWhenNoSlashPresent() {
-        let info = WorktreeInfo(path: "/tmp/repo", head: "abc123", branch: "")
-        XCTAssertEqual(info.branchName, "")
+    // Tests WorktreeInfo.branchName strips only the refs/heads/ prefix, preserving slashes in branch
+    // names, and passes through a value that lacks the prefix unchanged.
+    func testWorktreeInfoBranchNameStripsOnlyRefsHeadsPrefix() {
+        XCTAssertEqual(WorktreeInfo(path: "/tmp/repo", head: "a", branch: "refs/heads/smoke/hello").branchName, "smoke/hello")
+        XCTAssertEqual(WorktreeInfo(path: "/tmp/repo", head: "a", branch: "refs/heads/main").branchName, "main")
+        XCTAssertEqual(WorktreeInfo(path: "/tmp/repo", head: "a", branch: "feature-1").branchName, "feature-1")
+        XCTAssertEqual(WorktreeInfo(path: "/tmp/repo", head: "a", branch: "").branchName, "")
     }
 
     // Tests renameCurrentBranch throws invalidArgument when an empty branch name is provided.
