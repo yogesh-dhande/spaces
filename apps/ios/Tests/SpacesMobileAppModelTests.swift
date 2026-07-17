@@ -386,6 +386,58 @@
             XCTAssertNotNil(model.errorMessage)
         }
 
+        // MARK: - Incoming link routing (onOpenURL)
+
+        /// A pairing-shaped URL (scheme+host match `SpacesDevicePairingLink`) must route to `.pairing`
+        /// even when the payload itself is malformed: an unsupported version, missing fields, or garbage
+        /// query items. Routing must not depend on `SpacesDevicePairingLink.parse` succeeding, or a
+        /// thrown parse error gets swallowed and the link silently falls through to another branch.
+        func testIncomingLinkRoutingClassifiesMalformedPairingShapedURLAsPairing() {
+            let unsupportedVersion = URL(string: "spaces://pair?v=1&host=10.0.0.4&port=19000&nonce=n&code=c&fp=f&pv=3&av=1.0")!
+            let missingFields = URL(string: "spaces://pair?v=3")!
+
+            XCTAssertEqual(SpacesIncomingLinkRoute.route(for: unsupportedVersion), .pairing(unsupportedVersion))
+            XCTAssertEqual(SpacesIncomingLinkRoute.route(for: missingFields), .pairing(missingFields))
+        }
+
+        func testIncomingLinkRoutingClassifiesValidPairingURLAsPairing() {
+            let link = SpacesDevicePairingLink(
+                host: "10.0.0.4", port: 19000, nonce: "nonce", code: "code", certificateFingerprint: "fp", name: "Mac Studio",
+                protocolVersion: 3, appVersion: "1.0")
+
+            XCTAssertEqual(SpacesIncomingLinkRoute.route(for: link.url), .pairing(link.url))
+        }
+
+        func testIncomingLinkRoutingClassifiesTerminalURLAsTerminal() {
+            let url = SpacesTerminalDeepLink(sessionID: "session-orphan").url
+
+            XCTAssertEqual(SpacesIncomingLinkRoute.route(for: url), .terminal(SpacesTerminalDeepLink(sessionID: "session-orphan")))
+        }
+
+        func testIncomingLinkRoutingClassifiesUnrelatedURLAsUnrecognized() {
+            let url = URL(string: "https://example.com")!
+
+            XCTAssertEqual(SpacesIncomingLinkRoute.route(for: url), .unrecognized(url))
+        }
+
+        /// Regression for the bug where `onOpenURL` decided the route by whether
+        /// `SpacesDevicePairingLink.parse` succeeded: a malformed pairing link fell through to the
+        /// terminal-link branch (which also failed, wrong host) and was merely logged, leaving the user
+        /// with no feedback. Routing a malformed-but-pairing-shaped link to `preparePairingLink` must
+        /// surface a visible error instead of silence.
+        func testMalformedPairingShapedLinkSurfacesVisibleErrorNotSilence() {
+            let model = makeModel()
+            let malformedPairingLink = URL(string: "spaces://pair?v=1")!
+
+            switch SpacesIncomingLinkRoute.route(for: malformedPairingLink) {
+            case .pairing(let url): model.preparePairingLink(url)
+            case .terminal, .unrecognized: XCTFail("A pairing-shaped URL must route to .pairing regardless of payload validity.")
+            }
+
+            XCTAssertNotNil(model.errorMessage)
+            XCTAssertNil(model.pendingPairingLink)
+        }
+
         /// A deep link can name a session created after the overview was last fetched (polling pauses
         /// while a terminal detail view is open — exactly where agent-notification links appear), so a
         /// lookup miss against the cached overview must refresh once before the link is rejected.
