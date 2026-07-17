@@ -20,6 +20,8 @@
 
 
 ## Coding Guidelines
+- For all coding tasks use your judgement to decide an appropriate lower power model and run that in a subagent.
+- When user instruction contradicts previous instructions or documentation, explicitly ask for clarification before proceeding.
 - Do not add fallback paths without explicit approval. We should first fully understand, implement, and harden the intended path without complicating code or behavior behind fallback paths.
 - Do not add unnecessary options, arguments, alternate code paths, or script modes. Extra surface area should only be added when it supports real product behavior or behavior required for testing, and the intended path should stay clear and singular.
 - When making breaking changes, explicitly ask whether backwards compatibility is needed. Do not make the decision on supporting or not supporting backwards compatibility without explicit approval.
@@ -34,9 +36,11 @@
     - do the tests accurately and sufficiently capture intended product behavior or are we testing for implementation details? do we need to add any more tests?
     - unnecessary fixes, fallback paths, options, arguments, or script modes we added during debuging that should be removed to avoid unnecessary code complexity, code maintenance, or performance issues.
 - If on the `main` branch, switch to a new branch before committing changes. When asked to push, commit, push, and create a PR if there isn't one already. Do not add a coding agent name as a prefix to the branch name or the PR title as multiple coding agents may have contributed to the same commit. Please check the PR status before pushing to existing branches with previously opened PRs. If the PR is closed, create a new branch and a new PR.
-- The established gate before committing is `scripts/verify.sh` (build, lint, and tests). Either run `scripts/verify.sh` yourself and let it pass, or let the pre-commit hook run it. Do not `git commit --no-verify` unless `scripts/verify.sh` has already passed for the same change; `--no-verify` only skips the redundant re-run, it does not skip the gate.
+- The established gate before committing is `scripts/verify.sh` (build, lint, and tests). Either run `scripts/verify.sh` yourself and let it pass, or let the pre-commit hook run it. Do not `git commit --no-verify` unless `scripts/verify.sh` has already passed for the same change; `--no-verify` only skips the redundant re-run, it does not skip the gate. You can skip the date if making only documentation or website changes.
+
 - When running `git commit`, allow at least a 15-minute timeout so pre-commit checks can finish.
-- When fixing a bug, reproduce it first using the real system, `~/projects/spaces/apps/macos/.build/debug/spaces` cli, and/or database inspection when practical, then add a test, implement the fix, and confirm both the test and the real workflow.
+- When presented with review findings, create a table with estimates for probably of each bug occurring (1:10, 1:1000 etc) and impact (scale of 1 to 10, 10 be worst)., effort to write a failing test (high, medium, low) with reason (architecture vs narrow/rare edge case hard to codify), and recommendation for whether it is worth addressing the review based on the probability, impact, and complexity of the fix. 
+- When fixing a bug, reproduce it first by writing a failing test and/or using the real system, `~/projects/spaces/apps/macos/.build/debug/spaces` cli, and/or database inspection when practical.
 - Use the e2e test scripts for hotkey-sensitive verification before resorting to ad hoc manual app launches. Those scripts may wait for desktop control instead of killing unrelated running Spaces instances.
 - When manually launching a repo-local debug build, use the derived profile helper or `scripts/dev-build-and-launch.sh` so the app, CLI, and E2E helpers stay on the same worktree-scoped profile.
 - When working from a repo-local checkout and other worktrees may also be running Spaces, bind your shell to the current worktree profile before using the debug app, `spaces`, or `spacese2e`: `eval "$(apps/macos/.build/debug/spacese2e profile-show --shell)"`.
