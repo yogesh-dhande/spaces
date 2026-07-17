@@ -1444,7 +1444,14 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         let totalBytes = try handle.seekToEnd()
         let startOffset = totalBytes > UInt64(cap) ? totalBytes - UInt64(cap) : 0
         try handle.seek(toOffset: startOffset)
-        let data = try handle.readToEnd() ?? Data()
+        var data = try handle.readToEnd() ?? Data()
+        // A capped suffix starts at an arbitrary byte, which can split a UTF-8 character or an
+        // escape sequence and replay as garbage. Advance to the first line boundary so the replay
+        // starts on whole lines; a suffix with no newline at all is returned raw (the vt parser
+        // resynchronizes, at worst mangling the oldest visible scrollback line).
+        if startOffset > 0, let newlineIndex = data.firstIndex(of: 0x0A), newlineIndex < data.endIndex - 1 {
+            data = data.subdata(in: (newlineIndex + 1)..<data.endIndex)
+        }
         return SpacesDeviceAPIResponse(
             ok: true, message: "Read terminal transcript.", result: .terminalTranscript(.init(data: data, totalBytes: totalBytes)))
     }

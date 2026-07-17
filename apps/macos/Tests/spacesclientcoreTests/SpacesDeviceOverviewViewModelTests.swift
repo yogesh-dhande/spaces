@@ -18,6 +18,12 @@ final class SpacesDeviceOverviewViewModelTests: XCTestCase {
             SpacesDeviceClient.requestTimeoutSeconds(
                 for: .restartWorkspaceProcess(.init(workspaceID: "workspace-1", processID: nil, processKey: "web", processTemplateID: nil))),
             SpacesDeviceClient.longRunningMutationTimeoutSeconds)
+        // A transcript response can carry the full 10MB scrollback budget, which a slow remote link
+        // cannot deliver within the default timeout.
+        XCTAssertEqual(
+            SpacesDeviceClient.requestTimeoutSeconds(for: .terminalTranscript(.init(sessionID: "session-1", maxBytes: 1))),
+            SpacesDeviceClient.terminalTranscriptRequestTimeoutSeconds)
+        XCTAssertGreaterThan(SpacesDeviceClient.terminalTranscriptRequestTimeoutSeconds, SpacesDeviceClient.defaultRequestTimeoutSeconds)
         XCTAssertEqual(
             SpacesDeviceClient.requestTimeoutSeconds(
                 for: .restartCodingAgent(.init(workspaceID: "workspace-1", agentID: nil, agentName: "Codex", agentLauncherID: nil))),

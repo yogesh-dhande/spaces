@@ -11,6 +11,24 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
     private var originalDatabasePath: String?
     private var originalRuntimeDirectory: String?
     private var databaseRoot: URL?
+    private final class TranscriptFetchAttempts: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = 0
+
+        var count: Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return value
+        }
+
+        func next() -> Int {
+            lock.lock()
+            defer { lock.unlock() }
+            value += 1
+            return value
+        }
+    }
+
     private final class DirectTerminalServiceRecorder: @unchecked Sendable {
         private let lock = NSLock()
         private var payloads: [GhosttyRemoteSessionStatePayload]
@@ -760,6 +778,54 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         guard let text = host.snapshotText() else { return XCTFail("ended host lost its rendered surface after refresh") }
         XCTAssertTrue(text.contains("row-0"), "refresh clobbered the scrolled ended viewport: \(text)")
         XCTAssertFalse(text.contains("final-01"), "re-attach restored the final frame over the scrolled viewport: \(text)")
+    }
+
+    @MainActor func testEndedRemoteHostRetriesTranscriptFetchAfterTransientFailure() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let sessionID = "remote-ended-scrollback-retry"
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: sessionID, backend: .ghosttyEmbedded, title: "fallback", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
+            createdAt: "2026-06-05T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+        let runtimeState = TerminalSessionRuntimeState(
+            sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .exited, updatedAt: "2026-06-05T00:00:01Z",
+            exitedAt: "2026-06-05T00:00:01Z", title: "final-title", workingDirectory: "/tmp/final", columns: 8, rows: 5)
+        let finalText = "final-01\nfinal-02\nfinal-03\nfinal-04\nfinal-05"
+        let recorder = DirectTerminalServiceRecorder(
+            payload: GhosttyRemoteSessionStatePayload(
+                sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated, emittedAt: "2026-06-05T00:00:01Z", sessionStateRevision: 1,
+                sessionStateFlags: 1, screenStateRevision: 1, runtimeState: runtimeState, attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
+                title: "final-title", workingDirectory: "/tmp/final", outputByteCount: nil,
+                renderUpdate: try renderUpdate(text: finalText, sessionRevision: 1)))
+
+        let transcript = Data((1...200).map { String(format: "row-%03d", $0) }.joined(separator: "\r\n").utf8)
+        // The first fetch fails like a transport timeout would; the host must return to idle and
+        // retry on a later scroll gesture instead of latching scrollback unavailable.
+        let attempts = TranscriptFetchAttempts()
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: launchConfiguration, paths: paths, terminalServiceRequestSender: recorder.send,
+            transcriptProvider: { _ in
+                if attempts.next() == 1 { throw POSIXError(.ETIMEDOUT) }
+                return transcript
+            })
+        waitForCondition("ended host renders final state") { host.snapshotText()?.contains("final-01") == true }
+
+        try host.attach(
+            client: TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-06-05T00:00:02Z"),
+            mode: .viewer, into: NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 180)))
+
+        XCTAssertTrue(host.sendScroll(horizontal: 0, vertical: 2000, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil))
+
+        waitForCondition("ended host retries the transcript fetch and scrolls into scrollback", timeout: 4) {
+            _ = host.sendScroll(horizontal: 0, vertical: 400, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil)
+            guard let text = host.snapshotText() else { return false }
+            return text.contains("row-0") && !text.contains("final-01")
+        }
+        XCTAssertGreaterThanOrEqual(attempts.count, 2, "the failed first fetch should have been retried")
     }
 
     @MainActor func testRunningRemoteHostRejectsViewerBindingActions() throws {

@@ -603,13 +603,16 @@
                 guard let self else { return }
                 let transcript: Data
                 do { transcript = try await transcriptProvider(maxBytes) } catch {
-                    self.failEndedScrollbackLoadIfLoading()
+                    // A transport failure (timeout, daemon restarting, remote device offline) is
+                    // transient: return to idle so the next scroll gesture retries the fetch.
+                    if case .loading = self.endedScrollbackState { self.endedScrollbackState = .idle }
                     return
                 }
                 // A relaunch (session went interactive again) discards the loading state mid-fetch.
                 guard case .loading = self.endedScrollbackState else { return }
                 guard !transcript.isEmpty else {
-                    self.failEndedScrollbackLoadIfLoading()
+                    // An empty transcript is definitive — there is nothing to replay.
+                    self.endedScrollbackState = .unavailable
                     return
                 }
                 let model = await Task.detached(priority: .userInitiated) {
@@ -624,8 +627,6 @@
                 if pendingDeltaRows != 0 { self.applyEndedScroll(deltaRows: pendingDeltaRows, model: model) }
             }
         }
-
-        private func failEndedScrollbackLoadIfLoading() { if case .loading = endedScrollbackState { endedScrollbackState = .unavailable } }
 
         private func applyEndedScroll(deltaRows: Int, model: TerminalEndedSessionScrollbackModel) {
             guard let snapshot = model.scroll(deltaRows: deltaRows) else { return }
@@ -642,11 +643,12 @@
             }
         }
 
-        /// Discards the replay when the session becomes interactive again (a relaunch): the live render
-        /// takes over, so the model is dropped (freeing its vt session) and the accumulated scroll delta
-        /// is reset.
+        /// Resets ended-scrollback state when the session becomes interactive again (a relaunch): the
+        /// live render takes over, so the model is dropped (freeing its vt session), the accumulated
+        /// scroll delta is reset, and a previous `.unavailable` verdict is cleared — the relaunched
+        /// session will write a fresh transcript, so a later exit must get a fresh replay attempt.
         private func discardEndedScrollbackIfActive() {
-            guard isEndedScrollbackReplayActive else { return }
+            if case .idle = endedScrollbackState { return }
             endedScrollbackState = .idle
             endedScrollDeltaNormalizer = TerminalScrollDeltaNormalizer()
         }

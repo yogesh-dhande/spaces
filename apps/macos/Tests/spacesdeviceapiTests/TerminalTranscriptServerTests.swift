@@ -7,12 +7,42 @@
     @testable import spacesterminalcore
 
     final class TerminalTranscriptServerTests: XCTestCase {
-        func testTerminalTranscriptReturnsCappedSuffix() throws {
+        func testTerminalTranscriptCappedSuffixStartsAtALineBoundary() throws {
             try withTemporaryProfile { _ in
                 let sessionID = "session-transcript-\(UUID().uuidString)"
                 let paths = try TerminalSessionPaths.forSession(id: sessionID)
                 try paths.ensureDirectories()
-                let transcript = Data((0..<5000).map { UInt8($0 % 251) })
+                // 500 lines of exactly 10 bytes each ("line-0042\n"), so a 995-byte cap lands
+                // mid-line and the returned suffix must advance to the next line boundary.
+                let transcript = Data((0..<500).map { String(format: "line-%04d\n", $0) }.joined().utf8)
+                try transcript.write(to: URL(fileURLWithPath: paths.outputPath))
+
+                let (server, requestClient, clientApp, authToken) = try makeServerAndClient()
+                defer {
+                    requestClient.cancel()
+                    server.stop()
+                }
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .terminalTranscript(SpacesDeviceTerminalTranscriptRequest(sessionID: sessionID, maxBytes: 995)),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertTrue(response.ok, response.message)
+                let result = try XCTUnwrap(response.terminalTranscript)
+                XCTAssertEqual(result.totalBytes, 5000)
+                XCTAssertEqual(result.data, transcript.suffix(990))
+                let text = try XCTUnwrap(String(data: result.data, encoding: .utf8))
+                XCTAssertTrue(text.hasPrefix("line-"), "capped suffix should start on a whole line, got: \(text.prefix(20))")
+            }
+        }
+
+        func testTerminalTranscriptCappedSuffixWithoutNewlinesIsReturnedRaw() throws {
+            try withTemporaryProfile { _ in
+                let sessionID = "session-transcript-raw-\(UUID().uuidString)"
+                let paths = try TerminalSessionPaths.forSession(id: sessionID)
+                try paths.ensureDirectories()
+                let transcript = Data(repeating: UInt8(ascii: "x"), count: 5000)
                 try transcript.write(to: URL(fileURLWithPath: paths.outputPath))
 
                 let (server, requestClient, clientApp, authToken) = try makeServerAndClient()
@@ -29,7 +59,6 @@
                 XCTAssertTrue(response.ok, response.message)
                 let result = try XCTUnwrap(response.terminalTranscript)
                 XCTAssertEqual(result.totalBytes, 5000)
-                XCTAssertEqual(result.data.count, 1000)
                 XCTAssertEqual(result.data, transcript.suffix(1000))
             }
         }

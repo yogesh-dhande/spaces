@@ -182,10 +182,12 @@
             let clientApp = self.clientApp
             let requestClient = self.requestClient
             return try await Task.detached(priority: .userInitiated) {
-                let response = try requestClient.send(
-                    SpacesDeviceAPIRequest(
-                        command: .terminalTranscript(SpacesDeviceTerminalTranscriptRequest(sessionID: sessionID, maxBytes: maxBytes)),
-                        authToken: authToken, clientApp: clientApp))
+                let request = SpacesDeviceAPIRequest(
+                    command: .terminalTranscript(SpacesDeviceTerminalTranscriptRequest(sessionID: sessionID, maxBytes: maxBytes)),
+                    authToken: authToken, clientApp: clientApp)
+                // The session client's default timeout cannot carry a budget-sized transcript on a
+                // slow remote link; use the shared per-command policy instead.
+                let response = try requestClient.send(request, timeoutSeconds: SpacesDeviceClient.requestTimeoutSeconds(for: request.command))
                 guard response.ok, let transcript = response.terminalTranscript else { throw SpacesDeviceClientError.unavailable(response.message) }
                 return transcript.data
             }.value

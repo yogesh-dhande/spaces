@@ -79,6 +79,9 @@ public enum SpacesDeviceClient {
     static let defaultRequestTimeoutSeconds: TimeInterval = 10
     static let agentHooksStatusRequestTimeoutSeconds: TimeInterval = 20
     static let longRunningMutationTimeoutSeconds: TimeInterval = 60
+    /// A transcript response can carry up to the full scrollback budget (10MB, ~13MB as base64 JSON),
+    /// which needs more than the default timeout on slow remote links.
+    static let terminalTranscriptRequestTimeoutSeconds: TimeInterval = 60
 
     public static func macOSClientApp(
         installationID: String = SpacesDevicePairingClient.localMacClientInstallationID(), deviceName: String = Host.current().localizedName ?? "Mac",
@@ -722,7 +725,7 @@ public enum SpacesDeviceClient {
         }
     }
 
-    static func requestTimeoutSeconds(for command: SpacesDeviceAPICommand) -> TimeInterval {
+    public static func requestTimeoutSeconds(for command: SpacesDeviceAPICommand) -> TimeInterval {
         switch command {
         case .createProject, .previewGitProject, .deleteProject, .importProject, .exportProject, .createWorkspace, .launchWorkspace, .stopWorkspace,
             .restartWorkspace, .archiveWorkspace, .runWorkspaceSetup, .openWorkspaceTerminal, .stopWorkspaceTerminal, .runWorkspaceProcess,
@@ -730,9 +733,10 @@ public enum SpacesDeviceClient {
             .spawnAgentSession, .killAgentSession:
             longRunningMutationTimeoutSeconds
         case .agentHooksStatus: agentHooksStatusRequestTimeoutSeconds
+        case .terminalTranscript: terminalTranscriptRequestTimeoutSeconds
         case .pair, .ping, .daemonStatus, .requestDaemonRestart, .overview, .previewProject, .listDirectories, .workspaceCreateOptions,
             .updateProjectConfig, .updateWorkspaceConfig, .updateWorkspaceMetadata, .renameTerminalSession, .state, .terminalControl,
-            .terminalPasteImage, .sendTerminalInput, .tailTerminalOutput, .terminalTranscript, .resolveTerminalLink, .readTerminalLinkChunk,
+            .terminalPasteImage, .sendTerminalInput, .tailTerminalOutput, .resolveTerminalLink, .readTerminalLinkChunk,
             .subscribe, .subscribeDeviceOverview, .openServiceTunnel, .listAgentSessions, .annotateAgentSession:
             defaultRequestTimeoutSeconds
         }
