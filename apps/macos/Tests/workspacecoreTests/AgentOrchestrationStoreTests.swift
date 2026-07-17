@@ -20,7 +20,7 @@ final class AgentOrchestrationStoreTests: XCTestCase {
 
         let agent = try orchestrator.registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, label: "Claude Code CLI", terminalTrackingID: "agent-session", status: .idle)
-        try store.setAgentSessionNote(id: agent.id, note: "review the auth flow", updatedAt: "2026-07-14T00:00:00Z")
+        try store.setAgentSessionNote(id: agent.id, note: "review the auth flow")
 
         // A working then blocked signal re-upserts the agent row with a nil note; the annotation must
         // be preserved through both.
@@ -44,11 +44,32 @@ final class AgentOrchestrationStoreTests: XCTestCase {
         let agent = try orchestrator.registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "agent-session", status: .idle)
 
-        try store.setAgentSessionNote(id: agent.id, note: "temporary", updatedAt: "2026-07-14T00:00:00Z")
+        try store.setAgentSessionNote(id: agent.id, note: "temporary")
         XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).first?.note, "temporary")
 
-        try store.setAgentSessionNote(id: agent.id, note: nil, updatedAt: "2026-07-14T00:01:00Z")
+        try store.setAgentSessionNote(id: agent.id, note: nil)
         XCTAssertNil(try store.agentWindows(workspaceID: workspace.id).first?.note)
+    }
+
+    /// `updated_at` is read by macOS and iOS Alerts as the lifecycle event date and ordering key
+    /// (see `docs/implementation.md`'s `agent_sessions.note` paragraph), so annotating a waiting/done
+    /// agent must not bump it — otherwise an old blocked/finished alert would appear newly occurred.
+    func testSetAgentSessionNoteDoesNotChangeUpdatedAt() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        let agent = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "agent-session", status: .idle)
+
+        let lifecycleTimestamp = "2026-07-14T00:00:00Z"
+        try store.updateAgentWindowStatus(id: agent.id, status: .waiting, updatedAt: lifecycleTimestamp)
+        XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).first?.updatedAt, lifecycleTimestamp)
+
+        try store.setAgentSessionNote(id: agent.id, note: "review the auth flow")
+
+        let afterAnnotate = try XCTUnwrap(store.agentWindows(workspaceID: workspace.id).first)
+        XCTAssertEqual(afterAnnotate.note, "review the auth flow")
+        XCTAssertEqual(afterAnnotate.updatedAt, lifecycleTimestamp)
     }
 
     func testSubscriptionInsertListAndCascadeOnAgentDelete() throws {
@@ -186,7 +207,7 @@ final class AgentOrchestrationStoreTests: XCTestCase {
         XCTAssertEqual(migrated.terminalTrackingID, "agent-session")
         XCTAssertNil(migrated.note)
 
-        try store.setAgentSessionNote(id: "agent-1", note: "carried forward", updatedAt: "2026-07-14T00:00:00Z")
+        try store.setAgentSessionNote(id: "agent-1", note: "carried forward")
         XCTAssertEqual(try store.agentWindows(workspaceID: "workspace-1").first?.note, "carried forward")
 
         // The new subscriptions table exists post-migration and cascades on the carried-forward row.
@@ -263,7 +284,7 @@ final class AgentOrchestrationStoreTests: XCTestCase {
         let (project, workspace) = try makeProjectAndWorkspace(store: store)
         let agent = try orchestrator.registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, label: "Claude Code CLI", terminalTrackingID: "agent-session", status: .waiting)
-        try store.setAgentSessionNote(id: agent.id, note: "review auth", updatedAt: "2026-07-14T00:00:00Z")
+        try store.setAgentSessionNote(id: agent.id, note: "review auth")
 
         // No hook signal yet: the row carries its note and context but is not ready.
         let beforeSignal = try XCTUnwrap(orchestrator.agentSessionRows(sessionID: "agent-session").first)

@@ -24,6 +24,7 @@ final class RemoteAgentWatchServiceTests: XCTestCase {
         private var listGate: DispatchSemaphore?
         private var listCallCount = 0
         private var pendingListFailures = 0
+        private var pendingUnpairedFailures = 0
         private var activeListCalls = 0
         private var maxConcurrentListCalls = 0
 
@@ -38,6 +39,11 @@ final class RemoteAgentWatchServiceTests: XCTestCase {
                 listAgentSessions: { _ in
                     self.lock.lock()
                     self.listCallCount += 1
+                    if self.pendingUnpairedFailures > 0 {
+                        self.pendingUnpairedFailures -= 1
+                        self.lock.unlock()
+                        throw RemoteAgentWatchListingError.deviceUnpaired
+                    }
                     if self.pendingListFailures > 0 {
                         self.pendingListFailures -= 1
                         self.lock.unlock()
@@ -89,6 +95,12 @@ final class RemoteAgentWatchServiceTests: XCTestCase {
         func failNextListings(_ count: Int) {
             lock.lock()
             pendingListFailures = count
+            lock.unlock()
+        }
+
+        func failNextListingsWithUnpairedDevice(_ count: Int) {
+            lock.lock()
+            pendingUnpairedFailures = count
             lock.unlock()
         }
 
@@ -402,6 +414,142 @@ final class RemoteAgentWatchServiceTests: XCTestCase {
 
         // No further signal arrives; the retry alone must recover the blocked transition.
         try waitUntil(message: "failed listing pull was never retried") {
+            recorder.delivered.contains { $0.sessionID == "sub-1" && $0.line.contains("is blocked") }
+        }
+        XCTAssertEqual(recorder.delivered.count, 1)
+    }
+
+    /// A listing pull that discovers the device unpaired must be treated like a connect-time
+    /// `.deviceUnpaired`: the connect path's own handling only runs on a fresh connect, so it never
+    /// fires again for a device whose overview stream stayed open across the unpairing. The listing
+    /// path must stop the stream, drop the edges and persisted baseline itself, and — unlike a
+    /// transient listing failure — must not retry a device that can never resolve again.
+    @MainActor func testUnpairedDeviceListingFailureDropsEdgesAndStopsRetrying() throws {
+        let transport = FakeTransport()
+        let recorder = DeliveryRecorder()
+        let (service, store) = try makeWatchedService(transport: transport, recorder: recorder, baselineStatus: AgentWindowStatus.spinning.rawValue)
+        defer { service.stop() }
+
+        let listCallsBeforeSignal = transport.listCalls
+        transport.failNextListingsWithUnpairedDevice(1)
+        transport.fireSignal(connection: 0)
+
+        try waitUntil(message: "stream never stopped after unpaired listing failure") { service.debugStreamingDeviceIDs.isEmpty }
+        try waitUntil(message: "edges were never dropped after unpaired listing failure") {
+            ((try? store.agentRemoteSubscriptions(deviceID: "device-1")) ?? []).isEmpty
+        }
+        try waitUntil(message: "in-memory baseline was never retired after unpaired listing failure") {
+            service.debugSnapshot(deviceID: "device-1") == nil
+        }
+        try waitUntil(message: "persisted baseline was never retired after unpaired listing failure") {
+            (try? store.agentRemoteWatchBaselines())?["device-1"] == nil
+        }
+
+        // Give a wrongly-scheduled retry ample time to (incorrectly) fire another listing pull.
+        let settleDeadline = Date().addingTimeInterval(0.3)
+        while Date() < settleDeadline { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+        XCTAssertEqual(
+            transport.listCalls, listCallsBeforeSignal + 1, "a device dropped for being unpaired must not get a follow-up listing pull")
+    }
+
+    /// Store with one watch edge and a service connected with its first `listAgentSessions` pull gated,
+    /// so a test can seed a baseline (as the daemon's subscribe path does) before that first listing
+    /// applies. Returns once the pull is blocked on the gate.
+    @MainActor private func makeServiceWithGatedFirstListing(
+        transport: FakeTransport, recorder: DeliveryRecorder, firstListing: [SpacesDeviceAgentSessionRow], gate: DispatchSemaphore
+    ) throws -> (service: RemoteAgentWatchService, store: SQLiteStore) {
+        let (store, path) = try makeStoreAndPath()
+        try store.insertAgentRemoteSubscription(
+            subscriberTerminalSessionID: "sub-1", deviceID: "device-1", agentSessionID: "child-1", createdAt: "t")
+        transport.setListGate(gate)
+        transport.setListing(firstListing)
+        let service = RemoteAgentWatchService(
+            databasePath: path, transport: transport.transport, deliver: { sessionID, line in recorder.record(sessionID, line) },
+            logError: { _ in })
+        service.start()
+        try waitUntil(message: "stream never connected") { service.debugStreamingDeviceIDs == ["device-1"] }
+        try waitUntil(message: "first listing pull never started") { transport.listCalls == 1 }
+        return (service, store)
+    }
+
+    /// The failing-first case: a child that changes state in the gap between subscribe validation and
+    /// the watch's first listing. The subscribe seeds the validated row into the baseline, so the first
+    /// listing — which already shows the *new* status — diffs against the seed and emits the transition.
+    /// Without the seed the first listing would seed silently and the transition would be lost forever.
+    @MainActor func testSeededBaselineEmitsTransitionOnDivergentFirstListing() throws {
+        let transport = FakeTransport()
+        let recorder = DeliveryRecorder()
+        let gate = DispatchSemaphore(value: 0)
+        // The first listing already shows the child blocked (it went blocked during the connect gap).
+        let (service, _) = try makeServiceWithGatedFirstListing(
+            transport: transport, recorder: recorder, firstListing: [makeRow(status: AgentWindowStatus.waiting.rawValue)], gate: gate)
+        defer {
+            transport.setListGate(nil)
+            for _ in 0..<8 { gate.signal() }
+            service.stop()
+        }
+
+        // The child was spinning when validation fetched it; seed that before the gated listing applies.
+        service.seedBaseline(
+            deviceID: "device-1", childTerminalSessionID: "child-1", row: makeRow(status: AgentWindowStatus.spinning.rawValue))
+        XCTAssertEqual(service.debugSnapshot(deviceID: "device-1")?["child-1"]?.status, AgentWindowStatus.spinning.rawValue)
+
+        gate.signal()
+        try waitUntil(message: "blocked transition from the connect gap was never delivered") {
+            recorder.delivered.contains { $0.sessionID == "sub-1" && $0.line.contains("is blocked") }
+        }
+    }
+
+    /// A child that exits in the connect gap: the first listing omits it. Seeding the validated row
+    /// makes it present-in-baseline and absent-from-listing, so the diff emits `exited` and drops the
+    /// edge. Without the seed the absence is an unseen agent — no exit, and the edge leaks forever.
+    @MainActor func testSeededBaselineEmitsExitedWhenFirstListingOmitsChildAndDropsEdge() throws {
+        let transport = FakeTransport()
+        let recorder = DeliveryRecorder()
+        let gate = DispatchSemaphore(value: 0)
+        // The child exited during the connect gap: the first listing has no row for it.
+        let (service, store) = try makeServiceWithGatedFirstListing(
+            transport: transport, recorder: recorder, firstListing: [], gate: gate)
+        defer {
+            transport.setListGate(nil)
+            for _ in 0..<8 { gate.signal() }
+            service.stop()
+        }
+
+        service.seedBaseline(
+            deviceID: "device-1", childTerminalSessionID: "child-1", row: makeRow(status: AgentWindowStatus.spinning.rawValue))
+
+        gate.signal()
+        try waitUntil(message: "exit from the connect gap was never delivered") {
+            recorder.delivered.contains { $0.sessionID == "sub-1" && $0.line.contains("is exited") }
+        }
+        try waitUntil(message: "completed watch edge was never dropped") {
+            ((try? store.agentRemoteSubscriptions(deviceID: "device-1")) ?? []).isEmpty
+        }
+    }
+
+    /// Seeding a child that already has a baseline entry — it is already watched by another subscriber,
+    /// or its baseline survived a disconnect — must not overwrite it with the possibly-older validation
+    /// row. A later listing must diff against the retained entry, not the seed: here the retained
+    /// baseline is `spinning`, so a `waiting` listing still emits `blocked`; had the stale `waiting`
+    /// seed clobbered it, the diff would be `waiting` → `waiting` and nothing would fire.
+    @MainActor func testSeedDoesNotOverwriteExistingBaseline() throws {
+        let transport = FakeTransport()
+        let recorder = DeliveryRecorder()
+        let (service, _) = try makeWatchedService(transport: transport, recorder: recorder, baselineStatus: AgentWindowStatus.spinning.rawValue)
+        defer { service.stop() }
+
+        // A second subscribe validation happens to fetch an older `waiting` row; the seed must be ignored.
+        service.seedBaseline(
+            deviceID: "device-1", childTerminalSessionID: "child-1", row: makeRow(status: AgentWindowStatus.waiting.rawValue))
+        XCTAssertEqual(
+            service.debugSnapshot(deviceID: "device-1")?["child-1"]?.status, AgentWindowStatus.spinning.rawValue,
+            "an existing baseline entry must not be clobbered by a seed")
+
+        // The retained `spinning` baseline is proven by a `waiting` listing still diffing to blocked.
+        transport.setListing([makeRow(status: AgentWindowStatus.waiting.rawValue)])
+        transport.fireSignal(connection: 0)
+        try waitUntil(message: "blocked transition (proving the retained baseline) was never delivered") {
             recorder.delivered.contains { $0.sessionID == "sub-1" && $0.line.contains("is blocked") }
         }
         XCTAssertEqual(recorder.delivered.count, 1)

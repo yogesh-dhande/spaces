@@ -135,14 +135,28 @@ public struct AgentNotificationEngine {
         }
     }
 
-    /// Drops — without delivering — every queued notification for a subscriber terminal that can no
-    /// longer consume them, e.g. its own agent exited so the terminal is a bare shell (or gone).
-    /// `subscriberDidBecomeIdle` would submit these child-event lines into the shell prompt; on the
-    /// exit path that is corruption, so the queue is discarded instead of flushed.
-    public func discardQueuedNotifications(subscriberTerminalSessionID: String) throws {
+    /// A subscriber terminal has permanently exited — its own agent exited and the terminal reverted to
+    /// a bare shell, or the terminal itself was destroyed — and can never again be a valid delivery
+    /// target under this session id. Tears down every trace of it as a subscriber:
+    ///  - its queued INBOUND notifications, dropped rather than flushed: `subscriberDidBecomeIdle` would
+    ///    submit these child-event lines into the shell prompt, which is corruption on the exit path; and
+    ///  - every OUTGOING watch edge it holds, both same-device (`agent_subscriptions`) and cross-device
+    ///    (`agent_remote_subscriptions`). Neither table has a foreign key on the subscriber column (only
+    ///    `agent_subscriptions` has one, and only on the watched agent), so an exiting subscriber's own
+    ///    watches of OTHER agents would otherwise survive forever: every later transition of a still-live
+    ///    watched agent would keep re-queuing an undeliverable pending row for this dead subscriber, and
+    ///    for a remote edge the paired device's overview stream would stay open with no edge that can
+    ///    ever deliver.
+    /// Deleting the edges is a plain store write like any other, so it fires the same `databaseDidChange`
+    /// signal every mutation does; the daemon's `RemoteAgentWatchService.reconcile()` is driven off that
+    /// signal, so a device whose last edge just vanished has its stream closed without this method
+    /// needing to reach into daemon-only state.
+    public func subscriberDidExit(subscriberTerminalSessionID: String) throws {
         for pending in try store.pendingAgentNotifications(subscriberTerminalSessionID: subscriberTerminalSessionID) {
             try store.deletePendingAgentNotification(id: pending.id)
         }
+        try store.deleteAgentSubscriptions(subscriberTerminalSessionID: subscriberTerminalSessionID)
+        try store.deleteAgentRemoteSubscriptions(subscriberTerminalSessionID: subscriberTerminalSessionID)
     }
 
     /// A subscriber is idle when its own agent row leaves it idle (idle/done — see

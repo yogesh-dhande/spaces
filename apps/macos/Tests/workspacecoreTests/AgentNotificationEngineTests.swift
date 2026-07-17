@@ -93,7 +93,7 @@ final class AgentNotificationEngineTests: XCTestCase {
 
         let child = try orchestrator.registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, label: "Codex CLI", terminalTrackingID: "child-session", status: .done)
-        try store.setAgentSessionNote(id: child.id, note: "review the auth flow", updatedAt: "t")
+        try store.setAgentSessionNote(id: child.id, note: "review the auth flow")
         try store.insertAgentSubscription(subscriberTerminalSessionID: "orchestrator-session", agentSessionID: child.id, createdAt: "t")
         let noted = try XCTUnwrap(store.agentWindow(id: child.id))
 
@@ -162,7 +162,7 @@ final class AgentNotificationEngineTests: XCTestCase {
 
         let child = try orchestrator.registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, label: "Claude Code CLI", terminalTrackingID: "child-session", status: .idle)
-        try store.setAgentSessionNote(id: child.id, note: "fix the flaky tests", updatedAt: "t")
+        try store.setAgentSessionNote(id: child.id, note: "fix the flaky tests")
         try store.insertAgentSubscription(subscriberTerminalSessionID: "orchestrator-session", agentSessionID: child.id, createdAt: "t")
 
         let transitioned = try orchestrator.updateAgentWindowStatus(
@@ -202,7 +202,7 @@ final class AgentNotificationEngineTests: XCTestCase {
 
         let child = try orchestrator.registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, label: "Claude Code CLI", terminalTrackingID: "child-session", status: .waiting)
-        try store.setAgentSessionNote(id: child.id, note: "$(touch /tmp/pwn)", updatedAt: "t")
+        try store.setAgentSessionNote(id: child.id, note: "$(touch /tmp/pwn)")
         try store.insertAgentSubscription(subscriberTerminalSessionID: "orchestrator-session", agentSessionID: child.id, createdAt: "t")
         let noted = try XCTUnwrap(store.agentWindow(id: child.id))
 
@@ -216,10 +216,16 @@ final class AgentNotificationEngineTests: XCTestCase {
         XCTAssertTrue(branchLine.allSatisfy { !forbidden.contains($0) }, "branch line must not carry shell metacharacters, got: \(branchLine)")
     }
 
-    /// `discardQueuedNotifications` is the exit-path counterpart to `subscriberDidBecomeIdle`: it drops a
-    /// subscriber's queue instead of flushing it, for a terminal that can no longer consume child-event
-    /// lines (its own agent just exited). No delivery must occur.
-    func testDiscardQueuedNotificationsDropsQueueWithoutDelivering() throws {
+    /// `subscriberDidExit` is the exit-path counterpart to `subscriberDidBecomeIdle`: for a terminal that
+    /// can no longer consume child-event lines (its own agent just exited), it drops the queue instead of
+    /// flushing it, AND — since neither watch-edge table has a foreign key on the subscriber column —
+    /// explicitly tears down every watch edge the terminal held as a SUBSCRIBER, both same-device
+    /// (`agent_subscriptions`) and cross-device (`agent_remote_subscriptions`). Without that, a still-live
+    /// watched agent's later transitions would keep re-queuing an undeliverable pending row for a
+    /// subscriber that is gone, and a cross-device edge would keep a paired device's overview stream open
+    /// forever. No delivery must occur, and a later transition of the previously-watched child must not
+    /// re-enqueue anything for the exited subscriber.
+    func testSubscriberDidExitDropsQueueAndOutgoingEdgesSoLaterTransitionsNeverEnqueue() throws {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
@@ -230,14 +236,30 @@ final class AgentNotificationEngineTests: XCTestCase {
         let child = try orchestrator.registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, label: "A", terminalTrackingID: "childA", status: .waiting)
         try store.insertAgentSubscription(subscriberTerminalSessionID: "sub-session", agentSessionID: child.id, createdAt: "t")
+        try store.insertAgentRemoteSubscription(
+            subscriberTerminalSessionID: "sub-session", deviceID: "dev-1", agentSessionID: "remote-term", createdAt: "t")
 
         try engine.childDidTransition(agent: child, transition: .blocked)
         XCTAssertEqual(try store.pendingAgentNotifications(subscriberTerminalSessionID: "sub-session").count, 1)
 
-        try engine.discardQueuedNotifications(subscriberTerminalSessionID: "sub-session")
+        try engine.subscriberDidExit(subscriberTerminalSessionID: "sub-session")
 
         XCTAssertTrue(try store.pendingAgentNotifications(subscriberTerminalSessionID: "sub-session").isEmpty)
         XCTAssertTrue(recorder.delivered.isEmpty, "Discarding must never deliver the dropped lines.")
+        XCTAssertTrue(
+            try store.agentSubscriptions(subscriberTerminalSessionID: "sub-session").isEmpty,
+            "The exited terminal's own outgoing local watch edge must be dropped.")
+        XCTAssertTrue(
+            try store.agentRemoteSubscriptions(subscriberTerminalSessionID: "sub-session").isEmpty,
+            "The exited terminal's own outgoing remote watch edge must be dropped.")
+
+        // The watched child is still live and transitions again: with the edge gone, nothing re-enqueues
+        // for the exited subscriber.
+        let doneChild = try XCTUnwrap(store.agentWindow(id: child.id))
+        try engine.childDidTransition(agent: doneChild, transition: .done)
+        XCTAssertTrue(
+            try store.pendingAgentNotifications(subscriberTerminalSessionID: "sub-session").isEmpty,
+            "A dropped subscription must never re-enqueue on a later transition of the previously-watched child.")
     }
 
     func testBusySubscriberQueuesThenFlushesOnIdleInOrderExactlyOnce() throws {
@@ -338,6 +360,36 @@ final class AgentNotificationEngineTests: XCTestCase {
         XCTAssertTrue(
             recorder.delivered.first?.line.contains("is exited") == true,
             "the subscriber must be told the killed child exited, got: \(recorder.delivered.first?.line ?? "nothing")")
+    }
+
+    /// The terminal being killed may itself have been watching other agents (subscribing does not
+    /// require a live agent row on the subscriber). Killing it fully destroys that terminal, so it must
+    /// drop its own outgoing watch edges — both same-device and cross-device — exactly like an `.exit`
+    /// signal would; neither watch-edge table cascades on the subscriber column, so otherwise they leak.
+    func testKillAgentSessionDropsItsOwnOutgoingWatchEdges() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        let engine = makeEngine(store: store, recorder: DeliveryRecorder(), kind: "claude")
+
+        _ = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Claude Code CLI", terminalTrackingID: "child-session", status: .spinning)
+        let otherChild = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Other CLI", terminalTrackingID: "other-child", status: .waiting)
+        // The terminal about to be killed was itself watching another agent, both locally and cross-device.
+        try store.insertAgentSubscription(subscriberTerminalSessionID: "child-session", agentSessionID: otherChild.id, createdAt: "t")
+        try store.insertAgentRemoteSubscription(
+            subscriberTerminalSessionID: "child-session", deviceID: "dev-1", agentSessionID: "remote-term", createdAt: "t")
+
+        let killed = try orchestrator.killAgentSession(terminalSessionID: "child-session", engine: engine)
+
+        XCTAssertTrue(killed)
+        XCTAssertTrue(
+            try store.agentSubscriptions(subscriberTerminalSessionID: "child-session").isEmpty,
+            "the killed terminal's own local watch edge must be dropped")
+        XCTAssertTrue(
+            try store.agentRemoteSubscriptions(subscriberTerminalSessionID: "child-session").isEmpty,
+            "the killed terminal's own remote watch edge must be dropped")
     }
 
     func testBlockedThenDoneWhileBusyCoalescesToSingleDoneLine() throws {

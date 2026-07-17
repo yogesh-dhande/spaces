@@ -157,10 +157,14 @@ final class RemoteAgentSnapshotDiffTests: XCTestCase {
         ) { error in XCTAssertTrue("\(error)".contains("No agent session for terminal term-1 on Studio")) }
     }
 
-    func testValidatePassesForPairedDeviceWithMatchingChild() throws {
-        try RemoteAgentSubscriptionValidation.validate(
+    func testValidateReturnsMatchedRowForPairedDeviceWithMatchingChild() throws {
+        let matched = try RemoteAgentSubscriptionValidation.validate(
             deviceID: "dev-1", childTerminalSessionID: "term-1", resolveDevice: { _ in FakeDevice(name: "Studio") }, deviceName: { $0.name },
-            fetchRows: { _ in [self.row(terminal: "term-1", status: "waiting")] })
+            fetchRows: { _ in [self.row(terminal: "other-term", status: "spinning"), self.row(terminal: "term-1", status: "waiting")] })
+
+        // The matched child's current row is returned so the daemon can seed it into the watch baseline.
+        XCTAssertEqual(matched.terminalSessionID, "term-1")
+        XCTAssertEqual(matched.status, "waiting")
     }
 
     // MARK: - Fixtures

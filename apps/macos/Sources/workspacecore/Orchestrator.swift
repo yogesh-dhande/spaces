@@ -24,6 +24,11 @@ public final class WorkspaceOrchestrator {
     /// cannot show OS notifications (no app bundle), so it installs a process-wide
     /// override that forwards to the client instead of delivering directly.
     public typealias NotificationDeliverer = @Sendable (String, String, String?) -> Void
+    /// `(subscriberTerminalSessionID, line)`. Submits a rendered coding-agent notification line into a
+    /// subscriber terminal. The device-runtime reconcilers build plain orchestrators on a detached task
+    /// and cannot reach the daemon's terminal-send path directly, so the daemon installs a process-wide
+    /// override that routes to the same send chokepoint its request-path notification engine uses.
+    public typealias AgentNotificationLineSubmitter = @Sendable (String, String) throws -> Void
 
     public static let terminalTrackingIDEnvVar = "SPACES_TERMINAL_TRACKING_ID"
     #if canImport(UserNotifications)
@@ -32,6 +37,7 @@ public final class WorkspaceOrchestrator {
     private static let builtInTerminalSessionLauncherOverrideStore = LockedBox<BuiltInTerminalSessionLauncher?>(nil)
     private static let builtInTerminalSessionTerminatorOverrideStore = LockedBox<BuiltInTerminalSessionTerminator?>(nil)
     private static let notificationDelivererOverrideStore = LockedBox<NotificationDeliverer?>(nil)
+    static let agentNotificationLineSubmitterOverrideStore = LockedBox<AgentNotificationLineSubmitter?>(nil)
 
     public struct WorkspaceStopOutcome: Sendable {
         public let skippedStopScriptBecauseWorkspaceDirectoryMissing: Bool
@@ -104,6 +110,32 @@ public final class WorkspaceOrchestrator {
     /// created without an explicit one. The daemon sets this to forward notifications
     /// to the client, since a bundle-less daemon cannot post OS notifications.
     public static func setProcessWideNotificationDeliverer(_ deliverer: NotificationDeliverer?) { notificationDelivererOverrideStore.set(deliverer) }
+
+    /// Installs a process-wide submitter for coding-agent notification lines. The daemon sets this to
+    /// the same terminal-send chokepoint its request-path notification engine uses, so a child agent
+    /// whose exit is detected by reconciliation (no session-end hook fired) notifies its subscribers
+    /// identically to the hook-signaled exit path.
+    public static func setProcessWideAgentNotificationLineSubmitter(_ submitter: AgentNotificationLineSubmitter?) {
+        agentNotificationLineSubmitterOverrideStore.set(submitter)
+    }
+
+    /// Builds the notification engine the device-runtime reconcilers use to tell subscribers a coding
+    /// agent exited when reconciliation — not a hook — detected the exit. Delivery routes through the
+    /// process-wide submitter the daemon installs; with none installed (non-daemon callers, tests that
+    /// build an engine directly) delivery throws, which the engine reads as a vanished subscriber and
+    /// which is unreachable when the agent has no subscribers. The `(<kind>)` parenthetical reuses the
+    /// same runtime-state resolution `agent list` uses.
+    func makeAgentNotificationEngine() -> AgentNotificationEngine {
+        let submitter = Self.agentNotificationLineSubmitterOverrideStore.get()
+        return AgentNotificationEngine(
+            store: store,
+            deliver: { sessionID, line in
+                guard let submitter else { throw WorkspaceError.invalidArgument(message: "No agent notification submitter is configured.") }
+                try submitter(sessionID, line)
+            },
+            resolveAgentKind: { [self] agent in agent.terminalTrackingID.flatMap { agentRuntimeKind(terminalSessionID: $0) } },
+            logError: { Self.writeStandardError($0) })
+    }
 
     struct ResolvedBrowserSession {
         let index: Int

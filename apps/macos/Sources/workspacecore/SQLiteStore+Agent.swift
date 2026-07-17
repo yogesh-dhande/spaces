@@ -162,8 +162,11 @@ extension SQLiteStore {
     /// Sets (or, with an empty `note`, clears) an agent session's explicit annotation. The note is
     /// written directly here rather than through `upsertAgentWindow` so a status signal — which upserts
     /// with a nil note and therefore preserves the stored one — never clobbers an annotation.
-    public func setAgentSessionNote(id: String, note: String?, updatedAt: String) throws {
-        try execute(sql: "UPDATE agent_sessions SET note = NULLIF(?, ''), updated_at = ? WHERE id = ?", bindings: [note ?? "", updatedAt, id])
+    /// Updates only the note column. `updated_at` tracks when an agent entered its current lifecycle
+    /// state (read as the alert event timestamp by clients such as iOS Alerts), so annotating must not
+    /// touch it or a stale blocked/finished event would appear to have just occurred.
+    public func setAgentSessionNote(id: String, note: String?) throws {
+        try execute(sql: "UPDATE agent_sessions SET note = NULLIF(?, '') WHERE id = ?", bindings: [note ?? "", id])
     }
 
     /// Whether an agent session row with this id exists in any workspace. Used to validate a
@@ -186,6 +189,17 @@ extension SQLiteStore {
         try execute(
             sql: "DELETE FROM agent_subscriptions WHERE subscriber_terminal_session_id = ? AND agent_session_id = ?",
             bindings: [subscriberTerminalSessionID, agentSessionID])
+    }
+
+    /// Drops every watch edge where `subscriberTerminalSessionID` is the SUBSCRIBER — the outgoing-edge
+    /// counterpart to the FK cascade a deleted agent row gets automatically for its INCOMING edges.
+    /// `agent_subscriptions` carries no foreign key on `subscriber_terminal_session_id` (only on the
+    /// watched `agent_session_id`), so when a subscriber terminal's own agent exits, its own watches of
+    /// OTHER agents survive the exit unless dropped here explicitly. Used on subscriber-exit paths
+    /// (`AgentNotificationEngine.subscriberDidExit`), never on the agent-exit path (which already gets
+    /// its incoming edges cascaded away by the row delete).
+    public func deleteAgentSubscriptions(subscriberTerminalSessionID: String) throws {
+        try execute(sql: "DELETE FROM agent_subscriptions WHERE subscriber_terminal_session_id = ?", bindings: [subscriberTerminalSessionID])
     }
 
     /// Subscribers watching a given agent session (used when that agent changes state).
@@ -253,6 +267,16 @@ extension SQLiteStore {
     /// exit (its row left the remote listing), after the terminating line has been delivered.
     public func deleteAgentRemoteSubscriptions(deviceID: String, agentSessionID: String) throws {
         try execute(sql: "DELETE FROM agent_remote_subscriptions WHERE device_id = ? AND agent_session_id = ?", bindings: [deviceID, agentSessionID])
+    }
+
+    /// Drops every cross-device watch edge where `subscriberTerminalSessionID` is the SUBSCRIBER — the
+    /// remote counterpart of `deleteAgentSubscriptions(subscriberTerminalSessionID:)`, used on the same
+    /// subscriber-exit path so a local terminal that just exited never keeps a paired device's overview
+    /// stream open for edges that can never deliver again. `agent_remote_subscriptions` has no foreign
+    /// key at all (the watched agent lives on another device's database), so nothing else drops these.
+    public func deleteAgentRemoteSubscriptions(subscriberTerminalSessionID: String) throws {
+        try execute(
+            sql: "DELETE FROM agent_remote_subscriptions WHERE subscriber_terminal_session_id = ?", bindings: [subscriberTerminalSessionID])
     }
 
     /// Remote agents a given local terminal is watching (used when that subscriber goes idle to flush its

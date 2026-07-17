@@ -223,6 +223,17 @@ import workspacecore
         WorkspaceOrchestrator.setProcessWideBuiltInTerminalSessionTerminator { [weak self] sessionID in
             Self.runOnMainActorSynchronously { self?.terminateBuiltInTerminalSession(id: sessionID) }
         }
+        // The device-runtime reconcilers detect coding-agent exits that never fired a session-end hook
+        // (codex/opencode, SIGKILL'd claude) and notify subscribers through this submitter. They run on a
+        // detached task, so the send hops to the main actor exactly like the terminator override above.
+        WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter { [weak self] sessionID, line in
+            try Self.runOnMainActorSynchronously {
+                Result {
+                    guard let self else { throw Self.requestFailedError("spacesd is shutting down.") }
+                    try self.submitAgentNotificationLine(sessionID: sessionID, line: line)
+                }
+            }.get()
+        }
         #if os(macOS)
             WorkspaceOrchestrator.setProcessWideNotificationDeliverer { title, body, subtitle in
                 var userInfo = [IPCNotification.titleUserInfoKey: title, IPCNotification.detailUserInfoKey: body]
@@ -1066,12 +1077,14 @@ import workspacecore
             // Exit always discards: the signaling terminal is now a bare shell (or gone), so anything
             // still queued for it would submit child-event lines into a shell prompt if flushed. Unlike
             // the other transitions, an exited terminal can never become a valid delivery target again
-            // under this session id, so the queue is dropped rather than held for a later flush.
+            // under this session id, so the queue is dropped rather than held for a later flush, and any
+            // watch edges this terminal held as a SUBSCRIBER (of other agents) are dropped too — see
+            // `AgentNotificationEngine.subscriberDidExit`.
             shouldFlushQueuedNotifications = false
             shouldDiscardQueuedNotifications = true
         }
         if shouldDiscardQueuedNotifications {
-            try engine.discardQueuedNotifications(subscriberTerminalSessionID: sessionID)
+            try engine.subscriberDidExit(subscriberTerminalSessionID: sessionID)
         } else if shouldFlushQueuedNotifications {
             try engine.subscriberDidBecomeIdle(subscriberTerminalSessionID: sessionID)
         }
@@ -1184,13 +1197,21 @@ import workspacecore
                 return TerminalServiceProfileCommandResponse(message: "Subscribed to agent session.")
             }
             let clientApp = Self.daemonDeviceClientApp()
-            try RemoteAgentSubscriptionValidation.validate(
+            let validatedRow = try RemoteAgentSubscriptionValidation.validate(
                 deviceID: deviceID, childTerminalSessionID: payload.agentSessionID,
                 resolveDevice: { try SpacesClientDatabase.defaultDatabase().pairedDevice(id: $0) }, deviceName: { $0.name },
                 fetchRows: { try SpacesDeviceClient.listAgentSessions(sessionID: payload.agentSessionID, device: $0, clientApp: clientApp) })
             try orchestrator.store.insertAgentRemoteSubscription(
                 subscriberTerminalSessionID: payload.subscriberTerminalSessionID, deviceID: deviceID, agentSessionID: payload.agentSessionID,
                 createdAt: nowISO8601())
+            // Seed the watch baseline with the row validation just fetched *before* the stream's first
+            // listing can land, so a transition — or an exit — in the connect gap (seconds-to-minutes on
+            // a cold stream) is diffed against a real prior state instead of being silently absorbed.
+            // Seed before reconcile: both run synchronously on the main actor, so the seed is in place
+            // before any pull's continuation resumes (see `seedBaseline`), and reconcile then opens or
+            // refreshes the stream that pulls that first listing.
+            remoteAgentWatchService?.seedBaseline(
+                deviceID: deviceID, childTerminalSessionID: payload.agentSessionID, row: validatedRow)
             remoteAgentWatchService?.reconcile()
             return TerminalServiceProfileCommandResponse(message: "Subscribed to agent session \(payload.agentSessionID) on device \(deviceID).")
         }

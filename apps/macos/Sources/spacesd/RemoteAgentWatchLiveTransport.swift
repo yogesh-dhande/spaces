@@ -5,11 +5,6 @@ import workspacecore
 
 extension SpacesDeviceAPIOverviewStreamClient: RemoteAgentOverviewStreamHandle {}
 
-/// Thrown when a listing pull targets a device that vanished from the client database between the
-/// signal and the pull; the watch logs the failed pull and keeps its snapshot untouched (an empty
-/// listing would instead read as every watched agent having exited).
-private struct RemoteAgentWatchDeviceUnresolvedError: Error {}
-
 extension RemoteAgentWatchTransport {
     /// The daemon's live transport: resolves the paired-device record and pinned-TLS credentials from
     /// the client database and dials the device's overview stream / agent-session listing through
@@ -33,7 +28,7 @@ extension RemoteAgentWatchTransport {
             },
             listAgentSessions: { deviceID in
                 guard let device = try SpacesClientDatabase.defaultDatabase().pairedDevice(id: deviceID) else {
-                    throw RemoteAgentWatchDeviceUnresolvedError()
+                    throw RemoteAgentWatchListingError.deviceUnpaired
                 }
                 return try SpacesDeviceClient.listAgentSessions(device: device, clientApp: clientApp)
             })

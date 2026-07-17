@@ -28,6 +28,7 @@ extension WorkspaceOrchestrator {
             }
         }
         if try reconcileExitedAdHocForegroundAgentRows(excludingLiveSessionIDs: liveSessionIDs) { didMutate = true }
+        if try reconcileExitedSpawnedAgentRows(excludingLiveSessionIDs: liveSessionIDs, engine: makeAgentNotificationEngine()) { didMutate = true }
         return didMutate
     }
 
@@ -109,6 +110,49 @@ extension WorkspaceOrchestrator {
                         try store.updateAgentWindowStatus(id: agent.id, status: .done, updatedAt: nowISO8601())
                         didMutate = true
                     }
+                }
+            }
+        }
+        return didMutate
+    }
+
+    /// Finalizes coding-agent rows whose backing `.agent`-launch-kind terminal session has ended without
+    /// any exit signal — the state codex and opencode (which provide no session-end hook) and a
+    /// SIGKILL'd claude leave behind. Such a row would otherwise stay `spinning`/`waiting` forever and its
+    /// subscribers would never learn the child exited. For each such row this runs the real exit flow the
+    /// hook-signaled `.exit` case uses: render/enqueue the `exited` notice to subscribers BEFORE
+    /// `handleAgentExit` deletes the row — deletion cascades the subscription edges away, and the pending
+    /// row (no FK) is what carries the notice past that — then reuse `handleAgentExit` for the
+    /// delete-vs-`.done` decision, then tear down the dead terminal's own standing as a subscriber (its
+    /// inbound queue and any outgoing watch edges — see `AgentNotificationEngine.subscriberDidExit`),
+    /// since an exited terminal can never be a delivery target again. Only rows still in a live-agent
+    /// status are swept, so a row already finalized here — deleted (spawned) or `.done` (configured
+    /// launcher) — or already `.exited` from a real signal is never re-processed and its subscribers
+    /// never get a duplicate exited notice.
+    @discardableResult func reconcileExitedSpawnedAgentRows(excludingLiveSessionIDs liveSessionIDs: Set<String>, engine: AgentNotificationEngine)
+        throws -> Bool
+    {
+        var didMutate = false
+        for project in try store.projects() {
+            for workspace in try store.workspaces(projectID: project.id, includeArchived: false) {
+                for agent in try store.agentWindows(workspaceID: workspace.id) where agent.provider == .spaces {
+                    switch agent.status {
+                    case .idle, .spinning, .waiting: break
+                    case .done, .exited: continue
+                    }
+                    guard let sessionID = builtInTerminalSessionID(for: agent), !liveSessionIDs.contains(sessionID) else { continue }
+                    guard let launchConfiguration = terminalSessionLaunchConfiguration(sessionID: sessionID), launchConfiguration.kind == .agent
+                    else { continue }
+                    // Finalize only on unambiguous evidence the session ended: a present runtime state that
+                    // is non-interactive. A missing runtime-state file is ambiguous (e.g. a just-launched
+                    // session before its first write) and is left for a later sweep.
+                    guard let paths = try? TerminalSessionPaths.forSession(id: sessionID),
+                        let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths), !runtimeState.state.isInteractive
+                    else { continue }
+                    try engine.childDidTransition(agent: agent, transition: .exited)
+                    try handleAgentExit(agent, eventType: "exit", eventSource: "foreground_reconciler")
+                    try engine.subscriberDidExit(subscriberTerminalSessionID: sessionID)
+                    didMutate = true
                 }
             }
         }
@@ -648,14 +692,21 @@ extension WorkspaceOrchestrator {
     /// have no FK and survive the deletion). A not-yet-signaled session goes through
     /// `terminateSpawnedAgentTerminalSession`, whose `.agent` launch-kind gate refuses ordinary shell
     /// and process terminals. Returns false when the id names neither, for the caller to surface
-    /// loudly.
+    /// loudly. Either branch fully destroys the terminal session named by `terminalSessionID`, so
+    /// `engine.subscriberDidExit` also runs against that same id: the killed terminal may itself have
+    /// been a SUBSCRIBER of other agents (subscribing does not require a live agent row), and it can
+    /// hold a queue of its own undelivered inbound notifications — both are torn down here exactly as
+    /// an `.exit` signal or the foreground reconciler sweep would for a terminal that exits in place.
     public func killAgentSession(terminalSessionID: String, engine: AgentNotificationEngine) throws -> Bool {
         if let match = try resolveSpacesAgentSession(terminalSessionID: terminalSessionID) {
             try engine.childDidTransition(agent: match.record, transition: .exited)
             try stopCodingAgent(workspaceID: match.workspaceID, agentID: match.record.id)
+            try engine.subscriberDidExit(subscriberTerminalSessionID: terminalSessionID)
             return true
         }
-        return try terminateSpawnedAgentTerminalSession(sessionID: terminalSessionID)
+        guard try terminateSpawnedAgentTerminalSession(sessionID: terminalSessionID) else { return false }
+        try engine.subscriberDidExit(subscriberTerminalSessionID: terminalSessionID)
+        return true
     }
 
     @discardableResult public func restartCodingAgent(workspaceID: String, agentID: String) throws -> AgentWindowRecord {
@@ -864,7 +915,7 @@ extension WorkspaceOrchestrator {
                 message: "No agent session for terminal \(terminalSessionID). Annotate requires an active coding-agent session (hook-signaled).")
         }
         let sanitized = Self.sanitizedAgentNote(note)
-        try store.setAgentSessionNote(id: target.id, note: sanitized.isEmpty ? nil : sanitized, updatedAt: nowISO8601())
+        try store.setAgentSessionNote(id: target.id, note: sanitized.isEmpty ? nil : sanitized)
         guard let updated = try agentSessionRows(sessionID: terminalSessionID).first else {
             throw WorkspaceError.invalidArgument(message: "No agent session for terminal \(terminalSessionID).")
         }

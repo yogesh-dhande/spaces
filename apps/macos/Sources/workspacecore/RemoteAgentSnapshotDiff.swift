@@ -12,8 +12,11 @@ import spacesdevicecore
 ///  - a device's very first snapshot (empty `previous`) emits nothing and only seeds a baseline, while a
 ///    reconnect diffs against the retained baseline — so a dropped-then-restored stream never replays
 ///    the state it already reported, yet still emits every transition from the outage window;
-///  - a newly-watched agent seen for the first time seeds silently, so subscribing never replays the
-///    state the agent was already in at subscribe time.
+///  - a newly-watched agent with no prior observation seeds silently rather than replaying the state it
+///    was already in. The daemon's subscribe path pre-populates that prior observation with the row its
+///    validation fetched (`RemoteAgentWatchService.seedBaseline`), so a first listing that arrives already
+///    changed — or with the child gone — is diffed against the seed and its transition (or exit) is
+///    surfaced; only a subscribe whose validation row could not be seeded falls back to seeding silently.
 ///
 /// Transitions: a status change to `waiting` is `blocked`, to `done` is `done`, and `waiting` →
 /// `spinning` is `resumedWorking` — the child resumed after an approval, which never notifies but

@@ -17,6 +17,16 @@ public enum RemoteAgentWatchConnectResult: Sendable {
     case unavailable(reason: String)
 }
 
+/// Thrown by `RemoteAgentWatchTransport.listAgentSessions` when the paired-device record backing the
+/// pull no longer exists — e.g. the device was unpaired while its overview stream stayed connected.
+/// The service handles this the same way as a connect-time `RemoteAgentWatchConnectResult
+/// .deviceUnpaired`: the edges are dropped rather than retried forever against a device that can
+/// never resolve again. A dedicated public error (rather than an opaque thrown error) lets the
+/// service distinguish this from a transient listing failure, which just retries.
+public enum RemoteAgentWatchListingError: Error, Sendable {
+    case deviceUnpaired
+}
+
 /// The network seam of `RemoteAgentWatchService`, keyed by paired-device id so the service carries
 /// no client-database or TLS-credential knowledge and stays testable from workspacecore. The daemon
 /// injects the live device-client implementation; tests inject fakes to drive

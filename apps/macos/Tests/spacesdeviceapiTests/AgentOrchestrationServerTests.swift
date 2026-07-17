@@ -157,7 +157,7 @@
                     isRunning: false, lastLaunchedAt: nil))
             let agent = try orchestrator.registerAgentWindow(
                 workspaceID: "workspace-1", provider: .spaces, label: label, terminalTrackingID: terminalSessionID, status: status)
-            if let note { try store.setAgentSessionNote(id: agent.id, note: note, updatedAt: "2026-07-14T00:00:00Z") }
+            if let note { try store.setAgentSessionNote(id: agent.id, note: note) }
             if let signalAt {
                 try store.appendAgentSessionEvent(
                     agentSessionID: agent.id, eventType: "working", source: "spaces_agent_signal", message: nil, createdAt: signalAt)

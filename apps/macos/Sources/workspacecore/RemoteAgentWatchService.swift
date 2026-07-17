@@ -76,10 +76,43 @@ import spacesdevicecore
         listingQueued.removeAll()
     }
 
+    /// Seeds the watch baseline for a freshly subscribed cross-device child with the row the daemon's
+    /// subscribe validation already fetched, so the child has a real prior state before the watch's
+    /// first listing lands. Without it, an exit or transition that happens between validation and that
+    /// first listing has no baseline entry to diff against: a changed row would seed silently (transition
+    /// lost) and an exit would be an unseen absence (edge never dropped). The gap is milliseconds on an
+    /// already-open stream but seconds-to-minutes when the stream must first connect (TLS dial, 5s retry).
+    ///
+    /// Only writes when no baseline entry exists for the child. An existing retained entry — the child is
+    /// already watched by another subscriber, or its baseline survived a disconnect/restart — is newer
+    /// (or at worst equal) and must not be clobbered by the possibly-older validation row. The persisted
+    /// mirror is updated the same way `applyRows` does (whole-device replace), keeping the seed durable
+    /// across a daemon restart in the window before the first listing.
+    ///
+    /// Interleavings (the daemon seeds after inserting the edge, then nudges `reconcile()`; everything
+    /// here runs on the main actor, so a seed completes atomically before any concurrent pull's
+    /// continuation resumes):
+    ///  - (a) a listing already in flight when the seed lands: `applyRows` captures `previous` from
+    ///    `snapshots` at apply time, not at pull start, so the completing pull diffs against the seed —
+    ///    the seed participates correctly rather than being overwritten by a stale empty baseline;
+    ///  - (b) a child that exited before the first listing: the seed makes it present-in-baseline and
+    ///    absent-from-listing, which `RemoteAgentSnapshotDiff` renders as `exited`, delivering the line
+    ///    and dropping the edge instead of leaving it silent forever;
+    ///  - (c) a subscribe for an already-watched child: the existing baseline entry is retained, so the
+    ///    later listing diffs against it (nothing replays, nothing is lost).
+    public func seedBaseline(deviceID: String, childTerminalSessionID: String, row: SpacesDeviceAgentSessionRow) {
+        guard !isStopped else { return }
+        guard snapshots[deviceID]?[childTerminalSessionID] == nil else { return }
+        snapshots[deviceID, default: [:]][childTerminalSessionID] = row
+        do { try makeStore().replaceAgentRemoteWatchBaseline(deviceID: deviceID, baseline: snapshots[deviceID] ?? [:]) } catch {
+            logError("spacesd remote_agent_watch_error op=seed_baseline device=\(deviceID) error=\(error)\n")
+        }
+    }
+
     /// Reconciles the open stream set against the current watch edges: opens a stream for every newly
     /// watched device, tears one down when a device's last edge is removed, and pulls a fresh listing
-    /// for still-streaming devices so a freshly added edge captures the child's current state before
-    /// its next transition (which would otherwise be swallowed as that agent's first observation).
+    /// for still-streaming devices so a freshly added edge's first transition is diffed against the
+    /// baseline the subscribe seeded (or, absent a seed, is swallowed as that agent's first observation).
     public func reconcile() {
         guard !isStopped else { return }
         let desired: Set<String>
@@ -142,8 +175,9 @@ import spacesdevicecore
                 }
                 self.streams[deviceID] = handle
                 // The first post-connect listing goes through the same emitting diff as every other:
-                // on a first connect the empty retained baseline seeds silently, and on a reconnect
-                // the retained baseline surfaces every transition from the outage window.
+                // on a first connect it diffs against whatever the subscribe seeded (an empty baseline
+                // seeds silently), and on a reconnect the retained baseline surfaces every transition
+                // from the outage window.
                 self.requestListing(deviceID: deviceID)
             }
         }
@@ -167,16 +201,28 @@ import spacesdevicecore
         listingInFlight.insert(deviceID)
         let transport = transport
         Task { @MainActor [weak self] in
-            let rows = await Task.detached(priority: .userInitiated) { () -> [SpacesDeviceAgentSessionRow]? in
-                try? transport.listAgentSessions(deviceID)
+            let result = await Task.detached(priority: .userInitiated) { () -> Result<[SpacesDeviceAgentSessionRow], any Error> in
+                Result { try transport.listAgentSessions(deviceID) }
             }.value
             guard let self else { return }
             self.listingInFlight.remove(deviceID)
             let followUpQueued = self.listingQueued.remove(deviceID) != nil
             guard !self.isStopped, self.streams[deviceID] != nil else { return }
-            if let rows {
+            switch result {
+            case .success(let rows):
                 self.applyRows(deviceID: deviceID, rows: rows)
-            } else {
+            case .failure(RemoteAgentWatchListingError.deviceUnpaired):
+                // The device unpaired while its overview stream stayed connected, so the connect
+                // path's `.deviceUnpaired` handling — which only runs on a fresh connect — never
+                // fires again for it. Mirror that handling here instead of retrying a listing pull
+                // against a device that can never resolve again: stop the stream and drop the
+                // edges. No follow-up pull: a dropped device has nothing left to pull for.
+                self.logError("spacesd remote_agent_watch device=\(deviceID) unpaired dropping_edges\n")
+                let stream = self.streams.removeValue(forKey: deviceID)
+                stream?.stop()
+                self.dropAllEdges(deviceID: deviceID)
+                return
+            case .failure:
                 // The overview signal that drove this pull may have been the only cue for a
                 // transition, and with the stream still healthy nothing else would re-pull, so a
                 // failed pull schedules its own retry. The baseline did not advance, so the retried
