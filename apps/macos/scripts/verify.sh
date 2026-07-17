@@ -120,6 +120,12 @@ run_verify_steps() {
   "$root/Tests/silence_watchdog.sh"
   "$root/Tests/setup_ghostty_xcode_mismatch_autobuild.sh"
   "$root/Tests/setup_ghostty_cache_restore.sh"
+  # Sync the local GhosttyKit/libghostty-vt artifacts to the pinned submodule before building. CI
+  # runs ensure_ghostty_artifacts.sh ahead of verify, but a local .local can drift from the pin
+  # (worktree .local copies, iOS/Linux builds swapping artifacts), which makes embedded-terminal
+  # tests silently run against the wrong libghostty and fail as if flaky. This is a no-op when the
+  # installed manifest already matches the pin and self-heals from the cache otherwise.
+  "$root/scripts/setup_ghostty.sh"
   "$root/scripts/lint.sh"
   "$root/scripts/swiftpm.sh" build
   "$root/Tests/release_bundle_signing.sh"
