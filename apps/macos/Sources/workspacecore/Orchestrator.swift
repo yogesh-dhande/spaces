@@ -886,7 +886,8 @@ public final class WorkspaceOrchestrator {
                 terminateProcessGroup(pid: pid)
             }
         }
-        for agent in try store.agentWindows(workspaceID: workspace.id) {
+        let workspaceAgentWindows = try store.agentWindows(workspaceID: workspace.id)
+        for agent in workspaceAgentWindows {
             if let sessionID = agent.terminalTrackingID, !sessionID.isEmpty {
                 terminateBuiltInTerminalSession(sessionID)
                 closedBuiltInTerminalSessionIDs.insert(sessionID)
@@ -921,7 +922,17 @@ public final class WorkspaceOrchestrator {
         if waitForTerminalExit { waitForBuiltInTerminalSessionsToExit(closedBuiltInTerminalSessionIDs) }
         try store.deleteRunningProcesses(workspaceID: workspace.id)
         try store.deleteWindows(workspaceID: workspace.id)
+        // Stopping a workspace ends every coding agent in it. A subscriber watching one of these agents may
+        // live in ANOTHER workspace, so tell each agent's subscribers it exited BEFORE the bulk row delete
+        // cascades the subscription edges away, then tear down each stopped agent terminal's own watch state.
+        let agentNotificationEngine = makeAgentNotificationEngine()
+        for agent in workspaceAgentWindows { try agentNotificationEngine.childDidTransition(agent: agent, transition: .exited) }
         try store.deleteAgentWindows(workspaceID: workspace.id)
+        for agent in workspaceAgentWindows {
+            if let sessionID = agent.terminalTrackingID, !sessionID.isEmpty {
+                try agentNotificationEngine.subscriberDidExit(subscriberTerminalSessionID: sessionID)
+            }
+        }
         try markWorkspaceStopped(workspace)
         return WorkspaceStopOutcome(skippedStopScriptBecauseWorkspaceDirectoryMissing: skippedStopScriptBecauseWorkspaceDirectoryMissing)
     }
@@ -937,8 +948,9 @@ public final class WorkspaceOrchestrator {
     private func archiveWorkspaceUnlocked(workspaceID: String, deleteLocalBranch: Bool, deleteRemoteBranch: Bool) throws -> WorkspaceArchiveOutcome {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         guard !workspace.isDefault else { throw WorkspaceError.invalidArgument(message: "Default workspace cannot be archived.") }
+        // `stopWorkspaceUnlocked` already deleted this workspace's agent rows (notifying subscribers and
+        // tearing down watch state) under the same lifecycle lock, so archive does not repeat the delete.
         _ = try stopWorkspaceUnlocked(workspaceID: workspaceID, waitForTerminalExit: false)
-        try store.deleteAgentWindows(workspaceID: workspaceID)
         if project.isGitRepo {
             do { try git.removeWorktree(path: project.dir, worktreePath: workspace.dir) } catch { if !isMissingWorktreeError(error) { throw error } }
         }

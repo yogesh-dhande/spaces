@@ -88,16 +88,16 @@ import workspacecore
             }.get()
         },
         // Routes the remote `killAgentSession` Device API command through the same notify-then-stop flow
-        // as the local `.agentKill` (`killProfileAgentSession`): the child's subscribers are told it
-        // exited before the stop deletes its row. Runs on the main actor because the notification engine's
-        // delivery uses the daemon-owned terminal-send path.
+        // as the local `.agentKill` (`killProfileAgentSession`): `killAgentSession` routes through the stop
+        // chokepoint that tells the child's subscribers it exited before deleting its row. Runs on the main
+        // actor because the notification engine's delivery (via the process-wide submitter the daemon
+        // installs) uses the daemon-owned terminal-send path.
         agentSessionKiller: { [weak self] sessionID in
             try Self.runOnMainActorSynchronously {
                 Result {
                     guard let self else { throw Self.requestFailedError("spacesd is shutting down.") }
                     let orchestrator = try self.makeProfileOrchestrator()
-                    return try orchestrator.killAgentSession(
-                        terminalSessionID: sessionID, engine: self.makeAgentNotificationEngine(orchestrator: orchestrator))
+                    return try orchestrator.killAgentSession(terminalSessionID: sessionID)
                 }
             }.get()
         }, onRestartRequested: { [weak self] in Task { @MainActor in self?.requestDaemonRestart() } })
@@ -1169,7 +1169,7 @@ import workspacecore
     /// with its subscribers told it exited first, and a not-yet-signaled session is terminated only
     /// when it was launched as a coding agent. A session that is neither is a loud error.
     private func killProfileAgentSession(_ sessionID: String, orchestrator: WorkspaceOrchestrator) throws -> TerminalServiceProfileCommandResponse {
-        guard try orchestrator.killAgentSession(terminalSessionID: sessionID, engine: makeAgentNotificationEngine(orchestrator: orchestrator))
+        guard try orchestrator.killAgentSession(terminalSessionID: sessionID)
         else { throw SpacesRuntimeError.invalidArgument(message: "No agent session for terminal \(sessionID).") }
         return TerminalServiceProfileCommandResponse(message: "Killed agent session \(sessionID).")
     }

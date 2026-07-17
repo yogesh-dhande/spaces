@@ -371,14 +371,17 @@ final class AgentNotificationEngineTests: XCTestCase {
         let orchestrator = WorkspaceOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         let recorder = DeliveryRecorder()
-        let engine = makeEngine(store: store, recorder: recorder, kind: "claude")
+        // `killAgentSession` routes through the stop chokepoint, which builds its engine from the
+        // process-wide submitter, so the recorder is installed there rather than passed in.
+        WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter { try recorder.deliver($0, $1) }
+        defer { WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter(nil) }
 
         let child = try orchestrator.registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, label: "Claude Code CLI", terminalTrackingID: "child-session", status: .spinning)
         // A plain-shell subscriber terminal with no agent row of its own counts as idle.
         try store.insertAgentSubscription(subscriberTerminalSessionID: "orchestrator-session", agentSessionID: child.id, createdAt: "t")
 
-        let killed = try orchestrator.killAgentSession(terminalSessionID: "child-session", engine: engine)
+        let killed = try orchestrator.killAgentSession(terminalSessionID: "child-session")
 
         XCTAssertTrue(killed)
         XCTAssertNil(try store.agentWindow(id: child.id), "the kill must still delete the agent row")
@@ -396,7 +399,6 @@ final class AgentNotificationEngineTests: XCTestCase {
         let store = try makeTemporaryStore()
         let orchestrator = WorkspaceOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
-        let engine = makeEngine(store: store, recorder: DeliveryRecorder(), kind: "claude")
 
         _ = try orchestrator.registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, label: "Claude Code CLI", terminalTrackingID: "child-session", status: .spinning)
@@ -407,7 +409,7 @@ final class AgentNotificationEngineTests: XCTestCase {
         try store.insertAgentRemoteSubscription(
             subscriberTerminalSessionID: "child-session", deviceID: "dev-1", agentSessionID: "remote-term", createdAt: "t")
 
-        let killed = try orchestrator.killAgentSession(terminalSessionID: "child-session", engine: engine)
+        let killed = try orchestrator.killAgentSession(terminalSessionID: "child-session")
 
         XCTAssertTrue(killed)
         XCTAssertTrue(

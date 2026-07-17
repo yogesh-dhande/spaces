@@ -123,6 +123,115 @@ extension OrchestratorTests {
         XCTAssertEqual(try store.agentWindows(workspaceID: workspace.id).map(\.id), ["agent-codex"])
     }
 
+    /// Stopping a watched coding agent (macOS sidebar / Device API stop) routes through the shared stop
+    /// chokepoint, which must tell the child's subscribers it exited before deleting the row, and tear
+    /// down the stopped terminal's OWN watch state (its outgoing edge and queued inbound line).
+    func testStopCodingAgentDeliversExitedNoticeAndTearsDownStoppedTerminalWatchState() throws {
+        let store = try makeTemporaryStore()
+        let projectDir = try makeTempDirectory().path
+        let project = makeProjectRecord(dir: projectDir)
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: projectDir)
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace)
+
+        let recorder = AgentNotificationSubmitterRecorder()
+        WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter { try recorder.submit($0, $1) }
+        defer { WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter(nil) }
+
+        let orchestrator = WorkspaceOrchestrator(
+            store: store, builtInTerminalWindowCloser: { _ in }, builtInTerminalSessionTerminator: { _ in })
+
+        let child = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "child-session", status: .spinning)
+        // A plain-shell subscriber terminal (no agent row of its own) is idle and receives immediately.
+        try store.insertAgentSubscription(subscriberTerminalSessionID: "watcher-session", agentSessionID: child.id, createdAt: "t")
+        // The stopped agent's OWN terminal was ALSO watching another agent and holds a queued inbound line.
+        let otherChild = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Other", terminalTrackingID: "other-session", status: .waiting)
+        try store.insertAgentSubscription(subscriberTerminalSessionID: "child-session", agentSessionID: otherChild.id, createdAt: "t")
+        try store.upsertPendingAgentNotification(
+            subscriberTerminalSessionID: "child-session", agentSessionID: otherChild.id, transition: "blocked", message: "held", createdAt: "t")
+
+        try orchestrator.stopCodingAgent(workspaceID: workspace.id, agentID: child.id)
+
+        XCTAssertNil(try store.agentWindow(id: child.id), "stop deletes the agent row")
+        XCTAssertEqual(recorder.delivered.map(\.sessionID), ["watcher-session"])
+        XCTAssertTrue(
+            recorder.delivered.first?.line.contains("is exited") == true,
+            "the subscriber must be told the child exited, got: \(recorder.delivered.first?.line ?? "nothing")")
+        XCTAssertTrue(
+            try store.agentSubscriptions(subscriberTerminalSessionID: "child-session").isEmpty,
+            "the stopped terminal's own outgoing watch edge is torn down")
+        XCTAssertTrue(
+            try store.pendingAgentNotifications(subscriberTerminalSessionID: "child-session").isEmpty,
+            "the stopped terminal's own inbound queue is dropped")
+    }
+
+    /// Restarting a watched coding agent stops the old child through the same chokepoint, so its
+    /// subscribers are owed — and must receive — the exited notice for the OLD child before the relaunch.
+    func testRestartCodingAgentDeliversExitedNoticeForOldChild() throws {
+        let store = try makeTemporaryStore()
+        let projectDir = try makeTempDirectory().path
+        let project = makeProjectRecord(dir: projectDir)
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: projectDir)
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace)
+        try store.setWorkspaceAgentLaunchers(workspaceID: workspace.id, launchers: [AgentLauncher(name: "Codex", command: "codex")])
+        try store.touchWorkspaceSettings(workspaceID: workspace.id, updatedAt: "now")
+        try store.upsertAgentWindow(
+            AgentWindowRecord(
+                id: "agent-codex", workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "old-session", sessionKey: nil,
+                status: .spinning, createdAt: "now", updatedAt: "now"))
+        // A plain-shell subscriber terminal (no agent row of its own) is idle and receives immediately.
+        try store.insertAgentSubscription(subscriberTerminalSessionID: "watcher-session", agentSessionID: "agent-codex", createdAt: "t")
+
+        let recorder = AgentNotificationSubmitterRecorder()
+        WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter { try recorder.submit($0, $1) }
+        defer { WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter(nil) }
+
+        let orchestrator = WorkspaceOrchestrator(
+            store: store, builtInTerminalWindowOpener: { _, _ in }, builtInTerminalWindowCloser: { _ in },
+            builtInTerminalSessionTerminator: { _ in },
+            builtInTerminalSessionLauncher: { configuration in
+                TerminalServiceSessionSummary(
+                    id: configuration.sessionID, title: configuration.title, workingDirectory: configuration.workingDirectory,
+                    backend: configuration.backend, lifetimePolicy: configuration.lifetimePolicy, state: .running, servicePID: 123, childPID: 456,
+                    controlSocketPath: "/tmp/control-\(configuration.sessionID)", outputPath: "/tmp/output-\(configuration.sessionID)")
+            })
+
+        _ = try orchestrator.restartCodingAgent(workspaceID: workspace.id, agentID: "agent-codex")
+
+        XCTAssertEqual(recorder.delivered.map(\.sessionID), ["watcher-session"])
+        XCTAssertTrue(
+            recorder.delivered.first?.line.contains("is exited") == true,
+            "the subscriber must be told the OLD child exited, got: \(recorder.delivered.first?.line ?? "nothing")")
+        XCTAssertEqual(recorder.delivered.count, 1, "the relaunch itself must not deliver a second notice")
+    }
+
+    /// Stopping a whole workspace ends every coding agent in it. A subscriber watching one of those agents
+    /// (which may live in another workspace) must be told the child exited BEFORE the bulk row delete
+    /// cascades the subscription edges away — the delivery only happens if notify precedes delete.
+    func testStopWorkspaceDeliversExitedNoticeBeforeAgentRowsVanish() throws {
+        let (orchestrator, store, _, workspace, _) = try makeOrchestratorWithWorkspace()
+
+        let recorder = AgentNotificationSubmitterRecorder()
+        WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter { try recorder.submit($0, $1) }
+        defer { WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter(nil) }
+
+        let child = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "child-session", status: .spinning)
+        // A plain-shell watcher terminal (idle, receives immediately); it need not share the workspace.
+        try store.insertAgentSubscription(subscriberTerminalSessionID: "watcher-session", agentSessionID: child.id, createdAt: "t")
+
+        try withMockCommands(["osascript": Self.orchestratorOsaScriptMock]) { try orchestrator.stopWorkspace(workspaceID: workspace.id) }
+
+        XCTAssertTrue(try store.agentWindows(workspaceID: workspace.id).isEmpty, "workspace stop deletes the agent rows")
+        XCTAssertEqual(recorder.delivered.map(\.sessionID), ["watcher-session"])
+        XCTAssertTrue(
+            recorder.delivered.first?.line.contains("is exited") == true,
+            "the subscriber must be told the child exited before the rows vanished, got: \(recorder.delivered.first?.line ?? "nothing")")
+    }
+
     func testLaunchAgentLauncherUsesBuiltInSpacesTerminalAndRegistersAgentWindow() throws {
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
@@ -735,7 +844,11 @@ extension OrchestratorTests {
         }
     }
 
-    func testReconcileTerminalForegroundAgentClassificationsMarksExitedAdHocAgentSessionDone() throws {
+    /// A foreground-detected ad-hoc agent whose `.shell` terminal then EXITS is finalized by the unified
+    /// session-backed sweep: the row is deleted (not left as a phantom `.done` that would raise a spurious
+    /// "finished" alert), matching the spawned-agent sweep. A dead-terminal row disappears from listings,
+    /// which a remote overview diffs as `exited`.
+    func testReconcileTerminalForegroundAgentClassificationsDeletesExitedAdHocAgentSession() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
         let store = try SQLiteStore(path: dbPath)
@@ -761,7 +874,7 @@ extension OrchestratorTests {
                     terminalTrackingID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
 
             XCTAssertTrue(try orchestrator.reconcileTerminalForegroundAgentClassifications())
-            var agent = try XCTUnwrap(store.agentWindows(workspaceID: workspace.id).first)
+            let agent = try XCTUnwrap(store.agentWindows(workspaceID: workspace.id).first)
             XCTAssertEqual(agent.id, "terminal-agent-\(sessionID)")
             XCTAssertEqual(agent.status, .idle)
 
@@ -772,9 +885,12 @@ extension OrchestratorTests {
                 paths: paths)
 
             XCTAssertTrue(try orchestrator.reconcileTerminalForegroundAgentClassifications())
-            agent = try XCTUnwrap(store.agentWindows(workspaceID: workspace.id).first)
-            XCTAssertEqual(agent.id, "terminal-agent-\(sessionID)")
-            XCTAssertEqual(agent.status, .done)
+            XCTAssertTrue(
+                try store.agentWindows(workspaceID: workspace.id).isEmpty,
+                "the exited ad-hoc agent row is deleted by handleAgentExit, not marked .done")
+
+            // Idempotent: with the row gone, a later sweep finds nothing and reports no mutation.
+            XCTAssertFalse(try orchestrator.reconcileTerminalForegroundAgentClassifications())
         }
     }
 
