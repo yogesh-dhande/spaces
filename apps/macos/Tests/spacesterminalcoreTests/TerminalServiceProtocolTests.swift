@@ -113,12 +113,15 @@ final class TerminalServiceProtocolTests: XCTestCase {
         let response = TerminalServiceProfileCommandResponse(
             message: "Started agent session term-9 (detected codex).",
             agentSpawn: TerminalServiceAgentSpawnResult(
-                terminalSessionID: "term-9", workspaceID: "workspace-1", detectedAgent: "codex", deviceID: nil, subscribed: false))
+                terminalSessionID: "term-9", workspaceID: "workspace-1", detectedAgent: "codex", deviceID: nil, subscribed: false,
+                open: "spaces://terminal/term-9"))
         let encoded = try TerminalServiceCodec.encodeResponse(TerminalServiceResponse(ok: true, message: "ok", profile: response))
         let json = String(decoding: encoded, as: UTF8.self)
         XCTAssertTrue(json.contains(#""terminalSessionID":"term-9""#))
         XCTAssertTrue(json.contains(#""detectedAgent":"codex""#))
         XCTAssertTrue(json.contains(#""subscribed":false"#))
+        // JSONEncoder escapes forward slashes by default, so the deep link reads back with `\/`.
+        XCTAssertTrue(json.contains(#""open":"spaces:\/\/terminal\/term-9""#))
         XCTAssertEqual(try TerminalServiceCodec.decodeResponse(encoded).profile, response)
 
         // A response without a spawn outcome omits the field entirely.

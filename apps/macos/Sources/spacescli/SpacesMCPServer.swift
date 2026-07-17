@@ -307,7 +307,7 @@ final class SpacesMCPStdioServer {
             MCPToolDescriptor(
                 name: "spaces_agent_spawn",
                 description:
-                    "Start a coding agent (claude, codex, or opencode) in a new Spaces terminal and return once the daemon detects the agent running in that terminal (foreground classification) — not when it emits a hook signal. The result carries a structured agentSpawn object: terminalSessionID, workspaceID, detectedAgent, deviceID, and subscribed. Spawn delivers no prompt: to give the agent work, send input with spaces_terminal_send on agentSpawn.terminalSessionID, then poll spaces_agent_status or spaces_terminal_tail to confirm work started (and to see and answer any first-run trust/onboarding/auth dialog). Hooks enrich status but are not required to spawn. agentSpawn.subscribed reports whether the spawning terminal was auto-subscribed; when false (the child's agent row appears only on its first hook signal), call spaces_agent_subscribe once the agent has signaled to receive blocked/done notifications.",
+                    "Start a coding agent (claude, codex, or opencode) in a new Spaces terminal and return once the daemon detects the agent running in that terminal (foreground classification) — not when it emits a hook signal. The result carries a structured agentSpawn object: terminalSessionID, workspaceID, detectedAgent, deviceID, subscribed, and open (a spaces://terminal deep link, device-qualified when deviceID is set). Spawn delivers no prompt: to give the agent work, send input with spaces_terminal_send on agentSpawn.terminalSessionID, then poll spaces_agent_status or spaces_terminal_tail to confirm work started (and to see and answer any first-run trust/onboarding/auth dialog). Hooks enrich status but are not required to spawn. agentSpawn.subscribed reports whether the spawning terminal was auto-subscribed; when false (the child's agent row appears only on its first hook signal), call spaces_agent_subscribe once the agent has signaled to receive blocked/done notifications.",
                 properties: [
                     "command": stringSchema("Command that launches a supported coding agent (claude, codex, or opencode)."),
                     "workspace": stringSchema("Workspace ID. Defaults to the workspace containing the current directory. Required with device."),
@@ -341,7 +341,7 @@ final class SpacesMCPStdioServer {
                             "Started agent session \(result.terminalSessionID) (detected \(result.detectedAgent))\(deviceNote). Send its prompt with spaces_terminal_send, then poll spaces_agent_status or spaces_terminal_tail to confirm work started.",
                         agentSpawn: TerminalServiceAgentSpawnResult(
                             terminalSessionID: result.terminalSessionID, workspaceID: result.workspaceID, detectedAgent: result.detectedAgent,
-                            deviceID: result.deviceID, subscribed: result.subscribed)))
+                            deviceID: result.deviceID, subscribed: result.subscribed, open: result.open)))
             },
             MCPToolDescriptor(
                 name: "spaces_agent_interrupt", description: "Interrupt a coding-agent session by sending ESC to its terminal.",

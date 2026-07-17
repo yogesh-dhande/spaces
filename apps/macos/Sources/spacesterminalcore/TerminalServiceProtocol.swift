@@ -365,10 +365,18 @@ public struct TerminalServiceAgentSessionRow: Codable, Sendable, Equatable {
 }
 
 /// The structured outcome of an agent spawn, carried on a spawn command response so a client (the MCP
-/// tool, the CLI) can read the spawned terminal session id, detected agent, target device, and whether
-/// the spawning terminal was auto-subscribed directly, instead of parsing them back out of the prose
-/// guidance message. Mirrors the CLI's `AgentSpawnResult`; that type lives in the CLI target, so this is
-/// the wire struct both the CLI and MCP populate.
+/// tool) can read the spawned terminal session id, detected agent, target device, whether the spawning
+/// terminal was auto-subscribed, and the rendered `open` deep link directly, instead of parsing them back
+/// out of the prose guidance message. Mirrors the CLI's `AgentSpawnResult`, which lives in the CLI target
+/// and computes `open`; the MCP server passes that already-computed value through unchanged so the two
+/// can't diverge.
+///
+/// Despite living in this shared wire-type module, this struct is populated only by the MCP server: the
+/// daemon's own response to an `.agentSpawn` profile command carries `terminalSession`, never `agentSpawn`
+/// (see `SpacesdMain.spawnProfileAgentSession`). That makes it safe to widen directly with `open` — unlike
+/// `TerminalServiceAgentSessionRow`/`SpacesDeviceAgentSessionRow`, which the daemon and Device API do
+/// populate and decode, so an `open` field there stays out in the CLI-only `AgentSessionRowJSON` wrapper
+/// instead.
 public struct TerminalServiceAgentSpawnResult: Codable, Sendable, Equatable {
     public let terminalSessionID: String
     public let workspaceID: String?
@@ -378,13 +386,17 @@ public struct TerminalServiceAgentSpawnResult: Codable, Sendable, Equatable {
     /// False when the child had no agent row yet at spawn return (rows appear on the first hook signal),
     /// so no watch edge was recorded; the caller subscribes explicitly once the agent signals.
     public let subscribed: Bool
+    /// Rendered `spaces://terminal/<session-id>` deep link, device-qualified when `deviceID` is set —
+    /// identical to the CLI `AgentSpawnResult.open` value this field carries verbatim.
+    public let open: String
 
-    public init(terminalSessionID: String, workspaceID: String?, detectedAgent: String, deviceID: String?, subscribed: Bool) {
+    public init(terminalSessionID: String, workspaceID: String?, detectedAgent: String, deviceID: String?, subscribed: Bool, open: String) {
         self.terminalSessionID = terminalSessionID
         self.workspaceID = workspaceID
         self.detectedAgent = detectedAgent
         self.deviceID = deviceID
         self.subscribed = subscribed
+        self.open = open
     }
 }
 

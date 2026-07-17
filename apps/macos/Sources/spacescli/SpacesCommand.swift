@@ -338,6 +338,10 @@ struct AgentSpawnDetectionTimeoutError: LocalizedError {
 /// remote one (it qualifies the `open` deep link). `agent list`/`status` (keyed on `terminalSessionID`)
 /// surface the agent's live status once it reports one — the agent row may not exist yet at spawn return
 /// (rows appear on the first hook signal), which is also why `subscribed` can be false.
+///
+/// `open` is computed once here (mirroring `AgentSessionRowJSON`), so the text row (`agentSpawnResultLine`,
+/// which reads `result.open`), `--json`, and the MCP `spaces_agent_spawn` tool (which forwards it onto
+/// `TerminalServiceAgentSpawnResult.open`) can never disagree on the rendered deep link.
 struct AgentSpawnResult: Codable, Equatable {
     let terminalSessionID: String
     let workspaceID: String?
@@ -347,6 +351,18 @@ struct AgentSpawnResult: Codable, Equatable {
     /// False when the child had no agent row yet at spawn return (rows appear on the first hook
     /// signal), so no watch edge was recorded; the caller subscribes explicitly once the agent signals.
     let subscribed: Bool
+    /// Rendered `spaces://terminal/<session-id>` deep link, device-qualified when `deviceID` is set —
+    /// exactly what the text row's `open=` column prints.
+    let open: String
+
+    init(terminalSessionID: String, workspaceID: String?, detectedAgent: String, deviceID: String?, subscribed: Bool) {
+        self.terminalSessionID = terminalSessionID
+        self.workspaceID = workspaceID
+        self.detectedAgent = detectedAgent
+        self.deviceID = deviceID
+        self.subscribed = subscribed
+        self.open = SpacesTerminalDeepLink(sessionID: terminalSessionID, deviceID: deviceID).absoluteString
+    }
 }
 
 /// Spawns a coding agent on this machine and blocks until the daemon's foreground classifier identifies
@@ -562,7 +578,7 @@ struct AgentSpawnCommand: ParsableCommand {
 func agentSpawnResultLine(_ result: AgentSpawnResult) -> String {
     [
         result.terminalSessionID, "detected=\(result.detectedAgent)", "workspace=\(result.workspaceID ?? "-")", "subscribed=\(result.subscribed)",
-        "open=\(SpacesTerminalDeepLink(sessionID: result.terminalSessionID, deviceID: result.deviceID).absoluteString)",
+        "open=\(result.open)",
     ].joined(separator: "\t")
 }
 

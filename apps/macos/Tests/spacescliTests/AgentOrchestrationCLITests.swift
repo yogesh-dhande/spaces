@@ -266,6 +266,37 @@ final class AgentOrchestrationCLITests: XCTestCase {
         XCTAssertTrue(line.contains("open=\(SpacesTerminalDeepLink(sessionID: "session-3", deviceID: "device-9").absoluteString)"))
     }
 
+    func testAgentSpawnResultJSONCarriesUnqualifiedOpenLinkForLocalSpawn() throws {
+        let result = AgentSpawnResult(
+            terminalSessionID: "session-1", workspaceID: "workspace-1", detectedAgent: "codex", deviceID: nil, subscribed: true)
+        XCTAssertEqual(result.open, "spaces://terminal/session-1")
+        let encoded = try JSONSerialization.jsonObject(with: JSONEncoder().encode(result)) as? [String: Any]
+        XCTAssertEqual(encoded?["open"] as? String, "spaces://terminal/session-1")
+        XCTAssertNil(encoded?["deviceID"] as? String)
+    }
+
+    func testAgentSpawnResultJSONCarriesDeviceQualifiedOpenLinkForRemoteSpawn() throws {
+        let result = AgentSpawnResult(
+            terminalSessionID: "session-3", workspaceID: "workspace-2", detectedAgent: "opencode", deviceID: "device-9", subscribed: false)
+        XCTAssertEqual(result.open, SpacesTerminalDeepLink(sessionID: "session-3", deviceID: "device-9").absoluteString)
+        let encoded = try JSONSerialization.jsonObject(with: JSONEncoder().encode(result)) as? [String: Any]
+        XCTAssertEqual(encoded?["open"] as? String, "spaces://terminal/session-3?device=device-9")
+        XCTAssertEqual(encoded?["deviceID"] as? String, "device-9")
+    }
+
+    func testAgentSpawnResultJSONOpenMatchesTextLineOpenValue() {
+        // Both the text row and --json render `open` from the same `AgentSpawnResult.open` field, so they
+        // can never disagree on the deep link. Covers local and device-qualified spawns.
+        for result in [
+            AgentSpawnResult(terminalSessionID: "session-1", workspaceID: "workspace-1", detectedAgent: "codex", deviceID: nil, subscribed: true),
+            AgentSpawnResult(
+                terminalSessionID: "session-3", workspaceID: "workspace-2", detectedAgent: "opencode", deviceID: "device-9", subscribed: false),
+        ] {
+            let line = agentSpawnResultLine(result)
+            XCTAssertTrue(line.hasSuffix("open=\(result.open)"))
+        }
+    }
+
     // MARK: - Readiness phases
 
     /// A deterministic clock: `now()` advances one `step` per read so bounded polls terminate without
