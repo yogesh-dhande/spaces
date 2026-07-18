@@ -34,7 +34,8 @@ struct SpacesE2ECommand: ParsableCommand {
             MacClientInstallationIDCommand.self, ProfileSocketPathsCommand.self, ProfileDesktopControlOwnerCommand.self,
             ProfileWaitForDesktopControlCommand.self, MobileStatusCommand.self, MobileServeCommand.self, MobileRequestCommand.self,
             ServiceTunnelCommand.self, RenderUpdateTextCommand.self, ScrollApplicationWindowCommand.self, TypeApplicationWindowCommand.self,
-            DragApplicationWindowCommand.self,
+            DragApplicationWindowCommand.self, AutomationCreateCommand.self, AutomationUpdateCommand.self, AutomationDeleteCommand.self,
+            AutomationListCommand.self, AutomationRunsCommand.self, AutomationTriggerCommand.self, AutomationCancelCommand.self,
         ])
 }
 
@@ -1748,6 +1749,119 @@ private func workspaceSettingsPayload(_ settings: WorkspaceSettings) -> Workspac
 }
 
 /// Shared JSON encoder for the shell harness.
+// MARK: - Automation helpers (test seam; automation authoring is GUI-only in the product)
+
+/// Sends a profile automation command to the adjacent daemon and emits its response section as JSON,
+/// exactly like the app/CLI would over the same profile socket, so the shell harness drives real
+/// scheduler state. The harness binds to this worktree's profile via `profile-show --shell` before use.
+private func sendAutomationProfileCommand(_ command: TerminalServiceProfileCommand) throws -> TerminalServiceProfileCommandResponse {
+    try TerminalService.sendProfileCommand(command)
+}
+
+private func automationFields(
+    name: String, enabled: Bool, trigger: String, cron: String?, command: String, workingDirectory: String, timeoutSeconds: Int?, concurrency: String,
+    missedRun: String
+) -> TerminalServiceAutomationFields {
+    TerminalServiceAutomationFields(
+        name: name, enabled: enabled, triggerKind: trigger, cronExpression: normalizedOptional(cron), command: command,
+        workingDirectory: workingDirectory, timeoutSeconds: timeoutSeconds, concurrencyPolicy: concurrency, missedRunPolicy: missedRun)
+}
+
+private struct AutomationCreateCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "automation-create")
+
+    @Option(name: .long) var name: String
+    @Option(name: .long) var command: String
+    @Option(name: .long) var workingDirectory: String
+    @Option(name: .long) var trigger: String = "manual"
+    @Option(name: .long) var cron: String?
+    @Option(name: .long) var concurrency: String = "allow"
+    @Option(name: .long) var missedRun: String = "run_once"
+    @Option(name: .long) var timeoutSeconds: Int?
+    @Flag(name: .long, inversion: .prefixedNo) var enabled = true
+
+    func run() throws {
+        let fields = automationFields(
+            name: name, enabled: enabled, trigger: trigger, cron: cron, command: command, workingDirectory: workingDirectory,
+            timeoutSeconds: timeoutSeconds, concurrency: concurrency, missedRun: missedRun)
+        try emitJSON(try sendAutomationProfileCommand(.automationCreate(fields)).automations ?? [])
+    }
+}
+
+private struct AutomationUpdateCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "automation-update")
+
+    @Option(name: .long) var id: String
+    @Option(name: .long) var name: String
+    @Option(name: .long) var command: String
+    @Option(name: .long) var workingDirectory: String
+    @Option(name: .long) var trigger: String = "manual"
+    @Option(name: .long) var cron: String?
+    @Option(name: .long) var concurrency: String = "allow"
+    @Option(name: .long) var missedRun: String = "run_once"
+    @Option(name: .long) var timeoutSeconds: Int?
+    @Flag(name: .long, inversion: .prefixedNo) var enabled = true
+
+    func run() throws {
+        let fields = automationFields(
+            name: name, enabled: enabled, trigger: trigger, cron: cron, command: command, workingDirectory: workingDirectory,
+            timeoutSeconds: timeoutSeconds, concurrency: concurrency, missedRun: missedRun)
+        try emitJSON(try sendAutomationProfileCommand(.automationUpdate(.init(id: id, fields: fields))).automations ?? [])
+    }
+}
+
+private struct AutomationDeleteCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "automation-delete")
+
+    @Option(name: .long) var id: String
+
+    func run() throws {
+        let response = try sendAutomationProfileCommand(.automationDelete(id: try required(id, label: "id")))
+        try emitJSON(AutomationDeletePayload(success: true, message: response.message))
+    }
+}
+
+private struct AutomationDeletePayload: Encodable {
+    let success: Bool
+    let message: String
+}
+
+private struct AutomationListCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "automation-list")
+
+    func run() throws { try emitJSON(try sendAutomationProfileCommand(.automationList).automations ?? []) }
+}
+
+private struct AutomationRunsCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "automation-runs")
+
+    @Option(name: .long) var automationID: String?
+
+    func run() throws {
+        try emitJSON(try sendAutomationProfileCommand(.automationRunsList(.init(automationID: normalizedOptional(automationID)))).automationRuns ?? [])
+    }
+}
+
+private struct AutomationTriggerCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "automation-trigger")
+
+    @Option(name: .long) var id: String
+
+    func run() throws {
+        try emitJSON(try sendAutomationProfileCommand(.automationTrigger(id: try required(id, label: "id"))).automationRuns ?? [])
+    }
+}
+
+private struct AutomationCancelCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "automation-cancel")
+
+    @Option(name: .long) var runID: String
+
+    func run() throws {
+        try emitJSON(try sendAutomationProfileCommand(.automationRunCancel(runID: try required(runID, label: "run-id"))).automationRuns ?? [])
+    }
+}
+
 private func emitJSON<T: Encodable>(_ value: T) throws {
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.prettyPrinted, .sortedKeys]

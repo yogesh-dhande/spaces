@@ -111,6 +111,102 @@ import spacesterminalcore
         }
     }
 
+    // MARK: - Command surface
+
+    /// The single daemon-side implementation of every automation command. Both transports — the profile
+    /// service socket and the Device API — call these on the one live `AutomationService` instance, so
+    /// scheduling, execution, and validation never fork between local and remote callers. Validation and
+    /// next-fire-time recomputation live here (not per transport) so both boundaries behave identically.
+
+    /// Creates a new automation from a validated draft. On an enabled cron automation the initial next fire
+    /// time is computed from now (no backfill). Returns the persisted automation, including any computed
+    /// next fire time.
+    public func createAutomation(_ draft: AutomationDraft) throws -> Automation {
+        let validated = try draft.validated()
+        let timestamp = now()
+        let automation = Automation(
+            id: UUID().uuidString, name: validated.name, enabled: validated.enabled, triggerKind: validated.triggerKind,
+            cronExpression: validated.cronExpression, command: validated.command, workingDirectory: validated.workingDirectory,
+            timeoutSeconds: validated.timeoutSeconds, concurrencyPolicy: validated.concurrencyPolicy, missedRunPolicy: validated.missedRunPolicy,
+            nextFireTime: nil, createdAt: timestamp, updatedAt: timestamp)
+        try store.upsertAutomation(automation)
+        try applyNextFireTime(automationID: automation.id, enabled: validated.enabled, triggerKind: validated.triggerKind)
+        return try requireAutomation(id: automation.id)
+    }
+
+    /// Applies a validated draft to an existing automation (including enabling/disabling it), preserving its
+    /// id and creation time. Its next fire time is recomputed from now for an enabled cron automation and
+    /// cleared otherwise, so disabling or switching to manual removes a stale schedule anchor. Throws when
+    /// the automation does not exist.
+    public func updateAutomation(id: String, draft: AutomationDraft) throws -> Automation {
+        let existing = try requireAutomation(id: id)
+        let validated = try draft.validated()
+        let automation = Automation(
+            id: existing.id, name: validated.name, enabled: validated.enabled, triggerKind: validated.triggerKind,
+            cronExpression: validated.cronExpression, command: validated.command, workingDirectory: validated.workingDirectory,
+            timeoutSeconds: validated.timeoutSeconds, concurrencyPolicy: validated.concurrencyPolicy, missedRunPolicy: validated.missedRunPolicy,
+            nextFireTime: nil, createdAt: existing.createdAt, updatedAt: now())
+        try store.upsertAutomation(automation)
+        try applyNextFireTime(automationID: automation.id, enabled: validated.enabled, triggerKind: validated.triggerKind)
+        return try requireAutomation(id: automation.id)
+    }
+
+    public func listAutomations() throws -> [Automation] { try store.automations() }
+
+    /// Runs for one automation (newest first) when `automationID` is given, or across every automation
+    /// otherwise. Includes live (queued/running) runs, which sort to the top by their recent creation time.
+    public func listAutomationRuns(automationID: String?) throws -> [AutomationRun] {
+        if let automationID { return try store.automationRuns(automationID: automationID) }
+        return try store.allAutomationRuns()
+    }
+
+    /// Manually fires an automation through the shared concurrency gate. Throws when the automation is
+    /// missing so the boundary surfaces a clear error instead of a silent no-op.
+    public func triggerAutomation(id: String) throws -> AutomationRun {
+        let automation = try requireAutomation(id: id)
+        guard let run = fire(automation: automation, trigger: .manual) else {
+            throw AutomationValidationError("Failed to start a run for automation \(id).")
+        }
+        return run
+    }
+
+    /// Cancels a run, returning its resulting row. A terminal run is returned unchanged (idempotent).
+    /// Throws when the run does not exist.
+    public func cancelAutomationRun(runID: String) throws -> AutomationRun {
+        let run = try requireAutomationRun(id: runID)
+        guard !run.status.isTerminal else { return run }
+        cancelRun(runID: runID)
+        return try requireAutomationRun(id: runID)
+    }
+
+    /// Deletes an automation (cancelling any running run and cleaning up its artifacts and attributed
+    /// sessions). Throws when the automation does not exist.
+    public func deleteAutomationCommand(id: String) throws {
+        _ = try requireAutomation(id: id)
+        deleteAutomation(id: id)
+    }
+
+    private func requireAutomation(id: String) throws -> Automation {
+        guard let automation = try store.automation(id: id) else { throw AutomationValidationError("Automation not found: \(id).") }
+        return automation
+    }
+
+    private func requireAutomationRun(id: String) throws -> AutomationRun {
+        guard let run = try store.automationRun(id: id) else { throw AutomationValidationError("Automation run not found: \(id).") }
+        return run
+    }
+
+    /// Recomputes (enabled cron) or clears (disabled or manual) an automation's next fire time after a
+    /// create/update. `computeInitialNextFireTime` sets the anchor from now for an enabled cron automation;
+    /// every other case has no schedule, so the anchor is explicitly cleared to drop any stale value.
+    private func applyNextFireTime(automationID: String, enabled: Bool, triggerKind: AutomationTriggerKind) throws {
+        if enabled, triggerKind == .cron {
+            computeInitialNextFireTime(automationID: automationID)
+        } else {
+            try store.setAutomationNextFireTime(id: automationID, nextFireTime: nil)
+        }
+    }
+
     private func fireDueCronAutomations() {
         let currentTime = now()
         do {

@@ -140,6 +140,23 @@ extension SQLiteStore {
         ).compactMap(Self.decodeAutomationRun)
     }
 
+    /// Runs across every automation, newest first — the unfiltered runs listing. `limit` of nil returns
+    /// all rows; a positive limit caps the newest N (the overview's recent-run window uses this).
+    public func allAutomationRuns(limit: Int? = nil) throws -> [AutomationRun] {
+        let limitClause = limit.map { " LIMIT \($0)" } ?? ""
+        return try queryRows(
+            sql: "SELECT \(Self.automationRunColumns) FROM automation_runs ORDER BY created_at DESC, id DESC\(limitClause)"
+        ).compactMap(Self.decodeAutomationRun)
+    }
+
+    /// Runs across every automation that are still active (queued or running), oldest first — the overview
+    /// always includes these regardless of the recent-run window so a live run is never dropped.
+    public func activeAutomationRuns() throws -> [AutomationRun] {
+        try queryRows(
+            sql: "SELECT \(Self.automationRunColumns) FROM automation_runs WHERE status IN ('queued', 'running') ORDER BY created_at, id"
+        ).compactMap(Self.decodeAutomationRun)
+    }
+
     /// Runs of one automation in a non-terminal state (queued or running), oldest first.
     public func activeAutomationRuns(automationID: String) throws -> [AutomationRun] {
         try queryRows(

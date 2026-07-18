@@ -43,9 +43,29 @@ struct SpacesDeviceOverviewBuilder {
         let hasFinalRender: Bool
     }
 
+    /// The number of newest terminal automation runs the overview carries, in addition to every currently
+    /// active (queued/running) run. Keeps the snapshot bounded while still covering enough recent history
+    /// for a client to render run lists and derive alert entries from recent failed/timed-out runs.
+    static let recentAutomationRunLimit = 50
+
+    /// Selects the automation runs the overview carries: the newest terminal runs (already limited to
+    /// `recentAutomationRunLimit` by the caller's query) unioned with every currently-active run, so a
+    /// live run is never dropped by the recent-window cap, de-duplicated and returned newest first. Pure
+    /// and static so the selection contract is unit-testable without a store or a running server.
+    static func selectOverviewRuns(recentTerminal: [AutomationRun], active: [AutomationRun]) -> [AutomationRun] {
+        var seen = Set(recentTerminal.map(\.id))
+        var merged = recentTerminal
+        for run in active where !seen.contains(run.id) {
+            seen.insert(run.id)
+            merged.append(run)
+        }
+        return merged.sorted { $0.createdAt > $1.createdAt }
+    }
+
     static func build(
         projects: [ProjectRecord] = [], workspaces: [WorkspaceDescriptor], workspaceRows: [WorkspaceTerminalRow],
-        liveSessions: [TerminalSessionCatalogEntry], daemonStatus: TerminalServiceDaemonStatus
+        liveSessions: [TerminalSessionCatalogEntry], daemonStatus: TerminalServiceDaemonStatus,
+        automations: [TerminalServiceAutomationSummary] = [], automationRuns: [TerminalServiceAutomationRunSummary] = []
     ) -> SpacesDeviceOverviewPayload {
         let representedSessionIDs = Set(workspaceRows.map { $0.entry.sessionID })
         let matchedWorkspaceByLiveSessionID = Dictionary(
@@ -113,7 +133,7 @@ struct SpacesDeviceOverviewBuilder {
 
         return SpacesDeviceOverviewPayload(
             projects: projectSummaries, workspaces: workspaceSummaries, sessions: workspaceSessionSummaries + adHocSessionSummaries,
-            daemonStatus: daemonStatus)
+            daemonStatus: daemonStatus, automations: automations, automationRuns: automationRuns)
     }
 
     static func matchedWorkspace(for session: TerminalSessionCatalogEntry, workspaces: [WorkspaceDescriptor]) -> WorkspaceDescriptor? {

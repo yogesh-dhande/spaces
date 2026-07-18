@@ -415,12 +415,19 @@ public struct TerminalServiceProfileCommandResponse: Codable, Sendable, Equatabl
     /// counterpart to idle injection). Nil/omitted unless the piggyback path drained at least one row;
     /// carried only on the MCP piggyback path, so every other command leaves it nil.
     public let pendingAgentEvents: [String]?
+    /// Automations returned by `automationList` (and the single created/updated automation, as a
+    /// one-element list). Nil for commands that touch no automations.
+    public let automations: [TerminalServiceAutomationSummary]?
+    /// Automation runs returned by `automationRunsList` (and the single triggered/canceled run, as a
+    /// one-element list). Nil for commands that touch no runs.
+    public let automationRuns: [TerminalServiceAutomationRunSummary]?
 
     public init(
         message: String, projects: [TerminalServiceProfileProjectSummary]? = nil, workspaces: [TerminalServiceProfileWorkspaceRecord]? = nil,
         workspace: TerminalServiceProfileWorkspaceRecord? = nil, terminalSessions: [TerminalServiceSessionSummary]? = nil,
         terminalSession: TerminalServiceSessionSummary? = nil, terminalOutput: String? = nil, agentSessions: [TerminalServiceAgentSessionRow]? = nil,
-        agentSpawn: TerminalServiceAgentSpawnResult? = nil, pendingAgentEvents: [String]? = nil
+        agentSpawn: TerminalServiceAgentSpawnResult? = nil, pendingAgentEvents: [String]? = nil,
+        automations: [TerminalServiceAutomationSummary]? = nil, automationRuns: [TerminalServiceAutomationRunSummary]? = nil
     ) {
         self.message = message
         self.projects = projects
@@ -432,6 +439,8 @@ public struct TerminalServiceProfileCommandResponse: Codable, Sendable, Equatabl
         self.agentSessions = agentSessions
         self.agentSpawn = agentSpawn
         self.pendingAgentEvents = pendingAgentEvents
+        self.automations = automations
+        self.automationRuns = automationRuns
     }
 
     /// Returns a copy with `pendingAgentEvents` attached, or `self` unchanged when there is nothing to
@@ -442,7 +451,7 @@ public struct TerminalServiceProfileCommandResponse: Codable, Sendable, Equatabl
         return TerminalServiceProfileCommandResponse(
             message: message, projects: projects, workspaces: workspaces, workspace: workspace, terminalSessions: terminalSessions,
             terminalSession: terminalSession, terminalOutput: terminalOutput, agentSessions: agentSessions, agentSpawn: agentSpawn,
-            pendingAgentEvents: events)
+            pendingAgentEvents: events, automations: automations, automationRuns: automationRuns)
     }
 }
 

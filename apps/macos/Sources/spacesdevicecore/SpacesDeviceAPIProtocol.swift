@@ -635,15 +635,25 @@ public struct SpacesDeviceOverviewPayload: Codable, Sendable, Equatable {
     /// from the same round-trip as the overview, instead of paying a second `daemonStatus` call on
     /// every refresh.
     public let daemonStatus: TerminalServiceDaemonStatus
+    /// Every automation configured on the daemon, so a client can render the automations list and derive
+    /// per-automation schedule/next-fire details without a second call.
+    public let automations: [TerminalServiceAutomationSummary]
+    /// The daemon's recent automation runs: all currently-active (queued/running) runs plus the newest
+    /// terminal runs (see `SpacesDeviceOverviewBuilder` for the window size), newest first. Recent
+    /// failed/timed-out runs are identifiable here so clients can derive alert entries.
+    public let automationRuns: [TerminalServiceAutomationRunSummary]
 
     public init(
         projects: [SpacesDeviceProjectSummary] = [], workspaces: [SpacesDeviceWorkspaceSummary], sessions: [SpacesDeviceTerminalSessionSummary],
-        daemonStatus: TerminalServiceDaemonStatus
+        daemonStatus: TerminalServiceDaemonStatus, automations: [TerminalServiceAutomationSummary] = [],
+        automationRuns: [TerminalServiceAutomationRunSummary] = []
     ) {
         self.projects = projects
         self.workspaces = workspaces
         self.sessions = sessions
         self.daemonStatus = daemonStatus
+        self.automations = automations
+        self.automationRuns = automationRuns
     }
 }
 
@@ -1336,6 +1346,36 @@ public struct SpacesDeviceAgentSessionsResult: Codable, Sendable, Equatable {
     public init(rows: [SpacesDeviceAgentSessionRow]) { self.rows = rows }
 }
 
+/// Names an automation by id for the delete/trigger Device API commands. A one-field struct (rather than a
+/// bare string) keeps the command payloads uniform with the rest of the Device API contract.
+public struct SpacesDeviceAutomationReference: Codable, Sendable, Equatable {
+    public let id: String
+
+    public init(id: String) { self.id = id }
+}
+
+/// Names an automation run by id for the run-cancel Device API command.
+public struct SpacesDeviceAutomationRunReference: Codable, Sendable, Equatable {
+    public let runID: String
+
+    public init(runID: String) { self.runID = runID }
+}
+
+/// Automations returned by the create/update/list Device API commands (create/update return the affected
+/// automation as a one-element list, matching how `annotateAgentSession` returns its single row).
+public struct SpacesDeviceAutomationsResult: Codable, Sendable, Equatable {
+    public let rows: [TerminalServiceAutomationSummary]
+
+    public init(rows: [TerminalServiceAutomationSummary]) { self.rows = rows }
+}
+
+/// Automation runs returned by the runs-list/trigger/run-cancel Device API commands.
+public struct SpacesDeviceAutomationRunsResult: Codable, Sendable, Equatable {
+    public let rows: [TerminalServiceAutomationRunSummary]
+
+    public init(rows: [TerminalServiceAutomationRunSummary]) { self.rows = rows }
+}
+
 public enum SpacesDeviceAPICommand: Sendable, Equatable {
     case pair(SpacesDevicePairRequest)
     case ping
@@ -1404,6 +1444,16 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
     case killAgentSession(SpacesDeviceKillAgentSessionRequest)
     /// Hijacks the connection into a raw byte tunnel to a workspace service after one `ok` response line.
     case openServiceTunnel(SpacesDeviceServiceTunnelRequest)
+    /// Automation authoring + control on the daemon host, the remote counterparts of the profile-socket
+    /// automation commands. Each routes through the daemon's one live automation scheduler, so a local and
+    /// a remote caller drive the same scheduler state.
+    case createAutomation(TerminalServiceAutomationFields)
+    case updateAutomation(TerminalServiceAutomationUpdatePayload)
+    case deleteAutomation(SpacesDeviceAutomationReference)
+    case listAutomations
+    case listAutomationRuns(TerminalServiceAutomationRunsListPayload)
+    case triggerAutomation(SpacesDeviceAutomationReference)
+    case cancelAutomationRun(SpacesDeviceAutomationRunReference)
 
     public var name: String {
         switch self {
@@ -1454,6 +1504,13 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
         case .annotateAgentSession: "annotateAgentSession"
         case .killAgentSession: "killAgentSession"
         case .openServiceTunnel: "openServiceTunnel"
+        case .createAutomation: "createAutomation"
+        case .updateAutomation: "updateAutomation"
+        case .deleteAutomation: "deleteAutomation"
+        case .listAutomations: "listAutomations"
+        case .listAutomationRuns: "listAutomationRuns"
+        case .triggerAutomation: "triggerAutomation"
+        case .cancelAutomationRun: "cancelAutomationRun"
         }
     }
 
@@ -1515,7 +1572,8 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
     var isSafeToReplayAfterConnectionFailure: Bool {
         switch self {
         case .ping, .daemonStatus, .overview, .previewProject, .previewGitProject, .listDirectories, .workspaceCreateOptions, .state,
-            .resolveTerminalLink, .readTerminalLinkChunk, .tailTerminalOutput, .agentHooksStatus, .listAgentSessions:
+            .resolveTerminalLink, .readTerminalLinkChunk, .tailTerminalOutput, .agentHooksStatus, .listAgentSessions, .listAutomations,
+            .listAutomationRuns:
             true
         default: false
         }
@@ -1571,6 +1629,13 @@ extension SpacesDeviceAPICommand: Codable {
         case annotateAgentSession
         case killAgentSession
         case openServiceTunnel
+        case createAutomation
+        case updateAutomation
+        case deleteAutomation
+        case listAutomations
+        case listAutomationRuns
+        case triggerAutomation
+        case cancelAutomationRun
     }
 
     public init(from decoder: any Decoder) throws {
@@ -1643,6 +1708,15 @@ extension SpacesDeviceAPICommand: Codable {
         case .killAgentSession:
             self = .killAgentSession(try container.decode(SpacesDeviceKillAgentSessionRequest.self, forKey: key))
         case .openServiceTunnel: self = .openServiceTunnel(try container.decode(SpacesDeviceServiceTunnelRequest.self, forKey: key))
+        case .createAutomation: self = .createAutomation(try container.decode(TerminalServiceAutomationFields.self, forKey: key))
+        case .updateAutomation: self = .updateAutomation(try container.decode(TerminalServiceAutomationUpdatePayload.self, forKey: key))
+        case .deleteAutomation: self = .deleteAutomation(try container.decode(SpacesDeviceAutomationReference.self, forKey: key))
+        case .listAutomations:
+            _ = try container.decode(SpacesDeviceAPIEmptyPayload.self, forKey: key)
+            self = .listAutomations
+        case .listAutomationRuns: self = .listAutomationRuns(try container.decode(TerminalServiceAutomationRunsListPayload.self, forKey: key))
+        case .triggerAutomation: self = .triggerAutomation(try container.decode(SpacesDeviceAutomationReference.self, forKey: key))
+        case .cancelAutomationRun: self = .cancelAutomationRun(try container.decode(SpacesDeviceAutomationRunReference.self, forKey: key))
         }
     }
 
@@ -1696,6 +1770,13 @@ extension SpacesDeviceAPICommand: Codable {
         case .annotateAgentSession(let payload): try container.encode(payload, forKey: .annotateAgentSession)
         case .killAgentSession(let payload): try container.encode(payload, forKey: .killAgentSession)
         case .openServiceTunnel(let payload): try container.encode(payload, forKey: .openServiceTunnel)
+        case .createAutomation(let payload): try container.encode(payload, forKey: .createAutomation)
+        case .updateAutomation(let payload): try container.encode(payload, forKey: .updateAutomation)
+        case .deleteAutomation(let payload): try container.encode(payload, forKey: .deleteAutomation)
+        case .listAutomations: try container.encode(SpacesDeviceAPIEmptyPayload(), forKey: .listAutomations)
+        case .listAutomationRuns(let payload): try container.encode(payload, forKey: .listAutomationRuns)
+        case .triggerAutomation(let payload): try container.encode(payload, forKey: .triggerAutomation)
+        case .cancelAutomationRun(let payload): try container.encode(payload, forKey: .cancelAutomationRun)
         }
     }
 }
@@ -1753,6 +1834,8 @@ public enum SpacesDeviceAPIResult: Sendable, Equatable {
     case agentHooksStatus(SpacesAgentHooksStatusPayload)
     case agentHooksInstall(AgentHookInstallOutcome)
     case agentSessions(SpacesDeviceAgentSessionsResult)
+    case automations(SpacesDeviceAutomationsResult)
+    case automationRuns(SpacesDeviceAutomationRunsResult)
 }
 
 extension SpacesDeviceAPIResult: Codable {
@@ -1772,6 +1855,8 @@ extension SpacesDeviceAPIResult: Codable {
         case agentHooksStatus
         case agentHooksInstall
         case agentSessions
+        case automations
+        case automationRuns
     }
 
     public init(from decoder: any Decoder) throws {
@@ -1796,6 +1881,8 @@ extension SpacesDeviceAPIResult: Codable {
         case .agentHooksStatus: self = .agentHooksStatus(try container.decode(SpacesAgentHooksStatusPayload.self, forKey: key))
         case .agentHooksInstall: self = .agentHooksInstall(try container.decode(AgentHookInstallOutcome.self, forKey: key))
         case .agentSessions: self = .agentSessions(try container.decode(SpacesDeviceAgentSessionsResult.self, forKey: key))
+        case .automations: self = .automations(try container.decode(SpacesDeviceAutomationsResult.self, forKey: key))
+        case .automationRuns: self = .automationRuns(try container.decode(SpacesDeviceAutomationRunsResult.self, forKey: key))
         }
     }
 
@@ -1817,6 +1904,8 @@ extension SpacesDeviceAPIResult: Codable {
         case .agentHooksStatus(let payload): try container.encode(payload, forKey: .agentHooksStatus)
         case .agentHooksInstall(let payload): try container.encode(payload, forKey: .agentHooksInstall)
         case .agentSessions(let payload): try container.encode(payload, forKey: .agentSessions)
+        case .automations(let payload): try container.encode(payload, forKey: .automations)
+        case .automationRuns(let payload): try container.encode(payload, forKey: .automationRuns)
         }
     }
 }
@@ -1880,6 +1969,12 @@ public struct SpacesDeviceAPIResponse: Codable, Sendable, Equatable {
     public var agentHooksInstall: AgentHookInstallOutcome? { if case .agentHooksInstall(let payload) = result { payload } else { nil } }
 
     public var agentSessions: [SpacesDeviceAgentSessionRow]? { if case .agentSessions(let payload) = result { payload.rows } else { nil } }
+
+    public var automations: [TerminalServiceAutomationSummary]? { if case .automations(let payload) = result { payload.rows } else { nil } }
+
+    public var automationRuns: [TerminalServiceAutomationRunSummary]? {
+        if case .automationRuns(let payload) = result { payload.rows } else { nil }
+    }
 }
 
 public enum SpacesDeviceAPICodec {

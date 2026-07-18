@@ -260,6 +260,100 @@ public struct TerminalServiceAgentSubscriptionPayload: Codable, Sendable, Equata
     }
 }
 
+/// Editable fields of an automation carried by create/update. Enum-typed fields (`triggerKind`,
+/// `concurrencyPolicy`, `missedRunPolicy`) travel as raw strings so this wire module stays free of the
+/// `workspacecore` domain enums; the daemon validates the raw values (and the cron expression) when it
+/// maps this to a stored automation, so an unknown value is a descriptive boundary error, not a decode
+/// crash. `name`, `command`, and `workingDirectory` are enforced non-empty at decode; `cronExpression` is
+/// optional here and required-when-cron is enforced by the daemon's validation.
+public struct TerminalServiceAutomationFields: Codable, Sendable, Equatable {
+    public let name: String
+    public let enabled: Bool
+    public let triggerKind: String
+    public let cronExpression: String?
+    public let command: String
+    public let workingDirectory: String
+    public let timeoutSeconds: Int?
+    public let concurrencyPolicy: String
+    public let missedRunPolicy: String
+
+    public init(
+        name: String, enabled: Bool, triggerKind: String, cronExpression: String? = nil, command: String, workingDirectory: String,
+        timeoutSeconds: Int? = nil, concurrencyPolicy: String, missedRunPolicy: String
+    ) {
+        self.name = name
+        self.enabled = enabled
+        self.triggerKind = triggerKind
+        self.cronExpression = cronExpression
+        self.command = command
+        self.workingDirectory = workingDirectory
+        self.timeoutSeconds = timeoutSeconds
+        self.concurrencyPolicy = concurrencyPolicy
+        self.missedRunPolicy = missedRunPolicy
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case name
+        case enabled
+        case triggerKind
+        case cronExpression
+        case command
+        case workingDirectory
+        case timeoutSeconds
+        case concurrencyPolicy
+        case missedRunPolicy
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        name = try container.decodeRequiredNonEmpty(forKey: .name)
+        enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
+        triggerKind = try container.decodeRequiredNonEmpty(forKey: .triggerKind)
+        cronExpression = try container.decodeIfPresent(String.self, forKey: .cronExpression)
+        command = try container.decodeRequiredNonEmpty(forKey: .command)
+        workingDirectory = try container.decodeRequiredNonEmpty(forKey: .workingDirectory)
+        timeoutSeconds = try container.decodeIfPresent(Int.self, forKey: .timeoutSeconds)
+        concurrencyPolicy = try container.decodeRequiredNonEmpty(forKey: .concurrencyPolicy)
+        missedRunPolicy = try container.decodeRequiredNonEmpty(forKey: .missedRunPolicy)
+    }
+}
+
+public struct TerminalServiceAutomationUpdatePayload: Codable, Sendable, Equatable {
+    public let id: String
+    public let fields: TerminalServiceAutomationFields
+
+    public init(id: String, fields: TerminalServiceAutomationFields) {
+        self.id = id
+        self.fields = fields
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case fields
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeRequiredNonEmpty(forKey: .id)
+        fields = try container.decode(TerminalServiceAutomationFields.self, forKey: .fields)
+    }
+}
+
+/// Optional automation filter for the runs listing. `nil` (or an empty value the daemon normalizes away)
+/// lists runs across every automation, newest first.
+public struct TerminalServiceAutomationRunsListPayload: Codable, Sendable, Equatable {
+    public let automationID: String?
+
+    public init(automationID: String? = nil) { self.automationID = automationID }
+
+    private enum CodingKeys: String, CodingKey { case automationID }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        automationID = try container.decodeIfPresent(String.self, forKey: .automationID)
+    }
+}
+
 public struct TerminalServiceTerminalSendPayload: Codable, Sendable, Equatable {
     public let sessionID: String
     public let input: TerminalProfileInput
@@ -364,6 +458,13 @@ public enum TerminalServiceProfileCommand: Sendable, Equatable {
     case terminalSend(TerminalServiceTerminalSendPayload)
     case terminalTail(TerminalServiceTerminalTailPayload)
     case terminalCommand(TerminalServiceTerminalCommandPayload)
+    case automationCreate(TerminalServiceAutomationFields)
+    case automationUpdate(TerminalServiceAutomationUpdatePayload)
+    case automationDelete(id: String)
+    case automationList
+    case automationRunsList(TerminalServiceAutomationRunsListPayload)
+    case automationTrigger(id: String)
+    case automationRunCancel(runID: String)
 }
 
 extension TerminalServiceProfileCommand: Codable {
@@ -385,6 +486,13 @@ extension TerminalServiceProfileCommand: Codable {
         case terminalSend
         case terminalTail
         case terminalCommand
+        case automationCreate
+        case automationUpdate
+        case automationDelete
+        case automationList
+        case automationRunsList
+        case automationTrigger
+        case automationRunCancel
     }
 
     public init(from decoder: any Decoder) throws {
@@ -416,6 +524,15 @@ extension TerminalServiceProfileCommand: Codable {
         case .terminalSend: self = .terminalSend(try container.decode(TerminalServiceTerminalSendPayload.self, forKey: key))
         case .terminalTail: self = .terminalTail(try container.decode(TerminalServiceTerminalTailPayload.self, forKey: key))
         case .terminalCommand: self = .terminalCommand(try container.decode(TerminalServiceTerminalCommandPayload.self, forKey: key))
+        case .automationCreate: self = .automationCreate(try container.decode(TerminalServiceAutomationFields.self, forKey: key))
+        case .automationUpdate: self = .automationUpdate(try container.decode(TerminalServiceAutomationUpdatePayload.self, forKey: key))
+        case .automationDelete: self = .automationDelete(id: try container.decodeRequiredNonEmpty(forKey: key))
+        case .automationList:
+            _ = try container.decode(TerminalServiceEmptyPayload.self, forKey: key)
+            self = .automationList
+        case .automationRunsList: self = .automationRunsList(try container.decode(TerminalServiceAutomationRunsListPayload.self, forKey: key))
+        case .automationTrigger: self = .automationTrigger(id: try container.decodeRequiredNonEmpty(forKey: key))
+        case .automationRunCancel: self = .automationRunCancel(runID: try container.decodeRequiredNonEmpty(forKey: key))
         }
     }
 
@@ -440,6 +557,13 @@ extension TerminalServiceProfileCommand: Codable {
         case .terminalSend(let payload): try container.encode(payload, forKey: .terminalSend)
         case .terminalTail(let payload): try container.encode(payload, forKey: .terminalTail)
         case .terminalCommand(let payload): try container.encode(payload, forKey: .terminalCommand)
+        case .automationCreate(let payload): try container.encode(payload, forKey: .automationCreate)
+        case .automationUpdate(let payload): try container.encode(payload, forKey: .automationUpdate)
+        case .automationDelete(let id): try container.encode(id, forKey: .automationDelete)
+        case .automationList: try container.encode(TerminalServiceEmptyPayload(), forKey: .automationList)
+        case .automationRunsList(let payload): try container.encode(payload, forKey: .automationRunsList)
+        case .automationTrigger(let id): try container.encode(id, forKey: .automationTrigger)
+        case .automationRunCancel(let runID): try container.encode(runID, forKey: .automationRunCancel)
         }
     }
 }

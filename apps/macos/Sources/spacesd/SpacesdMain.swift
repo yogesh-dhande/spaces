@@ -102,6 +102,13 @@ import workspacecore
                     return try orchestrator.killAgentSession(terminalSessionID: sessionID)
                 }
             }.get()
+        },
+        // The Device API automation handlers route through these closures to the one live
+        // `AutomationService` on the daemon main actor, so a remote automation command drives the exact
+        // scheduler state a local profile command would — the "one implementation, two transports" seam.
+        automationOperations: Self.makeAutomationOperations { [weak self] in
+            guard let self else { throw Self.requestFailedError("spacesd is shutting down.") }
+            return try self.automationCommandService()
         }, onRestartRequested: { [weak self] in Task { @MainActor in self?.requestDaemonRestart() } })
     private let git = RemoteWorkspaceGitClient()
 
@@ -868,6 +875,75 @@ import workspacecore
             let workspaceID = try orchestrator.resolveWorkspaceIDForTerminalCommand(explicitWorkspaceID: payload.workspaceID, cwd: payload.cwd)
             let session = try orchestrator.createWorkspaceTerminalSession(workspaceID: workspaceID, title: payload.title, command: payload.command)
             return TerminalServiceProfileCommandResponse(message: "Started terminal session.", terminalSession: session)
+        case .automationCreate(let payload):
+            let automation = try automationCommandService().createAutomation(automationDraft(from: payload))
+            return TerminalServiceProfileCommandResponse(message: "Created automation.", automations: [TerminalServiceAutomationSummary(automation)])
+        case .automationUpdate(let payload):
+            let automation = try automationCommandService().updateAutomation(id: payload.id, draft: automationDraft(from: payload.fields))
+            return TerminalServiceProfileCommandResponse(message: "Updated automation.", automations: [TerminalServiceAutomationSummary(automation)])
+        case .automationDelete(let id):
+            try automationCommandService().deleteAutomationCommand(id: id)
+            return TerminalServiceProfileCommandResponse(message: "Deleted automation.")
+        case .automationList:
+            let service = try automationCommandService()
+            let summaries = try service.listAutomations().map(TerminalServiceAutomationSummary.init)
+            return TerminalServiceProfileCommandResponse(message: "Listed automations.", automations: summaries)
+        case .automationRunsList(let payload):
+            let service = try automationCommandService()
+            let runs = try service.listAutomationRuns(automationID: normalizedProfileArgument(payload.automationID))
+            return TerminalServiceProfileCommandResponse(message: "Listed automation runs.", automationRuns: try automationRunSummaries(runs))
+        case .automationTrigger(let id):
+            let run = try automationCommandService().triggerAutomation(id: id)
+            return TerminalServiceProfileCommandResponse(message: "Triggered automation.", automationRuns: try automationRunSummaries([run]))
+        case .automationRunCancel(let runID):
+            let run = try automationCommandService().cancelAutomationRun(runID: runID)
+            return TerminalServiceProfileCommandResponse(message: "Canceled automation run.", automationRuns: try automationRunSummaries([run]))
+        }
+    }
+
+    /// The one live automation scheduler both transports route commands through, so a profile command and a
+    /// Device API request drive the same scheduler state. Nil only if the service failed to start.
+    private func automationCommandService() throws -> AutomationService {
+        guard let automationService else { throw SpacesRuntimeError.invalidArgument(message: "Automations are unavailable on this daemon.") }
+        return automationService
+    }
+
+    private func automationDraft(from fields: TerminalServiceAutomationFields) throws -> AutomationDraft {
+        guard let triggerKind = AutomationTriggerKind(rawValue: fields.triggerKind) else {
+            throw SpacesRuntimeError.invalidArgument(message: "Unsupported automation trigger kind '\(fields.triggerKind)'.")
+        }
+        guard let concurrencyPolicy = AutomationConcurrencyPolicy(rawValue: fields.concurrencyPolicy) else {
+            throw SpacesRuntimeError.invalidArgument(message: "Unsupported automation concurrency policy '\(fields.concurrencyPolicy)'.")
+        }
+        guard let missedRunPolicy = AutomationMissedRunPolicy(rawValue: fields.missedRunPolicy) else {
+            throw SpacesRuntimeError.invalidArgument(message: "Unsupported automation missed-run policy '\(fields.missedRunPolicy)'.")
+        }
+        return AutomationDraft(
+            name: fields.name, enabled: fields.enabled, triggerKind: triggerKind, cronExpression: fields.cronExpression, command: fields.command,
+            workingDirectory: fields.workingDirectory, timeoutSeconds: fields.timeoutSeconds, concurrencyPolicy: concurrencyPolicy,
+            missedRunPolicy: missedRunPolicy)
+    }
+
+    /// Maps runs to wire summaries, denormalizing each run's automation name and counting its live
+    /// attributed sessions against the daemon's current live-session set (a coding agent a run spawned that
+    /// is still running, or the run's own command session before it ends).
+    private func automationRunSummaries(_ runs: [AutomationRun]) throws -> [TerminalServiceAutomationRunSummary] {
+        guard !runs.isEmpty else { return [] }
+        let store = try makeProfileOrchestrator().store
+        let liveSessionIDs = Set((try? TerminalSessionCatalog.listLiveSessions())?.map(\.sessionID) ?? [])
+        var namesByAutomationID: [String: String] = [:]
+        return try runs.map { run in
+            let name: String?
+            if let cached = namesByAutomationID[run.automationID] {
+                name = cached
+            } else {
+                let resolved = try store.automation(id: run.automationID)?.name
+                if let resolved { namesByAutomationID[run.automationID] = resolved }
+                name = resolved
+            }
+            let attributed = (try? store.terminalSessionIDs(automationRunID: run.id)) ?? []
+            let liveCount = attributed.filter { liveSessionIDs.contains($0) }.count
+            return TerminalServiceAutomationRunSummary(run, automationName: name, liveAttributedSessionCount: liveCount)
         }
     }
 
@@ -968,6 +1044,20 @@ import workspacecore
 
     private static func requestFailedError(_ message: String) -> NSError {
         NSError(domain: "spacesd", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
+    }
+
+    /// Wraps the live automation scheduler as a Device API `AutomationOperations` bundle: each op hops to
+    /// the daemon main actor and calls the same `AutomationService` the profile-command handlers use, so
+    /// both transports share one scheduler. `service` resolves that instance (throwing during shutdown).
+    private static func makeAutomationOperations(_ service: @escaping @Sendable @MainActor () throws -> AutomationService) -> AutomationOperations {
+        AutomationOperations(
+            create: { draft in try runOnMainActorSynchronously { Result { try service().createAutomation(draft) } }.get() },
+            update: { id, draft in try runOnMainActorSynchronously { Result { try service().updateAutomation(id: id, draft: draft) } }.get() },
+            delete: { id in try runOnMainActorSynchronously { Result { try service().deleteAutomationCommand(id: id) } }.get() },
+            list: { try runOnMainActorSynchronously { Result { try service().listAutomations() } }.get() },
+            runs: { automationID in try runOnMainActorSynchronously { Result { try service().listAutomationRuns(automationID: automationID) } }.get() },
+            trigger: { id in try runOnMainActorSynchronously { Result { try service().triggerAutomation(id: id) } }.get() },
+            cancelRun: { runID in try runOnMainActorSynchronously { Result { try service().cancelAutomationRun(runID: runID) } }.get() })
     }
 
     private func profileProjectSummary(_ value: ProjectSummary) -> TerminalServiceProfileProjectSummary {
@@ -1720,12 +1810,13 @@ private final class MainActorSyncBox<T>: @unchecked Sendable { var value: T? }
     init(
         builtInTerminalSessionTerminator: WorkspaceOrchestrator.BuiltInTerminalSessionTerminator? = nil,
         builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher? = nil,
-        agentSessionKiller: (@Sendable (String) throws -> Bool)? = nil, onRestartRequested: (@Sendable () -> Void)? = nil
+        agentSessionKiller: (@Sendable (String) throws -> Bool)? = nil, automationOperations: AutomationOperations? = nil,
+        onRestartRequested: (@Sendable () -> Void)? = nil
     ) {
         #if canImport(spacesdeviceapi)
             supervisor = SpacesDeviceAPISupervisor(
                 builtInTerminalSessionTerminator: builtInTerminalSessionTerminator, builtInTerminalSessionLauncher: builtInTerminalSessionLauncher,
-                agentSessionKiller: agentSessionKiller, onRestartRequested: onRestartRequested)
+                agentSessionKiller: agentSessionKiller, automationOperations: automationOperations, onRestartRequested: onRestartRequested)
         #endif
     }
 

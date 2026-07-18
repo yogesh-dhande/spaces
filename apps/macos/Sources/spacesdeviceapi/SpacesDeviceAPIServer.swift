@@ -774,6 +774,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// build itself. Nil only in tests or a misconfigured daemon; the `killAgentSession` handler then
     /// reports the endpoint unavailable rather than silently no-op.
     private let agentSessionKiller: (@Sendable (String) throws -> Bool)?
+    /// The daemon-side automation operations, routed to the one live automation scheduler. Nil only in
+    /// tests or a misconfigured daemon; the automation handlers then report the endpoint unavailable.
+    private let automationOperations: AutomationOperations?
     /// Frozen-core restart hook. Invoked for `.requestDaemonRestart`; the daemon performs its
     /// exec-in-place handoff so running terminals, processes, and agents survive the update.
     private let onRestartRequested: (@Sendable () -> Void)?
@@ -831,7 +834,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         onPairingSucceeded: (@Sendable (SpacesDeviceClientApp) -> Void)? = nil,
         builtInTerminalSessionTerminator: WorkspaceOrchestrator.BuiltInTerminalSessionTerminator? = nil,
         builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher? = nil,
-        agentSessionKiller: (@Sendable (String) throws -> Bool)? = nil, onRestartRequested: (@Sendable () -> Void)? = nil
+        agentSessionKiller: (@Sendable (String) throws -> Bool)? = nil, automationOperations: AutomationOperations? = nil,
+        onRestartRequested: (@Sendable () -> Void)? = nil
     ) throws {
         self.host = host
         self.port = port
@@ -841,6 +845,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         self.builtInTerminalSessionTerminator = builtInTerminalSessionTerminator
         self.builtInTerminalSessionLauncher = builtInTerminalSessionLauncher
         self.agentSessionKiller = agentSessionKiller
+        self.automationOperations = automationOperations
         self.onRestartRequested = onRestartRequested
         overviewLoaderForTesting = nil
         agentHookStatusLoader = { AgentHookInstaller.status() }
@@ -861,7 +866,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         networkEnvironment: [String: String] = ProcessInfo.processInfo.environment,
         builtInTerminalSessionTerminator: WorkspaceOrchestrator.BuiltInTerminalSessionTerminator? = nil,
         builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher? = nil,
-        agentSessionKiller: (@Sendable (String) throws -> Bool)? = nil, onRestartRequested: (@Sendable () -> Void)? = nil,
+        agentSessionKiller: (@Sendable (String) throws -> Bool)? = nil, automationOperations: AutomationOperations? = nil,
+        onRestartRequested: (@Sendable () -> Void)? = nil,
         terminalLinkTransferAuthorizationTTL: TimeInterval = SpacesDeviceAPIServer.defaultTerminalLinkTransferAuthorizationTTL,
         overviewLoaderForTesting: (@Sendable (SpacesDeviceClientApp?) throws -> SpacesDeviceOverviewPayload)? = nil,
         agentHookStatusLoader: @escaping AgentHookStatusLoader = { AgentHookInstaller.status() },
@@ -876,6 +882,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         self.builtInTerminalSessionTerminator = builtInTerminalSessionTerminator
         self.builtInTerminalSessionLauncher = builtInTerminalSessionLauncher
         self.agentSessionKiller = agentSessionKiller
+        self.automationOperations = automationOperations
         self.onRestartRequested = onRestartRequested
         self.overviewLoaderForTesting = overviewLoaderForTesting
         self.agentHookStatusLoader = agentHookStatusLoader
@@ -1221,6 +1228,13 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             // Hijacks the connection into a raw byte pipe after this response, like a subscription;
             // it cannot be answered on the request/response path handled here.
             return SpacesDeviceAPIResponse(ok: false, message: "Tunnel requests must use the tunnel path.", errorCode: .misroutedRequest)
+        case .createAutomation(let payload): return try handleCreateAutomationRequest(payload)
+        case .updateAutomation(let payload): return try handleUpdateAutomationRequest(payload)
+        case .deleteAutomation(let payload): return try handleDeleteAutomationRequest(payload)
+        case .listAutomations: return try handleListAutomationsRequest()
+        case .listAutomationRuns(let payload): return try handleListAutomationRunsRequest(payload, context: context)
+        case .triggerAutomation(let payload): return try handleTriggerAutomationRequest(payload, context: context)
+        case .cancelAutomationRun(let payload): return try handleCancelAutomationRunRequest(payload, context: context)
         }
     }
 
@@ -1302,6 +1316,11 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         // The daemon's host is missing the Spaces CLI every hook command needs; the request was well
         // formed, so this is the host lacking a capability rather than a client mistake.
         if error is AgentHookInstallerError { return .capabilityMissing }
+        // Automation boundary rejections (bad cron, empty field, unknown enum, missing automation/run) are
+        // all well-formed-request client errors, so they surface as invalidArgument with their descriptive
+        // message rather than a generic internal error.
+        if error is AutomationValidationError { return .invalidArgument }
+        if error is AutomationCronScheduleError { return .invalidArgument }
         if error is DecodingError { return .invalidArgument }
         return .internalError
     }
@@ -1628,8 +1647,37 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         var impact = RestartImpactCounts()
         for descriptor in workspaces { impact.accumulate(runningProcesses: descriptor.runningProcesses, agentWindows: descriptor.agentWindows) }
         let daemonStatus = Self.makeDaemonStatus(activeSessionCount: localSessions.count, impact: impact)
+        let (automationSummaries, automationRunSummaries) = try loadAutomationOverview(store: store, liveSessions: localSessions)
         return SpacesDeviceOverviewBuilder.build(
-            projects: projects, workspaces: workspaces, workspaceRows: workspaceRows, liveSessions: sessions, daemonStatus: daemonStatus)
+            projects: projects, workspaces: workspaces, workspaceRows: workspaceRows, liveSessions: sessions, daemonStatus: daemonStatus,
+            automations: automationSummaries, automationRuns: automationRunSummaries)
+    }
+
+    /// Builds the overview's automation section: every automation, plus the runs a client needs — all
+    /// currently-active (queued/running) runs unioned with the newest `recentAutomationRunLimit` terminal
+    /// runs, newest first, de-duplicated. Each run summary carries its automation name and its live
+    /// attributed-session count (computed against the live-session set the overview already scanned), so a
+    /// client can render run history and derive alert entries without extra calls.
+    private func loadAutomationOverview(store: SQLiteStore, liveSessions: [TerminalSessionCatalogEntry]) throws
+        -> ([TerminalServiceAutomationSummary], [TerminalServiceAutomationRunSummary])
+    {
+        let automations = try store.automations()
+        let automationSummaries = automations.map(TerminalServiceAutomationSummary.init)
+        let namesByAutomationID = Dictionary(automations.map { ($0.id, $0.name) }, uniquingKeysWith: { first, _ in first })
+        let liveSessionIDs = Set(liveSessions.map(\.sessionID))
+
+        // Active runs are always included regardless of the recent window; recent terminal runs fill in
+        // history. The selection contract lives in a pure builder helper so it can be unit-tested.
+        let ordered = SpacesDeviceOverviewBuilder.selectOverviewRuns(
+            recentTerminal: try store.allAutomationRuns(limit: SpacesDeviceOverviewBuilder.recentAutomationRunLimit),
+            active: try store.activeAutomationRuns())
+        let runSummaries = try ordered.map { run -> TerminalServiceAutomationRunSummary in
+            let attributed = (try? store.terminalSessionIDs(automationRunID: run.id)) ?? []
+            let liveCount = attributed.filter { liveSessionIDs.contains($0) }.count
+            return TerminalServiceAutomationRunSummary(
+                run, automationName: namesByAutomationID[run.automationID], liveAttributedSessionCount: liveCount)
+        }
+        return (automationSummaries, runSummaries)
     }
 
     private func mergedTerminalSessions(_ sessions: [TerminalSessionCatalogEntry]) -> [TerminalSessionCatalogEntry] {
@@ -2263,6 +2311,114 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             return SpacesDeviceAPIResponse(ok: false, message: "No agent session for terminal \(sessionID).", errorCode: .invalidArgument)
         }
         return try refreshedMutationResponse(context: context, message: "Killed agent session \(sessionID).")
+    }
+
+    // MARK: - Automations
+
+    /// The remote counterparts of the profile-socket automation commands. Each routes through the injected
+    /// `automationOperations` (the daemon's one live scheduler), so a create/trigger/cancel over the Device
+    /// API drives the exact scheduler state a local profile command would. Validation and next-fire-time
+    /// recomputation happen inside the shared `AutomationService`, not here.
+    private func handleCreateAutomationRequest(_ payload: TerminalServiceAutomationFields) throws -> SpacesDeviceAPIResponse {
+        guard let automationOperations else { return automationsUnavailableResponse() }
+        let draft = try automationDraft(from: payload)
+        let automation = try automationOperations.create(draft)
+        return automationsResponse([automation], message: "Created automation.")
+    }
+
+    private func handleUpdateAutomationRequest(_ payload: TerminalServiceAutomationUpdatePayload) throws -> SpacesDeviceAPIResponse {
+        guard let automationOperations else { return automationsUnavailableResponse() }
+        let draft = try automationDraft(from: payload.fields)
+        let automation = try automationOperations.update(payload.id, draft)
+        return automationsResponse([automation], message: "Updated automation.")
+    }
+
+    private func handleDeleteAutomationRequest(_ payload: SpacesDeviceAutomationReference) throws -> SpacesDeviceAPIResponse {
+        guard let automationOperations else { return automationsUnavailableResponse() }
+        try automationOperations.delete(payload.id)
+        return automationsResponse([], message: "Deleted automation.")
+    }
+
+    private func handleListAutomationsRequest() throws -> SpacesDeviceAPIResponse {
+        guard let automationOperations else { return automationsUnavailableResponse() }
+        return automationsResponse(try automationOperations.list(), message: "Listed automations.")
+    }
+
+    private func handleListAutomationRunsRequest(_ payload: TerminalServiceAutomationRunsListPayload, context: RequestContext) throws
+        -> SpacesDeviceAPIResponse
+    {
+        guard let automationOperations else { return automationsUnavailableResponse() }
+        let runs = try automationOperations.runs(normalizedString(payload.automationID))
+        return try automationRunsResponse(runs, context: context, message: "Listed automation runs.")
+    }
+
+    private func handleTriggerAutomationRequest(_ payload: SpacesDeviceAutomationReference, context: RequestContext) throws -> SpacesDeviceAPIResponse {
+        guard let automationOperations else { return automationsUnavailableResponse() }
+        let run = try automationOperations.trigger(payload.id)
+        return try automationRunsResponse([run], context: context, message: "Triggered automation.")
+    }
+
+    private func handleCancelAutomationRunRequest(_ payload: SpacesDeviceAutomationRunReference, context: RequestContext) throws
+        -> SpacesDeviceAPIResponse
+    {
+        guard let automationOperations else { return automationsUnavailableResponse() }
+        let run = try automationOperations.cancelRun(payload.runID)
+        return try automationRunsResponse([run], context: context, message: "Canceled automation run.")
+    }
+
+    private func automationsUnavailableResponse() -> SpacesDeviceAPIResponse {
+        SpacesDeviceAPIResponse(ok: false, message: "Automations are unavailable on this daemon.", errorCode: .internalError)
+    }
+
+    private static func invalidArgumentError(_ message: String) -> NSError {
+        NSError(domain: "SpacesDeviceAPIServer", code: 400, userInfo: [NSLocalizedDescriptionKey: message])
+    }
+
+    private func automationsResponse(_ automations: [Automation], message: String) -> SpacesDeviceAPIResponse {
+        SpacesDeviceAPIResponse(
+            ok: true, message: message, result: .automations(.init(rows: automations.map(TerminalServiceAutomationSummary.init))))
+    }
+
+    private func automationRunsResponse(_ runs: [AutomationRun], context: RequestContext, message: String) throws -> SpacesDeviceAPIResponse {
+        SpacesDeviceAPIResponse(
+            ok: true, message: message, result: .automationRuns(.init(rows: try automationRunSummaries(runs, store: context.store()))))
+    }
+
+    private func automationDraft(from fields: TerminalServiceAutomationFields) throws -> AutomationDraft {
+        guard let triggerKind = AutomationTriggerKind(rawValue: fields.triggerKind) else {
+            throw Self.invalidArgumentError("Unsupported automation trigger kind '\(fields.triggerKind)'.")
+        }
+        guard let concurrencyPolicy = AutomationConcurrencyPolicy(rawValue: fields.concurrencyPolicy) else {
+            throw Self.invalidArgumentError("Unsupported automation concurrency policy '\(fields.concurrencyPolicy)'.")
+        }
+        guard let missedRunPolicy = AutomationMissedRunPolicy(rawValue: fields.missedRunPolicy) else {
+            throw Self.invalidArgumentError("Unsupported automation missed-run policy '\(fields.missedRunPolicy)'.")
+        }
+        return AutomationDraft(
+            name: fields.name, enabled: fields.enabled, triggerKind: triggerKind, cronExpression: fields.cronExpression, command: fields.command,
+            workingDirectory: fields.workingDirectory, timeoutSeconds: fields.timeoutSeconds, concurrencyPolicy: concurrencyPolicy,
+            missedRunPolicy: missedRunPolicy)
+    }
+
+    /// Maps runs to wire summaries, denormalizing each run's automation name and counting its live
+    /// attributed sessions against the daemon's current live-session set.
+    private func automationRunSummaries(_ runs: [AutomationRun], store: SQLiteStore) throws -> [TerminalServiceAutomationRunSummary] {
+        guard !runs.isEmpty else { return [] }
+        let liveSessionIDs = Set((try? TerminalSessionCatalog.listLiveSessions())?.map(\.sessionID) ?? [])
+        var namesByAutomationID: [String: String] = [:]
+        return try runs.map { run in
+            let name: String?
+            if let cached = namesByAutomationID[run.automationID] {
+                name = cached
+            } else {
+                let resolved = try store.automation(id: run.automationID)?.name
+                if let resolved { namesByAutomationID[run.automationID] = resolved }
+                name = resolved
+            }
+            let attributed = (try? store.terminalSessionIDs(automationRunID: run.id)) ?? []
+            let liveCount = attributed.filter { liveSessionIDs.contains($0) }.count
+            return TerminalServiceAutomationRunSummary(run, automationName: name, liveAttributedSessionCount: liveCount)
+        }
     }
 
     /// Maps the neutral orchestration row the daemon builds to its Device API wire shape.
