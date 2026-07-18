@@ -1,7 +1,7 @@
 import SwiftUI
 import spacesterminalcore
 
-enum SpacesMobileSettingsRoute: Hashable { case pairedDevices }
+enum SpacesMobileSettingsRoute: Hashable { case pairedDevices, automations }
 
 /// Settings tab: connection, appearance, and version in the shared band language.
 struct SettingsTabView: View {
@@ -18,6 +18,11 @@ struct SettingsTabView: View {
                             Text("\(model.pairedDevices.count)").font(.system(size: 12)).foregroundStyle(Theme.mutedSecondary).monospacedDigit()
                         }
                     }
+                    settingsGroup("Automations") {
+                        navigationRow(label: "Automations", identifier: "settings.automations", destination: .automations) {
+                            Text("\(model.automationRows.count)").font(.system(size: 12)).foregroundStyle(Theme.mutedSecondary).monospacedDigit()
+                        }
+                    }
                     settingsGroup("Appearance") { themeRow }
                     settingsGroup("About") { versionRow }
                 }.padding(.vertical, 12)
@@ -25,6 +30,7 @@ struct SettingsTabView: View {
                 .navigationDestination(for: SpacesMobileSettingsRoute.self) { route in
                     switch route {
                     case .pairedDevices: PairedDevicesView(model: model)
+                    case .automations: AutomationsListView(model: model)
                     }
                 }
         }.accessibilityIdentifier("tab.settings").task { presentPairedDevicesIfRequested(model.isShowingConnectionSettings) }.onChange(

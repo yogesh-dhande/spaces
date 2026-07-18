@@ -19,7 +19,7 @@ struct AlertsTabView: View {
     }
 
     @ViewBuilder private var content: some View {
-        if model.attentionGroups.isEmpty {
+        if model.attentionGroups.isEmpty && model.automationAlerts.isEmpty {
             ContentUnavailableView {
                 Label("No Alerts", systemImage: "bell")
             } description: {
@@ -27,10 +27,34 @@ struct AlertsTabView: View {
             }
         } else {
             ScrollView {
-                LazyVStack(spacing: 0) { ForEach(model.attentionGroups) { group in alertGroupSection(group).padding(.bottom, 14) } }.padding(
-                    .vertical, 12)
+                LazyVStack(spacing: 0) {
+                    ForEach(model.attentionGroups) { group in alertGroupSection(group).padding(.bottom, 14) }
+                    if !model.automationAlerts.isEmpty { automationAlertsSection(model.automationAlerts).padding(.bottom, 14) }
+                }.padding(.vertical, 12)
             }.scrollContentBackground(.hidden)
         }
+    }
+
+    /// Failed/timed-out automation runs are workspace-less, so they get their own band rather than
+    /// joining a per-workspace section — mirrors the Mac's synthetic "Automations" alerts group.
+    private func automationAlertsSection(_ entries: [SpacesMobileAutomationAlertEntry]) -> some View {
+        VStack(spacing: 0) {
+            HeaderBand {
+                Text("Automations").font(.system(size: 14, weight: .semibold)).foregroundStyle(Theme.text).lineLimit(1)
+                Spacer(minLength: 0)
+                Text("\(entries.count)").font(.system(size: 12)).foregroundStyle(Theme.mutedSecondary).monospacedDigit()
+            }.accessibilityIdentifier("alerts.band.automations")
+            VStack(spacing: 0) { ForEach(entries) { entry in automationAlertRow(entry) } }.padding(.top, 4)
+        }
+    }
+
+    /// Status-level only: there is no terminal/replay to open for an automation run in this feature, so
+    /// unlike `eventRow` this row is never a button.
+    private func automationAlertRow(_ entry: SpacesMobileAutomationAlertEntry) -> some View {
+        BandRow(
+            dotKind: .exited, tile: TypeIconTile(systemName: "clock.arrow.circlepath", background: Theme.orange.opacity(0.16), foreground: Theme.orange),
+            title: entry.automationName, detail: entry.outcome, detailIsMonospaced: false
+        ) { EmptyView() }.accessibilityIdentifier("alert.automation.\(entry.id)")
     }
 
     private func alertGroupSection(_ group: SpacesMobileAttentionGroup) -> some View {

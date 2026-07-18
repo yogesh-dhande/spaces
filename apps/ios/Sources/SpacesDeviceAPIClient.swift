@@ -258,6 +258,22 @@ struct SpacesDeviceAPIClient: Sendable {
                 authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity), commandChannel: commandChannel)
     }
 
+    /// Manually fires an automation, respecting the daemon's concurrency gate. The response carries the
+    /// resulting run (started, queued, or skipped) but no overview, so the caller reloads the overview to
+    /// reflect it — see `SpacesMobileAppModel.triggerAutomation`.
+    func triggerAutomation(id: String, commandChannel: SpacesDeviceAPICommandChannel? = nil) async throws -> SpacesDeviceAPIResponse {
+        try await mutation(
+            .init(command: .triggerAutomation(.init(id: id)), authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity),
+            commandChannel: commandChannel)
+    }
+
+    /// Cancels a running (or queued) automation run.
+    func cancelAutomationRun(runID: String, commandChannel: SpacesDeviceAPICommandChannel? = nil) async throws -> SpacesDeviceAPIResponse {
+        try await mutation(
+            .init(command: .cancelAutomationRun(.init(runID: runID)), authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity),
+            commandChannel: commandChannel)
+    }
+
     func fetchState(sessionID: String, timeout: Duration = .seconds(3), commandChannel: SpacesDeviceAPICommandChannel? = nil) async throws
         -> GhosttyRemoteSessionStatePayload
     {

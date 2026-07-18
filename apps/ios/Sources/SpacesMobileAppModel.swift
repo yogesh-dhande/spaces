@@ -564,19 +564,60 @@ private enum SpacesMobileMutationTimeoutRecovery {
         return SpacesMobileAttention.groups(in: overview, dismissedEventIDs: dismissedAlertIDs)
     }
 
+    /// Failed/timed-out automation-run alert entries for the Alerts tab, with cleared entries filtered
+    /// out. Automation runs are workspace-less, so these are derived and rendered separately from
+    /// `attentionGroups` — see `SpacesMobileAutomationAlerts`.
+    var automationAlerts: [SpacesMobileAutomationAlertEntry] {
+        guard let overview else { return [] }
+        return SpacesMobileAutomationAlerts.entries(runs: overview.automationRuns).filter { !dismissedAlertIDs.contains($0.id) }
+    }
+
     /// Undismissed attention-event count, shown as the Alerts tab badge.
-    var undismissedAlertCount: Int { attentionGroups.reduce(0) { $0 + $1.events.count } }
+    var undismissedAlertCount: Int { attentionGroups.reduce(0) { $0 + $1.events.count } + automationAlerts.count }
 
     /// Marks every currently derived attention event dismissed.
     func clearAlerts() {
         guard let overview else { return }
         dismissedAlertIDs.formUnion(SpacesMobileAttention.events(in: overview).map(\.id))
+        dismissedAlertIDs.formUnion(SpacesMobileAutomationAlerts.entries(runs: overview.automationRuns).map(\.id))
     }
 
     /// Coding-agent rows across all workspaces grouped by activity for the Agents tab.
     var agentGroups: [SpacesMobileAgentGroup] {
         guard let overview else { return [] }
         return SpacesMobileAgentGrouping.groups(in: overview)
+    }
+
+    /// Automation rows for the Automations screen (pushed from Settings), derived from the active
+    /// device's overview.
+    var automationRows: [SpacesMobileAutomationRow] {
+        guard let overview else { return [] }
+        return SpacesMobileAutomations.rows(automations: overview.automations, runs: overview.automationRuns)
+    }
+
+    /// Manually fires an automation, respecting the daemon's concurrency gate. There is no separate
+    /// confirmation or toast for the started/queued/skipped outcome: the automation row's status dot
+    /// reflects it once the refreshed overview lands, mirroring how the Mac's Automations pane surfaces
+    /// this (a reload, not an optimistic local merge — automation mutation responses carry no overview).
+    func triggerAutomation(id: String) async {
+        guard !isMutating else { return }
+        isMutating = true
+        defer { isMutating = false }
+        do {
+            _ = try await bridgeClient.triggerAutomation(id: id, commandChannel: commandChannel)
+            await refresh()
+        } catch { handleBridgeError(error) }
+    }
+
+    /// Cancels a running (or queued) automation run.
+    func cancelAutomationRun(runID: String) async {
+        guard !isMutating else { return }
+        isMutating = true
+        defer { isMutating = false }
+        do {
+            _ = try await bridgeClient.cancelAutomationRun(runID: runID, commandChannel: commandChannel)
+            await refresh()
+        } catch { handleBridgeError(error) }
     }
 
     func toggleWorkspaceCollapsed(_ workspaceID: String) {
