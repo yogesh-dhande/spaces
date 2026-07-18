@@ -152,7 +152,14 @@
         public func terminate() {
             guard started || vtSession != nil || controlServer != nil || stateStreamServer != nil else { return }
             terminating = true
-            let finalPayload = makeStatePayload(reason: TerminalRemoteSessionStateReason.terminated, state: .exited)
+            // Stamp the exit ONCE and reuse that snapshot for both the persisted runtime state and the
+            // final payload's embedded runtime state. The client arms ended-scrollback replay with the
+            // identity from the final state payload, while the server's transcript endpoint reports the
+            // identity from the persisted runtime state; if the two disagree the client rejects the
+            // ended run's transcript and scrollback replay is unavailable. `runIdentity` embeds a
+            // sub-second exit timestamp, so two separate stamps virtually always differ — build one.
+            let exitedState = makeRuntimeStateSnapshot(state: .exited)
+            let finalPayload = makeStatePayload(reason: TerminalRemoteSessionStateReason.terminated, runtimeStateOverride: exitedState)
             if let finalPayload { try? TerminalSessionPersistence.writeRemoteSessionState(finalPayload, paths: paths) }
             if let finalPayload { stateStreamServer?.broadcast(finalPayload) }
             controlServer?.stop()
@@ -171,7 +178,6 @@
                 spaces_ghostty_vt_session_free(vtSession)
                 self.vtSession = nil
             }
-            writeRuntimeState(state: .exited)
             try? TerminalSessionPersistence.detachActiveClients(paths: paths, detachedAt: nowISO8601())
             try? outputHandle?.synchronize()
             try? outputHandle?.close()
@@ -548,15 +554,11 @@
         }
 
         private func enqueueControlInputWrite(_ bytes: Data) {
-            controlInputSequencer.enqueueWrite { [weak self] in
-                await MainActor.run { self?.ptyDriver.sendRawBytes(bytes) }
-            }
+            controlInputSequencer.enqueueWrite { [weak self] in await MainActor.run { self?.ptyDriver.sendRawBytes(bytes) } }
         }
 
         private func enqueueControlSubmitCarriageReturn() {
-            controlInputSequencer.enqueueSubmitCarriageReturn { [weak self] in
-                await MainActor.run { self?.ptyDriver.sendRawBytes(Data([0x0D])) }
-            }
+            controlInputSequencer.enqueueSubmitCarriageReturn { [weak self] in await MainActor.run { self?.ptyDriver.sendRawBytes(Data([0x0D])) } }
         }
 
         private func encodePastePayload(_ text: String) -> Data? {
@@ -775,7 +777,7 @@
         /// (`applyThemeAppearance(_:)`), since the headless daemon cannot read the client's OS
         /// appearance. Until a client attaches, the session uses the default (dark) appearance.
         private func makeVTSession(columns: Int, rows: Int) -> OpaquePointer? {
-            var theme = Self.vtTheme(export: ActiveTheme.descriptor.terminal(for: currentAppearance))
+            var theme = GhosttyVtSessionBridge.packTheme(ActiveTheme.descriptor.terminal(for: currentAppearance))
             return withUnsafePointer(to: &theme) { themePointer in
                 spaces_ghostty_vt_session_new(UInt16(clamping: columns), UInt16(clamping: rows), Self.maxScrollbackBytes, themePointer)
             }
@@ -788,35 +790,27 @@
             guard appearance != currentAppearance else { return }
             currentAppearance = appearance
             guard let vtSession else { return }
-            var theme = Self.vtTheme(export: ActiveTheme.descriptor.terminal(for: appearance))
+            var theme = GhosttyVtSessionBridge.packTheme(ActiveTheme.descriptor.terminal(for: appearance))
             let applied = withUnsafePointer(to: &theme) { spaces_ghostty_vt_session_set_theme(vtSession, $0) }
             guard applied else { return }
             screenStateRevision &+= 1
             forceNextBroadcastFullRenderUpdate = true
         }
 
-        /// Packs a theme's terminal export into the C shim's theme struct (default fg/bg/cursor plus
-        /// the 16 ANSI palette entries; the shim fills 16-255 with the standard xterm ramp).
-        private static func vtTheme(export: GhosttyThemeExport) -> SpacesGhosttyVtTheme {
-            var theme = SpacesGhosttyVtTheme()
-            theme.foreground_rgb = export.foreground.packedRGB
-            theme.background_rgb = export.background.packedRGB
-            theme.cursor_rgb = export.cursorColor.packedRGB
-            withUnsafeMutablePointer(to: &theme.palette_rgb) { tuplePointer in
-                tuplePointer.withMemoryRebound(to: UInt32.self, capacity: 16) { buffer in
-                    for index in 0..<16 { buffer[index] = index < export.palette.count ? export.palette[index].packedRGB : 0 }
-                }
-            }
-            return theme
+        private func writeRuntimeState(state: TerminalSessionState) {
+            persistRuntimeState(makeRuntimeStateSnapshot(state: state))
         }
 
-        private func writeRuntimeState(state: TerminalSessionState) {
+        /// Builds a runtime-state snapshot for `state`, stamping `updatedAt`/`exitedAt` once per call.
+        /// Extracted so an exit can be captured a single time and reused for both the persisted runtime
+        /// state and the final payload (see `terminate()`), guaranteeing they share one `runIdentity`.
+        private func makeRuntimeStateSnapshot(state: TerminalSessionState) -> TerminalSessionRuntimeState {
             let liveChildPID = ptyDriver.childPID()
             if let liveChildPID { lastKnownChildPID = liveChildPID }
             let foregroundPID = ptyDriver.foregroundPID()
             let foregroundProcess = foregroundPID.flatMap { TerminalForegroundProcessInspector.inspect(pid: $0) }
             let foregroundAgent = foregroundProcess.flatMap { TerminalForegroundProcessInspector.classify($0) }
-            let runtimeState = TerminalSessionRuntimeState(
+            return TerminalSessionRuntimeState(
                 sessionID: launchConfiguration.sessionID, backend: launchConfiguration.backend, servicePID: getpid(),
                 childPID: liveChildPID ?? lastKnownChildPID, state: state, updatedAt: nowISO8601(),
                 exitedAt: state.isInteractive ? nil : nowISO8601(), title: launchConfiguration.title,
@@ -825,6 +819,9 @@
                 foregroundExecutableName: foregroundProcess?.executableName, foregroundArgv: foregroundProcess?.argv,
                 foregroundDetectedAgentKind: foregroundAgent?.detectedAgentKind, foregroundDisplayLabel: foregroundAgent?.displayLabel,
                 foregroundDisplayCommand: foregroundAgent?.displayCommand)
+        }
+
+        private func persistRuntimeState(_ runtimeState: TerminalSessionRuntimeState) {
             let previousSignature = lastRuntimeState.map(runtimeStateSignature(for:))
             let nextSignature = runtimeStateSignature(for: runtimeState)
             try? TerminalSessionPersistence.writeRuntimeState(runtimeState, paths: paths)
@@ -867,16 +864,18 @@
         }
 
         private func makeStatePayload(
-            reason: String, state: TerminalSessionState? = nil, exportMode: RenderStateExportMode = .selfContained,
+            reason: String, runtimeStateOverride: TerminalSessionRuntimeState? = nil, exportMode: RenderStateExportMode = .selfContained,
             markNextBroadcastFull: Bool = false
         ) -> GhosttyRemoteSessionStatePayload? {
             let attachmentSnapshot = (try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)) ?? TerminalSessionAttachmentSnapshot()
             let ownerKind = TerminalRemoteSessionStatePolicy.activeOwnerClientKind(in: attachmentSnapshot)
             let includeScreenState = TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(reason: reason, ownerKind: ownerKind)
             let runtimeState: TerminalSessionRuntimeState
-            if let state {
-                writeRuntimeState(state: state)
-                runtimeState = lastRuntimeState ?? fallbackRuntimeState(state: state)
+            if let runtimeStateOverride {
+                // Persist and embed the caller-supplied snapshot verbatim so the payload's runtime state
+                // and the row written here share one `runIdentity` (terminate() relies on this).
+                persistRuntimeState(runtimeStateOverride)
+                runtimeState = runtimeStateOverride
             } else {
                 runtimeState = lastRuntimeState ?? fallbackRuntimeState(state: started ? .running : .exited)
             }
@@ -958,19 +957,7 @@
             var rawSnapshot = SpacesGhosttyVtSnapshot()
             guard spaces_ghostty_vt_session_copy_snapshot(vtSession, &rawSnapshot) else { throw GhosttyLinuxHeadlessSessionError.snapshotUnavailable }
             defer { spaces_ghostty_vt_snapshot_free(&rawSnapshot) }
-            let cells: [GhosttyTerminalSnapshot.Cell]
-            if let rawCells = rawSnapshot.cells, rawSnapshot.cell_count > 0 {
-                cells = UnsafeBufferPointer(start: rawCells, count: rawSnapshot.cell_count).map {
-                    GhosttyTerminalSnapshot.Cell(
-                        codepoint: $0.codepoint, foregroundRGB: $0.foreground_rgb, backgroundRGB: $0.background_rgb, flags: $0.flags)
-                }
-            } else {
-                cells = []
-            }
-            let snapshot = GhosttyTerminalSnapshot(
-                columns: Int(rawSnapshot.columns), rows: Int(rawSnapshot.rows), cursorColumn: Int(rawSnapshot.cursor_column),
-                cursorRow: Int(rawSnapshot.cursor_row), cursorVisible: rawSnapshot.cursor_visible,
-                defaultForegroundRGB: rawSnapshot.default_foreground_rgb, defaultBackgroundRGB: rawSnapshot.default_background_rgb, cells: cells)
+            let snapshot = GhosttyVtSessionBridge.snapshot(from: rawSnapshot)
             return GhosttyRenderFrame(sessionRevision: screenStateRevision, ownerEpoch: ownerEpoch, snapshot: snapshot)
         }
 

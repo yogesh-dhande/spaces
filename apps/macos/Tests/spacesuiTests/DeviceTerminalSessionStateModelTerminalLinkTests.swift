@@ -159,6 +159,11 @@ import workspacecore
         }
     }
 
+    // The `fetchTranscript` mapping is covered by `DeviceTerminalSessionStateModelTranscriptTests`
+    // (XCTest): its positive path round-trips per-session filesystem and profile-database state that the
+    // in-process server re-resolves from `SPACES_DB_PATH`/`SPACES_RUNTIME_DIR` at request time, and
+    // parallel Swift Testing suites mutating that process-global env make such assertions flaky here.
+
     // MARK: Server harness
 
     /// A dedicated, never-listening port. The guard-clause tests above assert the model throws before
