@@ -159,6 +159,32 @@ import workspacecore
         }
     }
 
+    @Test func fetchTranscriptReturnsTheTranscriptSuffixWhenOutputExists() throws {
+        try withServer { pairingStore, clientApp, requestClient in
+            let sessionID = "transcript-session-\(UUID().uuidString)"
+            let paths = try TerminalSessionPaths.forSession(id: sessionID)
+            try paths.ensureDirectories()
+            let transcript = Data("row-1\nrow-2\nrow-3\n".utf8)
+            try transcript.write(to: URL(fileURLWithPath: paths.outputPath))
+
+            let data = try DeviceTerminalSessionStateModel.fetchTranscript(
+                sessionID: sessionID, maxBytes: 1_000_000, requestClient: requestClient, authToken: pairingStore.authToken, clientApp: clientApp)
+            #expect(data == transcript)
+        }
+    }
+
+    @Test func fetchTranscriptReturnsEmptyDataWhenTheDeviceReportsNoTranscript() throws {
+        // A missing `output.log` makes the server answer `.sessionNotAvailable`, a definitive "nothing to
+        // replay". The model must map that to empty data (not throw) so the render host latches its
+        // `.unavailable` verdict instead of retrying the doomed fetch on every scroll gesture.
+        try withServer { pairingStore, clientApp, requestClient in
+            let data = try DeviceTerminalSessionStateModel.fetchTranscript(
+                sessionID: "missing-transcript-session-\(UUID().uuidString)", maxBytes: 1000, requestClient: requestClient,
+                authToken: pairingStore.authToken, clientApp: clientApp)
+            #expect(data.isEmpty)
+        }
+    }
+
     // MARK: Server harness
 
     /// A dedicated, never-listening port. The guard-clause tests above assert the model throws before

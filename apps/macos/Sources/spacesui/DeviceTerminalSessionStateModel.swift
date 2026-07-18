@@ -182,15 +182,34 @@
             let clientApp = self.clientApp
             let requestClient = self.requestClient
             return try await Task.detached(priority: .userInitiated) {
-                let request = SpacesDeviceAPIRequest(
-                    command: .terminalTranscript(SpacesDeviceTerminalTranscriptRequest(sessionID: sessionID, maxBytes: maxBytes)),
-                    authToken: authToken, clientApp: clientApp)
-                // The session client's default timeout cannot carry a budget-sized transcript on a
-                // slow remote link; use the shared per-command policy instead.
-                let response = try requestClient.send(request, timeoutSeconds: SpacesDeviceClient.requestTimeoutSeconds(for: request.command))
-                guard response.ok, let transcript = response.terminalTranscript else { throw SpacesDeviceClientError.unavailable(response.message) }
-                return transcript.data
+                try Self.fetchTranscript(
+                    sessionID: sessionID, maxBytes: maxBytes, requestClient: requestClient, authToken: authToken, clientApp: clientApp)
             }.value
+        }
+
+        /// Internal (not `private`) so `spacesuiTests` can drive it directly through
+        /// `@testable import spacesui` against a real `SpacesDeviceAPIRequestSessionClient` pointed at an
+        /// in-process `SpacesDeviceAPIServer`; the client is a concrete `final class` with no protocol
+        /// seam to fake, so this is the closest faithful integration test of the mapping below.
+        nonisolated static func fetchTranscript(
+            sessionID: String, maxBytes: Int, requestClient: SpacesDeviceAPIRequestSessionClient, authToken: String?,
+            clientApp: SpacesDeviceClientApp
+        ) throws -> Data {
+            let request = SpacesDeviceAPIRequest(
+                command: .terminalTranscript(SpacesDeviceTerminalTranscriptRequest(sessionID: sessionID, maxBytes: maxBytes)),
+                authToken: authToken, clientApp: clientApp)
+            // The session client's default timeout cannot carry a budget-sized transcript on a
+            // slow remote link; use the shared per-command policy instead.
+            let response = try requestClient.send(request, timeoutSeconds: SpacesDeviceClient.requestTimeoutSeconds(for: request.command))
+            guard response.ok, let transcript = response.terminalTranscript else {
+                // A missing `output.log` is definitive: the server reports `.sessionNotAvailable`, which
+                // means there is simply nothing to replay. Return empty so the render host latches its
+                // `.unavailable` verdict instead of retrying the doomed fetch on every scroll gesture;
+                // every other failure stays transient and throws so the host retries.
+                if response.errorCode == .sessionNotAvailable { return Data() }
+                throw SpacesDeviceClientError.unavailable(response.message)
+            }
+            return transcript.data
         }
 
         /// State-stream subscriber for the Ghostty render host. Instead of opening a

@@ -32,6 +32,9 @@
                 let result = try XCTUnwrap(response.terminalTranscript)
                 XCTAssertEqual(result.totalBytes, 5000)
                 XCTAssertEqual(result.data, transcript.suffix(990))
+                // The read is bounded to the size snapshot, so the returned suffix never exceeds the cap
+                // even if the session were still appending output past the snapshotted EOF.
+                XCTAssertLessThanOrEqual(result.data.count, 995)
                 let text = try XCTUnwrap(String(data: result.data, encoding: .utf8))
                 XCTAssertTrue(text.hasPrefix("line-"), "capped suffix should start on a whole line, got: \(text.prefix(20))")
             }

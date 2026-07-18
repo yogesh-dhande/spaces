@@ -55,6 +55,10 @@
         /// and every post-suspension check in `beginLoadingEndedScrollbackModel` requires an unchanged
         /// generation before applying its result.
         private var endedScrollbackGeneration: UInt64 = 0
+        /// Identifies the ended run the current replay/verdict belongs to, so an ended->ended transition
+        /// to a *different* run (the session relaunched and exited again unobserved by this client) still
+        /// discards the stale replay state. `nil` whenever no replay is armed.
+        private var endedScrollbackRunIdentity: String?
         /// Monotonic local revision for replay frames, so the mirror's frame-dedupe never drops a
         /// scrolled viewport that happens to match a prior revision.
         private var endedScrollbackRevision: UInt64 = 0
@@ -413,8 +417,18 @@
             let applyStartedAt = Date()
             // A relaunch resurrects the live renderer, so drop any ended-session replay and let live
             // frames render again. While a replay is still active for an ended session, a re-served
-            // final payload must not clobber the locally scrolled viewport.
-            if isInteractiveRuntimeStateForControl() { discardEndedScrollbackIfActive() }
+            // final payload for the *same* run must not clobber the locally scrolled viewport.
+            //
+            // A relaunch+exit unobserved by this client (disconnected, or between refreshes) surfaces as
+            // another *ended* payload rather than an interactive one, so the interactive check alone would
+            // keep replaying the previous run's transcript and suppressing the new run's final frame.
+            // Detect it by run identity: when the armed replay belongs to a different ended run than the
+            // one now observed, discard so the new run's final frame renders and its transcript re-fetches.
+            if isInteractiveRuntimeStateForControl() {
+                discardEndedScrollbackIfActive()
+            } else if let armedRunIdentity = endedScrollbackRunIdentity, currentEndedRunIdentity() != armedRunIdentity {
+                discardEndedScrollbackIfActive()
+            }
             if !isEndedScrollbackReplayActive, frameForUpdate != nil || !terminalView.hasRenderedSurfaceContent {
                 terminalView.update(frame: frameForUpdate, renderStateKey: currentRenderStateKey())
             } else if isEndedScrollbackReplayActive {
@@ -598,6 +612,11 @@
                 // A sub-cell nudge normalizes to zero rows; wait for a real scroll before paying to
                 // fetch and replay the transcript, but still report it as accepted.
                 guard deltaRows != 0 else { return true }
+                // Arm the replay against the current ended run. Every non-idle state descends from this
+                // single idle->loading transition, so recording identity once here covers the `.loading`,
+                // `.ready`, and `.unavailable` outcomes; `applyRemoteState` compares it to later payloads
+                // to discard a stale replay when a different ended run is observed.
+                endedScrollbackRunIdentity = currentEndedRunIdentity()
                 endedScrollbackState = .loading(pendingDeltaRows: deltaRows)
                 beginLoadingEndedScrollbackModel()
                 return true
@@ -699,7 +718,16 @@
             if case .idle = endedScrollbackState { return }
             endedScrollbackGeneration &+= 1
             endedScrollbackState = .idle
+            endedScrollbackRunIdentity = nil
             endedScrollDeltaNormalizer = TerminalScrollDeltaNormalizer()
+        }
+
+        /// Run identity for the ended run currently described by `latestState`: the child PID differs per
+        /// launch and the exit timestamp per exit, so together they identify a run. `nil` when there is no
+        /// runtime state yet. Used to detect an ended->ended transition to a different run.
+        private func currentEndedRunIdentity() -> String? {
+            guard let runtimeState = latestState?.runtimeState else { return nil }
+            return "\(runtimeState.childPID.map(String.init) ?? "-")|\(runtimeState.exitedAt ?? "-")"
         }
 
         private func enqueueRemoteScrollBatch(_ batch: TerminalScrollCoalescer.Batch, onFinished: @escaping TerminalScrollCoalescer.FinishHandler) {

@@ -1444,11 +1444,18 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         let totalBytes = try handle.seekToEnd()
         let startOffset = totalBytes > UInt64(cap) ? totalBytes - UInt64(cap) : 0
         try handle.seek(toOffset: startOffset)
-        var data = try handle.readToEnd() ?? Data()
+        // Bound the read to the size snapshot: `output.log` is append-only, so this range always
+        // exists, and a still-running session appending past `totalBytes` cannot grow the response
+        // beyond the cap (this command is deliberately not interactivity-gated).
+        var data = try handle.read(upToCount: Int(totalBytes - startOffset)) ?? Data()
         // A capped suffix starts at an arbitrary byte, which can split a UTF-8 character or an
         // escape sequence and replay as garbage. Advance to the first line boundary so the replay
         // starts on whole lines; a suffix with no newline at all is returned raw (the vt parser
         // resynchronizes, at worst mangling the oldest visible scrollback line).
+        // Accepted limitation: a suffix cut inside established VT state (an alternate-screen session,
+        // a persistent SGR color) replays with default terminal state — faithfully restoring it would
+        // require reconstructing terminal state from the dropped prefix, which capped replay deliberately
+        // does not do. The newest scrollback is unaffected.
         if startOffset > 0, let newlineIndex = data.firstIndex(of: 0x0A), newlineIndex < data.endIndex - 1 {
             data = data.subdata(in: (newlineIndex + 1)..<data.endIndex)
         }
