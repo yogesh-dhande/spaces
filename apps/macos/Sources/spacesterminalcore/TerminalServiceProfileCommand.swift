@@ -181,12 +181,17 @@ public struct TerminalServiceAgentSpawnPayload: Codable, Sendable, Equatable {
     /// daemon gates it against the supported-agent hook set (and their install state) before spawning.
     public let command: String
     public let title: String?
+    /// The automation execution this spawn belongs to, when the daemon's scheduler initiates it. When
+    /// present the daemon stamps it onto the spawned session's terminal_sessions row; nil for ordinary
+    /// interactive spawns, which keeps their existing behavior unchanged.
+    public let automationRunID: String?
 
-    public init(cwd: String, workspaceID: String? = nil, command: String, title: String? = nil) {
+    public init(cwd: String, workspaceID: String? = nil, command: String, title: String? = nil, automationRunID: String? = nil) {
         self.cwd = cwd
         self.workspaceID = workspaceID
         self.command = command
         self.title = title
+        self.automationRunID = automationRunID
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -194,6 +199,7 @@ public struct TerminalServiceAgentSpawnPayload: Codable, Sendable, Equatable {
         case workspaceID
         case command
         case title
+        case automationRunID
     }
 
     public init(from decoder: any Decoder) throws {
@@ -202,6 +208,7 @@ public struct TerminalServiceAgentSpawnPayload: Codable, Sendable, Equatable {
         workspaceID = try container.decodeIfPresent(String.self, forKey: .workspaceID)
         command = try container.decodeRequiredNonEmpty(forKey: .command)
         title = try container.decodeIfPresent(String.self, forKey: .title)
+        automationRunID = try container.decodeIfPresent(String.self, forKey: .automationRunID)
     }
 }
 

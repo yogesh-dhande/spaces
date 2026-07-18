@@ -1150,7 +1150,8 @@ import workspacecore
             throw SpacesRuntimeError.invalidArgument(message: error.errorDescription ?? "Agent spawn command is not supported.")
         }
         let workspaceID = try orchestrator.resolveWorkspaceIDForTerminalCommand(explicitWorkspaceID: payload.workspaceID, cwd: payload.cwd)
-        let session = try orchestrator.createWorkspaceAgentSession(workspaceID: workspaceID, command: payload.command, title: payload.title)
+        let session = try orchestrator.createWorkspaceAgentSession(
+            workspaceID: workspaceID, command: payload.command, title: payload.title, automationRunID: payload.automationRunID)
         return TerminalServiceProfileCommandResponse(message: "Started agent session.", terminalSession: session)
     }
 

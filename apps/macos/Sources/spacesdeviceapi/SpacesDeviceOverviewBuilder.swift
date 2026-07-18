@@ -87,10 +87,13 @@ struct SpacesDeviceOverviewBuilder {
                 return lhs.workspace.workspace.displayName.localizedStandardCompare(rhs.workspace.workspace.displayName) == .orderedAscending
             }
             return lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending
-        }.map { row in
-            summary(
-                for: row.entry, matchedWorkspace: row.workspace, title: row.title, rowKind: row.rowKind, rowSourceID: row.rowSourceID,
-                hasFinalRender: row.hasFinalRender)
+        }.compactMap { row -> SpacesDeviceTerminalSessionSummary? in
+            // Workspace rows always carry a workspace; a nil id would be a workspace-less session that has
+            // no place in a workspace-scoped listing, so it is dropped rather than surfaced.
+            guard let workspaceID = row.entry.workspaceID else { return nil }
+            return summary(
+                for: row.entry, workspaceID: workspaceID, matchedWorkspace: row.workspace, title: row.title, rowKind: row.rowKind,
+                rowSourceID: row.rowSourceID, hasFinalRender: row.hasFinalRender)
         }
 
         let adHocSessionSummaries = adHocLiveSessions.sorted { lhs, rhs in
@@ -98,11 +101,14 @@ struct SpacesDeviceOverviewBuilder {
                 return lhs.effectiveWorkingDirectory.localizedStandardCompare(rhs.effectiveWorkingDirectory) == .orderedAscending
             }
             return lhs.effectiveTitle.localizedStandardCompare(rhs.effectiveTitle) == .orderedAscending
-        }.map { session in
+        }.compactMap { session -> SpacesDeviceTerminalSessionSummary? in
+            // Workspace-less sessions (e.g. automation runs) are not workspace-owned and stay invisible
+            // in the workspace-scoped overview; only sessions with a workspace id produce a summary.
+            guard let workspaceID = session.workspaceID else { return nil }
             let matchedWorkspace = matchedWorkspaceBySessionID[session.sessionID] ?? nil
             return summary(
-                for: session, matchedWorkspace: matchedWorkspace, title: session.effectiveTitle, rowKind: .liveSession, rowSourceID: nil,
-                hasFinalRender: false)
+                for: session, workspaceID: workspaceID, matchedWorkspace: matchedWorkspace, title: session.effectiveTitle, rowKind: .liveSession,
+                rowSourceID: nil, hasFinalRender: false)
         }
 
         return SpacesDeviceOverviewPayload(
@@ -115,15 +121,15 @@ struct SpacesDeviceOverviewBuilder {
     }
 
     private static func summary(
-        for session: TerminalSessionCatalogEntry, matchedWorkspace: WorkspaceDescriptor?, title: String, rowKind: SpacesDeviceTerminalSessionRowKind,
-        rowSourceID: String?, hasFinalRender: Bool
+        for session: TerminalSessionCatalogEntry, workspaceID: String, matchedWorkspace: WorkspaceDescriptor?, title: String,
+        rowKind: SpacesDeviceTerminalSessionRowKind, rowSourceID: String?, hasFinalRender: Bool
     ) -> SpacesDeviceTerminalSessionSummary {
         let isInteractive = session.runtimeState.state.isInteractive
         return SpacesDeviceTerminalSessionSummary(
             id: session.sessionID, title: title, workingDirectory: session.effectiveWorkingDirectory, shell: session.launchConfiguration.shell,
             command: session.launchConfiguration.command, state: session.runtimeState.state, backend: session.launchConfiguration.backend,
             lifetimePolicy: session.launchConfiguration.lifetimePolicy, servicePID: session.runtimeState.servicePID,
-            childPID: session.runtimeState.childPID, workspaceID: session.workspaceID, workspaceTitle: matchedWorkspace?.workspace.displayName,
+            childPID: session.runtimeState.childPID, workspaceID: workspaceID, workspaceTitle: matchedWorkspace?.workspace.displayName,
             projectID: matchedWorkspace?.project.id, projectName: matchedWorkspace?.project.name, createdAt: session.launchConfiguration.createdAt,
             updatedAt: session.runtimeState.updatedAt, isControlAvailable: isInteractive && session.isControlAvailable,
             isSubscriptionAvailable: isInteractive && session.isSubscriptionAvailable, attachmentSnapshot: session.attachmentSnapshot,

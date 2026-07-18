@@ -2211,7 +2211,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 ok: false, message: error.errorDescription ?? "Agent spawn command is not supported.", errorCode: .invalidArgument)
         }
         let session = try context.orchestrator().createWorkspaceAgentSession(
-            workspaceID: workspaceID, command: command, title: normalizedString(request.title))
+            workspaceID: workspaceID, command: command, title: normalizedString(request.title),
+            automationRunID: normalizedString(request.automationRunID))
         return try refreshedMutationResponse(context: context, message: "Started agent session.", workspaceID: workspaceID, sessionID: session.id)
     }
 

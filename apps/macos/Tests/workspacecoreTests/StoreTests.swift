@@ -45,6 +45,26 @@ private final class StoreOpenErrors: @unchecked Sendable {
 }
 
 final class StoreTests: XCTestCase {
+    /// The `terminal_sessions` table as it stood at every schema version before v8. A real database
+    /// always carries it by the time it reaches v7 (no pre-v8 step alters it), so version fixtures that
+    /// migrate through the v7→v8 rebuild must include it for the copy-forward to succeed.
+    static let preV8TerminalSessionsTableSQL = """
+        CREATE TABLE terminal_sessions (
+          session_id TEXT PRIMARY KEY,
+          root_directory TEXT NOT NULL UNIQUE,
+          backend TEXT NOT NULL,
+          lifetime_policy TEXT NOT NULL,
+          workspace_id TEXT NOT NULL,
+          kind TEXT NOT NULL DEFAULT 'shell',
+          title TEXT NOT NULL,
+          user_title TEXT,
+          working_directory TEXT NOT NULL,
+          shell TEXT NOT NULL,
+          command TEXT,
+          created_at TEXT NOT NULL
+        );
+        """
+
     // Tests a fresh store bootstraps the current schema and version by arranging an empty DB path and asserting the resulting shape.
     func testFreshStoreBootstrapsCurrentSchema() throws {
         let root = try makeTempDirectory()
@@ -221,6 +241,7 @@ final class StoreTests: XCTestCase {
                   PRIMARY KEY (subscriber_terminal_session_id, agent_session_id),
                   FOREIGN KEY (agent_session_id) REFERENCES agent_sessions(id) ON DELETE CASCADE
                 );
+                \(Self.preV8TerminalSessionsTableSQL)
                 """)
 
         try withEnvironmentValues([
@@ -303,6 +324,7 @@ final class StoreTests: XCTestCase {
                   PRIMARY KEY (subscriber_terminal_session_id, agent_session_id),
                   FOREIGN KEY (agent_session_id) REFERENCES agent_sessions(id) ON DELETE CASCADE
                 );
+                \(Self.preV8TerminalSessionsTableSQL)
                 """)
 
         try withEnvironmentValues([

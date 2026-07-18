@@ -7,7 +7,7 @@ import Foundation
 #endif
 
 public enum DatabaseSchema {
-    public static let currentVersion = 7
+    public static let currentVersion = 8
 
     /// Adds the coding-agent orchestration surface: an explicit `note` on each agent session and the
     /// `agent_subscriptions` graph. The subscriber key is a terminal session id (a subscriber may be a
@@ -89,6 +89,56 @@ public enum DatabaseSchema {
             );
         """
 
+    /// Daemon-owned scheduled automations that run a shell command in a workspace-less terminal session.
+    /// `trigger_kind` is `manual` or `cron`; `cron_expression` holds the 5-field cron string and is NULL
+    /// for manual automations. `next_fire_time` is the persisted next-due epoch for a cron automation and
+    /// doubles as the missed-run anchor a restarted daemon reads to decide whether a fire was missed while
+    /// it was down. Timestamps are stored as REAL epoch seconds. Named separately so the fresh-schema SQL
+    /// and the v7→v8 migration step share one definition and can never drift apart.
+    static let automationsSQL = """
+            CREATE TABLE IF NOT EXISTS automations (
+              id TEXT PRIMARY KEY,
+              name TEXT NOT NULL,
+              enabled INTEGER NOT NULL DEFAULT 1,
+              trigger_kind TEXT NOT NULL,
+              cron_expression TEXT,
+              command TEXT NOT NULL,
+              working_directory TEXT NOT NULL,
+              timeout_seconds INTEGER,
+              concurrency_policy TEXT NOT NULL,
+              missed_run_policy TEXT NOT NULL,
+              next_fire_time REAL,
+              created_at REAL NOT NULL,
+              updated_at REAL NOT NULL
+            );
+        """
+
+    /// One row per automation execution attempt. The foreign key mirrors the `agent_session_events →
+    /// agent_sessions` precedent (`ON DELETE CASCADE`): a run history row is a child of its automation and
+    /// is removed with it, an app-managed cascade. `skip_reason` records why a `skipped` run never ran
+    /// (`concurrency` when a policy blocked an overlapping run, `missed` when a catch-up decision skipped
+    /// it); `trigger_kind` records how the run was initiated (`manual`, `cron`, or `missed_catch_up`).
+    /// `terminal_session_id` links to the workspace-less session that carried the command. Named
+    /// separately so the fresh-schema SQL and the v7→v8 migration step share one definition.
+    static let automationRunsSQL = """
+            CREATE TABLE IF NOT EXISTS automation_runs (
+              id TEXT PRIMARY KEY,
+              automation_id TEXT NOT NULL,
+              status TEXT NOT NULL,
+              skip_reason TEXT,
+              trigger_kind TEXT NOT NULL,
+              exit_code INTEGER,
+              terminal_session_id TEXT,
+              started_at REAL,
+              ended_at REAL,
+              created_at REAL NOT NULL,
+              FOREIGN KEY (automation_id) REFERENCES automations(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS automation_runs_automation_created_idx
+              ON automation_runs(automation_id, created_at);
+        """
+
     public static let migrationSteps: [DatabaseMigrationStep] = [
         DatabaseMigrationStep(fromVersion: 1, toVersion: 2, description: "Add agent_sessions.note and agent_subscriptions", requiresBackup: true) {
             handle in
@@ -164,6 +214,47 @@ public enum DatabaseSchema {
                     ALTER TABLE agent_subscriptions_new RENAME TO agent_subscriptions;
                     """)
         },
+        // Adds the scheduled-automation surface (`automations`, `automation_runs`) and makes terminal
+        // sessions workspace-optional so an automation's command can run in a workspace-less session,
+        // attributed back to its run via `automation_run_id`. SQLite cannot drop a column's NOT NULL or
+        // add a column mid-table in place, so `terminal_sessions` is rebuilt: create the new shape, copy
+        // every row (workspace_id carried forward unchanged; automation_run_id defaults NULL), drop the
+        // old table, and rename. No table declares a foreign key onto `terminal_sessions`, so the
+        // drop/rename touches nothing else even with foreign_keys ON inside the migration transaction. The
+        // new-table column shape here must match `terminalSessionsTableSQL`, which the fresh schema uses.
+        DatabaseMigrationStep(fromVersion: 7, toVersion: 8, description: "Add automations tables and make terminal_sessions workspace-optional", requiresBackup: true)
+        { handle in
+            try migrationExecuteBatch(
+                handle,
+                sql: """
+                    \(automationsSQL)
+                    \(automationRunsSQL)
+                    CREATE TABLE terminal_sessions_new (
+                      session_id TEXT PRIMARY KEY,
+                      root_directory TEXT NOT NULL UNIQUE,
+                      backend TEXT NOT NULL,
+                      lifetime_policy TEXT NOT NULL,
+                      workspace_id TEXT,
+                      kind TEXT NOT NULL DEFAULT 'shell',
+                      title TEXT NOT NULL,
+                      user_title TEXT,
+                      working_directory TEXT NOT NULL,
+                      shell TEXT NOT NULL,
+                      command TEXT,
+                      created_at TEXT NOT NULL,
+                      automation_run_id TEXT
+                    );
+                    INSERT INTO terminal_sessions_new (
+                      session_id, root_directory, backend, lifetime_policy, workspace_id, kind, title, user_title,
+                      working_directory, shell, command, created_at
+                    )
+                      SELECT session_id, root_directory, backend, lifetime_policy, workspace_id, kind, title, user_title,
+                             working_directory, shell, command, created_at
+                      FROM terminal_sessions;
+                    DROP TABLE terminal_sessions;
+                    ALTER TABLE terminal_sessions_new RENAME TO terminal_sessions;
+                    """)
+        },
     ]
 
     static let terminalRemoteSessionStateSQL = """
@@ -194,21 +285,31 @@ public enum DatabaseSchema {
             ON terminal_agent_signal_events(session_id, acknowledged_at, created_at);
         """
 
-    static let terminalSchemaSQL = """
+    /// The `terminal_sessions` table. `workspace_id` is nullable: a workspace-scoped session carries its
+    /// owning workspace, while an automation's command runs in a workspace-less session (NULL). That
+    /// session is attributed back to the automation execution that spawned it via `automation_run_id`.
+    /// The unique `root_directory` constraint keeps one live session per session directory. Named
+    /// separately so the fresh-schema SQL and the v7→v8 rebuild step share one column shape.
+    static let terminalSessionsTableSQL = """
             CREATE TABLE IF NOT EXISTS terminal_sessions (
               session_id TEXT PRIMARY KEY,
               root_directory TEXT NOT NULL UNIQUE,
               backend TEXT NOT NULL,
               lifetime_policy TEXT NOT NULL,
-              workspace_id TEXT NOT NULL,
+              workspace_id TEXT,
               kind TEXT NOT NULL DEFAULT 'shell',
               title TEXT NOT NULL,
               user_title TEXT,
               working_directory TEXT NOT NULL,
               shell TEXT NOT NULL,
               command TEXT,
-              created_at TEXT NOT NULL
+              created_at TEXT NOT NULL,
+              automation_run_id TEXT
             );
+        """
+
+    static let terminalSchemaSQL = """
+            \(terminalSessionsTableSQL)
 
             CREATE TABLE IF NOT EXISTS terminal_runtime_states (
               session_id TEXT PRIMARY KEY,
@@ -492,6 +593,10 @@ public enum DatabaseSchema {
             );
 
             \(terminalSchemaSQL)
+
+            \(automationsSQL)
+
+            \(automationRunsSQL)
 
             CREATE TABLE IF NOT EXISTS migration_state (
               current_version INTEGER NOT NULL

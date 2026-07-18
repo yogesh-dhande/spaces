@@ -571,12 +571,12 @@ public enum SpacesDeviceClient {
     /// session id (via the mutation result) so the caller polls readiness with `listAgentSessions`; the
     /// daemon runs the same supported-agent hook gate as the local spawn before creating the session.
     @discardableResult public static func spawnAgentSession(
-        workspaceID: String, command: String, title: String? = nil, device: SpacesPairedDeviceRecord,
+        workspaceID: String, command: String, title: String? = nil, automationRunID: String? = nil, device: SpacesPairedDeviceRecord,
         clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
     ) throws -> SpacesDeviceAPIResponse {
         try request(
-            .init(command: .spawnAgentSession(.init(workspaceID: workspaceID, command: command, title: title))), device: device, clientApp: clientApp,
-            profile: profile)
+            .init(command: .spawnAgentSession(.init(workspaceID: workspaceID, command: command, title: title, automationRunID: automationRunID))),
+            device: device, clientApp: clientApp, profile: profile)
     }
 
     /// Coding-agent sessions on a paired device (`spaces agent list/status --device`), also used for

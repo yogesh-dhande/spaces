@@ -358,7 +358,8 @@ extension WorkspaceOrchestrator {
     func builtInSessionBelongsToConfiguredAgent(sessionID: String, workspaceID: String) -> Bool {
         switch terminalSessionLaunchConfiguration(sessionID: sessionID)?.kind {
         case .agent: return true
-        case .shell, .process: return false
+        // An automation session is workspace-less and never a workspace's configured coding agent.
+        case .shell, .process, .automation: return false
         case nil: return ((try? store.agentWindows(workspaceID: workspaceID)) ?? []).contains { builtInTerminalSessionID(for: $0) == sessionID }
         }
     }
@@ -514,7 +515,8 @@ extension WorkspaceOrchestrator {
         if ownership.process != nil { return true }
         switch ownership.launchKind {
         case .process, .agent: return true
-        case .shell: return false
+        // An automation session is workspace-less, so it is never a workspace's configured owner.
+        case .shell, .automation: return false
         case nil: return false
         }
     }

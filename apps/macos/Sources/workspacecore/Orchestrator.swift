@@ -31,6 +31,11 @@ public final class WorkspaceOrchestrator {
     public typealias AgentNotificationLineSubmitter = @Sendable (String, String) throws -> Void
 
     public static let terminalTrackingIDEnvVar = "SPACES_TERMINAL_TRACKING_ID"
+    /// Set by the CLI's `agent spawn` on the automation orchestrator's own terminal to identify the
+    /// automation run it is acting on behalf of. `performAgentSpawn`/`performRemoteAgentSpawn` forward it
+    /// as `automationRunID` on the spawn request so the daemon can stamp the child session's row with the
+    /// run that created it. Absent for ordinary interactive spawns, which keeps existing behavior.
+    public static let automationRunIDEnvVar = "SPACES_AUTOMATION_RUN_ID"
     #if canImport(UserNotifications)
         private static let notificationAuthorizationCache = LockedBox<UNAuthorizationStatus?>(nil)
     #endif
@@ -1202,9 +1207,9 @@ public final class WorkspaceOrchestrator {
     /// first signal, so a coding agent (e.g. Codex) that emits `working` before `init` still registers.
     /// The default title is the matched coding agent's display name (or the command's executable
     /// basename when no supported agent matches — spawn's hook gate has already ensured one does).
-    @discardableResult public func createWorkspaceAgentSession(workspaceID: String, command: String, title: String?) throws
-        -> TerminalServiceSessionSummary
-    {
+    @discardableResult public func createWorkspaceAgentSession(
+        workspaceID: String, command: String, title: String?, automationRunID: String? = nil
+    ) throws -> TerminalServiceSessionSummary {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         guard !workspace.isArchived else { throw WorkspaceError.invalidArgument(message: "Workspace is archived.") }
         let trimmedCommand = command.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1213,14 +1218,16 @@ public final class WorkspaceOrchestrator {
             SupportedCodingAgentHook.matching(command: command)?.displayName
             ?? (SupportedCodingAgentHook.executableToken(inCommand: command).map { ($0 as NSString).lastPathComponent } ?? "Agent")
         return try launchWorkspaceCommandSession(
-            project: project, workspace: workspace, title: title, rawCommand: command, kind: .agent, defaultTitle: defaultTitle)
+            project: project, workspace: workspace, title: title, rawCommand: command, kind: .agent, defaultTitle: defaultTitle,
+            automationRunID: automationRunID)
     }
 
     /// Shared launch path for ad-hoc command and agent sessions: builds the workspace environment,
     /// prefixes the shell command, persists the tracked terminal window, and marks the workspace
     /// running. The only per-caller differences are the launch `kind` and the fallback title.
     @discardableResult private func launchWorkspaceCommandSession(
-        project: ProjectRecord, workspace: WorkspaceRecord, title: String?, rawCommand: String, kind: TerminalSessionKind, defaultTitle: String
+        project: ProjectRecord, workspace: WorkspaceRecord, title: String?, rawCommand: String, kind: TerminalSessionKind, defaultTitle: String,
+        automationRunID: String? = nil
     ) throws -> TerminalServiceSessionSummary {
         let assignedPorts = try store.workspacePortsAssigned(workspaceID: workspace.id)
         let sessionID = UUID().uuidString
@@ -1236,7 +1243,8 @@ public final class WorkspaceOrchestrator {
         let launchCommand = commandPrefixedWithShellEnvironment(rawCommand, env: env)
         let launchConfiguration = TerminalSessionLaunchConfiguration(
             sessionID: sessionID, backend: .ghosttyEmbedded, lifetimePolicy: .persistent, title: sessionTitle, workingDirectory: workspace.dir,
-            shell: shellPath, command: launchCommand, createdAt: nowISO8601(), workspaceID: workspace.id, kind: kind)
+            shell: shellPath, command: launchCommand, createdAt: nowISO8601(), workspaceID: workspace.id, kind: kind,
+            automationRunID: automationRunID)
 
         let session = try builtInTerminalSessionLauncher(launchConfiguration)
         let windowRecordID = UUID().uuidString
@@ -1328,7 +1336,7 @@ public final class WorkspaceOrchestrator {
                 title: reservation.launchConfiguration.title, workingDirectory: reservation.launchConfiguration.workingDirectory,
                 command: reservation.launchConfiguration.command, showMode: .owner, backend: reservation.launchConfiguration.backend,
                 readinessPolicy: .stableChildPID, sessionID: reservation.sessionID, lifetimePolicy: reservation.launchConfiguration.lifetimePolicy,
-                workspaceID: reservation.launchConfiguration.workspaceID, kind: reservation.launchConfiguration.kind)
+                workspaceID: reservation.workspaceID, kind: reservation.launchConfiguration.kind)
             if reservation.windowRecordInsertedBeforeLaunch {
                 guard try reservedWorkspaceTerminalWindowExists(reservation) else {
                     builtInTerminalSessionTerminator(reservation.sessionID)

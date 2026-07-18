@@ -1211,17 +1211,23 @@ public struct SpacesDeviceSpawnAgentSessionRequest: Codable, Sendable, Equatable
     public let workspaceID: String
     public let command: String
     public let title: String?
+    /// The automation execution this spawn belongs to, when initiated by the daemon's scheduler. Threaded
+    /// through to the daemon so it can attribute the spawned session to its run; nil for ordinary spawns,
+    /// which preserves existing behavior.
+    public let automationRunID: String?
 
-    public init(workspaceID: String, command: String, title: String? = nil) {
+    public init(workspaceID: String, command: String, title: String? = nil, automationRunID: String? = nil) {
         self.workspaceID = workspaceID
         self.command = command
         self.title = title
+        self.automationRunID = automationRunID
     }
 
     private enum CodingKeys: String, CodingKey {
         case workspaceID
         case command
         case title
+        case automationRunID
     }
 
     public init(from decoder: any Decoder) throws {
@@ -1229,6 +1235,7 @@ public struct SpacesDeviceSpawnAgentSessionRequest: Codable, Sendable, Equatable
         workspaceID = try container.decode(String.self, forKey: .workspaceID)
         command = try container.decode(String.self, forKey: .command)
         title = try container.decodeIfPresent(String.self, forKey: .title)
+        automationRunID = try container.decodeIfPresent(String.self, forKey: .automationRunID)
     }
 }
 

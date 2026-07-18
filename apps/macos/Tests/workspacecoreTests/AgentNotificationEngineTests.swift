@@ -1007,6 +1007,20 @@ final class AgentNotificationEngineTests: XCTestCase {
             VALUES ('\(agentID)', '\(workspaceID)', 'spaces', 'X', 'spinning', '\(terminalSessionID)', 'now', 'now');
             INSERT INTO agent_subscriptions(subscriber_terminal_session_id, agent_session_id, created_at)
             VALUES ('watcher-terminal', '\(agentID)', 'now');
+            CREATE TABLE terminal_sessions (
+              session_id TEXT PRIMARY KEY,
+              root_directory TEXT NOT NULL UNIQUE,
+              backend TEXT NOT NULL,
+              lifetime_policy TEXT NOT NULL,
+              workspace_id TEXT NOT NULL,
+              kind TEXT NOT NULL DEFAULT 'shell',
+              title TEXT NOT NULL,
+              user_title TEXT,
+              working_directory TEXT NOT NULL,
+              shell TEXT NOT NULL,
+              command TEXT,
+              created_at TEXT NOT NULL
+            );
             """
         var errorMessage: UnsafeMutablePointer<CChar>?
         guard sqlite3_exec(db, sql, nil, nil, &errorMessage) == SQLITE_OK else {
