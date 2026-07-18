@@ -65,6 +65,8 @@ import workspacecore
     private var worktreeDiscoveryService: WorktreeDiscoveryService?
     private var terminalForegroundAgentReconciler: TerminalForegroundAgentReconciler?
     private var remoteAgentWatchService: RemoteAgentWatchService?
+    private var automationService: AutomationService?
+    private var automationTimer: Timer?
     private var databaseChangeObserver: NSObjectProtocol?
     #if os(Linux)
         private var databaseChangeSignalReceiver: DatabaseChangeSignalReceiver?
@@ -159,6 +161,7 @@ import workspacecore
             }, logError: { writeStandardError($0) })
         remoteAgentWatch.start()
         remoteAgentWatchService = remoteAgentWatch
+        startAutomationService()
         #if os(macOS)
             // The router port is a Mac-only concept: only the macOS client runs Caddy, so only it
             // pins/consumes a real listening port. Seed it alongside the router service and never on
@@ -196,6 +199,27 @@ import workspacecore
                 forName: IPCNotification.caddyRouteRegistryDidChange, object: try? IPCNotification.currentObject(), queue: nil
             ) { [weak self] _ in Task { @MainActor in self?.caddyRouterService?.reconcile() } }
         #endif
+    }
+
+    /// Starts the scheduled-automation scheduler/executor: reconciles runs missed while the daemon was
+    /// down, then drives its poll-based `tick` from a periodic timer. The command's PATH is seeded with the
+    /// running daemon's own binary directory so an automation's `spaces` invocations resolve to the sibling
+    /// CLI. Runs on every device, including headless remotes, since automations are daemon-owned.
+    private func startAutomationService() {
+        do {
+            let orchestrator = try makeProfileOrchestrator()
+            let binaryDirectory = URL(fileURLWithPath: launchExecutablePath, isDirectory: false).deletingLastPathComponent().path
+            let service = AutomationService(
+                store: orchestrator.store, orchestrator: orchestrator, binaryDirectory: binaryDirectory, timeZone: .current,
+                logError: { writeStandardError("spacesd automation_error \($0)\n") })
+            service.reconcileMissedRunsOnStart()
+            automationService = service
+            let timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+                Task { @MainActor [weak self] in self?.automationService?.tick() }
+            }
+            RunLoop.main.add(timer, forMode: .common)
+            automationTimer = timer
+        } catch { writeStandardError("spacesd automation_service_error error=\(error)\n") }
     }
 
     private func handleDatabaseDidChangeForDeviceRuntime() {
@@ -255,6 +279,9 @@ import workspacecore
     private func stopSharedServices() {
         lifecycleTimer?.invalidate()
         lifecycleTimer = nil
+        automationTimer?.invalidate()
+        automationTimer = nil
+        automationService = nil
         if let databaseChangeObserver {
             NotificationCenter.default.removeObserver(databaseChangeObserver)
             self.databaseChangeObserver = nil
