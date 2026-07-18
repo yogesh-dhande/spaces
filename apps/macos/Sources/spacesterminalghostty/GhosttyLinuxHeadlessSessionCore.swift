@@ -152,7 +152,14 @@
         public func terminate() {
             guard started || vtSession != nil || controlServer != nil || stateStreamServer != nil else { return }
             terminating = true
-            let finalPayload = makeStatePayload(reason: TerminalRemoteSessionStateReason.terminated, state: .exited)
+            // Stamp the exit ONCE and reuse that snapshot for both the persisted runtime state and the
+            // final payload's embedded runtime state. The client arms ended-scrollback replay with the
+            // identity from the final state payload, while the server's transcript endpoint reports the
+            // identity from the persisted runtime state; if the two disagree the client rejects the
+            // ended run's transcript and scrollback replay is unavailable. `runIdentity` embeds a
+            // sub-second exit timestamp, so two separate stamps virtually always differ — build one.
+            let exitedState = makeRuntimeStateSnapshot(state: .exited)
+            let finalPayload = makeStatePayload(reason: TerminalRemoteSessionStateReason.terminated, runtimeStateOverride: exitedState)
             if let finalPayload { try? TerminalSessionPersistence.writeRemoteSessionState(finalPayload, paths: paths) }
             if let finalPayload { stateStreamServer?.broadcast(finalPayload) }
             controlServer?.stop()
@@ -171,7 +178,6 @@
                 spaces_ghostty_vt_session_free(vtSession)
                 self.vtSession = nil
             }
-            writeRuntimeState(state: .exited)
             try? TerminalSessionPersistence.detachActiveClients(paths: paths, detachedAt: nowISO8601())
             try? outputHandle?.synchronize()
             try? outputHandle?.close()
@@ -792,12 +798,19 @@
         }
 
         private func writeRuntimeState(state: TerminalSessionState) {
+            persistRuntimeState(makeRuntimeStateSnapshot(state: state))
+        }
+
+        /// Builds a runtime-state snapshot for `state`, stamping `updatedAt`/`exitedAt` once per call.
+        /// Extracted so an exit can be captured a single time and reused for both the persisted runtime
+        /// state and the final payload (see `terminate()`), guaranteeing they share one `runIdentity`.
+        private func makeRuntimeStateSnapshot(state: TerminalSessionState) -> TerminalSessionRuntimeState {
             let liveChildPID = ptyDriver.childPID()
             if let liveChildPID { lastKnownChildPID = liveChildPID }
             let foregroundPID = ptyDriver.foregroundPID()
             let foregroundProcess = foregroundPID.flatMap { TerminalForegroundProcessInspector.inspect(pid: $0) }
             let foregroundAgent = foregroundProcess.flatMap { TerminalForegroundProcessInspector.classify($0) }
-            let runtimeState = TerminalSessionRuntimeState(
+            return TerminalSessionRuntimeState(
                 sessionID: launchConfiguration.sessionID, backend: launchConfiguration.backend, servicePID: getpid(),
                 childPID: liveChildPID ?? lastKnownChildPID, state: state, updatedAt: nowISO8601(),
                 exitedAt: state.isInteractive ? nil : nowISO8601(), title: launchConfiguration.title,
@@ -806,6 +819,9 @@
                 foregroundExecutableName: foregroundProcess?.executableName, foregroundArgv: foregroundProcess?.argv,
                 foregroundDetectedAgentKind: foregroundAgent?.detectedAgentKind, foregroundDisplayLabel: foregroundAgent?.displayLabel,
                 foregroundDisplayCommand: foregroundAgent?.displayCommand)
+        }
+
+        private func persistRuntimeState(_ runtimeState: TerminalSessionRuntimeState) {
             let previousSignature = lastRuntimeState.map(runtimeStateSignature(for:))
             let nextSignature = runtimeStateSignature(for: runtimeState)
             try? TerminalSessionPersistence.writeRuntimeState(runtimeState, paths: paths)
@@ -848,16 +864,18 @@
         }
 
         private func makeStatePayload(
-            reason: String, state: TerminalSessionState? = nil, exportMode: RenderStateExportMode = .selfContained,
+            reason: String, runtimeStateOverride: TerminalSessionRuntimeState? = nil, exportMode: RenderStateExportMode = .selfContained,
             markNextBroadcastFull: Bool = false
         ) -> GhosttyRemoteSessionStatePayload? {
             let attachmentSnapshot = (try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)) ?? TerminalSessionAttachmentSnapshot()
             let ownerKind = TerminalRemoteSessionStatePolicy.activeOwnerClientKind(in: attachmentSnapshot)
             let includeScreenState = TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(reason: reason, ownerKind: ownerKind)
             let runtimeState: TerminalSessionRuntimeState
-            if let state {
-                writeRuntimeState(state: state)
-                runtimeState = lastRuntimeState ?? fallbackRuntimeState(state: state)
+            if let runtimeStateOverride {
+                // Persist and embed the caller-supplied snapshot verbatim so the payload's runtime state
+                // and the row written here share one `runIdentity` (terminate() relies on this).
+                persistRuntimeState(runtimeStateOverride)
+                runtimeState = runtimeStateOverride
             } else {
                 runtimeState = lastRuntimeState ?? fallbackRuntimeState(state: started ? .running : .exited)
             }

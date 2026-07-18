@@ -505,6 +505,37 @@
             XCTAssertEqual(occurrences(of: duringHandoffMarker, in: transcript), 1)
             XCTAssertEqual(occurrences(of: afterMarker, in: transcript), 1)
         }
+
+        // MARK: - 6. Exit identity consistency
+
+        /// The persisted runtime state and the broadcast/persisted final payload must carry one exit
+        /// `runIdentity`. Ended-scrollback replay arms itself with the identity from the final state
+        /// payload and the transcript endpoint reports the identity from the persisted runtime state,
+        /// so a mismatch makes the client reject the ended run's transcript (scrollback unavailable).
+        /// `runIdentity` embeds a sub-second exit timestamp, so stamping the exit twice would diverge.
+        @MainActor func testTerminateStampsSingleExitIdentityForRuntimeStateAndFinalPayload() async throws {
+            let paths = try makeTemporaryPaths()
+            defer { try? FileManager.default.removeItem(atPath: paths.rootDirectory) }
+
+            let marker = "EXIT_IDENTITY_MARKER"
+            let configuration = makeConfiguration(
+                sessionID: "exit-identity-\(UUID().uuidString)", command: "stty -echo; printf '%s\\n' '\(marker)'; cat")
+            let core = GhosttyEmbeddedSessionCore(launchConfiguration: configuration, paths: paths)
+            try core.startIfNeeded()
+            try await waitAsync { (try? String(contentsOfFile: paths.outputPath))?.contains(marker) == true }
+
+            core.terminate()
+
+            let persistedRuntimeState = try TerminalSessionPersistence.readRuntimeState(paths: paths)
+            let finalPayload = try TerminalSessionPersistence.readRemoteSessionState(paths: paths)
+            let payloadRuntimeState = try XCTUnwrap(finalPayload.runtimeState, "the terminated payload must embed a runtime state")
+
+            XCTAssertEqual(persistedRuntimeState.state, .exited, "the persisted runtime state must be exited")
+            XCTAssertEqual(payloadRuntimeState.state, .exited, "the final payload's runtime state must be exited")
+            XCTAssertEqual(
+                persistedRuntimeState.runIdentity, payloadRuntimeState.runIdentity,
+                "the persisted runtime state and the final payload must share one exit identity so the client accepts the ended run's transcript")
+        }
     }
 
     /// Thread-safe collector for the state-stream subscriber callback.
