@@ -328,7 +328,7 @@ Set `SPACES_E2E_AGENT_MATRIX=1` to also run the opt-in provider matrix (Part B),
 SPACES_E2E_AGENT_MATRIX=1 apps/macos/Tests/e2e_agent_orchestration.sh
 ```
 
-For each provider (`claude`, `codex`, `opencode`) whose binary is on `PATH` and whose Spaces hooks are current, Part B spawns the agent, records a `provider=… first_signal_observed=… ready_ms=… sequence=…` report line from `agent status --json` polling, submits a trivial prompt (text then carriage return), best-effort interrupts a working phase, and kills the session. It installs nothing: a provider whose binary is missing or whose hooks are not current is reported as `SKIP` (the loud spawn hook-gate error), leaving the user's real agent configs untouched. Skips do not fail the run; any attempted provider that fails makes the script exit non-zero.
+For each provider (`claude`, `codex`, `opencode`) whose binary is on `PATH` and whose Spaces hooks are current, Part B spawns the agent, records a `provider=… first_signal_observed=… ready_ms=… sequence=…` report line from `agent status --json` polling, submits a trivial prompt with `terminal send text --submit`, best-effort interrupts a working phase, and kills the session. It installs nothing: a provider whose binary is missing or whose hooks are not current is reported as `SKIP` (the loud spawn hook-gate error), leaving the user's real agent configs untouched. Skips do not fail the run; any attempted provider that fails makes the script exit non-zero.
 
 The Spaces terminal `tail` path also depends on the local `libghostty-vt` artifacts. Set them up before building or profiling terminal changes:
 

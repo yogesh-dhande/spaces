@@ -203,36 +203,28 @@ final class SpacesMCPStdioServer {
             MCPToolDescriptor(
                 name: "spaces_terminal_send",
                 description:
-                    "Send text or raw bytes to an explicit Spaces terminal session. Text with appendNewline=true reliably submits: the session host writes the text and the Enter keystroke as separate spaced writes so agent TUIs (Claude Code, Codex) run the line instead of leaving it as an unsubmitted paste — one call is enough, submit-safety is server-side. An empty text with appendNewline presses Enter alone (e.g. to answer a TUI dialog).",
+                    "Send text or raw bytes to an explicit Spaces terminal session. Text with appendNewline=true reliably submits: the session host writes the text and the Enter keystroke as separate spaced writes so agent TUIs (Claude Code, Codex) run the line instead of leaving it as an unsubmitted paste — one call is enough, submit-safety is server-side. An empty text with appendNewline presses Enter alone (e.g. to answer a TUI dialog). OpenCode's composer does not treat that server-side spacing as a submit; set submit=true to additionally send a second, independent Return keystroke after the payload, which is provider-neutral across Claude Code, Codex, and OpenCode.",
                 properties: [
                     "session": stringSchema("Spaces terminal session ID."),
                     "text": stringSchema("Text to send. Use an empty string with appendNewline to press Enter alone."),
                     "bytes": byteArraySchema("Raw byte values to send. Each value must be an integer from 0 through 255."),
                     "appendNewline": boolSchema("Append an Enter keystroke after the payload; with text this submits the line."),
-                    "device": stringSchema("Paired device name or ID. Defaults to this machine."),
+                    "submit": boolSchema(
+                        "Send a second, independent Return keystroke after the payload. Provider-neutral prompt submit for Claude Code, Codex, and OpenCode."
+                    ), "device": stringSchema("Paired device name or ID. Defaults to this machine."),
                 ], required: ["session"], oneOf: [["required": ["text"]], ["required": ["bytes"]]]
             ) { server, arguments in
                 let input = try server.terminalInputPayload(from: arguments)
                 let sessionID = try server.requiredString(arguments["session"], field: "session")
                 let appendNewline = server.optionalBool(arguments["appendNewline"]) ?? false
-                if let device = try server.resolvedDevice(arguments) {
-                    let text: String?
-                    let bytes: Data?
-                    switch input {
-                    case .text(let value):
-                        text = value
-                        bytes = nil
-                    case .bytes(let value):
-                        text = nil
-                        bytes = value
-                    }
-                    let response = try SpacesDeviceClient.sendTerminalInput(
-                        sessionID: sessionID, text: text, bytes: bytes, appendNewline: appendNewline, device: device, clientApp: cliDeviceClientApp())
-                    return .profile(TerminalServiceProfileCommandResponse(message: response.message))
-                }
-                return .profile(
-                    try TerminalService.sendProfileCommand(
-                        .terminalSend(.init(sessionID: sessionID, input: input, appendNewline: appendNewline)), timeout: 5))
+                let submit = server.optionalBool(arguments["submit"]) ?? false
+                let response = try server.sendTerminalInput(input, sessionID: sessionID, appendNewline: appendNewline, arguments: arguments)
+                // Mirrors the CLI's `terminal send text --submit`: a second, independent CR send after the
+                // first response, not a CR appended to the same write — see issue #187 for why OpenCode
+                // needs the two sends to land as genuinely separate PTY reads.
+                guard submit else { return .profile(response) }
+                let submitResponse = try server.sendTerminalInput(.bytes(Data([0x0D])), sessionID: sessionID, appendNewline: false, arguments: arguments)
+                return .profile(submitResponse)
             },
             MCPToolDescriptor(
                 name: "spaces_agent_list",
@@ -629,6 +621,31 @@ final class SpacesMCPStdioServer {
         guard !(hasText && hasBytes) else { throw MCPError.invalidArguments("Provide text or bytes, not both.") }
         if hasText { return .text(try requiredRawString(textValue, field: "text")) }
         return .bytes(try requiredBytes(bytesValue, field: "bytes"))
+    }
+
+    /// Sends one input payload to a terminal session, on a paired device if `arguments` names one, or the
+    /// local daemon otherwise. Shared by `spaces_terminal_send`'s primary payload and its optional submit
+    /// follow-up CR so both routes stay identical.
+    private func sendTerminalInput(
+        _ input: TerminalProfileInput, sessionID: String, appendNewline: Bool, arguments: [String: Any]
+    ) throws -> TerminalServiceProfileCommandResponse {
+        if let device = try resolvedDevice(arguments) {
+            let text: String?
+            let bytes: Data?
+            switch input {
+            case .text(let value):
+                text = value
+                bytes = nil
+            case .bytes(let value):
+                text = nil
+                bytes = value
+            }
+            let response = try SpacesDeviceClient.sendTerminalInput(
+                sessionID: sessionID, text: text, bytes: bytes, appendNewline: appendNewline, device: device, clientApp: cliDeviceClientApp())
+            return TerminalServiceProfileCommandResponse(message: response.message)
+        }
+        return try TerminalService.sendProfileCommand(
+            .terminalSend(.init(sessionID: sessionID, input: input, appendNewline: appendNewline)), timeout: 5)
     }
 
     private func requiredBytes(_ value: Any?, field: String) throws -> Data {

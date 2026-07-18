@@ -22,7 +22,7 @@ public struct SpacesCommand: ParsableCommand {
               - `workspace restart` forces a full stop and relaunch for a workspace.
               - Agent events stay explicit. Workspace runtime commands do not imply agent lifecycle. `agent signal <event>` records those lifecycle transitions for the current Spaces terminal session, or no-ops outside one.
               - `agent list`/`agent status` report coding-agent sessions with status, note, project/workspace context, and a spaces://terminal deep link. `agent annotate` sets an explicit note (empty clears it). `status`/`annotate` default the session to SPACES_TERMINAL_TRACKING_ID.
-              - `agent spawn --command <cmd>` starts a supported coding agent (claude, codex, opencode) in a new terminal and blocks until the daemon's foreground classifier detects it running (not until a hook signal — a promptless Codex never signals). It delivers no prompt — the orchestrator sends the prompt with `terminal send` and confirms work with `terminal tail`/`agent status`. It auto-subscribes the current terminal once the child has an agent row. `agent interrupt <session>` sends ESC, `agent kill <session>` terminates the session, and `agent subscribe`/`unsubscribe <session>` record a watch edge (subscriber defaults to SPACES_TERMINAL_TRACKING_ID).
+              - `agent spawn --command <cmd>` starts a supported coding agent (claude, codex, opencode) in a new terminal and blocks until the daemon's foreground classifier detects it running (not until a hook signal — a promptless Codex never signals). It delivers no prompt — the orchestrator sends the prompt with `terminal send text --submit` and confirms work with `terminal tail`/`agent status`. It auto-subscribes the current terminal once the child has an agent row. `agent interrupt <session>` sends ESC, `agent kill <session>` terminates the session, and `agent subscribe`/`unsubscribe <session>` record a watch edge (subscriber defaults to SPACES_TERMINAL_TRACKING_ID).
               - `agent spawn`/`list`/`status`/`annotate`/`interrupt`/`kill`/`subscribe`/`unsubscribe` accept `--device <name-or-id>` to act on a paired device; remote `spawn` requires `--workspace`, auto-subscribes the current terminal to the remote child, and remote `kill` works before the child signals (it terminates the session directly when no agent row exists yet). `agent subscribe --device` records a cross-device watch: the current terminal receives the same blocked/done/exited notification lines for the remote child, delivered by this machine's daemon (device-qualified deep links). A `--device` naming this machine is validated like a local watch (self-edges and subscription cycles are rejected); cross-device cycles to a remote device cannot be detected (the remote's own subscriptions are not queryable locally).
             """, version: AppVersion.current,
         subcommands: [
@@ -367,15 +367,17 @@ struct AgentSpawnResult: Codable, Equatable {
 
 /// Spawns a coding agent on this machine and blocks until the daemon's foreground classifier identifies
 /// it in the new terminal (readiness = detection, NOT a hook signal). It delivers no prompt: spawn
-/// returns at detection, and the orchestrator sends the prompt with `terminal send` and confirms work
-/// with `terminal tail`/`agent status`. Auto-subscribes the spawning terminal when the child already has
-/// an agent row. Shared by `agent spawn` and the `spaces_agent_spawn` MCP tool so both block identically.
+/// returns at detection, and the orchestrator sends the prompt with `terminal send text --submit` and
+/// confirms work with `terminal tail`/`agent status`. Auto-subscribes the spawning terminal when the
+/// child already has an agent row. Shared by `agent spawn` and the `spaces_agent_spawn` MCP tool so both
+/// block identically.
 func performAgentSpawn(
     cwd: String, workspace: String?, command: String, title: String?, timeoutSeconds: Int, subscriberSessionID: String?,
-    pollInterval: TimeInterval = 0.5
+    automationRunID: String? = nil, pollInterval: TimeInterval = 0.5
 ) throws -> AgentSpawnResult {
     let spawnResponse = try TerminalService.sendProfileCommand(
-        .agentSpawn(.init(cwd: cwd, workspaceID: workspace, command: command, title: title)), timeout: TerminalService.createSessionRequestTimeout())
+        .agentSpawn(.init(cwd: cwd, workspaceID: workspace, command: command, title: title, automationRunID: automationRunID)),
+        timeout: TerminalService.createSessionRequestTimeout())
     guard let session = spawnResponse.terminalSession else {
         throw WorkspaceError.invalidArgument(message: "spacesd did not return an agent session.")
     }
@@ -449,11 +451,11 @@ private func resolvedAgentRowIDIfPresent(forChildTerminalSessionID childSessionI
 /// local. Returns the spawn result carrying the device id so the `open` deep link is device-qualified.
 func performRemoteAgentSpawn(
     device: SpacesPairedDeviceRecord, workspace: String, command: String, title: String?, timeoutSeconds: Int, subscriberSessionID: String?,
-    pollInterval: TimeInterval = 0.5
+    automationRunID: String? = nil, pollInterval: TimeInterval = 0.5
 ) throws -> AgentSpawnResult {
     let clientApp = cliDeviceClientApp()
     let spawnResponse = try SpacesDeviceClient.spawnAgentSession(
-        workspaceID: workspace, command: command, title: title, device: device, clientApp: clientApp)
+        workspaceID: workspace, command: command, title: title, automationRunID: automationRunID, device: device, clientApp: clientApp)
     guard let childSessionID = spawnResponse.sessionID else {
         throw WorkspaceError.invalidArgument(message: "\(device.name) did not return an agent session.")
     }
@@ -519,6 +521,16 @@ func resolvedSubscriberSessionID(_ subscriber: String?, environment: [String: St
     throw ValidationError("--subscriber is required, or run inside a Spaces terminal so \(WorkspaceOrchestrator.terminalTrackingIDEnvVar) is set.")
 }
 
+/// Resolves the automation run id to stamp onto an `agent spawn` request, read from
+/// `SPACES_AUTOMATION_RUN_ID` (trimmed; empty treated as absent). Set by an automation orchestrator on
+/// its own terminal so the daemon can attribute the spawned child session to the run that created it. nil
+/// when unset, which keeps ordinary interactive spawns unchanged.
+func resolvedAutomationRunID(environment: [String: String] = ProcessInfo.processInfo.environment) -> String? {
+    guard let envValue = environment[WorkspaceOrchestrator.automationRunIDEnvVar]?.trimmingCharacters(in: .whitespacesAndNewlines), !envValue.isEmpty
+    else { return nil }
+    return envValue
+}
+
 struct AgentSpawnCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "spawn", abstract: "Start a coding agent in a new Spaces terminal and block until it is detected running.",
@@ -527,10 +539,12 @@ struct AgentSpawnCommand: ParsableCommand {
             identifies the coding agent in the new terminal — not when it emits a hook signal (a
             promptless Codex never does). Hooks are not required to spawn; they enrich live status when
             present. Spawn delivers no prompt — to give the agent work, the orchestrator sends input
-            with `spaces terminal send <id>` and confirms progress with `spaces terminal tail <id>` /
-            `spaces agent status`; the orchestrator can also see and answer any first-run trust,
-            onboarding, or auth dialog that spawn's detection cannot. If the agent is never detected
-            spawn errors and leaves the session running for inspection with `spaces terminal tail <id>`.
+            with `spaces terminal send text <id> <prompt> --submit` (`--submit` is the provider-neutral
+            prompt submit for Claude Code, Codex, and OpenCode) and confirms progress with
+            `spaces terminal tail <id>` / `spaces agent status`; the orchestrator can also see and answer
+            any first-run trust, onboarding, or auth dialog that spawn's detection cannot. If the agent is
+            never detected spawn errors and leaves the session running for inspection with
+            `spaces terminal tail <id>`.
             --device spawns on a paired device, detected the same way over the Device API.
             """)
 
@@ -548,6 +562,7 @@ struct AgentSpawnCommand: ParsableCommand {
         let subscriber = ProcessInfo.processInfo.environment[WorkspaceOrchestrator.terminalTrackingIDEnvVar]?.trimmingCharacters(
             in: .whitespacesAndNewlines)
         let subscriberSessionID = (subscriber?.isEmpty == false) ? subscriber : nil
+        let automationRunID = resolvedAutomationRunID()
         let result: AgentSpawnResult
         if let device {
             // Validate the required workspace before resolving the device so `--device` without
@@ -558,11 +573,11 @@ struct AgentSpawnCommand: ParsableCommand {
             let record = try SpacesPairedDeviceSelection.resolve(device)
             result = try performRemoteAgentSpawn(
                 device: record, workspace: workspace, command: command, title: title, timeoutSeconds: timeout,
-                subscriberSessionID: subscriberSessionID)
+                subscriberSessionID: subscriberSessionID, automationRunID: automationRunID)
         } else {
             result = try performAgentSpawn(
                 cwd: context.currentDirectoryPath(), workspace: workspace, command: command, title: title, timeoutSeconds: timeout,
-                subscriberSessionID: subscriberSessionID)
+                subscriberSessionID: subscriberSessionID, automationRunID: automationRunID)
         }
         if json {
             try context.output.emitJSON(result)
@@ -1002,10 +1017,21 @@ struct TerminalSendTextCommand: ParsableCommand {
 
     @Argument(help: "Terminal session ID.") var sessionID: String
     @Argument(help: "Text to send.") var text: String
-    @Flag(name: .long, help: "Append a newline after the text.") var newline = false
+    @Flag(name: .long, help: "Insert a newline character after the text.") var newline = false
+    @Flag(name: .long, help: "Press Return after the text (provider-neutral prompt submit for Claude, Codex, and OpenCode).")
+    var submit = false
     @Option(name: .long, help: "Paired device name or ID. Defaults to this machine's local sessions.") var device: String?
 
-    func run() throws { try sendTerminalInput(.text(text), sessionID: sessionID, appendNewline: newline, device: device) }
+    func run() throws {
+        try sendTerminalInput(.text(text), sessionID: sessionID, appendNewline: newline, device: device)
+        // OpenCode's composer (unlike Claude Code's and Codex's) does not treat --newline's server-side
+        // spaced text+CR write as a submit — see issue #187. The only sequence verified to submit it is
+        // two independent top-level sends: this text send, then a second, later CR (byte 13) send. That
+        // second send reuses the same helper as `terminal send bytes <id> 13`, rather than appending \r
+        // to the text in one write, because a single write's trailing CR is exactly the case OpenCode
+        // leaves unsubmitted.
+        if submit { try sendTerminalInput(.bytes(Data([0x0D])), sessionID: sessionID, appendNewline: false, device: device) }
+    }
 }
 
 struct TerminalSendBytesCommand: ParsableCommand {

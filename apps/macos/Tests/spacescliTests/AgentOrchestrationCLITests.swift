@@ -225,6 +225,17 @@ final class AgentOrchestrationCLITests: XCTestCase {
         XCTAssertThrowsError(try resolvedSubscriberSessionID(nil, environment: [:]))
     }
 
+    // MARK: - Automation run id resolution
+
+    func testResolvedAutomationRunIDReturnsTrimmedEnvironmentValue() {
+        XCTAssertEqual(resolvedAutomationRunID(environment: [WorkspaceOrchestrator.automationRunIDEnvVar: "  run-1  "]), "run-1")
+    }
+
+    func testResolvedAutomationRunIDIsNilWhenUnsetOrEmpty() {
+        XCTAssertNil(resolvedAutomationRunID(environment: [:]))
+        XCTAssertNil(resolvedAutomationRunID(environment: [WorkspaceOrchestrator.automationRunIDEnvVar: "   "]))
+    }
+
     func testAgentSpawnDetectionTimeoutErrorNamesCommandAndTail() {
         let message = AgentSpawnDetectionTimeoutError(sessionID: "session-1", command: "codex", timeoutSeconds: 90).errorDescription
         XCTAssertEqual(

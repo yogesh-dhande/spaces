@@ -281,6 +281,23 @@ final class SpacesCommandTests: XCTestCase {
         XCTAssertEqual(command.sessionID, "session-1")
         XCTAssertEqual(command.text, "hello")
         XCTAssertTrue(command.newline)
+        XCTAssertFalse(command.submit)
+    }
+
+    func testTerminalSendTextParsesSubmitFlag() throws {
+        let command = try TerminalSendTextCommand.parse(["session-1", "hello", "--submit"])
+
+        XCTAssertEqual(command.sessionID, "session-1")
+        XCTAssertEqual(command.text, "hello")
+        XCTAssertFalse(command.newline)
+        XCTAssertTrue(command.submit)
+    }
+
+    func testTerminalSendTextParsesNewlineAndSubmitTogether() throws {
+        let command = try TerminalSendTextCommand.parse(["session-1", "hello", "--newline", "--submit"])
+
+        XCTAssertTrue(command.newline)
+        XCTAssertTrue(command.submit)
     }
 
     func testTerminalSendBytesParsesDecimalBytes() throws {
@@ -419,6 +436,7 @@ final class SpacesCommandTests: XCTestCase {
         XCTAssertEqual(sendSchema["required"] as? [String], ["session"])
         let sendProperties = try XCTUnwrap(sendSchema["properties"] as? [String: Any])
         XCTAssertNotNil(sendProperties["bytes"])
+        XCTAssertNotNil(sendProperties["submit"])
         XCTAssertEqual(sendSchema["oneOf"] as? [[String: [String]]], [["required": ["text"]], ["required": ["bytes"]]])
     }
 
