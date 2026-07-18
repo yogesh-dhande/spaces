@@ -75,8 +75,8 @@ schemes:
     build:
       targets:
         SpacesMobile: all
-        SpacesMobileTests: all
-        SpacesMobileUITests: all
+        SpacesMobileTests: [test]
+        SpacesMobileUITests: [test]
     run:
       storeKitConfiguration: SpacesMobile.storekit
     test:

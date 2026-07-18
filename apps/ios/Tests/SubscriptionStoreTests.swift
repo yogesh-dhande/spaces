@@ -40,5 +40,30 @@
             XCTAssertEqual(SubscriptionStore.resolvedState(hasActiveEntitlement: true, isBypassed: false), .entitled)
             XCTAssertEqual(SubscriptionStore.resolvedState(hasActiveEntitlement: false, isBypassed: false), .notEntitled)
         }
+
+        // MARK: - Product load outcome
+
+        func testProductLoadOutcomeWithEmptyProductsIsAFailure() {
+            let outcome = SubscriptionStore.productLoadOutcome(products: [])
+            XCTAssertNil(outcome.product)
+            XCTAssertNotNil(outcome.errorMessage)
+        }
+
+        // MARK: - Trial eligibility gating
+
+        func testShowsTrialOnlyWhenConfiguredAndEligible() {
+            XCTAssertTrue(
+                SubscriptionPricing.showsTrial(hasConfiguredFreeTrial: true, isEligibleForIntroOffer: true)
+            )
+            XCTAssertFalse(
+                SubscriptionPricing.showsTrial(hasConfiguredFreeTrial: true, isEligibleForIntroOffer: false)
+            )
+            XCTAssertFalse(
+                SubscriptionPricing.showsTrial(hasConfiguredFreeTrial: false, isEligibleForIntroOffer: true)
+            )
+            XCTAssertFalse(
+                SubscriptionPricing.showsTrial(hasConfiguredFreeTrial: false, isEligibleForIntroOffer: false)
+            )
+        }
     }
 #endif

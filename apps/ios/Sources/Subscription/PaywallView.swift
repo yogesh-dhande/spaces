@@ -158,7 +158,8 @@ struct PaywallView: View {
 
     private var primaryButtonTitle: String {
         guard let product = store.product else { return "Try Again" }
-        return SubscriptionPricing.hasFreeTrial(product) ? "Start Free Trial" : "Subscribe"
+        return SubscriptionPricing.hasFreeTrial(product, isEligibleForIntroOffer: store.isEligibleForIntroOffer)
+            ? "Start Free Trial" : "Subscribe"
     }
 
     /// The price line derived entirely from the loaded product — no hard-coded price strings. Falls back
@@ -167,21 +168,31 @@ struct PaywallView: View {
         guard let product = store.product else {
             return store.errorMessage == nil ? "Loading subscription…" : "Couldn't load the subscription."
         }
-        return SubscriptionPricing.priceLine(for: product)
+        return SubscriptionPricing.priceLine(for: product, isEligibleForIntroOffer: store.isEligibleForIntroOffer)
     }
 }
 
 /// Formats the subscription's price and introductory trial from the loaded `Product`, so every price
 /// string in the UI is derived from StoreKit rather than hard-coded.
 enum SubscriptionPricing {
-    static func hasFreeTrial(_ product: Product) -> Bool {
-        guard let offer = product.subscription?.introductoryOffer else { return false }
-        return offer.paymentMode == .freeTrial
+    /// A trial is advertised only when the product has a configured free-trial introductory offer AND
+    /// this specific customer is still eligible for it (StoreKit will not grant a second trial to a
+    /// lapsed subscriber, so showing one would misstate the purchase).
+    static func showsTrial(hasConfiguredFreeTrial: Bool, isEligibleForIntroOffer: Bool) -> Bool {
+        hasConfiguredFreeTrial && isEligibleForIntroOffer
     }
 
-    static func priceLine(for product: Product) -> String {
+    static func hasFreeTrial(_ product: Product, isEligibleForIntroOffer: Bool) -> Bool {
+        let hasConfiguredFreeTrial = product.subscription?.introductoryOffer?.paymentMode == .freeTrial
+        return showsTrial(hasConfiguredFreeTrial: hasConfiguredFreeTrial, isEligibleForIntroOffer: isEligibleForIntroOffer)
+    }
+
+    static func priceLine(for product: Product, isEligibleForIntroOffer: Bool) -> String {
         let perYear = "\(product.displayPrice)/year"
-        guard let offer = product.subscription?.introductoryOffer, offer.paymentMode == .freeTrial else {
+        let hasConfiguredFreeTrial = product.subscription?.introductoryOffer?.paymentMode == .freeTrial
+        guard let offer = product.subscription?.introductoryOffer,
+            showsTrial(hasConfiguredFreeTrial: hasConfiguredFreeTrial, isEligibleForIntroOffer: isEligibleForIntroOffer)
+        else {
             return perYear
         }
         return "\(trialLength(offer.period)) free, then \(perYear)"

@@ -32,6 +32,12 @@ import StoreKit
 
     private(set) var state: State
     private(set) var product: Product?
+    /// Whether this specific customer is still eligible for the product's introductory free trial.
+    /// Distinct from the product having a configured trial at all: a lapsed subscriber who already
+    /// consumed it is not eligible again, so the paywall must not advertise "Start Free Trial" to them.
+    /// Defaults to false and is only set true once StoreKit confirms eligibility, so the conservative
+    /// (paid) framing is what shows if that check has not resolved yet.
+    private(set) var isEligibleForIntroOffer = false
     private(set) var entitlementDetail: EntitlementDetail = .none
     private(set) var isPurchasing = false
     private(set) var errorMessage: String?
@@ -82,17 +88,36 @@ import StoreKit
     }
 
     /// Loads the product and refreshes the entitlement. Also the paywall's retry path: when StoreKit
-    /// is unreachable the product stays `nil` and the entitlement read yields nothing, so the paywall
-    /// stays up with a retry affordance rather than falling through to the app.
+    /// is unreachable, or the product fetch succeeds but returns nothing, the product stays `nil` and
+    /// the paywall stays up with a retry affordance rather than falling through to the app.
     func load() async {
         do {
             let products = try await Product.products(for: [Self.yearlyProductID])
-            product = products.first
-            errorMessage = nil
+            let outcome = Self.productLoadOutcome(products: products)
+            product = outcome.product
+            errorMessage = outcome.errorMessage
+            if let product = outcome.product {
+                isEligibleForIntroOffer = await product.subscription?.isEligibleForIntroOffer ?? false
+            } else {
+                isEligibleForIntroOffer = false
+            }
         } catch {
             errorMessage = error.localizedDescription
+            isEligibleForIntroOffer = false
         }
         await refreshEntitlement()
+    }
+
+    /// Maps a successful (non-throwing) product fetch to the store's fields. An empty response — e.g.
+    /// the product not yet available in this storefront while App Store Connect configuration
+    /// propagates — is a load failure the paywall must surface, not a silent nil: without this, `product`
+    /// stays nil, `errorMessage` is cleared, and the paywall shows "Loading subscription…" forever with
+    /// no retry affordance. Pure so it is testable without constructing a `Product`.
+    static func productLoadOutcome(products: [Product]) -> (product: Product?, errorMessage: String?) {
+        guard let product = products.first else {
+            return (nil, "The subscription is currently unavailable. Please try again later.")
+        }
+        return (product, nil)
     }
 
     /// Purchases the yearly subscription. A verified success finishes the transaction and unlocks the
