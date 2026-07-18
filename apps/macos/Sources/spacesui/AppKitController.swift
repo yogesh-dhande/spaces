@@ -98,6 +98,34 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let countsTowardBadge: Bool
         let eventDate: Date?
         let focusRequest: WindowFocusRequest?
+        /// Set for a failed/timed-out automation-run alert. Its card deep-links to the Runs tab (a
+        /// workspace-less run has no `WindowFocusRequest` window to focus), so `focusRequest` stays nil.
+        let automationRunTarget: AutomationRunAlertTarget?
+
+        init(
+            attentionID: String, icon: String, iconTint: AlertsIconTint, label: String, detail: String?, shortcut: String,
+            processStatus: RunningProcessState? = nil, agentStatus: AgentWindowStatus? = nil, countsTowardBadge: Bool, eventDate: Date?,
+            focusRequest: WindowFocusRequest? = nil, automationRunTarget: AutomationRunAlertTarget? = nil
+        ) {
+            self.attentionID = attentionID
+            self.icon = icon
+            self.iconTint = iconTint
+            self.label = label
+            self.detail = detail
+            self.shortcut = shortcut
+            self.processStatus = processStatus
+            self.agentStatus = agentStatus
+            self.countsTowardBadge = countsTowardBadge
+            self.eventDate = eventDate
+            self.focusRequest = focusRequest
+            self.automationRunTarget = automationRunTarget
+        }
+    }
+
+    /// Names the automation run an alert card deep-links to (its device and run id).
+    struct AutomationRunAlertTarget: Sendable, Equatable {
+        let deviceID: String
+        let runID: String
     }
 
     struct AlertsGroup: Sendable {
@@ -205,6 +233,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     var visibleDetailWorkspaceID: String? { detailPane.workspaceID }
     var visibleCompatibilityBlockDeviceID: String? { detailPane.compatibilityBlockDeviceID }
     var showingAlerts: Bool { detailPane.isAlerts }
+    var showingAutomations: Bool { detailPane.isAutomations }
 
     var selectedProjectID: String? { didSet { overlays.updateOperationProgressOverlayVisibility() } }
     var selectedWorkspaceID: String? { didSet { overlays.updateOperationProgressOverlayVisibility() } }
@@ -257,6 +286,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// overview, so an offline remote's windows return when the device does.
     var pendingPanelWindowRestores: [SpacesClientDatabase.PanelWindowRecord]?
     lazy var alerts = AlertsController(host: self)
+    lazy var automations = AutomationsController(host: self)
+    lazy var automationEditor = AutomationEditorController(host: self)
     lazy var overlays = TransientOverlaysController(host: self)
     lazy var workspaceVisibility = WorkspaceVisibilityController(host: self)
     lazy var settings = SettingsController(host: self)
@@ -2747,7 +2778,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// intentionally absent: desktop windows are client-local and not part of the daemon overview,
     /// so an exited process shows as a process alert and clicking it focuses the process. Recency
     /// (and dismissal identity) come from the daemon-supplied `exitedAt`/`updatedAt` timestamps.
-    nonisolated static func buildOverviewAlertsGroups(from overview: SpacesDeviceOverviewPayload, deviceID: String) -> [AlertsGroup] {
+    nonisolated static func buildOverviewAlertsGroups(from overview: SpacesDeviceOverviewPayload, deviceID: String, deviceName: String = "")
+        -> [AlertsGroup]
+    {
         let iso8601Formatter = staticISO8601Formatter
         var groups: [AlertsGroup] = []
         for workspace in overview.workspaces where !workspace.isArchived {
@@ -2797,6 +2830,22 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 AlertsGroup(
                     projectName: workspace.projectName, workspaceID: workspace.id, workspaceName: workspace.displayName,
                     workspaceBranch: workspace.branch, items: items))
+        }
+        // Failed/timed-out automation runs draw attention too. Automation runs are workspace-less, so they
+        // form their own synthetic group ("Automations / <device>") whose cards deep-link to the Runs tab
+        // instead of focusing a workspace window.
+        let automationEntries = AutomationsViewModel.alertEntries(deviceID: deviceID, deviceName: deviceName, runs: overview.automationRuns)
+        if !automationEntries.isEmpty {
+            let items = automationEntries.map { entry in
+                AlertsAttentionEntry(
+                    attentionID: entry.attentionID, icon: entry.status == "timed_out" ? "clock.badge.exclamationmark.fill" : "xmark.octagon.fill",
+                    iconTint: .warning, label: entry.text, detail: nil, shortcut: "", countsTowardBadge: true, eventDate: entry.eventDate,
+                    automationRunTarget: AutomationRunAlertTarget(deviceID: entry.deviceID, runID: entry.runID))
+            }
+            groups.append(
+                AlertsGroup(
+                    projectName: "Automations", workspaceID: "automations:\(deviceID)", workspaceName: deviceName.isEmpty ? "This device" : deviceName,
+                    workspaceBranch: nil, items: items))
         }
         groups.sort {
             switch ($0.latestDate, $1.latestDate) {
@@ -2884,7 +2933,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 logStartupSnapshotProfile(
                     "sidebar_snapshot_local_device_ready",
                     details: "device=\(localDevice.name) project_count=\(mapped.projects.count) workspace_count=\(workspaceCount)")
-                let alertsGroups = buildOverviewAlertsGroups(from: localOverview, deviceID: localDevice.id)
+                let alertsGroups = buildOverviewAlertsGroups(from: localOverview, deviceID: localDevice.id, deviceName: localDevice.name)
                 logStartupSnapshotProfile(
                     "sidebar_snapshot_alerts_ready",
                     details: "group_count=\(alertsGroups.count) item_count=\(alertsGroups.reduce(0) { $0 + $1.items.count })")
@@ -3977,6 +4026,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let alertsRow = sidebar.makeAlertsSidebarRow()
         alertsRow.translatesAutoresizingMaskIntoConstraints = false
 
+        let automationsRow = sidebar.makeAutomationsSidebarRow()
+        automationsRow.translatesAutoresizingMaskIntoConstraints = false
+
         // The app identity row (logo, name, devices/settings/reload) is the sidebar's
         // footer; the Alerts row leads the content, which starts just below the
         // titlebar strip.
@@ -3985,6 +4037,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         footerSeparator.translatesAutoresizingMaskIntoConstraints = false
 
         container.addSubview(alertsRow)
+        container.addSubview(automationsRow)
         container.addSubview(sectionHeader)
         container.addSubview(scroll)
         container.addSubview(footerSeparator)
@@ -3995,9 +4048,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             alertsRow.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
             alertsRow.topAnchor.constraint(equalTo: container.topAnchor, constant: 4),
 
+            automationsRow.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
+            automationsRow.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
+            automationsRow.topAnchor.constraint(equalTo: alertsRow.bottomAnchor, constant: 2),
+
             sectionHeader.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
             sectionHeader.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -16),
-            sectionHeader.topAnchor.constraint(equalTo: alertsRow.bottomAnchor, constant: 10),
+            sectionHeader.topAnchor.constraint(equalTo: automationsRow.bottomAnchor, constant: 10),
 
             scroll.leadingAnchor.constraint(equalTo: container.leadingAnchor), scroll.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             scroll.topAnchor.constraint(equalTo: sectionHeader.bottomAnchor, constant: 6),
@@ -4033,6 +4090,69 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     func loadAlertsDismissedAttentionItemIDs() { alerts.loadAlertsDismissedAttentionItemIDs() }
     func pruneDismissedAlertsAttentionItemIDsIfNeeded() { alerts.pruneDismissedAlertsAttentionItemIDsIfNeeded() }
     func showAlertsDetail() { alerts.showAlertsDetail() }
+
+    // MARK: - Automations
+
+    @objc func automationsRowClicked() { automations.showAutomationsDetail() }
+    func showAutomationsDetail() { automations.showAutomationsDetail() }
+    func updateAutomationsSidebarRow() { sidebar.updateAutomationsSidebarRow() }
+
+    /// The per-device automation slices for the pane and sidebar row: every device section mapped to its
+    /// overview's automations/runs, with unreachable sections marked (never dropped) so the pane can surface
+    /// them. Local daemon and paired devices are treated identically.
+    func automationDeviceInputs() -> [AutomationDeviceInput] {
+        deviceSections.map { section in
+            let isReachable = section.loadState == .loaded
+            let offlineMessage: String? = if case .offline(let message) = section.loadState { message } else { nil }
+            return AutomationDeviceInput(
+                deviceID: section.deviceID, deviceName: section.deviceName, isLocal: section.isLocal, isReachable: isReachable,
+                offlineMessage: offlineMessage, automations: section.overview?.automations ?? [], runs: section.overview?.automationRuns ?? [])
+        }
+    }
+
+    /// The paired-device record to send an automation Device API command to. Mirrors `deviceForMutation`:
+    /// the local id resolves to the local record, any other to its loaded section record.
+    func automationDeviceRecord(deviceID: String) -> SpacesPairedDeviceRecord? {
+        deviceID == localDeviceID ? localPairedDevice : deviceRecord(forDeviceID: deviceID)
+    }
+
+    func isRemoteAutomationDevice(deviceID: String) -> Bool { deviceID != localDeviceID }
+
+    /// The summary for one automation on one device, read from that device's loaded overview.
+    func automationSummary(deviceID: String, automationID: String) -> TerminalServiceAutomationSummary? {
+        deviceSection(id: deviceID)?.overview?.automations.first { $0.id == automationID }
+    }
+
+    /// Builds wire fields from a summary, optionally overriding `enabled` (used by the enable toggle).
+    static func automationFields(from summary: TerminalServiceAutomationSummary, enabled: Bool? = nil) -> TerminalServiceAutomationFields {
+        TerminalServiceAutomationFields(
+            name: summary.name, enabled: enabled ?? summary.enabled, triggerKind: summary.triggerKind, cronExpression: summary.cronExpression,
+            command: summary.command, workingDirectory: summary.workingDirectory, timeoutSeconds: summary.timeoutSeconds,
+            concurrencyPolicy: summary.concurrencyPolicy, missedRunPolicy: summary.missedRunPolicy)
+    }
+
+    /// Opens an automation run's terminal: a live pane for a running run, or the read-only transcript replay
+    /// for an ended one (the pane shows its read-only banner once the ended session's final render lands).
+    ///
+    /// Automation sessions are workspace-less and deliberately excluded from the workspace-scoped overview's
+    /// `sessions`, so the normal session→pane resolution (which reads `overview.sessions`) cannot find them.
+    /// The request is therefore synthesized from the run and its automation and opened in a standalone panel
+    /// window (automation sessions are not workspace panes). The seeded shell is display metadata only — the
+    /// pane attaches to the daemon's existing session and streams its real render — so the user's login shell
+    /// is a faithful label for a local run and a reasonable one for a remote run.
+    func openAutomationRunTerminal(deviceID: String, run: TerminalServiceAutomationRunSummary) {
+        guard let sessionID = run.terminalSessionID else {
+            showError(Self.terminalSessionNotFoundError())
+            return
+        }
+        let automation = automationSummary(deviceID: deviceID, automationID: run.automationID)
+        let loginShell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
+        let request = DeviceTerminalOpenRequest(
+            workspaceID: "", deviceID: deviceID, sessionID: sessionID, title: automation?.name ?? "Automation", workingDirectory: automation?.workingDirectory ?? "",
+            kind: .automation, shell: loginShell, command: automation?.command,
+            initialState: AutomationRunStatus(rawValue: run.status) == .running ? .running : .exited)
+        panelCoordinator.moveSessionToNewPanelWindow(request)
+    }
 
     private func makeRightPane() -> NSView {
         let container = NSView()
@@ -4097,7 +4217,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     func rebuildFlatSidebarData() { sidebar.rebuildFlatSidebarData() }
     func applySidebarProjectExpansionState() { sidebar.applySidebarProjectExpansionState() }
     func updateAlertsSidebarBadge() { sidebar.updateAlertsSidebarBadge() }
-    func updateAlertsRowAppearance() { sidebar.updateAlertsRowAppearance() }
+    func updateAlertsRowAppearance() {
+        sidebar.updateAlertsRowAppearance()
+        // The Alerts and Automations rows share a mutually-exclusive selection highlight, so refresh both
+        // whenever the detail pane changes.
+        sidebar.updateAutomationsRowAppearance()
+    }
     func refreshSidebarSelectionRows(previousProjectID: String?, currentProjectID: String?, previousWorkspaceID: String?, currentWorkspaceID: String?)
     {
         sidebar.refreshSidebarSelectionRows(
@@ -4359,7 +4484,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             deviceSections[index].overview = overview
             if deviceSections[index].isLocal {
                 localDeviceOverview = overview
-                deviceSections[index].alertsGroups = Self.buildOverviewAlertsGroups(from: overview, deviceID: deviceID)
+                deviceSections[index].alertsGroups = Self.buildOverviewAlertsGroups(
+                    from: overview, deviceID: deviceID, deviceName: deviceSections[index].deviceName)
             }
         }
         if deviceID != localDeviceID, let device = deviceRecord(forDeviceID: deviceID) {
@@ -4379,6 +4505,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         if !shouldPreserveDetailPane { refreshSelection() }
         updateAlertsSidebarBadge()
         if showingAlerts { showAlertsDetail() }
+        if showingAutomations { showAutomationsDetail() }
     }
 
     func applyDeviceMutationResponse(
@@ -4416,6 +4543,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     func refreshSelection() {
         if showingAlerts {
             showAlertsDetail()
+            return
+        }
+        if showingAutomations {
+            showAutomationsDetail()
             return
         }
         if let selectedWorkspaceID {

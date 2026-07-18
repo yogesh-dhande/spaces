@@ -10,6 +10,8 @@ enum DetailPane: Equatable {
     case workspace(id: String)
     /// The full-pane alerts list.
     case alerts
+    /// The full-pane automations manager (automations + runs tabs).
+    case automations
     /// The full-pane compatibility block for an incompatible device's daemon. Held here (rather than
     /// only in the sidebar selection) so the block survives background sidebar reloads instead of
     /// being replaced.
@@ -20,6 +22,9 @@ enum DetailPane: Equatable {
 
     /// Whether the alerts list is the current pane.
     var isAlerts: Bool { if case .alerts = self { true } else { false } }
+
+    /// Whether the automations manager is the current pane.
+    var isAutomations: Bool { if case .automations = self { true } else { false } }
 
     /// Device whose compatibility block is shown, or `nil` for any other pane.
     var compatibilityBlockDeviceID: String? { if case .compatibilityBlock(let deviceID) = self { deviceID } else { nil } }

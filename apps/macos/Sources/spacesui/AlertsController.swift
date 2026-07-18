@@ -197,6 +197,10 @@ import workspacecore
                             guard let self else { return }
                             await self.host.performWindowFocus(focusRequest)
                         }
+                    } else if let automationRunTarget = entry.automationRunTarget {
+                        cardAction = { [weak self] in
+                            self?.host.automations.showRunsForAlert(deviceID: automationRunTarget.deviceID, runID: automationRunTarget.runID)
+                        }
                     } else {
                         cardAction = nil
                     }

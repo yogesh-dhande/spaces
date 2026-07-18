@@ -334,6 +334,17 @@ Every terminal runs in the built-in terminal, never an external terminal app. A 
 - The Alerts sidebar badge and dock badge should reflect the number of visible Alerts attention rows after dismissals are applied.
 - Users should be able to dismiss individual Alerts attention items so they disappear from the Alerts list and dock badge until that specific attention event changes.
 - Dismissing an Alerts attention item must not hide the underlying process or agent row from the sidebar's runtime-target list.
+- A failed or timed-out automation run contributes a dismissible Alerts attention item, grouped under the device it ran on, with text naming the automation, the failure (including exit code when known), and the device. Clicking it opens the Automations Runs tab filtered to that device.
+
+## Automations
+- An automation is a named shell command that runs on a specific device, either on demand or on a cron schedule. Automations run in their own terminal sessions that are separate from workspaces and never appear in workspace panels or window cycling.
+- The sidebar shows an Automations row directly below Alerts. Its badge counts automation runs currently running across every paired device. Expanding the row lists those running runs (automation name and, when more than one device is paired, the device); clicking a running run opens its live terminal. Clicking the row opens the Automations detail pane.
+- The Automations detail pane merges automations and runs across the local Mac and every paired device into one view, with a device filter and a New automation button. An unreachable paired device is shown as a visible marker rather than being silently omitted.
+- The Automations tab lists each automation with its device, trigger (manual or the cron expression), next fire time, an enabled toggle, its policies, and its most recent run's status. Each row offers Run now, Edit, and Delete (Delete asks for confirmation and also cancels any running run).
+- The Runs tab lists runs newest first with a status icon, automation name, device, trigger kind (manual, cron, or missed catch-up), start time, duration, and exit code; a skipped run shows why it was skipped. A running run can be canceled and its live terminal opened; an ended run opens its read-only transcript replay; a skipped or queued run with no session is inert. A run that spawned still-live coding-agent sessions shows a live-agents indicator.
+- Creating or editing an automation uses a labeled form. The device is chosen only at creation because an automation lives on its device. The command is entered as multiline text and runs in the device's login shell; the working directory can be typed or, for the local device, chosen with a folder browser.
+- The trigger is Manual or Cron. A cron trigger offers a schedule builder with presets — every N minutes, hourly at a minute, daily at a time, and weekly on chosen days at a time — plus an Advanced mode for a raw 5-field cron expression. Whichever is active, the form shows the next three run times and any cron parse error inline. The builder always stores a plain cron string; editing an automation re-opens the matching preset when the stored string fits one, otherwise it opens in Advanced.
+- The form also exposes an optional timeout (empty means none), a concurrency policy for overlapping runs, and a missed-run policy for schedules missed while the daemon was down, each with a one-line description.
 
 ## Editing and Shortcuts
 - The app should support keyboard-driven use for common actions.

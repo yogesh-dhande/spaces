@@ -118,6 +118,15 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     private var alertsRowView: NSView?
     private var alertsRowStack: NSStackView?
     private var alertsRowBadge: NSTextField?
+
+    // Automations sidebar row (header + collapsible running-run children)
+    private var automationsRowContainer: NSView?
+    private var automationsHeaderStack: NSStackView?
+    private var automationsRowBadge: NSTextField?
+    private var automationsChildrenStack: NSStackView?
+    private var automationsDisclosureButton: NSButton?
+    /// Whether the running-run children are expanded. Session state; defaults collapsed.
+    private var automationsExpanded = false
     /// Top-bar warning icon shown while another Spaces instance owns desktop control.
     private(set) weak var desktopControlStatusIcon: NSImageView?
 
@@ -586,7 +595,8 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             host.deviceSections[index].projects = mapped.projects
             host.deviceSections[index].workspacesByProject = mapped.workspacesByProject
             host.deviceSections[index].workspaceRuntimeStatusByID = mapped.workspaceRuntimeStatusByID
-            host.deviceSections[index].alertsGroups = AppKitController.buildOverviewAlertsGroups(from: overview.overview, deviceID: deviceID)
+            host.deviceSections[index].alertsGroups = AppKitController.buildOverviewAlertsGroups(
+                from: overview.overview, deviceID: deviceID, deviceName: host.deviceSections[index].deviceName)
             host.deviceSections[index].overview = overview.overview
             host.deviceSections[index].device = overview.device
             host.deviceSections[index].loadState = .loaded
@@ -631,6 +641,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         //      pre-rebuild groups and would keep showing (and routing clicks to) the now-removed device's
         //      alerts until the user navigates away.
         if selectionInvalidatedByOffline || host.showingAlerts { host.showAlertsDetail() }
+        if host.showingAutomations { host.showAutomationsDetail() }
     }
 
     /// Recomputes the flat, id-keyed sidebar dictionaries as the union of every
@@ -1867,6 +1878,158 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         }
         NSApp.dockTile.badgeLabel = totalCount == 0 ? nil : "\(totalCount)"
         NSApp.dockTile.display()
+        // The automations row's running-run count and children track the same overview changes as the alerts
+        // badge, so refresh them here to cover every sidebar-refresh path in one place.
+        updateAutomationsSidebarRow()
+    }
+
+    func makeAutomationsSidebarRow() -> NSView {
+        let container = NSView()
+        container.translatesAutoresizingMaskIntoConstraints = false
+        container.setAccessibilityIdentifier("sidebar-automations")
+
+        let disclosure = NSButton()
+        disclosure.bezelStyle = .regularSquare
+        disclosure.isBordered = false
+        disclosure.imagePosition = .imageOnly
+        disclosure.image = NSImage(systemSymbolName: "chevron.right", accessibilityDescription: "Expand")?.withSymbolConfiguration(
+            .init(pointSize: 9, weight: .semibold))
+        disclosure.contentTintColor = .tertiaryLabelColor
+        disclosure.target = self
+        disclosure.action = #selector(automationsDisclosureToggled)
+        disclosure.setContentHuggingPriority(.required, for: .horizontal)
+        disclosure.toolTip = "Show running automations"
+        automationsDisclosureButton = disclosure
+
+        let icon = NSImageView()
+        icon.image = NSImage(systemSymbolName: "clock.arrow.circlepath", accessibilityDescription: "Automations")?.withSymbolConfiguration(
+            .init(pointSize: 11, weight: .medium))
+        icon.contentTintColor = .secondaryLabelColor
+        icon.setContentHuggingPriority(.required, for: .horizontal)
+
+        let titleLabel = NSTextField(labelWithString: "Automations")
+        titleLabel.font = .systemFont(ofSize: 12, weight: .medium)
+        titleLabel.textColor = .labelColor
+
+        let badge = NSTextField(labelWithString: "")
+        badge.font = .monospacedSystemFont(ofSize: 10, weight: .bold)
+        badge.textColor = sidebarRunningIndicatorColor()
+        badge.alignment = .right
+        badge.isBordered = false
+        badge.isEditable = false
+        badge.drawsBackground = false
+        badge.isHidden = true
+        badge.setContentHuggingPriority(.required, for: .horizontal)
+        badge.setContentCompressionResistancePriority(.required, for: .horizontal)
+        automationsRowBadge = badge
+
+        let header = NSStackView(views: [disclosure, icon, titleLabel, NSView(), badge])
+        header.orientation = .horizontal
+        header.alignment = .centerY
+        header.spacing = 6
+        header.edgeInsets = NSEdgeInsets(top: 6, left: 8, bottom: 6, right: 8)
+        header.wantsLayer = true
+        header.layer?.cornerRadius = UIRadius.regular
+        header.translatesAutoresizingMaskIntoConstraints = false
+        automationsHeaderStack = header
+        // The header (not the disclosure triangle) opens the detail pane; the triangle only expands.
+        let click = NSClickGestureRecognizer(target: host, action: #selector(AppKitController.automationsRowClicked))
+        titleLabel.addGestureRecognizer(click)
+        let iconClick = NSClickGestureRecognizer(target: host, action: #selector(AppKitController.automationsRowClicked))
+        icon.addGestureRecognizer(iconClick)
+
+        let children = NSStackView()
+        children.orientation = .vertical
+        children.alignment = .leading
+        children.spacing = 2
+        children.translatesAutoresizingMaskIntoConstraints = false
+        automationsChildrenStack = children
+
+        container.addSubview(header)
+        container.addSubview(children)
+        NSLayoutConstraint.activate([
+            header.topAnchor.constraint(equalTo: container.topAnchor),
+            header.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            header.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            children.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 2),
+            children.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 20),
+            children.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -6),
+            children.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+        ])
+        automationsRowContainer = container
+
+        updateAutomationsSidebarRow()
+        return container
+    }
+
+    @objc private func automationsDisclosureToggled() {
+        automationsExpanded.toggle()
+        updateAutomationsSidebarRow()
+    }
+
+    /// Refreshes the automations row: the running-run count badge, the disclosure state, and (when expanded)
+    /// the running-run children across every device. Each child opens its run's live terminal on click.
+    func updateAutomationsSidebarRow() {
+        guard let container = automationsRowContainer else { return }
+        let runningRuns = AutomationsViewModel.runningRuns(from: host.automationDeviceInputs())
+
+        if let badge = automationsRowBadge {
+            badge.stringValue = "\(runningRuns.count)"
+            badge.isHidden = runningRuns.isEmpty
+        }
+        automationsDisclosureButton?.isHidden = runningRuns.isEmpty
+        automationsDisclosureButton?.image = NSImage(
+            systemSymbolName: automationsExpanded ? "chevron.down" : "chevron.right", accessibilityDescription: automationsExpanded ? "Collapse" : "Expand")?
+            .withSymbolConfiguration(.init(pointSize: 9, weight: .semibold))
+
+        updateAutomationsRowAppearance()
+
+        guard let children = automationsChildrenStack else { return }
+        children.removeAllArrangedSubviews()
+        guard automationsExpanded, !runningRuns.isEmpty else {
+            children.isHidden = true
+            return
+        }
+        children.isHidden = false
+        let showDevice = host.deviceSections.count > 1
+        for row in runningRuns {
+            let child = makeAutomationRunningChildRow(row, showDevice: showDevice)
+            children.addArrangedSubview(child)
+            // Leading is pinned by the stack's .leading alignment; stretch to full width so the whole row is
+            // a click target.
+            child.trailingAnchor.constraint(equalTo: children.trailingAnchor).isActive = true
+        }
+    }
+
+    private func makeAutomationRunningChildRow(_ row: AutomationRunTableRow, showDevice: Bool) -> NSView {
+        let dot = RowPrimitives.statusDot(.running)
+        dot.setContentHuggingPriority(.required, for: .horizontal)
+        let name = row.run.automationName ?? "Automation"
+        let label = NSTextField(labelWithString: showDevice ? "\(name) — \(row.deviceName)" : name)
+        label.font = .systemFont(ofSize: 11)
+        label.textColor = .secondaryLabelColor
+        label.lineBreakMode = .byTruncatingTail
+        let stack = NSStackView(views: [dot, label])
+        stack.orientation = .horizontal
+        stack.alignment = .centerY
+        stack.spacing = 6
+        stack.edgeInsets = NSEdgeInsets(top: 3, left: 6, bottom: 3, right: 6)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        stack.toolTip = "Open live terminal"
+        attachRowClickAction(to: stack) { [weak self] in
+            self?.host.openAutomationRunTerminal(deviceID: row.deviceID, run: row.run)
+        }
+        return stack
+    }
+
+    func updateAutomationsRowAppearance() {
+        guard let header = automationsHeaderStack else { return }
+        let isShowing = host.showingAutomations
+        header.layer?.borderWidth = isShowing ? 1 : 0
+        bindAppearanceReactiveLayer(header) { [weak self] view in
+            view.layer?.backgroundColor = isShowing ? self?.sidebarSelectedCardBackgroundColor().cgColor : NSColor.clear.cgColor
+            view.layer?.borderColor = self?.sidebarCardBorderColor(isSelected: true).cgColor
+        }
     }
 
     func makeSidebarTopBarRow() -> NSView {
