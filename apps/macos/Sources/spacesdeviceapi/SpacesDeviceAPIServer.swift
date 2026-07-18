@@ -1459,8 +1459,13 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         if startOffset > 0, let newlineIndex = data.firstIndex(of: 0x0A), newlineIndex < data.endIndex - 1 {
             data = data.subdata(in: (newlineIndex + 1)..<data.endIndex)
         }
+        // Carry the current run's identity so the client can reject a fetch that straddled a relaunch:
+        // a relaunch truncates `output.log`, so bytes read here could belong to a newer run than the one
+        // the client's replay was armed against. `nil` when no runtime state exists yet.
+        let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths)
         return SpacesDeviceAPIResponse(
-            ok: true, message: "Read terminal transcript.", result: .terminalTranscript(.init(data: data, totalBytes: totalBytes)))
+            ok: true, message: "Read terminal transcript.",
+            result: .terminalTranscript(.init(data: data, totalBytes: totalBytes, runIdentity: runtimeState?.runIdentity)))
     }
 
     private func handleTerminalPasteImageRequest(_ payload: SpacesDeviceTerminalPasteImageRequest) throws -> SpacesDeviceAPIResponse {

@@ -176,7 +176,7 @@
         /// Fetches a suffix of the session's persisted output transcript for the render host's
         /// client-local ended-session scrollback replay. Read-only; routes through the owning device's
         /// Device API endpoint like every other request, so it serves local and remote sessions alike.
-        func fetchTranscript(maxBytes: Int) async throws -> Data {
+        func fetchTranscript(maxBytes: Int) async throws -> RemoteGhosttyTranscript {
             let sessionID = self.sessionID
             let authToken = self.authToken
             let clientApp = self.clientApp
@@ -194,7 +194,7 @@
         nonisolated static func fetchTranscript(
             sessionID: String, maxBytes: Int, requestClient: SpacesDeviceAPIRequestSessionClient, authToken: String?,
             clientApp: SpacesDeviceClientApp
-        ) throws -> Data {
+        ) throws -> RemoteGhosttyTranscript {
             let request = SpacesDeviceAPIRequest(
                 command: .terminalTranscript(SpacesDeviceTerminalTranscriptRequest(sessionID: sessionID, maxBytes: maxBytes)),
                 authToken: authToken, clientApp: clientApp)
@@ -203,13 +203,14 @@
             let response = try requestClient.send(request, timeoutSeconds: SpacesDeviceClient.requestTimeoutSeconds(for: request.command))
             guard response.ok, let transcript = response.terminalTranscript else {
                 // A missing `output.log` is definitive: the server reports `.sessionNotAvailable`, which
-                // means there is simply nothing to replay. Return empty so the render host latches its
-                // `.unavailable` verdict instead of retrying the doomed fetch on every scroll gesture;
-                // every other failure stays transient and throws so the host retries.
-                if response.errorCode == .sessionNotAvailable { return Data() }
+                // means there is simply nothing to replay. Return an empty transcript so the render host
+                // latches its `.unavailable` verdict instead of retrying the doomed fetch on every scroll
+                // gesture; every other failure stays transient and throws so the host retries. The server
+                // does not report a run identity on the error response, so it is nil here.
+                if response.errorCode == .sessionNotAvailable { return RemoteGhosttyTranscript(data: Data(), runIdentity: nil) }
                 throw SpacesDeviceClientError.unavailable(response.message)
             }
-            return transcript.data
+            return RemoteGhosttyTranscript(data: transcript.data, runIdentity: transcript.runIdentity)
         }
 
         /// State-stream subscriber for the Ghostty render host. Instead of opening a

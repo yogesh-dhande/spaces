@@ -8,7 +8,7 @@ import Foundation
 /// Client and daemon must speak the exact same version (lockstep — there is no backwards-compatibility
 /// window). Raise `version` whenever the wire contract changes.
 public enum SpacesWireProtocol {
-    public static let version = 7
+    public static let version = 8
 
     /// Compares dotted numeric version strings (e.g. "0.1.0"). Non-numeric components count as 0 and
     /// empty inputs compare equal, so a missing version never reports an update. Shared by macOS and

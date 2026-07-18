@@ -11,10 +11,25 @@
             _ onDisconnect: @escaping @Sendable ((any Error)?) -> Void
         ) throws -> any TerminalRemoteStateStreamClient
 
+    /// A fetched ended-session transcript plus the run identity the server reported it was read from.
+    /// The host validates `runIdentity` against the run its replay was armed against, so a fetch that
+    /// straddles a relaunch (which truncates `output.log`) cannot install the new run's bytes under the
+    /// old run's final frame. `runIdentity` is nil when the server did not report one (the
+    /// missing-output error path maps to an empty transcript with no identity).
+    public struct RemoteGhosttyTranscript: Sendable {
+        public let data: Data
+        public let runIdentity: String?
+
+        public init(data: Data, runIdentity: String?) {
+            self.data = data
+            self.runIdentity = runIdentity
+        }
+    }
+
     /// Fetches a suffix of the session's persisted output transcript (capped at `maxBytes`) for the
     /// ended-session scrollback replay. Read-only; the caller invokes it once, lazily, on the first
     /// scroll of an ended pane.
-    public typealias RemoteGhosttyTranscriptProvider = @Sendable (_ maxBytes: Int) async throws -> Data
+    public typealias RemoteGhosttyTranscriptProvider = @Sendable (_ maxBytes: Int) async throws -> RemoteGhosttyTranscript
 
     @MainActor public final class RemoteGhosttySessionHost: TerminalGhosttySessionHosting {
         private let launchConfiguration: TerminalSessionLaunchConfiguration
@@ -630,6 +645,11 @@
             }
             // Build at the final frame's grid so the replay wraps exactly as the daemon's final frame
             // did; fall back to the runtime-state grid when the final frame is unavailable.
+            //
+            // The replay seeds at the transcript bottom. The persisted final frame is viewport-only with
+            // no scrollback offset, so a process that exited while the user was scrolled above the bottom
+            // jumps bottom-relative (or clamps) on the first scroll gesture. Accepted until a scroll
+            // offset is persisted with the final frame.
             let finalFrame = latestState?.decodedRenderUpdate?.fullFrame
             let columns = finalFrame?.columns ?? latestState?.runtimeState?.columns ?? 80
             let rows = finalFrame?.rows ?? latestState?.runtimeState?.rows ?? 24
@@ -642,7 +662,7 @@
             let generation = endedScrollbackGeneration
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                let transcript: Data
+                let transcript: RemoteGhosttyTranscript
                 do { transcript = try await transcriptProvider(maxBytes) } catch {
                     // A transport failure (timeout, daemon restarting, remote device offline) is
                     // transient: return to idle so the next scroll gesture retries the fetch.
@@ -654,13 +674,26 @@
                 // A relaunch (session went interactive again) discards the loading state mid-fetch,
                 // bumping the generation; a stale-run result is rejected here.
                 guard generation == self.endedScrollbackGeneration, case .loading = self.endedScrollbackState else { return }
-                guard !transcript.isEmpty else {
+                // The transcript response carries the run identity the server read it from. A relaunch
+                // that lands after the fetch started but before this client observes a new state payload
+                // leaves the generation and armed identity unchanged, yet truncates `output.log` — so the
+                // fetched bytes can belong to the new run. When the response identity differs from the
+                // armed one, the armed run's transcript is definitively gone: latch `.unavailable` (cleared
+                // only by a later discard through the interactive or run-identity path). Skip the check
+                // when either identity is unknown (nil) and behave as before.
+                if let responseIdentity = transcript.runIdentity, let armedIdentity = self.endedScrollbackRunIdentity,
+                    responseIdentity != armedIdentity
+                {
+                    self.endedScrollbackState = .unavailable
+                    return
+                }
+                guard !transcript.data.isEmpty else {
                     // An empty transcript is definitive — there is nothing to replay.
                     self.endedScrollbackState = .unavailable
                     return
                 }
                 let model = await Task.detached(priority: .userInitiated) {
-                    TerminalEndedSessionScrollbackModel(columns: columns, rows: rows, theme: theme, transcript: transcript)
+                    TerminalEndedSessionScrollbackModel(columns: columns, rows: rows, theme: theme, transcript: transcript.data)
                 }.value
                 guard generation == self.endedScrollbackGeneration, case .loading(let pendingDeltaRows) = self.endedScrollbackState else { return }
                 guard let model else {
@@ -722,12 +755,12 @@
             endedScrollDeltaNormalizer = TerminalScrollDeltaNormalizer()
         }
 
-        /// Run identity for the ended run currently described by `latestState`: the child PID differs per
-        /// launch and the exit timestamp per exit, so together they identify a run. `nil` when there is no
-        /// runtime state yet. Used to detect an ended->ended transition to a different run.
+        /// Run identity for the ended run currently described by `latestState`, delegating to the shared
+        /// `TerminalSessionRuntimeState.runIdentity` format so the armed replay identity matches the one
+        /// the transcript response carries. `nil` when there is no runtime state yet. Used to detect an
+        /// ended->ended transition to a different run and to validate transcript responses.
         private func currentEndedRunIdentity() -> String? {
-            guard let runtimeState = latestState?.runtimeState else { return nil }
-            return "\(runtimeState.childPID.map(String.init) ?? "-")|\(runtimeState.exitedAt ?? "-")"
+            latestState?.runtimeState?.runIdentity
         }
 
         private func enqueueRemoteScrollBatch(_ batch: TerminalScrollCoalescer.Batch, onFinished: @escaping TerminalScrollCoalescer.FinishHandler) {

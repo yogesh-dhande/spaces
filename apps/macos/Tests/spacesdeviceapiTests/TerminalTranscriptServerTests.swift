@@ -92,6 +92,62 @@
             }
         }
 
+        func testTerminalTranscriptReportsTheRunIdentityFromRuntimeState() throws {
+            try withTemporaryProfile { _ in
+                let sessionID = "session-transcript-identity-\(UUID().uuidString)"
+                let paths = try TerminalSessionPaths.forSession(id: sessionID)
+                try paths.ensureDirectories()
+                try Data("hello".utf8).write(to: URL(fileURLWithPath: paths.outputPath))
+                // The persisted runtime state's child PID + exit time identify the run the transcript was
+                // read from; the response must carry that identity so a client can reject a fetch that
+                // straddled a relaunch.
+                let runtimeState = TerminalSessionRuntimeState(
+                    sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 4242, state: .exited,
+                    updatedAt: "2026-06-05T00:00:09Z", exitedAt: "2026-06-05T00:00:09Z", columns: 8, rows: 5)
+                try TerminalSessionPersistence.writeRuntimeState(runtimeState, paths: paths)
+
+                let (server, requestClient, clientApp, authToken) = try makeServerAndClient()
+                defer {
+                    requestClient.cancel()
+                    server.stop()
+                }
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .terminalTranscript(SpacesDeviceTerminalTranscriptRequest(sessionID: sessionID, maxBytes: 1_000_000)),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertTrue(response.ok, response.message)
+                let result = try XCTUnwrap(response.terminalTranscript)
+                XCTAssertEqual(result.runIdentity, "4242|2026-06-05T00:00:09Z")
+                XCTAssertEqual(result.runIdentity, runtimeState.runIdentity)
+            }
+        }
+
+        func testTerminalTranscriptRunIdentityIsNilWhenNoRuntimeStateExists() throws {
+            try withTemporaryProfile { _ in
+                let sessionID = "session-transcript-no-runtime-\(UUID().uuidString)"
+                let paths = try TerminalSessionPaths.forSession(id: sessionID)
+                try paths.ensureDirectories()
+                try Data("hello".utf8).write(to: URL(fileURLWithPath: paths.outputPath))
+
+                let (server, requestClient, clientApp, authToken) = try makeServerAndClient()
+                defer {
+                    requestClient.cancel()
+                    server.stop()
+                }
+
+                let response = try requestClient.send(
+                    SpacesDeviceAPIRequest(
+                        command: .terminalTranscript(SpacesDeviceTerminalTranscriptRequest(sessionID: sessionID, maxBytes: 1_000_000)),
+                        authToken: authToken, clientApp: clientApp))
+
+                XCTAssertTrue(response.ok, response.message)
+                let result = try XCTUnwrap(response.terminalTranscript)
+                XCTAssertNil(result.runIdentity)
+            }
+        }
+
         func testTerminalTranscriptMissingOutputErrors() throws {
             try withTemporaryProfile { _ in
                 let sessionID = "session-transcript-missing-\(UUID().uuidString)"

@@ -34,7 +34,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
     /// second exit, then resolve the stale and current fetches independently.
     private final class ManualTranscriptProvider: @unchecked Sendable {
         private let lock = NSLock()
-        private var continuations: [CheckedContinuation<Data, Error>] = []
+        private var continuations: [CheckedContinuation<RemoteGhosttyTranscript, Error>] = []
 
         var pendingCount: Int {
             lock.lock()
@@ -42,7 +42,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             return continuations.count
         }
 
-        func fetch() async throws -> Data {
+        func fetch() async throws -> RemoteGhosttyTranscript {
             try await withCheckedThrowingContinuation { continuation in
                 lock.lock()
                 continuations.append(continuation)
@@ -50,11 +50,11 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             }
         }
 
-        func resolveNext(with data: Data) {
+        func resolveNext(with data: Data, runIdentity: String? = nil) {
             lock.lock()
             let continuation = continuations.isEmpty ? nil : continuations.removeFirst()
             lock.unlock()
-            continuation?.resume(returning: data)
+            continuation?.resume(returning: RemoteGhosttyTranscript(data: data, runIdentity: runIdentity))
         }
     }
 
@@ -780,9 +780,11 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         // The session's full transcript survives in output.log: 200 CRLF-terminated numbered lines.
         let transcript = Data((1...200).map { String(format: "row-%03d", $0) }.joined(separator: "\r\n").utf8)
 
+        // The transcript reports the ended run's identity, matching the run the replay arms against, so
+        // it replays normally (the positive counterpart to the mismatched-identity rejection test).
         let host = RemoteGhosttySessionHost(
             launchConfiguration: launchConfiguration, paths: paths, terminalServiceRequestSender: recorder.send,
-            transcriptProvider: { _ in transcript })
+            transcriptProvider: { _ in RemoteGhosttyTranscript(data: transcript, runIdentity: runtimeState.runIdentity) })
         waitForCondition("ended host renders final state") { host.snapshotText()?.contains("final-01") == true }
 
         try host.attach(
@@ -839,7 +841,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             launchConfiguration: launchConfiguration, paths: paths, terminalServiceRequestSender: recorder.send,
             transcriptProvider: { _ in
                 if attempts.next() == 1 { throw POSIXError(.ETIMEDOUT) }
-                return transcript
+                return RemoteGhosttyTranscript(data: transcript, runIdentity: runtimeState.runIdentity)
             })
         waitForCondition("ended host renders final state") { host.snapshotText()?.contains("final-01") == true }
 
@@ -882,7 +884,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
 
         let host = RemoteGhosttySessionHost(
             launchConfiguration: launchConfiguration, paths: paths, terminalServiceRequestSender: recorder.send,
-            transcriptProvider: { _ in transcript })
+            transcriptProvider: { _ in RemoteGhosttyTranscript(data: transcript, runIdentity: runtimeState.runIdentity) })
         waitForCondition("ended host renders final state") { host.snapshotText()?.contains("final-01") == true }
 
         let container = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 180))
@@ -1044,9 +1046,15 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         let transcriptA = Data((1...200).map { String(format: "OLDRUN-%04d", $0) }.joined(separator: "\r\n").utf8)
         let transcriptB = Data((1...200).map { String(format: "NEWRUN-%04d", $0) }.joined(separator: "\r\n").utf8)
 
+        // Each fetch reports the run identity of the run it belongs to (A's first, B's second), matching
+        // whichever run the replay is armed against, so identity never blocks the discard-and-re-fetch.
         let host = RemoteGhosttySessionHost(
             launchConfiguration: launchConfiguration, paths: paths, terminalServiceRequestSender: recorder.send,
-            transcriptProvider: { _ in attempts.next() == 1 ? transcriptA : transcriptB })
+            transcriptProvider: { _ in
+                attempts.next() == 1
+                    ? RemoteGhosttyTranscript(data: transcriptA, runIdentity: exitedStateA.runIdentity)
+                    : RemoteGhosttyTranscript(data: transcriptB, runIdentity: exitedStateB.runIdentity)
+            })
         waitForCondition("ended host renders run A final state") { host.snapshotText()?.contains("final-A") == true }
 
         try host.attach(
@@ -1079,6 +1087,66 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             return text.contains("NEWRUN-") && !text.contains("OLDRUN-") && !text.contains("final-B")
         }
         XCTAssertGreaterThanOrEqual(attempts.count, 2, "the new ended run should have re-fetched its own transcript")
+    }
+
+    @MainActor func testEndedRemoteHostRejectsTranscriptReportedForADifferentRun() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let sessionID = "remote-ended-scrollback-mismatched-identity"
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: sessionID, backend: .ghosttyEmbedded, title: "fallback", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
+            createdAt: "2026-06-05T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+        // The replay arms against run A (childPID 2, exitedAt T1) shown as "final-A".
+        let exitedStateA = TerminalSessionRuntimeState(
+            sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .exited, updatedAt: "2026-06-05T00:00:01Z",
+            exitedAt: "2026-06-05T00:00:01Z", title: "final-title-A", workingDirectory: "/tmp/final", columns: 8, rows: 5)
+        let recorder = DirectTerminalServiceRecorder(
+            payload: GhosttyRemoteSessionStatePayload(
+                sessionID: sessionID, reason: TerminalRemoteSessionStateReason.terminated, emittedAt: "2026-06-05T00:00:01Z", sessionStateRevision: 1,
+                sessionStateFlags: 1, screenStateRevision: 1, runtimeState: exitedStateA, attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
+                title: "final-title-A", workingDirectory: "/tmp/final", outputByteCount: nil,
+                renderUpdate: try renderUpdate(text: "final-A", sessionRevision: 1)))
+
+        // The fetch resolves with a transcript the server read from a *different* run (childPID 4,
+        // exitedAt T2): the session relaunched after the fetch started but before this client observed a
+        // new state payload, truncating output.log so the bytes belong to the newer run. The host must
+        // reject it by the reported run identity — the armed run's transcript is definitively gone.
+        let attempts = TranscriptFetchAttempts()
+        let newRunTranscript = Data((1...200).map { String(format: "NEWRUN-%04d", $0) }.joined(separator: "\r\n").utf8)
+        let differentRunIdentity = "4|2026-06-05T00:00:02Z"
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: launchConfiguration, paths: paths, terminalServiceRequestSender: recorder.send,
+            transcriptProvider: { _ in
+                _ = attempts.next()
+                return RemoteGhosttyTranscript(data: newRunTranscript, runIdentity: differentRunIdentity)
+            })
+        waitForCondition("ended host renders run A final state") { host.snapshotText()?.contains("final-A") == true }
+
+        try host.attach(
+            client: TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-06-05T00:00:03Z"),
+            mode: .viewer, into: NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 180)))
+
+        // The scroll arms the replay and fetches; the mismatched-identity response latches `.unavailable`.
+        XCTAssertTrue(host.sendScroll(horizontal: 0, vertical: 2000, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil))
+        waitForCondition("mismatched-identity transcript fetch completes") { attempts.count >= 1 }
+
+        // The viewport keeps the run A final frame and never shows the rejected new run's rows.
+        for _ in 0..<10 { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+        guard let text = host.snapshotText() else { return XCTFail("ended host lost its rendered surface") }
+        XCTAssertTrue(text.contains("final-A"), "the armed run's final frame was replaced: \(text)")
+        XCTAssertFalse(text.contains("NEWRUN-"), "the mismatched-run transcript replaced the viewport: \(text)")
+
+        // Further scroll gestures must not re-fetch: `.unavailable` latched, so the attempt count stays 1.
+        for _ in 0..<5 {
+            _ = host.sendScroll(horizontal: 0, vertical: 2000, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: nil)
+            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+        }
+        XCTAssertEqual(attempts.count, 1, "a mismatched-identity rejection must latch .unavailable and not re-fetch")
+        XCTAssertFalse(host.snapshotText()?.contains("NEWRUN-") == true, "the rejected transcript must never render")
     }
 
     @MainActor func testRunningRemoteHostRejectsViewerBindingActions() throws {

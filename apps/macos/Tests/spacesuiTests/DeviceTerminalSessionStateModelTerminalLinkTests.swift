@@ -159,31 +159,10 @@ import workspacecore
         }
     }
 
-    @Test func fetchTranscriptReturnsTheTranscriptSuffixWhenOutputExists() throws {
-        try withServer { pairingStore, clientApp, requestClient in
-            let sessionID = "transcript-session-\(UUID().uuidString)"
-            let paths = try TerminalSessionPaths.forSession(id: sessionID)
-            try paths.ensureDirectories()
-            let transcript = Data("row-1\nrow-2\nrow-3\n".utf8)
-            try transcript.write(to: URL(fileURLWithPath: paths.outputPath))
-
-            let data = try DeviceTerminalSessionStateModel.fetchTranscript(
-                sessionID: sessionID, maxBytes: 1_000_000, requestClient: requestClient, authToken: pairingStore.authToken, clientApp: clientApp)
-            #expect(data == transcript)
-        }
-    }
-
-    @Test func fetchTranscriptReturnsEmptyDataWhenTheDeviceReportsNoTranscript() throws {
-        // A missing `output.log` makes the server answer `.sessionNotAvailable`, a definitive "nothing to
-        // replay". The model must map that to empty data (not throw) so the render host latches its
-        // `.unavailable` verdict instead of retrying the doomed fetch on every scroll gesture.
-        try withServer { pairingStore, clientApp, requestClient in
-            let data = try DeviceTerminalSessionStateModel.fetchTranscript(
-                sessionID: "missing-transcript-session-\(UUID().uuidString)", maxBytes: 1000, requestClient: requestClient,
-                authToken: pairingStore.authToken, clientApp: clientApp)
-            #expect(data.isEmpty)
-        }
-    }
+    // The `fetchTranscript` mapping is covered by `DeviceTerminalSessionStateModelTranscriptTests`
+    // (XCTest): its positive path round-trips per-session filesystem and profile-database state that the
+    // in-process server re-resolves from `SPACES_DB_PATH`/`SPACES_RUNTIME_DIR` at request time, and
+    // parallel Swift Testing suites mutating that process-global env make such assertions flaky here.
 
     // MARK: Server harness
 

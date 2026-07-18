@@ -1084,16 +1084,22 @@ public struct SpacesDeviceTerminalTranscriptRequest: Codable, Sendable, Equatabl
     }
 }
 
-/// Result of `terminalTranscript`: the requested suffix `data` of the output transcript plus the
-/// transcript's full `totalBytes`, so a client can tell whether it received the whole log or a
-/// budget-capped tail.
+/// Result of `terminalTranscript`: the requested suffix `data` of the output transcript, the
+/// transcript's full `totalBytes` (so a client can tell whether it received the whole log or a
+/// budget-capped tail), and the `runIdentity` of the session run the transcript was read from. The
+/// client validates `runIdentity` against the run its ended-scrollback replay was armed against, so a
+/// fetch that straddles a relaunch (which truncates `output.log`) is rejected rather than replaying
+/// the new run's bytes under the old run's final frame. `runIdentity` is nil when no runtime state
+/// exists for the session.
 public struct SpacesDeviceTerminalTranscriptResult: Codable, Sendable, Equatable {
     public let data: Data
     public let totalBytes: UInt64
+    public let runIdentity: String?
 
-    public init(data: Data, totalBytes: UInt64) {
+    public init(data: Data, totalBytes: UInt64, runIdentity: String? = nil) {
         self.data = data
         self.totalBytes = totalBytes
+        self.runIdentity = runIdentity
     }
 }
 
