@@ -1,70 +1,75 @@
 import SwiftUI
 import UIKit
+import spacesterminalcore
 
-/// Spaces brand tokens for the iOS app.
+/// SwiftUI adapter over the active theme descriptor for the iOS app.
 ///
-/// Values mirror `apps/macos/Sources/spacesui/Theme.swift` one-for-one so the
-/// macOS GUI and `apps/web/app/globals.css` remain the single source of truth.
-/// When a token changes there, update it here too. Each token is a dynamic
-/// `Color` that resolves to its light or dark RGB based on the active trait
-/// collection.
+/// The token values live in `ThemeRegistry` (`spacesterminalcore`), the single source of
+/// truth shared with the macOS GUI and embedded Ghostty terminals; this type only converts
+/// the descriptor's raw colors into appearance-dynamic `Color`s so the iOS palette cannot
+/// drift from the Mac/web palette. Call sites keep referencing `Theme.<token>`. The active
+/// descriptor is bound once at launch (see `ActiveTheme`), so these static values never
+/// observe a mid-session theme change.
 enum Theme {
     // MARK: Surfaces
 
     /// App background.
-    static let bg = dynamic(light: (248, 247, 241), dark: (15, 21, 23))
+    static let bg = dynamic(\.background)
     /// Section card background.
-    static let surface = dynamic(light: (255, 255, 255), dark: (29, 42, 45))
+    static let surface = dynamic(\.surface)
     /// Secondary surface used inside cards (inputs, code-like content).
-    static let surface2 = dynamic(light: (241, 239, 230), dark: (23, 33, 36))
+    static let surface2 = dynamic(\.surface2)
 
     // MARK: Text
 
-    static let text = dynamic(light: (16, 32, 40), dark: (234, 240, 239))
-    static let muted = dynamic(light: (58, 77, 87), dark: (173, 192, 196))
-    static let mutedSecondary = dynamic(light: (111, 132, 141), dark: (122, 138, 141))
+    static let text = dynamic(\.text)
+    static let muted = dynamic(\.muted)
+    static let mutedSecondary = dynamic(\.mutedSecondary)
 
     // MARK: Lines
 
-    static let border = dynamic(light: (213, 216, 211), dark: (48, 67, 70))
-    static let borderStrong = dynamic(light: (184, 189, 181), dark: (63, 84, 88))
+    static let border = dynamic(\.border)
+    static let borderStrong = dynamic(\.borderStrong)
 
     // MARK: Accent (teal)
 
-    static let accent = dynamic(light: (15, 122, 118), dark: (89, 219, 205))
-    static let accentStrong = dynamic(light: (13, 95, 93), dark: (61, 198, 184))
+    static let accent = dynamic(\.accent)
+    static let accentStrong = dynamic(\.accentStrong)
     /// Accent-tinted fill (selected rows, browser/agent tiles). Alpha differs per mode.
-    static let accentTint = dynamic(light: (15, 122, 118), dark: (89, 219, 205), lightAlpha: 0.12, darkAlpha: 0.16)
+    static let accentTint = dynamic(\.accentTint)
     /// Fill for primary action buttons — bright teal in both appearances so dark ink reads.
-    static let primaryButtonFill = dynamic(light: (61, 198, 184), dark: (61, 198, 184))
+    static let primaryButtonFill = dynamic(\.primaryButtonFill)
     /// Dark ink text for primary action buttons.
-    static let primaryButtonText = dynamic(light: (15, 21, 23), dark: (15, 21, 23))
+    static let primaryButtonText = dynamic(\.primaryButtonText)
 
     // MARK: Semantic status
 
-    static let green = dynamic(light: (58, 158, 95), dark: (76, 208, 122))
-    static let red = dynamic(light: (198, 58, 47), dark: (255, 107, 96))
-    static let orange = dynamic(light: (208, 122, 26), dark: (245, 167, 66))
+    static let green = dynamic(\.green)
+    static let red = dynamic(\.red)
+    static let orange = dynamic(\.orange)
     /// The one tint for a stopped runtime target, matching the Mac sidebar's exited rows. Distinct
     /// from `red`, which stays for attention marks that are not a stopped target.
-    static let statusFailed = dynamic(light: (186, 67, 111), dark: (255, 111, 91), lightAlpha: 0.95, darkAlpha: 0.95)
+    static let statusFailed = dynamic(\.statusFailed)
 
     // MARK: Chips & tiles
 
     /// Neutral chip background (shortcut, metadata chips).
-    static let chipBg = dynamic(light: (15, 32, 40), dark: (234, 240, 239), lightAlpha: 0.06, darkAlpha: 0.08)
+    static let chipBg = dynamic(\.chipBackground)
     /// Running status dot halo.
-    static let statusRunningHalo = dynamic(light: (58, 158, 95), dark: (76, 208, 122), lightAlpha: 0.22, darkAlpha: 0.22)
+    static let statusRunningHalo = dynamic(\.statusRunningHalo)
 
     // MARK: Helpers
 
-    private static func dynamic(light: (Int, Int, Int), dark: (Int, Int, Int), lightAlpha: CGFloat = 1, darkAlpha: CGFloat = 1) -> Color {
+    private static func dynamic(_ token: KeyPath<ThemeAppearanceTokens, ThemeColor>) -> Color {
         Color(
             uiColor: UIColor { traits in
+                let descriptor = ActiveTheme.descriptor
                 let isDark = traits.userInterfaceStyle == .dark
-                let rgb = isDark ? dark : light
-                let alpha = isDark ? darkAlpha : lightAlpha
-                return UIColor(red: CGFloat(rgb.0) / 255, green: CGFloat(rgb.1) / 255, blue: CGFloat(rgb.2) / 255, alpha: alpha)
+                return uiColor((isDark ? descriptor.dark : descriptor.light)[keyPath: token])
             })
+    }
+
+    private static func uiColor(_ color: ThemeColor) -> UIColor {
+        UIColor(red: CGFloat(color.red) / 255, green: CGFloat(color.green) / 255, blue: CGFloat(color.blue) / 255, alpha: CGFloat(color.alpha))
     }
 }
