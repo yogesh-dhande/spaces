@@ -330,6 +330,16 @@ SPACES_E2E_AGENT_MATRIX=1 apps/macos/Tests/e2e_agent_orchestration.sh
 
 For each provider (`claude`, `codex`, `opencode`) whose binary is on `PATH` and whose Spaces hooks are current, Part B spawns the agent, records a `provider=… first_signal_observed=… ready_ms=… sequence=…` report line from `agent status --json` polling, submits a trivial prompt with `terminal send text --submit`, best-effort interrupts a working phase, and kills the session. It installs nothing: a provider whose binary is missing or whose hooks are not current is reported as `SKIP` (the loud spawn hook-gate error), leaving the user's real agent configs untouched. Skips do not fail the run; any attempted provider that fails makes the script exit non-zero.
 
+For the scheduled-automations command surface (`spaces` `automation-create`/`-update`/`-delete`/`-list`/`-runs`/`-trigger`/`-cancel`, exposed through `spacese2e` rather than `spaces` itself):
+
+```bash
+apps/macos/Tests/e2e_automations.sh
+```
+
+`e2e_automations.sh` is a daemon-only test (no app, desktop control, or hotkeys) that binds to the current worktree profile from `spacese2e profile-show --shell`, so it only ever drives this checkout's daemon and never another worktree's; the daemon autolaunches on the first profile command. It drives `spacese2e automation-*` — the same profile-socket commands the app's Automations UI sends — as the seam for authoring automations in tests, since there is no `spaces automation` CLI surface for end users. All scenarios use fast fake commands, never a real coding agent: a manual automation whose command writes a marker and exits 0 runs to `succeeded` with the marker in its output and the run's terminal session stamped `kind=automation` plus the run id; a command that exits 3 runs to `failed` with that exit code; a `concurrency=skip` automation triggered while a run is still sleeping records a `skipped(concurrency)` row for the second trigger, then canceling the sleeping run leaves it `canceled`; a 2-second timeout against a longer sleep lands `timed_out`; and a `SPACES_AUTOMATION_RUN_ID` attribution check confirms the run's own workspace-less session carries the run id (the spawned-agent sweep-and-finalize cycle needs a real provider, so that path is covered by unit tests instead). The script deletes every automation it creates on exit, which also cancels any still-running run and cleans up its artifacts.
+
+To exercise a cron schedule locally rather than triggering manually, create the automation with a `--cron` expression a minute or two out (`spacese2e automation-create --trigger cron --cron '<minute> * * * *' ...`) and poll `automation-runs --automation-id <id>` until the fire lands, instead of waiting on a long-period expression.
+
 The Spaces terminal `tail` path also depends on the local `libghostty-vt` artifacts. Set them up before building or profiling terminal changes:
 
 ```bash

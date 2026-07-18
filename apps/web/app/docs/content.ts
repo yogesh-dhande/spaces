@@ -71,6 +71,12 @@ export const docsPageLinks: DocsPageLink[] = [
       "Talk to one agent to get all your work done: a lead agent spawns children in isolated worktrees across harnesses, models, and machines, and coordinates them to a verified finish. Includes the copy-paste orchestrator prompt.",
   },
   {
+    href: "/docs/automations",
+    title: "Automations",
+    summary:
+      "Run a shell command on your Mac or a paired Linux box, manually or on a schedule, even when Spaces is closed. Watch runs live, replay them later, and let spawned coding agents keep working after a run finishes.",
+  },
+  {
     href: "/docs/shortcuts",
     title: "Keyboard Shortcuts",
     summary:
