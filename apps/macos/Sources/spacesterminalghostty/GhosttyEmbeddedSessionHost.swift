@@ -1170,7 +1170,8 @@
             do {
                 let outputHandle = try ensureOutputHandle()
                 try outputHandle.write(contentsOf: data)
-                let outputEndByteOffset = (try? outputHandle.seekToEnd()).map(Self.clampedInt)
+                let outputEndByteOffset = (try? Self.appendedTranscriptEndOffset(outputHandle: outputHandle, outputPath: paths.outputPath)).map(
+                    Self.clampedInt)
                 requestSurfaceRefreshAction()
                 GhosttyEmbeddedAppService.shared.tick()
                 postOutputDidChange(
@@ -1392,6 +1393,14 @@
         private static func clampedInt(_ value: UInt64) -> Int {
             guard value <= UInt64(Int.max) else { return Int.max }
             return Int(value)
+        }
+
+        /// Positions `outputHandle` at the transcript's end and returns that offset, head-truncating the
+        /// durable `output.log` first when it has grown past the live-transcript bound so a long-running
+        /// session stops accumulating disk without bound. See `TerminalTranscriptTrim`.
+        private static func appendedTranscriptEndOffset(outputHandle: FileHandle, outputPath: String) throws -> UInt64 {
+            let endOffset = try outputHandle.seekToEnd()
+            return try TerminalTranscriptTrim.trimIfNeeded(outputPath: outputPath, writeHandle: outputHandle, currentEndOffset: endOffset)
         }
 
         private static func normalizedSessionMetadataValue(_ value: String?) -> String? {

@@ -702,6 +702,28 @@ public enum TerminalSessionPersistence {
         }
     }
 
+    /// Reclaims a removed session's persisted footprint: every `terminal_*` row keyed by its root
+    /// directory, plus the on-disk session directory (`output.log`, `service.log`). Control/subscription
+    /// sockets live outside this directory and are already removed at terminate; this drops what
+    /// terminate deliberately keeps for ended-pane replay, and is therefore only safe once the session is
+    /// no longer shown by the product (see `TerminalSessionGarbageCollector`). Removing every table's row
+    /// for the root — not just `terminal_remote_session_states` — keeps the persisted footprint from
+    /// outliving the session it belongs to.
+    public static func purgeSession(paths: TerminalSessionPaths, fileManager: FileManager = .default) throws {
+        let root = normalizedRootDirectory(paths.rootDirectory)
+        try withDatabase(paths: paths) { database in
+            try database.withImmediateTransaction {
+                for table in [
+                    "terminal_agent_signal_events", "terminal_attachments", "terminal_clients", "terminal_remote_session_states",
+                    "terminal_runtime_states", "terminal_sessions",
+                ] {
+                    try database.execute(sql: "DELETE FROM \(table) WHERE root_directory = ?", bindings: [root])
+                }
+            }
+        }
+        if fileManager.fileExists(atPath: paths.rootDirectory) { try fileManager.removeItem(atPath: paths.rootDirectory) }
+    }
+
     public static func listKnownSessions(fileManager _: FileManager = .default) throws -> [TerminalSessionLaunchConfiguration] {
         try withProfileDatabase { database in
             try database.queryRows(

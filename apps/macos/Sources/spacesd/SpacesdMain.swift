@@ -59,6 +59,11 @@ import workspacecore
     private var sessionCores: [String: GhosttyEmbeddedSessionCore] = [:]
     private var terminalLinkTransferAuthorizations: [String: TerminalLinkTransferAuthorization] = [:]
     private var lifecycleTimer: Timer?
+    /// Throttles the ended-session garbage-collection sweep to a coarse cadence: the lifecycle timer fires
+    /// every second for attachment reaping, but collecting removed sessions scans every known session and
+    /// need not run that often. `nil` until the first sweep.
+    private var lastSessionGarbageCollectionAt: Date?
+    private static let sessionGarbageCollectionInterval: TimeInterval = 60
     #if os(Linux)
         private let databaseChangeSignalQueue = DispatchQueue(label: "spaces.database-change.signal")
     #endif
@@ -1590,8 +1595,14 @@ import workspacecore
 
     private func startLifecycleTimer() {
         lifecycleTimer?.invalidate()
+        // Defer the first garbage-collection sweep by a full interval so clients re-attaching and handoff
+        // resume completing after a daemon (re)start are never mistaken for a removed session.
+        lastSessionGarbageCollectionAt = Date()
         lifecycleTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in self?.reapInactiveSessions() }
+            Task { @MainActor [weak self] in
+                self?.reapInactiveSessions()
+                self?.garbageCollectRemovedSessionsIfDue()
+            }
         }
         if let lifecycleTimer { RunLoop.main.add(lifecycleTimer, forMode: .common) }
     }
@@ -1603,6 +1614,26 @@ import workspacecore
                 continue
             }
             _ = terminateSession(id: sessionID)
+        }
+    }
+
+    /// Reclaims the directory, transcript, and rows of sessions the product no longer shows, on a coarse
+    /// cadence. The daemon is the sole owner of each session's on-disk footprint and the only party that
+    /// can see authoritative attachment state across every client, so this GC lives here rather than in a
+    /// client. `TerminalSessionGarbageCollector` enforces the safety gate (ended, unattached, unreferenced);
+    /// the in-memory `sessionCores` are handed in so a live session the daemon owns is never collected.
+    private func garbageCollectRemovedSessionsIfDue(now: Date = Date()) {
+        if let lastSessionGarbageCollectionAt, now.timeIntervalSince(lastSessionGarbageCollectionAt) < Self.sessionGarbageCollectionInterval {
+            return
+        }
+        lastSessionGarbageCollectionAt = now
+        do {
+            let store = try SQLiteStore(path: try DatabaseLocator.defaultPath())
+            try TerminalSessionGarbageCollector.collectRemovedSessions(
+                activeSessionIDs: Set(sessionCores.keys),
+                isReferencedByProduct: { try store.terminalSessionIsReferencedByProduct($0) }, now: now)
+        } catch {
+            fputs("spaces: terminal session garbage collection failed: \(error)\n", stderr)
         }
     }
 

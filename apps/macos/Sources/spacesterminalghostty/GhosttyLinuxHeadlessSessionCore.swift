@@ -372,6 +372,12 @@
             do {
                 try outputHandle.write(contentsOf: data)
                 outputByteCount += data.count
+                // Head-truncate the durable transcript once it grows past the live-transcript bound so a
+                // long-running session stops accumulating disk without bound; `outputByteCount` tracks the
+                // (possibly reduced) end offset. See `TerminalTranscriptTrim`.
+                let newEndOffset = try TerminalTranscriptTrim.trimIfNeeded(
+                    outputPath: paths.outputPath, writeHandle: outputHandle, currentEndOffset: UInt64(outputByteCount))
+                outputByteCount = Int(newEndOffset)
                 return true
             } catch { return false }
         }

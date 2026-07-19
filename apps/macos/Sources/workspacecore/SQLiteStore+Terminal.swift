@@ -135,6 +135,26 @@ extension SQLiteStore {
         return row?.first
     }
 
+    /// Whether the product still surfaces this terminal session, so its transcript must not be garbage
+    /// collected. A terminal session appears in a device overview only while a `running_processes` or
+    /// `agent_sessions` row references it (an exited process/agent row keeps its ended pane reachable, so
+    /// the user can reopen it and scroll-replay the transcript), or while a `runtime_targets` focus row
+    /// tracks it. When none of these reference it, the session has been removed from the product and its
+    /// ended pane can never be reconstructed from persisted state, so the daemon's session garbage
+    /// collector may reclaim its directory and rows.
+    public func terminalSessionIsReferencedByProduct(_ sessionID: String) throws -> Bool {
+        let row = try queryRow(
+            sql: """
+                SELECT 1 FROM running_processes WHERE terminal_session_id = ?
+                UNION ALL
+                SELECT 1 FROM agent_sessions WHERE terminal_session_id = ?
+                UNION ALL
+                SELECT 1 FROM runtime_targets WHERE tracking_id = ?
+                LIMIT 1
+                """, bindings: [sessionID, sessionID, sessionID])
+        return row != nil
+    }
+
     public func deleteWindows(workspaceID: String) throws {
         try execute(sql: "DELETE FROM runtime_targets WHERE workspace_id = ?", bindings: [workspaceID])
     }
