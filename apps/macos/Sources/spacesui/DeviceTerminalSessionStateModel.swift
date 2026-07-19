@@ -31,12 +31,17 @@
             let authToken: String?
         }
 
-        private let device: SpacesPairedDeviceRecord
+        // `device` and `requestClient` are mutable so the local device's stale Device API port can be
+        // re-resolved at connect time (see `ensureLocalDeviceReachableForRetry`). The app holds this model
+        // for the pane's lifetime; the paired_devices row it was seeded from goes stale when the local
+        // daemon idle-shuts-down and rebinds a port, so both the persistent request client and the
+        // subscription stream must be able to swing to the daemon's current port.
+        private var device: SpacesPairedDeviceRecord
         private let sessionID: String
         private let clientApp: SpacesDeviceClientApp
         private let authToken: String?
         private let certificateFingerprint: String
-        private let requestClient: SpacesDeviceAPIRequestSessionClient
+        private var requestClient: SpacesDeviceAPIRequestSessionClient
 
         // Cached device-owned state. Synchronous reads keep the window controller's
         // refresh path non-blocking; updates arrive on the main actor.
@@ -56,6 +61,10 @@
         private var lastSubscriptionAttemptAt: Date?
         private var refreshInFlight = false
         private var stateRefreshRetryTask: Task<Void, Never>?
+        // Owns the off-main connect for the live subscription. The pinned-TLS connect blocks on a
+        // semaphore, so it must never run on the main actor; while a connect is in flight this guards
+        // `ensureSubscriptionStarted` from starting a second one.
+        private var subscriptionConnectTask: Task<Void, Never>?
 
         // Emission time of the newest payload already applied. The catch-up `.state`
         // request runs in parallel with the live subscription, so a catch-up response
@@ -100,6 +109,7 @@
             MainActor.assumeIsolated {
                 streamClient?.stop()
                 stateRefreshRetryTask?.cancel()
+                subscriptionConnectTask?.cancel()
                 requestClient.cancel()
             }
         }
@@ -248,7 +258,7 @@
         }
 
         private func ensureSubscriptionStarted(now: Date = Date()) {
-            if streamClient != nil { return }
+            if streamClient != nil || subscriptionConnectTask != nil { return }
             if let lastSubscriptionAttemptAt, now.timeIntervalSince(lastSubscriptionAttemptAt) < 0.5 { return }
             lastSubscriptionAttemptAt = now
             // Catch up unconditionally, before (and independent of) the subscribe below.
@@ -256,25 +266,114 @@
             // rejected — but its `.state` response still carries the final render the host
             // needs, and that response must be applied even when no live stream attaches.
             refreshState()
+            subscriptionConnectTask = Task { @MainActor [weak self] in
+                await self?.establishStateStreamConnection()
+                self?.subscriptionConnectTask = nil
+            }
+        }
+
+        /// Establishes the live subscription stream, keeping the blocking pinned-TLS connect off the main
+        /// actor (issue #185). The connect is gated by a dispatch-semaphore wait; running it on the main
+        /// actor froze the UI for the full connect timeout whenever the endpoint was stale or unreachable.
+        /// On a retryable connect failure for the local device it re-resolves the daemon's current Device
+        /// API port and retries once, so an idle-shut-down daemon that rebound an ephemeral port (or a
+        /// stale paired_devices row) is recovered rather than stranding the pane.
+        private func establishStateStreamConnection() async {
+            if streamClient != nil { return }
+            if let client = await openStateStream(port: Int(device.port)) {
+                streamClient = client
+                return
+            }
+            // The first connect failed. For the local device this may be a stale port or an idle-shut-down
+            // daemon; ensure it is running and re-resolve its current port, then retry. The (possibly
+            // rebuilt) request client now targets a running daemon, so re-run the catch-up: an ended
+            // session's final render — and every subsequent transcript fetch — must reach the live daemon.
+            guard await ensureLocalDeviceReachableForRetry() else {
+                scheduleReconnect()
+                return
+            }
+            await reloadCatchUpState()
+            if let client = await openStateStream(port: Int(device.port)) {
+                streamClient = client
+                return
+            }
+            // A transient subscribe failure on a live session would otherwise strand existing listeners
+            // with only the one-shot catch-up and no live updates, because the render host has already
+            // taken its `ListenerHandle` and will not ask to subscribe again. Schedule the same
+            // model-owned retry the disconnect path uses.
+            scheduleReconnect()
+        }
+
+        /// Opens and starts the subscription stream, running the blocking `start()` connect in a detached
+        /// task so its semaphore wait never lands on the main actor. Returns the started client, or nil on
+        /// a connect/handshake failure.
+        private func openStateStream(port: Int) async -> SpacesDeviceAPIStateStreamClient? {
             let request = SpacesDeviceAPIRequest(
                 command: .subscribe(SpacesDeviceTerminalSubscriptionRequest(sessionID: sessionID, clientID: nil)), authToken: authToken,
                 clientApp: clientApp)
+            let host = device.host
+            let fingerprint = certificateFingerprint
+            let client: SpacesDeviceAPIStateStreamClient
             do {
-                let client = try SpacesDeviceAPIStateStreamClient(
-                    request: request, host: device.host, port: Int(device.port), certificateFingerprint: certificateFingerprint,
+                client = try SpacesDeviceAPIStateStreamClient(
+                    request: request, host: host, port: port, certificateFingerprint: fingerprint,
                     onEvent: { [weak self] payload in Task { @MainActor [weak self] in self?.apply(payload) } },
                     onDisconnect: { [weak self] error in Task { @MainActor [weak self] in self?.handleStreamDisconnect(error) } })
-                try client.start()
-                streamClient = client
-            } catch {
-                // A transient subscribe failure on a live session would otherwise strand
-                // existing listeners with only the one-shot catch-up and no live updates,
-                // because the render host has already taken its `ListenerHandle` and will
-                // not ask to subscribe again. Schedule the same model-owned retry the
-                // disconnect path uses.
-                streamClient = nil
-                scheduleReconnect()
+            } catch { return nil }
+            let started = await Task.detached(priority: .userInitiated) { () -> Bool in
+                do {
+                    try client.start()
+                    return true
+                } catch { return false }
+            }.value
+            guard started else {
+                client.stop()
+                return nil
             }
+            return client
+        }
+
+        /// Deterministic catch-up used by the connect recovery path after re-resolving a stale local port.
+        /// Unlike `refreshState()` it bypasses the `refreshInFlight` throttle — the throttled fetch is
+        /// against the now-cancelled stale-port client and about to fail — so the ended session's final
+        /// render reliably reloads against the fresh port. Reuses the same `fetchState` mapping.
+        private func reloadCatchUpState() async {
+            let sessionID = self.sessionID
+            let authToken = self.authToken
+            let clientApp = self.clientApp
+            let requestClient = self.requestClient
+            let result = await Task.detached(priority: .userInitiated) {
+                Self.fetchState(sessionID: sessionID, requestClient: requestClient, authToken: authToken, clientApp: clientApp)
+            }.value
+            if case .success(let payload) = result { apply(payload) }
+        }
+
+        /// For the local device, ensures the daemon is running and re-resolves its current Device API port
+        /// via `SpacesDeviceClient.bootstrapLocalDevice` — the same per-request resolution the CLI uses,
+        /// which starts the daemon if it idle-shut-down — rebuilding the persistent request client when the
+        /// port (or host) moved so catch-up `.state` and transcript fetches reach the live daemon. Returns
+        /// true when a connect retry is worthwhile: this is the local device and the bootstrap succeeded,
+        /// so the daemon is now reachable whether or not it rebound the same port. Returns false for remote
+        /// devices (stable port, nothing to re-resolve) and when the local bootstrap itself failed (the
+        /// daemon could not be reached or started).
+        @discardableResult private func ensureLocalDeviceReachableForRetry() async -> Bool {
+            guard device.id == SpacesPairedDeviceRecord.localDeviceID else { return false }
+            let clientApp = self.clientApp
+            let previousHost = device.host
+            let previousPort = device.port
+            let refreshed = await Task.detached(priority: .userInitiated) { () -> SpacesPairedDeviceRecord? in
+                try? SpacesDeviceClient.bootstrapLocalDevice(clientApp: clientApp)
+            }.value
+            guard let refreshed else { return false }
+            if refreshed.port != previousPort || refreshed.host != previousHost,
+                let rebuiltClient = try? SpacesDeviceAPIRequestSessionClient(
+                    host: refreshed.host, port: refreshed.port, certificateFingerprint: certificateFingerprint)
+            {
+                requestClient.cancel()
+                requestClient = rebuiltClient
+                device = refreshed
+            }
+            return true
         }
 
         private func handleStreamDisconnect(_ error: (any Error)?) {

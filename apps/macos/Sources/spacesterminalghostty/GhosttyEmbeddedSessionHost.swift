@@ -446,6 +446,13 @@
             controlServer?.stop()
             controlServer = nil
             TerminalControlServer.removeSocketFileIfPresent(at: paths.controlSocketPath)
+            // Flush any output still buffered for the coalesced write before blocking further appends
+            // below. A command that produces output and exits immediately (e.g. `seq 1 300`) leaves its
+            // final bytes in `incomingOutputBuffer` pending the delayed flush; that flush's `appendOutput`
+            // would then be dropped by the `didTerminateCurrentRun` guard, leaving `output.log` empty even
+            // though the surface rendered the output. The ended-session scrollback replay reads `output.log`,
+            // so without this flush a self-exiting command has no transcript to scroll back through.
+            flushPendingIncomingOutputForStateExport()
             didTerminateCurrentRun = true
             started = false
             let exitedState = TerminalSessionRuntimeState(

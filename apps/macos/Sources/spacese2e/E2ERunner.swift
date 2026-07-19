@@ -135,6 +135,9 @@ private struct E2EScenarioDescriptor: Sendable {
             name: "mouse-reporting-scroll",
             kind: .script(scriptName: "e2e_terminal_mouse_reporting_scroll.sh", arguments: [], environment: { $0.remoteEnvironment(enabled: false) })),
         E2EScenarioDescriptor(
+            name: "ended-session-scroll",
+            kind: .script(scriptName: "e2e_terminal_ended_session_scroll.sh", arguments: [], environment: { $0.remoteEnvironment(enabled: false) })),
+        E2EScenarioDescriptor(
             name: "agent-orchestration",
             kind: .script(scriptName: "e2e_agent_orchestration.sh", arguments: [], environment: { $0.remoteEnvironment(enabled: false) })),
         E2EScenarioDescriptor(name: "mac-input-latency", kind: .terminalLatency),
