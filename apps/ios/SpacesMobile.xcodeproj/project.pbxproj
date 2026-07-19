@@ -33,6 +33,7 @@
 		5E74AE9B5CC2326AD53BA04E /* AlertsTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 895AC546F077905FD8E53CF9 /* AlertsTabView.swift */; };
 		EF11B7A5EC232ACED72F0D2E /* AutomationRows.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3588DB3E57B261C2ABE4F7FB /* AutomationRows.swift */; };
 		433E692B19E8C5CC8D696E76 /* AutomationsListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E93C7D2183E23B5B28741C3 /* AutomationsListView.swift */; };
+		1CB8DABF8F891F837E2126D7 /* AutomationsTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 68CC6A7DC614293BB18134C6 /* AutomationsTabView.swift */; };
 		5FD4313E441F15B6AFE8A029 /* BrowserProxyTunnel.swift in Sources */ = {isa = PBXBuildFile; fileRef = C39C8CAB0348FE24E6F0A46D /* BrowserProxyTunnel.swift */; };
 		636C2B8EB59BDDBE8707D1E1 /* TerminalArtifactViewersTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3C3A209B5AB578545E3F3D74 /* TerminalArtifactViewersTests.swift */; };
 		690D6FC159F64BF7E519C01C /* SpacesMobileAlertsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5746D7B660E9B5038B0DDEAF /* SpacesMobileAlertsTests.swift */; };
@@ -106,6 +107,7 @@
 		19845234400228576231BEBB /* AttentionEvents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttentionEvents.swift; sourceTree = "<group>"; };
 		3588DB3E57B261C2ABE4F7FB /* AutomationRows.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutomationRows.swift; sourceTree = "<group>"; };
 		5E93C7D2183E23B5B28741C3 /* AutomationsListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutomationsListView.swift; sourceTree = "<group>"; };
+		68CC6A7DC614293BB18134C6 /* AutomationsTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutomationsTabView.swift; sourceTree = "<group>"; };
 		2A942269988694E66C1CA6F4 /* SpacesMobile.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = SpacesMobile.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		35C5584696D86B15B55614E4 /* SpacesMobileAppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacesMobileAppModel.swift; sourceTree = "<group>"; };
 		38B8B376D14D9A659066191F /* SpacesMobileDeviceStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacesMobileDeviceStore.swift; sourceTree = "<group>"; };
@@ -229,6 +231,7 @@
 			children = (
 				3588DB3E57B261C2ABE4F7FB /* AutomationRows.swift */,
 				5E93C7D2183E23B5B28741C3 /* AutomationsListView.swift */,
+				68CC6A7DC614293BB18134C6 /* AutomationsTabView.swift */,
 			);
 			path = Automations;
 			sourceTree = "<group>";
@@ -545,6 +548,7 @@
 				A5AB8C3614BB7444A8FB4C5D /* AttentionEvents.swift in Sources */,
 				EF11B7A5EC232ACED72F0D2E /* AutomationRows.swift in Sources */,
 				433E692B19E8C5CC8D696E76 /* AutomationsListView.swift in Sources */,
+				1CB8DABF8F891F837E2126D7 /* AutomationsTabView.swift in Sources */,
 				E1AC38A01996EE501A1F0F05 /* BandPrimitives.swift in Sources */,
 				48E9A72866FE6F0C32209A1D /* BrowserProxyHTTPHead.swift in Sources */,
 				E90E0BD172C314AB1A2422BB /* BrowserProxyRoutingTable.swift in Sources */,

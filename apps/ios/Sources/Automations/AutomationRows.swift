@@ -52,10 +52,14 @@ enum SpacesMobileAutomations {
     /// The raw status of an automation's most recent run (by start-or-create time), or nil if it has
     /// never run — mirrors `AutomationsViewModel.lastRunStatus` on the Mac.
     static func lastRunStatus(automationID: String, in runs: [TerminalServiceAutomationRunSummary]) -> String? {
-        runs.filter { $0.automationID == automationID }
-            .max { lhs, rhs in (lhs.startedAt ?? lhs.createdAt) < (rhs.startedAt ?? rhs.createdAt) }?
+        runs.filter { $0.automationID == automationID }.max { lhs, rhs in (lhs.startedAt ?? lhs.createdAt) < (rhs.startedAt ?? rhs.createdAt) }?
             .status
     }
+
+    /// Count of runs currently in flight across every automation on the device — the Automations
+    /// tab's badge count. Unlike `lastRunStatus`, which is scoped to one automation's most recent run,
+    /// this counts every running run regardless of which automation started it.
+    static func runningCount(_ runs: [TerminalServiceAutomationRunSummary]) -> Int { runs.filter { $0.status == "running" }.count }
 
     /// Runs newest first (by start-or-create time; a queued/skipped run never started), optionally
     /// narrowed to one automation — nil lists every run, the "Recent Runs" view.
@@ -137,21 +141,18 @@ enum SpacesMobileAutomations {
 /// the Mac.
 enum SpacesMobileAutomationAlerts {
     static func entries(runs: [TerminalServiceAutomationRunSummary]) -> [SpacesMobileAutomationAlertEntry] {
-        runs.filter { $0.status == "failed" || $0.status == "timed_out" }
-            .map { run -> (entry: SpacesMobileAutomationAlertEntry, date: Date?) in
-                let entry = SpacesMobileAutomationAlertEntry(
-                    id: "alert:automationrun:\(run.id):\(run.status)", automationName: run.automationName ?? "Automation",
-                    outcome: outcome(for: run), runID: run.id, status: run.status)
-                return (entry, TerminalSessionTimestamp.date(from: run.endedAt ?? run.createdAt))
+        runs.filter { $0.status == "failed" || $0.status == "timed_out" }.map { run -> (entry: SpacesMobileAutomationAlertEntry, date: Date?) in
+            let entry = SpacesMobileAutomationAlertEntry(
+                id: "alert:automationrun:\(run.id):\(run.status)", automationName: run.automationName ?? "Automation", outcome: outcome(for: run),
+                runID: run.id, status: run.status)
+            return (entry, TerminalSessionTimestamp.date(from: run.endedAt ?? run.createdAt))
+        }.sorted { lhs, rhs in
+            switch (lhs.date, rhs.date) {
+            case (let a?, let b?): return a > b
+            case (nil, _): return false
+            case (_, nil): return true
             }
-            .sorted { lhs, rhs in
-                switch (lhs.date, rhs.date) {
-                case (let a?, let b?): return a > b
-                case (nil, _): return false
-                case (_, nil): return true
-                }
-            }
-            .map(\.entry)
+        }.map(\.entry)
     }
 
     private static func outcome(for run: TerminalServiceAutomationRunSummary) -> String {

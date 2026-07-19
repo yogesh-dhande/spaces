@@ -118,7 +118,7 @@ export default function AutomationsDocsPage() {
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <h2 className="text-2xl font-semibold tracking-tight">On iPhone</h2>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
-          Settings ▸ Automations on iOS shows the paired device&apos;s automations and lets you run one now or cancel one that&apos;s running — creating, editing, and deleting an automation stay Mac-only. Each row shows a status dot for its most recent run, its trigger, the next fire time, and whether it&apos;s disabled; tapping a row runs it, and the outcome (started, queued, or skipped) shows through the row once the list refreshes. A Runs screen lists every run the same way the Mac Runs tab does, with a Cancel action on a running one — iOS shows status only, with no terminal or replay view.
+          The Automations tab on iOS shows the paired device&apos;s automations and lets you run one now or cancel one that&apos;s running — creating, editing, and deleting an automation stay Mac-only. Each row shows a status dot for its most recent run, its trigger, the next fire time, and whether it&apos;s disabled; tapping a row runs it, and the outcome (started, queued, or skipped) shows through the row once the list refreshes. A Runs screen lists every run the same way the Mac Runs tab does, with a Cancel action on a running one — iOS shows status only, with no terminal or replay view. The tab badges how many runs are currently in flight on the device.
         </p>
       </article>
 

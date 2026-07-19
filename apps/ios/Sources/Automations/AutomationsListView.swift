@@ -1,11 +1,11 @@
 import SwiftUI
 import spacesterminalcore
 
-/// Automations list, pushed from the Settings tab (see `SettingsTabView`). Automations are workspace-
-/// less and device-scoped like paired devices, so they live alongside "Paired Devices" rather than
-/// under Alerts/Spaces/Agents, which are all workspace-scoped. iOS view scope is deliberately narrow:
-/// view automations and runs, trigger a run, and cancel a running run — no create/edit/delete, which
-/// stay Mac-only.
+/// Root content of the Automations tab (see `AutomationsTabView` for the tab shell). Automations are a
+/// headline feature, so they get their own bottom tab rather than living under Settings or joining the
+/// workspace-scoped Alerts/Spaces/Agents tabs — an automation is device-scoped, not tied to any one
+/// workspace. iOS view scope is deliberately narrow: view automations and runs, trigger a run, and
+/// cancel a running run — no create/edit/delete, which stay Mac-only.
 ///
 /// Tapping a row runs it now, mirroring the Agents/Spaces tabs' "tap performs the primary action"
 /// convention (there is no session to open for an automation, so a tap always runs). Viewing an
@@ -27,7 +27,7 @@ struct AutomationsListView: View {
         }.navigationDestination(item: $selectedAutomationID) { automationID in
             AutomationRunsView(model: model, automationID: automationID, title: automationName(for: automationID))
         }.navigationDestination(isPresented: $isShowingRecentRuns) { AutomationRunsView(model: model, automationID: nil, title: "Recent Runs") }
-            .overviewPolling(model: model, tab: .settings, activeDetailRouteID: activeDetailRouteID)
+            .overviewPolling(model: model, tab: .automations, activeDetailRouteID: activeDetailRouteID)
     }
 
     private var activeDetailRouteID: String? { selectedAutomationID ?? (isShowingRecentRuns ? "recent-runs" : nil) }
@@ -41,12 +41,14 @@ struct AutomationsListView: View {
             ContentUnavailableView {
                 Label("No Automations", systemImage: "clock.arrow.circlepath")
             } description: {
-                Text("Automations created on \(model.activeDeviceName ?? "this device") show up here.")
+                Text(
+                    "Automations run commands on \(model.activeDeviceName ?? "this device") on a schedule — manually or with cron. Create them in Spaces on your Mac."
+                )
             }.background(Theme.bg.ignoresSafeArea())
         } else {
-            ScrollView {
-                LazyVStack(spacing: 0) { ForEach(rows) { row in automationRow(row) } }.padding(.vertical, 12)
-            }.scrollContentBackground(.hidden).background(Theme.bg.ignoresSafeArea()).refreshable { await model.refresh() }
+            ScrollView { LazyVStack(spacing: 0) { ForEach(rows) { row in automationRow(row) } }.padding(.vertical, 12) }.scrollContentBackground(
+                .hidden
+            ).background(Theme.bg.ignoresSafeArea()).refreshable { await model.refresh() }
         }
     }
 
@@ -87,10 +89,12 @@ struct AutomationRunsView: View {
     let title: String
     @State private var pendingCancelRunID: String?
 
-    private var rows: [SpacesMobileAutomationRunRow] { SpacesMobileAutomations.runRows(model.overview?.automationRuns ?? [], automationID: automationID) }
+    private var rows: [SpacesMobileAutomationRunRow] {
+        SpacesMobileAutomations.runRows(model.overview?.automationRuns ?? [], automationID: automationID)
+    }
 
     var body: some View {
-        content.navigationTitle(title).tint(Theme.accent).overviewPolling(model: model, tab: .settings, activeDetailRouteID: nil)
+        content.navigationTitle(title).tint(Theme.accent).overviewPolling(model: model, tab: .automations, activeDetailRouteID: nil)
             .confirmationDialog("Cancel this run?", isPresented: cancelDialogBinding, titleVisibility: .visible) {
                 Button("Cancel Run", role: .destructive) {
                     guard let pendingCancelRunID else { return }
@@ -110,9 +114,8 @@ struct AutomationRunsView: View {
                 Text("Runs appear here once an automation fires.")
             }.background(Theme.bg.ignoresSafeArea())
         } else {
-            ScrollView {
-                LazyVStack(spacing: 0) { ForEach(rows) { row in runRow(row) } }.padding(.vertical, 12)
-            }.scrollContentBackground(.hidden).background(Theme.bg.ignoresSafeArea()).refreshable { await model.refresh() }
+            ScrollView { LazyVStack(spacing: 0) { ForEach(rows) { row in runRow(row) } }.padding(.vertical, 12) }.scrollContentBackground(.hidden)
+                .background(Theme.bg.ignoresSafeArea()).refreshable { await model.refresh() }
         }
     }
 

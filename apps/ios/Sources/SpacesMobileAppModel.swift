@@ -187,6 +187,7 @@ enum SpacesMobileTab: String, Hashable, Sendable {
     case alerts
     case spaces
     case agents
+    case automations
     case settings
 }
 
@@ -588,11 +589,18 @@ private enum SpacesMobileMutationTimeoutRecovery {
         return SpacesMobileAgentGrouping.groups(in: overview)
     }
 
-    /// Automation rows for the Automations screen (pushed from Settings), derived from the active
-    /// device's overview.
+    /// Automation rows for the Automations tab, derived from the active device's overview.
     var automationRows: [SpacesMobileAutomationRow] {
         guard let overview else { return [] }
         return SpacesMobileAutomations.rows(automations: overview.automations, runs: overview.automationRuns)
+    }
+
+    /// Currently-running automation-run count on the active device — the Automations tab's badge.
+    /// Failed/timed-out runs already badge Alerts (see `automationAlerts`), so this counts only
+    /// in-flight runs, giving the tab a live "something is executing right now" pulse.
+    var automationRunningRunCount: Int {
+        guard let overview else { return 0 }
+        return SpacesMobileAutomations.runningCount(overview.automationRuns)
     }
 
     /// Manually fires an automation, respecting the daemon's concurrency gate. There is no separate
