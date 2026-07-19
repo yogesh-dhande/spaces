@@ -162,6 +162,12 @@ public struct TerminalSessionRuntimeState: Codable, Sendable, Equatable {
         updatedAt = try container.decode(String.self, forKey: .updatedAt)
         exitedAt = try container.decodeIfPresent(String.self, forKey: .exitedAt)
     }
+
+    /// Identifies one run of a session: the child PID differs per launch and the exit timestamp per
+    /// exit, so together they identify a single run. Used to tie ended-scrollback replay state and the
+    /// transcript response to a specific run, so a transcript fetch that straddles a relaunch is
+    /// rejected by data rather than by state-delivery timing.
+    public var runIdentity: String { "\(childPID.map(String.init) ?? "-")|\(exitedAt ?? "-")" }
 }
 
 public struct TerminalSessionAttachmentSnapshot: Codable, Sendable, Equatable {
@@ -765,8 +771,7 @@ public enum TerminalSessionPersistence {
         return TerminalSessionLaunchConfiguration(
             sessionID: row[0], backend: backend, lifetimePolicy: lifetimePolicy, title: row[5], workingDirectory: row[6], shell: row[7],
             command: row[8].isEmpty ? nil : row[8], createdAt: row[9], workspaceID: row[3].isEmpty ? nil : row[3], kind: kind,
-            userTitle: row.count > 10 && !row[10].isEmpty ? row[10] : nil,
-            automationRunID: row.count > 11 && !row[11].isEmpty ? row[11] : nil)
+            userTitle: row.count > 10 && !row[10].isEmpty ? row[10] : nil, automationRunID: row.count > 11 && !row[11].isEmpty ? row[11] : nil)
     }
 
     private static func encodeForegroundArgv(_ argv: [String]?) throws -> String? {

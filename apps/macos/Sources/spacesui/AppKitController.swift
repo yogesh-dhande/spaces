@@ -2014,8 +2014,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 sessionHostProvider: { launchConfiguration, paths in
                     Self.terminalSessionHost(
                         launchConfiguration: launchConfiguration, paths: paths, terminalServiceRequestSender: requestSender,
-                        stateStreamSubscriber: stateModel.makeHostStateStreamSubscriber(), agentSignalHandler: agentSignalHandler,
-                        linkOpenHandler: { [linkOpenBox] rawLink in linkOpenBox.open(rawLink) })
+                        stateStreamSubscriber: stateModel.makeHostStateStreamSubscriber(),
+                        transcriptProvider: { [weak stateModel] maxBytes in
+                            guard let stateModel else { throw WorkspaceError.invalidArgument(message: "Terminal state model was released.") }
+                            return try await stateModel.fetchTranscript(maxBytes: maxBytes)
+                        }, agentSignalHandler: agentSignalHandler, linkOpenHandler: { [linkOpenBox] rawLink in linkOpenBox.open(rawLink) })
                 })
             let linkOpenCoordinator = TerminalLinkOpenCoordinator(
                 sessionID: sessionID, deviceID: resolvedDeviceID, isLocalDevice: resolvedDeviceID == SpacesPairedDeviceRecord.localDeviceID,
@@ -2533,12 +2536,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     @MainActor static func terminalSessionHost(
         launchConfiguration: TerminalSessionLaunchConfiguration, paths: TerminalSessionPaths,
         terminalServiceRequestSender: RemoteGhosttyTerminalServiceRequestSender? = nil,
-        stateStreamSubscriber: RemoteGhosttyStateStreamSubscriber? = nil, agentSignalHandler: RemoteGhosttyAgentSignalHandler? = nil,
-        linkOpenHandler: (@MainActor (String) -> Void)? = nil
+        stateStreamSubscriber: RemoteGhosttyStateStreamSubscriber? = nil, transcriptProvider: RemoteGhosttyTranscriptProvider? = nil,
+        agentSignalHandler: RemoteGhosttyAgentSignalHandler? = nil, linkOpenHandler: (@MainActor (String) -> Void)? = nil
     ) -> any TerminalGhosttySessionHosting {
         RemoteGhosttySessionHost(
             launchConfiguration: launchConfiguration, paths: paths, terminalServiceRequestSender: terminalServiceRequestSender,
-            stateStreamSubscriber: stateStreamSubscriber, agentSignalHandler: agentSignalHandler, linkOpenHandler: linkOpenHandler)
+            stateStreamSubscriber: stateStreamSubscriber, transcriptProvider: transcriptProvider, agentSignalHandler: agentSignalHandler,
+            linkOpenHandler: linkOpenHandler)
     }
 
     nonisolated static func launchServiceBuiltInTerminalSession(_ launchConfiguration: TerminalSessionLaunchConfiguration) throws
@@ -2844,8 +2848,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             }
             groups.append(
                 AlertsGroup(
-                    projectName: "Automations", workspaceID: "automations:\(deviceID)", workspaceName: deviceName.isEmpty ? "This device" : deviceName,
-                    workspaceBranch: nil, items: items))
+                    projectName: "Automations", workspaceID: "automations:\(deviceID)",
+                    workspaceName: deviceName.isEmpty ? "This device" : deviceName, workspaceBranch: nil, items: items))
         }
         groups.sort {
             switch ($0.latestDate, $1.latestDate) {
@@ -4148,8 +4152,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let automation = automationSummary(deviceID: deviceID, automationID: run.automationID)
         let loginShell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
         let request = DeviceTerminalOpenRequest(
-            workspaceID: "", deviceID: deviceID, sessionID: sessionID, title: automation?.name ?? "Automation", workingDirectory: automation?.workingDirectory ?? "",
-            kind: .automation, shell: loginShell, command: automation?.command,
+            workspaceID: "", deviceID: deviceID, sessionID: sessionID, title: automation?.name ?? "Automation",
+            workingDirectory: automation?.workingDirectory ?? "", kind: .automation, shell: loginShell, command: automation?.command,
             initialState: AutomationRunStatus(rawValue: run.status) == .running ? .running : .exited)
         panelCoordinator.moveSessionToNewPanelWindow(request)
     }

@@ -1215,6 +1215,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         case .terminalPasteImage(let payload): return try handleTerminalPasteImageRequest(payload)
         case .sendTerminalInput(let payload): return try handleSendTerminalInputRequest(payload)
         case .tailTerminalOutput(let payload): return try handleTailTerminalOutputRequest(payload)
+        case .terminalTranscript(let payload): return try handleTerminalTranscriptRequest(payload)
         case .resolveTerminalLink(let payload): return try handleResolveTerminalLinkRequest(payload, context: context)
         case .readTerminalLinkChunk(let payload): return try handleReadTerminalLinkChunkRequest(payload)
         case .subscribe, .subscribeDeviceOverview:
@@ -1446,6 +1447,46 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         return SpacesDeviceAPIResponse(ok: true, message: "Read terminal output.", result: .terminalOutput(.init(text: output)))
     }
 
+    /// Read-only suffix of the session's persisted output transcript, for client-local ended-session
+    /// scrollback replay. Not interactivity-gated: it exposes the same append-only `output.log` bytes
+    /// `tailTerminalOutput` already renders, and an ended session is exactly when this is needed. The
+    /// returned suffix is capped at the smaller of the requested size and the scrollback budget.
+    private func handleTerminalTranscriptRequest(_ payload: SpacesDeviceTerminalTranscriptRequest) throws -> SpacesDeviceAPIResponse {
+        let sessionID = payload.sessionID
+        let paths = try TerminalSessionPaths.forSession(id: sessionID)
+        guard FileManager.default.fileExists(atPath: paths.outputPath) else {
+            return SpacesDeviceAPIResponse(ok: false, message: "Terminal session '\(sessionID)' has no output yet.", errorCode: .sessionNotAvailable)
+        }
+        let cap = min(max(payload.maxBytes, 0), TerminalScrollbackBudget.defaultMaxBytes)
+        let handle = try FileHandle(forReadingFrom: URL(fileURLWithPath: paths.outputPath))
+        defer { try? handle.close() }
+        let totalBytes = try handle.seekToEnd()
+        let startOffset = totalBytes > UInt64(cap) ? totalBytes - UInt64(cap) : 0
+        try handle.seek(toOffset: startOffset)
+        // Bound the read to the size snapshot: `output.log` is append-only, so this range always
+        // exists, and a still-running session appending past `totalBytes` cannot grow the response
+        // beyond the cap (this command is deliberately not interactivity-gated).
+        var data = try handle.read(upToCount: Int(totalBytes - startOffset)) ?? Data()
+        // A capped suffix starts at an arbitrary byte, which can split a UTF-8 character or an
+        // escape sequence and replay as garbage. Advance to the first line boundary so the replay
+        // starts on whole lines; a suffix with no newline at all is returned raw (the vt parser
+        // resynchronizes, at worst mangling the oldest visible scrollback line).
+        // Accepted limitation: a suffix cut inside established VT state (an alternate-screen session,
+        // a persistent SGR color) replays with default terminal state — faithfully restoring it would
+        // require reconstructing terminal state from the dropped prefix, which capped replay deliberately
+        // does not do. The newest scrollback is unaffected.
+        if startOffset > 0, let newlineIndex = data.firstIndex(of: 0x0A), newlineIndex < data.endIndex - 1 {
+            data = data.subdata(in: (newlineIndex + 1)..<data.endIndex)
+        }
+        // Carry the current run's identity so the client can reject a fetch that straddled a relaunch:
+        // a relaunch truncates `output.log`, so bytes read here could belong to a newer run than the one
+        // the client's replay was armed against. `nil` when no runtime state exists yet.
+        let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths)
+        return SpacesDeviceAPIResponse(
+            ok: true, message: "Read terminal transcript.",
+            result: .terminalTranscript(.init(data: data, totalBytes: totalBytes, runIdentity: runtimeState?.runIdentity)))
+    }
+
     private func handleTerminalPasteImageRequest(_ payload: SpacesDeviceTerminalPasteImageRequest) throws -> SpacesDeviceAPIResponse {
         let startedAt = Date()
         let sessionID = payload.sessionID
@@ -1658,9 +1699,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// runs, newest first, de-duplicated. Each run summary carries its automation name and its live
     /// attributed-session count (computed against the live-session set the overview already scanned), so a
     /// client can render run history and derive alert entries without extra calls.
-    private func loadAutomationOverview(store: SQLiteStore, liveSessions: [TerminalSessionCatalogEntry]) throws
-        -> ([TerminalServiceAutomationSummary], [TerminalServiceAutomationRunSummary])
-    {
+    private func loadAutomationOverview(store: SQLiteStore, liveSessions: [TerminalSessionCatalogEntry]) throws -> (
+        [TerminalServiceAutomationSummary], [TerminalServiceAutomationRunSummary]
+    ) {
         let automations = try store.automations()
         let automationSummaries = automations.map(TerminalServiceAutomationSummary.init)
         let namesByAutomationID = Dictionary(automations.map { ($0.id, $0.name) }, uniquingKeysWith: { first, _ in first })
@@ -2352,7 +2393,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         return try automationRunsResponse(runs, context: context, message: "Listed automation runs.")
     }
 
-    private func handleTriggerAutomationRequest(_ payload: SpacesDeviceAutomationReference, context: RequestContext) throws -> SpacesDeviceAPIResponse {
+    private func handleTriggerAutomationRequest(_ payload: SpacesDeviceAutomationReference, context: RequestContext) throws -> SpacesDeviceAPIResponse
+    {
         guard let automationOperations else { return automationsUnavailableResponse() }
         let run = try automationOperations.trigger(payload.id)
         return try automationRunsResponse([run], context: context, message: "Triggered automation.")
@@ -2375,8 +2417,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     }
 
     private func automationsResponse(_ automations: [Automation], message: String) -> SpacesDeviceAPIResponse {
-        SpacesDeviceAPIResponse(
-            ok: true, message: message, result: .automations(.init(rows: automations.map(TerminalServiceAutomationSummary.init))))
+        SpacesDeviceAPIResponse(ok: true, message: message, result: .automations(.init(rows: automations.map(TerminalServiceAutomationSummary.init))))
     }
 
     private func automationRunsResponse(_ runs: [AutomationRun], context: RequestContext, message: String) throws -> SpacesDeviceAPIResponse {

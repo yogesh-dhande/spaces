@@ -173,6 +173,45 @@
             }.value
         }
 
+        /// Fetches a suffix of the session's persisted output transcript for the render host's
+        /// client-local ended-session scrollback replay. Read-only; routes through the owning device's
+        /// Device API endpoint like every other request, so it serves local and remote sessions alike.
+        func fetchTranscript(maxBytes: Int) async throws -> RemoteGhosttyTranscript {
+            let sessionID = self.sessionID
+            let authToken = self.authToken
+            let clientApp = self.clientApp
+            let requestClient = self.requestClient
+            return try await Task.detached(priority: .userInitiated) {
+                try Self.fetchTranscript(
+                    sessionID: sessionID, maxBytes: maxBytes, requestClient: requestClient, authToken: authToken, clientApp: clientApp)
+            }.value
+        }
+
+        /// Internal (not `private`) so `spacesuiTests` can drive it directly through
+        /// `@testable import spacesui` against a real `SpacesDeviceAPIRequestSessionClient` pointed at an
+        /// in-process `SpacesDeviceAPIServer`; the client is a concrete `final class` with no protocol
+        /// seam to fake, so this is the closest faithful integration test of the mapping below.
+        nonisolated static func fetchTranscript(
+            sessionID: String, maxBytes: Int, requestClient: SpacesDeviceAPIRequestSessionClient, authToken: String?, clientApp: SpacesDeviceClientApp
+        ) throws -> RemoteGhosttyTranscript {
+            let request = SpacesDeviceAPIRequest(
+                command: .terminalTranscript(SpacesDeviceTerminalTranscriptRequest(sessionID: sessionID, maxBytes: maxBytes)), authToken: authToken,
+                clientApp: clientApp)
+            // The session client's default timeout cannot carry a budget-sized transcript on a
+            // slow remote link; use the shared per-command policy instead.
+            let response = try requestClient.send(request, timeoutSeconds: SpacesDeviceClient.requestTimeoutSeconds(for: request.command))
+            guard response.ok, let transcript = response.terminalTranscript else {
+                // A missing `output.log` is definitive: the server reports `.sessionNotAvailable`, which
+                // means there is simply nothing to replay. Return an empty transcript so the render host
+                // latches its `.unavailable` verdict instead of retrying the doomed fetch on every scroll
+                // gesture; every other failure stays transient and throws so the host retries. The server
+                // does not report a run identity on the error response, so it is nil here.
+                if response.errorCode == .sessionNotAvailable { return RemoteGhosttyTranscript(data: Data(), runIdentity: nil) }
+                throw SpacesDeviceClientError.unavailable(response.message)
+            }
+            return RemoteGhosttyTranscript(data: transcript.data, runIdentity: transcript.runIdentity)
+        }
+
         /// State-stream subscriber for the Ghostty render host. Instead of opening a
         /// second Device API stream, it attaches the host's callbacks to this model's
         /// single underlying subscription, so one stream feeds both the host renderer

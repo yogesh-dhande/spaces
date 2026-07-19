@@ -544,6 +544,8 @@ launch_simulator_app() {
   local -a launch_env=(
     "SIMCTL_CHILD_SPACES_MOBILE_TERMINAL_TRACE=$demo_trace"
     "SIMCTL_CHILD_SPACES_MOBILE_TERMINAL_PERFORMANCE_LOG_PATH=$performance_log_path"
+    # DEBUG-only paywall bypass so the demo reaches the app shell without an active subscription.
+    "SIMCTL_CHILD_SPACES_MOBILE_PAYWALL_BYPASS=1"
   )
   if [[ -n "$installation_id" ]]; then
     launch_env+=("SIMCTL_CHILD_SPACES_MOBILE_TEST_INSTALLATION_ID=$installation_id")

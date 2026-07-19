@@ -169,13 +169,16 @@ struct TerminalSessionNavigationModifier: ViewModifier {
                     selectedSession = nil
                 }, onSessionChanged: { session in selectedSession = SelectedTerminalSessionRoute(session: session) }
             ) { selectedSession = nil }.id(route.id)
+                // Hide the tab bar in terminal detail so the keyboard accessory row owns the bottom
+                // edge instead of overlapping the tabs.
+                .toolbar(.hidden, for: .tabBar)
         }.navigationDestination(item: $pendingTerminalLaunch) { launch in
             TerminalLaunchPendingView(launch: launch, model: model) { session in
                 pendingTerminalLaunch = nil
                 if let session { selectedSession = SelectedTerminalSessionRoute(session: session) }
             } onBack: {
                 pendingTerminalLaunch = nil
-            }
+            }.toolbar(.hidden, for: .tabBar)
         }.onChange(of: activeRouteID) { oldValue, newValue in
             if oldValue != nil, newValue == nil { onTerminalDismissed?() }
             guard newValue == nil, let message = pendingAuthenticationMessage else { return }

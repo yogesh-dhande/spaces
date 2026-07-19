@@ -49,6 +49,9 @@ export function SiteFooter() {
           >
             GitHub
           </a>
+          <Link href="/privacy" className="transition-colors hover:text-foreground">
+            Privacy
+          </Link>
         </nav>
       </div>
     </footer>

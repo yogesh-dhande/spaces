@@ -6,6 +6,7 @@ enum SpacesMobileSettingsRoute: Hashable { case pairedDevices, automations }
 /// Settings tab: connection, appearance, and version in the shared band language.
 struct SettingsTabView: View {
     @Bindable var model: SpacesMobileAppModel
+    @Environment(SubscriptionStore.self) private var subscription
     @State private var path: [SpacesMobileSettingsRoute] = []
     @AppStorage(AppAppearanceStorage.key) private var appearanceMode: AppAppearanceMode = .default
 
@@ -23,6 +24,7 @@ struct SettingsTabView: View {
                             Text("\(model.automationRows.count)").font(.system(size: 12)).foregroundStyle(Theme.mutedSecondary).monospacedDigit()
                         }
                     }
+                    SubscriptionSettingsSection(store: subscription)
                     settingsGroup("Appearance") { themeRow }
                     settingsGroup("About") { versionRow }
                 }.padding(.vertical, 12)

@@ -221,7 +221,12 @@ type FaqItem = {
 const faqItems: FaqItem[] = [
   {
     question: "How much does it cost?",
-    answer: <>Spaces is free!</>,
+    answer: (
+      <>
+        Spaces is free on Mac and Linux. The iOS companion app is $29/year,
+        with a 7-day free trial.
+      </>
+    ),
   },
   {
     question: "What are the system requirements?",
@@ -311,9 +316,12 @@ const faqItems: FaqItem[] = [
     question: "Where do I send bug reports?",
     answer: (
       <>
-        Open a GitHub issue at{" "}
-        <a href="https://github.com/yogesh-dhande/spaces/issues" className="text-accent hover:underline">
-          https://github.com/yogesh-dhande/spaces/issues
+        Start a GitHub discussion at{" "}
+        <a
+          href="https://github.com/yogesh-dhande/spaces/discussions"
+          className="text-accent hover:underline"
+        >
+          https://github.com/yogesh-dhande/spaces/discussions
         </a>
         .
       </>
@@ -480,9 +488,9 @@ export default function HomePage() {
             </div>
 
             <dl className="mt-8 grid grid-cols-3 gap-6 border-t border-line/70 pt-7">
-              <SpecItem label="Client" value="macOS + iOS" />
-              <SpecItem label="Daemon" value="macOS + Linux" />
-              <SpecItem label="Price" value="Free" />
+              <SpecItem label="Client" lines={["macOS", "iOS"]} />
+              <SpecItem label="Daemon" lines={["macOS", "Linux"]} />
+              <SpecItem label="Price" lines={["Mac: Free", "iOS: $29/year"]} />
             </dl>
           </div>
 
@@ -1381,15 +1389,20 @@ function ComparisonColumn({
   );
 }
 
-function SpecItem({ label, value }: { label: string; value: string }) {
+function SpecItem({ label, lines }: { label: string; lines: string[] }) {
   return (
     <div>
       <dt className="font-mono text-[0.62rem] uppercase tracking-[0.14em] text-foreground-soft">
         {label}
       </dt>
-      <dd className="mt-1.5 text-lg font-semibold leading-tight tracking-tight tabular-nums md:text-xl">
-        {value}
-      </dd>
+      {lines.map((line, index) => (
+        <dd
+          key={line}
+          className={`${index === 0 ? "mt-1.5" : "mt-1"} text-lg font-semibold leading-tight tracking-tight tabular-nums md:text-xl`}
+        >
+          {line}
+        </dd>
+      ))}
     </div>
   );
 }
