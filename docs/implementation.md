@@ -587,6 +587,16 @@ Setup scripts, stop scripts, process commands, and coding-agent launchers all ex
 
 Workspace creation, launch, stop, and archive semantics are specified in [spec.md](spec.md). Two implementation patterns are worth naming: the Device API **defers setup** to a background queue with a fresh store and orchestrator, and workspace-terminal creation uses a **reservation path** that persists a `.starting` session and returns its `sessionID` before the shell backend is ready.
 
+### Daemon request server and liveness
+
+`TerminalServiceServer` accepts on a serial queue but processes each connection on a concurrent worker queue, so one slow request never head-of-line-blocks the others. Per-client ordering still holds because a client sends one request per connection and waits for its response before opening the next. Session-mutating work still funnels through the daemon's single main actor (`runOnMainActorSynchronously`), which keeps state changes serialized; concurrency lives only at the socket layer.
+
+The liveness `.ping` is answered off the main actor from `DaemonLivenessState`, a lock-guarded snapshot the main actor writes (the certificate fingerprint once at startup, the session count on every `sessionCores` mutation) and the connection worker reads. This is deliberate: a client's `TerminalService.ensureRunning` treats a ping that misses its short timeout as "daemon down" and races to spawn a replacement, which then loses the instance lock and leaves the client waiting out its startup timeout. If ping shared the main actor with session `.create`, a burst of concurrent `agent spawn` calls could starve pings past that timeout and make a healthy-but-busy daemon look dead. Keeping ping off the actor makes liveness independent of how busy the daemon is. The ping response still carries the full `TerminalServiceDaemonStatus` (with an eventually-consistent session count) so wire-compatibility negotiation is unchanged.
+
+### Ghostty resource resolution
+
+An embedded terminal needs the Ghostty runtime resources (`SPACES_GHOSTTY_RESOURCES_DIR`/terminfo). `GhosttyEmbeddedLocator` resolves them from, in order: an explicit `SPACES_GHOSTTY_RESOURCES_DIR`, the app bundle, and — for development builds — a `.local/ghosttykit` tree. The dev-tree search is anchored to **both** the current directory and the running `spacesd` binary's own location (walking up from the executable to the `apps/macos` package directory). A `spacesd` a client spawns on demand inherits that client's working directory and environment, so anchoring resolution to the daemon binary keeps "where are my Ghostty resources" a fact the daemon derives from itself rather than one that depends on which client happened to launch it. Production installs resolve through the bundle and never reach the dev-tree search.
+
 ### Projects and `spaces.yaml`
 
 A project's identity is a freshly minted UUID, separate from its filesystem path, so the same repository on two devices is two distinct projects and IDs never collide when one client aggregates several devices.
