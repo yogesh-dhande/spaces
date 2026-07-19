@@ -1070,6 +1070,39 @@ public struct SpacesDeviceTerminalOutputResult: Codable, Sendable, Equatable {
     public init(text: String) { self.text = text }
 }
 
+/// Raw suffix of a terminal session's persisted output transcript, for client-local ended-session
+/// scrollback replay. Read-only and not interactivity-gated — it exposes the same append-only
+/// `output.log` bytes `tailTerminalOutput` already renders — and works uniformly for local and
+/// remote devices. `maxBytes` bounds how much of the tail the daemon returns.
+public struct SpacesDeviceTerminalTranscriptRequest: Codable, Sendable, Equatable {
+    public let sessionID: String
+    public let maxBytes: Int
+
+    public init(sessionID: String, maxBytes: Int) {
+        self.sessionID = sessionID
+        self.maxBytes = maxBytes
+    }
+}
+
+/// Result of `terminalTranscript`: the requested suffix `data` of the output transcript, the
+/// transcript's full `totalBytes` (so a client can tell whether it received the whole log or a
+/// budget-capped tail), and the `runIdentity` of the session run the transcript was read from. The
+/// client validates `runIdentity` against the run its ended-scrollback replay was armed against, so a
+/// fetch that straddles a relaunch (which truncates `output.log`) is rejected rather than replaying
+/// the new run's bytes under the old run's final frame. `runIdentity` is nil when no runtime state
+/// exists for the session.
+public struct SpacesDeviceTerminalTranscriptResult: Codable, Sendable, Equatable {
+    public let data: Data
+    public let totalBytes: UInt64
+    public let runIdentity: String?
+
+    public init(data: Data, totalBytes: UInt64, runIdentity: String? = nil) {
+        self.data = data
+        self.totalBytes = totalBytes
+        self.runIdentity = runIdentity
+    }
+}
+
 public enum SpacesDeviceTerminalControlAction: String, Codable, Sendable, Equatable {
     case attach
     case detach
@@ -1372,6 +1405,9 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
     case terminalPasteImage(SpacesDeviceTerminalPasteImageRequest)
     case sendTerminalInput(SpacesDeviceTerminalInputRequest)
     case tailTerminalOutput(SpacesDeviceTerminalTailRequest)
+    /// Reads a suffix of a terminal session's persisted output transcript for client-local
+    /// ended-session scrollback replay. Read-only.
+    case terminalTranscript(SpacesDeviceTerminalTranscriptRequest)
     case subscribe(SpacesDeviceTerminalSubscriptionRequest)
     case resolveTerminalLink(SpacesDeviceTerminalLinkResolveRequest)
     case readTerminalLinkChunk(SpacesDeviceTerminalLinkChunkRequest)
@@ -1436,6 +1472,7 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
         case .terminalPasteImage: "terminalPasteImage"
         case .sendTerminalInput: "sendTerminalInput"
         case .tailTerminalOutput: "tailTerminalOutput"
+        case .terminalTranscript: "terminalTranscript"
         case .subscribe: "subscribe"
         case .resolveTerminalLink: "resolveTerminalLink"
         case .readTerminalLinkChunk: "readTerminalLinkChunk"
@@ -1459,6 +1496,7 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
         case .terminalPasteImage(let payload): payload.sessionID
         case .sendTerminalInput(let payload): payload.sessionID
         case .tailTerminalOutput(let payload): payload.sessionID
+        case .terminalTranscript(let payload): payload.sessionID
         case .subscribe(let payload): payload.sessionID
         case .resolveTerminalLink(let payload): payload.sessionID
         case .readTerminalLinkChunk(let payload): payload.sessionID
@@ -1508,7 +1546,7 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
     var isSafeToReplayAfterConnectionFailure: Bool {
         switch self {
         case .ping, .daemonStatus, .overview, .previewProject, .previewGitProject, .listDirectories, .workspaceCreateOptions, .state,
-            .resolveTerminalLink, .readTerminalLinkChunk, .tailTerminalOutput, .agentHooksStatus, .listAgentSessions:
+            .resolveTerminalLink, .readTerminalLinkChunk, .tailTerminalOutput, .terminalTranscript, .agentHooksStatus, .listAgentSessions:
             true
         default: false
         }
@@ -1553,6 +1591,7 @@ extension SpacesDeviceAPICommand: Codable {
         case terminalPasteImage
         case sendTerminalInput
         case tailTerminalOutput
+        case terminalTranscript
         case subscribe
         case resolveTerminalLink
         case readTerminalLinkChunk
@@ -1620,6 +1659,7 @@ extension SpacesDeviceAPICommand: Codable {
         case .terminalPasteImage: self = .terminalPasteImage(try container.decode(SpacesDeviceTerminalPasteImageRequest.self, forKey: key))
         case .sendTerminalInput: self = .sendTerminalInput(try container.decode(SpacesDeviceTerminalInputRequest.self, forKey: key))
         case .tailTerminalOutput: self = .tailTerminalOutput(try container.decode(SpacesDeviceTerminalTailRequest.self, forKey: key))
+        case .terminalTranscript: self = .terminalTranscript(try container.decode(SpacesDeviceTerminalTranscriptRequest.self, forKey: key))
         case .subscribe: self = .subscribe(try container.decode(SpacesDeviceTerminalSubscriptionRequest.self, forKey: key))
         case .resolveTerminalLink: self = .resolveTerminalLink(try container.decode(SpacesDeviceTerminalLinkResolveRequest.self, forKey: key))
         case .readTerminalLinkChunk: self = .readTerminalLinkChunk(try container.decode(SpacesDeviceTerminalLinkChunkRequest.self, forKey: key))
@@ -1633,8 +1673,7 @@ extension SpacesDeviceAPICommand: Codable {
         case .spawnAgentSession: self = .spawnAgentSession(try container.decode(SpacesDeviceSpawnAgentSessionRequest.self, forKey: key))
         case .listAgentSessions: self = .listAgentSessions(try container.decode(SpacesDeviceListAgentSessionsRequest.self, forKey: key))
         case .annotateAgentSession: self = .annotateAgentSession(try container.decode(SpacesDeviceAnnotateAgentSessionRequest.self, forKey: key))
-        case .killAgentSession:
-            self = .killAgentSession(try container.decode(SpacesDeviceKillAgentSessionRequest.self, forKey: key))
+        case .killAgentSession: self = .killAgentSession(try container.decode(SpacesDeviceKillAgentSessionRequest.self, forKey: key))
         case .openServiceTunnel: self = .openServiceTunnel(try container.decode(SpacesDeviceServiceTunnelRequest.self, forKey: key))
         }
     }
@@ -1678,6 +1717,7 @@ extension SpacesDeviceAPICommand: Codable {
         case .terminalPasteImage(let payload): try container.encode(payload, forKey: .terminalPasteImage)
         case .sendTerminalInput(let payload): try container.encode(payload, forKey: .sendTerminalInput)
         case .tailTerminalOutput(let payload): try container.encode(payload, forKey: .tailTerminalOutput)
+        case .terminalTranscript(let payload): try container.encode(payload, forKey: .terminalTranscript)
         case .subscribe(let payload): try container.encode(payload, forKey: .subscribe)
         case .resolveTerminalLink(let payload): try container.encode(payload, forKey: .resolveTerminalLink)
         case .readTerminalLinkChunk(let payload): try container.encode(payload, forKey: .readTerminalLinkChunk)
@@ -1743,6 +1783,7 @@ public enum SpacesDeviceAPIResult: Sendable, Equatable {
     case terminalLinkMetadata(SpacesDeviceTerminalLinkMetadata)
     case terminalLinkChunk(SpacesDeviceTerminalLinkChunk)
     case terminalOutput(SpacesDeviceTerminalOutputResult)
+    case terminalTranscript(SpacesDeviceTerminalTranscriptResult)
     case agentHooksStatus(SpacesAgentHooksStatusPayload)
     case agentHooksInstall(AgentHookInstallOutcome)
     case agentSessions(SpacesDeviceAgentSessionsResult)
@@ -1762,6 +1803,7 @@ extension SpacesDeviceAPIResult: Codable {
         case terminalLinkMetadata
         case terminalLinkChunk
         case terminalOutput
+        case terminalTranscript
         case agentHooksStatus
         case agentHooksInstall
         case agentSessions
@@ -1786,6 +1828,7 @@ extension SpacesDeviceAPIResult: Codable {
         case .terminalLinkMetadata: self = .terminalLinkMetadata(try container.decode(SpacesDeviceTerminalLinkMetadata.self, forKey: key))
         case .terminalLinkChunk: self = .terminalLinkChunk(try container.decode(SpacesDeviceTerminalLinkChunk.self, forKey: key))
         case .terminalOutput: self = .terminalOutput(try container.decode(SpacesDeviceTerminalOutputResult.self, forKey: key))
+        case .terminalTranscript: self = .terminalTranscript(try container.decode(SpacesDeviceTerminalTranscriptResult.self, forKey: key))
         case .agentHooksStatus: self = .agentHooksStatus(try container.decode(SpacesAgentHooksStatusPayload.self, forKey: key))
         case .agentHooksInstall: self = .agentHooksInstall(try container.decode(AgentHookInstallOutcome.self, forKey: key))
         case .agentSessions: self = .agentSessions(try container.decode(SpacesDeviceAgentSessionsResult.self, forKey: key))
@@ -1807,6 +1850,7 @@ extension SpacesDeviceAPIResult: Codable {
         case .terminalLinkMetadata(let payload): try container.encode(payload, forKey: .terminalLinkMetadata)
         case .terminalLinkChunk(let payload): try container.encode(payload, forKey: .terminalLinkChunk)
         case .terminalOutput(let payload): try container.encode(payload, forKey: .terminalOutput)
+        case .terminalTranscript(let payload): try container.encode(payload, forKey: .terminalTranscript)
         case .agentHooksStatus(let payload): try container.encode(payload, forKey: .agentHooksStatus)
         case .agentHooksInstall(let payload): try container.encode(payload, forKey: .agentHooksInstall)
         case .agentSessions(let payload): try container.encode(payload, forKey: .agentSessions)
@@ -1867,6 +1911,10 @@ public struct SpacesDeviceAPIResponse: Codable, Sendable, Equatable {
     public var terminalLinkChunk: SpacesDeviceTerminalLinkChunk? { if case .terminalLinkChunk(let payload) = result { payload } else { nil } }
 
     public var terminalOutput: String? { if case .terminalOutput(let payload) = result { payload.text } else { nil } }
+
+    public var terminalTranscript: SpacesDeviceTerminalTranscriptResult? {
+        if case .terminalTranscript(let payload) = result { payload } else { nil }
+    }
 
     public var agentHooksStatus: SpacesAgentHooksStatusPayload? { if case .agentHooksStatus(let payload) = result { payload } else { nil } }
 

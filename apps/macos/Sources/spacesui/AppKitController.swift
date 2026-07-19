@@ -1983,8 +1983,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 sessionHostProvider: { launchConfiguration, paths in
                     Self.terminalSessionHost(
                         launchConfiguration: launchConfiguration, paths: paths, terminalServiceRequestSender: requestSender,
-                        stateStreamSubscriber: stateModel.makeHostStateStreamSubscriber(), agentSignalHandler: agentSignalHandler,
-                        linkOpenHandler: { [linkOpenBox] rawLink in linkOpenBox.open(rawLink) })
+                        stateStreamSubscriber: stateModel.makeHostStateStreamSubscriber(),
+                        transcriptProvider: { [weak stateModel] maxBytes in
+                            guard let stateModel else { throw WorkspaceError.invalidArgument(message: "Terminal state model was released.") }
+                            return try await stateModel.fetchTranscript(maxBytes: maxBytes)
+                        }, agentSignalHandler: agentSignalHandler, linkOpenHandler: { [linkOpenBox] rawLink in linkOpenBox.open(rawLink) })
                 })
             let linkOpenCoordinator = TerminalLinkOpenCoordinator(
                 sessionID: sessionID, deviceID: resolvedDeviceID, isLocalDevice: resolvedDeviceID == SpacesPairedDeviceRecord.localDeviceID,
@@ -2502,12 +2505,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     @MainActor static func terminalSessionHost(
         launchConfiguration: TerminalSessionLaunchConfiguration, paths: TerminalSessionPaths,
         terminalServiceRequestSender: RemoteGhosttyTerminalServiceRequestSender? = nil,
-        stateStreamSubscriber: RemoteGhosttyStateStreamSubscriber? = nil, agentSignalHandler: RemoteGhosttyAgentSignalHandler? = nil,
-        linkOpenHandler: (@MainActor (String) -> Void)? = nil
+        stateStreamSubscriber: RemoteGhosttyStateStreamSubscriber? = nil, transcriptProvider: RemoteGhosttyTranscriptProvider? = nil,
+        agentSignalHandler: RemoteGhosttyAgentSignalHandler? = nil, linkOpenHandler: (@MainActor (String) -> Void)? = nil
     ) -> any TerminalGhosttySessionHosting {
         RemoteGhosttySessionHost(
             launchConfiguration: launchConfiguration, paths: paths, terminalServiceRequestSender: terminalServiceRequestSender,
-            stateStreamSubscriber: stateStreamSubscriber, agentSignalHandler: agentSignalHandler, linkOpenHandler: linkOpenHandler)
+            stateStreamSubscriber: stateStreamSubscriber, transcriptProvider: transcriptProvider, agentSignalHandler: agentSignalHandler,
+            linkOpenHandler: linkOpenHandler)
     }
 
     nonisolated static func launchServiceBuiltInTerminalSession(_ launchConfiguration: TerminalSessionLaunchConfiguration) throws
