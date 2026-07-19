@@ -432,6 +432,35 @@ Useful overrides:
 - `SPACES_MOBILE_DEMO_PORT=...` sets the daemon Device API port for the demo profile; the E2E wrapper supplies `0` by default so the daemon chooses an available port.
 - `SPACES_MOBILE_E2E_DEVICE_KEY=iphone|ipad` and `SPACES_MOBILE_E2E_DEVICE_NAME=...` select the simulator used by the mobile E2E lane; the default E2E target is `iPhone 17 Pro`.
 
+For staging App Store screenshots against a running mobile-demo stack, `SpacesMobileScreenshotUITests` navigates the paired app to a chosen screen and holds it idle so a host process can capture it with `xcrun simctl io <udid> screenshot`; the test captures nothing itself. Build the UI test bundle once with `build-for-testing`, then run `testScreenshotStaging` with `test-without-building` once per screenshot, changing only the env vars and (when capturing both simulators) the destination UDID:
+
+```bash
+xcodebuild \
+  -project apps/ios/SpacesMobile.xcodeproj \
+  -scheme SpacesMobile \
+  -destination "platform=iOS Simulator,id=$IPHONE_UDID" \
+  -derivedDataPath apps/macos/.build/ios-derived-data \
+  -only-testing:SpacesMobileUITests/SpacesMobileScreenshotUITests \
+  build-for-testing
+
+TEST_RUNNER_SPACES_MOBILE_UI_TEST_CONFIG_PATH="$UI_TEST_CONFIG" \
+TEST_RUNNER_SPACES_MOBILE_SCREENSHOT_TAB=agents \
+TEST_RUNNER_SPACES_MOBILE_SCREENSHOT_HOLD_SECONDS=45 \
+xcodebuild \
+  -project apps/ios/SpacesMobile.xcodeproj \
+  -scheme SpacesMobile \
+  -destination "platform=iOS Simulator,id=$IPHONE_UDID" \
+  -derivedDataPath apps/macos/.build/ios-derived-data \
+  -only-testing:SpacesMobileUITests/SpacesMobileScreenshotUITests/testScreenshotStaging \
+  test-without-building &
+sleep 33 && xcrun simctl io "$IPHONE_UDID" screenshot /tmp/agents-tab.png
+wait
+```
+
+The test reads the same `SPACES_MOBILE_UI_TEST_CONFIG_PATH` config file (and default path) as `SpacesMobileUITests`, but only needs its `host`, `port`, `authToken`, `certificateFingerprint`, and `installationID` fields; build `$UI_TEST_CONFIG` from the mobile-demo stack's printed `deviceAPIHost`/`deviceAPIPort` plus the matching device entry (`ipad` or `iphone`) in `<demo root>/pairing.json`. Each screenshot env var must carry the `TEST_RUNNER_` prefix: `xcodebuild` forwards a prefixed variable to the in-simulator test runner with the prefix stripped, and a bare variable does not reach it. Connect a hardware keyboard for the simulator (`defaults write com.apple.iphonesimulator ConnectHardwareKeyboard -bool true`) so terminal screens capture without the software keyboard covering the lower half.
+
+`SPACES_MOBILE_SCREENSHOT_TAB` selects `alerts`, `spaces`, `agents`, or `settings`. `SPACES_MOBILE_SCREENSHOT_OPEN_ROW`, honored only with `SPACES_MOBILE_SCREENSHOT_TAB=spaces`, taps the first Spaces row whose visible title contains the given text, opening its terminal detail. `SPACES_MOBILE_SCREENSHOT_PAYWALL=1` launches the app without the paywall bypass so `PaywallView` renders — for the App Store Connect subscription-review screenshot — instead of navigating tabs. In the simulator the paywall's price line stays on its loading state because StoreKit has no product catalog without App Store Connect (the scheme's Run-action StoreKit configuration is not applied to a `test-without-building` UI-test launch); the real price and trial length render on TestFlight and production builds, where StoreKit serves the live product, so capture the final subscription-review screenshot from a real build.
+
 For targeted mobile E2E runs, use `--scenario`:
 
 ```bash
@@ -705,6 +734,19 @@ Important environment variables:
 For GitHub Actions releases, `CODESIGN_CERTIFICATE_P12` must be the base64-encoded Developer ID Application `.p12` bundle that matches `CODESIGN_IDENTITY`, and `CODESIGN_CERTIFICATE_PASSWORD` must be the password used when exporting that `.p12`.
 
 Sparkle update hosting lives under `https://usespaces.dev/releases/` on the static Firebase site. The update feed and Sparkle archives are staged into `apps/web/public/releases`, which Next.js exports as real static files before Firebase deploy. The release pipeline keeps a single DMG, a single Sparkle zip, one stable `appcast.xml`, and signed Linux remote artifacts the installer downloads; the Linux installer itself is published separately at `https://usespaces.dev/install.sh` through the `apps/web` `prebuild` copy rather than as a GitHub release asset. The app bundle carries `spaces`, `spacesd`, and Caddy in `Contents/Resources`; the DMG installer links `/usr/local/bin` and `~/.spaces/bin` helpers to those bundled binaries so installed CLI commands, launchd, and remote Mac pairing use the updated app bundle after Sparkle updates. Linux artifacts link `~/.local/bin/spaces` to the managed `~/.spaces/bin/spaces` helper so user shells can run `spaces` without a system-wide install.
+
+## iOS Release
+
+[`.github/workflows/ios-release.yml`](../.github/workflows/ios-release.yml) builds the iOS app and uploads it to App Store Connect for TestFlight. Pushing a `v*` tag runs both the macOS and iOS release workflows, so the same version ships across every client. A `workflow_dispatch` run with a required `version` input cuts a TestFlight-only build from any branch without tagging a public macOS release. The build number is `GITHUB_RUN_NUMBER` in both cases, and `scripts/sync-app-version.sh --short <version> --build <build>` stamps the shared version metadata while preserving the checked-in Sparkle feed URL and keys.
+
+The workflow obtains `GhosttyKit` the same way as the macOS release, running `apps/macos/scripts/ensure_ghostty_artifacts.sh --publish-missing` so the pinned-submodule `GhosttyKit.xcframework` (including its iOS device and simulator slices) is present, then `xcodebuild archive`/`-exportArchive` with [`apps/ios/ExportOptions.plist`](../apps/ios/ExportOptions.plist) (`method: app-store-connect`, `destination: upload`). The export step itself uploads the build to App Store Connect. The `.xcarchive` is retained as a workflow artifact for debugging. In `apps/ios/project.yml`, the `SpacesMobile` scheme's build targets list `SpacesMobileTests` and `SpacesMobileUITests` with `[test]` rather than `all`, so their `BuildActionEntry` gets `buildForArchiving="NO"`: those targets `@testable import SpacesMobile`, which needs the app built with `-enable-testing`, a flag `xcodebuild archive -configuration Release` does not set. Leaving the test targets on `all` would have `archive` compile them in Release and fail every release build; XcodeGen regenerates the shared scheme from this setting, so hand-editing the generated `.xcscheme` does not stick.
+
+Signing uses Apple cloud-managed distribution certificates and provisioning, created and refreshed by `xcodebuild -allowProvisioningUpdates` with an App Store Connect API key. No signing certificate or provisioning profile secrets are needed; the workflow reads three secrets:
+- `APP_STORE_CONNECT_KEY_ID`
+- `APP_STORE_CONNECT_ISSUER_ID`
+- `APP_STORE_CONNECT_API_KEY_P8` (raw `.p8` key contents, written to `$RUNNER_TEMP` with `600` permissions for the build only)
+
+The App Store Connect app record for `dev.usespaces.spacesmobile` must already exist before the first upload.
 
 ## Website Deploy
 

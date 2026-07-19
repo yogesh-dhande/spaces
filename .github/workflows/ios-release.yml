@@ -1,0 +1,132 @@
+# Build, sign, and upload the Spaces iOS app to App Store Connect (TestFlight).
+#
+# Triggers:
+#   - push a tag matching v* (e.g. v0.3.0): the same tag that cuts a macOS release
+#     also uploads a matching iOS build.
+#   - workflow_dispatch with a required `version` input: cut a TestFlight-only build
+#     from a branch without tagging a public macOS release.
+#
+# In both cases the build number is GITHUB_RUN_NUMBER.
+#
+# Signing uses Apple cloud-managed distribution certificates and provisioning,
+# created and refreshed by xcodebuild via -allowProvisioningUpdates plus an App
+# Store Connect API key. No signing certificate or provisioning profile secrets
+# are required.
+#
+# Required secrets:
+#   APP_STORE_CONNECT_KEY_ID     - App Store Connect API key identifier.
+#   APP_STORE_CONNECT_ISSUER_ID  - App Store Connect API key issuer identifier.
+#   APP_STORE_CONNECT_API_KEY_P8 - Raw contents of the App Store Connect API .p8 key.
+
+name: iOS Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Marketing version to stamp and upload (e.g. 1.0.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ios-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  ios-release:
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Print Swift toolchain
+        run: |
+          xcode-select -p
+          xcrun swift --version
+          swift --version
+
+      - name: Setup terminal build dependencies
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: apps/macos/scripts/ensure_ghostty_artifacts.sh --publish-missing
+
+      - name: Resolve version and build
+        id: version
+        env:
+          VERSION_INPUT: ${{ inputs.version }}
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            version="$VERSION_INPUT"
+          else
+            version="${GITHUB_REF_NAME#v}"
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "build=${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+
+      - name: Sync app version metadata
+        run: |
+          scripts/sync-app-version.sh \
+            --short "${{ steps.version.outputs.version }}" \
+            --build "${{ steps.version.outputs.build }}"
+
+      - name: Write App Store Connect API key
+        id: asc_key
+        env:
+          APP_STORE_CONNECT_API_KEY_P8: ${{ secrets.APP_STORE_CONNECT_API_KEY_P8 }}
+        run: |
+          key_path="$RUNNER_TEMP/asc_api_key.p8"
+          (umask 077; printf '%s' "$APP_STORE_CONNECT_API_KEY_P8" > "$key_path")
+          chmod 600 "$key_path"
+          echo "key_path=${key_path}" >> "$GITHUB_OUTPUT"
+
+      - name: Archive iOS app
+        env:
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+        run: |
+          xcodebuild archive \
+            -project apps/ios/SpacesMobile.xcodeproj \
+            -scheme SpacesMobile \
+            -configuration Release \
+            -destination generic/platform=iOS \
+            -archivePath "$RUNNER_TEMP/SpacesMobile.xcarchive" \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "${{ steps.asc_key.outputs.key_path }}" \
+            -authenticationKeyID "$APP_STORE_CONNECT_KEY_ID" \
+            -authenticationKeyIssuerID "$APP_STORE_CONNECT_ISSUER_ID"
+
+      - name: Export and upload to App Store Connect
+        env:
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+        run: |
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/SpacesMobile.xcarchive" \
+            -exportOptionsPlist apps/ios/ExportOptions.plist \
+            -exportPath "$RUNNER_TEMP/export" \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "${{ steps.asc_key.outputs.key_path }}" \
+            -authenticationKeyID "$APP_STORE_CONNECT_KEY_ID" \
+            -authenticationKeyIssuerID "$APP_STORE_CONNECT_ISSUER_ID"
+
+      - name: Upload xcarchive for debugging
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: SpacesMobile-${{ steps.version.outputs.version }}-${{ steps.version.outputs.build }}.xcarchive
+          path: ${{ runner.temp }}/SpacesMobile.xcarchive
+          if-no-files-found: warn
