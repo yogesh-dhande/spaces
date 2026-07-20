@@ -92,28 +92,39 @@ public enum SpacesDeviceClient {
             appVersion: appVersion)
     }
 
+    /// Serializes local bootstraps within this process so read-presented-token → daemon round-trip →
+    /// save-returned-token runs as one atomic section. The daemon mints a replacement token for every
+    /// stale presentation, so two interleaved bootstraps that both read a stale stored token would mint
+    /// competing tokens — the second revoking the first's — and their out-of-order saves could persist
+    /// a non-current token. Serialized, the second bootstrap reads the token the first just persisted,
+    /// presents it, and the daemon keeps it. Held across a blocking daemon round-trip deliberately;
+    /// callers already run off the main actor, and correctness needs the whole section.
+    private static let localBootstrapLock = NSLock()
+
     @discardableResult public static func bootstrapLocalDevice(
         database providedDatabase: SpacesClientDatabase? = nil, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil,
         now: Date = Date(), bootstrap: LocalBootstrapProvider = SpacesDeviceClient.defaultLocalBootstrapProvider
     ) throws -> SpacesPairedDeviceRecord {
         let database = try providedDatabase ?? SpacesClientDatabase.defaultDatabase()
-        // Present the token we already hold so the daemon keeps it instead of rotating it: the local
-        // device re-bootstraps on every sidebar reload, and a rotated token would invalidate the
-        // tokens held by live Device API connections (terminal streams and control requests).
-        let presentedToken = (try? SpacesDeviceCredentialStore.token(deviceID: SpacesPairedDeviceRecord.localDeviceID, profile: profile)) ?? nil
-        let response = try bootstrap(clientApp, presentedToken)
-        // The local control socket's response carries no error code; pairing-related rejections
-        // from it are classified by the message heuristics kept for uncoded errors.
-        guard response.ok else { throw SpacesDeviceClientError.requestRejected(message: response.message, code: nil) }
-        guard let bootstrap = response.localClientBootstrap else { throw SpacesDeviceClientError.missingLocalBootstrap }
-        let timestamp = ISO8601DateFormatter().string(from: now)
-        let existingCreatedAt = (try? database.pairedDevice(id: bootstrap.deviceID)?.createdAt) ?? timestamp
-        let record = SpacesPairedDeviceRecord(
-            id: bootstrap.deviceID, name: bootstrap.name, platform: bootstrap.platform, host: bootstrap.host, port: bootstrap.port,
-            certificateFingerprint: bootstrap.certificateFingerprint, createdAt: existingCreatedAt, updatedAt: timestamp, lastSelectedAt: timestamp)
-        try database.upsert(device: record)
-        try SpacesDeviceCredentialStore.saveToken(bootstrap.authToken, deviceID: record.id, profile: profile)
-        return record
+        return try localBootstrapLock.withLock {
+            // Present the token we already hold so the daemon keeps it instead of rotating it: the local
+            // device re-bootstraps on every sidebar reload, and a rotated token would invalidate the
+            // tokens held by live Device API connections (terminal streams and control requests).
+            let presentedToken = (try? SpacesDeviceCredentialStore.token(deviceID: SpacesPairedDeviceRecord.localDeviceID, profile: profile)) ?? nil
+            let response = try bootstrap(clientApp, presentedToken)
+            // The local control socket's response carries no error code; pairing-related rejections
+            // from it are classified by the message heuristics kept for uncoded errors.
+            guard response.ok else { throw SpacesDeviceClientError.requestRejected(message: response.message, code: nil) }
+            guard let bootstrap = response.localClientBootstrap else { throw SpacesDeviceClientError.missingLocalBootstrap }
+            let timestamp = ISO8601DateFormatter().string(from: now)
+            let existingCreatedAt = (try? database.pairedDevice(id: bootstrap.deviceID)?.createdAt) ?? timestamp
+            let record = SpacesPairedDeviceRecord(
+                id: bootstrap.deviceID, name: bootstrap.name, platform: bootstrap.platform, host: bootstrap.host, port: bootstrap.port,
+                certificateFingerprint: bootstrap.certificateFingerprint, createdAt: existingCreatedAt, updatedAt: timestamp, lastSelectedAt: timestamp)
+            try database.upsert(device: record)
+            try SpacesDeviceCredentialStore.saveToken(bootstrap.authToken, deviceID: record.id, profile: profile)
+            return record
+        }
     }
 
     /// Ensures the local device's Device API auth token is present, re-bootstrapping to regenerate it
@@ -692,6 +703,11 @@ public enum SpacesDeviceClient {
             switch requestError {
             case .timeout, .emptyResponse, .connectionFailed: return true
             case .invalidPort: return false
+            // A coded rejection means the daemon answered — it is reachable — so this is not a
+            // reachability failure. Callers that need to recover a rejection (e.g. re-authenticate on
+            // `.unauthorized`) branch on the code itself; treating it as retryable here would wrongly
+            // degrade a reachable daemon to the offline path.
+            case .requestRejected: return false
             }
         }
         // The pinned-TLS transport's reachability failures (timeout/refused/closed). A certificate
