@@ -6,10 +6,13 @@ import spacesterminalcore
 import workspacecore
 
 /// Owns the create/edit automation form window. `AppKitController` holds one instance; the unowned `host`
-/// gives access to the shared form-window chrome and device services. The cron schedule builder serializes to
-/// a cron string via `AutomationSchedulePreset` — the string is the only stored form — and shows a live
-/// next-3-runs preview plus inline parse validation. The device is chosen only at create time; an automation
-/// lives on its device, so edit fixes it.
+/// gives access to the shared form-window chrome and device services. A type toggle switches between an
+/// **Agent** automation (spawn a coding agent in a workspace, seeded with a prompt — the default for a new
+/// automation) and a **Script** automation (a shell script in a working directory); the shared name/device/
+/// trigger/schedule/timeout/concurrency fields apply to both. The cron schedule builder serializes to a cron
+/// string via `AutomationSchedulePreset` — the string is the only stored form — and shows a live next-3-runs
+/// preview plus inline parse validation. The device is chosen only at create time; an automation lives on its
+/// device, so edit fixes it.
 @MainActor final class AutomationEditorController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     unowned let host: AppKitController
 
@@ -30,9 +33,22 @@ import workspacecore
     private var isLocalDevice: Bool = true
     private var deviceInputs: [AutomationDeviceInput] = []
 
+    /// The kind currently selected in the type toggle. A new automation defaults to `.agent` (the headline
+    /// simplification — most users just want to spawn an agent with a prompt); editing opens on the stored kind.
+    private var currentKind: AutomationKind = .agent
+    /// The workspace choices for the selected device, recomputed whenever the form is (re)built.
+    private var workspaceChoices: [AppKitController.AutomationWorkspaceChoice] = []
+    /// The last script text this editor auto-generated as an Agent→Script prefill, so a later switch can tell a
+    /// stale prefill (safe to replace) from script the user has since authored (never clobber).
+    private var lastGeneratedScriptPrefill: String?
+
     // Live control references, valid while the window is open.
     private var nameField: NSTextField?
     private var devicePopUp: NSPopUpButton?
+    private var kindSegmented: NSSegmentedControl?
+    private var workspacePopUp: NSPopUpButton?
+    private var agentCommandField: NSTextField?
+    private var agentPromptTextView: NSTextView?
     private var scriptTextView: NSTextView?
     private var workingDirectoryField: NSTextField?
     private var triggerSegmented: NSSegmentedControl?
@@ -51,6 +67,13 @@ import workspacecore
     private var missedRunPopUp: NSPopUpButton?
     private var previewLabel: NSTextField?
     private var errorLabel: NSTextField?
+
+    // Rows whose visibility depends on the type toggle.
+    private var workspaceRow: NSView?
+    private var agentCommandRow: NSView?
+    private var agentPromptRow: NSView?
+    private var scriptRow: NSView?
+    private var workingDirectoryRow: NSView?
 
     // Rows whose visibility depends on trigger/mode/preset selection.
     private var cronSectionRows: [NSView] = []
@@ -82,6 +105,8 @@ import workspacecore
     }
 
     private func present(title: String, seed: TerminalServiceAutomationSummary?) {
+        workspaceChoices = host.automationWorkspaceChoices(deviceID: deviceID)
+
         let stack = NSStackView()
         stack.orientation = .vertical
         stack.alignment = .leading
@@ -100,10 +125,30 @@ import workspacecore
             addRow(host.settingsLabeledField(name: "Device", hint: "An automation stays on its device.", control: label), to: stack)
         }
 
-        addRow(host.settingsLabeledField(name: "Script", hint: "Runs in your login shell.", control: makeScriptEditor(seed: seed)), to: stack)
-        addRow(
-            host.settingsLabeledField(
-                name: "Working directory", hint: "Directory the command runs in.", control: makeWorkingDirectoryControl(seed: seed)), to: stack)
+        addRow(host.settingsLabeledField(name: "Type", hint: "Spawn a coding agent, or run a shell script.", control: makeKindControl(seed: seed)), to: stack)
+
+        // Agent-kind rows.
+        let workspaceRow = host.settingsLabeledField(
+            name: "Workspace", hint: "The workspace the coding agent spawns into.", control: makeWorkspacePopUp(seed: seed))
+        addRow(workspaceRow, to: stack)
+        self.workspaceRow = workspaceRow
+        let agentCommandRow = host.settingsLabeledField(
+            name: "Agent command", hint: "Launches a supported coding agent (claude, codex, opencode); may carry flags.",
+            control: makeAgentCommandField(seed: seed))
+        addRow(agentCommandRow, to: stack)
+        self.agentCommandRow = agentCommandRow
+        let agentPromptRow = host.settingsLabeledField(name: "Prompt", hint: "Sent to the agent once it starts.", control: makeAgentPromptEditor(seed: seed))
+        addRow(agentPromptRow, to: stack)
+        self.agentPromptRow = agentPromptRow
+
+        // Script-kind rows.
+        let scriptRow = host.settingsLabeledField(name: "Script", hint: "Runs in your login shell.", control: makeScriptEditor(seed: seed))
+        addRow(scriptRow, to: stack)
+        self.scriptRow = scriptRow
+        let workingDirectoryRow = host.settingsLabeledField(
+            name: "Working directory", hint: "Directory the command runs in.", control: makeWorkingDirectoryControl(seed: seed))
+        addRow(workingDirectoryRow, to: stack)
+        self.workingDirectoryRow = workingDirectoryRow
 
         addRow(host.settingsLabeledField(name: "Trigger", hint: "Run manually or on a cron schedule.", control: makeTriggerControl(seed: seed)), to: stack)
         appendCronSection(to: stack, seed: seed)
@@ -121,6 +166,7 @@ import workspacecore
 
         addRow(makeFooter(), to: stack)
 
+        applyKindVisibility()
         applyScheduleVisibility()
         updatePreview()
 
@@ -155,6 +201,55 @@ import workspacecore
         popUp.action = #selector(deviceChanged(_:))
         devicePopUp = popUp
         return popUp
+    }
+
+    private func makeKindControl(seed: TerminalServiceAutomationSummary?) -> NSView {
+        currentKind = seed.flatMap { AutomationKind(rawValue: $0.kind) } ?? .agent
+        let segmented = NSSegmentedControl(labels: ["Agent", "Script"], trackingMode: .selectOne, target: self, action: #selector(kindChanged(_:)))
+        segmented.selectedSegment = currentKind == .script ? 1 : 0
+        kindSegmented = segmented
+        return segmented
+    }
+
+    private func makeWorkspacePopUp(seed: TerminalServiceAutomationSummary?) -> NSView {
+        let popUp = NSPopUpButton()
+        if workspaceChoices.isEmpty {
+            popUp.addItem(withTitle: "No workspaces on this device")
+            popUp.itemArray.last?.representedObject = nil
+            popUp.isEnabled = false
+        } else {
+            for choice in workspaceChoices {
+                popUp.addItem(withTitle: choice.label)
+                popUp.itemArray.last?.representedObject = choice.workspaceID
+                if choice.workspaceID == seed?.workspaceID { popUp.select(popUp.itemArray.last) }
+            }
+        }
+        workspacePopUp = popUp
+        return popUp
+    }
+
+    private func makeAgentCommandField(seed: TerminalServiceAutomationSummary?) -> NSView {
+        let field = NSTextField(string: seed?.agentCommand ?? "claude")
+        field.placeholderString = "claude"
+        field.font = .systemFont(ofSize: 13)
+        agentCommandField = field
+        return field
+    }
+
+    private func makeAgentPromptEditor(seed: TerminalServiceAutomationSummary?) -> NSView {
+        let textView = NSTextView()
+        textView.string = seed?.agentPrompt ?? ""
+        textView.isRichText = false
+        // Prose, not code: use the system font (matching the script editor's visual language but not its
+        // monospace). Smart substitutions stay off so the prompt reaches the agent verbatim.
+        textView.font = .systemFont(ofSize: 13)
+        textView.isAutomaticQuoteSubstitutionEnabled = false
+        textView.isAutomaticDashSubstitutionEnabled = false
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        agentPromptTextView = textView
+        return host.scrollableTextView(textView, height: 72)
     }
 
     private func makeScriptEditor(seed: TerminalServiceAutomationSummary?) -> NSView {
@@ -422,6 +517,30 @@ import workspacecore
 
     // MARK: - Visibility & preview
 
+    /// Shows the agent form or the script form for the current kind. Shared fields stay visible for both.
+    private func applyKindVisibility() {
+        let isAgent = currentKind == .agent
+        workspaceRow?.isHidden = !isAgent
+        agentCommandRow?.isHidden = !isAgent
+        agentPromptRow?.isHidden = !isAgent
+        scriptRow?.isHidden = isAgent
+        workingDirectoryRow?.isHidden = isAgent
+    }
+
+    /// Prefills the script editor with the CLI equivalent of the current agent form when switching
+    /// Agent → Script — but only when the editor is empty or still holds a previous auto-prefill, so
+    /// script the user typed themselves is never clobbered. The working directory is left for the user to fill.
+    private func prefillScriptFromAgentIfAppropriate() {
+        let current = scriptTextView?.string ?? ""
+        guard current.isEmpty || current == lastGeneratedScriptPrefill else { return }
+        let workspaceID = (workspacePopUp?.selectedItem?.representedObject as? String) ?? ""
+        let command = agentCommandField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let generated = AutomationsViewModel.agentEquivalentScript(
+            workspaceID: workspaceID, command: command.isEmpty ? "claude" : command, prompt: agentPromptTextView?.string ?? "")
+        scriptTextView?.string = generated
+        lastGeneratedScriptPrefill = generated
+    }
+
     private func applyScheduleVisibility() {
         let isCron = (triggerSegmented?.selectedSegment ?? 0) == 1
         for row in cronSectionRows { row.isHidden = !isCron }
@@ -489,11 +608,22 @@ import workspacecore
     // MARK: - Actions
 
     @objc private func deviceChanged(_ sender: NSPopUpButton) {
-        deviceID = (sender.selectedItem?.representedObject as? String) ?? deviceID
-        let wasLocal = isLocalDevice
+        let newDeviceID = (sender.selectedItem?.representedObject as? String) ?? deviceID
+        guard newDeviceID != deviceID else { return }
+        deviceID = newDeviceID
         isLocalDevice = deviceInputs.first(where: { $0.deviceID == deviceID })?.isLocal ?? false
-        // Re-present so the working-directory Browse button appears/disappears with device locality.
-        if wasLocal != isLocalDevice { rebuildPreservingValues() }
+        // Re-present so the workspace list (agent form) and the working-directory Browse button (local only)
+        // match the newly selected device.
+        rebuildPreservingValues()
+    }
+
+    @objc private func kindChanged(_ sender: NSSegmentedControl) {
+        let newKind: AutomationKind = sender.selectedSegment == 1 ? .script : .agent
+        guard newKind != currentKind else { return }
+        // Prefill the script only when moving Agent → Script; the reverse just reveals the agent form.
+        if newKind == .script { prefillScriptFromAgentIfAppropriate() }
+        currentKind = newKind
+        applyKindVisibility()
     }
 
     @objc private func triggerChanged(_ sender: NSSegmentedControl) {
@@ -560,14 +690,9 @@ import workspacecore
     }
 
     /// Reads the controls into validated wire fields, surfacing the first problem inline and returning nil.
+    /// The shared cron/timeout resolution lives here; the name check and kind-specific field validation and
+    /// assembly are delegated to `AutomationsViewModel.buildAutomationFields` so they stay unit-testable.
     private func collectFields() -> TerminalServiceAutomationFields? {
-        let name = nameField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard !name.isEmpty else { return failValidation("Enter a name.") }
-        let script = scriptTextView?.string ?? ""
-        guard !script.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return failValidation("Enter a script.") }
-        let workingDirectory = workingDirectoryField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard !workingDirectory.isEmpty else { return failValidation("Enter a working directory.") }
-
         var timeoutSeconds: Int?
         if let timeoutText = timeoutField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines), !timeoutText.isEmpty {
             guard let value = Int(timeoutText), value > 0 else { return failValidation("Timeout must be a positive number of seconds, or empty.") }
@@ -589,13 +714,19 @@ import workspacecore
         let concurrency = (concurrencyPopUp?.selectedItem?.representedObject as? String) ?? AutomationConcurrencyPolicy.allow.rawValue
         let missed = (missedRunPopUp?.selectedItem?.representedObject as? String) ?? AutomationMissedRunPolicy.runOnce.rawValue
 
-        errorLabel?.isHidden = true
-        // Kind is fixed to `.script` here: the editor has no type toggle yet (a later commit adds one), so
-        // every automation authored through this form is a script automation.
-        return TerminalServiceAutomationFields(
-            name: name, enabled: currentEnabled(), triggerKind: triggerKind.rawValue, cronExpression: cronExpression,
-            kind: AutomationKind.script.rawValue, script: script, workingDirectory: workingDirectory, timeoutSeconds: timeoutSeconds,
+        let result = AutomationsViewModel.buildAutomationFields(
+            name: nameField?.stringValue ?? "", kind: currentKind, enabled: currentEnabled(), triggerKind: triggerKind,
+            cronExpression: cronExpression, workspaceID: workspacePopUp?.selectedItem?.representedObject as? String,
+            agentCommand: agentCommandField?.stringValue ?? "", agentPrompt: agentPromptTextView?.string ?? "",
+            script: scriptTextView?.string ?? "", workingDirectory: workingDirectoryField?.stringValue ?? "", timeoutSeconds: timeoutSeconds,
             concurrencyPolicy: concurrency, missedRunPolicy: missed)
+        switch result {
+        case .success(let fields):
+            errorLabel?.isHidden = true
+            return fields
+        case .failure(let error):
+            return failValidation(error.message)
+        }
     }
 
     /// Preserves the automation's enabled state across edits; a newly created automation is enabled.
@@ -627,8 +758,9 @@ import workspacecore
         return TerminalServiceAutomationSummary(
             id: editingAutomationID ?? "", name: nameField?.stringValue ?? "", enabled: currentEnabled(),
             triggerKind: (isCron ? AutomationTriggerKind.cron : .manual).rawValue, cronExpression: isCron ? currentPreset()?.cronExpression : nil,
-            kind: AutomationKind.script.rawValue, script: scriptTextView?.string ?? "", workingDirectory: workingDirectoryField?.stringValue ?? "",
-            timeoutSeconds: timeoutField.flatMap { Int($0.stringValue) },
+            kind: currentKind.rawValue, script: scriptTextView?.string ?? "", agentCommand: agentCommandField?.stringValue,
+            agentPrompt: agentPromptTextView?.string, workspaceID: workspacePopUp?.selectedItem?.representedObject as? String,
+            workingDirectory: workingDirectoryField?.stringValue ?? "", timeoutSeconds: timeoutField.flatMap { Int($0.stringValue) },
             concurrencyPolicy: (concurrencyPopUp?.selectedItem?.representedObject as? String) ?? AutomationConcurrencyPolicy.allow.rawValue,
             missedRunPolicy: (missedRunPopUp?.selectedItem?.representedObject as? String) ?? AutomationMissedRunPolicy.runOnce.rawValue,
             nextFireTime: nil, createdAt: "", updatedAt: "")

@@ -197,7 +197,20 @@ import workspacecore
         meta.textColor = .secondaryLabelColor
         meta.lineBreakMode = .byTruncatingTail
 
-        let textColumn = NSStackView(views: [name, meta])
+        var columnViews: [NSView] = [name]
+        // A kind-appropriate one-line excerpt (an agent automation's prompt, a script automation's script) as
+        // plain text — the type itself is not marked here; the user identifies it from the automation name.
+        let excerpt = AutomationsViewModel.excerpt(for: automation)
+        if !excerpt.isEmpty {
+            let excerptLabel = NSTextField(labelWithString: excerpt)
+            excerptLabel.font = .systemFont(ofSize: 11)
+            excerptLabel.textColor = .secondaryLabelColor
+            excerptLabel.lineBreakMode = .byTruncatingTail
+            columnViews.append(excerptLabel)
+        }
+        columnViews.append(meta)
+
+        let textColumn = NSStackView(views: columnViews)
         textColumn.orientation = .vertical
         textColumn.alignment = .leading
         textColumn.spacing = 2
@@ -263,10 +276,22 @@ import workspacecore
         meta.textColor = .secondaryLabelColor
         meta.lineBreakMode = .byTruncatingTail
 
-        let textColumn = NSStackView(views: [name, meta])
+        var columnViews: [NSView] = [name, meta]
+        // Attributed coding agents (an agent-kind run's own agent, plus any a script-kind run's command
+        // spawned): one clickable chip each, its status dot reusing the app's shared agent-state language.
+        if !run.attributedAgents.isEmpty {
+            let chips = run.attributedAgents.map { makeAgentChip(deviceID: row.deviceID, agent: $0) }
+            let chipsRow = NSStackView(views: chips + [NSView()])
+            chipsRow.orientation = .horizontal
+            chipsRow.alignment = .centerY
+            chipsRow.spacing = 6
+            columnViews.append(chipsRow)
+        }
+
+        let textColumn = NSStackView(views: columnViews)
         textColumn.orientation = .vertical
         textColumn.alignment = .leading
-        textColumn.spacing = 2
+        textColumn.spacing = 4
 
         var trailing: [NSView] = []
         if status == .running {
@@ -274,6 +299,15 @@ import workspacecore
             cancelButton.target = self
             cancelButton.identifier = NSUserInterfaceItemIdentifier("\(row.deviceID)::\(run.id)")
             trailing.append(cancelButton)
+        } else if AutomationsViewModel.endAgentsAvailable(for: run) {
+            // A terminal-status run with a live attributed agent still lingering: offer to reap it. "End
+            // agents" is a text label — ending someone's agent is not an obvious icon action.
+            let endButton = host.actionButton(
+                title: "End agents", symbol: nil, tooltip: "End this run's still-running coding agents", action: #selector(endAgentsTapped(_:)),
+                primary: false)
+            endButton.target = self
+            endButton.identifier = NSUserInterfaceItemIdentifier("\(row.deviceID)::\(run.id)")
+            trailing.append(endButton)
         }
 
         let content = NSStackView(views: [statusIcon, textColumn, NSView()] + trailing)
@@ -294,6 +328,41 @@ import workspacecore
     }
 
     // MARK: - Shared row helpers
+
+    /// A clickable chip for one attributed coding agent: its status dot (shared agent-state language) plus the
+    /// agent's label. Clicking opens that agent's terminal session, device-qualified for a remote run.
+    private func makeAgentChip(deviceID: String, agent: TerminalServiceAutomationAgentSummary) -> NSView {
+        let status = AgentWindowStatus(rawValue: agent.status) ?? .idle
+        let dot = AppKitController.agentStatusIndicator(status)
+        dot.setContentHuggingPriority(.required, for: .horizontal)
+        let title = agent.title.flatMap { $0.isEmpty ? nil : $0 } ?? "Agent"
+        let label = NSTextField(labelWithString: title)
+        label.font = .systemFont(ofSize: 11)
+        label.textColor = host.sidebarPrimaryTextColor(isSelected: false, isArchived: false)
+        label.lineBreakMode = .byTruncatingTail
+
+        let row = NSStackView(views: [dot, label])
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 5
+        row.edgeInsets = NSEdgeInsets(top: 3, left: 8, bottom: 3, right: 8)
+        row.translatesAutoresizingMaskIntoConstraints = false
+
+        let chip = ColoredBackgroundView()
+        chip.cornerRadius = 6
+        chip.fillColor = host.sidebarSelectedCardBackgroundColor()
+        chip.translatesAutoresizingMaskIntoConstraints = false
+        chip.toolTip = "Open agent terminal"
+        chip.addSubview(row)
+        NSLayoutConstraint.activate([
+            row.leadingAnchor.constraint(equalTo: chip.leadingAnchor), row.trailingAnchor.constraint(equalTo: chip.trailingAnchor),
+            row.topAnchor.constraint(equalTo: chip.topAnchor), row.bottomAnchor.constraint(equalTo: chip.bottomAnchor),
+        ])
+        attachRowClickAction(to: chip) { [weak self] in
+            self?.host.openAutomationAgentSession(deviceID: deviceID, agent: agent)
+        }
+        return chip
+    }
 
     private func cardContainer(_ content: NSView) -> NSView {
         content.translatesAutoresizingMaskIntoConstraints = false
@@ -461,6 +530,13 @@ import workspacecore
         guard let (deviceID, runID) = Self.splitIdentifier(sender.identifier?.rawValue) else { return }
         performMutation(deviceID: deviceID) { device, clientApp in
             try SpacesDeviceClient.cancelAutomationRun(runID: runID, device: device, clientApp: clientApp)
+        }
+    }
+
+    @objc private func endAgentsTapped(_ sender: NSButton) {
+        guard let (deviceID, runID) = Self.splitIdentifier(sender.identifier?.rawValue) else { return }
+        performMutation(deviceID: deviceID) { device, clientApp in
+            try SpacesDeviceClient.endAutomationAgents(runID: runID, device: device, clientApp: clientApp)
         }
     }
 

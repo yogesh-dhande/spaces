@@ -4159,6 +4159,74 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         panelCoordinator.moveSessionToNewPanelWindow(request)
     }
 
+    /// Opens an automation run's attributed coding-agent terminal session, device-qualified so a remote run's
+    /// agent resolves on its own device. The agent runs in a workspace, so the request is resolved from that
+    /// device's overview when the session is present (for the real shell/command/state) and synthesized
+    /// otherwise; it opens in a standalone panel window like the run's own terminal, since the Automations
+    /// pane has no workspace pane to host it.
+    func openAutomationAgentSession(deviceID: String, agent: TerminalServiceAutomationAgentSummary) {
+        let workspaceID = agent.workspaceID ?? ""
+        let overview = deviceSection(id: deviceID)?.overview
+        let resolved = Self.deviceTerminalOpenRequest(workspaceID: workspaceID, sessionID: agent.terminalSessionID, overview: overview)
+        let request = DeviceTerminalOpenRequest(
+            workspaceID: resolved?.workspaceID ?? workspaceID, deviceID: deviceID, sessionID: agent.terminalSessionID,
+            title: resolved?.title ?? agent.title ?? "Agent", workingDirectory: resolved?.workingDirectory ?? "", kind: resolved?.kind ?? .agent,
+            shell: resolved?.shell, command: resolved?.command, initialState: resolved?.initialState ?? (agent.live ? .running : .exited),
+            servicePID: resolved?.servicePID, childPID: resolved?.childPID, createdAt: resolved?.createdAt, updatedAt: resolved?.updatedAt)
+        panelCoordinator.moveSessionToNewPanelWindow(request)
+    }
+
+    /// One workspace the editor's Agent form can target, sourced from the sidebar's loaded overview model.
+    struct AutomationWorkspaceChoice: Sendable, Equatable {
+        let workspaceID: String
+        /// "<project> / <workspace>" so the same branch name across projects stays distinguishable.
+        let label: String
+    }
+
+    /// The workspaces available to an `agent`-kind automation on a device, read from the sidebar's already
+    /// loaded project/workspace model (the same source the sidebar renders), so the editor adds no new fetch
+    /// path. Ordered by the sidebar's project order, visible (non-archived, non-hidden) workspaces only.
+    func automationWorkspaceChoices(deviceID: String) -> [AutomationWorkspaceChoice] {
+        deviceProjects(deviceID: deviceID).flatMap { project in
+            visibleWorkspaces(projectID: project.id).map { workspace in
+                AutomationWorkspaceChoice(workspaceID: workspace.id, label: "\(project.name) / \(workspace.displayName)")
+            }
+        }
+    }
+
+    /// The status glyph name and tint for a settled (non-spinning) agent status. Single source of truth shared
+    /// by `windowRow`'s indicator and the automations run agent chips so agent state reads identically.
+    static func agentStatusSymbolAndColor(_ status: AgentWindowStatus) -> (symbol: String, color: NSColor) {
+        switch status {
+        case .waiting: ("exclamationmark.triangle.fill", .systemOrange)
+        case .done: ("circle.fill", .systemGreen)
+        // Agent gone, terminal alive: hollow dimmed dot, distinct from idle's filled dot.
+        case .exited: ("circle", .tertiaryLabelColor)
+        case .spinning, .idle: ("circle.fill", .tertiaryLabelColor)
+        }
+    }
+
+    /// A compact agent status indicator — a spinner for a working agent, a tinted dot otherwise — matching the
+    /// agent state shown in window rows. Reused by the automations runs tab's attributed-agent chips.
+    static func agentStatusIndicator(_ status: AgentWindowStatus) -> NSView {
+        if status == .spinning {
+            let spinner = NSProgressIndicator()
+            spinner.style = .spinning
+            spinner.controlSize = .mini
+            spinner.translatesAutoresizingMaskIntoConstraints = false
+            NSLayoutConstraint.activate([spinner.widthAnchor.constraint(equalToConstant: 10), spinner.heightAnchor.constraint(equalToConstant: 10)])
+            spinner.startAnimation(nil)
+            return spinner
+        }
+        let (symbol, color) = agentStatusSymbolAndColor(status)
+        let imageView = NSImageView()
+        imageView.image = NSImage(systemSymbolName: symbol, accessibilityDescription: status.rawValue)
+        imageView.contentTintColor = color
+        imageView.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([imageView.widthAnchor.constraint(equalToConstant: 10), imageView.heightAnchor.constraint(equalToConstant: 10)])
+        return imageView
+    }
+
     private func makeRightPane() -> NSView {
         let container = NSView()
         container.translatesAutoresizingMaskIntoConstraints = false
@@ -6748,23 +6816,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                     spinner.centerYAnchor.constraint(equalTo: statusSlot.centerYAnchor),
                 ])
             } else {
-                let statusIconName: String
-                let statusColor: NSColor
-                switch agentStatus {
-                case .waiting:
-                    statusIconName = "exclamationmark.triangle.fill"
-                    statusColor = .systemOrange
-                case .done:
-                    statusIconName = "circle.fill"
-                    statusColor = .systemGreen
-                case .exited:
-                    // Agent gone, terminal alive: hollow dimmed dot, distinct from idle's filled dot.
-                    statusIconName = "circle"
-                    statusColor = .tertiaryLabelColor
-                default:
-                    statusIconName = "circle.fill"
-                    statusColor = .tertiaryLabelColor
-                }
+                let (statusIconName, statusColor) = Self.agentStatusSymbolAndColor(agentStatus)
                 let statusDot = NSImageView()
                 if let automationID { statusDot.setAccessibilityIdentifier("\(automationID)-status-\(agentStatus.rawValue)") }
                 statusDot.image = NSImage(systemSymbolName: statusIconName, accessibilityDescription: agentStatus.rawValue)

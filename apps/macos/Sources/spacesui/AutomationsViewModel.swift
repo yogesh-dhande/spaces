@@ -1,5 +1,6 @@
 import Foundation
 import spacesterminalcore
+import workspacecore
 
 /// One paired device's automation slice, read from its loaded overview (or marked unreachable). The
 /// Automations detail pane and the sidebar row fan out over these and merge them, so every merge/filter/
@@ -182,5 +183,94 @@ enum AutomationsViewModel {
         default: outcome = run.status
         }
         return "\(name) \(outcome) on \(deviceName)"
+    }
+
+    // MARK: - Editor form logic (pure, unit-testable)
+
+    /// A fail-fast validation problem from `buildAutomationFields`, carrying the message shown inline in the
+    /// editor.
+    struct ValidationError: Error, Equatable {
+        let message: String
+    }
+
+    /// The one-line excerpt shown for an automation in the table: an `agent`-kind automation's prompt (first
+    /// non-empty line), a `script`-kind automation's script (first non-empty line). Empty when nothing to show.
+    static func excerpt(for automation: TerminalServiceAutomationSummary) -> String {
+        let source: String
+        switch AutomationKind(rawValue: automation.kind) {
+        case .agent: source = automation.agentPrompt ?? ""
+        default: source = automation.script
+        }
+        return firstNonEmptyLine(source)
+    }
+
+    private static func firstNonEmptyLine(_ text: String) -> String {
+        for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if !trimmed.isEmpty { return trimmed }
+        }
+        return ""
+    }
+
+    /// Whether the "End agents" action applies to a run: it does only when the run has reached a terminal
+    /// status (so its own execution is done) yet still has at least one live attributed coding agent lingering.
+    /// A running run is never eligible — it keeps its Cancel affordance instead.
+    static func endAgentsAvailable(for run: TerminalServiceAutomationRunSummary) -> Bool {
+        guard let status = AutomationRunStatus(rawValue: run.status), status.isTerminal else { return false }
+        return run.attributedAgents.contains { $0.live }
+    }
+
+    /// The shell-script equivalent of an `agent`-kind automation, generated to prefill the script editor when
+    /// the user switches an agent automation to a script one. It spawns the coding agent in the chosen
+    /// workspace, captures the child session id from the spawn result's first (tab-separated) column, then
+    /// delivers the prompt with `--submit`. Command and prompt are single-quoted (embedded quotes escaped) so
+    /// arbitrary text survives as one shell argument; the workspace id is a plain identifier and needs none.
+    static func agentEquivalentScript(workspaceID: String, command: String, prompt: String) -> String {
+        """
+        SESSION=$(spaces agent spawn --command \(shellSingleQuoted(command)) --workspace \(workspaceID) | cut -f1)
+        spaces terminal send text "$SESSION" \(shellSingleQuoted(prompt)) --submit
+        """
+    }
+
+    /// Wraps a value in single quotes for a POSIX shell, escaping embedded single quotes as `'\''`.
+    static func shellSingleQuoted(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
+    /// Validates the editor's collected values for the chosen kind and assembles the wire fields, or returns
+    /// the first problem's message. The daemon re-validates; this fails fast inline. `cronExpression` and
+    /// `timeoutSeconds` are pre-resolved by the caller (they are shared across both kinds); this owns the
+    /// name check and the kind-specific required-field checks.
+    static func buildAutomationFields(
+        name: String, kind: AutomationKind, enabled: Bool, triggerKind: AutomationTriggerKind, cronExpression: String?, workspaceID: String?,
+        agentCommand: String, agentPrompt: String, script: String, workingDirectory: String, timeoutSeconds: Int?, concurrencyPolicy: String,
+        missedRunPolicy: String
+    ) -> Result<TerminalServiceAutomationFields, ValidationError> {
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty else { return .failure(ValidationError(message: "Enter a name.")) }
+
+        switch kind {
+        case .agent:
+            let workspace = workspaceID?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !workspace.isEmpty else { return .failure(ValidationError(message: "Choose a workspace.")) }
+            let command = agentCommand.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !command.isEmpty else { return .failure(ValidationError(message: "Enter an agent command.")) }
+            let prompt = agentPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !prompt.isEmpty else { return .failure(ValidationError(message: "Enter a prompt.")) }
+            return .success(
+                TerminalServiceAutomationFields(
+                    name: trimmedName, enabled: enabled, triggerKind: triggerKind.rawValue, cronExpression: cronExpression,
+                    kind: AutomationKind.agent.rawValue, script: "", agentCommand: command, agentPrompt: prompt, workspaceID: workspace,
+                    workingDirectory: "", timeoutSeconds: timeoutSeconds, concurrencyPolicy: concurrencyPolicy, missedRunPolicy: missedRunPolicy))
+        case .script:
+            guard !script.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return .failure(ValidationError(message: "Enter a script.")) }
+            let directory = workingDirectory.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !directory.isEmpty else { return .failure(ValidationError(message: "Enter a working directory.")) }
+            return .success(
+                TerminalServiceAutomationFields(
+                    name: trimmedName, enabled: enabled, triggerKind: triggerKind.rawValue, cronExpression: cronExpression,
+                    kind: AutomationKind.script.rawValue, script: script, agentCommand: nil, agentPrompt: nil, workspaceID: nil,
+                    workingDirectory: directory, timeoutSeconds: timeoutSeconds, concurrencyPolicy: concurrencyPolicy, missedRunPolicy: missedRunPolicy))
+        }
     }
 }
