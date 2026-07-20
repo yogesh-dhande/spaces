@@ -32,9 +32,17 @@ import spacesdevicecore
             await Task.detached(priority: .userInitiated) { () -> Outcome? in
                 guard let refreshed = try? SpacesDeviceClient.bootstrapLocalDevice(clientApp: clientApp) else { return nil }
                 // The bootstrap persisted the daemon's (possibly rotated) token; read it back so a
-                // pairing-state reset that minted a new token re-authenticates every sender.
-                let persistedToken: String?? = try? SpacesDeviceCredentialStore.token(
-                    deviceID: SpacesPairedDeviceRecord.localDeviceID, profile: nil)
+                // pairing-state reset that minted a new token re-authenticates every sender. The
+                // nested optional must be built explicitly: `try?` flattens a `throws -> String?`
+                // result, which would report a thrown read as a successful "no token" and defeat
+                // the callers' keep-previous-token fallback.
+                let persistedToken: String??
+                do {
+                    persistedToken = try SpacesDeviceCredentialStore.token(
+                        deviceID: SpacesPairedDeviceRecord.localDeviceID, profile: nil)
+                } catch {
+                    persistedToken = .none
+                }
                 return Outcome(record: refreshed, persistedToken: persistedToken)
             }.value
         }
