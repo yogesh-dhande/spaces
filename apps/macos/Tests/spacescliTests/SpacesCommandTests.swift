@@ -160,10 +160,10 @@ final class SpacesCommandTests: XCTestCase {
 
     func testTerminalCommandsParseDeviceSelector() throws {
         XCTAssertEqual(try TerminalListCommand.parse(["--device", "linux-box"]).device, "linux-box")
-        let send = try TerminalSendTextCommand.parse(["session-1", "echo hi", "--newline", "--device", "linux-box"])
+        let send = try TerminalSendTextCommand.parse(["session-1", "echo hi", "--submit", "--device", "linux-box"])
         XCTAssertEqual(send.sessionID, "session-1")
         XCTAssertEqual(send.text, "echo hi")
-        XCTAssertTrue(send.newline)
+        XCTAssertTrue(send.submit)
         XCTAssertEqual(send.device, "linux-box")
         let bytes = try TerminalSendBytesCommand.parse(["session-1", "3", "13", "--device", "linux-box"])
         XCTAssertEqual(bytes.sessionID, "session-1")
@@ -276,11 +276,11 @@ final class SpacesCommandTests: XCTestCase {
     }
 
     func testTerminalSendTextParsesSessionAndText() throws {
-        let command = try TerminalSendTextCommand.parse(["session-1", "hello", "--newline"])
+        let command = try TerminalSendTextCommand.parse(["session-1", "hello", "--submit"])
 
         XCTAssertEqual(command.sessionID, "session-1")
         XCTAssertEqual(command.text, "hello")
-        XCTAssertTrue(command.newline)
+        XCTAssertTrue(command.submit)
     }
 
     func testTerminalSendBytesParsesDecimalBytes() throws {

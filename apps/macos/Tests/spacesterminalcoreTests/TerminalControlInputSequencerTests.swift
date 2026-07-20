@@ -54,6 +54,33 @@ final class TerminalControlInputSequencerTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(recorded[3].at.duration(to: recorded[4].at), minimumGap, "the write after the second CR must be held back")
     }
 
+    /// Regression guard for issue #187: `terminal send text --submit` reliably submitted Claude Code and
+    /// Codex at the previous, shorter default separation, but left OpenCode's composer holding the
+    /// unsubmitted text — its composer needs materially more room before it reads a lone CR burst as its
+    /// own Enter keystroke. This pins the default (used by every consumer: the interactive "Enter"
+    /// button, `terminal send --submit`, and the agent-notification injection path) at a value generous
+    /// enough to cover OpenCode too, so a future change cannot silently shrink it back toward the
+    /// Claude/Codex-only threshold without failing a test.
+    func testDefaultSeparationIsGenerousEnoughForTheSlowestSupportedComposer() async {
+        let sequencer = TerminalControlInputSequencer()
+        let recorder = WriteRecorder()
+        let drained = expectation(description: "text then CR ran")
+
+        sequencer.enqueueWrite { recorder.record("text") }
+        sequencer.enqueueSubmitCarriageReturn {
+            recorder.record("cr")
+            drained.fulfill()
+        }
+
+        await fulfillment(of: [drained], timeout: 10)
+
+        let recorded = recorder.recorded
+        XCTAssertEqual(recorded.map(\.label), ["text", "cr"])
+        XCTAssertGreaterThanOrEqual(
+            recorded[0].at.duration(to: recorded[1].at), .milliseconds(450),
+            "the default submit separation regressed toward the shorter Claude/Codex-only gap that left OpenCode unsubmitted (issue #187)")
+    }
+
     func testPlainWritesRunBackToBackWithoutArtificialSpacing() async {
         let sequencer = TerminalControlInputSequencer(separation: .milliseconds(200))
         let recorder = WriteRecorder()
