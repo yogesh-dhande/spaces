@@ -433,6 +433,10 @@ private enum SpacesMobileMutationTimeoutRecovery {
     var settings: SpacesMobileConnectionSettings
     var pairedDevices: [SpacesMobilePairedDeviceRecord]
     var activeDeviceID: String?
+    /// Whether Demo Mode is on. While on, the device list shows only the synthetic Demo Mac and the
+    /// active client is backed by the in-memory `DemoDeviceBackend`; the real paired devices are parked
+    /// in memory and left untouched on disk. Persisted across launches via `DemoModeStore`.
+    private(set) var isDemoModeEnabled: Bool
     var overview: SpacesDeviceOverviewPayload?
     /// Wire-protocol status of the active device, read on each successful refresh. `nil` until the
     /// first handshake. Drives the compatibility banner and blocks incompatible interaction.
@@ -462,6 +466,13 @@ private enum SpacesMobileMutationTimeoutRecovery {
     var dismissedAlertIDs: Set<String> = []
     @ObservationIgnored private var bridgeClient: SpacesDeviceAPIClient
     @ObservationIgnored private var commandChannel: SpacesDeviceAPICommandChannel
+    /// The real device-store state (records, active id, settings) parked in memory when Demo Mode is
+    /// enabled, so turning it off restores exactly what was on screen. `nil` when Demo Mode is off, or
+    /// when the app launched straight into Demo Mode — in that case turning it off reloads the real
+    /// state from `SpacesMobileDeviceStore` instead. Never written to disk.
+    @ObservationIgnored private var parkedRealDeviceState: SpacesMobileDeviceStoreState?
+    /// Shown when a device-management action is attempted while Demo Mode is on.
+    private static let demoModeGuardNotice = "Turn off Demo Mode to pair or switch devices."
     /// The client bound to the active device, exposed so screens that open their own request/stream
     /// paths (e.g. `TerminalViewerModel`) reuse the same backend instead of building a parallel client
     /// from `settings`. Reflects the current device after a switch.
@@ -492,20 +503,39 @@ private enum SpacesMobileMutationTimeoutRecovery {
         #endif
         let loadedSettings = SpacesMobileSettingsStore.load()
         let deviceState = SpacesMobileDeviceStore.load(fallbackSettings: loadedSettings)
+        browserProxy = SpacesMobileBrowserProxy(installationID: deviceState.settings.installationID)
+        // The real settings are persisted regardless of Demo Mode; the demo device is never written to
+        // disk, so a launch that lands in Demo Mode still keeps the real records and settings intact.
+        SpacesMobileSettingsStore.save(deviceState.settings)
+
+        // When the persisted flag is on, construct the demo state directly and leave the real records
+        // parked on disk (parkedRealDeviceState stays nil, so disabling reloads them from the store).
+        if DemoModeStore.load(), let backend = try? DemoDeviceBackend.makeDefault() {
+            let demoSettings = SpacesMobileDemoDevice.settings(installationID: deviceState.settings.installationID)
+            let bridgeClient = SpacesDeviceAPIClient(settings: demoSettings, backend: backend)
+            settings = demoSettings
+            pairedDevices = [SpacesMobileDemoDevice.record()]
+            activeDeviceID = SpacesMobileDemoDevice.id
+            isDemoModeEnabled = true
+            self.bridgeClient = bridgeClient
+            commandChannel = bridgeClient.makeCommandChannel()
+            return
+        }
+
         let bridgeClient = SpacesDeviceAPIClient(settings: deviceState.settings)
         settings = deviceState.settings
         pairedDevices = deviceState.devices
         activeDeviceID = deviceState.activeDeviceID
+        isDemoModeEnabled = false
         self.bridgeClient = bridgeClient
         commandChannel = bridgeClient.makeCommandChannel()
-        browserProxy = SpacesMobileBrowserProxy(installationID: deviceState.settings.installationID)
-        SpacesMobileSettingsStore.save(deviceState.settings)
     }
 
     init(settings: SpacesMobileConnectionSettings, bridgeClient: SpacesDeviceAPIClient, browserProxy: SpacesMobileBrowserProxy? = nil) {
         self.settings = settings
         pairedDevices = []
         activeDeviceID = nil
+        isDemoModeEnabled = false
         self.bridgeClient = bridgeClient
         commandChannel = bridgeClient.makeCommandChannel()
         self.browserProxy = browserProxy ?? SpacesMobileBrowserProxy(installationID: settings.installationID)
@@ -779,6 +809,10 @@ private enum SpacesMobileMutationTimeoutRecovery {
     }
 
     func applyConnectionSettings(_ settings: SpacesMobileConnectionSettings, deviceName: String? = nil) {
+        guard !isDemoModeEnabled else {
+            connectionNotice = Self.demoModeGuardNotice
+            return
+        }
         let previousCommandChannel = commandChannel
         let deviceState =
             settings.isPaired
@@ -801,6 +835,10 @@ private enum SpacesMobileMutationTimeoutRecovery {
     }
 
     func selectDevice(id: String) {
+        guard !isDemoModeEnabled else {
+            connectionNotice = Self.demoModeGuardNotice
+            return
+        }
         guard let deviceState = SpacesMobileDeviceStore.select(deviceID: id, installationID: settings.installationID) else { return }
         let previousCommandChannel = commandChannel
         settings = deviceState.settings
@@ -820,6 +858,15 @@ private enum SpacesMobileMutationTimeoutRecovery {
     }
 
     func removeDevice(id: String) {
+        // The demo device is not a stored device; "removing" it means leaving Demo Mode.
+        if id == SpacesMobileDemoDevice.id {
+            setDemoMode(false)
+            return
+        }
+        guard !isDemoModeEnabled else {
+            connectionNotice = Self.demoModeGuardNotice
+            return
+        }
         let previousCommandChannel = commandChannel
         let deviceState = SpacesMobileDeviceStore.remove(deviceID: id, fallbackSettings: settings)
         settings = deviceState.settings
@@ -845,6 +892,68 @@ private enum SpacesMobileMutationTimeoutRecovery {
         pairedDevices = deviceState.devices
     }
 
+    /// Turns Demo Mode on or off, swapping the active client the same way a device switch does (close and
+    /// rebuild the client and command channel, bump `overviewIdentity`, and clear the published overview,
+    /// status, and notices). Turning it on parks the real device-store state in memory and swaps in the
+    /// synthetic Demo Mac backed by `DemoDeviceBackend`, writing nothing to the device store or Keychain;
+    /// turning it off restores the parked state (or reloads it from the store when the app launched
+    /// straight into Demo Mode). The enabled flag itself is persisted via `DemoModeStore`.
+    func setDemoMode(_ enabled: Bool) {
+        guard enabled != isDemoModeEnabled else { return }
+        if enabled { enableDemoMode() } else { disableDemoMode() }
+    }
+
+    private func enableDemoMode() {
+        let backend: DemoDeviceBackend
+        do {
+            backend = try DemoDeviceBackend.makeDefault()
+        } catch {
+            // The recording could not load; leave the real connection exactly as it was.
+            errorMessage = error.localizedDescription
+            return
+        }
+        parkedRealDeviceState = SpacesMobileDeviceStoreState(devices: pairedDevices, activeDeviceID: activeDeviceID, settings: settings)
+        let previousCommandChannel = commandChannel
+        let demoSettings = SpacesMobileDemoDevice.settings(installationID: settings.installationID)
+        settings = demoSettings
+        pairedDevices = [SpacesMobileDemoDevice.record()]
+        activeDeviceID = SpacesMobileDemoDevice.id
+        isDemoModeEnabled = true
+        bridgeClient = SpacesDeviceAPIClient(settings: demoSettings, backend: backend)
+        commandChannel = bridgeClient.makeCommandChannel()
+        overviewIdentity += 1
+        DemoModeStore.save(true)
+        clearActiveConnectionState()
+        Task { await previousCommandChannel.close() }
+    }
+
+    private func disableDemoMode() {
+        let restored = parkedRealDeviceState ?? SpacesMobileDeviceStore.load(fallbackSettings: SpacesMobileSettingsStore.load())
+        parkedRealDeviceState = nil
+        let previousCommandChannel = commandChannel
+        settings = restored.settings
+        pairedDevices = restored.devices
+        activeDeviceID = restored.activeDeviceID
+        isDemoModeEnabled = false
+        bridgeClient = SpacesDeviceAPIClient(settings: restored.settings)
+        commandChannel = bridgeClient.makeCommandChannel()
+        overviewIdentity += 1
+        DemoModeStore.save(false)
+        clearActiveConnectionState()
+        Task { await previousCommandChannel.close() }
+    }
+
+    /// Clears every piece of published state tied to the previous active connection, matching what a
+    /// device switch resets so no stale overview, status, or notice bleeds across the swap.
+    private func clearActiveConnectionState() {
+        overview = nil
+        daemonStatus = nil
+        compatibility = nil
+        workspaceCreateOptions = nil
+        connectionNotice = nil
+        errorMessage = nil
+    }
+
     func dismissError() { errorMessage = nil }
 
     func clearPendingPairingLink() { pendingPairingLink = nil }
@@ -866,6 +975,10 @@ private enum SpacesMobileMutationTimeoutRecovery {
     }
 
     func preparePairingLink(_ url: URL) {
+        guard !isDemoModeEnabled else {
+            connectionNotice = Self.demoModeGuardNotice
+            return
+        }
         do {
             pendingPairingLink = try SpacesDevicePairingLink.parse(url)
             connectionNotice = nil
