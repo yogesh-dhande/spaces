@@ -1757,7 +1757,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             priority: .userInitiated)
         {
             do {
-                let credentials = try DeviceTerminalSessionStateModel.resolveCredentials(device: device, clientApp: clientApp)
                 // For the local device, re-resolve the daemon's current Device API port (and ensure it is
                 // running) the way the CLI does per request. The stored paired_devices row goes stale when
                 // the local daemon idle-shuts-down and rebinds a port; seeding the fresh endpoint here — off
@@ -1766,6 +1765,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 // failed re-resolution falls back to the stored row, and the model's connect-time recovery
                 // still heals the port later.
                 let refreshedLocalDevice = isLocalDevice ? try? SpacesDeviceClient.bootstrapLocalDevice(clientApp: clientApp) : nil
+                // Resolve credentials from the same record the endpoint came from: the bootstrap above may
+                // have re-paired against a daemon whose TLS identity rotated, so `resolveCredentials` must
+                // read the refreshed record's fingerprint. Resolving before the bootstrap would pair the
+                // rotated daemon's fresh host/port with the stale token file's fingerprint — its
+                // re-bootstrap branch only fires on a missing token — and pin-fail every connect.
+                let credentials = try DeviceTerminalSessionStateModel.resolveCredentials(
+                    device: refreshedLocalDevice ?? device, clientApp: clientApp)
                 return .success((credentials, refreshedLocalDevice))
             } catch { return .failure(error) }
         }.value

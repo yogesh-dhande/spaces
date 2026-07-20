@@ -31,17 +31,23 @@
             let authToken: String?
         }
 
-        // `device` and `requestClient` are mutable so the local device's stale Device API port can be
-        // re-resolved at connect time (see `ensureLocalDeviceReachableForRetry`). The app holds this model
-        // for the pane's lifetime; the paired_devices row it was seeded from goes stale when the local
-        // daemon idle-shuts-down and rebinds a port, so both the persistent request client and the
-        // subscription stream must be able to swing to the daemon's current port.
+        // `device`, `certificateFingerprint`, and the boxed request client are mutable so the local
+        // device's stale Device API endpoint can be re-resolved at connect time (see
+        // `ensureLocalDeviceReachableForRetry`). The app holds this model for the pane's lifetime; the
+        // paired_devices row it was seeded from goes stale when the local daemon idle-shuts-down and
+        // rebinds a port — and its TLS identity may rotate — so the persistent request client, its
+        // certificate fingerprint, and the subscription stream must all be able to swing to the daemon's
+        // current endpoint and identity.
         private var device: SpacesPairedDeviceRecord
         private let sessionID: String
         private let clientApp: SpacesDeviceClientApp
         private let authToken: String?
-        private let certificateFingerprint: String
-        private var requestClient: SpacesDeviceAPIRequestSessionClient
+        private var certificateFingerprint: String
+        // Internal (not `private`) so `spacesuiTests` can swing the box to a second in-process server to
+        // prove vended senders follow a local endpoint recovery: `ensureLocalDeviceReachableForRetry`
+        // bootstraps through the real local control socket and cannot run hermetically, so the test drives
+        // the box replacement the recovery performs directly.
+        let requestClientBox: DeviceAPIRequestClientBox
 
         // Cached device-owned state. Synchronous reads keep the window controller's
         // refresh path non-blocking; updates arrive on the main actor.
@@ -58,6 +64,11 @@
 
         private var listeners: [Listener] = []
         private var streamClient: (any TerminalRemoteStateStreamClient)?
+        // Bumped every time a stream client is installed. `onEvent`/`onDisconnect` callbacks carry the
+        // generation they were created under, so a superseded client's late callback (an immediate
+        // post-connect rejection, or a straggling disconnect after replacement) is ignored instead of
+        // tearing down or feeding the current stream.
+        private var streamClientGeneration: UInt64 = 0
         private var lastSubscriptionAttemptAt: Date?
         private var refreshInFlight = false
         private var stateRefreshRetryTask: Task<Void, Never>?
@@ -87,8 +98,9 @@
             self.clientApp = clientApp
             certificateFingerprint = preparedCredentials.certificateFingerprint
             authToken = preparedCredentials.authToken
-            requestClient = try SpacesDeviceAPIRequestSessionClient(
-                host: device.host, port: device.port, certificateFingerprint: preparedCredentials.certificateFingerprint)
+            requestClientBox = DeviceAPIRequestClientBox(
+                try SpacesDeviceAPIRequestSessionClient(
+                    host: device.host, port: device.port, certificateFingerprint: preparedCredentials.certificateFingerprint))
             currentLaunchConfiguration = launchConfiguration
             currentRuntimeState = initialRuntimeState
             // Seed the owner from the overview so an owner-seeking open sees the existing
@@ -110,7 +122,7 @@
                 streamClient?.stop()
                 stateRefreshRetryTask?.cancel()
                 subscriptionConnectTask?.cancel()
-                requestClient.cancel()
+                requestClientBox.current.cancel()
             }
         }
 
@@ -122,10 +134,10 @@
             let sessionID = self.sessionID
             let authToken = self.authToken
             let clientApp = self.clientApp
-            let requestClient = self.requestClient
+            let requestClientBox = self.requestClientBox
             Task { @MainActor [weak self] in
                 let result = await Task.detached(priority: .userInitiated) {
-                    Self.fetchState(sessionID: sessionID, requestClient: requestClient, authToken: authToken, clientApp: clientApp)
+                    Self.fetchState(sessionID: sessionID, requestClient: requestClientBox.current, authToken: authToken, clientApp: clientApp)
                 }.value
                 guard let self else { return }
                 self.refreshInFlight = false
@@ -152,10 +164,10 @@
             let sessionID = self.sessionID
             let authToken = self.authToken
             let clientApp = self.clientApp
-            let requestClient = self.requestClient
+            let requestClientBox = self.requestClientBox
             return { request in
                 try Self.sendTerminalServiceRequest(
-                    request, defaultSessionID: sessionID, requestClient: requestClient, authToken: authToken, clientApp: clientApp)
+                    request, defaultSessionID: sessionID, requestClient: requestClientBox.current, authToken: authToken, clientApp: clientApp)
             }
         }
 
@@ -171,14 +183,14 @@
         }
 
         func pasteImage(_ image: TerminalPasteboardImage, clientID: String, ownerEpoch: UInt64) async throws -> TerminalControlResponse {
-            let requestClient = self.requestClient
+            let requestClientBox = self.requestClientBox
             let request = SpacesDeviceAPIRequest(
                 command: .terminalPasteImage(
                     SpacesDeviceTerminalPasteImageRequest(
                         sessionID: sessionID, clientID: clientID, ownerEpoch: ownerEpoch, fileExtension: image.fileExtension,
                         imageData: image.imageData)), authToken: authToken, clientApp: clientApp)
             return try await Task.detached(priority: .userInitiated) {
-                let response = try requestClient.send(request)
+                let response = try requestClientBox.current.send(request)
                 return TerminalControlResponse(ok: response.ok, message: response.message)
             }.value
         }
@@ -190,10 +202,10 @@
             let sessionID = self.sessionID
             let authToken = self.authToken
             let clientApp = self.clientApp
-            let requestClient = self.requestClient
+            let requestClientBox = self.requestClientBox
             return try await Task.detached(priority: .userInitiated) {
                 try Self.fetchTranscript(
-                    sessionID: sessionID, maxBytes: maxBytes, requestClient: requestClient, authToken: authToken, clientApp: clientApp)
+                    sessionID: sessionID, maxBytes: maxBytes, requestClient: requestClientBox.current, authToken: authToken, clientApp: clientApp)
             }.value
         }
 
@@ -277,13 +289,12 @@
         /// actor froze the UI for the full connect timeout whenever the endpoint was stale or unreachable.
         /// On a retryable connect failure for the local device it re-resolves the daemon's current Device
         /// API port and retries once, so an idle-shut-down daemon that rebound an ephemeral port (or a
-        /// stale paired_devices row) is recovered rather than stranding the pane.
+        /// stale paired_devices row) is recovered rather than stranding the pane. `openStateStream` installs
+        /// and clears `streamClient` itself (see its install-before-start note), so this method only decides
+        /// whether to retry or schedule a reconnect from its boolean result.
         private func establishStateStreamConnection() async {
             if streamClient != nil { return }
-            if let client = await openStateStream(port: Int(device.port)) {
-                streamClient = client
-                return
-            }
+            if await openStateStream(port: Int(device.port)) { return }
             // The first connect failed. For the local device this may be a stale port or an idle-shut-down
             // daemon; ensure it is running and re-resolve its current port, then retry. The (possibly
             // rebuilt) request client now targets a running daemon, so re-run the catch-up: an ended
@@ -293,10 +304,7 @@
                 return
             }
             await reloadCatchUpState()
-            if let client = await openStateStream(port: Int(device.port)) {
-                streamClient = client
-                return
-            }
+            if await openStateStream(port: Int(device.port)) { return }
             // A transient subscribe failure on a live session would otherwise strand existing listeners
             // with only the one-shot catch-up and no live updates, because the render host has already
             // taken its `ListenerHandle` and will not ask to subscribe again. Schedule the same
@@ -305,21 +313,35 @@
         }
 
         /// Opens and starts the subscription stream, running the blocking `start()` connect in a detached
-        /// task so its semaphore wait never lands on the main actor. Returns the started client, or nil on
-        /// a connect/handshake failure.
-        private func openStateStream(port: Int) async -> SpacesDeviceAPIStateStreamClient? {
+        /// task so its semaphore wait never lands on the main actor. Returns true when `start()` succeeded,
+        /// false on a construction or connect/handshake failure.
+        ///
+        /// The client is installed as `streamClient` before `start()` runs: `start()` returns after merely
+        /// sending the subscribe request, so a server rejection arrives as a later response line whose
+        /// `onDisconnect` can reach the main actor before this function resumes. Installing first means that
+        /// racing disconnect finds the client installed and clears it through the disconnect path (which
+        /// owns reconnect), instead of clearing nothing and letting the resumption store a dead client that
+        /// would block every future reconnect. A `true` result therefore does not guarantee the installed
+        /// client is still current — a racing disconnect may already have cleared and rescheduled it — only
+        /// that the disconnect path has taken over its lifecycle.
+        @discardableResult private func openStateStream(port: Int) async -> Bool {
             let request = SpacesDeviceAPIRequest(
                 command: .subscribe(SpacesDeviceTerminalSubscriptionRequest(sessionID: sessionID, clientID: nil)), authToken: authToken,
                 clientApp: clientApp)
             let host = device.host
             let fingerprint = certificateFingerprint
+            streamClientGeneration &+= 1
+            let generation = streamClientGeneration
             let client: SpacesDeviceAPIStateStreamClient
             do {
                 client = try SpacesDeviceAPIStateStreamClient(
                     request: request, host: host, port: port, certificateFingerprint: fingerprint,
-                    onEvent: { [weak self] payload in Task { @MainActor [weak self] in self?.apply(payload) } },
-                    onDisconnect: { [weak self] error in Task { @MainActor [weak self] in self?.handleStreamDisconnect(error) } })
-            } catch { return nil }
+                    onEvent: { [weak self] payload in Task { @MainActor [weak self] in self?.applyStreamEvent(payload, generation: generation) } },
+                    onDisconnect: { [weak self] error in
+                        Task { @MainActor [weak self] in self?.handleStreamDisconnect(error, generation: generation) }
+                    })
+            } catch { return false }
+            streamClient = client
             let started = await Task.detached(priority: .userInitiated) { () -> Bool in
                 do {
                     try client.start()
@@ -327,10 +349,13 @@
                 } catch { return false }
             }.value
             guard started else {
+                // Only clear the installed client if it is still this one; a racing disconnect (or a newer
+                // connect) may already have replaced it, and clearing then would drop a healthy stream.
+                if streamClient === client { streamClient = nil }
                 client.stop()
-                return nil
+                return false
             }
-            return client
+            return true
         }
 
         /// Deterministic catch-up used by the connect recovery path after re-resolving a stale local port.
@@ -341,42 +366,57 @@
             let sessionID = self.sessionID
             let authToken = self.authToken
             let clientApp = self.clientApp
-            let requestClient = self.requestClient
+            let requestClientBox = self.requestClientBox
             let result = await Task.detached(priority: .userInitiated) {
-                Self.fetchState(sessionID: sessionID, requestClient: requestClient, authToken: authToken, clientApp: clientApp)
+                Self.fetchState(sessionID: sessionID, requestClient: requestClientBox.current, authToken: authToken, clientApp: clientApp)
             }.value
             if case .success(let payload) = result { apply(payload) }
         }
 
-        /// For the local device, ensures the daemon is running and re-resolves its current Device API port
-        /// via `SpacesDeviceClient.bootstrapLocalDevice` — the same per-request resolution the CLI uses,
-        /// which starts the daemon if it idle-shut-down — rebuilding the persistent request client when the
-        /// port (or host) moved so catch-up `.state` and transcript fetches reach the live daemon. Returns
+        /// For the local device, ensures the daemon is running and re-resolves its current Device API
+        /// endpoint via `SpacesDeviceClient.bootstrapLocalDevice` — the same per-request resolution the CLI
+        /// uses, which starts the daemon if it idle-shut-down — rebuilding the persistent request client
+        /// when the port, host, or certificate fingerprint moved so catch-up `.state` and transcript
+        /// fetches reach the live daemon under its current identity. The rebuild swings the shared
+        /// `requestClientBox`, so senders already vended to the render host follow the new client. Returns
         /// true when a connect retry is worthwhile: this is the local device and the bootstrap succeeded,
-        /// so the daemon is now reachable whether or not it rebound the same port. Returns false for remote
-        /// devices (stable port, nothing to re-resolve) and when the local bootstrap itself failed (the
-        /// daemon could not be reached or started).
+        /// so the daemon is now reachable whether or not it rebound the same port or rotated its
+        /// certificate. Returns false for remote devices (stable endpoint, nothing to re-resolve) and when
+        /// the local bootstrap itself failed (the daemon could not be reached or started).
         @discardableResult private func ensureLocalDeviceReachableForRetry() async -> Bool {
             guard device.id == SpacesPairedDeviceRecord.localDeviceID else { return false }
             let clientApp = self.clientApp
             let previousHost = device.host
             let previousPort = device.port
+            let previousFingerprint = certificateFingerprint
             let refreshed = await Task.detached(priority: .userInitiated) { () -> SpacesPairedDeviceRecord? in
                 try? SpacesDeviceClient.bootstrapLocalDevice(clientApp: clientApp)
             }.value
             guard let refreshed else { return false }
-            if refreshed.port != previousPort || refreshed.host != previousHost,
+            if refreshed.port != previousPort || refreshed.host != previousHost || refreshed.certificateFingerprint != previousFingerprint,
                 let rebuiltClient = try? SpacesDeviceAPIRequestSessionClient(
-                    host: refreshed.host, port: refreshed.port, certificateFingerprint: certificateFingerprint)
+                    host: refreshed.host, port: refreshed.port, certificateFingerprint: refreshed.certificateFingerprint)
             {
-                requestClient.cancel()
-                requestClient = rebuiltClient
+                let previousClient = requestClientBox.replace(with: rebuiltClient)
+                // `cancel()` contends with `send()`'s request lock, which an in-flight request against the
+                // stale endpoint can hold for its full timeout — so the previous client must be cancelled
+                // off the main actor.
+                Task.detached(priority: .utility) { previousClient.cancel() }
+                // The stream connect in `openStateStream` reads `certificateFingerprint`, so it must move to
+                // the daemon's current identity too or the retried subscribe would pin-fail.
+                certificateFingerprint = refreshed.certificateFingerprint
                 device = refreshed
             }
             return true
         }
 
-        private func handleStreamDisconnect(_ error: (any Error)?) {
+        /// Internal (not `private`) so `spacesuiTests` can drive the generation guard directly: the concrete
+        /// stream client offers no seam to force callback orderings, so the test installs stream clients via
+        /// `installStreamClientForTesting` and calls this with a stale generation to prove a superseded
+        /// client's late callback is ignored.
+        func handleStreamDisconnect(_ error: (any Error)?, generation: UInt64) {
+            // A superseded stream client's late disconnect must not tear down the client that replaced it.
+            guard generation == streamClientGeneration else { return }
             // Keep listeners attached through a subscribe drop: the asynchronous catch-up
             // `.state` (the final render for an ended session) must still reach them, and
             // not notifying listeners keeps the render host from re-registering and
@@ -384,6 +424,26 @@
             streamClient = nil
             scheduleReconnect()
         }
+
+        /// Applies a live stream event only when it belongs to the current stream generation, so a
+        /// superseded client cannot feed state after replacement. Catch-up `.state` responses bypass this
+        /// and call `apply` directly — they carry no generation and their staleness is handled by
+        /// `apply`'s emission-time guard.
+        private func applyStreamEvent(_ payload: GhosttyRemoteSessionStatePayload, generation: UInt64) {
+            guard generation == streamClientGeneration else { return }
+            apply(payload)
+        }
+
+        // Test seams mirroring `openStateStream`'s install semantics. The concrete stream client offers no
+        // protocol seam to force callback orderings, so `spacesuiTests` drives the generation guard through
+        // these instead of racing a real connect.
+        @discardableResult func installStreamClientForTesting(_ client: any TerminalRemoteStateStreamClient) -> UInt64 {
+            streamClientGeneration &+= 1
+            streamClient = client
+            return streamClientGeneration
+        }
+
+        var hasActiveStreamClientForTesting: Bool { streamClient != nil }
 
         /// Re-subscribes after a short delay — only while the session may still be
         /// interactive and listeners remain. The delay avoids a tight reconnect loop;
@@ -524,6 +584,33 @@
         private nonisolated static func terminalServiceLinkChunk(_ chunk: SpacesDeviceTerminalLinkChunk) -> TerminalServiceTerminalLinkChunk {
             TerminalServiceTerminalLinkChunk(
                 linkID: chunk.linkID, offset: chunk.offset, byteCount: chunk.byteCount, isFinal: chunk.isFinal, base64Data: chunk.base64Data)
+        }
+    }
+
+    /// Mutable, thread-safe holder for the model's persistent Device API request client.
+    ///
+    /// The render host vends request senders (`terminalServiceRequestSender`, and the closures behind
+    /// `refreshState`/`pasteImage`/`fetchTranscript`/`reloadCatchUpState`) that run off the main actor and
+    /// so cannot read main-actor state at send time. A local endpoint recovery
+    /// (`ensureLocalDeviceReachableForRetry`) rebuilds the request client to target the daemon's current
+    /// port and identity; capturing the client by value would leave those already-vended senders forever
+    /// targeting the cancelled stale-endpoint client. Capturing this box instead and reading `current` at
+    /// send time lets every vended sender observe the rebuilt client.
+    final class DeviceAPIRequestClientBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var client: SpacesDeviceAPIRequestSessionClient
+
+        init(_ client: SpacesDeviceAPIRequestSessionClient) { self.client = client }
+
+        var current: SpacesDeviceAPIRequestSessionClient { lock.withLock { client } }
+
+        /// Swaps in a new client and returns the previous one so the caller can cancel it.
+        func replace(with newClient: SpacesDeviceAPIRequestSessionClient) -> SpacesDeviceAPIRequestSessionClient {
+            lock.withLock {
+                let previous = client
+                client = newClient
+                return previous
+            }
         }
     }
 
