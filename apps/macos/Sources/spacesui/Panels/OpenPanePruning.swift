@@ -1,4 +1,5 @@
 import Foundation
+import spacesdevicecore
 
 /// Pure decision for live, overview-driven pane pruning.
 ///
@@ -33,5 +34,30 @@ enum OpenPanePruning {
     /// session gone) is a valid input and closes all of that device's open panes.
     static func sessionsToClose(openPanes: [OpenPane], deviceID: String, catalogSessionIDs: Set<String>) -> [String] {
         openPanes.filter { $0.deviceID == deviceID && !catalogSessionIDs.contains($0.sessionID) }.map(\.sessionID)
+    }
+
+    /// The keep-set both prune call sites pass as `catalogSessionIDs`: every terminal session id whose
+    /// pane must stay open. A pane closes only when its session id is absent here.
+    ///
+    /// The daemon publishes this as `SpacesDeviceOverviewPayload.retainedTerminalSessionIDs` — its own
+    /// authoritative retention rule (live interactive sessions unioned with sessions referenced by a
+    /// `running_processes`, `agent_sessions`, or `runtime_targets` row, matching the session garbage
+    /// collector's `SQLiteStore.terminalSessionIsReferencedByProduct`). The client reads the daemon's
+    /// verdict directly rather than re-deriving it from overview row surfaces: the daemon's `sessions`
+    /// list drops an ad hoc shell's id the instant it exits, but the shell's `runtime_targets` row still
+    /// holds its transcript, so `retainedTerminalSessionIDs` keeps that id and the ended pane stays open
+    /// for scrollback until the row is removed. Since the daemon owns the rule, the client and collector
+    /// cannot drift.
+    ///
+    /// Ids are re-trimmed here (the daemon already trims) purely to parse the wire field defensively, so
+    /// a malformed entry cannot inject an empty string into the keep-set.
+    static func referencedTerminalSessionIDs(overview: SpacesDeviceOverviewPayload) -> Set<String> {
+        var referenced = Set<String>()
+        for trackingID in overview.retainedTerminalSessionIDs {
+            let normalized = trackingID.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !normalized.isEmpty else { continue }
+            referenced.insert(normalized)
+        }
+        return referenced
     }
 }

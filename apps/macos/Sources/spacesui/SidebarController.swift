@@ -591,12 +591,16 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             host.deviceSections[index].device = overview.device
             host.deviceSections[index].loadState = .loaded
             host.reconcileRemoteBrowserForwards(device: overview.device, overview: overview.overview)
-            // Authoritative catalog for this remote device: close any open pane whose session it no
-            // longer lists so the pane cannot outlive the remote daemon's transcript garbage-collection.
+            // Authoritative overview for this remote device: close any open pane whose session it no
+            // longer retains so the pane cannot outlive the remote daemon's transcript garbage-collection.
+            // The keep-set is the remote daemon's own published retention rule
+            // (`overview.retainedTerminalSessionIDs`), so an ended session held by any product row —
+            // including a `runtime_targets` row after its shell exits — stays open for scrollback.
             // Only this success-with-overview branch prunes — the reachable-but-incompatible branch above
-            // and the offline `.failure` branch below carry no overview, and absence of a catalog is never
-            // evidence a session's product row was removed. Ended sessions keeping their row stay open.
-            host.panelCoordinator.pruneOpenPanes(deviceID: deviceID, catalogSessionIDs: Set(overview.overview.sessions.map(\.id)))
+            // and the offline `.failure` branch below carry no overview, and absence of an overview is never
+            // evidence a session's product row was removed.
+            host.panelCoordinator.pruneOpenPanes(
+                deviceID: deviceID, catalogSessionIDs: OpenPanePruning.referencedTerminalSessionIDs(overview: overview.overview))
         case .failure(let error):
             if case .offline = host.deviceSections[index].loadState { return }
             // Capture (before the rebuild drops this device's rows from the merged data) whether the

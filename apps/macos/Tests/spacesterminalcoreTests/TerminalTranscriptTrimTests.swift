@@ -56,11 +56,14 @@ final class TerminalTranscriptTrimTests: XCTestCase {
         return String(decoding: UnsafeRawBufferPointer(UnsafeBufferPointer(start: pointer2, count: length)), as: UTF8.self)
     }
 
-    /// Splits a trimmed transcript into (preamble, tail). The preamble always ends with the SGR reset
-    /// `ESC [ 0 m`, and the retained filler used in these tests contains no escape sequences, so the
-    /// first occurrence of that reset marks the preamble/tail boundary.
+    /// Splits a trimmed transcript into (preamble, tail). The preamble ends with a final SGR reset
+    /// `ESC [ 0 m`; the grid repaint inside the preamble also emits interior `ESC [ 0 m` sequences, so
+    /// the LAST reset marks the boundary. The retained filler used in these tests contains no `ESC [ 0 m`
+    /// of its own (line filler has no escapes; the counter-update filler uses only CUP), so a backwards
+    /// search lands on the preamble's closing reset.
     private func splitPreambleAndTail(_ trimmed: Data) throws -> (preamble: Data, tail: Data) {
-        let resetRange = try XCTUnwrap(trimmed.range(of: Self.sgrReset), "trimmed transcript must contain a preamble SGR reset")
+        let resetRange = try XCTUnwrap(
+            trimmed.range(of: Self.sgrReset, options: .backwards), "trimmed transcript must contain a preamble SGR reset")
         return (Data(trimmed[..<resetRange.upperBound]), Data(trimmed[resetRange.upperBound...]))
     }
 
@@ -210,6 +213,60 @@ final class TerminalTranscriptTrimTests: XCTestCase {
         XCTAssertFalse(trimmedFrame.isEmpty)
         XCTAssertEqual(
             trimmedFrame, originalFrame, "From-zero replay of the trimmed transcript must yield the same visible frame as the untrimmed original.")
+    }
+
+    // MARK: - Grid repaint (cells the retained tail never redraws)
+
+    /// A static header drawn once at row 1 (before the cut) followed only by cursor-positioned updates
+    /// to another row must survive the trim: the preamble's grid repaint carries the header, since the
+    /// retained tail never redraws it. Uses box-drawing (`══`) and a wide CJK cell (`漢`) to exercise the
+    /// multi-byte UTF-8 and wide-cell/spacer paths of the repaint.
+    ///
+    /// Fails against a preamble that only restores modes/cursor (no grid repaint): the from-zero replay
+    /// of the trimmed transcript starts from a blank grid, so the header row is never redrawn and is lost.
+    func testGridRepaintRestoresStaticHeaderNeverRedrawnByTail() throws {
+        let (url, handle) = try makeTranscriptFile()
+
+        // Header painted once at row 1. No trailing newline, so it never scrolls.
+        let header = "══ 漢 BUILD WATCHER ══"
+        var payload = Data("\u{1B}[1;1H\(header)".utf8)
+
+        // Cursor-positioned counter updates confined to row 5 (fixed width, each followed by a LF that
+        // moves to the blank row 6 without scrolling). No update ever touches the header row, and the
+        // record boundaries are newline-aligned so the retained tail starts cleanly on a record.
+        var index = 0
+        var records = Data()
+        while records.count < 6000 {
+            records.append(Data("\u{1B}[5;1H\(String(format: "%06d", index))\n".utf8))
+            index += 1
+        }
+        let lastCounter = String(format: "%06d", index - 1)
+        payload.append(records)
+        try handle.write(contentsOf: payload)
+        let original = payload
+
+        _ = try TerminalTranscriptTrim.trimIfNeeded(
+            outputPath: url.path, writeHandle: handle, currentEndOffset: UInt64(payload.count), columns: 80, rows: 24,
+            triggerBytes: 4000, retainedBytes: 2000)
+        let trimmed = try Data(contentsOf: url)
+
+        // The header lives only in the dropped head; the retained tail must not carry it (it is the grid
+        // repaint in the preamble that restores it, not the retained bytes).
+        let (_, tail) = try splitPreambleAndTail(trimmed)
+        XCTAssertFalse(String(decoding: tail, as: UTF8.self).contains("BUILD WATCHER"), "The retained tail must not redraw the header.")
+
+        // From-zero replay of the trimmed transcript must show the header (via the grid repaint) and the
+        // newest counter, and must match the untrimmed from-zero frame exactly.
+        let trimmedFrame = try renderPlain(trimmed)
+        XCTAssertTrue(trimmedFrame.contains("BUILD WATCHER"), "The static header must survive the trim via the grid repaint: \(trimmedFrame)")
+        XCTAssertTrue(trimmedFrame.contains("漢"), "The wide CJK header cell must survive the trim: \(trimmedFrame)")
+        XCTAssertTrue(trimmedFrame.contains(lastCounter), "The newest counter must survive the trim: \(trimmedFrame)")
+
+        let originalFrame = try renderPlain(original)
+        XCTAssertFalse(trimmedFrame.isEmpty)
+        XCTAssertEqual(
+            trimmedFrame, originalFrame,
+            "From-zero replay of the trimmed transcript must yield the same visible frame as the untrimmed original.")
     }
 
     // MARK: - Newline alignment

@@ -15,7 +15,10 @@ import ghosttyvtshim
 /// To keep from-zero replay correct after a trim, `trimIfNeeded` synthesizes a state-restoration
 /// PREAMBLE and writes it at the head of the retained tail. The preamble is derived by replaying the
 /// pre-trim head `[0..cut]` through a throwaway vt session and serializing its resulting persistent
-/// state (`spaces_ghostty_vt_session_state_preamble`). This is inductively correct across successive
+/// state (`spaces_ghostty_vt_session_state_preamble`): the terminal modes, Kitty keyboard flags, and
+/// cursor position, plus a repaint of the active screen's visible grid so cells the dropped head drew
+/// once (e.g. a static TUI header) that the retained tail never redraws survive the trim. This is
+/// inductively correct across successive
 /// trims: each trim's head replay `[0..cut]` itself starts from the previous trim's preamble, so the
 /// serialized state always reflects the true accumulated state at the cut. The retained tail is copied
 /// verbatim after the preamble, and its cut is newline-aligned so replay begins on a line boundary.

@@ -1100,6 +1100,146 @@ static void spaces_ghostty_vt_preamble_append(SpacesGhosttyVtPreambleBuffer *buf
     buf->len += (size_t)needed;
 }
 
+// Appends a single Unicode scalar as UTF-8. Codepoint 0 renders as a space so an empty cell paints a
+// blank glyph rather than nothing. The bytes are copied via "%.*s" (the '%' lives only in the format
+// string, so a literal '%' glyph is copied verbatim), and they never contain a NUL to trip the
+// precision-with-NUL behavior since the minimum emitted byte is 0x20.
+static void spaces_ghostty_vt_preamble_append_utf8_codepoint(SpacesGhosttyVtPreambleBuffer *buf, uint32_t codepoint) {
+    if (codepoint == 0) codepoint = 0x20;
+    uint8_t bytes[4];
+    size_t len = 0;
+    if (codepoint < 0x80) {
+        bytes[0] = (uint8_t)codepoint;
+        len = 1;
+    } else if (codepoint < 0x800) {
+        bytes[0] = (uint8_t)(0xC0 | (codepoint >> 6));
+        bytes[1] = (uint8_t)(0x80 | (codepoint & 0x3F));
+        len = 2;
+    } else if (codepoint < 0x10000) {
+        bytes[0] = (uint8_t)(0xE0 | (codepoint >> 12));
+        bytes[1] = (uint8_t)(0x80 | ((codepoint >> 6) & 0x3F));
+        bytes[2] = (uint8_t)(0x80 | (codepoint & 0x3F));
+        len = 3;
+    } else if (codepoint <= 0x10FFFF) {
+        bytes[0] = (uint8_t)(0xF0 | (codepoint >> 18));
+        bytes[1] = (uint8_t)(0x80 | ((codepoint >> 12) & 0x3F));
+        bytes[2] = (uint8_t)(0x80 | ((codepoint >> 6) & 0x3F));
+        bytes[3] = (uint8_t)(0x80 | (codepoint & 0x3F));
+        len = 4;
+    } else {
+        bytes[0] = 0x20;  // out-of-range scalar -> space
+        len = 1;
+    }
+    spaces_ghostty_vt_preamble_append(buf, "%.*s", (int)len, (const char *)bytes);
+}
+
+// Emits a full pen transition as `CSI 0 m` (reset) followed by only the non-default attributes of the
+// target cell. Resetting first and reapplying is larger than a minimal diff but is unconditionally
+// correct — the emitted pen depends on nothing but the target cell, so no attribute can leak forward.
+// 24-bit color is used for any non-default fg/bg; flags map to their SGR codes.
+static void spaces_ghostty_vt_preamble_append_pen(
+    SpacesGhosttyVtPreambleBuffer *buf,
+    uint16_t flags,
+    uint32_t foreground_rgb,
+    uint32_t background_rgb,
+    uint32_t default_foreground_rgb,
+    uint32_t default_background_rgb
+) {
+    spaces_ghostty_vt_preamble_append(buf, "\x1b[0");
+    if (flags & SPACES_GHOSTTY_VT_FLAG_BOLD) spaces_ghostty_vt_preamble_append(buf, ";1");
+    if (flags & SPACES_GHOSTTY_VT_FLAG_FAINT) spaces_ghostty_vt_preamble_append(buf, ";2");
+    if (flags & SPACES_GHOSTTY_VT_FLAG_ITALIC) spaces_ghostty_vt_preamble_append(buf, ";3");
+    if (flags & SPACES_GHOSTTY_VT_FLAG_UNDERLINE) spaces_ghostty_vt_preamble_append(buf, ";4");
+    if (flags & SPACES_GHOSTTY_VT_FLAG_INVERSE) spaces_ghostty_vt_preamble_append(buf, ";7");
+    if (flags & SPACES_GHOSTTY_VT_FLAG_INVISIBLE) spaces_ghostty_vt_preamble_append(buf, ";8");
+    if (flags & SPACES_GHOSTTY_VT_FLAG_STRIKE) spaces_ghostty_vt_preamble_append(buf, ";9");
+    if (foreground_rgb != default_foreground_rgb) {
+        GhosttyColorRgb color = spaces_ghostty_vt_unpack_rgb(foreground_rgb);
+        spaces_ghostty_vt_preamble_append(buf, ";38;2;%u;%u;%u", (unsigned)color.r, (unsigned)color.g, (unsigned)color.b);
+    }
+    if (background_rgb != default_background_rgb) {
+        GhosttyColorRgb color = spaces_ghostty_vt_unpack_rgb(background_rgb);
+        spaces_ghostty_vt_preamble_append(buf, ";48;2;%u;%u;%u", (unsigned)color.r, (unsigned)color.g, (unsigned)color.b);
+    }
+    spaces_ghostty_vt_preamble_append(buf, "m");
+}
+
+// Repaints the active screen's visible grid into the preamble buffer so a from-zero replay restores
+// cells that the retained tail never redraws (e.g. a static TUI header drawn once, followed by
+// cursor-only updates elsewhere). Reuses the snapshot machinery (`spaces_ghostty_vt_session_copy_snapshot`)
+// to read the active screen's cells, colors, and per-cell style flags.
+//
+// Painting is CUP + text only (no LF, no scrolling), so it cannot push lines into the target's
+// scrollback. Per row: skip the row entirely when every cell is default; otherwise `CSI <row>;1 H`,
+// then walk cells up to the last non-default one, emitting a pen transition only when the pen changes
+// and the cell's UTF-8 glyph (codepoint 0 -> space). Wide-cell spacers are skipped because the wide
+// codepoint already advances the cursor two columns. A closing `CSI 0 m` + `CSI K` clears any trailing
+// default cells so a mostly-empty grid stays small.
+//
+// Returns false when the underlying snapshot cannot be read; the caller then fails the whole preamble.
+static bool spaces_ghostty_vt_preamble_append_grid(SpacesGhosttyVtSession *session, SpacesGhosttyVtPreambleBuffer *buf) {
+    SpacesGhosttyVtSnapshot snapshot;
+    memset(&snapshot, 0, sizeof(snapshot));
+    if (!spaces_ghostty_vt_session_copy_snapshot(session, &snapshot)) return false;
+
+    uint16_t columns = snapshot.columns;
+    uint16_t rows = snapshot.rows;
+    uint32_t default_foreground_rgb = snapshot.default_foreground_rgb;
+    uint32_t default_background_rgb = snapshot.default_background_rgb;
+
+    for (uint16_t row = 0; row < rows && buf->ok; row++) {
+        const SpacesGhosttyVtSnapshotCell *row_cells = snapshot.cells + (size_t)row * (size_t)columns;
+
+        // Find the last column that carries non-default content, so trailing blanks are cleared with a
+        // single EL instead of painted. A cell is default when it is blank (codepoint 0 or space), keeps
+        // the default background, and has no style flags. Spacer cells are covered by their wide
+        // codepoint and never count as content on their own.
+        int last_content_column = -1;
+        for (int column = columns - 1; column >= 0; column--) {
+            const SpacesGhosttyVtSnapshotCell *cell = &row_cells[column];
+            if (cell->flags & SPACES_GHOSTTY_VT_FLAG_SPACER) continue;
+            uint16_t style_flags = cell->flags & (uint16_t)~SPACES_GHOSTTY_VT_FLAG_SPACER;
+            bool blank = cell->codepoint == 0 || cell->codepoint == 0x20;
+            if (blank && cell->background_rgb == default_background_rgb && style_flags == 0) continue;
+            last_content_column = column;
+            break;
+        }
+        if (last_content_column < 0) continue;
+
+        spaces_ghostty_vt_preamble_append(buf, "\x1b[%u;1H", (unsigned)row + 1);
+
+        uint16_t current_flags = 0;
+        uint32_t current_foreground_rgb = default_foreground_rgb;
+        uint32_t current_background_rgb = default_background_rgb;
+        for (int column = 0; column <= last_content_column; column++) {
+            const SpacesGhosttyVtSnapshotCell *cell = &row_cells[column];
+            // The preceding wide codepoint already advanced the cursor across this spacer column.
+            if (cell->flags & SPACES_GHOSTTY_VT_FLAG_SPACER) continue;
+            uint16_t style_flags = cell->flags & (uint16_t)~SPACES_GHOSTTY_VT_FLAG_SPACER;
+            uint32_t foreground_rgb = cell->foreground_rgb;
+            uint32_t background_rgb = cell->background_rgb;
+            if (
+                style_flags != current_flags ||
+                foreground_rgb != current_foreground_rgb ||
+                background_rgb != current_background_rgb
+            ) {
+                spaces_ghostty_vt_preamble_append_pen(
+                    buf, style_flags, foreground_rgb, background_rgb, default_foreground_rgb, default_background_rgb);
+                current_flags = style_flags;
+                current_foreground_rgb = foreground_rgb;
+                current_background_rgb = background_rgb;
+            }
+            spaces_ghostty_vt_preamble_append_utf8_codepoint(buf, cell->codepoint);
+        }
+
+        // Reset the pen (so EL clears with the default background) and erase any trailing default cells.
+        spaces_ghostty_vt_preamble_append(buf, "\x1b[0m\x1b[K");
+    }
+
+    spaces_ghostty_vt_snapshot_free(&snapshot);
+    return buf->ok;
+}
+
 // Serializes the session's current persistent terminal state as escape sequences, diffed against a
 // fresh reference terminal created at the same cols/rows via the already-loaded symbols. Only state
 // that differs from a brand-new terminal is emitted, so the library's own defaults define "emit
@@ -1108,16 +1248,26 @@ static void spaces_ghostty_vt_preamble_append(SpacesGhosttyVtPreambleBuffer *buf
 // Emission order:
 //   1. Modes (ANSI: CSI <n> h/l; DEC private: CSI ? <n> h/l), including alt-screen modes.
 //   2. Kitty keyboard flags (CSI = <flags> ; 1 u) when nonzero.
-//   3. Cursor position (CSI <y+1> ; <x+1> H), after all mode/screen changes so it lands on the
+//   3. Grid repaint of the active screen (CUP + text, per `spaces_ghostty_vt_preamble_append_grid`).
+//      Emitted after the modes so it lands on the active (possibly alt) screen, and before the CUP so
+//      the final cursor position wins over wherever painting left the cursor.
+//   4. Cursor position (CSI <y+1> ; <x+1> H), after all mode/screen/grid changes so it lands on the
 //      active screen.
-//   4. SGR reset (CSI 0 m) so pen state is deterministic.
+//   5. SGR reset (CSI 0 m) so pen state is deterministic.
 //
-// ACCEPTED v1 GAPS (intentionally NOT restored): scroll region, tab stops, charset designations,
-// saved-cursor (DECSC), pending-wrap, OSC color/title overrides, and pen SGR restoration. In
-// addition, the pinned libghostty-vt exposes no cursor-SHAPE getter
-// (GHOSTTY_TERMINAL_DATA_CURSOR_STYLE returns the pen SGR style, not a block/underline/bar shape),
-// so DECSCUSR is not emitted. These are acceptable because from-zero handoff replay only needs the
-// mode/cursor state that changes how the retained tail's bytes are interpreted.
+// RESTORED beyond modes/cursor: the ACTIVE screen's visible grid (cell text, colors, and style flags)
+// via the grid repaint, so cells drawn before the cut that the retained tail never redraws survive a
+// from-zero replay.
+//
+// ACCEPTED GAPS (intentionally NOT restored): the INACTIVE screen's grid (render state exposes only
+// the active screen) and scrollback content above the grid (inherent to trimming — those bytes are
+// dropped). Also not restored: scroll region, tab stops, charset designations, saved-cursor (DECSC),
+// pending-wrap at the bottom-right corner (unrestorable — painting cannot re-arm it without
+// scrolling), OSC color/title overrides, and the live pen's SGR (reset to default). In addition, the
+// pinned libghostty-vt exposes no cursor-SHAPE getter (GHOSTTY_TERMINAL_DATA_CURSOR_STYLE returns the
+// pen SGR style, not a block/underline/bar shape), so DECSCUSR is not emitted. These are acceptable
+// because from-zero handoff replay only needs the mode/cursor/grid state that determines how the
+// retained tail's bytes render.
 bool spaces_ghostty_vt_session_state_preamble(SpacesGhosttyVtSession *session, char **out_ptr, size_t *out_len) {
     if (out_ptr == NULL || out_len == NULL) return false;
     *out_ptr = NULL;
@@ -1170,7 +1320,14 @@ bool spaces_ghostty_vt_session_state_preamble(SpacesGhosttyVtSession *session, c
         spaces_ghostty_vt_preamble_append(&buf, "\x1b[=%u;1u", (unsigned)kitty_flags);
     }
 
-    // 3. Cursor position (0-indexed getters, 1-indexed CUP). Always emitted so the retained tail
+    // 3. Grid repaint of the active screen. Emitted after the modes (so alt-screen entry has already
+    //    happened) and before the cursor position (so the CUP below wins). A snapshot-read failure
+    //    fails the whole preamble rather than emitting a partially painted grid.
+    if (!spaces_ghostty_vt_preamble_append_grid(session, &buf)) {
+        buf.ok = false;
+    }
+
+    // 4. Cursor position (0-indexed getters, 1-indexed CUP). Always emitted so the retained tail
     //    begins with a deterministic cursor location.
     uint16_t cursor_x = 0;
     uint16_t cursor_y = 0;
@@ -1181,7 +1338,7 @@ bool spaces_ghostty_vt_session_state_preamble(SpacesGhosttyVtSession *session, c
         spaces_ghostty_vt_preamble_append(&buf, "\x1b[%u;%uH", (unsigned)cursor_y + 1, (unsigned)cursor_x + 1);
     }
 
-    // 4. SGR reset.
+    // 5. SGR reset.
     spaces_ghostty_vt_preamble_append(&buf, "\x1b[0m");
 
     session->symbols.terminal_free(reference);

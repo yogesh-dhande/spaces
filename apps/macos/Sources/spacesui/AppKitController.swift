@@ -4366,11 +4366,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 deviceSections[index].alertsGroups = Self.buildOverviewAlertsGroups(from: overview, deviceID: deviceID)
             }
         }
-        // This is an authoritative catalog for `deviceID`: close any open pane whose session
-        // it no longer lists (its product row was removed, possibly from another device), so
-        // the pane cannot outlive the daemon's transcript garbage-collection. Ended sessions
-        // still carrying their row remain in `sessions` and stay open for scrollback.
-        panelCoordinator.pruneOpenPanes(deviceID: deviceID, catalogSessionIDs: Set(overview.sessions.map(\.id)))
+        // This is an authoritative overview for `deviceID`: close any open pane whose session it no
+        // longer retains (its product row was removed, possibly from another device), so the pane cannot
+        // outlive the daemon's transcript garbage-collection. The keep-set is the daemon's own published
+        // retention rule (`overview.retainedTerminalSessionIDs`), so an ended session still held by any
+        // product row — including a `runtime_targets` row after its shell exits — stays open for scrollback.
+        panelCoordinator.pruneOpenPanes(deviceID: deviceID, catalogSessionIDs: OpenPanePruning.referencedTerminalSessionIDs(overview: overview))
         if deviceID != localDeviceID, let device = deviceRecord(forDeviceID: deviceID) {
             reconcileRemoteBrowserForwards(device: device, overview: overview)
         }
