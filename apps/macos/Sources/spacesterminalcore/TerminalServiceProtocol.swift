@@ -909,6 +909,10 @@ public final class TerminalServiceServer {
             throw POSIXError(code)
         }
         try setNonBlocking(socketFD)
+        // Hygiene: `stop()` normally closes this before an exec-in-place handoff, but close-on-exec
+        // means a handoff that somehow reaches `execv` without going through `stop()` first still
+        // can't leak the listen socket into the new image.
+        _ = fcntl(socketFD, F_SETFD, FD_CLOEXEC)
 
         listenSocketFD = socketFD
         let source = DispatchSource.makeReadSource(fileDescriptor: socketFD, queue: queue)
@@ -934,6 +938,12 @@ public final class TerminalServiceServer {
                 if errno == EWOULDBLOCK || errno == EAGAIN { return }
                 return
             }
+            // Accepted sockets must not survive an exec-in-place daemon handoff: a request queued on
+            // `workQueue` but not yet answered when the old image execs would otherwise leave its FD
+            // open in the new image, leaking it while the caller hangs to its full RPC timeout instead
+            // of seeing the connection reset. `accept4` with `SOCK_CLOEXEC` would set this atomically,
+            // but it isn't portable to both of this file's targets (macOS/Linux), so it's set here instead.
+            _ = fcntl(clientFD, F_SETFD, FD_CLOEXEC)
 
             // Read and decode on the accept queue (a request is small and sent in one go, so this stays
             // fast). A liveness ping is answered inline off the main actor; every other request is handed
