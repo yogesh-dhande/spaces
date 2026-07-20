@@ -157,7 +157,7 @@ import spacesterminalcore
 
     func testExecutorRecordsZeroExitAsSucceeded() throws {
         let harness = try Harness(self, realCommands: true)
-        let automation = try harness.insertAutomation(command: "exit 0", concurrency: .allow)
+        let automation = try harness.insertAutomation(script: "exit 0", concurrency: .allow)
         let run = try XCTUnwrap(harness.service.triggerManually(automationID: automation.id))
         let finished = try harness.runUntilTerminal(runID: run.id)
         XCTAssertEqual(finished.status, .succeeded)
@@ -166,11 +166,28 @@ import spacesterminalcore
 
     func testExecutorRecordsNonZeroExitCode() throws {
         let harness = try Harness(self, realCommands: true)
-        let automation = try harness.insertAutomation(command: "exit 3", concurrency: .allow)
+        let automation = try harness.insertAutomation(script: "exit 3", concurrency: .allow)
         let run = try XCTUnwrap(harness.service.triggerManually(automationID: automation.id))
         let finished = try harness.runUntilTerminal(runID: run.id)
         XCTAssertEqual(finished.status, .failed)
         XCTAssertEqual(finished.exitCode, 3)
+    }
+
+    // MARK: - Agent kind (not yet executable)
+
+    /// An agent-kind automation has no execution path yet (commit 9 adds it): triggering one must fail the
+    /// run immediately through the same launch-failure path a script launch error takes, rather than
+    /// attempting to launch a session for a command that does not exist.
+    func testAgentKindRunFailsImmediately() throws {
+        let harness = try Harness(self)
+        let automation = try harness.insertAutomation(kind: .agent, concurrency: .allow)
+        let triggered = try XCTUnwrap(harness.service.triggerManually(automationID: automation.id))
+        // The run object `triggerManually` returns reflects the run as started (`.running`); the executor
+        // persists the actual outcome to the store rather than mutating that in-flight value, the same
+        // convention a script launch failure follows. Re-read the store for the settled status.
+        let stored = try XCTUnwrap(harness.store.automationRun(id: triggered.id))
+        XCTAssertEqual(stored.status, .failed)
+        XCTAssertNil(stored.terminalSessionID)
     }
 
     // MARK: - Timeout + cancel
@@ -178,7 +195,7 @@ import spacesterminalcore
     func testTimeoutKillsCommandAndRecordsTimedOut() throws {
         let clock = MutableClock(start: Date())
         let harness = try Harness(self, realCommands: true, now: clock.now)
-        let automation = try harness.insertAutomation(command: "sleep 30", concurrency: .allow, timeoutSeconds: 1)
+        let automation = try harness.insertAutomation(script: "sleep 30", concurrency: .allow, timeoutSeconds: 1)
         let run = try XCTUnwrap(harness.service.triggerManually(automationID: automation.id))
         let childPID = try XCTUnwrap(harness.host.lastChildPID)
 
@@ -191,7 +208,7 @@ import spacesterminalcore
 
     func testCancelKillsCommandAndRecordsCanceled() throws {
         let harness = try Harness(self, realCommands: true)
-        let automation = try harness.insertAutomation(command: "sleep 30", concurrency: .allow)
+        let automation = try harness.insertAutomation(script: "sleep 30", concurrency: .allow)
         let run = try XCTUnwrap(harness.service.triggerManually(automationID: automation.id))
         let childPID = try XCTUnwrap(harness.host.lastChildPID)
 
@@ -225,14 +242,14 @@ import spacesterminalcore
     }
 
     func insertAutomation(
-        command: String = "true", triggerKind: AutomationTriggerKind = .manual, cronExpression: String? = nil,
+        script: String = "true", kind: AutomationKind = .script, triggerKind: AutomationTriggerKind = .manual, cronExpression: String? = nil,
         concurrency: AutomationConcurrencyPolicy = .allow, missedRunPolicy: AutomationMissedRunPolicy = .runOnce, timeoutSeconds: Int? = nil,
         nextFireTime: Date? = nil
     ) throws -> Automation {
         let automation = Automation(
-            id: UUID().uuidString, name: "Test", enabled: true, triggerKind: triggerKind, cronExpression: cronExpression, command: command,
-            workingDirectory: FileManager.default.temporaryDirectory.path, timeoutSeconds: timeoutSeconds, concurrencyPolicy: concurrency,
-            missedRunPolicy: missedRunPolicy, nextFireTime: nextFireTime, createdAt: now(), updatedAt: now())
+            id: UUID().uuidString, name: "Test", enabled: true, triggerKind: triggerKind, cronExpression: cronExpression, kind: kind,
+            script: script, workingDirectory: FileManager.default.temporaryDirectory.path, timeoutSeconds: timeoutSeconds,
+            concurrencyPolicy: concurrency, missedRunPolicy: missedRunPolicy, nextFireTime: nextFireTime, createdAt: now(), updatedAt: now())
         try store.upsertAutomation(automation)
         return automation
     }

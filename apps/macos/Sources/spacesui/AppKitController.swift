@@ -4131,7 +4131,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     static func automationFields(from summary: TerminalServiceAutomationSummary, enabled: Bool? = nil) -> TerminalServiceAutomationFields {
         TerminalServiceAutomationFields(
             name: summary.name, enabled: enabled ?? summary.enabled, triggerKind: summary.triggerKind, cronExpression: summary.cronExpression,
-            command: summary.command, workingDirectory: summary.workingDirectory, timeoutSeconds: summary.timeoutSeconds,
+            kind: summary.kind, script: summary.script, agentCommand: summary.agentCommand, agentPrompt: summary.agentPrompt,
+            workspaceID: summary.workspaceID, workingDirectory: summary.workingDirectory, timeoutSeconds: summary.timeoutSeconds,
             concurrencyPolicy: summary.concurrencyPolicy, missedRunPolicy: summary.missedRunPolicy)
     }
 
@@ -4153,7 +4154,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let loginShell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
         let request = DeviceTerminalOpenRequest(
             workspaceID: "", deviceID: deviceID, sessionID: sessionID, title: automation?.name ?? "Automation",
-            workingDirectory: automation?.workingDirectory ?? "", kind: .automation, shell: loginShell, command: automation?.command,
+            workingDirectory: automation?.workingDirectory ?? "", kind: .automation, shell: loginShell, command: automation?.script,
             initialState: AutomationRunStatus(rawValue: run.status) == .running ? .running : .exited)
         panelCoordinator.moveSessionToNewPanelWindow(request)
     }

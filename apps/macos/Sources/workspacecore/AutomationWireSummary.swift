@@ -9,9 +9,10 @@ extension TerminalServiceAutomationSummary {
     public init(_ automation: Automation) {
         self.init(
             id: automation.id, name: automation.name, enabled: automation.enabled, triggerKind: automation.triggerKind.rawValue,
-            cronExpression: automation.cronExpression, command: automation.command, workingDirectory: automation.workingDirectory,
-            timeoutSeconds: automation.timeoutSeconds, concurrencyPolicy: automation.concurrencyPolicy.rawValue,
-            missedRunPolicy: automation.missedRunPolicy.rawValue,
+            cronExpression: automation.cronExpression, kind: automation.kind.rawValue, script: automation.script,
+            agentCommand: automation.agentCommand, agentPrompt: automation.agentPrompt, workspaceID: automation.workspaceID,
+            workingDirectory: automation.workingDirectory, timeoutSeconds: automation.timeoutSeconds,
+            concurrencyPolicy: automation.concurrencyPolicy.rawValue, missedRunPolicy: automation.missedRunPolicy.rawValue,
             nextFireTime: automation.nextFireTime.map(TerminalSessionTimestamp.string(from:)),
             createdAt: TerminalSessionTimestamp.string(from: automation.createdAt),
             updatedAt: TerminalSessionTimestamp.string(from: automation.updatedAt))

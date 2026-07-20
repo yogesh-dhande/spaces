@@ -912,6 +912,9 @@ import workspacecore
         guard let triggerKind = AutomationTriggerKind(rawValue: fields.triggerKind) else {
             throw SpacesRuntimeError.invalidArgument(message: "Unsupported automation trigger kind '\(fields.triggerKind)'.")
         }
+        guard let kind = AutomationKind(rawValue: fields.kind) else {
+            throw SpacesRuntimeError.invalidArgument(message: "Unsupported automation kind '\(fields.kind)'.")
+        }
         guard let concurrencyPolicy = AutomationConcurrencyPolicy(rawValue: fields.concurrencyPolicy) else {
             throw SpacesRuntimeError.invalidArgument(message: "Unsupported automation concurrency policy '\(fields.concurrencyPolicy)'.")
         }
@@ -919,7 +922,8 @@ import workspacecore
             throw SpacesRuntimeError.invalidArgument(message: "Unsupported automation missed-run policy '\(fields.missedRunPolicy)'.")
         }
         return AutomationDraft(
-            name: fields.name, enabled: fields.enabled, triggerKind: triggerKind, cronExpression: fields.cronExpression, command: fields.command,
+            name: fields.name, enabled: fields.enabled, triggerKind: triggerKind, cronExpression: fields.cronExpression, kind: kind,
+            script: fields.script, agentCommand: fields.agentCommand, agentPrompt: fields.agentPrompt, workspaceID: fields.workspaceID,
             workingDirectory: fields.workingDirectory, timeoutSeconds: fields.timeoutSeconds, concurrencyPolicy: concurrencyPolicy,
             missedRunPolicy: missedRunPolicy)
     }

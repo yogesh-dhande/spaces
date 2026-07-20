@@ -287,7 +287,7 @@
             cronExpression: String? = nil, nextFireTime: String? = nil
         ) -> TerminalServiceAutomationSummary {
             TerminalServiceAutomationSummary(
-                id: id, name: name, enabled: enabled, triggerKind: triggerKind, cronExpression: cronExpression, command: "echo hi",
+                id: id, name: name, enabled: enabled, triggerKind: triggerKind, cronExpression: cronExpression, script: "echo hi",
                 workingDirectory: "/tmp", timeoutSeconds: nil, concurrencyPolicy: "skip", missedRunPolicy: "skip", nextFireTime: nextFireTime,
                 createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z")
         }

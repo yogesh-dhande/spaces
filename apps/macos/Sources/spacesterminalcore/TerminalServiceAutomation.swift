@@ -13,7 +13,17 @@ public struct TerminalServiceAutomationSummary: Codable, Sendable, Equatable, Id
     public let triggerKind: String
     /// The 5-field cron string for a cron automation, or nil for a manual one.
     public let cronExpression: String?
-    public let command: String
+    /// `script` or `agent` (raw `AutomationKind` value).
+    public let kind: String
+    /// The shell script a `script`-kind automation runs. Empty for an `agent`-kind automation.
+    public let script: String
+    /// The shell command that launches the coding agent, for an `agent`-kind automation; nil for `script`.
+    public let agentCommand: String?
+    /// The prompt seeded into the spawned coding agent, for an `agent`-kind automation; nil for `script`.
+    public let agentPrompt: String?
+    /// The workspace an `agent`-kind automation's coding agent spawns into; nil for `script`.
+    public let workspaceID: String?
+    /// The directory a `script`-kind automation's script runs in. Empty for an `agent`-kind automation.
     public let workingDirectory: String
     /// Wall-clock budget in seconds after which a running run is terminated and recorded timed_out, or nil.
     public let timeoutSeconds: Int?
@@ -25,15 +35,20 @@ public struct TerminalServiceAutomationSummary: Codable, Sendable, Equatable, Id
     public let updatedAt: String
 
     public init(
-        id: String, name: String, enabled: Bool, triggerKind: String, cronExpression: String?, command: String, workingDirectory: String,
-        timeoutSeconds: Int?, concurrencyPolicy: String, missedRunPolicy: String, nextFireTime: String?, createdAt: String, updatedAt: String
+        id: String, name: String, enabled: Bool, triggerKind: String, cronExpression: String?, kind: String = "script", script: String,
+        agentCommand: String? = nil, agentPrompt: String? = nil, workspaceID: String? = nil, workingDirectory: String, timeoutSeconds: Int?,
+        concurrencyPolicy: String, missedRunPolicy: String, nextFireTime: String?, createdAt: String, updatedAt: String
     ) {
         self.id = id
         self.name = name
         self.enabled = enabled
         self.triggerKind = triggerKind
         self.cronExpression = cronExpression
-        self.command = command
+        self.kind = kind
+        self.script = script
+        self.agentCommand = agentCommand
+        self.agentPrompt = agentPrompt
+        self.workspaceID = workspaceID
         self.workingDirectory = workingDirectory
         self.timeoutSeconds = timeoutSeconds
         self.concurrencyPolicy = concurrencyPolicy

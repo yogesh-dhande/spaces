@@ -7,6 +7,15 @@ public enum AutomationTriggerKind: String, Codable, Sendable, CaseIterable {
     case cron
 }
 
+/// What a scheduled automation runs. A `script` automation runs `script` verbatim in its workspace-less
+/// session. An `agent` automation instead spawns a coding agent (`agentCommand`) seeded with `agentPrompt`
+/// in `workspaceID`'s workspace — commit 9 wires up its execution; until then `AutomationService` marks an
+/// `agent`-kind run failed immediately rather than attempting to launch it.
+public enum AutomationKind: String, Codable, Sendable, CaseIterable {
+    case script
+    case agent
+}
+
 /// What happens when a fire lands while an earlier run of the same automation is still queued or running.
 /// `allow` always starts a new run; `skip` records a lightweight skipped row instead; `queue` coalesces to
 /// at most one pending queued run that executes when the current one finishes.
@@ -24,7 +33,8 @@ public enum AutomationMissedRunPolicy: String, Codable, Sendable, CaseIterable {
     case skip
 }
 
-/// A daemon-owned scheduled automation that runs a shell command in a workspace-less terminal session.
+/// A daemon-owned scheduled automation that runs a shell script or spawns a coding agent in a
+/// workspace-less terminal session.
 public struct Automation: Equatable, Sendable, Identifiable {
     public let id: String
     public let name: String
@@ -32,7 +42,17 @@ public struct Automation: Equatable, Sendable, Identifiable {
     public let triggerKind: AutomationTriggerKind
     /// The 5-field cron string for a `cron` automation, or nil for a `manual` one.
     public let cronExpression: String?
-    public let command: String
+    public let kind: AutomationKind
+    /// The shell script a `script`-kind automation runs. Ignored (and empty) for an `agent`-kind automation.
+    public let script: String
+    /// The shell command that launches the coding agent, for an `agent`-kind automation; nil for `script`.
+    public let agentCommand: String?
+    /// The prompt seeded into the spawned coding agent, for an `agent`-kind automation; nil for `script`.
+    public let agentPrompt: String?
+    /// The workspace an `agent`-kind automation's coding agent spawns into; nil for `script`.
+    public let workspaceID: String?
+    /// The directory a `script`-kind automation's script runs in. Empty for an `agent`-kind automation,
+    /// whose coding agent's location comes from `workspaceID` instead.
     public let workingDirectory: String
     /// Optional wall-clock budget after which a running run is terminated and recorded `timed_out`.
     public let timeoutSeconds: Int?
@@ -44,16 +64,21 @@ public struct Automation: Equatable, Sendable, Identifiable {
     public let updatedAt: Date
 
     public init(
-        id: String, name: String, enabled: Bool, triggerKind: AutomationTriggerKind, cronExpression: String?, command: String,
-        workingDirectory: String, timeoutSeconds: Int?, concurrencyPolicy: AutomationConcurrencyPolicy, missedRunPolicy: AutomationMissedRunPolicy,
-        nextFireTime: Date?, createdAt: Date, updatedAt: Date
+        id: String, name: String, enabled: Bool, triggerKind: AutomationTriggerKind, cronExpression: String?, kind: AutomationKind = .script,
+        script: String, agentCommand: String? = nil, agentPrompt: String? = nil, workspaceID: String? = nil, workingDirectory: String,
+        timeoutSeconds: Int?, concurrencyPolicy: AutomationConcurrencyPolicy, missedRunPolicy: AutomationMissedRunPolicy, nextFireTime: Date?,
+        createdAt: Date, updatedAt: Date
     ) {
         self.id = id
         self.name = name
         self.enabled = enabled
         self.triggerKind = triggerKind
         self.cronExpression = cronExpression
-        self.command = command
+        self.kind = kind
+        self.script = script
+        self.agentCommand = agentCommand
+        self.agentPrompt = agentPrompt
+        self.workspaceID = workspaceID
         self.workingDirectory = workingDirectory
         self.timeoutSeconds = timeoutSeconds
         self.concurrencyPolicy = concurrencyPolicy

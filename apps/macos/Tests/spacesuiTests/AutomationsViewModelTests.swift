@@ -8,7 +8,7 @@ import spacesterminalcore
 struct AutomationsViewModelTests {
     private func automation(id: String, name: String, triggerKind: String = "manual", cron: String? = nil) -> TerminalServiceAutomationSummary {
         TerminalServiceAutomationSummary(
-            id: id, name: name, enabled: true, triggerKind: triggerKind, cronExpression: cron, command: "echo hi", workingDirectory: "/tmp",
+            id: id, name: name, enabled: true, triggerKind: triggerKind, cronExpression: cron, script: "echo hi", workingDirectory: "/tmp",
             timeoutSeconds: nil, concurrencyPolicy: "allow", missedRunPolicy: "run_once", nextFireTime: nil, createdAt: "2026-01-01T00:00:00Z",
             updatedAt: "2026-01-01T00:00:00Z")
     }

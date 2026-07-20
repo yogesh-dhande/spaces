@@ -17,13 +17,15 @@ import spacesterminalcore
     }
 
     private func draft(
-        name: String = "Nightly", enabled: Bool = true, trigger: AutomationTriggerKind = .manual, cron: String? = nil, command: String = "echo hi",
-        workingDirectory: String = "/tmp", timeoutSeconds: Int? = nil, concurrency: AutomationConcurrencyPolicy = .allow,
-        missedRun: AutomationMissedRunPolicy = .runOnce
+        name: String = "Nightly", enabled: Bool = true, trigger: AutomationTriggerKind = .manual, cron: String? = nil,
+        kind: AutomationKind = .script, script: String = "echo hi", agentCommand: String? = nil, agentPrompt: String? = nil,
+        workspaceID: String? = nil, workingDirectory: String = "/tmp", timeoutSeconds: Int? = nil,
+        concurrency: AutomationConcurrencyPolicy = .allow, missedRun: AutomationMissedRunPolicy = .runOnce
     ) -> AutomationDraft {
         AutomationDraft(
-            name: name, enabled: enabled, triggerKind: trigger, cronExpression: cron, command: command, workingDirectory: workingDirectory,
-            timeoutSeconds: timeoutSeconds, concurrencyPolicy: concurrency, missedRunPolicy: missedRun)
+            name: name, enabled: enabled, triggerKind: trigger, cronExpression: cron, kind: kind, script: script, agentCommand: agentCommand,
+            agentPrompt: agentPrompt, workspaceID: workspaceID, workingDirectory: workingDirectory, timeoutSeconds: timeoutSeconds,
+            concurrencyPolicy: concurrency, missedRunPolicy: missedRun)
     }
 
     // MARK: - Validation
@@ -33,12 +35,53 @@ import spacesterminalcore
         XCTAssertThrowsError(try service.createAutomation(draft(name: "   ")))
     }
 
-    func testCreateRejectsEmptyCommand() throws {
+    func testCreateRejectsEmptyScript() throws {
         let (service, _) = try makeService()
-        XCTAssertThrowsError(try service.createAutomation(draft(command: "  ")))
+        XCTAssertThrowsError(try service.createAutomation(draft(script: "  ")))
     }
 
-    func testCreateRejectsEmptyWorkingDirectory() throws {
+    func testCreateAgentKindRejectsMissingAgentCommand() throws {
+        let (service, _) = try makeService()
+        XCTAssertThrowsError(try service.createAutomation(draft(kind: .agent, agentCommand: nil, agentPrompt: "do the thing", workspaceID: "ws-1")))
+    }
+
+    func testCreateAgentKindRejectsMissingAgentPrompt() throws {
+        let (service, _) = try makeService()
+        XCTAssertThrowsError(try service.createAutomation(draft(kind: .agent, agentCommand: "claude", agentPrompt: nil, workspaceID: "ws-1")))
+    }
+
+    func testCreateAgentKindRejectsMissingWorkspaceID() throws {
+        let (service, _) = try makeService()
+        XCTAssertThrowsError(
+            try service.createAutomation(draft(kind: .agent, agentCommand: "claude", agentPrompt: "do the thing", workspaceID: nil)))
+    }
+
+    func testCreateAgentKindAcceptsAllRequiredFields() throws {
+        let (service, _) = try makeService()
+        // Agent-kind drafts have no working directory of their own (the editor has no cwd field for this
+        // kind — see commit 11), so an empty one must validate rather than be rejected.
+        let automation = try service.createAutomation(
+            draft(kind: .agent, script: "", agentCommand: "claude", agentPrompt: "do the thing", workspaceID: "ws-1", workingDirectory: ""))
+        XCTAssertEqual(automation.kind, .agent)
+        XCTAssertEqual(automation.agentCommand, "claude")
+        XCTAssertEqual(automation.agentPrompt, "do the thing")
+        XCTAssertEqual(automation.workspaceID, "ws-1")
+        XCTAssertEqual(automation.script, "", "an agent-kind automation's script is normalized to empty")
+        XCTAssertEqual(automation.workingDirectory, "", "an agent-kind automation's working directory is normalized to empty")
+    }
+
+    func testCreateAgentKindAcceptsNonEmptyWorkingDirectoryButIgnoresIt() throws {
+        // A caller that still supplies a working directory (e.g. a stale form value) does not get rejected
+        // for it — the agent kind simply normalizes it away, matching how it clears `script`.
+        let (service, _) = try makeService()
+        let automation = try service.createAutomation(
+            draft(
+                kind: .agent, script: "", agentCommand: "claude", agentPrompt: "do the thing", workspaceID: "ws-1",
+                workingDirectory: "/some/stale/path"))
+        XCTAssertEqual(automation.workingDirectory, "")
+    }
+
+    func testCreateScriptKindRejectsEmptyWorkingDirectory() throws {
         let (service, _) = try makeService()
         XCTAssertThrowsError(try service.createAutomation(draft(workingDirectory: "")))
     }
@@ -142,6 +185,34 @@ import spacesterminalcore
         XCTAssertEqual(Set(try service.listAutomations().map(\.name)), ["A", "B"])
     }
 
+    // MARK: - Store roundtrip
+
+    func testStoreRoundTripsScriptKindAutomation() throws {
+        let (service, store) = try makeService()
+        let created = try service.createAutomation(draft(name: "Nightly", script: "echo hi"))
+        let reloaded = try XCTUnwrap(try store.automation(id: created.id))
+        XCTAssertEqual(reloaded.kind, .script)
+        XCTAssertEqual(reloaded.script, "echo hi")
+        XCTAssertNil(reloaded.agentCommand)
+        XCTAssertNil(reloaded.agentPrompt)
+        XCTAssertNil(reloaded.workspaceID)
+    }
+
+    func testStoreRoundTripsAgentKindAutomation() throws {
+        let (service, store) = try makeService()
+        let created = try service.createAutomation(
+            draft(
+                name: "Triage", kind: .agent, script: "", agentCommand: "claude", agentPrompt: "triage the inbox", workspaceID: "ws-1",
+                workingDirectory: ""))
+        let reloaded = try XCTUnwrap(try store.automation(id: created.id))
+        XCTAssertEqual(reloaded.kind, .agent)
+        XCTAssertEqual(reloaded.script, "")
+        XCTAssertEqual(reloaded.agentCommand, "claude")
+        XCTAssertEqual(reloaded.agentPrompt, "triage the inbox")
+        XCTAssertEqual(reloaded.workspaceID, "ws-1")
+        XCTAssertEqual(reloaded.workingDirectory, "", "an agent-kind automation's working directory round-trips as empty")
+    }
+
     // MARK: - Wire summaries
 
     func testAutomationSummaryCarriesScheduleFields() throws {
@@ -156,6 +227,17 @@ import spacesterminalcore
         XCTAssertEqual(summary.concurrencyPolicy, "skip")
         XCTAssertEqual(summary.missedRunPolicy, "skip")
         XCTAssertNotNil(summary.nextFireTime)
+    }
+
+    func testAutomationSummaryCarriesAgentKindFields() throws {
+        let (service, _) = try makeService()
+        let automation = try service.createAutomation(
+            draft(name: "Triage", kind: .agent, script: "", agentCommand: "claude", agentPrompt: "triage the inbox", workspaceID: "ws-1"))
+        let summary = TerminalServiceAutomationSummary(automation)
+        XCTAssertEqual(summary.kind, "agent")
+        XCTAssertEqual(summary.agentCommand, "claude")
+        XCTAssertEqual(summary.agentPrompt, "triage the inbox")
+        XCTAssertEqual(summary.workspaceID, "ws-1")
     }
 
     func testRunSummaryPreservesAlertRelevantFields() {

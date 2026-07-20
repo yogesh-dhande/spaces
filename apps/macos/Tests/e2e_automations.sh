@@ -132,7 +132,7 @@ part_a() {
   printf '\n=== Scenario a: manual success, marker, exit 0, session stamp ===\n'
   local marker="$FIXTURE_DIR/marker-a.txt"
   rm -f "$marker"
-  create_automation --name "e2e-success" --command "echo MARKER_A > '$marker'; echo run-output-marker; exit 0" \
+  create_automation --name "e2e-success" --script "echo MARKER_A > '$marker'; echo run-output-marker; exit 0" \
     --working-directory "$FIXTURE_DIR" --trigger manual --concurrency allow
   trigger_run "$AUTOMATION_ID"
   wait_run_status "$AUTOMATION_ID" "$RUN_ID" "succeeded" || fail "run did not succeed"
@@ -168,7 +168,7 @@ part_a() {
 
 part_b() {
   printf '\n=== Scenario b: failing command, exit 3 ===\n'
-  create_automation --name "e2e-fail" --command "exit 3" --working-directory "$FIXTURE_DIR" --trigger manual --concurrency allow
+  create_automation --name "e2e-fail" --script "exit 3" --working-directory "$FIXTURE_DIR" --trigger manual --concurrency allow
   trigger_run "$AUTOMATION_ID"
   wait_run_status "$AUTOMATION_ID" "$RUN_ID" "failed" || fail "run did not fail"
   local exit_code
@@ -179,7 +179,7 @@ part_b() {
 
 part_c() {
   printf '\n=== Scenario c: concurrency=skip + cancel ===\n'
-  create_automation --name "e2e-skip" --command "sleep 60" --working-directory "$FIXTURE_DIR" --trigger manual --concurrency skip
+  create_automation --name "e2e-skip" --script "sleep 60" --working-directory "$FIXTURE_DIR" --trigger manual --concurrency skip
   trigger_run "$AUTOMATION_ID"
   local running_run="$RUN_ID"
   # Give the first run time to become running before the second trigger.
@@ -201,7 +201,7 @@ part_c() {
 
 part_d() {
   printf '\n=== Scenario d: timeout ===\n'
-  create_automation --name "e2e-timeout" --command "sleep 60" --working-directory "$FIXTURE_DIR" --trigger manual --concurrency allow \
+  create_automation --name "e2e-timeout" --script "sleep 60" --working-directory "$FIXTURE_DIR" --trigger manual --concurrency allow \
     --timeout-seconds 2
   trigger_run "$AUTOMATION_ID"
   wait_run_status "$AUTOMATION_ID" "$RUN_ID" "timed_out" 25 || fail "run did not time out"
@@ -218,7 +218,7 @@ part_e() {
   # `AutomationServiceTests.testSweepFinalizesEndedAttributedSessionAndKeepsLiveOne`, which injects a fake
   # ended attributed session directly. Here we assert the directly-launched attributed session the product
   # always creates: the run's own workspace-less .automation session, stamped with the run id.
-  create_automation --name "e2e-attribution" --command "echo attributed; exit 0" --working-directory "$FIXTURE_DIR" --trigger manual \
+  create_automation --name "e2e-attribution" --script "echo attributed; exit 0" --working-directory "$FIXTURE_DIR" --trigger manual \
     --concurrency allow
   trigger_run "$AUTOMATION_ID"
   wait_run_status "$AUTOMATION_ID" "$RUN_ID" "succeeded" || fail "attribution run did not succeed"

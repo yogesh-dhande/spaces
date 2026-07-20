@@ -33,7 +33,7 @@ import workspacecore
     // Live control references, valid while the window is open.
     private var nameField: NSTextField?
     private var devicePopUp: NSPopUpButton?
-    private var commandTextView: NSTextView?
+    private var scriptTextView: NSTextView?
     private var workingDirectoryField: NSTextField?
     private var triggerSegmented: NSSegmentedControl?
     private var cronModeSegmented: NSSegmentedControl?
@@ -100,7 +100,7 @@ import workspacecore
             addRow(host.settingsLabeledField(name: "Device", hint: "An automation stays on its device.", control: label), to: stack)
         }
 
-        addRow(host.settingsLabeledField(name: "Command", hint: "Runs in your login shell.", control: makeCommandEditor(seed: seed)), to: stack)
+        addRow(host.settingsLabeledField(name: "Script", hint: "Runs in your login shell.", control: makeScriptEditor(seed: seed)), to: stack)
         addRow(
             host.settingsLabeledField(
                 name: "Working directory", hint: "Directory the command runs in.", control: makeWorkingDirectoryControl(seed: seed)), to: stack)
@@ -157,9 +157,9 @@ import workspacecore
         return popUp
     }
 
-    private func makeCommandEditor(seed: TerminalServiceAutomationSummary?) -> NSView {
+    private func makeScriptEditor(seed: TerminalServiceAutomationSummary?) -> NSView {
         let textView = NSTextView()
-        textView.string = seed?.command ?? ""
+        textView.string = seed?.script ?? ""
         textView.isRichText = false
         textView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
         textView.isAutomaticQuoteSubstitutionEnabled = false
@@ -167,7 +167,7 @@ import workspacecore
         textView.isVerticallyResizable = true
         textView.isHorizontallyResizable = false
         textView.autoresizingMask = [.width]
-        commandTextView = textView
+        scriptTextView = textView
         return host.scrollableTextView(textView, height: 72)
     }
 
@@ -563,8 +563,8 @@ import workspacecore
     private func collectFields() -> TerminalServiceAutomationFields? {
         let name = nameField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !name.isEmpty else { return failValidation("Enter a name.") }
-        let command = commandTextView?.string ?? ""
-        guard !command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return failValidation("Enter a command.") }
+        let script = scriptTextView?.string ?? ""
+        guard !script.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return failValidation("Enter a script.") }
         let workingDirectory = workingDirectoryField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !workingDirectory.isEmpty else { return failValidation("Enter a working directory.") }
 
@@ -590,9 +590,12 @@ import workspacecore
         let missed = (missedRunPopUp?.selectedItem?.representedObject as? String) ?? AutomationMissedRunPolicy.runOnce.rawValue
 
         errorLabel?.isHidden = true
+        // Kind is fixed to `.script` here: the editor has no type toggle yet (a later commit adds one), so
+        // every automation authored through this form is a script automation.
         return TerminalServiceAutomationFields(
-            name: name, enabled: currentEnabled(), triggerKind: triggerKind.rawValue, cronExpression: cronExpression, command: command,
-            workingDirectory: workingDirectory, timeoutSeconds: timeoutSeconds, concurrencyPolicy: concurrency, missedRunPolicy: missed)
+            name: name, enabled: currentEnabled(), triggerKind: triggerKind.rawValue, cronExpression: cronExpression,
+            kind: AutomationKind.script.rawValue, script: script, workingDirectory: workingDirectory, timeoutSeconds: timeoutSeconds,
+            concurrencyPolicy: concurrency, missedRunPolicy: missed)
     }
 
     /// Preserves the automation's enabled state across edits; a newly created automation is enabled.
@@ -624,7 +627,7 @@ import workspacecore
         return TerminalServiceAutomationSummary(
             id: editingAutomationID ?? "", name: nameField?.stringValue ?? "", enabled: currentEnabled(),
             triggerKind: (isCron ? AutomationTriggerKind.cron : .manual).rawValue, cronExpression: isCron ? currentPreset()?.cronExpression : nil,
-            command: commandTextView?.string ?? "", workingDirectory: workingDirectoryField?.stringValue ?? "",
+            kind: AutomationKind.script.rawValue, script: scriptTextView?.string ?? "", workingDirectory: workingDirectoryField?.stringValue ?? "",
             timeoutSeconds: timeoutField.flatMap { Int($0.stringValue) },
             concurrencyPolicy: (concurrencyPopUp?.selectedItem?.representedObject as? String) ?? AutomationConcurrencyPolicy.allow.rawValue,
             missedRunPolicy: (missedRunPopUp?.selectedItem?.representedObject as? String) ?? AutomationMissedRunPolicy.runOnce.rawValue,

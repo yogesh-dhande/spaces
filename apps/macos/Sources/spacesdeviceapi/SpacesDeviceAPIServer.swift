@@ -2429,6 +2429,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         guard let triggerKind = AutomationTriggerKind(rawValue: fields.triggerKind) else {
             throw Self.invalidArgumentError("Unsupported automation trigger kind '\(fields.triggerKind)'.")
         }
+        guard let kind = AutomationKind(rawValue: fields.kind) else {
+            throw Self.invalidArgumentError("Unsupported automation kind '\(fields.kind)'.")
+        }
         guard let concurrencyPolicy = AutomationConcurrencyPolicy(rawValue: fields.concurrencyPolicy) else {
             throw Self.invalidArgumentError("Unsupported automation concurrency policy '\(fields.concurrencyPolicy)'.")
         }
@@ -2436,7 +2439,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             throw Self.invalidArgumentError("Unsupported automation missed-run policy '\(fields.missedRunPolicy)'.")
         }
         return AutomationDraft(
-            name: fields.name, enabled: fields.enabled, triggerKind: triggerKind, cronExpression: fields.cronExpression, command: fields.command,
+            name: fields.name, enabled: fields.enabled, triggerKind: triggerKind, cronExpression: fields.cronExpression, kind: kind,
+            script: fields.script, agentCommand: fields.agentCommand, agentPrompt: fields.agentPrompt, workspaceID: fields.workspaceID,
             workingDirectory: fields.workingDirectory, timeoutSeconds: fields.timeoutSeconds, concurrencyPolicy: concurrencyPolicy,
             missedRunPolicy: missedRunPolicy)
     }

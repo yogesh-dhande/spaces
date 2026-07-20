@@ -260,32 +260,47 @@ public struct TerminalServiceAgentSubscriptionPayload: Codable, Sendable, Equata
     }
 }
 
-/// Editable fields of an automation carried by create/update. Enum-typed fields (`triggerKind`,
+/// Editable fields of an automation carried by create/update. Enum-typed fields (`triggerKind`, `kind`,
 /// `concurrencyPolicy`, `missedRunPolicy`) travel as raw strings so this wire module stays free of the
-/// `workspacecore` domain enums; the daemon validates the raw values (and the cron expression) when it
-/// maps this to a stored automation, so an unknown value is a descriptive boundary error, not a decode
-/// crash. `name`, `command`, and `workingDirectory` are enforced non-empty at decode; `cronExpression` is
-/// optional here and required-when-cron is enforced by the daemon's validation.
+/// `workspacecore` domain enums; the daemon validates the raw values (and the cron expression, and the
+/// kind-specific required fields) when it maps this to a stored automation, so an unknown value is a
+/// descriptive boundary error, not a decode crash. `name` is enforced non-empty at decode; `cronExpression`
+/// is optional here and required-when-cron is enforced by the daemon's validation. `script` and
+/// `workingDirectory` are likewise not enforced non-empty at decode: only a `script`-kind automation
+/// requires them (the directory its script runs in); an `agent`-kind automation has no working directory of
+/// its own — its coding agent's location comes from `workspaceID` — and instead requires
+/// `agentCommand`/`agentPrompt`/`workspaceID`. The daemon's `AutomationDraft.validated()` is the single
+/// place that enforces these kind-specific requirements.
 public struct TerminalServiceAutomationFields: Codable, Sendable, Equatable {
     public let name: String
     public let enabled: Bool
     public let triggerKind: String
     public let cronExpression: String?
-    public let command: String
+    /// `script` or `agent` (raw `AutomationKind` value); defaults to `script` when omitted.
+    public let kind: String
+    public let script: String
+    public let agentCommand: String?
+    public let agentPrompt: String?
+    public let workspaceID: String?
     public let workingDirectory: String
     public let timeoutSeconds: Int?
     public let concurrencyPolicy: String
     public let missedRunPolicy: String
 
     public init(
-        name: String, enabled: Bool, triggerKind: String, cronExpression: String? = nil, command: String, workingDirectory: String,
-        timeoutSeconds: Int? = nil, concurrencyPolicy: String, missedRunPolicy: String
+        name: String, enabled: Bool, triggerKind: String, cronExpression: String? = nil, kind: String = "script", script: String,
+        agentCommand: String? = nil, agentPrompt: String? = nil, workspaceID: String? = nil, workingDirectory: String, timeoutSeconds: Int? = nil,
+        concurrencyPolicy: String, missedRunPolicy: String
     ) {
         self.name = name
         self.enabled = enabled
         self.triggerKind = triggerKind
         self.cronExpression = cronExpression
-        self.command = command
+        self.kind = kind
+        self.script = script
+        self.agentCommand = agentCommand
+        self.agentPrompt = agentPrompt
+        self.workspaceID = workspaceID
         self.workingDirectory = workingDirectory
         self.timeoutSeconds = timeoutSeconds
         self.concurrencyPolicy = concurrencyPolicy
@@ -297,7 +312,11 @@ public struct TerminalServiceAutomationFields: Codable, Sendable, Equatable {
         case enabled
         case triggerKind
         case cronExpression
-        case command
+        case kind
+        case script
+        case agentCommand
+        case agentPrompt
+        case workspaceID
         case workingDirectory
         case timeoutSeconds
         case concurrencyPolicy
@@ -310,8 +329,12 @@ public struct TerminalServiceAutomationFields: Codable, Sendable, Equatable {
         enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
         triggerKind = try container.decodeRequiredNonEmpty(forKey: .triggerKind)
         cronExpression = try container.decodeIfPresent(String.self, forKey: .cronExpression)
-        command = try container.decodeRequiredNonEmpty(forKey: .command)
-        workingDirectory = try container.decodeRequiredNonEmpty(forKey: .workingDirectory)
+        kind = try container.decodeIfPresent(String.self, forKey: .kind) ?? "script"
+        script = try container.decodeIfPresent(String.self, forKey: .script) ?? ""
+        agentCommand = try container.decodeIfPresent(String.self, forKey: .agentCommand)
+        agentPrompt = try container.decodeIfPresent(String.self, forKey: .agentPrompt)
+        workspaceID = try container.decodeIfPresent(String.self, forKey: .workspaceID)
+        workingDirectory = try container.decodeIfPresent(String.self, forKey: .workingDirectory) ?? ""
         timeoutSeconds = try container.decodeIfPresent(Int.self, forKey: .timeoutSeconds)
         concurrencyPolicy = try container.decodeRequiredNonEmpty(forKey: .concurrencyPolicy)
         missedRunPolicy = try container.decodeRequiredNonEmpty(forKey: .missedRunPolicy)

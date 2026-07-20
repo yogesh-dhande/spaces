@@ -89,12 +89,21 @@ public enum DatabaseSchema {
             );
         """
 
-    /// Daemon-owned scheduled automations that run a shell command in a workspace-less terminal session.
-    /// `trigger_kind` is `manual` or `cron`; `cron_expression` holds the 5-field cron string and is NULL
-    /// for manual automations. `next_fire_time` is the persisted next-due epoch for a cron automation and
-    /// doubles as the missed-run anchor a restarted daemon reads to decide whether a fire was missed while
-    /// it was down. Timestamps are stored as REAL epoch seconds. Named separately so the fresh-schema SQL
-    /// and the v7→v8 migration step share one definition and can never drift apart.
+    /// Daemon-owned scheduled automations that run a shell script or spawn a coding agent in a
+    /// workspace-less terminal session. `trigger_kind` is `manual` or `cron`; `cron_expression` holds the
+    /// 5-field cron string and is NULL for manual automations. `kind` is `script` or `agent`: a `script`
+    /// automation runs `script` verbatim in `working_directory`; an `agent` automation instead runs
+    /// `agent_command` (the shell command that launches the coding agent) seeded with `agent_prompt` in
+    /// `workspace_id`'s workspace — its location comes from the workspace, so it carries no
+    /// `working_directory` of its own. `script`, `working_directory`, `agent_command`, `agent_prompt`, and
+    /// `workspace_id` are mutually exclusive by convention (only the fields matching `kind` are populated —
+    /// `working_directory` is `''` for an `agent`-kind row, kept NOT NULL rather than nullable so every
+    /// reader can treat it as a plain string; see `AutomationDraft.validated()`), not by a CHECK constraint,
+    /// so a kind switch is a plain column update rather than a row rebuild. `next_fire_time` is the
+    /// persisted next-due epoch for a cron automation and doubles as the missed-run anchor a restarted
+    /// daemon reads to decide whether a fire was missed while it was down. Timestamps are stored as REAL
+    /// epoch seconds. Named separately so the fresh-schema SQL and the v7→v8 migration step share one
+    /// definition and can never drift apart.
     static let automationsSQL = """
             CREATE TABLE IF NOT EXISTS automations (
               id TEXT PRIMARY KEY,
@@ -102,7 +111,11 @@ public enum DatabaseSchema {
               enabled INTEGER NOT NULL DEFAULT 1,
               trigger_kind TEXT NOT NULL,
               cron_expression TEXT,
-              command TEXT NOT NULL,
+              kind TEXT NOT NULL DEFAULT 'script',
+              script TEXT NOT NULL,
+              agent_command TEXT,
+              agent_prompt TEXT,
+              workspace_id TEXT,
               working_directory TEXT NOT NULL,
               timeout_seconds INTEGER,
               concurrency_policy TEXT NOT NULL,

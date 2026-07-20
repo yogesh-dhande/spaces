@@ -126,7 +126,8 @@ import spacesterminalcore
         let timestamp = now()
         let automation = Automation(
             id: UUID().uuidString, name: validated.name, enabled: validated.enabled, triggerKind: validated.triggerKind,
-            cronExpression: validated.cronExpression, command: validated.command, workingDirectory: validated.workingDirectory,
+            cronExpression: validated.cronExpression, kind: validated.kind, script: validated.script, agentCommand: validated.agentCommand,
+            agentPrompt: validated.agentPrompt, workspaceID: validated.workspaceID, workingDirectory: validated.workingDirectory,
             timeoutSeconds: validated.timeoutSeconds, concurrencyPolicy: validated.concurrencyPolicy, missedRunPolicy: validated.missedRunPolicy,
             nextFireTime: nil, createdAt: timestamp, updatedAt: timestamp)
         try store.upsertAutomation(automation)
@@ -143,7 +144,8 @@ import spacesterminalcore
         let validated = try draft.validated()
         let automation = Automation(
             id: existing.id, name: validated.name, enabled: validated.enabled, triggerKind: validated.triggerKind,
-            cronExpression: validated.cronExpression, command: validated.command, workingDirectory: validated.workingDirectory,
+            cronExpression: validated.cronExpression, kind: validated.kind, script: validated.script, agentCommand: validated.agentCommand,
+            agentPrompt: validated.agentPrompt, workspaceID: validated.workspaceID, workingDirectory: validated.workingDirectory,
             timeoutSeconds: validated.timeoutSeconds, concurrencyPolicy: validated.concurrencyPolicy, missedRunPolicy: validated.missedRunPolicy,
             nextFireTime: nil, createdAt: existing.createdAt, updatedAt: now())
         try store.upsertAutomation(automation)
@@ -287,6 +289,17 @@ import spacesterminalcore
 
         sweepPriorRunSessions(automationID: automation.id, excludingRunID: runID)
 
+        // An agent-kind automation has no executable path yet (commit 9 adds it): fail the run immediately
+        // through the same launch-failure path a script-launch error takes, rather than attempting to
+        // launch a session for a command that does not exist.
+        guard automation.kind == .script else {
+            logError("automation_agent_kind_not_yet_executable run=\(runID)")
+            try store.updateAutomationRun(
+                id: runID, status: .failed, skipReason: nil, exitCode: nil, terminalSessionID: nil, startedAt: currentTime, endedAt: now())
+            try pruneRetention(automationID: automation.id)
+            return run
+        }
+
         let sessionID = UUID().uuidString
         do {
             try AutomationPaths.ensureRunDirectory(runID: runID)
@@ -318,7 +331,7 @@ import spacesterminalcore
         let quotedSentinel = orchestrator.automationShellQuoted(sentinelPath)
         return """
             export PATH=\(quotedBinDir):"$PATH"
-            ( \(automation.command)
+            ( \(automation.script)
             )
             __spaces_ec=$?
             printf '%s' "$__spaces_ec" > \(quotedSentinel) 2>/dev/null || true
