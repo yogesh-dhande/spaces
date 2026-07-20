@@ -226,7 +226,7 @@ run_handoff_round() {
   wait_for_tail_contains "$session_id" "$MARKER" 20
   assert_no_failed_runtime_states
 
-  env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal send text "$session_id" "$post_marker" --newline >/dev/null
+  env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal send text "$session_id" "$post_marker" --submit >/dev/null
   wait_for_tail_contains "$session_id" "$post_marker" 20
 
   echo "Handoff round OK: generation=$expected_generation pid=$SERVICE_PID child=$CHILD_PID"
