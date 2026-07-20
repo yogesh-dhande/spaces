@@ -1,4 +1,5 @@
 import SwiftUI
+import spacesdevicecore
 import spacesterminalcore
 
 /// Root content of the Automations tab (see `AutomationsTabView` for the tab shell). Automations are a
@@ -54,15 +55,26 @@ struct AutomationsListView: View {
 
     private func automationRow(_ row: SpacesMobileAutomationRow) -> some View {
         let automation = row.automation
-        let detailParts = [SpacesMobileAutomations.triggerSummary(automation), SpacesMobileAutomations.nextFireDescription(automation)]
+        var detailParts = [SpacesMobileAutomations.triggerSummary(automation), SpacesMobileAutomations.nextFireDescription(automation)]
+        if let workspaceName = SpacesMobileAutomations.workspaceName(for: automation, in: model.overview?.workspaces ?? []) {
+            detailParts.append(workspaceName)
+        }
         let detail = detailParts.compactMap { $0 }.joined(separator: " · ")
+        let excerpt = SpacesMobileAutomations.excerpt(automation)
 
         return Button {
             Task { await model.triggerAutomation(id: automation.id) }
         } label: {
             BandRow(
                 dotKind: StatusDot.Kind(automationRunStatus: row.lastRunStatus), tile: TypeIconTile(systemName: "clock.arrow.circlepath"),
-                title: automation.name, detail: detail, detailIsMonospaced: false
+                title: {
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(automation.name).font(.system(size: 13, weight: .medium)).foregroundStyle(Theme.text).lineLimit(1)
+                        if !excerpt.isEmpty {
+                            Text(excerpt).font(.system(size: 11)).foregroundStyle(Theme.mutedSecondary).lineLimit(1)
+                        }
+                    }
+                }, detail: detail, detailIsMonospaced: false
             ) {
                 if !automation.enabled {
                     Image(systemName: "bolt.slash").font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.mutedSecondary)
@@ -81,13 +93,16 @@ struct AutomationsListView: View {
 }
 
 /// Runs list for one automation (pushed from a row's context menu) or every automation ("Recent Runs",
-/// from the toolbar) — newest first, with a Cancel action on running rows. Read-only beyond that: no
-/// terminal or replay viewing on iOS, matching the view/trigger/cancel scope of this feature.
+/// from the toolbar) — newest first, with a Cancel action on running rows and an End Agents action on
+/// finished runs that still have a live attributed coding agent. Read-only beyond that: no terminal or
+/// replay viewing on iOS, matching the view/trigger/cancel scope of this feature — attributed agents are
+/// display-only, not tappable.
 struct AutomationRunsView: View {
     @Bindable var model: SpacesMobileAppModel
     let automationID: String?
     let title: String
     @State private var pendingCancelRunID: String?
+    @State private var pendingEndAgentsRunID: String?
 
     private var rows: [SpacesMobileAutomationRunRow] {
         SpacesMobileAutomations.runRows(model.overview?.automationRuns ?? [], automationID: automationID)
@@ -101,10 +116,20 @@ struct AutomationRunsView: View {
                     Task { await model.cancelAutomationRun(runID: pendingCancelRunID) }
                 }
                 Button("Keep Running", role: .cancel) {}
+            }.confirmationDialog("End this run's agents?", isPresented: endAgentsDialogBinding, titleVisibility: .visible) {
+                Button("End Agents", role: .destructive) {
+                    guard let pendingEndAgentsRunID else { return }
+                    Task { await model.endAutomationAgents(runID: pendingEndAgentsRunID) }
+                }
+                Button("Keep Agents Running", role: .cancel) {}
             }
     }
 
     private var cancelDialogBinding: Binding<Bool> { Binding(get: { pendingCancelRunID != nil }, set: { if !$0 { pendingCancelRunID = nil } }) }
+
+    private var endAgentsDialogBinding: Binding<Bool> {
+        Binding(get: { pendingEndAgentsRunID != nil }, set: { if !$0 { pendingEndAgentsRunID = nil } })
+    }
 
     @ViewBuilder private var content: some View {
         if rows.isEmpty {
@@ -127,18 +152,46 @@ struct AutomationRunsView: View {
         if let exitCode = run.exitCode { detailParts.append("exit \(exitCode)") }
         if run.status == "skipped", let reason = run.skipReason { detailParts.append("skipped: \(SpacesMobileAutomations.skipReasonLabel(reason))") }
 
-        return BandRow(
-            dotKind: StatusDot.Kind(automationRunStatus: run.status), tile: TypeIconTile(systemName: "clock.arrow.circlepath"),
-            title: run.automationName ?? "Automation", detail: detailParts.joined(separator: " · "), detailIsMonospaced: false
-        ) {
-            if row.isRunning {
-                Button {
-                    pendingCancelRunID = run.id
-                } label: {
-                    Image(systemName: "stop.fill").font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.red)
-                }.buttonStyle(.plain).disabled(model.isMutating).accessibilityIdentifier("automations.run.cancel.\(run.id)")
+        return VStack(alignment: .leading, spacing: 0) {
+            BandRow(
+                dotKind: StatusDot.Kind(automationRunStatus: run.status), tile: TypeIconTile(systemName: "clock.arrow.circlepath"),
+                title: run.automationName ?? "Automation", detail: detailParts.joined(separator: " · "), detailIsMonospaced: false
+            ) {
+                if row.isRunning {
+                    Button {
+                        pendingCancelRunID = run.id
+                    } label: {
+                        Image(systemName: "stop.fill").font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.red)
+                    }.buttonStyle(.plain).disabled(model.isMutating).accessibilityIdentifier("automations.run.cancel.\(run.id)")
+                } else if SpacesMobileAutomations.endAgentsAvailable(run) {
+                    // A text label, not an icon: ending someone's agent is not an obvious action (see
+                    // AGENTS.md GUI rules), matching the Mac's own "End agents" button.
+                    Button {
+                        pendingEndAgentsRunID = run.id
+                    } label: {
+                        Text("End agents").font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.red)
+                    }.buttonStyle(.plain).disabled(model.isMutating).accessibilityIdentifier("automations.run.endAgents.\(run.id)")
+                }
             }
+            if !run.attributedAgents.isEmpty { attributedAgentsRow(run.attributedAgents) }
         }.accessibilityIdentifier("automations.run.\(row.id)")
+    }
+
+    /// The run's attributed coding agents (its own spawned agent, plus any a script's command spawned),
+    /// each as a compact dot-plus-title element — display-only, no tap-to-open, since iOS shows no
+    /// terminal. Indented to align under the row's title column and independently horizontally
+    /// scrollable so several agents never wrap or clip the row.
+    private func attributedAgentsRow(_ agents: [TerminalServiceAutomationAgentSummary]) -> some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 12) { ForEach(agents, id: \.terminalSessionID) { agent in attributedAgentChip(agent) } }
+        }.padding(.leading, 58).padding(.trailing, 20).padding(.bottom, 8)
+    }
+
+    private func attributedAgentChip(_ agent: TerminalServiceAutomationAgentSummary) -> some View {
+        HStack(spacing: 5) {
+            StatusDot(kind: StatusDot.Kind(agentStatus: agent.status, live: agent.live))
+            Text(agent.title.flatMap { $0.isEmpty ? nil : $0 } ?? "Agent").font(.system(size: 11)).foregroundStyle(Theme.mutedSecondary).lineLimit(1)
+        }
     }
 }
 
@@ -153,6 +206,21 @@ extension StatusDot.Kind {
         case "succeeded": self = .done
         case "failed", "timed_out": self = .exited
         default: self = .idle
+        }
+    }
+
+    /// Maps an attributed agent's raw `AgentWindowStatus` to the dot's signal, reusing the exact vocabulary
+    /// the Agents tab uses for a workspace coding-agent row (`init(runState:activityState:)` in
+    /// `BandPrimitives.swift`): waiting/done/spinning map directly, exited always reads as exited, and idle
+    /// — meaning no agent row yet, including the detection-pending phase of a starting run — reads as
+    /// running while the terminal session is still live (a bare shell) and idle once it is not.
+    init(agentStatus status: String, live: Bool) {
+        switch status {
+        case "waiting": self = .waiting
+        case "done": self = .done
+        case "spinning": self = .running
+        case "exited": self = .exited
+        default: self = live ? .running : .idle
         }
     }
 }

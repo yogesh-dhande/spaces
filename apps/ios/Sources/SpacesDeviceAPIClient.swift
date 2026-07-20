@@ -274,6 +274,14 @@ struct SpacesDeviceAPIClient: Sendable {
             commandChannel: commandChannel)
     }
 
+    /// Ends a finished run's still-live attributed coding agents (the run itself has already reached a
+    /// terminal status; only its spawned coding-agent sessions are still up).
+    func endAutomationAgents(runID: String, commandChannel: SpacesDeviceAPICommandChannel? = nil) async throws -> SpacesDeviceAPIResponse {
+        try await mutation(
+            .init(command: .endAutomationAgents(.init(runID: runID)), authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity),
+            commandChannel: commandChannel)
+    }
+
     func fetchState(sessionID: String, timeout: Duration = .seconds(3), commandChannel: SpacesDeviceAPICommandChannel? = nil) async throws
         -> GhosttyRemoteSessionStatePayload
     {

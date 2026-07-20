@@ -628,6 +628,19 @@ private enum SpacesMobileMutationTimeoutRecovery {
         } catch { handleBridgeError(error) }
     }
 
+    /// Ends a finished run's still-live attributed coding agents. There is no optimistic local merge,
+    /// mirroring `cancelAutomationRun`: the run row's agent chips reflect the outcome once the refreshed
+    /// overview lands.
+    func endAutomationAgents(runID: String) async {
+        guard !isMutating else { return }
+        isMutating = true
+        defer { isMutating = false }
+        do {
+            _ = try await bridgeClient.endAutomationAgents(runID: runID, commandChannel: commandChannel)
+            await refresh()
+        } catch { handleBridgeError(error) }
+    }
+
     func toggleWorkspaceCollapsed(_ workspaceID: String) {
         if collapsedWorkspaceIDs.contains(workspaceID) {
             collapsedWorkspaceIDs.remove(workspaceID)

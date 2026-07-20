@@ -1,4 +1,5 @@
 import Foundation
+import spacesdevicecore
 import spacesterminalcore
 
 /// One row for the iOS Automations list: an automation plus its most recent run's status (for the
@@ -76,6 +77,41 @@ enum SpacesMobileAutomations {
     static func triggerSummary(_ automation: TerminalServiceAutomationSummary) -> String {
         guard automation.triggerKind == "cron" else { return "Manual" }
         return automation.cronExpression.map { "Cron: \($0)" } ?? "Cron"
+    }
+
+    /// The one-line excerpt shown under an automation's name: an `agent`-kind automation's prompt (first
+    /// non-empty line), a `script`-kind automation's script (first non-empty line). Empty when there is
+    /// nothing to show. Mirrors `AutomationsViewModel.excerpt` on the Mac — the row shows no type icon or
+    /// label, so this excerpt (plus the name) is how a user tells an agent automation from a script one.
+    static func excerpt(_ automation: TerminalServiceAutomationSummary) -> String {
+        let source = automation.kind == "agent" ? (automation.agentPrompt ?? "") : automation.script
+        return firstNonEmptyLine(source)
+    }
+
+    private static func firstNonEmptyLine(_ text: String) -> String {
+        for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if !trimmed.isEmpty { return trimmed }
+        }
+        return ""
+    }
+
+    /// The display name of an `agent`-kind automation's target workspace, resolved from the overview
+    /// already on hand — nil if the automation has no workspace (a `script`-kind automation) or the
+    /// workspace is not in the current overview (e.g. archived/hidden and filtered out upstream). Never
+    /// triggers a separate fetch; a workspace that cannot be resolved this way is simply omitted.
+    static func workspaceName(for automation: TerminalServiceAutomationSummary, in workspaces: [SpacesDeviceWorkspaceSummary]) -> String? {
+        guard let workspaceID = automation.workspaceID else { return nil }
+        return workspaces.first(where: { $0.id == workspaceID })?.displayName
+    }
+
+    /// Whether a run's still-live attributed coding agents should offer "End agents": only once the run
+    /// itself has reached a terminal status (`running`/`queued` keep their Cancel affordance instead), and
+    /// only if at least one attributed agent's terminal session is still live. Mirrors
+    /// `AutomationsViewModel.endAgentsAvailable` on the Mac.
+    static func endAgentsAvailable(_ run: TerminalServiceAutomationRunSummary) -> Bool {
+        guard run.status != "running", run.status != "queued" else { return false }
+        return run.attributedAgents.contains { $0.live }
     }
 
     /// "next in 5 min" for an enabled cron automation with a next fire time, else nil — a manual or

@@ -136,6 +136,77 @@
             XCTAssertEqual(StatusDot.Kind(automationRunStatus: nil), .idle)
         }
 
+        // MARK: - SpacesMobileAutomations.excerpt
+
+        func testExcerptPicksPromptForAgentKindAndScriptForScriptKind() {
+            let agentAutomation = makeAutomation(kind: "agent", script: "", agentPrompt: "\n  Fix the flaky test \n\nMore detail")
+            let scriptAutomation = makeAutomation(kind: "script", script: "\n  echo hello \nmore lines")
+
+            XCTAssertEqual(SpacesMobileAutomations.excerpt(agentAutomation), "Fix the flaky test")
+            XCTAssertEqual(SpacesMobileAutomations.excerpt(scriptAutomation), "echo hello")
+        }
+
+        func testExcerptEmptyWhenSourceHasNoContent() {
+            XCTAssertEqual(SpacesMobileAutomations.excerpt(makeAutomation(kind: "agent", script: "", agentPrompt: nil)), "")
+            XCTAssertEqual(SpacesMobileAutomations.excerpt(makeAutomation(kind: "script", script: "")), "")
+        }
+
+        // MARK: - SpacesMobileAutomations.workspaceName
+
+        func testWorkspaceNameResolvesFromOverviewOrOmits() {
+            let workspaces = [makeWorkspace(id: "workspace-1", branch: "feature/x")]
+            let agentAutomation = makeAutomation(kind: "agent", workspaceID: "workspace-1")
+            let unresolvableAutomation = makeAutomation(kind: "agent", workspaceID: "workspace-missing")
+            let scriptAutomation = makeAutomation(kind: "script", workspaceID: nil)
+
+            XCTAssertEqual(SpacesMobileAutomations.workspaceName(for: agentAutomation, in: workspaces), "feature/x")
+            XCTAssertNil(SpacesMobileAutomations.workspaceName(for: unresolvableAutomation, in: workspaces))
+            XCTAssertNil(SpacesMobileAutomations.workspaceName(for: scriptAutomation, in: workspaces))
+        }
+
+        // MARK: - SpacesMobileAutomations.endAgentsAvailable
+
+        func testEndAgentsAvailableRequiresTerminalStatusAndLiveAgent() {
+            let liveAgent = makeAgentSummary(terminalSessionID: "agent-1", live: true)
+            let settledAgent = makeAgentSummary(terminalSessionID: "agent-2", live: false)
+
+            XCTAssertTrue(SpacesMobileAutomations.endAgentsAvailable(makeRun(id: "r", automationID: "a", status: "succeeded", attributedAgents: [liveAgent])))
+            XCTAssertFalse(
+                SpacesMobileAutomations.endAgentsAvailable(makeRun(id: "r", automationID: "a", status: "succeeded", attributedAgents: [settledAgent])))
+            XCTAssertFalse(
+                SpacesMobileAutomations.endAgentsAvailable(makeRun(id: "r", automationID: "a", status: "running", attributedAgents: [liveAgent])))
+            XCTAssertFalse(
+                SpacesMobileAutomations.endAgentsAvailable(makeRun(id: "r", automationID: "a", status: "queued", attributedAgents: [liveAgent])))
+            XCTAssertFalse(SpacesMobileAutomations.endAgentsAvailable(makeRun(id: "r", automationID: "a", status: "failed", attributedAgents: [])))
+        }
+
+        // MARK: - StatusDot.Kind(agentStatus:live:)
+
+        func testAgentStatusDotKindMapsAgentWindowStatusToDotSignal() {
+            XCTAssertEqual(StatusDot.Kind(agentStatus: "waiting", live: true), .waiting)
+            XCTAssertEqual(StatusDot.Kind(agentStatus: "done", live: true), .done)
+            XCTAssertEqual(StatusDot.Kind(agentStatus: "spinning", live: true), .running)
+            XCTAssertEqual(StatusDot.Kind(agentStatus: "exited", live: true), .exited)
+            XCTAssertEqual(StatusDot.Kind(agentStatus: "exited", live: false), .exited)
+            // Idle means no agent row yet (including the detection-pending phase of a starting run): a
+            // still-live bare terminal reads as running, a settled one reads as idle.
+            XCTAssertEqual(StatusDot.Kind(agentStatus: "idle", live: true), .running)
+            XCTAssertEqual(StatusDot.Kind(agentStatus: "idle", live: false), .idle)
+        }
+
+        // MARK: - Attributed agents decode
+
+        func testRunSummaryCarriesAttributedAgents() {
+            let agent = makeAgentSummary(terminalSessionID: "agent-1", status: "spinning", live: true, title: "Fix flaky test", workspaceID: "workspace-1")
+            let run = makeRun(id: "r", automationID: "a", status: "running", attributedAgents: [agent])
+
+            XCTAssertEqual(run.attributedAgents.count, 1)
+            XCTAssertEqual(run.attributedAgents.first?.terminalSessionID, "agent-1")
+            XCTAssertEqual(run.attributedAgents.first?.status, "spinning")
+            XCTAssertEqual(run.attributedAgents.first?.title, "Fix flaky test")
+            XCTAssertEqual(run.attributedAgents.first?.workspaceID, "workspace-1")
+        }
+
         // MARK: - SpacesMobileAutomationAlerts
 
         func testAlertEntriesOnlyIncludeFailedAndTimedOutNewestFirst() {
@@ -264,6 +335,34 @@
             XCTAssertNil(model.errorMessage)
         }
 
+        func testEndAutomationAgentsSendsEndAgentsThenReloadsOverview() async {
+            let recorder = SpacesMobileAutomationsRequestRecorder()
+            let settings = SpacesMobileConnectionSettings()
+            let settledAgent = makeAgentSummary(terminalSessionID: "agent-1", status: "exited", live: false)
+            let endedRun = makeRun(id: "run-1", automationID: "automation-a", status: "succeeded", attributedAgents: [settledAgent])
+            let refreshedOverview = makeOverview(automations: [makeAutomation(id: "automation-a", name: "Deploy")], automationRuns: [endedRun])
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                if request.commandName == "endAutomationAgents" {
+                    return SpacesDeviceAPIResponse(ok: true, message: "Ended automation agents.", result: .automationRuns(.init(rows: [endedRun])))
+                }
+                return SpacesDeviceAPIResponse(ok: true, message: "loaded", result: .overview(refreshedOverview))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+
+            await model.endAutomationAgents(runID: "run-1")
+
+            let requests = await recorder.snapshot()
+            XCTAssertEqual(requests.map(\.commandName), ["endAutomationAgents", "overview"])
+            guard case .endAutomationAgents(let payload)? = requests.first?.command else {
+                XCTFail("Expected endAutomationAgents request.")
+                return
+            }
+            XCTAssertEqual(payload.runID, "run-1")
+            XCTAssertFalse(model.isMutating)
+            XCTAssertNil(model.errorMessage)
+        }
+
         // MARK: - Fixtures
 
         private func makeModel() -> SpacesMobileAppModel {
@@ -282,24 +381,39 @@
                     protocolVersion: SpacesWireProtocol.version), automations: automations, automationRuns: automationRuns)
         }
 
+        private func makeWorkspace(id: String, branch: String?) -> SpacesDeviceWorkspaceSummary {
+            SpacesDeviceWorkspaceSummary(
+                id: id, projectID: "project-1", projectName: "Project", branch: branch, baseBranch: nil, dir: "/tmp/\(id)", isRunning: false,
+                isArchived: false, isHidden: false, isDefault: false, sessionCount: 0)
+        }
+
+        private func makeAgentSummary(
+            terminalSessionID: String, status: String = "idle", live: Bool = true, title: String? = "Agent", workspaceID: String? = "workspace-1"
+        ) -> TerminalServiceAutomationAgentSummary {
+            TerminalServiceAutomationAgentSummary(terminalSessionID: terminalSessionID, status: status, live: live, title: title, workspaceID: workspaceID)
+        }
+
         private func makeAutomation(
             id: String = "automation-a", name: String = "Automation", enabled: Bool = true, triggerKind: String = "manual",
-            cronExpression: String? = nil, nextFireTime: String? = nil
+            cronExpression: String? = nil, kind: String = "script", script: String = "echo hi", agentPrompt: String? = nil,
+            workspaceID: String? = nil, nextFireTime: String? = nil
         ) -> TerminalServiceAutomationSummary {
             TerminalServiceAutomationSummary(
-                id: id, name: name, enabled: enabled, triggerKind: triggerKind, cronExpression: cronExpression, script: "echo hi",
+                id: id, name: name, enabled: enabled, triggerKind: triggerKind, cronExpression: cronExpression, kind: kind, script: script,
+                agentPrompt: agentPrompt, workspaceID: workspaceID,
                 workingDirectory: "/tmp", timeoutSeconds: nil, concurrencyPolicy: "skip", missedRunPolicy: "skip", nextFireTime: nextFireTime,
                 createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z")
         }
 
         private func makeRun(
             id: String, automationID: String, automationName: String? = nil, status: String = "queued", trigger: String = "manual",
-            exitCode: Int? = nil, startedAt: String? = "2026-01-01T00:00:00Z", endedAt: String? = nil, createdAt: String = "2026-01-01T00:00:00Z"
+            exitCode: Int? = nil, startedAt: String? = "2026-01-01T00:00:00Z", endedAt: String? = nil, createdAt: String = "2026-01-01T00:00:00Z",
+            attributedAgents: [TerminalServiceAutomationAgentSummary] = []
         ) -> TerminalServiceAutomationRunSummary {
             TerminalServiceAutomationRunSummary(
                 id: id, automationID: automationID, automationName: automationName, status: status, trigger: trigger, skipReason: nil,
                 exitCode: exitCode, terminalSessionID: nil, startedAt: startedAt, endedAt: endedAt, createdAt: createdAt,
-                liveAttributedSessionCount: 0)
+                liveAttributedSessionCount: attributedAgents.filter(\.live).count, attributedAgents: attributedAgents)
         }
     }
 #endif
