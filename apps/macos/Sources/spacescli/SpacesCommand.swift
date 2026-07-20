@@ -1002,10 +1002,14 @@ struct TerminalSendTextCommand: ParsableCommand {
 
     @Argument(help: "Terminal session ID.") var sessionID: String
     @Argument(help: "Text to send.") var text: String
-    @Flag(name: .long, help: "Append a newline after the text.") var newline = false
+    @Flag(
+        name: .long,
+        help:
+            "Submit the text: send it, then a separate, spaced Enter keystroke (carriage return) so every supported agent TUI (Claude Code, Codex, OpenCode) runs the line instead of leaving it as an unsubmitted paste."
+    ) var submit = false
     @Option(name: .long, help: "Paired device name or ID. Defaults to this machine's local sessions.") var device: String?
 
-    func run() throws { try sendTerminalInput(.text(text), sessionID: sessionID, appendNewline: newline, device: device) }
+    func run() throws { try sendTerminalInput(.text(text), sessionID: sessionID, appendNewline: submit, device: device) }
 }
 
 struct TerminalSendBytesCommand: ParsableCommand {

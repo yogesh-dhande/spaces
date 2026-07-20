@@ -1423,11 +1423,11 @@ spaces_demo_send_secondary() {
 }
 
 spaces_demo_sendline() {
-  "\$SPACES_CLI" terminal send text "\$SPACES_DEMO_SESSION_ID" "\$1" --newline
+  "\$SPACES_CLI" terminal send text "\$SPACES_DEMO_SESSION_ID" "\$1" --submit
 }
 
 spaces_demo_sendline_secondary() {
-  "\$SPACES_CLI" terminal send text "\$SPACES_DEMO_SECONDARY_SESSION_ID" "\$1" --newline
+  "\$SPACES_CLI" terminal send text "\$SPACES_DEMO_SECONDARY_SESSION_ID" "\$1" --submit
 }
 
 spaces_demo_enter() {

@@ -78,6 +78,32 @@ final class GhosttyEmbeddedLocatorTests: XCTestCase {
         XCTAssertEqual(paths.resourcesDirectoryPath, resourcesRoot.path)
     }
 
+    /// A `spacesd` a client spawns on demand inherits the client's working directory, which need not be
+    /// the repo. Ghostty resources must still resolve from the branch-local `.local/ghosttykit` tree by
+    /// anchoring the dev-tree search to the daemon binary's own location rather than the cwd (issue #188).
+    func testResolveFindsBranchLocalGhosttykitFromExecutableWhenCwdIsUnrelated() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let packageDir = root.appendingPathComponent("apps/macos", isDirectory: true)
+        let resourcesRoot = packageDir.appendingPathComponent(".local/ghosttykit/Resources/ghostty", isDirectory: true)
+        let daemonURL = packageDir.appendingPathComponent(".build/arm64-apple-macosx/debug/spacesd")
+        try FileManager.default.createDirectory(at: resourcesRoot, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: daemonURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: daemonURL.path, contents: Data())
+
+        // A cwd that resolves nothing on its own, proving the executable anchor carries resolution.
+        let unrelatedCwd = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: unrelatedCwd, withIntermediateDirectories: true)
+
+        let availability = GhosttyEmbeddedLocator.resolve(
+            environment: [:], currentDirectoryPath: unrelatedCwd.path, bundleResourcesURL: nil, executableURL: daemonURL)
+        guard case .available(let paths) = availability else {
+            XCTFail("Expected Ghostty resources resolved from the daemon executable location")
+            return
+        }
+
+        XCTAssertEqual(paths.resourcesDirectoryPath, resourcesRoot.path)
+    }
+
     func testResolveReportsHelpfulReasonWhenResourcesMissing() {
         let availability = GhosttyEmbeddedLocator.resolve(
             environment: [:], currentDirectoryPath: "/tmp/spaces-terminal", bundleResourcesURL: nil, executableURL: nil)

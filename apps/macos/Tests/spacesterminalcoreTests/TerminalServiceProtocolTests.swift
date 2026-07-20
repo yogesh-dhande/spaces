@@ -308,6 +308,72 @@ final class TerminalServiceProtocolTests: XCTestCase {
         XCTAssertEqual(response, TerminalServiceResponse(ok: true, message: "pong"))
     }
 
+    func testPingIsAnsweredByLivenessResponderWithoutReachingHandleRequest() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let socketPath = root.appendingPathComponent("service.sock").path
+        let queue = DispatchQueue(label: "terminal-service-liveness-test")
+        let handleRequestCalled = LockedFlag()
+
+        // A handleRequest that would block for well beyond the ping timeout if a ping ever reached it,
+        // and records that it was called at all.
+        let server = TerminalServiceServer(
+            socketPath: socketPath, queue: queue, livenessResponder: { TerminalServiceResponse(ok: true, message: "pong", servicePID: 4242) }
+        ) { _ in
+            handleRequestCalled.set()
+            Thread.sleep(forTimeInterval: 5)
+            return TerminalServiceResponse(ok: false, message: "should not be used for ping")
+        }
+        try server.start()
+        defer { server.stop() }
+
+        let start = Date()
+        let response = try TerminalServiceClient.send(request: TerminalServiceRequest(command: .ping), socketPath: socketPath, timeout: 2)
+        let elapsed = Date().timeIntervalSince(start)
+
+        XCTAssertTrue(response.ok)
+        XCTAssertEqual(response.servicePID, 4242)
+        XCTAssertLessThan(elapsed, 1, "Liveness ping must not go through the blocking handleRequest path")
+        XCTAssertFalse(handleRequestCalled.value, "Ping must be served by the liveness responder, not handleRequest")
+    }
+
+    func testSlowRequestDoesNotBlockConcurrentPing() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let socketPath = root.appendingPathComponent("service.sock").path
+        let queue = DispatchQueue(label: "terminal-service-concurrency-test")
+
+        // handleRequest simulates a heavy `.create` holding for longer than a client's ping timeout.
+        let server = TerminalServiceServer(
+            socketPath: socketPath, queue: queue, livenessResponder: { TerminalServiceResponse(ok: true, message: "pong", servicePID: 7) }
+        ) { _ in
+            Thread.sleep(forTimeInterval: 3)
+            return TerminalServiceResponse(ok: true, message: "slow-done")
+        }
+        try server.start()
+        defer { server.stop() }
+
+        // Start a slow non-ping request that occupies a connection worker, without waiting for it.
+        let slowStarted = expectation(description: "slow request dispatched")
+        DispatchQueue.global().async {
+            slowStarted.fulfill()
+            _ = try? TerminalServiceClient.send(request: TerminalServiceRequest(command: .list), socketPath: socketPath, timeout: 10)
+        }
+        wait(for: [slowStarted], timeout: 2)
+        Thread.sleep(forTimeInterval: 0.3)  // let the slow request reach the server and occupy its worker
+
+        let start = Date()
+        let ping = try TerminalServiceClient.send(request: TerminalServiceRequest(command: .ping), socketPath: socketPath, timeout: 2)
+        let elapsed = Date().timeIntervalSince(start)
+
+        XCTAssertTrue(ping.ok)
+        XCTAssertLessThan(elapsed, 1.5, "A ping must not be head-of-line-blocked behind an in-flight slow request")
+    }
+
     func testRelaunchIfIdleLeavesBusyDaemonRunningWhenItRefuses() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -593,6 +659,24 @@ private func posixPermissions(at url: URL) throws -> Int {
         return -1
     }
     return value.intValue & 0o777
+}
+
+/// File-scope thread-safe flag usable from the `@Sendable` service-server handler on macOS and Linux.
+private final class LockedFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedValue = false
+
+    var value: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedValue
+    }
+
+    func set() {
+        lock.lock()
+        storedValue = true
+        lock.unlock()
+    }
 }
 
 /// File-scope thread-safe counter usable from the `@Sendable` service-server handler on macOS and Linux
