@@ -674,6 +674,16 @@ public enum SpacesDeviceClient {
             ?? []
     }
 
+    /// Ends the still-live coding-agent sessions attributed to a terminal automation run on a paired device,
+    /// returning the run (its status unchanged) as a one-element list. Used to reap an `agent`-kind run's
+    /// session that was left open after the agent signalled done.
+    @discardableResult public static func endAutomationAgents(
+        runID: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
+    ) throws -> [TerminalServiceAutomationRunSummary] {
+        try request(.init(command: .endAutomationAgents(.init(runID: runID))), device: device, clientApp: clientApp, profile: profile).automationRuns
+            ?? []
+    }
+
     /// Terminal sessions on a paired device, read from the overview (`spaces terminal list --device`).
     public static func terminalSessions(
         device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
@@ -789,7 +799,8 @@ public enum SpacesDeviceClient {
         case .createProject, .previewGitProject, .deleteProject, .importProject, .exportProject, .createWorkspace, .launchWorkspace, .stopWorkspace,
             .restartWorkspace, .archiveWorkspace, .runWorkspaceSetup, .openWorkspaceTerminal, .stopWorkspaceTerminal, .runWorkspaceProcess,
             .stopWorkspaceProcess, .restartWorkspaceProcess, .runCodingAgent, .stopCodingAgent, .restartCodingAgent, .installAgentHooks,
-            .spawnAgentSession, .killAgentSession, .createAutomation, .updateAutomation, .deleteAutomation, .triggerAutomation, .cancelAutomationRun:
+            .spawnAgentSession, .killAgentSession, .createAutomation, .updateAutomation, .deleteAutomation, .triggerAutomation, .cancelAutomationRun,
+            .endAutomationAgents:
             longRunningMutationTimeoutSeconds
         case .agentHooksStatus: agentHooksStatusRequestTimeoutSeconds
         case .terminalTranscript: terminalTranscriptRequestTimeoutSeconds

@@ -488,6 +488,7 @@ public enum TerminalServiceProfileCommand: Sendable, Equatable {
     case automationRunsList(TerminalServiceAutomationRunsListPayload)
     case automationTrigger(id: String)
     case automationRunCancel(runID: String)
+    case automationEndAgents(runID: String)
 }
 
 extension TerminalServiceProfileCommand: Codable {
@@ -516,6 +517,7 @@ extension TerminalServiceProfileCommand: Codable {
         case automationRunsList
         case automationTrigger
         case automationRunCancel
+        case automationEndAgents
     }
 
     public init(from decoder: any Decoder) throws {
@@ -556,6 +558,7 @@ extension TerminalServiceProfileCommand: Codable {
         case .automationRunsList: self = .automationRunsList(try container.decode(TerminalServiceAutomationRunsListPayload.self, forKey: key))
         case .automationTrigger: self = .automationTrigger(id: try container.decodeRequiredNonEmpty(forKey: key))
         case .automationRunCancel: self = .automationRunCancel(runID: try container.decodeRequiredNonEmpty(forKey: key))
+        case .automationEndAgents: self = .automationEndAgents(runID: try container.decodeRequiredNonEmpty(forKey: key))
         }
     }
 
@@ -587,6 +590,7 @@ extension TerminalServiceProfileCommand: Codable {
         case .automationRunsList(let payload): try container.encode(payload, forKey: .automationRunsList)
         case .automationTrigger(let id): try container.encode(id, forKey: .automationTrigger)
         case .automationRunCancel(let runID): try container.encode(runID, forKey: .automationRunCancel)
+        case .automationEndAgents(let runID): try container.encode(runID, forKey: .automationEndAgents)
         }
     }
 }

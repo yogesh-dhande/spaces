@@ -17,6 +17,10 @@
 #   d. timeout 2s on a long sleep -> timed_out.
 #   e. attribution stamp for the run's own workspace-less .automation session (see the note in part_e for
 #      why the spawned-agent sweep cycle needs a real provider and is covered by unit tests instead).
+#   f. agent-kind automation whose workspace does not resolve -> the launch fails cleanly (failed run), the
+#      run's attributed-agent list is empty, and end-agents on the terminal run is an accepted no-op (see the
+#      note in part_f for why the detect/deliver/done + End-agents lifecycle needs a real provider and lives
+#      in unit tests instead).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -229,6 +233,41 @@ part_e() {
   pass "scenario e: run's own .automation session is stamped with the run id (spawned-agent sweep covered by unit test)"
 }
 
+part_f() {
+  printf '\n=== Scenario f: agent-kind clean-failure + attributed agents + end-agents ===\n'
+  # The full agent-kind lifecycle — spawn a real coding agent, wait for foreground detection, deliver the
+  # seed prompt, observe `done`, then End-agents the left-open session — cannot run here without a real
+  # provider on PATH. A fake `claude` shell-script fixture passes the spawn command gate (which matches only
+  # the command string) but is NOT foreground-detected: the daemon's foreground classifier
+  # (TerminalForegroundProcessInspector) matches the live foreground process's executable/argv[0] basename,
+  # and a shebang script named `claude` runs as its interpreter (`/bin/bash <path>/claude`), so the detected
+  # executable is `bash`, never `claude`. That detect/deliver/done + End-agents cycle is covered by the
+  # workspacecore unit tests (AutomationServiceTests: prompt delivery, done completion, endAttributedAgents).
+  #
+  # Here we drive the agent-kind clean-failure path end to end: a supported command (`claude`, so the gate
+  # passes) targeting a workspace id that does not resolve, so the spawn fails and the run is recorded failed
+  # with no attributed session created. We then assert the run's attributed-agent list is empty and that
+  # end-agents on the (terminal) run is an accepted no-op that leaves the run failed.
+  create_automation --name "e2e-agent-failure" --kind agent --script "" --agent-command "claude" --agent-prompt "investigate" \
+    --workspace-id "nonexistent-workspace-e2e" --trigger manual --concurrency allow
+  trigger_run "$AUTOMATION_ID"
+  wait_run_status "$AUTOMATION_ID" "$RUN_ID" "failed" || fail "agent run with an unresolvable workspace did not fail"
+
+  # A clean launch failure creates no attributed session, so the run's attributed-agent list is empty.
+  local runs agent_count
+  runs="$("$SPACES_E2E" automation-runs --automation-id "$AUTOMATION_ID")"
+  agent_count="$(json_field "$runs" 'next((len(r["attributedAgents"]) for r in d if r["id"]=="'"$RUN_ID"'"), -1)')"
+  [[ "$agent_count" == "0" ]] || fail "expected 0 attributed agents on the failed run, got $agent_count"
+  pass "scenario f.1: agent-kind run with an unresolvable workspace failed with no attributed agents"
+
+  # End-agents on the terminal (failed) run is an accepted no-op: it succeeds and leaves the run failed.
+  "$SPACES_E2E" automation-end-agents --run-id "$RUN_ID" >/dev/null || fail "end-agents on a terminal run should succeed"
+  local status_after
+  status_after="$(run_status "$AUTOMATION_ID" "$RUN_ID")"
+  [[ "$status_after" == "failed" ]] || fail "end-agents changed the run status to '$status_after', expected failed"
+  pass "scenario f.2: end-agents on the terminal run is a no-op and leaves the run failed"
+}
+
 main() {
   require_binaries
   bind_worktree_profile
@@ -238,6 +277,7 @@ main() {
   part_c
   part_d
   part_e
+  part_f
   printf '\nAll automation e2e scenarios passed.\n'
 }
 

@@ -59,12 +59,46 @@ public struct TerminalServiceAutomationSummary: Codable, Sendable, Equatable, Id
     }
 }
 
+/// Client-facing wire summary of one coding agent a run is attributed with. An automation run's attributed
+/// agents are the terminal sessions stamped with the run id that carry a coding agent: an `agent`-kind run's
+/// own spawned agent session, plus any coding agent a `script`-kind run's command spawned. The run's own
+/// workspace-less `.automation` wrapper session (a `script`-kind run) is stamped too but is NOT an agent, so
+/// it never appears here.
+///
+/// `status` is the agent's raw `AgentWindowStatus` (idle/spinning/waiting/done/exited) once the agent has an
+/// orchestration row. A live, agent-launched session that has not produced a row yet — the detection /
+/// prompt-delivery phase of a running `agent`-kind run — is reported as `idle` (the row-less "no agent has
+/// started in this terminal yet" value) with `live == true`, rather than inventing a separate
+/// detection-pending status; the `live` flag distinguishes it from a settled idle agent for a client that
+/// needs to. `title` is the agent row's visible label (or the session's launch title before a row exists).
+public struct TerminalServiceAutomationAgentSummary: Codable, Sendable, Equatable {
+    /// The attributed terminal session id the coding agent runs in.
+    public let terminalSessionID: String
+    /// The agent's raw `AgentWindowStatus`, or `idle` for a live agent-launched session with no row yet.
+    public let status: String
+    /// Whether the agent's terminal session is currently live.
+    public let live: Bool
+    /// The agent's visible label (row label, or the session's launch title before a row exists).
+    public let title: String?
+    /// The workspace the agent runs in.
+    public let workspaceID: String?
+
+    public init(terminalSessionID: String, status: String, live: Bool, title: String?, workspaceID: String?) {
+        self.terminalSessionID = terminalSessionID
+        self.status = status
+        self.live = live
+        self.title = title
+        self.workspaceID = workspaceID
+    }
+}
+
 /// Client-facing wire summary of one automation execution attempt. Carries the identity a client needs to
 /// display run history and derive alert entries: the run's status, trigger origin, skip reason, exit code,
 /// its command terminal session, and its timestamps. `automationName` is denormalized in so a run-centric
 /// list (e.g. an alerts feed) can render without a second lookup. `liveAttributedSessionCount` is the
 /// number of terminal sessions stamped with this run that are currently live — non-zero only for a running
-/// or recently-ended run whose spawned coding-agent sessions have not been swept yet.
+/// or recently-ended run whose spawned coding-agent sessions have not been swept yet. `attributedAgents` is
+/// the per-agent breakdown of those attributed sessions that carry a coding agent, each with its own status.
 public struct TerminalServiceAutomationRunSummary: Codable, Sendable, Equatable, Identifiable {
     public let id: String
     public let automationID: String
@@ -78,10 +112,12 @@ public struct TerminalServiceAutomationRunSummary: Codable, Sendable, Equatable,
     public let endedAt: String?
     public let createdAt: String
     public let liveAttributedSessionCount: Int
+    public let attributedAgents: [TerminalServiceAutomationAgentSummary]
 
     public init(
         id: String, automationID: String, automationName: String?, status: String, trigger: String, skipReason: String?, exitCode: Int?,
-        terminalSessionID: String?, startedAt: String?, endedAt: String?, createdAt: String, liveAttributedSessionCount: Int
+        terminalSessionID: String?, startedAt: String?, endedAt: String?, createdAt: String, liveAttributedSessionCount: Int,
+        attributedAgents: [TerminalServiceAutomationAgentSummary] = []
     ) {
         self.id = id
         self.automationID = automationID
@@ -95,5 +131,6 @@ public struct TerminalServiceAutomationRunSummary: Codable, Sendable, Equatable,
         self.endedAt = endedAt
         self.createdAt = createdAt
         self.liveAttributedSessionCount = liveAttributedSessionCount
+        self.attributedAgents = attributedAgents
     }
 }

@@ -36,6 +36,7 @@ struct SpacesE2ECommand: ParsableCommand {
             ServiceTunnelCommand.self, RenderUpdateTextCommand.self, ScrollApplicationWindowCommand.self, TypeApplicationWindowCommand.self,
             DragApplicationWindowCommand.self, AutomationCreateCommand.self, AutomationUpdateCommand.self, AutomationDeleteCommand.self,
             AutomationListCommand.self, AutomationRunsCommand.self, AutomationTriggerCommand.self, AutomationCancelCommand.self,
+            AutomationEndAgentsCommand.self,
         ])
 }
 
@@ -1876,6 +1877,16 @@ private struct AutomationCancelCommand: ParsableCommand {
 
     func run() throws {
         try emitJSON(try sendAutomationProfileCommand(.automationRunCancel(runID: try required(runID, label: "run-id"))).automationRuns ?? [])
+    }
+}
+
+private struct AutomationEndAgentsCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "automation-end-agents")
+
+    @Option(name: .long) var runID: String
+
+    func run() throws {
+        try emitJSON(try sendAutomationProfileCommand(.automationEndAgents(runID: try required(runID, label: "run-id"))).automationRuns ?? [])
     }
 }
 

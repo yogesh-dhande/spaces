@@ -369,6 +369,119 @@ import spacesterminalcore
         XCTAssertEqual(try harness.store.automationRun(id: run.id)?.status, .succeeded)
     }
 
+    // MARK: - End attributed agents
+
+    /// End-agents over a terminal run reaps its still-live attributed agent session through the agent-kill
+    /// flow (the agent row is finalized and its subscriber told it exited), without touching the run row.
+    func testEndAttributedAgentsKillsLiveAgentOfTerminalRunAndKeepsRunStatus() throws {
+        let harness = try Harness(self)
+        let (_, workspace) = try harness.makeProjectAndWorkspace()
+        let automation = try harness.insertAgentAutomation(workspaceID: workspace.id)
+
+        // Drive an agent run to succeeded with its session deliberately left live (the done path).
+        let run = try XCTUnwrap(harness.service.triggerManually(automationID: automation.id))
+        let sessionID = try XCTUnwrap(harness.store.automationRun(id: run.id)?.terminalSessionID)
+        harness.host.markSessionForegroundDetected(sessionID: sessionID)
+        harness.service.tick()  // delivers prompt
+        let agent = try harness.registerAgentRow(workspaceID: workspace.id, sessionID: sessionID, status: .done)
+        harness.service.tick()  // observes done → succeeded, session left open
+        try harness.store.insertAgentSubscription(subscriberTerminalSessionID: "watcher", agentSessionID: agent.id, createdAt: "t")
+        XCTAssertEqual(try harness.store.automationRun(id: run.id)?.status, .succeeded)
+        XCTAssertTrue(harness.orchestrator.automationSessionIsLive(sessionID: sessionID))
+
+        let returned = try harness.service.endAttributedAgents(runID: run.id)
+
+        XCTAssertEqual(returned.status, .succeeded, "end-agents leaves the run's terminal status untouched")
+        XCTAssertFalse(harness.orchestrator.automationSessionIsLive(sessionID: sessionID), "the live attributed agent session is ended")
+        XCTAssertNil(try harness.store.agentWindow(id: agent.id), "the agent row is finalized through the kill flow")
+        XCTAssertTrue(
+            harness.host.delivered.contains { $0.sessionID == "watcher" && $0.line.contains("exited") }, "the subscriber is told the agent exited")
+    }
+
+    /// End-agents is a no-op for a terminal run with no live attributed sessions (all already swept/ended),
+    /// and still returns the unchanged run.
+    func testEndAttributedAgentsIsNoOpWhenNoLiveAgents() throws {
+        let harness = try Harness(self)
+        let (_, workspace) = try harness.makeProjectAndWorkspace()
+        let automation = try harness.insertAgentAutomation(workspaceID: workspace.id)
+        let run = try harness.insertRun(automationID: automation.id, status: .failed)
+        _ = try harness.writeAttributedAgentSession(workspaceID: workspace.id, runID: run.id, sessionID: UUID().uuidString, live: false)
+
+        let returned = try harness.service.endAttributedAgents(runID: run.id)
+        XCTAssertEqual(returned.status, .failed)
+    }
+
+    /// A running (non-terminal) run is rejected loudly: a live run is stopped with cancel, not end-agents.
+    func testEndAttributedAgentsErrorsOnRunningRun() throws {
+        let harness = try Harness(self)
+        let automation = try harness.insertAutomation(script: "sleep 60", concurrency: .allow)
+        let run = try XCTUnwrap(harness.service.triggerManually(automationID: automation.id))
+        XCTAssertEqual(run.status, .running)
+        XCTAssertThrowsError(try harness.service.endAttributedAgents(runID: run.id)) { error in
+            XCTAssertTrue(error is AutomationValidationError, "a running run cannot be end-agents'd")
+        }
+        // The run is still running (untouched); clean it up.
+        harness.service.cancelRun(runID: run.id)
+    }
+
+    // MARK: - Attributed-agent summaries
+
+    /// Attributed-agent summaries reflect the agent row's status and the session's liveness: a live agent
+    /// carries its row status with `live == true`, and a done agent whose session has ended (not yet swept)
+    /// carries its status with `live == false`.
+    func testAttributedAgentSummariesReflectStatusAndLiveness() throws {
+        let harness = try Harness(self)
+        let (_, workspace) = try harness.makeProjectAndWorkspace()
+        let automation = try harness.insertAgentAutomation(workspaceID: workspace.id)
+        let run = try harness.insertRun(automationID: automation.id, status: .succeeded)
+        let liveSessionID = UUID().uuidString
+        let endedSessionID = UUID().uuidString
+        _ = try harness.writeAttributedAgentSession(workspaceID: workspace.id, runID: run.id, sessionID: liveSessionID, live: true, status: .spinning)
+        _ = try harness.writeAttributedAgentSession(workspaceID: workspace.id, runID: run.id, sessionID: endedSessionID, live: false, status: .done)
+
+        let byRunID = try AutomationAttributedAgents.summariesByRunID(
+            runs: [run], store: harness.store, liveSessions: try TerminalSessionCatalog.listLiveSessions())
+        let agents = try XCTUnwrap(byRunID[run.id])
+        let live = try XCTUnwrap(agents.first { $0.terminalSessionID == liveSessionID })
+        XCTAssertEqual(live.status, "spinning")
+        XCTAssertTrue(live.live)
+        XCTAssertEqual(live.workspaceID, workspace.id)
+        let ended = try XCTUnwrap(agents.first { $0.terminalSessionID == endedSessionID })
+        XCTAssertEqual(ended.status, "done")
+        XCTAssertFalse(ended.live)
+    }
+
+    /// A live agent-launch session with no orchestration row yet — the detection / prompt-delivery phase —
+    /// reads as `idle` with `live == true` rather than being dropped.
+    func testAttributedAgentSummaryForDetectionPendingSessionReadsIdleLive() throws {
+        let harness = try Harness(self)
+        let (_, workspace) = try harness.makeProjectAndWorkspace()
+        let automation = try harness.insertAgentAutomation(workspaceID: workspace.id)
+        let run = try harness.insertRun(automationID: automation.id, status: .running)
+        let sessionID = UUID().uuidString
+        try harness.writeAttributedSessionFiles(workspaceID: workspace.id, runID: run.id, sessionID: sessionID, kind: .agent, live: true)
+
+        let byRunID = try AutomationAttributedAgents.summariesByRunID(
+            runs: [run], store: harness.store, liveSessions: try TerminalSessionCatalog.listLiveSessions())
+        let agent = try XCTUnwrap(byRunID[run.id]?.first { $0.terminalSessionID == sessionID })
+        XCTAssertEqual(agent.status, "idle")
+        XCTAssertTrue(agent.live)
+    }
+
+    /// A script run's own workspace-less `.automation` wrapper session is attributed but is not a coding
+    /// agent, so it never appears in the attributed-agent breakdown.
+    func testAttributedAgentSummariesExcludeNonAgentSessions() throws {
+        let harness = try Harness(self)
+        let automation = try harness.insertAutomation(concurrency: .allow)
+        let run = try harness.insertRun(automationID: automation.id, status: .running)
+        let sessionID = UUID().uuidString
+        try harness.writeAttributedSessionFiles(workspaceID: nil, runID: run.id, sessionID: sessionID, kind: .automation, live: true)
+
+        let byRunID = try AutomationAttributedAgents.summariesByRunID(
+            runs: [run], store: harness.store, liveSessions: try TerminalSessionCatalog.listLiveSessions())
+        XCTAssertEqual(byRunID[run.id], [], "the .automation wrapper session is not a coding agent")
+    }
+
     // MARK: - Timeout + cancel
 
     func testTimeoutKillsCommandAndRecordsTimedOut() throws {
@@ -478,24 +591,36 @@ import spacesterminalcore
         return (project, workspace)
     }
 
-    /// Writes an attributed coding-agent terminal session (workspace-scoped, stamped with the run id) plus
-    /// its agent row, modeling a `spaces agent spawn` a run's command performed. `live` controls whether the
-    /// runtime state reads as interactive with a live control socket.
-    @discardableResult func writeAttributedAgentSession(workspaceID: String, runID: String, sessionID: String, live: Bool) throws -> AgentWindowRecord {
+    /// Writes an attributed terminal session (workspace-scoped, stamped with the run id) to the store and to
+    /// disk, WITHOUT an agent row — the session the product creates for a spawned agent before it signals, or
+    /// a plain `.automation` wrapper session. `live` controls whether the runtime state reads as interactive
+    /// with a live control socket; `kind` distinguishes an agent-launch session from the run's own wrapper.
+    func writeAttributedSessionFiles(
+        workspaceID: String?, runID: String, sessionID: String, kind: TerminalSessionKind, live: Bool, title: String = "agent"
+    ) throws {
         let paths = try TerminalSessionPaths.forSession(id: sessionID)
         try paths.ensureDirectories()
         try TerminalSessionPersistence.writeLaunchConfiguration(
             TerminalSessionLaunchConfiguration(
-                sessionID: sessionID, backend: .ghosttyEmbedded, title: "agent", workingDirectory: "/tmp", shell: "/bin/zsh", command: nil,
-                createdAt: "2026-06-06T00:00:00Z", workspaceID: workspaceID, kind: .agent, automationRunID: runID), paths: paths)
+                sessionID: sessionID, backend: .ghosttyEmbedded, title: title, workingDirectory: "/tmp", shell: "/bin/zsh", command: nil,
+                createdAt: "2026-06-06T00:00:00Z", workspaceID: workspaceID, kind: kind, automationRunID: runID), paths: paths)
         FileManager.default.createFile(atPath: paths.outputPath, contents: Data("agent transcript\n".utf8))
         try TerminalSessionPersistence.writeRuntimeState(
             TerminalSessionRuntimeState(
                 sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: live ? getpid() : 1, childPID: nil, state: live ? .running : .exited,
-                updatedAt: "2026-06-06T00:00:01Z", exitedAt: live ? nil : "2026-06-06T00:00:01Z", title: "agent", workingDirectory: "/tmp"), paths: paths)
+                updatedAt: "2026-06-06T00:00:01Z", exitedAt: live ? nil : "2026-06-06T00:00:01Z", title: title, workingDirectory: "/tmp"), paths: paths)
         if live { FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data()) }
+    }
+
+    /// Writes an attributed coding-agent terminal session (workspace-scoped, stamped with the run id) plus
+    /// its agent row, modeling a `spaces agent spawn` a run's command performed. `live` controls whether the
+    /// runtime state reads as interactive with a live control socket; `status` is the agent row's status.
+    @discardableResult func writeAttributedAgentSession(
+        workspaceID: String, runID: String, sessionID: String, live: Bool, status: AgentWindowStatus = .spinning
+    ) throws -> AgentWindowRecord {
+        try writeAttributedSessionFiles(workspaceID: workspaceID, runID: runID, sessionID: sessionID, kind: .agent, live: live)
         return try orchestrator.registerAgentWindow(
-            workspaceID: workspaceID, provider: .spaces, label: "Codex CLI", terminalTrackingID: sessionID, status: .spinning)
+            workspaceID: workspaceID, provider: .spaces, label: "Codex CLI", terminalTrackingID: sessionID, status: status)
     }
 
     /// Drives `tick()` until a run reaches a terminal status, waiting for the fake host's background waiter

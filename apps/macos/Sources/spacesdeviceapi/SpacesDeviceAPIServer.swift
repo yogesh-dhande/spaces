@@ -1236,6 +1236,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         case .listAutomationRuns(let payload): return try handleListAutomationRunsRequest(payload, context: context)
         case .triggerAutomation(let payload): return try handleTriggerAutomationRequest(payload, context: context)
         case .cancelAutomationRun(let payload): return try handleCancelAutomationRunRequest(payload, context: context)
+        case .endAutomationAgents(let payload): return try handleEndAutomationAgentsRequest(payload, context: context)
         }
     }
 
@@ -1712,11 +1713,13 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         let ordered = SpacesDeviceOverviewBuilder.selectOverviewRuns(
             recentTerminal: try store.allAutomationRuns(limit: SpacesDeviceOverviewBuilder.recentAutomationRunLimit),
             active: try store.activeAutomationRuns())
+        let attributedAgentsByRunID = try AutomationAttributedAgents.summariesByRunID(runs: ordered, store: store, liveSessions: liveSessions)
         let runSummaries = try ordered.map { run -> TerminalServiceAutomationRunSummary in
             let attributed = (try? store.terminalSessionIDs(automationRunID: run.id)) ?? []
             let liveCount = attributed.filter { liveSessionIDs.contains($0) }.count
             return TerminalServiceAutomationRunSummary(
-                run, automationName: namesByAutomationID[run.automationID], liveAttributedSessionCount: liveCount)
+                run, automationName: namesByAutomationID[run.automationID], liveAttributedSessionCount: liveCount,
+                attributedAgents: attributedAgentsByRunID[run.id] ?? [])
         }
         return (automationSummaries, runSummaries)
     }
@@ -2408,6 +2411,14 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         return try automationRunsResponse([run], context: context, message: "Canceled automation run.")
     }
 
+    private func handleEndAutomationAgentsRequest(_ payload: SpacesDeviceAutomationRunReference, context: RequestContext) throws
+        -> SpacesDeviceAPIResponse
+    {
+        guard let automationOperations else { return automationsUnavailableResponse() }
+        let run = try automationOperations.endAgents(payload.runID)
+        return try automationRunsResponse([run], context: context, message: "Ended automation run agents.")
+    }
+
     private func automationsUnavailableResponse() -> SpacesDeviceAPIResponse {
         SpacesDeviceAPIResponse(ok: false, message: "Automations are unavailable on this daemon.", errorCode: .internalError)
     }
@@ -2449,7 +2460,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     /// attributed sessions against the daemon's current live-session set.
     private func automationRunSummaries(_ runs: [AutomationRun], store: SQLiteStore) throws -> [TerminalServiceAutomationRunSummary] {
         guard !runs.isEmpty else { return [] }
-        let liveSessionIDs = Set((try? TerminalSessionCatalog.listLiveSessions())?.map(\.sessionID) ?? [])
+        let liveSessions = (try? TerminalSessionCatalog.listLiveSessions()) ?? []
+        let liveSessionIDs = Set(liveSessions.map(\.sessionID))
+        let attributedAgentsByRunID = try AutomationAttributedAgents.summariesByRunID(runs: runs, store: store, liveSessions: liveSessions)
         var namesByAutomationID: [String: String] = [:]
         return try runs.map { run in
             let name: String?
@@ -2462,7 +2475,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             }
             let attributed = (try? store.terminalSessionIDs(automationRunID: run.id)) ?? []
             let liveCount = attributed.filter { liveSessionIDs.contains($0) }.count
-            return TerminalServiceAutomationRunSummary(run, automationName: name, liveAttributedSessionCount: liveCount)
+            return TerminalServiceAutomationRunSummary(
+                run, automationName: name, liveAttributedSessionCount: liveCount, attributedAgents: attributedAgentsByRunID[run.id] ?? [])
         }
     }
 

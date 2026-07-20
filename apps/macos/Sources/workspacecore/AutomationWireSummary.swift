@@ -22,13 +22,71 @@ extension TerminalServiceAutomationSummary {
 extension TerminalServiceAutomationRunSummary {
     /// `automationName` is denormalized in by the caller (from the run's automation lookup, when it still
     /// exists); `liveAttributedSessionCount` is the number of the run's stamped terminal sessions currently
-    /// live, which the caller computes from the live-session set.
-    public init(_ run: AutomationRun, automationName: String?, liveAttributedSessionCount: Int) {
+    /// live, which the caller computes from the live-session set; `attributedAgents` is the run's coding-agent
+    /// breakdown, which the caller builds once for the whole listing (see `AutomationAttributedAgents`).
+    public init(
+        _ run: AutomationRun, automationName: String?, liveAttributedSessionCount: Int,
+        attributedAgents: [TerminalServiceAutomationAgentSummary] = []
+    ) {
         self.init(
             id: run.id, automationID: run.automationID, automationName: automationName, status: run.status.rawValue, trigger: run.trigger.rawValue,
             skipReason: run.skipReason?.rawValue, exitCode: run.exitCode, terminalSessionID: run.terminalSessionID,
             startedAt: run.startedAt.map(TerminalSessionTimestamp.string(from:)),
             endedAt: run.endedAt.map(TerminalSessionTimestamp.string(from:)),
-            createdAt: TerminalSessionTimestamp.string(from: run.createdAt), liveAttributedSessionCount: liveAttributedSessionCount)
+            createdAt: TerminalSessionTimestamp.string(from: run.createdAt), liveAttributedSessionCount: liveAttributedSessionCount,
+            attributedAgents: attributedAgents)
+    }
+}
+
+/// Builds the coding-agent breakdown attached to each automation run summary. Living in `workspacecore` (the
+/// one module that sees the domain store, the orchestration agent rows, and the wire summaries) keeps this
+/// mapping identical across every transport — the profile runs listing, the Device API runs listing, and the
+/// device overview all call it, so a run's attributed agents read the same everywhere.
+public enum AutomationAttributedAgents {
+    /// The attributed-agent summaries for each of `runs`, keyed by run id. An attributed terminal session is
+    /// surfaced as a coding agent when EITHER it has an orchestration agent row (the agent has signalled or
+    /// been foreground-detected), OR it is a still-live agent-launch-kind session that has not produced a row
+    /// yet (an `agent`-kind run mid detection / prompt delivery). A session with no row that is not a live
+    /// agent-launch — the run's own `.automation` wrapper session, or an already-ended agent session pending
+    /// the sweep — is not an agent and is omitted.
+    ///
+    /// The agent rows are batch-fetched once (across every workspace, keyed by the terminal tracking id each
+    /// attributed agent binds to) rather than queried per attributed session in a loop; liveness and the
+    /// row-less launch kind/title/workspace come from the caller's already-loaded live-session catalog.
+    public static func summariesByRunID(runs: [AutomationRun], store: SQLiteStore, liveSessions: [TerminalSessionCatalogEntry]) throws -> [String:
+        [TerminalServiceAutomationAgentSummary]]
+    {
+        guard !runs.isEmpty else { return [:] }
+        let liveSessionsByID = Dictionary(liveSessions.map { ($0.sessionID, $0) }, uniquingKeysWith: { first, _ in first })
+        var agentRowsByTrackingID: [String: AgentWindowRecord] = [:]
+        for (_, agents) in try store.agentWindowsByWorkspace() {
+            for agent in agents where agent.provider == .spaces {
+                if let trackingID = agent.terminalTrackingID { agentRowsByTrackingID[trackingID] = agent }
+            }
+        }
+
+        var summariesByRunID: [String: [TerminalServiceAutomationAgentSummary]] = [:]
+        for run in runs {
+            let sessionIDs = (try? store.terminalSessionIDs(automationRunID: run.id)) ?? []
+            var agents: [TerminalServiceAutomationAgentSummary] = []
+            for sessionID in sessionIDs {
+                let live = liveSessionsByID[sessionID] != nil
+                if let agentRow = agentRowsByTrackingID[sessionID] {
+                    agents.append(
+                        TerminalServiceAutomationAgentSummary(
+                            terminalSessionID: sessionID, status: agentRow.status.rawValue, live: live, title: agentRow.label,
+                            workspaceID: agentRow.workspaceID))
+                } else if let entry = liveSessionsByID[sessionID], entry.kind == .agent {
+                    // Detection / prompt-delivery phase: a live agent-launch-kind session with no row yet.
+                    // Reported as the row-less `idle` value with live == true rather than a separate status.
+                    agents.append(
+                        TerminalServiceAutomationAgentSummary(
+                            terminalSessionID: sessionID, status: AgentWindowStatus.idle.rawValue, live: true, title: entry.effectiveTitle,
+                            workspaceID: entry.workspaceID))
+                }
+            }
+            summariesByRunID[run.id] = agents
+        }
+        return summariesByRunID
     }
 }

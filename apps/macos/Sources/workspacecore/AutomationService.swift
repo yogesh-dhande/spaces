@@ -187,6 +187,27 @@ import spacesterminalcore
         return try requireAutomationRun(id: runID)
     }
 
+    /// Ends every still-live coding-agent session attributed to a TERMINAL run, returning the run row
+    /// unchanged. This reaps the agent sessions a finished run left running — an `agent`-kind run whose agent
+    /// signalled `done` (succeeded) deliberately leaves its session open, and this is how a client stops it
+    /// on demand. The run's status, exit code, and timestamps are left untouched: end-agents cleans up
+    /// lingering sessions, it does not re-finalize the run. A non-terminal (queued/running) run is rejected
+    /// loudly — a live run is stopped with cancel, not end-agents. Each live attributed session is torn down
+    /// through the exact seams cancel's agent teardown uses: capture the transcript, then the agent-kill flow
+    /// (which finalizes the agent row and notifies subscribers), falling back to a plain session termination
+    /// for a not-yet-signalled `.agent` session with no row.
+    public func endAttributedAgents(runID: String) throws -> AutomationRun {
+        let run = try requireAutomationRun(id: runID)
+        guard run.status.isTerminal else {
+            throw AutomationValidationError("Cannot end agents for automation run \(runID): it is still \(run.status.rawValue). Cancel it instead.")
+        }
+        for sessionID in try store.terminalSessionIDs(automationRunID: run.id) where orchestrator.automationSessionIsLive(sessionID: sessionID) {
+            try captureAttributedTranscript(runID: run.id, sessionID: sessionID)
+            if try !orchestrator.killAgentSession(terminalSessionID: sessionID) { orchestrator.automationTerminateSession(sessionID: sessionID) }
+        }
+        return try requireAutomationRun(id: runID)
+    }
+
     /// Deletes an automation (cancelling any running run and cleaning up its artifacts and attributed
     /// sessions). Throws when the automation does not exist.
     public func deleteAutomationCommand(id: String) throws {

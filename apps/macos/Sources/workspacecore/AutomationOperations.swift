@@ -14,12 +14,14 @@ public struct AutomationOperations: Sendable {
     public let runs: @Sendable (_ automationID: String?) throws -> [AutomationRun]
     public let trigger: @Sendable (_ id: String) throws -> AutomationRun
     public let cancelRun: @Sendable (_ runID: String) throws -> AutomationRun
+    public let endAgents: @Sendable (_ runID: String) throws -> AutomationRun
 
     public init(
         create: @escaping @Sendable (AutomationDraft) throws -> Automation,
         update: @escaping @Sendable (String, AutomationDraft) throws -> Automation, delete: @escaping @Sendable (String) throws -> Void,
         list: @escaping @Sendable () throws -> [Automation], runs: @escaping @Sendable (String?) throws -> [AutomationRun],
-        trigger: @escaping @Sendable (String) throws -> AutomationRun, cancelRun: @escaping @Sendable (String) throws -> AutomationRun
+        trigger: @escaping @Sendable (String) throws -> AutomationRun, cancelRun: @escaping @Sendable (String) throws -> AutomationRun,
+        endAgents: @escaping @Sendable (String) throws -> AutomationRun
     ) {
         self.create = create
         self.update = update
@@ -28,5 +30,6 @@ public struct AutomationOperations: Sendable {
         self.runs = runs
         self.trigger = trigger
         self.cancelRun = cancelRun
+        self.endAgents = endAgents
     }
 }

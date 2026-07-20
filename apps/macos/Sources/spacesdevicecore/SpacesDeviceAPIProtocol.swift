@@ -1490,6 +1490,9 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
     case listAutomationRuns(TerminalServiceAutomationRunsListPayload)
     case triggerAutomation(SpacesDeviceAutomationReference)
     case cancelAutomationRun(SpacesDeviceAutomationRunReference)
+    /// Ends the still-live coding-agent sessions attributed to a terminal automation run. The remote
+    /// counterpart of the profile-socket `automationEndAgents` command; leaves the run status untouched.
+    case endAutomationAgents(SpacesDeviceAutomationRunReference)
 
     public var name: String {
         switch self {
@@ -1548,6 +1551,7 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
         case .listAutomationRuns: "listAutomationRuns"
         case .triggerAutomation: "triggerAutomation"
         case .cancelAutomationRun: "cancelAutomationRun"
+        case .endAutomationAgents: "endAutomationAgents"
         }
     }
 
@@ -1675,6 +1679,7 @@ extension SpacesDeviceAPICommand: Codable {
         case listAutomationRuns
         case triggerAutomation
         case cancelAutomationRun
+        case endAutomationAgents
     }
 
     public init(from decoder: any Decoder) throws {
@@ -1756,6 +1761,7 @@ extension SpacesDeviceAPICommand: Codable {
         case .listAutomationRuns: self = .listAutomationRuns(try container.decode(TerminalServiceAutomationRunsListPayload.self, forKey: key))
         case .triggerAutomation: self = .triggerAutomation(try container.decode(SpacesDeviceAutomationReference.self, forKey: key))
         case .cancelAutomationRun: self = .cancelAutomationRun(try container.decode(SpacesDeviceAutomationRunReference.self, forKey: key))
+        case .endAutomationAgents: self = .endAutomationAgents(try container.decode(SpacesDeviceAutomationRunReference.self, forKey: key))
         }
     }
 
@@ -1817,6 +1823,7 @@ extension SpacesDeviceAPICommand: Codable {
         case .listAutomationRuns(let payload): try container.encode(payload, forKey: .listAutomationRuns)
         case .triggerAutomation(let payload): try container.encode(payload, forKey: .triggerAutomation)
         case .cancelAutomationRun(let payload): try container.encode(payload, forKey: .cancelAutomationRun)
+        case .endAutomationAgents(let payload): try container.encode(payload, forKey: .endAutomationAgents)
         }
     }
 }

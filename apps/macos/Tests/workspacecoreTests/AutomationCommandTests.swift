@@ -256,4 +256,24 @@ import spacesterminalcore
             startedAt: Date(timeIntervalSince1970: 200), endedAt: Date(timeIntervalSince1970: 260), createdAt: Date(timeIntervalSince1970: 199))
         XCTAssertEqual(TerminalServiceAutomationRunSummary(timedOut, automationName: "Deploy", liveAttributedSessionCount: 1).status, "timed_out")
     }
+
+    /// A run summary carrying attributed agents survives a JSON encode/decode round-trip unchanged — the
+    /// contract every transport (profile response, Device API result, device overview) relies on.
+    func testRunSummaryAttributedAgentsRoundTripThroughJSON() throws {
+        let run = AutomationRun(
+            id: "run-1", automationID: "auto-1", status: .succeeded, skipReason: nil, trigger: .manual, exitCode: nil,
+            terminalSessionID: "session-1", startedAt: Date(timeIntervalSince1970: 100), endedAt: Date(timeIntervalSince1970: 105),
+            createdAt: Date(timeIntervalSince1970: 99))
+        let agents = [
+            TerminalServiceAutomationAgentSummary(
+                terminalSessionID: "session-1", status: "done", live: true, title: "Reviewer", workspaceID: "ws-1"),
+            TerminalServiceAutomationAgentSummary(
+                terminalSessionID: "session-2", status: "idle", live: true, title: nil, workspaceID: "ws-1"),
+        ]
+        let summary = TerminalServiceAutomationRunSummary(
+            run, automationName: "Deploy", liveAttributedSessionCount: 2, attributedAgents: agents)
+        let decoded = try JSONDecoder().decode(TerminalServiceAutomationRunSummary.self, from: JSONEncoder().encode(summary))
+        XCTAssertEqual(decoded, summary)
+        XCTAssertEqual(decoded.attributedAgents, agents)
+    }
 }
