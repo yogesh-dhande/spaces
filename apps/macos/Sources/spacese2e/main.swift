@@ -859,9 +859,21 @@ private struct StopFixturesCommand: ParsableCommand {
 }
 
 private struct SeedFixtureCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "seed-fixture")
+    static let configuration = CommandConfiguration(
+        commandName: "seed-fixture",
+        abstract: "Register a local git repo as a Spaces project and seed deterministic browser/process defaults.",
+        discussion: """
+            The seeded project serves one of the hand-authored Lighthouse demo templates \
+            (harbor, lantern, atlas). Pass --template to pick which one; when the project \
+            directory has no pre-seeded .spaces-e2e-demo payload the matching template is \
+            materialized into it. The primary `harbor` template additionally wires a coding-agent \
+            launcher (`spaces_e2e_demo agent`) so the workspace can produce an agent-waiting-on-input \
+            state for the mobile demo recording and E2E suite.
+            """)
 
     @Option(name: .long) var projectDir: String
+    @Option(name: .long, help: "Demo template to seed: harbor (primary web app), lantern (API service), or atlas (docs site).")
+    var template: String = "harbor"
     @Option(name: .long) var docsURL: String
     @Option(name: .long) var adminURL: String
 
@@ -870,7 +882,7 @@ private struct SeedFixtureCommand: ParsableCommand {
     func run() throws {
         let orchestrator = try makeOrchestrator()
         let normalizedProjectDir = normalizePath(projectDir)
-        try materializeDemoFixtureIfNeeded(projectDir: normalizedProjectDir, variant: "beacon")
+        try materializeDemoFixtureIfNeeded(projectDir: normalizedProjectDir, variant: template)
         let project = try orchestrator.project(dir: normalizedProjectDir) ?? orchestrator.addProject(dir: normalizedProjectDir)
         let frontendCommand = fixtureServiceCommand(
             executable: "/usr/bin/env",
@@ -888,7 +900,18 @@ private struct SeedFixtureCommand: ParsableCommand {
             ProcessTemplate(name: "frontend", command: frontendCommand), ProcessTemplate(name: "backend", command: backendCommand),
         ]
         let fixtureBrowserSessions = [BrowserSession(name: "docs", url: docsURL), BrowserSession(name: "admin", url: adminURL)]
-        let fixtureAgentLaunchers: [AgentLauncher] = []
+        // Only the primary harbor project carries a coding-agent launcher. Launching it
+        // runs the scripted `spaces_e2e_demo agent`, which prints agent-style output and
+        // then blocks on stdin, settling the workspace into an "agent waiting on input"
+        // state for the mobile demo recording and the macOS E2E suite.
+        let fixtureAgentLaunchers: [AgentLauncher]
+        if template == "harbor" {
+            let agentCommand = fixtureServiceCommand(
+                executable: "/usr/bin/env", arguments: ["python3", "-m", "spaces_e2e_demo", "agent"])
+            fixtureAgentLaunchers = [AgentLauncher(name: "Fix checkout 500", command: agentCommand)]
+        } else {
+            fixtureAgentLaunchers = []
+        }
 
         try orchestrator.updateProjectConfig(projectID: project.id) { config in
             config.ports = fixturePorts

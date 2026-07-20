@@ -68,13 +68,13 @@ TMP_RUNTIME_DIR="$TMP_ROOT/runtime"
 TMP_CLIENT_DB="$TMP_ROOT/client/spaces-client.db"
 TMP_CLIENT_SECRET_DIR="$TMP_ROOT/client/secrets"
 FIXTURE_TEMPLATE_DIR="$ROOT_DIR/apps/macos/Tests/fixtures/e2e_demo"
-TEST_REPO="$TMP_ROOT/beacon-status"
-TEST_REPO_2="$TMP_ROOT/scout-errors"
-TEST_REPO_3="${TEST_REPO_3:-$TMP_ROOT/prism-analytics}"
+TEST_REPO="$TMP_ROOT/harbor-web"
+TEST_REPO_2="$TMP_ROOT/lantern-api"
+TEST_REPO_3="${TEST_REPO_3:-$TMP_ROOT/atlas-docs}"
 WORKSPACE_BRANCH="redesign-hero"
 WORKSPACE_NOTES="Redesign the landing page hero for clarity and impact"
-SCOUT_BRANCH_WORKSPACE_BRANCH="redesign-hero"
-SCOUT_BRANCH_WORKSPACE_NOTES="Redesign the error console hero section"
+LANTERN_BRANCH_WORKSPACE_BRANCH="redesign-hero"
+LANTERN_BRANCH_WORKSPACE_NOTES="Redesign the API error console hero section"
 MOCK_AGENT_LABEL="Mock Agent"
 SPACES_PID=""
 CAFFEINATE_PID=""
@@ -109,12 +109,12 @@ TERTIARY_BACKEND_STATUS_URL=""
 CREATED_DOCS_URL=""
 CREATED_ADMIN_URL=""
 CREATED_BACKEND_STATUS_URL=""
-BEACON_BRANCH_DOCS_URL=""
-BEACON_BRANCH_ADMIN_URL=""
-BEACON_BRANCH_BACKEND_STATUS_URL=""
-SCOUT_BRANCH_DOCS_URL=""
-SCOUT_BRANCH_ADMIN_URL=""
-SCOUT_BRANCH_BACKEND_STATUS_URL=""
+HARBOR_BRANCH_DOCS_URL=""
+HARBOR_BRANCH_ADMIN_URL=""
+HARBOR_BRANCH_BACKEND_STATUS_URL=""
+LANTERN_BRANCH_DOCS_URL=""
+LANTERN_BRANCH_ADMIN_URL=""
+LANTERN_BRANCH_BACKEND_STATUS_URL=""
 KNOWN_SPACES_FRONTEND_SESSION_ID=""
 KNOWN_SPACES_BACKEND_SESSION_ID=""
 KNOWN_SPACES_AGENT_SESSION_ID=""
@@ -885,27 +885,30 @@ setup_git_fixture() {
 }
 
 seed_fixture() {
-  log_step "seeding project fixture (beacon-status)"
+  log_step "seeding project fixture (harbor-web)"
   # spacese2e seeds deterministic project/workspace templates through the real
   # workspacecore layer so the manual test is reproducible.
   "$SPACES_E2E_CLI" seed-fixture \
     --project-dir "$TEST_REPO" \
+    --template harbor \
     --docs-url "http://localhost:\$${APP_PORT_VAR}/docs/" \
     --admin-url "http://localhost:\$${APP_PORT_VAR}/admin/" >"$SEED_FILE"
 }
 
 seed_second_fixture() {
-  log_step "seeding second project fixture (scout-errors)"
+  log_step "seeding second project fixture (lantern-api)"
   "$SPACES_E2E_CLI" seed-fixture \
     --project-dir "$TEST_REPO_2" \
+    --template lantern \
     --docs-url "http://localhost:\$${APP_PORT_VAR}/docs/" \
     --admin-url "http://localhost:\$${APP_PORT_VAR}/admin/" >"$SECOND_SEED_FILE"
 }
 
 seed_third_fixture() {
-  log_step "seeding third project fixture (prism-analytics)"
+  log_step "seeding third project fixture (atlas-docs)"
   "$SPACES_E2E_CLI" seed-fixture \
     --project-dir "$TEST_REPO_3" \
+    --template atlas \
     --docs-url "http://localhost:\$${APP_PORT_VAR}/docs/" \
     --admin-url "http://localhost:\$${APP_PORT_VAR}/admin/" >"$THIRD_SEED_FILE"
 }
@@ -2252,7 +2255,7 @@ APPLESCRIPT
 }
 
 create_workspace_via_gui() {
-  log_step "creating beacon hero-redesign branch workspace through real orchestrator helper"
+  log_step "creating harbor hero-redesign branch workspace through real orchestrator helper"
   # Workspace creation exercises the real store, git worktree creation, and
   # workspace initialization logic against a branch with distinct HTML content.
   "$SPACES_E2E_CLI" create-workspace \
@@ -2264,15 +2267,15 @@ create_workspace_via_gui() {
   transition_pause "workspace creation"
 }
 
-create_scout_branch_workspace() {
-  log_step "creating scout hero-redesign branch workspace"
+create_lantern_branch_workspace() {
+  log_step "creating lantern hero-redesign branch workspace"
   "$SPACES_E2E_CLI" create-workspace \
     --project-dir "$TEST_REPO_2" \
     --existing-branch \
-    --branch "$SCOUT_BRANCH_WORKSPACE_BRANCH" \
+    --branch "$LANTERN_BRANCH_WORKSPACE_BRANCH" \
     --base-branch main \
-    --notes "$SCOUT_BRANCH_WORKSPACE_NOTES" >"$TMP_ROOT/scout-branch-workspace.json"
-  transition_pause "scout branch workspace creation"
+    --notes "$LANTERN_BRANCH_WORKSPACE_NOTES" >"$TMP_ROOT/lantern-branch-workspace.json"
+  transition_pause "lantern branch workspace creation"
 }
 
 set_workspace_browser_urls() {
@@ -5260,8 +5263,8 @@ PY
 run_window_cycle_small_assertions() {
   local host="$1"
   local workspace_dir="$2"
-  local docs_expected="${3:-Beacon docs sentinel}"
-  local backend_expected="${4:-\"workspace\": \"beacon-status\"}"
+  local docs_expected="${3:-Harbor docs sentinel}"
+  local backend_expected="${4:-\"workspace\": \"harbor-web\"}"
   local dump_file="$TMP_ROOT/$host-window-cycle-small-dump.json"
   local agent_script browser_docs_url docs_window_id backend_status_url
 
@@ -5323,8 +5326,8 @@ run_window_cycle_small_assertions() {
 run_launch_and_focus_assertions() {
   local host="$1"
   local workspace_dir="$2"
-  local docs_expected="${3:-Beacon docs sentinel}"
-  local backend_expected="${4:-\"workspace\": \"beacon-status\"}"
+  local docs_expected="${3:-Harbor docs sentinel}"
+  local backend_expected="${4:-\"workspace\": \"harbor-web\"}"
   local dump_file="$TMP_ROOT/$host-dump.json"
   local agent_script
 
@@ -6323,7 +6326,7 @@ main() {
   fi
   run_local_device_api_parity
   create_workspace_via_gui
-  create_scout_branch_workspace
+  create_lantern_branch_workspace
 
   local lookup_file="$TMP_ROOT/workspace.json"
   wait_for_workspace_lookup "$WORKSPACE_BRANCH" "$lookup_file"
@@ -6334,8 +6337,8 @@ main() {
   second_workspace_dir="$(json_get "$SECOND_SEED_FILE" "defaultWorkspace.dir")"
   local third_workspace_dir
   third_workspace_dir="$(json_get "$THIRD_SEED_FILE" "defaultWorkspace.dir")"
-  local scout_branch_workspace_dir
-  scout_branch_workspace_dir="$(json_get "$TMP_ROOT/scout-branch-workspace.json" "dir")"
+  local lantern_branch_workspace_dir
+  lantern_branch_workspace_dir="$(json_get "$TMP_ROOT/lantern-branch-workspace.json" "dir")"
   PRIMARY_DOCS_URL="$(frontend_url_for_workspace "$workspace_dir" "/docs/")"
   PRIMARY_ADMIN_URL="$(frontend_url_for_workspace "$workspace_dir" "/admin/")"
   PRIMARY_BACKEND_STATUS_URL="$(backend_url_for_workspace "$workspace_dir" "/api/launch-status")"
@@ -6348,12 +6351,12 @@ main() {
   CREATED_DOCS_URL="$(frontend_url_for_workspace "$created_workspace_dir" "/docs/")"
   CREATED_ADMIN_URL="$(frontend_url_for_workspace "$created_workspace_dir" "/admin/")"
   CREATED_BACKEND_STATUS_URL="$(backend_url_for_workspace "$created_workspace_dir" "/api/launch-status")"
-  BEACON_BRANCH_DOCS_URL="$CREATED_DOCS_URL"
-  BEACON_BRANCH_ADMIN_URL="$CREATED_ADMIN_URL"
-  BEACON_BRANCH_BACKEND_STATUS_URL="$CREATED_BACKEND_STATUS_URL"
-  SCOUT_BRANCH_DOCS_URL="$(frontend_url_for_workspace "$scout_branch_workspace_dir" "/docs/")"
-  SCOUT_BRANCH_ADMIN_URL="$(frontend_url_for_workspace "$scout_branch_workspace_dir" "/admin/")"
-  SCOUT_BRANCH_BACKEND_STATUS_URL="$(backend_url_for_workspace "$scout_branch_workspace_dir" "/api/launch-status")"
+  HARBOR_BRANCH_DOCS_URL="$CREATED_DOCS_URL"
+  HARBOR_BRANCH_ADMIN_URL="$CREATED_ADMIN_URL"
+  HARBOR_BRANCH_BACKEND_STATUS_URL="$CREATED_BACKEND_STATUS_URL"
+  LANTERN_BRANCH_DOCS_URL="$(frontend_url_for_workspace "$lantern_branch_workspace_dir" "/docs/")"
+  LANTERN_BRANCH_ADMIN_URL="$(frontend_url_for_workspace "$lantern_branch_workspace_dir" "/admin/")"
+  LANTERN_BRANCH_BACKEND_STATUS_URL="$(backend_url_for_workspace "$lantern_branch_workspace_dir" "/api/launch-status")"
   local stop_marker="workspace-stop-override"
 
   set_workspace_stop_script_via_gui "$stop_marker" "$workspace_dir"
@@ -6366,34 +6369,34 @@ main() {
 Manual fixture environment is ready:
   HOME=$TMP_HOME
   DB=$TMP_DB
-  Workspace 1 (beacon main):       $workspace_dir
-  Workspace 2 (beacon redesign):   $created_workspace_dir
-  Workspace 3 (scout main):        $second_workspace_dir
-  Workspace 4 (scout redesign):    $scout_branch_workspace_dir
-  Workspace 5 (prism main):        $third_workspace_dir
-  Beacon docs:       $PRIMARY_DOCS_URL
-  Beacon backend:    $PRIMARY_BACKEND_STATUS_URL
-  Scout docs:        $SECONDARY_DOCS_URL
-  Scout backend:     $SECONDARY_BACKEND_STATUS_URL
-  Prism docs:        $TERTIARY_DOCS_URL
-  Prism backend:     $TERTIARY_BACKEND_STATUS_URL
-  Beacon redesign docs: $BEACON_BRANCH_DOCS_URL
-  Scout redesign docs:  $SCOUT_BRANCH_DOCS_URL
+  Workspace 1 (harbor main):       $workspace_dir
+  Workspace 2 (harbor redesign):   $created_workspace_dir
+  Workspace 3 (lantern main):        $second_workspace_dir
+  Workspace 4 (lantern redesign):    $lantern_branch_workspace_dir
+  Workspace 5 (atlas main):        $third_workspace_dir
+  Harbor docs:       $PRIMARY_DOCS_URL
+  Harbor backend:    $PRIMARY_BACKEND_STATUS_URL
+  Lantern docs:        $SECONDARY_DOCS_URL
+  Lantern backend:     $SECONDARY_BACKEND_STATUS_URL
+  Atlas docs:        $TERTIARY_DOCS_URL
+  Atlas backend:     $TERTIARY_BACKEND_STATUS_URL
+  Harbor redesign docs: $HARBOR_BRANCH_DOCS_URL
+  Lantern redesign docs:  $LANTERN_BRANCH_DOCS_URL
   Spaces PID: $SPACES_PID
 EOF
     return 0
   fi
 
   if (( ONLY_WINDOW_CYCLE_SMALL == 1 )); then
-    run_window_cycle_small_assertions "local-primary" "$workspace_dir" "Beacon docs sentinel" '"workspace": "beacon-status"'
+    run_window_cycle_small_assertions "local-primary" "$workspace_dir" "Harbor docs sentinel" '"workspace": "harbor-web"'
     if [[ "${SPACES_E2E_RUN_REMOTE:-0}" == "1" ]]; then
       run_remote_window_cycle_small_assertions
     fi
     return 0
   fi
 
-  run_launch_and_focus_assertions "local-primary" "$workspace_dir" "Beacon docs sentinel" '"workspace": "beacon-status"'
-  run_launch_and_focus_assertions "local-secondary" "$second_workspace_dir" "Scout docs sentinel" '"workspace": "scout-errors"'
+  run_launch_and_focus_assertions "local-primary" "$workspace_dir" "Harbor docs sentinel" '"workspace": "harbor-web"'
+  run_launch_and_focus_assertions "local-secondary" "$second_workspace_dir" "Lantern docs sentinel" '"workspace": "lantern-api"'
   if (( ONLY_WINDOW_CYCLE_PROFILE == 1 )); then
     return 0
   fi
@@ -6403,42 +6406,42 @@ EOF
   assert_file_contains "$EVENT_LOG" "$stop_marker"
 
   begin_case "branch and tertiary workspaces serve correct content"
-  run_spaces_logged /tmp/spaces-e2e-beacon-branch-start.log start "$created_workspace_dir"
+  run_spaces_logged /tmp/spaces-e2e-harbor-branch-start.log start "$created_workspace_dir"
   wait_for_workspace_running_state "$created_workspace_dir" "true"
-  wait_for_http_body_contains "$BEACON_BRANCH_DOCS_URL" "Beacon redesign-hero docs sentinel"
-  run_spaces_logged /tmp/spaces-e2e-scout-branch-start.log start "$scout_branch_workspace_dir"
-  run_spaces_logged /tmp/spaces-e2e-scout-branch-open-docs.log open docs "$scout_branch_workspace_dir"
-  wait_for_workspace_running_state "$scout_branch_workspace_dir" "true"
-  SCOUT_BRANCH_DOCS_URL="$(wait_for_workspace_window_url_by_name "$scout_branch_workspace_dir" "docs")"
-  ensure_workspace_http_ready "local-scout-branch" "$scout_branch_workspace_dir" "$SCOUT_BRANCH_DOCS_URL" "Scout redesign-hero docs sentinel" "$SCOUT_BRANCH_BACKEND_STATUS_URL" '"workspace": "scout-errors"'
-  local scout_branch_dump_file="$TMP_ROOT/scout-branch-render-dump.json"
-  local scout_branch_frontend_session_id
-  local scout_branch_backend_session_id
-  run_spaces_logged /tmp/spaces-e2e-scout-branch-open-frontend.log open frontend "$scout_branch_workspace_dir"
-  transition_pause "local scout branch frontend terminal focus"
-  scout_branch_frontend_session_id="$(wait_for_workspace_terminal_tracking_id "$scout_branch_workspace_dir" "frontend" "$scout_branch_dump_file")"
-  wait_for_condition "spaces_front_terminal_pane_session_id" "${scout_branch_frontend_session_id}"
+  wait_for_http_body_contains "$HARBOR_BRANCH_DOCS_URL" "Harbor redesign-hero docs sentinel"
+  run_spaces_logged /tmp/spaces-e2e-lantern-branch-start.log start "$lantern_branch_workspace_dir"
+  run_spaces_logged /tmp/spaces-e2e-lantern-branch-open-docs.log open docs "$lantern_branch_workspace_dir"
+  wait_for_workspace_running_state "$lantern_branch_workspace_dir" "true"
+  LANTERN_BRANCH_DOCS_URL="$(wait_for_workspace_window_url_by_name "$lantern_branch_workspace_dir" "docs")"
+  ensure_workspace_http_ready "local-lantern-branch" "$lantern_branch_workspace_dir" "$LANTERN_BRANCH_DOCS_URL" "Lantern redesign-hero docs sentinel" "$LANTERN_BRANCH_BACKEND_STATUS_URL" '"workspace": "lantern-api"'
+  local lantern_branch_dump_file="$TMP_ROOT/lantern-branch-render-dump.json"
+  local lantern_branch_frontend_session_id
+  local lantern_branch_backend_session_id
+  run_spaces_logged /tmp/spaces-e2e-lantern-branch-open-frontend.log open frontend "$lantern_branch_workspace_dir"
+  transition_pause "local lantern branch frontend terminal focus"
+  lantern_branch_frontend_session_id="$(wait_for_workspace_terminal_tracking_id "$lantern_branch_workspace_dir" "frontend" "$lantern_branch_dump_file")"
+  wait_for_condition "spaces_front_terminal_pane_session_id" "${lantern_branch_frontend_session_id}"
   wait_for_spaces_front_window_title "frontend"
-  wait_for_terminal_session_live_render "$scout_branch_frontend_session_id" "local scout branch frontend"
-  run_spaces_logged /tmp/spaces-e2e-scout-branch-open-backend.log open backend "$scout_branch_workspace_dir"
-  transition_pause "local scout branch backend terminal focus"
-  scout_branch_backend_session_id="$(wait_for_workspace_terminal_tracking_id "$scout_branch_workspace_dir" "backend" "$scout_branch_dump_file")"
-  wait_for_condition "spaces_front_terminal_pane_session_id" "${scout_branch_backend_session_id}"
+  wait_for_terminal_session_live_render "$lantern_branch_frontend_session_id" "local lantern branch frontend"
+  run_spaces_logged /tmp/spaces-e2e-lantern-branch-open-backend.log open backend "$lantern_branch_workspace_dir"
+  transition_pause "local lantern branch backend terminal focus"
+  lantern_branch_backend_session_id="$(wait_for_workspace_terminal_tracking_id "$lantern_branch_workspace_dir" "backend" "$lantern_branch_dump_file")"
+  wait_for_condition "spaces_front_terminal_pane_session_id" "${lantern_branch_backend_session_id}"
   wait_for_spaces_front_window_title "backend"
-  wait_for_terminal_session_live_render "$scout_branch_backend_session_id" "local scout branch backend"
-  run_spaces_logged /tmp/spaces-e2e-prism-start.log start "$third_workspace_dir"
+  wait_for_terminal_session_live_render "$lantern_branch_backend_session_id" "local lantern branch backend"
+  run_spaces_logged /tmp/spaces-e2e-atlas-start.log start "$third_workspace_dir"
   wait_for_workspace_running_state "$third_workspace_dir" "true"
-  wait_for_http_body_contains "$TERTIARY_DOCS_URL" "Prism docs sentinel"
+  wait_for_http_body_contains "$TERTIARY_DOCS_URL" "Atlas docs sentinel"
   reset_fixture_runtime "$created_workspace_dir"
-  reset_fixture_runtime "$scout_branch_workspace_dir"
+  reset_fixture_runtime "$lantern_branch_workspace_dir"
   reset_fixture_runtime "$third_workspace_dir"
   pass_case
 
   begin_case "archive branch workspaces"
-  "$SPACES_E2E_CLI" archive-workspace --workspace-dir "$created_workspace_dir" >/tmp/spaces-e2e-archive-beacon-branch.json
-  "$SPACES_E2E_CLI" archive-workspace --workspace-dir "$scout_branch_workspace_dir" >/tmp/spaces-e2e-archive-scout-branch.json
+  "$SPACES_E2E_CLI" archive-workspace --workspace-dir "$created_workspace_dir" >/tmp/spaces-e2e-archive-harbor-branch.json
+  "$SPACES_E2E_CLI" archive-workspace --workspace-dir "$lantern_branch_workspace_dir" >/tmp/spaces-e2e-archive-lantern-branch.json
   wait_for_workspace_lookup "$WORKSPACE_BRANCH" "$lookup_file"
-  assert_equals "true" "$(json_get "$lookup_file" "isArchived")" "beacon branch workspace archived"
+  assert_equals "true" "$(json_get "$lookup_file" "isArchived")" "harbor branch workspace archived"
   pass_case
 }
 

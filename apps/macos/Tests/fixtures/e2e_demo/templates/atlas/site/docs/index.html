@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Atlas Docs</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f5f3ff;
+      --panel: rgba(255, 255, 255, 0.9);
+      --ink: #1a1033;
+      --muted: #6b5f8a;
+      --line: rgba(26, 16, 51, 0.1);
+      --accent: #6d28d9;
+      --accent-soft: rgba(109, 40, 217, 0.1);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "SF Pro Text", "Inter", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, rgba(109, 40, 217, 0.16), transparent 32rem),
+        linear-gradient(180deg, #faf8ff 0%, var(--bg) 100%);
+    }
+    .shell { max-width: 1180px; margin: 0 auto; padding: 40px 32px 56px; }
+    .topbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 28px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+    .badge {
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-weight: 600;
+    }
+    .hero {
+      display: grid;
+      grid-template-columns: 1.2fr 0.8fr;
+      gap: 24px;
+      margin-bottom: 24px;
+    }
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      background: var(--panel);
+      backdrop-filter: blur(16px);
+      box-shadow: 0 18px 40px rgba(26, 16, 51, 0.08);
+    }
+    .hero-copy { padding: 32px; }
+    h1 {
+      margin: 0 0 12px;
+      font-size: 44px;
+      line-height: 1.02;
+      letter-spacing: -0.04em;
+    }
+    p {
+      margin: 0;
+      font-size: 17px;
+      line-height: 1.6;
+      color: var(--muted);
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 18px;
+      margin-top: 28px;
+    }
+    .tile {
+      padding: 18px;
+      border-radius: 18px;
+      background: rgba(255, 255, 255, 0.72);
+      border: 1px solid var(--line);
+    }
+    .tile strong {
+      display: block;
+      margin-bottom: 8px;
+      font-size: 14px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--accent);
+    }
+    .hero-side {
+      padding: 24px;
+      display: grid;
+      gap: 14px;
+      align-content: start;
+    }
+    .stat {
+      padding: 16px 18px;
+      border-radius: 18px;
+      background: rgba(109, 40, 217, 0.07);
+    }
+    .stat span {
+      display: block;
+      color: var(--muted);
+      font-size: 13px;
+      margin-bottom: 4px;
+    }
+    .stat strong {
+      font-size: 28px;
+      letter-spacing: -0.03em;
+    }
+    .docs-list { padding: 28px 32px; }
+    .docs-list h2 {
+      margin: 0 0 18px;
+      font-size: 22px;
+      letter-spacing: -0.03em;
+    }
+    .row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 16px 0;
+      border-top: 1px solid var(--line);
+    }
+    .row:first-of-type { border-top: 0; }
+    .row b { display: block; margin-bottom: 4px; }
+    .row small { color: var(--muted); font-size: 13px; }
+    .pill {
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: #ffffff;
+      border: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 600;
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div class="topbar">
+      <div>Atlas · Documentation</div>
+      <div class="badge">Atlas docs sentinel</div>
+    </div>
+    <section class="hero">
+      <div class="card hero-copy">
+        <h1>Documentation your customers can actually find.</h1>
+        <p>Atlas is the Lighthouse documentation site. It publishes guides for the Harbor web app and the Lantern API from Markdown in the same repo your team already works in, with fast search and versioned releases.</p>
+        <div class="grid">
+          <div class="tile"><strong>Guides</strong>Author pages in Markdown and preview them on a branch before they ever reach a reader.</div>
+          <div class="tile"><strong>Search</strong>Instant full-text search with zero-result reporting so gaps in your docs surface on their own.</div>
+          <div class="tile"><strong>Versioning</strong>Pin docs to each release so customers always read the guide that matches the API they call.</div>
+        </div>
+      </div>
+      <div class="card hero-side">
+        <div class="stat"><span>Monthly readers</span><strong>128,400</strong></div>
+        <div class="stat"><span>Pages published</span><strong>212</strong></div>
+        <div class="stat"><span>Search success rate</span><strong>91.4%</strong></div>
+      </div>
+    </section>
+    <section class="card docs-list">
+      <h2>Popular guides</h2>
+      <div class="row">
+        <div><b>Getting started</b><small>Stand up a local Harbor storefront against the Lantern API and make your first authenticated call.</small></div>
+        <div class="pill">5 min</div>
+      </div>
+      <div class="row">
+        <div><b>Checkout integration</b><small>Walk through the cart-to-payment flow end to end, including declines, retries, and idempotency keys.</small></div>
+        <div class="pill">8 min</div>
+      </div>
+      <div class="row">
+        <div><b>Writing and previewing docs</b><small>Add a Markdown page, open a branch preview, and publish it to Atlas once review passes.</small></div>
+        <div class="pill">4 min</div>
+      </div>
+    </section>
+  </div>
+</body>
+</html>

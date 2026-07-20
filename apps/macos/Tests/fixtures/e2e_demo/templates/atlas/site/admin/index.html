@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Atlas Admin</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #faf5ff;
+      --panel: #ffffff;
+      --ink: #1a1033;
+      --muted: #64748b;
+      --line: #e2e8f0;
+      --accent: #6d28d9;
+      --good: #059669;
+      --warn: #d97706;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "SF Pro Text", "Inter", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top right, rgba(109, 40, 217, 0.12), transparent 26rem),
+        linear-gradient(180deg, #fdf8ff 0%, var(--bg) 100%);
+    }
+    .shell { max-width: 1240px; margin: 0 auto; padding: 28px; }
+    .bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 18px;
+    }
+    .bar h1 {
+      margin: 0;
+      font-size: 28px;
+      letter-spacing: -0.04em;
+    }
+    .bar small { color: var(--muted); font-size: 14px; }
+    .chip {
+      border-radius: 999px;
+      padding: 8px 12px;
+      background: rgba(109, 40, 217, 0.1);
+      color: var(--accent);
+      font-weight: 700;
+      font-size: 12px;
+    }
+    .layout {
+      display: grid;
+      grid-template-columns: 1.2fr 0.8fr;
+      gap: 20px;
+    }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      box-shadow: 0 18px 36px rgba(15, 23, 42, 0.06);
+    }
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 14px;
+      padding: 20px;
+    }
+    .metric {
+      border-radius: 18px;
+      padding: 18px;
+      background: #fdf8ff;
+      border: 1px solid var(--line);
+    }
+    .metric span { display: block; color: var(--muted); font-size: 13px; margin-bottom: 6px; }
+    .metric strong { font-size: 30px; letter-spacing: -0.04em; }
+    .table { padding: 20px 22px 10px; }
+    .table h2, .side h2 { margin: 0 0 14px; font-size: 19px; letter-spacing: -0.03em; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { padding: 14px 0; border-top: 1px solid var(--line); text-align: left; }
+    th { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; border-top: 0; }
+    td:last-child, th:last-child { text-align: right; }
+    .status {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .healthy { background: rgba(5, 150, 105, 0.12); color: var(--good); }
+    .review { background: rgba(217, 119, 6, 0.12); color: var(--warn); }
+    .side {
+      padding: 20px 22px;
+      display: grid;
+      gap: 16px;
+      align-content: start;
+    }
+    .note {
+      padding: 16px;
+      border-radius: 16px;
+      background: #f8fafc;
+      border: 1px solid var(--line);
+    }
+    .note b { display: block; margin-bottom: 6px; }
+    .note p { margin: 0; color: var(--muted); line-height: 1.5; }
+    .api-card {
+      margin-top: 18px;
+      padding: 18px 20px;
+      border-radius: 18px;
+      background: #fdf8ff;
+      border: 1px solid var(--line);
+    }
+    .api-card h2 { margin: 0 0 8px; font-size: 16px; }
+    .api-card code {
+      display: block;
+      margin-top: 8px;
+      color: var(--muted);
+      white-space: pre-wrap;
+      font-size: 13px;
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div class="bar">
+      <div>
+        <h1>Atlas Docs Admin</h1>
+        <small>Readership and search overview</small>
+      </div>
+      <div class="chip">Atlas admin sentinel</div>
+    </div>
+    <div class="layout">
+      <section class="panel">
+        <div class="metrics">
+          <div class="metric"><span>Monthly readers</span><strong>128,400</strong></div>
+          <div class="metric"><span>Search success rate</span><strong>91.4%</strong></div>
+          <div class="metric"><span>Avg time on page</span><strong>2m 41s</strong></div>
+        </div>
+        <div class="table">
+          <h2>Top pages this week</h2>
+          <table>
+            <thead>
+              <tr><th>Page</th><th>Views</th><th>Trend</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>Getting started</td><td>42,100</td><td><span class="status healthy">Steady</span></td></tr>
+              <tr><td>Checkout integration</td><td>31,800</td><td><span class="status healthy">Steady</span></td></tr>
+              <tr><td>Payment declined — troubleshooting</td><td>12,400</td><td><span class="status review">Surging</span></td></tr>
+            </tbody>
+          </table>
+          <div class="api-card">
+            <h2>Backend health</h2>
+            <code id="api-status">Loading backend status...</code>
+          </div>
+        </div>
+      </section>
+      <aside class="panel side">
+        <h2>Content notes</h2>
+        <div class="note">
+          <b>Troubleshooting page surge</b>
+          <p>Views on "Payment declined" jumped 3x today, tracking the Lantern <code>/api/checkout</code> 500 spike. Customers hitting the checkout incident are landing here for help.</p>
+        </div>
+        <div class="note">
+          <b>Top zero-result search</b>
+          <p>"checkout 500" is this week's most common search with no matching page. Publish a dedicated guide so readers stop bouncing during the Harbor incident window.</p>
+        </div>
+      </aside>
+    </div>
+  </div>
+  <script>
+    fetch("/api/launch-status")
+      .then((response) => response.json())
+      .then((payload) => {
+        document.getElementById("api-status").textContent = JSON.stringify(payload, null, 2);
+      })
+      .catch((error) => {
+        document.getElementById("api-status").textContent = "Backend unavailable: " + error;
+      });
+  </script>
+</body>
+</html>

@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Harbor Docs</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f0fdf4;
+      --panel: rgba(255, 255, 255, 0.9);
+      --ink: #14211a;
+      --muted: #4d7060;
+      --line: rgba(20, 33, 26, 0.1);
+      --accent: #059669;
+      --accent-soft: rgba(5, 150, 105, 0.12);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "SF Pro Text", "Inter", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, rgba(5, 150, 105, 0.18), transparent 32rem),
+        linear-gradient(180deg, #f7fdf9 0%, var(--bg) 100%);
+    }
+    .shell { max-width: 1180px; margin: 0 auto; padding: 40px 32px 56px; }
+    .topbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 28px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+    .badge {
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-weight: 600;
+    }
+    .hero {
+      display: grid;
+      grid-template-columns: 1.2fr 0.8fr;
+      gap: 24px;
+      margin-bottom: 24px;
+    }
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      background: var(--panel);
+      backdrop-filter: blur(16px);
+      box-shadow: 0 18px 40px rgba(14, 33, 26, 0.08);
+    }
+    .hero-copy { padding: 32px; }
+    h1 {
+      margin: 0 0 12px;
+      font-size: 44px;
+      line-height: 1.02;
+      letter-spacing: -0.04em;
+    }
+    p {
+      margin: 0;
+      font-size: 17px;
+      line-height: 1.6;
+      color: var(--muted);
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 18px;
+      margin-top: 28px;
+    }
+    .tile {
+      padding: 18px;
+      border-radius: 18px;
+      background: rgba(255, 255, 255, 0.72);
+      border: 1px solid var(--line);
+    }
+    .tile strong {
+      display: block;
+      margin-bottom: 8px;
+      font-size: 14px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--accent);
+    }
+    .hero-side {
+      padding: 24px;
+      display: grid;
+      gap: 14px;
+      align-content: start;
+    }
+    .stat {
+      padding: 16px 18px;
+      border-radius: 18px;
+      background: rgba(5, 150, 105, 0.08);
+    }
+    .stat span {
+      display: block;
+      color: var(--muted);
+      font-size: 13px;
+      margin-bottom: 4px;
+    }
+    .stat strong {
+      font-size: 28px;
+      letter-spacing: -0.03em;
+    }
+    .docs-list { padding: 28px 32px; }
+    .docs-list h2 {
+      margin: 0 0 18px;
+      font-size: 22px;
+      letter-spacing: -0.03em;
+    }
+    .row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 16px 0;
+      border-top: 1px solid var(--line);
+    }
+    .row:first-of-type { border-top: 0; }
+    .row b { display: block; margin-bottom: 4px; }
+    .row small { color: var(--muted); font-size: 13px; }
+    .pill {
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: #ffffff;
+      border: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 600;
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div class="topbar">
+      <div>Harbor · Web app docs</div>
+      <div class="badge">Harbor docs sentinel</div>
+    </div>
+    <section class="hero">
+      <div class="card hero-copy">
+        <h1>Ship the storefront your customers expect.</h1>
+        <p>Harbor is the Lighthouse customer web app. Build storefront pages, checkout, and account flows on one codebase, and deploy every change straight from the workspace you built it in.</p>
+        <div class="grid">
+          <div class="tile"><strong>Storefront</strong>Compose product and landing pages from typed components with instant preview on every branch.</div>
+          <div class="tile"><strong>Checkout</strong>Drive the full cart-to-payment flow through the Lantern API with retries and idempotent orders.</div>
+          <div class="tile"><strong>Accounts</strong>Sign-in, profiles, and saved carts backed by the shared Lighthouse auth service.</div>
+        </div>
+      </div>
+      <div class="card hero-side">
+        <div class="stat"><span>Uptime (30 days)</span><strong>99.98%</strong></div>
+        <div class="stat"><span>Active incidents</span><strong>0</strong></div>
+        <div class="stat"><span>Deploys this week</span><strong>18</strong></div>
+      </div>
+    </section>
+    <section class="card docs-list">
+      <h2>Popular guides</h2>
+      <div class="row">
+        <div><b>Local dev environment setup</b><small>Run the Harbor storefront against a mocked Lantern API and seed demo products in under 5 minutes.</small></div>
+        <div class="pill">5 min</div>
+      </div>
+      <div class="row">
+        <div><b>Checkout integration walkthrough</b><small>Wire the cart to the Lantern <code>/api/checkout</code> endpoint and handle payment retries safely.</small></div>
+        <div class="pill">8 min</div>
+      </div>
+      <div class="row">
+        <div><b>Branch preview deploys</b><small>Give every pull request its own preview URL so reviewers can click through the real flow before merge.</small></div>
+        <div class="pill">6 min</div>
+      </div>
+    </section>
+  </div>
+</body>
+</html>

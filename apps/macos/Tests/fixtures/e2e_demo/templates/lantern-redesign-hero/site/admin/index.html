@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lantern Admin</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #faf8f8;
+      --panel: #ffffff;
+      --ink: #1c0f11;
+      --muted: #64748b;
+      --line: #e2e8f0;
+      --accent: #e11d48;
+      --good: #059669;
+      --warn: #d97706;
+      --open: #e11d48;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "SF Pro Text", "Inter", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top right, rgba(225, 29, 72, 0.1), transparent 26rem),
+        linear-gradient(180deg, #fff8f9 0%, var(--bg) 100%);
+    }
+    .shell { max-width: 1240px; margin: 0 auto; padding: 28px; }
+    .bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 18px;
+    }
+    .bar h1 {
+      margin: 0;
+      font-size: 28px;
+      letter-spacing: -0.04em;
+    }
+    .bar small { color: var(--muted); font-size: 14px; }
+    .chip {
+      border-radius: 999px;
+      padding: 8px 12px;
+      background: rgba(225, 29, 72, 0.1);
+      color: var(--accent);
+      font-weight: 700;
+      font-size: 12px;
+    }
+    .layout {
+      display: grid;
+      grid-template-columns: 1.2fr 0.8fr;
+      gap: 20px;
+    }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      box-shadow: 0 18px 36px rgba(15, 23, 42, 0.06);
+    }
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 14px;
+      padding: 20px;
+    }
+    .metric {
+      border-radius: 18px;
+      padding: 18px;
+      background: #fff8f9;
+      border: 1px solid var(--line);
+    }
+    .metric span { display: block; color: var(--muted); font-size: 13px; margin-bottom: 6px; }
+    .metric strong { font-size: 30px; letter-spacing: -0.04em; }
+    .metric.alert strong { color: var(--accent); }
+    .table { padding: 20px 22px 10px; }
+    .table h2, .side h2 { margin: 0 0 14px; font-size: 19px; letter-spacing: -0.03em; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { padding: 14px 0; border-top: 1px solid var(--line); text-align: left; }
+    th { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; border-top: 0; }
+    td:last-child, th:last-child { text-align: right; }
+    .status {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .open { background: rgba(225, 29, 72, 0.1); color: var(--open); }
+    .investigating { background: rgba(217, 119, 6, 0.1); color: var(--warn); }
+    .side {
+      padding: 20px 22px;
+      display: grid;
+      gap: 16px;
+      align-content: start;
+    }
+    .note {
+      padding: 16px;
+      border-radius: 16px;
+      background: #f8fafc;
+      border: 1px solid var(--line);
+    }
+    .note b { display: block; margin-bottom: 6px; }
+    .note p { margin: 0; color: var(--muted); line-height: 1.5; }
+    .api-card {
+      margin-top: 18px;
+      padding: 18px 20px;
+      border-radius: 18px;
+      background: #fff8f9;
+      border: 1px solid var(--line);
+    }
+    .api-card h2 { margin: 0 0 8px; font-size: 16px; }
+    .api-card code {
+      display: block;
+      margin-top: 8px;
+      color: var(--muted);
+      white-space: pre-wrap;
+      font-size: 13px;
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div class="bar">
+      <div>
+        <h1>Lantern Admin</h1>
+        <small>API error console</small>
+      </div>
+      <div class="chip">Lantern redesign-hero admin sentinel</div>
+    </div>
+    <div class="layout">
+      <section class="panel">
+        <div class="metrics">
+          <div class="metric alert"><span>Open errors</span><strong>3</strong></div>
+          <div class="metric"><span>Total occurrences</span><strong>1,062</strong></div>
+          <div class="metric"><span>Affected users</span><strong>443</strong></div>
+        </div>
+        <div class="table">
+          <h2>Active errors</h2>
+          <table>
+            <thead>
+              <tr><th>Error</th><th>Occurrences</th><th>Users</th><th>Status</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>TypeError: cannot read null</td>
+                <td>847</td>
+                <td>340</td>
+                <td><span class="status open">Open</span></td>
+              </tr>
+              <tr>
+                <td>500 /api/checkout</td>
+                <td>203</td>
+                <td>91</td>
+                <td><span class="status open">Open</span></td>
+              </tr>
+              <tr>
+                <td>DB connection timeout</td>
+                <td>12</td>
+                <td>12</td>
+                <td><span class="status investigating">Investigating</span></td>
+              </tr>
+            </tbody>
+          </table>
+          <div class="api-card">
+            <h2>Backend health</h2>
+            <code id="api-status">Loading backend status...</code>
+          </div>
+        </div>
+      </section>
+      <aside class="panel side">
+        <h2>Triage notes</h2>
+        <div class="note">
+          <b>Top priority</b>
+          <p>The TypeError: null spike traces to the checkout handler dereferencing a missing payment token. This is the root cause of the Harbor checkout incident — open a Lantern workspace on the redesign-hero branch to reproduce and fix.</p>
+        </div>
+        <div class="note">
+          <b>Context</b>
+          <p>Atlas shows a surge of readers on the "Payment declined" troubleshooting page in the same window — customers are hitting the failing <code>/api/checkout</code> route and searching for help.</p>
+        </div>
+      </aside>
+    </div>
+  </div>
+  <script>
+    fetch("/api/launch-status")
+      .then((response) => response.json())
+      .then((payload) => {
+        document.getElementById("api-status").textContent = JSON.stringify(payload, null, 2);
+      })
+      .catch((error) => {
+        document.getElementById("api-status").textContent = "Backend unavailable: " + error;
+      });
+  </script>
+</body>
+</html>
