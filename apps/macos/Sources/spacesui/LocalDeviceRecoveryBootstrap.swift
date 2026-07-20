@@ -2,15 +2,17 @@ import Foundation
 import spacesclientcore
 import spacesdevicecore
 
-/// Process-wide single-flight for the local-device recovery bootstrap.
+/// Process-wide single-flight for the GUI's local-device bootstrap — every pane-path call to
+/// `bootstrapLocalDevice` (pane preparation and the models' in-session recoveries) routes through it.
 ///
-/// After a local pairing-state reset, every open local pane's recovery fires at nearly the same
-/// moment. `SpacesDevicePairingStore.issueToken` mints a replacement token for every stale
-/// presentation, so N concurrent bootstraps would invalidate each other's freshly installed tokens
-/// and out-of-order secret-file saves could persist a non-current token. Coalescing means exactly
-/// one bootstrap round-trips the control socket; every concurrent recovery awaits it and installs
-/// the same refreshed record and token. All GUI models share one client-app identity, so joiners
-/// receiving the initiator's bootstrap result is exact, not approximate.
+/// Local pane events arrive in bursts: restoration prepares every pane at launch, and a
+/// pairing-state reset drops every open pane's stream at nearly the same moment.
+/// `SpacesDevicePairingStore.issueToken` mints a replacement token for every stale presentation, so
+/// N concurrent bootstraps would invalidate each other's freshly installed tokens and out-of-order
+/// secret-file saves could persist a non-current token. Coalescing means exactly one bootstrap
+/// round-trips the control socket; every concurrent caller awaits it and installs the same
+/// refreshed record and token. All GUI models share one client-app identity, so joiners receiving
+/// the initiator's bootstrap result is exact, not approximate.
 @MainActor enum LocalDeviceRecoveryBootstrap {
     struct Outcome {
         let record: SpacesPairedDeviceRecord

@@ -1753,18 +1753,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         guard let device = deviceForMutation(deviceID: deviceID) else { return .failure(Self.deviceNotLoadedError()) }
         let clientApp = SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)
         let isLocalDevice = device.id == SpacesPairedDeviceRecord.localDeviceID
-        let result: Result<(DeviceTerminalSessionStateModel.PreparedCredentials, SpacesPairedDeviceRecord?), Error> = await Task.detached(
-            priority: .userInitiated)
-        {
+        // For the local device, re-resolve the daemon's current Device API port (and ensure it is
+        // running) the way the CLI does per request. The stored paired_devices row goes stale when
+        // the local daemon idle-shuts-down and rebinds a port; seeding the fresh endpoint here — off
+        // the main actor, before the model and its request client are built — keeps the pane's first
+        // control connect fast instead of blocking the main actor on a dead port. The bootstrap goes
+        // through the process-wide single-flight shared with the models' recovery paths: pane
+        // restoration prepares many panes concurrently, and uncoalesced bootstraps presenting the
+        // same stale token would each mint a distinct replacement, seeding all but the last-prepared
+        // pane with an already-revoked token. Best-effort: a failed re-resolution falls back to the
+        // stored row, and the model's connect-time recovery still heals the port later.
+        let refreshedLocalDevice = isLocalDevice ? await LocalDeviceRecoveryBootstrap.run(clientApp: clientApp)?.record : nil
+        let result: Result<DeviceTerminalSessionStateModel.PreparedCredentials, Error> = await Task.detached(priority: .userInitiated) {
             do {
-                // For the local device, re-resolve the daemon's current Device API port (and ensure it is
-                // running) the way the CLI does per request. The stored paired_devices row goes stale when
-                // the local daemon idle-shuts-down and rebinds a port; seeding the fresh endpoint here — off
-                // the main actor, before the model and its request client are built — keeps the pane's first
-                // control connect fast instead of blocking the main actor on a dead port. Best-effort: a
-                // failed re-resolution falls back to the stored row, and the model's connect-time recovery
-                // still heals the port later.
-                let refreshedLocalDevice = isLocalDevice ? try? SpacesDeviceClient.bootstrapLocalDevice(clientApp: clientApp) : nil
                 // Resolve credentials from the same record the endpoint came from: the bootstrap above may
                 // have re-paired against a daemon whose TLS identity rotated, so `resolveCredentials` must
                 // read the refreshed record's fingerprint. Resolving before the bootstrap would pair the
@@ -1772,10 +1773,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 // re-bootstrap branch only fires on a missing token — and pin-fail every connect.
                 let credentials = try DeviceTerminalSessionStateModel.resolveCredentials(
                     device: refreshedLocalDevice ?? device, clientApp: clientApp)
-                return .success((credentials, refreshedLocalDevice))
+                return .success(credentials)
             } catch { return .failure(error) }
         }.value
-        return result.map { credentials, refreshedLocalDevice in
+        return result.map { credentials in
             request.prepared(credentials: credentials, resolvedLocalDevice: refreshedLocalDevice)
         }
     }
