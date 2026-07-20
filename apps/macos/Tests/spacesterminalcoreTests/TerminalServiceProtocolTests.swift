@@ -390,31 +390,31 @@ final class TerminalServiceProtocolTests: XCTestCase {
         lock.release()
     }
 
-    func testPinnedTLSClientCanSendRequestToRemoteService() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-
-        let identity = try TerminalServiceTLSIdentityStore.loadOrCreate(root: root)
-        let queue = DispatchQueue(label: "terminal-service-tls-protocol-test")
-        let received = expectation(description: "received pinned TLS request")
-        let server = TerminalServiceTLSServer(host: "127.0.0.1", port: 0, authToken: "SECRET", identity: identity, queue: queue) { request in
-            XCTAssertEqual(request, TerminalServiceRequest(command: .ping, authToken: "SECRET"))
-            received.fulfill()
-            return TerminalServiceResponse(ok: true, message: "pong")
-        }
-        try server.start()
-        defer { server.stop() }
-
-        let response = try TerminalServiceClient.sendPinnedTLS(
-            request: TerminalServiceRequest(command: .ping), host: "127.0.0.1", port: server.listeningPort, authToken: "SECRET",
-            certificateFingerprint: identity.certificateFingerprint)
-
-        wait(for: [received], timeout: 5)
-        XCTAssertEqual(response, TerminalServiceResponse(ok: true, message: "pong"))
-    }
-
     #if canImport(Network) && canImport(Security)
+        func testPinnedTLSClientCanSendRequestToRemoteService() throws {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+
+            let identity = try TerminalServiceTLSIdentityStore.loadOrCreate(root: root)
+            let queue = DispatchQueue(label: "terminal-service-tls-protocol-test")
+            let received = expectation(description: "received pinned TLS request")
+            let server = TerminalServiceTLSServer(host: "127.0.0.1", port: 0, authToken: "SECRET", identity: identity, queue: queue) { request in
+                XCTAssertEqual(request, TerminalServiceRequest(command: .ping, authToken: "SECRET"))
+                received.fulfill()
+                return TerminalServiceResponse(ok: true, message: "pong")
+            }
+            try server.start()
+            defer { server.stop() }
+
+            let response = try TerminalServiceClient.sendPinnedTLS(
+                request: TerminalServiceRequest(command: .ping), host: "127.0.0.1", port: server.listeningPort, authToken: "SECRET",
+                certificateFingerprint: identity.certificateFingerprint)
+
+            wait(for: [received], timeout: 5)
+            XCTAssertEqual(response, TerminalServiceResponse(ok: true, message: "pong"))
+        }
+
         func testPinnedTLSServerKeepsConnectionOpenForMultipleRequests() throws {
             let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -556,31 +556,43 @@ final class TerminalServiceProtocolTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("identity.keychain.passphrase").path))
     }
 
-    func testPinnedTLSClientRejectsCertificateMismatch() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
+    #if canImport(Network) && canImport(Security)
+        func testPinnedTLSClientRejectsCertificateMismatch() throws {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
 
-        let identity = try TerminalServiceTLSIdentityStore.loadOrCreate(root: root)
-        let queue = DispatchQueue(label: "terminal-service-tls-pin-test")
-        let server = TerminalServiceTLSServer(host: "127.0.0.1", port: 0, authToken: "SECRET", identity: identity, queue: queue) { _ in
-            XCTFail("A mismatched certificate pin should not reach the handler.")
-            return TerminalServiceResponse(ok: true, message: "unexpected")
-        }
-        try server.start()
-        defer { server.stop() }
+            let identity = try TerminalServiceTLSIdentityStore.loadOrCreate(root: root)
+            let queue = DispatchQueue(label: "terminal-service-tls-pin-test")
+            let server = TerminalServiceTLSServer(host: "127.0.0.1", port: 0, authToken: "SECRET", identity: identity, queue: queue) { _ in
+                XCTFail("A mismatched certificate pin should not reach the handler.")
+                return TerminalServiceResponse(ok: true, message: "unexpected")
+            }
+            try server.start()
+            defer { server.stop() }
 
-        XCTAssertThrowsError(
-            try TerminalServiceClient.sendPinnedTLS(
-                request: TerminalServiceRequest(command: .ping), host: "127.0.0.1", port: server.listeningPort, authToken: "SECRET",
-                certificateFingerprint: "SHA256:0000000000000000000000000000000000000000000000000000000000000000")
-        ) { error in
-            guard case TerminalServiceTLSError.certificatePinMismatch = error else {
-                XCTFail("Expected certificate pin mismatch, got \(error)")
-                return
+            XCTAssertThrowsError(
+                try TerminalServiceClient.sendPinnedTLS(
+                    request: TerminalServiceRequest(command: .ping), host: "127.0.0.1", port: server.listeningPort, authToken: "SECRET",
+                    certificateFingerprint: "SHA256:0000000000000000000000000000000000000000000000000000000000000000")
+            ) { error in
+                guard case TerminalServiceTLSError.certificatePinMismatch = error else {
+                    XCTFail("Expected certificate pin mismatch, got \(error)")
+                    return
+                }
             }
         }
+    #endif
+}
+
+/// File-scope and unguarded so both the Network/Security-only tests and the cross-platform
+/// identity-store tests can assert on-disk permission modes.
+private func posixPermissions(at url: URL) throws -> Int {
+    guard let value = try FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as? NSNumber else {
+        XCTFail("Missing POSIX permissions for \(url.path)")
+        return -1
     }
+    return value.intValue & 0o777
 }
 
 /// File-scope thread-safe counter usable from the `@Sendable` service-server handler on macOS and Linux
@@ -682,14 +694,6 @@ private final class ThreadSafeCounter: @unchecked Sendable {
             guard semaphore.wait(timeout: .now() + 5) == .success else { throw TerminalServiceTLSError.requestTimedOut }
             return try result.value.get()
         }
-    }
-
-    private func posixPermissions(at url: URL) throws -> Int {
-        guard let value = try FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as? NSNumber else {
-            XCTFail("Missing POSIX permissions for \(url.path)")
-            return -1
-        }
-        return value.intValue & 0o777
     }
 
     private final class LockedCounter: @unchecked Sendable {

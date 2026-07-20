@@ -616,9 +616,21 @@
             guard let columns = request.columns, let rows = request.rows, columns > 0, rows > 0 else {
                 return TerminalControlResponse(ok: false, message: "Missing terminal size.", errorCode: .invalidArgument)
             }
-            do { try recreateVTRenderer(columns: columns, rows: rows) } catch {
-                return TerminalControlResponse(ok: false, message: "Unable to resize the terminal renderer: \(error)")
+            guard let vtSession else { return TerminalControlResponse(ok: false, message: "Terminal renderer is unavailable.") }
+            // Resize transforms the LIVE renderer in place (libghostty reflow), never by
+            // replaying output.log at the new size: the session already holds the accumulated
+            // state, and the transcript's bytes (including any trim-time state preamble) are
+            // laid out for the grid they were produced on, so a replay at another width
+            // garbles the screen. Replay is reserved for the handoff paths, where renderer
+            // memory genuinely did not survive the exec.
+            guard spaces_ghostty_vt_session_resize(vtSession, UInt16(clamping: columns), UInt16(clamping: rows)) else {
+                return TerminalControlResponse(ok: false, message: "Unable to resize the terminal renderer.")
             }
+            // The reflow rewrote every row: drop the diff baseline and force the next
+            // broadcast to a self-contained full frame, the same way a renderer swap does.
+            renderUpdateBaseline = nil
+            forceNextBroadcastFullRenderUpdate = true
+            screenStateRevision &+= 1
             terminalSize = (columns, rows)
             _ = ptyDriver.resizeCellGrid(columns: columns, rows: rows)
             writeRuntimeState(state: .running)
@@ -739,6 +751,9 @@
         /// materializing the whole file in memory. Replay happens into a replacement
         /// session first, so a read or VT-write failure leaves the current renderer
         /// intact and handoff resume can fail before adopting the inherited PTY.
+        /// Only the handoff resume paths use this — renderer memory did not survive the
+        /// exec there, so the transcript is the sole source of truth. A live resize never
+        /// comes here: it resizes the existing vt session in place (reflow) instead.
         private func recreateVTRenderer(columns: Int, rows: Int) throws {
             guard let replacementSession = makeVTSession(columns: columns, rows: rows) else {
                 throw GhosttyLinuxHeadlessSessionError.vtSessionUnavailable

@@ -1631,9 +1631,12 @@ import workspacecore
             let store = try SQLiteStore(path: try DatabaseLocator.defaultPath())
             try TerminalSessionGarbageCollector.collectRemovedSessions(
                 activeSessionIDs: Set(sessionCores.keys),
-                isReferencedByProduct: { try store.terminalSessionIsReferencedByProduct($0) }, now: now)
+                isReferencedByProduct: { try store.terminalSessionIsReferencedByProduct($0) }, now: now,
+                onPurgeFailure: { sessionID, error in
+                    writeStandardError("spaces: terminal session garbage collection failed to purge \(sessionID), will retry next sweep: \(error)\n")
+                })
         } catch {
-            fputs("spaces: terminal session garbage collection failed: \(error)\n", stderr)
+            writeStandardError("spaces: terminal session garbage collection failed: \(error)\n")
         }
     }
 

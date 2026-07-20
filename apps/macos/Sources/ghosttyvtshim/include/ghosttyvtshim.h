@@ -65,6 +65,17 @@ bool spaces_ghostty_vt_session_write(
     size_t input_len
 );
 
+// Resizes the live terminal in place to `columns` x `rows`, reflowing the primary screen's content
+// (when wraparound is enabled) and preserving terminal state, modes, and scrollback. This is the
+// alternative to recreating a session and replaying a preamble: it mutates the existing terminal so
+// its grid and render state reflect the new size while keeping everything already written. Returns
+// false when `columns` or `rows` is zero or the underlying resize fails.
+bool spaces_ghostty_vt_session_resize(
+    SpacesGhosttyVtSession *session,
+    uint16_t columns,
+    uint16_t rows
+);
+
 bool spaces_ghostty_vt_session_encode_paste(
     SpacesGhosttyVtSession *session,
     const uint8_t *input,

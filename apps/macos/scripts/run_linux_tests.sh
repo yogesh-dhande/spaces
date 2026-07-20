@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Runs the Linux daemon-side unit suites inside the swift:6.2-noble container.
+# Invoked INSIDE the container by the `docker run` command in docs/dev.md, which mounts
+# the repo at /workspace and named volumes for the staged sources, build scratch, and caches.
+set -euo pipefail
+apt-get update -qq
+apt-get install -y -qq pkg-config libsqlite3-dev libssl-dev openssl rsync >/dev/null
+
+# Stage sources onto container-native fs: resource copies (e.g. AppIcon.icns) from the
+# virtiofs bind mount fail deterministically with EINTR under the amd64 runner, and
+# native-fs reads compile faster. The staged tree lives in a named volume so paths stay
+# stable across runs and the swift scratch cache remains incremental.
+mkdir -p /root/src/apps/macos
+rsync -a --delete \
+  --exclude '.build/' \
+  --exclude 'vendor/' \
+  --exclude '.local/ghosttykit/' \
+  /workspace/apps/macos/ /root/src/apps/macos/
+
+cd /root/src/apps/macos
+export SPACES_GHOSTTY_VT_DYLIB_PATH=/root/src/apps/macos/.local/ghosttyvt/lib/libghostty-vt.so
+# Resize suite only: the older XCTest-based Linux suites (handoff, submit-ordering) use
+# async @MainActor test methods, which deadlock under corelibs-xctest before the first
+# line — the test job is queued to the main executor while XCTest's main thread waits in
+# a poll that never drains it. Linux suites must use Swift Testing (async-main runner) to
+# actually execute; convert a suite and add it to this filter to bring it into the lane.
+swift test \
+  --scratch-path /root/spaces-test-build \
+  --jobs 4 \
+  --filter 'GhosttyLinuxHeadlessSessionResizeTests' 2>&1

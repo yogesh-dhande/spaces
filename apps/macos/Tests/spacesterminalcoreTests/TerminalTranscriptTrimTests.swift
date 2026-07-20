@@ -288,8 +288,9 @@ final class TerminalTranscriptTrimTests: XCTestCase {
     }
 
     func testCutFallsBackToNominalOffsetWithoutNewlineWithinBound() throws {
-        // A retained region larger than the 1MB forward-scan bound with no newline forces the nominal
-        // (unaligned) offset — the bounded scan must not run past its limit hunting for a newline.
+        // A retained region larger than the 1MB forward-scan bound with neither a newline nor an ESC byte
+        // (an all-'X' span) forces the nominal (unaligned) offset — the last-resort fallback for a window
+        // with no parser-safe boundary at all. The bounded scan must not run past its limit hunting for one.
         let (url, handle) = try makeTranscriptFile()
         let retainedBytes = TerminalTranscriptTrim.maxNewlineAlignScanBytes + 100_000  // > 1 MiB newline-free retained span
         var payload = Data()
@@ -308,6 +309,44 @@ final class TerminalTranscriptTrimTests: XCTestCase {
         let (_, tail) = try splitPreambleAndTail(try Data(contentsOf: url))
         XCTAssertEqual(UInt64(tail.count), retainedBytes, "Fallback must keep exactly the nominal retained span (cut = nominal offset).")
         XCTAssertTrue(tail.allSatisfy { $0 == 0x58 }, "Retained tail must be the newline-free span.")
+    }
+
+    // An LF-free megabyte span is realistic for alt-screen TUIs (the exact sessions that trim): repeated
+    // cursor positioning with no trailing newline. Cutting at the arbitrary nominal offset would land
+    // mid-CSI-sequence, and a from-zero replay of the retained tail would then start parsing mid-sequence
+    // and render garbage. ESC (0x1B) is always the start of a new escape sequence and can never sit inside
+    // a UTF-8 continuation byte (those are all >= 0x80), so cutting immediately before the first ESC in the
+    // scan window is always a clean parser boundary.
+    //
+    // Fails against a nominal-offset fallback: the retained tail then begins mid-CSI-sequence, not at 0x1B.
+    func testCutFallsBackToFirstEscByteWhenNoNewlineWithinBound() throws {
+        let (url, handle) = try makeTranscriptFile()
+        // The `+ 100_007` (vs. a round number) is deliberate: it makes the nominal offset land a few bytes
+        // into a record rather than coincidentally on a record's leading ESC, so this test cannot pass by
+        // accident against the old nominal-offset fallback.
+        let retainedBytes = TerminalTranscriptTrim.maxNewlineAlignScanBytes + 100_007  // > 1 MiB newline-free retained span
+        var payload = Data()
+        payload.append(lineFiller(prefix: "HEADER", minBytes: 400_000).data)
+
+        // Repeated CUP + text with no trailing LF anywhere: an alt-screen TUI redrawing a fixed line in
+        // place. ESC recurs every few bytes, so the scan window is dense with clean cut points.
+        var index = 0
+        var controlHeavy = Data()
+        while controlHeavy.count < Int(retainedBytes) + 200_000 {
+            controlHeavy.append(Data("\u{1B}[5;1Hline \(index)".utf8))
+            index += 1
+        }
+        payload.append(controlHeavy)
+        let triggerBytes = retainedBytes + 300_000
+        XCTAssertGreaterThan(UInt64(payload.count), triggerBytes)
+        try handle.write(contentsOf: payload)
+
+        _ = try TerminalTranscriptTrim.trimIfNeeded(
+            outputPath: url.path, writeHandle: handle, currentEndOffset: UInt64(payload.count), columns: 80, rows: 24,
+            triggerBytes: triggerBytes, retainedBytes: retainedBytes)
+
+        let (_, tail) = try splitPreambleAndTail(try Data(contentsOf: url))
+        XCTAssertEqual(tail.first, 0x1B, "Without a newline in the scan window, the cut must land just before the first ESC, not mid-sequence.")
     }
 
     // MARK: - Induction across successive trims

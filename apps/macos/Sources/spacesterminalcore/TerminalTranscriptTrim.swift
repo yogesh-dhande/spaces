@@ -35,9 +35,11 @@ public enum TerminalTranscriptTrim {
 
     /// Upper bound on the forward newline scan used to align the cut to a line boundary. This is a
     /// bounded scan, not a fallback path: if no newline appears within this many bytes of the nominal
-    /// offset, the cut falls back to the nominal offset (a mid-line cut, which the preamble + vt
-    /// replay still tolerate). A megabyte is far larger than any realistic single terminal line, so
-    /// the fallback effectively never engages outside adversarial newline-free spans.
+    /// offset, the cut falls back to the offset just before the first ESC byte in the window (see
+    /// `newlineAlignedCutOffset`), and only when the window has neither does it fall back to the nominal
+    /// offset itself. A megabyte is far larger than any realistic single terminal line, so an LF-free scan
+    /// window is already the adversarial case (a long alt-screen TUI redraw run); this bound just caps how
+    /// far the scan looks before conceding to one of those fallbacks, it does not claim they never engage.
     static let maxNewlineAlignScanBytes: UInt64 = 1 << 20
 
     private static let replayChunkBytes = 256 * 1024
@@ -90,13 +92,28 @@ public enum TerminalTranscriptTrim {
         return newEndOffset
     }
 
-    /// Scans forward from `nominalStart` for the next newline and returns the offset just past it, so
-    /// the retained tail begins on a line boundary. Bounded by `maxNewlineAlignScanBytes`; if no
-    /// newline is found within the bound (or before end of file), returns `nominalStart`.
+    /// Scans forward from `nominalStart` for the next newline and returns the offset just past it, so the
+    /// retained tail begins on a line boundary. Bounded by `maxNewlineAlignScanBytes`.
+    ///
+    /// A line boundary is preferred, but any cut must land on a parser-safe boundary or the retained tail
+    /// starts mid-sequence and a from-zero replay renders those bytes as garbage (the preamble serializes
+    /// terminal *state*, not mid-sequence *parser* state). If no newline turns up within the bound, the
+    /// cut falls back to the offset immediately before the first ESC (0x1B) byte seen while scanning:
+    /// ESC is always < 0x80, so it can never sit inside a UTF-8 continuation byte, and a tail beginning at
+    /// ESC starts a clean escape sequence from the ground state. The head ending just before that ESC at
+    /// worst leaves an unterminated escape/string sequence dangling in the throwaway preamble replay,
+    /// which is simply never applied there — harmless. Only when the window contains neither a newline
+    /// nor an ESC (essentially impossible for the control-heavy streams — alt-screen TUIs — that actually
+    /// trigger this bounded-scan fallback) does the cut fall back to `nominalStart` itself, an arbitrary
+    /// byte that the caller must otherwise avoid.
+    ///
+    /// Single pass: the first ESC offset is remembered while scanning for the newline rather than
+    /// re-reading the window to find it separately.
     private static func newlineAlignedCutOffset(readHandle: FileHandle, nominalStart: UInt64, endOffset: UInt64) throws -> UInt64 {
         let scanLimit = min(nominalStart + maxNewlineAlignScanBytes, endOffset)
         try readHandle.seek(toOffset: nominalStart)
         var scanned = nominalStart
+        var firstEscOffset: UInt64?
         while scanned < scanLimit {
             let toRead = Int(min(UInt64(newlineScanBlockBytes), scanLimit - scanned))
             let chunk = try readHandle.read(upToCount: toRead) ?? Data()
@@ -104,9 +121,12 @@ public enum TerminalTranscriptTrim {
             if let newlineIndex = chunk.firstIndex(of: 0x0A) {
                 return scanned + UInt64(chunk.distance(from: chunk.startIndex, to: newlineIndex)) + 1
             }
+            if firstEscOffset == nil, let escIndex = chunk.firstIndex(of: 0x1B) {
+                firstEscOffset = scanned + UInt64(chunk.distance(from: chunk.startIndex, to: escIndex))
+            }
             scanned += UInt64(chunk.count)
         }
-        return nominalStart
+        return firstEscOffset ?? nominalStart
     }
 
     /// Builds the state preamble by streaming `[0..cutOffset]` through a throwaway vt session (created

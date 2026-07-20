@@ -61,17 +61,37 @@ final class TerminalSessionGarbageCollectorTests: XCTestCase {
         return paths
     }
 
-    private func collect(active: Set<String> = [], referenced: Set<String> = [], fileManager: FileManager = .default) throws -> [String] {
+    private func collect(
+        active: Set<String> = [], referenced: Set<String> = [], fileManager: FileManager = .default,
+        onPurgeFailure: (String, any Error) -> Void = { _, _ in }
+    ) throws -> [String] {
         try TerminalSessionGarbageCollector.collectRemovedSessions(
-            activeSessionIDs: active, isReferencedByProduct: { referenced.contains($0) }, fileManager: fileManager, now: now)
+            activeSessionIDs: active, isReferencedByProduct: { referenced.contains($0) }, fileManager: fileManager, now: now,
+            onPurgeFailure: onPurgeFailure)
     }
 
     /// Stands in for a `removeItem` failure (e.g. a permissions error or a busy file handle) so purge
     /// retryability can be tested without relying on the real filesystem to reject a delete. Everything
     /// else (fileExists, createDirectory, ...) falls back to the real `FileManager` behavior via `super`.
+    /// `failingSessionID` narrows the failure to one session's directory (matched by substring on the
+    /// runtime-scoped path) so a sweep containing multiple collectable sessions can exercise "only the
+    /// targeted purge fails"; `nil` fails every removal, as every prior caller of this class relies on.
     private final class RemoveItemThrowingFileManager: FileManager {
         struct RemovalFailure: Error {}
-        override func removeItem(atPath path: String) throws { throw RemovalFailure() }
+        private let failingSessionID: String?
+
+        init(failingSessionID: String? = nil) {
+            self.failingSessionID = failingSessionID
+            super.init()
+        }
+
+        override func removeItem(atPath path: String) throws {
+            if let failingSessionID, !path.contains(failingSessionID) {
+                try super.removeItem(atPath: path)
+                return
+            }
+            throw RemovalFailure()
+        }
     }
 
     // (b) Removal deletes the dir and prunes every persisted row, including the final-render state row.
@@ -174,17 +194,50 @@ final class TerminalSessionGarbageCollectorTests: XCTestCase {
     }
 
     // (P3) Same guarantee through the collector's own entry point: a removeItem failure must not drop the
-    // session from the next sweep, and the next sweep must finish the purge it left behind.
+    // session from the next sweep, and the next sweep must finish the purge it left behind. The failure is
+    // contained (the sweep does not throw) and reported to the caller so it can be logged; per the daemon
+    // call site, the collector never performs the logging I/O itself.
     func testCollectRemovedSessionsRetriesPurgeAfterDirectoryRemovalFailure() throws {
         _ = try seedSession(id: "leaky", state: .exited, servicePID: 999_999)
+        var failures: [String] = []
 
-        XCTAssertThrowsError(try collect(fileManager: RemoveItemThrowingFileManager()))
+        let purged = try collect(fileManager: RemoveItemThrowingFileManager(), onPurgeFailure: { sessionID, _ in failures.append(sessionID) })
+
+        XCTAssertTrue(purged.isEmpty, "A contained purge failure must not be reported as purged.")
+        XCTAssertEqual(failures, ["leaky"], "The failure must be reported to the caller so it can be logged.")
         XCTAssertEqual(
             try TerminalSessionPersistence.listKnownSessions().map(\.sessionID), ["leaky"],
             "A removeItem failure must not drop the session's row, or the next sweep can never rediscover it.")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: try TerminalSessionPaths.forSession(id: "leaky").rootDirectory))
 
-        let purged = try collect()
-        XCTAssertEqual(purged, ["leaky"])
+        let retried = try collect()
+        XCTAssertEqual(retried, ["leaky"])
+        XCTAssertTrue(try TerminalSessionPersistence.listKnownSessions().isEmpty)
+    }
+
+    // (P4) A single failing purge must not abort the whole sweep: the collector iterates sessions in a
+    // stable order (`created_at`, then `session_id`), reruns every minute, and one permanently-undeletable
+    // session (e.g. a permissions error) must not block collection of every session ordered after it
+    // forever. "a-leaky" sorts before "b-clean" so it is purged first in sweep order.
+    func testCollectContainsOnePurgeFailureAndStillPurgesRemainingSessions() throws {
+        _ = try seedSession(id: "a-leaky", state: .exited, servicePID: 999_999)
+        let cleanPaths = try seedSession(id: "b-clean", state: .exited, servicePID: 999_998)
+        var failures: [String] = []
+
+        let purged = try collect(
+            fileManager: RemoveItemThrowingFileManager(failingSessionID: "a-leaky"), onPurgeFailure: { sessionID, _ in failures.append(sessionID) })
+
+        XCTAssertEqual(purged, ["b-clean"], "The sweep must continue past the failed session and purge the rest.")
+        XCTAssertEqual(failures, ["a-leaky"])
+        XCTAssertEqual(
+            try TerminalSessionPersistence.listKnownSessions().map(\.sessionID), ["a-leaky"],
+            "The failed session's row must remain for retry; the purged session's row must be gone.")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: try TerminalSessionPaths.forSession(id: "a-leaky").rootDirectory))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: cleanPaths.rootDirectory))
+
+        // The next sweep, with a working FileManager, retries and completes the deferred purge.
+        let retried = try collect()
+        XCTAssertEqual(retried, ["a-leaky"])
         XCTAssertTrue(try TerminalSessionPersistence.listKnownSessions().isEmpty)
     }
 }

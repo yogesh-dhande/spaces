@@ -17,6 +17,7 @@ typedef GhosttyResult (*GhosttyTerminalNewFn)(const GhosttyAllocator *, GhosttyT
 typedef void (*GhosttyTerminalFreeFn)(GhosttyTerminal);
 typedef void (*GhosttyTerminalVtWriteFn)(GhosttyTerminal, const uint8_t *, size_t);
 typedef void (*GhosttyTerminalScrollViewportFn)(GhosttyTerminal, GhosttyTerminalScrollViewport);
+typedef GhosttyResult (*GhosttyTerminalResizeFn)(GhosttyTerminal, uint16_t, uint16_t, uint32_t, uint32_t);
 typedef GhosttyResult (*GhosttyTerminalGetFn)(GhosttyTerminal, GhosttyTerminalData, void *);
 typedef GhosttyResult (*GhosttyTerminalModeGetFn)(GhosttyTerminal, GhosttyMode, bool *);
 typedef GhosttyResult (*GhosttyTerminalSetFn)(GhosttyTerminal, GhosttyTerminalOption, const void *);
@@ -52,6 +53,7 @@ typedef struct {
     GhosttyTerminalFreeFn terminal_free;
     GhosttyTerminalVtWriteFn terminal_vt_write;
     GhosttyTerminalScrollViewportFn terminal_scroll_viewport;
+    GhosttyTerminalResizeFn terminal_resize;
     GhosttyTerminalGetFn terminal_get;
     GhosttyTerminalModeGetFn terminal_mode_get;
     GhosttyTerminalSetFn terminal_set;
@@ -280,6 +282,7 @@ static bool spaces_ghostty_vt_load_symbols(SpacesGhosttyVtSymbols *symbols) {
     symbols->terminal_free = (GhosttyTerminalFreeFn)dlsym(handle, "ghostty_terminal_free");
     symbols->terminal_vt_write = (GhosttyTerminalVtWriteFn)dlsym(handle, "ghostty_terminal_vt_write");
     symbols->terminal_scroll_viewport = (GhosttyTerminalScrollViewportFn)dlsym(handle, "ghostty_terminal_scroll_viewport");
+    symbols->terminal_resize = (GhosttyTerminalResizeFn)dlsym(handle, "ghostty_terminal_resize");
     symbols->terminal_get = (GhosttyTerminalGetFn)dlsym(handle, "ghostty_terminal_get");
     symbols->terminal_mode_get = (GhosttyTerminalModeGetFn)dlsym(handle, "ghostty_terminal_mode_get");
     // Optional: present in libghostty-vt builds that expose default-color configuration. Kept out
@@ -311,6 +314,7 @@ static bool spaces_ghostty_vt_load_symbols(SpacesGhosttyVtSymbols *symbols) {
         symbols->terminal_free == NULL ||
         symbols->terminal_vt_write == NULL ||
         symbols->terminal_scroll_viewport == NULL ||
+        symbols->terminal_resize == NULL ||
         symbols->terminal_get == NULL ||
         symbols->terminal_mode_get == NULL ||
         symbols->paste_encode == NULL ||
@@ -554,6 +558,14 @@ bool spaces_ghostty_vt_session_write(SpacesGhosttyVtSession *session, const uint
     if (input == NULL || input_len == 0) return true;
     session->symbols.terminal_vt_write(session->terminal, input, input_len);
     return true;
+}
+
+bool spaces_ghostty_vt_session_resize(SpacesGhosttyVtSession *session, uint16_t columns, uint16_t rows) {
+    if (session == NULL || session->terminal == NULL || columns == 0 || rows == 0) return false;
+    // Session creation leaves the pixel cell metrics unset (GhosttyTerminalOptions carries only
+    // cols/rows/max_scrollback), so the in-place resize keeps that same convention and passes zero
+    // pixel metrics. Only the cell grid is reflowed; image-protocol pixel geometry stays unset.
+    return session->symbols.terminal_resize(session->terminal, columns, rows, 0, 0) == GHOSTTY_SUCCESS;
 }
 
 bool spaces_ghostty_vt_session_encode_paste(
@@ -1133,111 +1145,266 @@ static void spaces_ghostty_vt_preamble_append_utf8_codepoint(SpacesGhosttyVtPrea
     spaces_ghostty_vt_preamble_append(buf, "%.*s", (int)len, (const char *)bytes);
 }
 
+// A resolved pen for one cell: the style flags plus the *tagged* foreground and background colors.
+// Colors are kept in tagged form (none / palette index / RGB) rather than resolved to RGB so the
+// preamble can re-emit palette-indexed colors as `38;5;n` / `48;5;n` (which the viewer resolves against
+// its own Spaces theme, and which adapt to light/dark) and reserve truecolor `38;2` / `48;2` for
+// genuinely RGB colors. Consequently a palette-1 cell and an RGB cell that happens to resolve to the
+// same RGB are different pens: the run-length comparison and the blank-cell test compare tags, not RGB.
+typedef struct {
+    uint16_t flags;             // SPACES_GHOSTTY_VT_FLAG_* style bits (never the spacer bit)
+    GhosttyStyleColorTag fg_tag;
+    GhosttyStyleColorTag bg_tag;
+    uint32_t fg_value;          // palette index (PALETTE) or packed 0x00RRGGBB (RGB); 0 for NONE
+    uint32_t bg_value;
+} SpacesGhosttyVtPen;
+
+static uint32_t spaces_ghostty_vt_style_color_value(GhosttyStyleColor color) {
+    if (color.tag == GHOSTTY_STYLE_COLOR_PALETTE) return (uint32_t)color.value.palette;
+    if (color.tag == GHOSTTY_STYLE_COLOR_RGB) return spaces_ghostty_vt_pack_rgb(color.value.rgb);
+    return 0;
+}
+
+static SpacesGhosttyVtPen spaces_ghostty_vt_pen_from_style(const GhosttyStyle *style) {
+    SpacesGhosttyVtPen pen;
+    memset(&pen, 0, sizeof(pen));
+    pen.flags = spaces_ghostty_vt_flags_for_style(style, GHOSTTY_CELL_WIDE_NARROW);
+    pen.fg_tag = style->fg_color.tag;
+    pen.bg_tag = style->bg_color.tag;
+    pen.fg_value = spaces_ghostty_vt_style_color_value(style->fg_color);
+    pen.bg_value = spaces_ghostty_vt_style_color_value(style->bg_color);
+    return pen;
+}
+
+static bool spaces_ghostty_vt_pen_equal(const SpacesGhosttyVtPen *a, const SpacesGhosttyVtPen *b) {
+    return a->flags == b->flags && a->fg_tag == b->fg_tag && a->bg_tag == b->bg_tag &&
+           a->fg_value == b->fg_value && a->bg_value == b->bg_value;
+}
+
 // Emits a full pen transition as `CSI 0 m` (reset) followed by only the non-default attributes of the
 // target cell. Resetting first and reapplying is larger than a minimal diff but is unconditionally
 // correct — the emitted pen depends on nothing but the target cell, so no attribute can leak forward.
-// 24-bit color is used for any non-default fg/bg; flags map to their SGR codes.
-static void spaces_ghostty_vt_preamble_append_pen(
-    SpacesGhosttyVtPreambleBuffer *buf,
-    uint16_t flags,
-    uint32_t foreground_rgb,
-    uint32_t background_rgb,
-    uint32_t default_foreground_rgb,
-    uint32_t default_background_rgb
-) {
+// Palette-tagged colors emit `38;5;n` / `48;5;n`; RGB-tagged colors emit truecolor; NONE emits nothing
+// (the default fg/bg stays in effect). Flags map to their SGR codes.
+static void spaces_ghostty_vt_preamble_append_pen(SpacesGhosttyVtPreambleBuffer *buf, const SpacesGhosttyVtPen *pen) {
     spaces_ghostty_vt_preamble_append(buf, "\x1b[0");
-    if (flags & SPACES_GHOSTTY_VT_FLAG_BOLD) spaces_ghostty_vt_preamble_append(buf, ";1");
-    if (flags & SPACES_GHOSTTY_VT_FLAG_FAINT) spaces_ghostty_vt_preamble_append(buf, ";2");
-    if (flags & SPACES_GHOSTTY_VT_FLAG_ITALIC) spaces_ghostty_vt_preamble_append(buf, ";3");
-    if (flags & SPACES_GHOSTTY_VT_FLAG_UNDERLINE) spaces_ghostty_vt_preamble_append(buf, ";4");
-    if (flags & SPACES_GHOSTTY_VT_FLAG_INVERSE) spaces_ghostty_vt_preamble_append(buf, ";7");
-    if (flags & SPACES_GHOSTTY_VT_FLAG_INVISIBLE) spaces_ghostty_vt_preamble_append(buf, ";8");
-    if (flags & SPACES_GHOSTTY_VT_FLAG_STRIKE) spaces_ghostty_vt_preamble_append(buf, ";9");
-    if (foreground_rgb != default_foreground_rgb) {
-        GhosttyColorRgb color = spaces_ghostty_vt_unpack_rgb(foreground_rgb);
+    if (pen->flags & SPACES_GHOSTTY_VT_FLAG_BOLD) spaces_ghostty_vt_preamble_append(buf, ";1");
+    if (pen->flags & SPACES_GHOSTTY_VT_FLAG_FAINT) spaces_ghostty_vt_preamble_append(buf, ";2");
+    if (pen->flags & SPACES_GHOSTTY_VT_FLAG_ITALIC) spaces_ghostty_vt_preamble_append(buf, ";3");
+    if (pen->flags & SPACES_GHOSTTY_VT_FLAG_UNDERLINE) spaces_ghostty_vt_preamble_append(buf, ";4");
+    if (pen->flags & SPACES_GHOSTTY_VT_FLAG_INVERSE) spaces_ghostty_vt_preamble_append(buf, ";7");
+    if (pen->flags & SPACES_GHOSTTY_VT_FLAG_INVISIBLE) spaces_ghostty_vt_preamble_append(buf, ";8");
+    if (pen->flags & SPACES_GHOSTTY_VT_FLAG_STRIKE) spaces_ghostty_vt_preamble_append(buf, ";9");
+    if (pen->fg_tag == GHOSTTY_STYLE_COLOR_PALETTE) {
+        spaces_ghostty_vt_preamble_append(buf, ";38;5;%u", (unsigned)pen->fg_value);
+    } else if (pen->fg_tag == GHOSTTY_STYLE_COLOR_RGB) {
+        GhosttyColorRgb color = spaces_ghostty_vt_unpack_rgb(pen->fg_value);
         spaces_ghostty_vt_preamble_append(buf, ";38;2;%u;%u;%u", (unsigned)color.r, (unsigned)color.g, (unsigned)color.b);
     }
-    if (background_rgb != default_background_rgb) {
-        GhosttyColorRgb color = spaces_ghostty_vt_unpack_rgb(background_rgb);
+    if (pen->bg_tag == GHOSTTY_STYLE_COLOR_PALETTE) {
+        spaces_ghostty_vt_preamble_append(buf, ";48;5;%u", (unsigned)pen->bg_value);
+    } else if (pen->bg_tag == GHOSTTY_STYLE_COLOR_RGB) {
+        GhosttyColorRgb color = spaces_ghostty_vt_unpack_rgb(pen->bg_value);
         spaces_ghostty_vt_preamble_append(buf, ";48;2;%u;%u;%u", (unsigned)color.r, (unsigned)color.g, (unsigned)color.b);
     }
     spaces_ghostty_vt_preamble_append(buf, "m");
 }
 
+// A cell of the active screen as modeled for the grid repaint: its pen, whether it is a wide-char
+// spacer, whether it carries content, and its grapheme cluster (base codepoint plus any combining
+// marks / ZWJ codepoints).
+typedef struct {
+    SpacesGhosttyVtPen pen;
+    bool spacer;             // wide-char spacer (head/tail): covered by the wide glyph, never content
+    bool has_content;        // participates in last-column / last-row detection
+    uint32_t base_codepoint; // first grapheme codepoint (0 = blank cell)
+    uint16_t grapheme_len;   // total codepoints in the cluster (0 = no text)
+    uint32_t *graphemes;     // heap cluster of grapheme_len codepoints when grapheme_len > 1, else NULL
+} SpacesGhosttyVtGridCell;
+
 // Repaints the active screen's visible grid into the preamble buffer so a from-zero replay restores
 // cells that the retained tail never redraws (e.g. a static TUI header drawn once, followed by
-// cursor-only updates elsewhere). Reuses the snapshot machinery (`spaces_ghostty_vt_session_copy_snapshot`)
-// to read the active screen's cells, colors, and per-cell style flags.
+// cursor-only updates elsewhere). The painter does its own render-state row/cell iteration (rather than
+// going through the flat snapshot) so it can read each cell's *tagged* style color (to keep palette
+// indices palette-indexed) and its full grapheme cluster (so multi-codepoint clusters are not collapsed
+// to their base codepoint).
 //
-// Painting is CUP + text only (no LF, no scrolling), so it cannot push lines into the target's
-// scrollback. Per row: skip the row entirely when every cell is default; otherwise `CSI <row>;1 H`,
-// then walk cells up to the last non-default one, emitting a pen transition only when the pen changes
-// and the cell's UTF-8 glyph (codepoint 0 -> space). Wide-cell spacers are skipped because the wide
-// codepoint already advances the cursor two columns. A closing `CSI 0 m` + `CSI K` clears any trailing
-// default cells so a mostly-empty grid stays small.
+// Painting is top-down flow, NOT absolute addressing: home once (`CSI 1;1 H`), then paint rows in order
+// up to the last row that carries content, separated by `\r\n`; a blank interior row contributes `CSI K`
+// (it must not be skipped, or the row-to-line mapping desyncs). This is what makes a replay at a SMALLER
+// size behave correctly: the excess rows wrap/scroll like ordinary content instead of clamping absolute
+// CUPs onto the bottom row (which destructively overwrites rows). At the same size, home + N painted
+// rows joined by N-1 newlines can never scroll, so the result is visually identical to before. No `\r\n`
+// follows the last painted row. Painting a full-width row then `\r\n` is safe because CR/LF do not
+// advance the deferred (pending) wrap, so no extra scroll happens.
 //
-// Returns false when the underlying snapshot cannot be read; the caller then fails the whole preamble.
+// Per row: paint cells up to the last content column, emitting a pen transition only when the pen
+// changes and the cell's grapheme cluster (base codepoint 0 -> space). Wide-cell spacers are skipped
+// because the wide codepoint already advances the cursor two columns. A closing `CSI 0 m` resets the
+// pen; `CSI K` then erases trailing default cells, but only when the content does not already fill the
+// row (a full-width row leaves the cursor in the deferred-wrap state on the last column, where EL would
+// erase the glyph just painted).
+//
+// Returns false when the render state cannot be read; the caller then fails the whole preamble.
 static bool spaces_ghostty_vt_preamble_append_grid(SpacesGhosttyVtSession *session, SpacesGhosttyVtPreambleBuffer *buf) {
-    SpacesGhosttyVtSnapshot snapshot;
-    memset(&snapshot, 0, sizeof(snapshot));
-    if (!spaces_ghostty_vt_session_copy_snapshot(session, &snapshot)) return false;
-
-    uint16_t columns = snapshot.columns;
-    uint16_t rows = snapshot.rows;
-    uint32_t default_foreground_rgb = snapshot.default_foreground_rgb;
-    uint32_t default_background_rgb = snapshot.default_background_rgb;
-
-    for (uint16_t row = 0; row < rows && buf->ok; row++) {
-        const SpacesGhosttyVtSnapshotCell *row_cells = snapshot.cells + (size_t)row * (size_t)columns;
-
-        // Find the last column that carries non-default content, so trailing blanks are cleared with a
-        // single EL instead of painted. A cell is default when it is blank (codepoint 0 or space), keeps
-        // the default background, and has no style flags. Spacer cells are covered by their wide
-        // codepoint and never count as content on their own.
-        int last_content_column = -1;
-        for (int column = columns - 1; column >= 0; column--) {
-            const SpacesGhosttyVtSnapshotCell *cell = &row_cells[column];
-            if (cell->flags & SPACES_GHOSTTY_VT_FLAG_SPACER) continue;
-            uint16_t style_flags = cell->flags & (uint16_t)~SPACES_GHOSTTY_VT_FLAG_SPACER;
-            bool blank = cell->codepoint == 0 || cell->codepoint == 0x20;
-            if (blank && cell->background_rgb == default_background_rgb && style_flags == 0) continue;
-            last_content_column = column;
-            break;
-        }
-        if (last_content_column < 0) continue;
-
-        spaces_ghostty_vt_preamble_append(buf, "\x1b[%u;1H", (unsigned)row + 1);
-
-        uint16_t current_flags = 0;
-        uint32_t current_foreground_rgb = default_foreground_rgb;
-        uint32_t current_background_rgb = default_background_rgb;
-        for (int column = 0; column <= last_content_column; column++) {
-            const SpacesGhosttyVtSnapshotCell *cell = &row_cells[column];
-            // The preceding wide codepoint already advanced the cursor across this spacer column.
-            if (cell->flags & SPACES_GHOSTTY_VT_FLAG_SPACER) continue;
-            uint16_t style_flags = cell->flags & (uint16_t)~SPACES_GHOSTTY_VT_FLAG_SPACER;
-            uint32_t foreground_rgb = cell->foreground_rgb;
-            uint32_t background_rgb = cell->background_rgb;
-            if (
-                style_flags != current_flags ||
-                foreground_rgb != current_foreground_rgb ||
-                background_rgb != current_background_rgb
-            ) {
-                spaces_ghostty_vt_preamble_append_pen(
-                    buf, style_flags, foreground_rgb, background_rgb, default_foreground_rgb, default_background_rgb);
-                current_flags = style_flags;
-                current_foreground_rgb = foreground_rgb;
-                current_background_rgb = background_rgb;
-            }
-            spaces_ghostty_vt_preamble_append_utf8_codepoint(buf, cell->codepoint);
-        }
-
-        // Reset the pen (so EL clears with the default background) and erase any trailing default cells.
-        spaces_ghostty_vt_preamble_append(buf, "\x1b[0m\x1b[K");
+    if (session->symbols.render_state_update(session->render_state, session->terminal) != GHOSTTY_SUCCESS) {
+        return false;
     }
 
-    spaces_ghostty_vt_snapshot_free(&snapshot);
-    return buf->ok;
+    uint16_t columns = 0;
+    uint16_t rows = 0;
+    if (
+        session->symbols.render_state_get(session->render_state, GHOSTTY_RENDER_STATE_DATA_COLS, &columns) != GHOSTTY_SUCCESS ||
+        session->symbols.render_state_get(session->render_state, GHOSTTY_RENDER_STATE_DATA_ROWS, &rows) != GHOSTTY_SUCCESS
+    ) {
+        return false;
+    }
+
+    size_t cell_count = (size_t)columns * (size_t)rows;
+    if (cell_count == 0) return buf->ok;  // Nothing to paint.
+
+    // calloc leaves each cell blank + default: pen all-zero (NONE tags, no flags), grapheme_len 0,
+    // has_content false. Cells the iterator does not visit therefore stay a correct blank default.
+    SpacesGhosttyVtGridCell *grid = (SpacesGhosttyVtGridCell *)calloc(cell_count, sizeof(SpacesGhosttyVtGridCell));
+    if (grid == NULL) return false;
+
+    bool ok = true;
+    if (session->symbols.render_state_get(session->render_state, GHOSTTY_RENDER_STATE_DATA_ROW_ITERATOR, &session->row_iterator) != GHOSTTY_SUCCESS) {
+        ok = false;
+    }
+
+    size_t cell_index = 0;
+    while (ok && cell_index < cell_count && session->symbols.row_iterator_next(session->row_iterator)) {
+        if (
+            session->symbols.row_get(session->row_iterator, GHOSTTY_RENDER_STATE_ROW_DATA_CELLS, &session->row_cells) !=
+            GHOSTTY_SUCCESS
+        ) {
+            ok = false;
+            break;
+        }
+
+        size_t row_start = cell_index;
+        size_t row_end = row_start + (size_t)columns;
+        while (cell_index < row_end && session->symbols.row_cells_next(session->row_cells)) {
+            GhosttyCell raw_cell = 0;
+            GhosttyStyle style = GHOSTTY_INIT_SIZED(GhosttyStyle);
+            GhosttyCellWide wide = GHOSTTY_CELL_WIDE_NARROW;
+            uint32_t codepoint = 0;
+            uint32_t grapheme_len = 0;
+
+            session->symbols.row_cells_get(session->row_cells, GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_RAW, &raw_cell);
+            session->symbols.row_cells_get(session->row_cells, GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_STYLE, &style);
+            session->symbols.cell_get(raw_cell, GHOSTTY_CELL_DATA_CODEPOINT, &codepoint);
+            session->symbols.cell_get(raw_cell, GHOSTTY_CELL_DATA_WIDE, &wide);
+            if (
+                session->symbols.row_cells_get(
+                    session->row_cells, GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_LEN, &grapheme_len
+                ) != GHOSTTY_SUCCESS
+            ) {
+                grapheme_len = 0;
+            }
+
+            SpacesGhosttyVtGridCell *model = &grid[cell_index];
+            model->pen = spaces_ghostty_vt_pen_from_style(&style);
+            model->spacer = (wide == GHOSTTY_CELL_WIDE_SPACER_HEAD || wide == GHOSTTY_CELL_WIDE_SPACER_TAIL);
+            model->base_codepoint = codepoint;
+            model->grapheme_len = grapheme_len > 0xFFFF ? 0xFFFF : (uint16_t)grapheme_len;
+
+            // Only copy the cluster out when it holds more than the base codepoint; a single-codepoint
+            // cell is emitted from base_codepoint alone. The buffer receives base first, then extras.
+            if (model->grapheme_len > 1) {
+                uint32_t *cluster = (uint32_t *)malloc((size_t)model->grapheme_len * sizeof(uint32_t));
+                if (cluster == NULL) {
+                    ok = false;
+                    break;
+                }
+                if (
+                    session->symbols.row_cells_get(
+                        session->row_cells, GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_BUF, cluster
+                    ) != GHOSTTY_SUCCESS
+                ) {
+                    free(cluster);
+                    model->grapheme_len = 1;  // Fall back to the base codepoint.
+                } else {
+                    model->graphemes = cluster;
+                    model->base_codepoint = cluster[0];
+                }
+            }
+
+            // A cell counts as content unless it is blank (no glyph or a space), keeps the default
+            // background (tag NONE), and carries no style flags — all compared in tagged terms. Spacer
+            // cells never count on their own; the wide glyph they trail already carries the content.
+            bool blank = model->base_codepoint == 0 || model->base_codepoint == 0x20;
+            model->has_content = !model->spacer &&
+                (!blank || model->pen.bg_tag != GHOSTTY_STYLE_COLOR_NONE || model->pen.flags != 0);
+            cell_index++;
+        }
+        cell_index = row_end;
+    }
+
+    if (ok && buf->ok) {
+        // Find the last row that carries content; nothing is painted if the grid is entirely default.
+        int last_content_row = -1;
+        for (int row = (int)rows - 1; row >= 0; row--) {
+            const SpacesGhosttyVtGridCell *row_cells = grid + (size_t)row * (size_t)columns;
+            for (uint16_t column = 0; column < columns; column++) {
+                if (row_cells[column].has_content) {
+                    last_content_row = row;
+                    break;
+                }
+            }
+            if (last_content_row >= 0) break;
+        }
+
+        if (last_content_row >= 0) {
+            spaces_ghostty_vt_preamble_append(buf, "\x1b[1;1H");
+            for (int row = 0; row <= last_content_row && buf->ok; row++) {
+                if (row > 0) spaces_ghostty_vt_preamble_append(buf, "\r\n");
+                const SpacesGhosttyVtGridCell *row_cells = grid + (size_t)row * (size_t)columns;
+
+                int last_content_column = -1;
+                for (int column = (int)columns - 1; column >= 0; column--) {
+                    if (row_cells[column].has_content) {
+                        last_content_column = column;
+                        break;
+                    }
+                }
+
+                if (last_content_column < 0) {
+                    // Blank interior row: clear the line and let the loop's `\r\n` advance to the next.
+                    spaces_ghostty_vt_preamble_append(buf, "\x1b[K");
+                    continue;
+                }
+
+                SpacesGhosttyVtPen current_pen;
+                memset(&current_pen, 0, sizeof(current_pen));  // Default pen (NONE tags, no flags).
+                for (int column = 0; column <= last_content_column; column++) {
+                    const SpacesGhosttyVtGridCell *cell = &row_cells[column];
+                    if (cell->spacer) continue;  // The preceding wide glyph already advanced the cursor.
+                    if (!spaces_ghostty_vt_pen_equal(&cell->pen, &current_pen)) {
+                        spaces_ghostty_vt_preamble_append_pen(buf, &cell->pen);
+                        current_pen = cell->pen;
+                    }
+                    if (cell->grapheme_len > 1 && cell->graphemes != NULL) {
+                        for (uint16_t i = 0; i < cell->grapheme_len; i++) {
+                            spaces_ghostty_vt_preamble_append_utf8_codepoint(buf, cell->graphemes[i]);
+                        }
+                    } else {
+                        spaces_ghostty_vt_preamble_append_utf8_codepoint(buf, cell->base_codepoint);
+                    }
+                }
+
+                spaces_ghostty_vt_preamble_append(buf, "\x1b[0m");
+                if (last_content_column < (int)columns - 1) spaces_ghostty_vt_preamble_append(buf, "\x1b[K");
+            }
+        }
+    }
+
+    for (size_t index = 0; index < cell_count; index++) {
+        if (grid[index].graphemes != NULL) free(grid[index].graphemes);
+    }
+    free(grid);
+    return ok && buf->ok;
 }
 
 // Serializes the session's current persistent terminal state as escape sequences, diffed against a
@@ -1248,7 +1415,7 @@ static bool spaces_ghostty_vt_preamble_append_grid(SpacesGhosttyVtSession *sessi
 // Emission order:
 //   1. Modes (ANSI: CSI <n> h/l; DEC private: CSI ? <n> h/l), including alt-screen modes.
 //   2. Kitty keyboard flags (CSI = <flags> ; 1 u) when nonzero.
-//   3. Grid repaint of the active screen (CUP + text, per `spaces_ghostty_vt_preamble_append_grid`).
+//   3. Grid repaint of the active screen (top-down flow paint, per `spaces_ghostty_vt_preamble_append_grid`).
 //      Emitted after the modes so it lands on the active (possibly alt) screen, and before the CUP so
 //      the final cursor position wins over wherever painting left the cursor.
 //   4. Cursor position (CSI <y+1> ; <x+1> H), after all mode/screen/grid changes so it lands on the

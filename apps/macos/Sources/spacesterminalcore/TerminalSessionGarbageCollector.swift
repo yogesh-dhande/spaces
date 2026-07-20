@@ -21,22 +21,40 @@ public enum TerminalSessionGarbageCollector {
     /// Runs one collection pass over every known session. `activeSessionIDs` are sessions the daemon still
     /// owns in memory (live cores) and never collects. `isReferencedByProduct` reports whether a session
     /// still has a product row keeping it visible. Returns the IDs of the sessions purged.
+    ///
+    /// A single session's purge failure (an undeletable directory — e.g. a permissions error or a busy
+    /// file handle — or a `TerminalSessionPaths.forSession` failure) is contained to that session: it is
+    /// reported through `onPurgeFailure` and left for the next sweep to retry, and the loop continues to
+    /// the remaining sessions. Sessions are collected in a stable order (`listKnownSessions` orders by
+    /// `created_at`, then `session_id`) and this sweep reruns on a fixed cadence, so without containment
+    /// one permanently-undeletable session would block every session ordered after it forever. This
+    /// collector stays pure (no I/O beyond the persistence calls it exists to make): it reports failures
+    /// through the callback rather than logging them itself, matching the closure-injection style already
+    /// used for `isReferencedByProduct`, and the daemon call site — which already logs the outer sweep
+    /// failure to stderr — does the actual logging.
+    ///
+    /// A `listKnownSessions` failure still aborts the whole call: with no session list, there is nothing
+    /// to iterate or retry.
     @discardableResult
     public static func collectRemovedSessions(
         activeSessionIDs: Set<String>, isReferencedByProduct: (String) throws -> Bool, fileManager: FileManager = .default,
-        now: Date = Date()
+        now: Date = Date(), onPurgeFailure: (String, any Error) -> Void = { _, _ in }
     ) throws -> [String] {
         var purged: [String] = []
         for launchConfiguration in try TerminalSessionPersistence.listKnownSessions(fileManager: fileManager) {
             let sessionID = launchConfiguration.sessionID
             guard !activeSessionIDs.contains(sessionID) else { continue }
-            let paths = try TerminalSessionPaths.forSession(id: sessionID)
-            // No runtime state yet means the session is mid-creation (config written, runtime not); leave it.
-            guard let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths) else { continue }
-            guard !isSessionShown(runtimeState: runtimeState, paths: paths, now: now) else { continue }
-            guard !((try? isReferencedByProduct(sessionID)) ?? true) else { continue }
-            try TerminalSessionPersistence.purgeSession(paths: paths, fileManager: fileManager)
-            purged.append(sessionID)
+            do {
+                let paths = try TerminalSessionPaths.forSession(id: sessionID)
+                // No runtime state yet means the session is mid-creation (config written, runtime not); leave it.
+                guard let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths) else { continue }
+                guard !isSessionShown(runtimeState: runtimeState, paths: paths, now: now) else { continue }
+                guard !((try? isReferencedByProduct(sessionID)) ?? true) else { continue }
+                try TerminalSessionPersistence.purgeSession(paths: paths, fileManager: fileManager)
+                purged.append(sessionID)
+            } catch {
+                onPurgeFailure(sessionID, error)
+            }
         }
         return purged
     }
