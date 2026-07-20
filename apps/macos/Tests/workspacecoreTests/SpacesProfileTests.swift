@@ -253,6 +253,71 @@ final class SpacesProfileTests: XCTestCase {
         XCTAssertNotEqual(lease.owner.token, staleOwner.token)
     }
 
+    func testResolveThrowsForRepoBuiltBinaryWhenGitProbeThrows() throws {
+        let repoRoot = try makeFakeRepoRoot()
+        let executablePath = repoRoot.appendingPathComponent("apps/macos/.build/arm64-apple-macosx/debug/spacesd").path
+        let probeError = NSError(domain: "SpacesGitProfileProbe", code: 128, userInfo: [NSLocalizedDescriptionKey: "fatal: not a git repository"])
+
+        XCTAssertThrowsError(
+            try SpacesProfile.resolve(
+                environment: [:], homeDirectoryURL: tempHomeURL, currentDirectoryPath: repoRoot.path, executablePath: executablePath,
+                gitProbe: StubGitProfileProbe(result: .failure(probeError)))
+        ) { error in
+            guard case SpacesProfileResolutionError.repoBuiltGitProbeFailed(let reportedExecutable, let reportedRepoRoot, _) = error else {
+                return XCTFail("Expected repoBuiltGitProbeFailed, got \(error).")
+            }
+            XCTAssertEqual(reportedExecutable, executablePath)
+            XCTAssertEqual(reportedRepoRoot, repoRoot.path)
+            let message = String(describing: error)
+            XCTAssertTrue(message.contains(executablePath), "Error should name the executable path: \(message)")
+            XCTAssertTrue(message.contains(repoRoot.path), "Error should name the repo root: \(message)")
+            XCTAssertTrue(message.contains("fatal: not a git repository"), "Error should carry the underlying git failure: \(message)")
+            XCTAssertTrue(message.contains("~/.spaces"), "Error should say it refuses the installed profile: \(message)")
+        }
+    }
+
+    func testResolveThrowsForRepoBuiltBinaryWhenGitProbeReturnsNil() throws {
+        let repoRoot = try makeFakeRepoRoot()
+        let executablePath = repoRoot.appendingPathComponent("apps/macos/.build/arm64-apple-macosx/debug/spacesd").path
+
+        XCTAssertThrowsError(
+            try SpacesProfile.resolve(
+                environment: [:], homeDirectoryURL: tempHomeURL, currentDirectoryPath: repoRoot.path, executablePath: executablePath,
+                gitProbe: StubGitProfileProbe(result: .success(nil)))
+        ) { error in
+            guard case SpacesProfileResolutionError.repoBuiltGitProbeFailed = error else {
+                return XCTFail("Expected repoBuiltGitProbeFailed, got \(error).")
+            }
+        }
+    }
+
+    func testResolveDevelopmentWorktreeFromArchSpecificBuildPath() throws {
+        let repoRoot = try makeFakeRepoRoot()
+        let executablePath = repoRoot.appendingPathComponent("apps/macos/.build/arm64-apple-macosx/debug/spacesd").path
+        let worktreeRoot = tempHomeURL.appendingPathComponent("worktree").path
+        let context = SpacesDevelopmentContext(worktreeRoot: worktreeRoot, branchName: "feature/x")
+
+        let profile = try SpacesProfile.resolve(
+            environment: [:], homeDirectoryURL: tempHomeURL, currentDirectoryPath: repoRoot.path, executablePath: executablePath,
+            gitProbe: StubGitProfileProbe(result: .success(context)))
+
+        XCTAssertEqual(profile.source, .developmentWorktree)
+    }
+
+    func testResolveExplicitOverrideWinsForRepoBuiltBinaryEvenWhenGitProbeThrows() throws {
+        let repoRoot = try makeFakeRepoRoot()
+        let executablePath = repoRoot.appendingPathComponent("apps/macos/.build/arm64-apple-macosx/debug/spacesd").path
+        let overridePath = tempHomeURL.appendingPathComponent("profiles/custom/spaces.db").path
+        let probeError = NSError(domain: "SpacesGitProfileProbe", code: 128, userInfo: [NSLocalizedDescriptionKey: "boom"])
+
+        let profile = try SpacesProfile.resolve(
+            environment: [SpacesProfile.databasePathEnvironmentVariable: overridePath], homeDirectoryURL: tempHomeURL,
+            currentDirectoryPath: repoRoot.path, executablePath: executablePath, gitProbe: StubGitProfileProbe(result: .failure(probeError)))
+
+        XCTAssertEqual(profile.source, .explicitDatabasePath)
+        XCTAssertEqual(profile.databasePath, overridePath)
+    }
+
     private func explicitProfile(named name: String) throws -> SpacesProfile {
         let databasePath = tempHomeURL.appendingPathComponent("profiles/\(name)/spaces.db").path
         return try SpacesProfile.resolve(
@@ -271,8 +336,12 @@ final class SpacesProfileTests: XCTestCase {
 }
 
 private struct StubGitProfileProbe: SpacesGitProfileProbe {
-    let context: SpacesDevelopmentContext?
-    func resolveDevelopmentContext(repoRootPath _: String) throws -> SpacesDevelopmentContext? { context }
+    let result: Result<SpacesDevelopmentContext?, Error>
+
+    init(result: Result<SpacesDevelopmentContext?, Error>) { self.result = result }
+    init(context: SpacesDevelopmentContext?) { self.result = .success(context) }
+
+    func resolveDevelopmentContext(repoRootPath _: String) throws -> SpacesDevelopmentContext? { try result.get() }
 }
 
 private final class LockedValueBox<Value>: @unchecked Sendable {

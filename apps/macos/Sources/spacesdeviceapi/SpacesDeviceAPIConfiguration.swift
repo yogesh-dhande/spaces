@@ -80,13 +80,36 @@ public struct SpacesDeviceAPIStatus: Codable, Equatable, Sendable {
 public final class SpacesDeviceAPISettingsStore {
     private let fileManager: FileManager
     private let environment: [String: String]
+    private let profileSource: () throws -> SpacesProfileSource
 
-    public init(fileManager: FileManager = .default, environment: [String: String] = ProcessInfo.processInfo.environment) {
+    /// `profileSource` is injectable for testing; it defaults to the running process's resolved profile
+    /// source. It decides whether this profile is allowed to bind the canonical Device API port.
+    public init(
+        fileManager: FileManager = .default, environment: [String: String] = ProcessInfo.processInfo.environment,
+        profileSource: @escaping () throws -> SpacesProfileSource = { try SpacesProfile.current().source }
+    ) {
         self.fileManager = fileManager
         self.environment = environment
+        self.profileSource = profileSource
     }
 
-    public func loadOrCreate() throws -> SpacesDeviceAPISettings { try applyingEnvironmentOverrides(to: loadStoredOrCreate()) }
+    public func loadOrCreate() throws -> SpacesDeviceAPISettings {
+        try applyingEnvironmentOverrides(to: normalizingCanonicalPort(loadStoredOrCreate()))
+    }
+
+    /// The fixed canonical Device API port belongs to the installed profile alone. Any other profile
+    /// (dev worktree, explicit database) that would otherwise bind the canonical port instead binds an
+    /// ephemeral port (0), so a leftover development daemon can't steal the well-known port from the
+    /// installed daemon. Normalization happens at load only — the stored file keeps its canonical default,
+    /// so existing stale dev-profile configs are covered without a migration. Env overrides are applied
+    /// afterward and still win, which is how the Linux systemd install (SPACES_DEVICE_API_PORT together with
+    /// SPACES_DB_PATH) keeps binding the canonical port. A non-canonical stored port is respected as-is.
+    private func normalizingCanonicalPort(_ settings: SpacesDeviceAPISettings) throws -> SpacesDeviceAPISettings {
+        guard settings.port == SpacesDeviceAPIDefaults.port, try profileSource() != .installedFallback else { return settings }
+        var normalized = settings
+        normalized.port = 0
+        return normalized
+    }
 
     private func loadStoredOrCreate() throws -> SpacesDeviceAPISettings {
         let path = try settingsPath()

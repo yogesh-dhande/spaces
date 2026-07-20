@@ -235,7 +235,24 @@ public struct SpacesProfile: Sendable, Equatable {
         #if os(macOS)
             guard let executablePath = executablePath ?? currentExecutablePath(currentDirectoryPath: currentDirectoryPath) else { return nil }
             guard let repoRoot = detectRepoRoot(executablePath: executablePath, fileManager: fileManager) else { return nil }
-            return try? gitProbe.resolveDevelopmentContext(repoRootPath: repoRoot)
+            // The executable lives inside a Spaces checkout, so it is a repo-built binary and must derive
+            // its profile from the worktree. Falling back to the installed profile (~/.spaces) would open the
+            // user's production database with a development build and, on a schema mismatch, crash-loop the
+            // installed daemon. A git probe that throws or returns nothing is therefore fatal here — never a
+            // silent fallback. Explicit SPACES_DB_PATH overrides are handled earlier in `resolve`, so this
+            // path only governs binaries that reached automatic profile detection.
+            do {
+                guard let context = try gitProbe.resolveDevelopmentContext(repoRootPath: repoRoot) else {
+                    throw SpacesProfileResolutionError.repoBuiltGitProbeFailed(
+                        executablePath: executablePath, repoRoot: repoRoot, underlyingError: nil)
+                }
+                return context
+            } catch let error as SpacesProfileResolutionError {
+                throw error
+            } catch {
+                throw SpacesProfileResolutionError.repoBuiltGitProbeFailed(
+                    executablePath: executablePath, repoRoot: repoRoot, underlyingError: error)
+            }
         #else
             return nil
         #endif
@@ -275,6 +292,25 @@ public struct SpacesProfile: Sendable, Equatable {
     }
 
     private static func trimmed(_ value: String?) -> String? { value?.trimmingCharacters(in: .whitespacesAndNewlines) }
+}
+
+/// Raised while resolving `SpacesProfile` for a binary that was built inside a Spaces checkout.
+/// Such a binary must never fall back to the installed profile, so a failed git probe surfaces
+/// loudly instead of silently pointing a development build at the installed daemon's database.
+public enum SpacesProfileResolutionError: Error, CustomStringConvertible {
+    /// The git probe for a repo-built executable threw or returned no development context. Carries the
+    /// executable path, the detected repo root, and the underlying git failure (when there was one).
+    case repoBuiltGitProbeFailed(executablePath: String, repoRoot: String, underlyingError: (any Error)?)
+
+    public var description: String {
+        switch self {
+        case .repoBuiltGitProbeFailed(let executablePath, let repoRoot, let underlyingError):
+            let reason = underlyingError.map { String(describing: $0) } ?? "git probe returned no development context"
+            return "repo-built executable \(executablePath) could not resolve its development profile from repo root \(repoRoot): "
+                + "\(reason). Refusing to fall back to the installed profile (~/.spaces) so a development build cannot open the "
+                + "installed daemon's database."
+        }
+    }
 }
 
 public protocol SpacesGitProfileProbe { func resolveDevelopmentContext(repoRootPath: String) throws -> SpacesDevelopmentContext? }
