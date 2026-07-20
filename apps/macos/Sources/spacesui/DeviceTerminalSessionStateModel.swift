@@ -211,7 +211,17 @@
         /// error. No other request path gets this recovery — the stream side owns it for interactive sessions.
         func fetchTranscript(maxBytes: Int) async throws -> RemoteGhosttyTranscript {
             do { return try await sendTranscriptRequest(maxBytes: maxBytes) } catch {
-                guard device.id == SpacesPairedDeviceRecord.localDeviceID, SpacesDeviceClient.isLocalDaemonUnreachableError(error),
+                // A certificate pin mismatch is accepted as a recovery trigger here, unlike everywhere else.
+                // `isLocalDaemonUnreachableError` deliberately excludes pin mismatch because for a REMOTE
+                // device a rotated identity can only be re-established by re-pairing. For the LOCAL device it
+                // IS recoverable: the daemon may have restarted on the same port with a rotated TLS identity,
+                // and the bootstrap re-reads that current identity over the trusted local control socket. This
+                // guard is already local-device-only, so accepting it here stays safe. The connector throws
+                // `TerminalServiceTLSError.certificatePinMismatch` unwrapped, so match it directly.
+                let isLocalPinMismatch: Bool
+                if case TerminalServiceTLSError.certificatePinMismatch = error { isLocalPinMismatch = true } else { isLocalPinMismatch = false }
+                guard device.id == SpacesPairedDeviceRecord.localDeviceID,
+                    isLocalPinMismatch || SpacesDeviceClient.isLocalDaemonUnreachableError(error),
                     await ensureLocalDeviceReachableForRetry()
                 else { throw error }
                 return try await sendTranscriptRequest(maxBytes: maxBytes)
@@ -409,6 +419,11 @@
         /// the daemon is now reachable whether or not it rebound the same port, rotated its certificate, or
         /// rotated its token. Returns false for remote devices (stable endpoint, nothing to re-resolve) and
         /// when the local bootstrap itself failed (the daemon could not be reached or started).
+        ///
+        /// Invoked from the connect-time subscribe recovery, the transcript path's local pin-mismatch/
+        /// unreachable recovery, and the stream-disconnect path when the local daemon rejected a subscribe as
+        /// `.unauthorized` — every case where the daemon is reachable but the pane's pinned identity or boxed
+        /// token is stale, and the token refresh above is what re-authenticates the revoked case.
         @discardableResult private func ensureLocalDeviceReachableForRetry() async -> Bool {
             guard device.id == SpacesPairedDeviceRecord.localDeviceID else { return false }
             let clientApp = self.clientApp
@@ -454,6 +469,12 @@
         /// stream client offers no seam to force callback orderings, so the test installs stream clients via
         /// `installStreamClientForTesting` and calls this with a stale generation to prove a superseded
         /// client's late callback is ignored.
+        ///
+        /// A reachable local daemon that rejected the subscribe as `.unauthorized` gets a credential refresh
+        /// before the reconnect: the boxed token was revoked (a pairing-state reset minted a fresh one) while
+        /// the endpoint stayed put, so re-bootstrapping through the trusted local control socket swings the
+        /// box to the daemon's current token and the next subscribe authenticates. Every other disconnect
+        /// takes the plain delayed reconnect.
         func handleStreamDisconnect(_ error: (any Error)?, generation: UInt64) {
             // A superseded stream client's late disconnect must not tear down the client that replaced it.
             guard generation == streamClientGeneration else { return }
@@ -462,6 +483,21 @@
             // not notifying listeners keeps the render host from re-registering and
             // accumulating duplicates. The model owns reconnection.
             streamClient = nil
+            // Gate strictly on `.unauthorized` for the local device: an unauthorized subscribe rejection means
+            // the daemon is reachable but the boxed token is stale, recoverable only by re-bootstrapping.
+            // Ended-session rejections (session-not-running/not-available) and remote devices must never
+            // trigger a bootstrap, so they fall through to the plain reconnect. A failed recovery still
+            // reaches `scheduleReconnect`, so the loop degrades to the pre-existing retry cadence rather than
+            // tightening.
+            if let error, case SpacesDeviceAPIRequestClientError.requestRejected(_, .unauthorized) = error,
+                device.id == SpacesPairedDeviceRecord.localDeviceID
+            {
+                Task { @MainActor [weak self] in
+                    await self?.ensureLocalDeviceReachableForRetry()
+                    self?.scheduleReconnect()
+                }
+                return
+            }
             scheduleReconnect()
         }
 

@@ -692,6 +692,11 @@ public enum SpacesDeviceClient {
             switch requestError {
             case .timeout, .emptyResponse, .connectionFailed: return true
             case .invalidPort: return false
+            // A coded rejection means the daemon answered — it is reachable — so this is not a
+            // reachability failure. Callers that need to recover a rejection (e.g. re-authenticate on
+            // `.unauthorized`) branch on the code itself; treating it as retryable here would wrongly
+            // degrade a reachable daemon to the offline path.
+            case .requestRejected: return false
             }
         }
         // The pinned-TLS transport's reachability failures (timeout/refused/closed). A certificate

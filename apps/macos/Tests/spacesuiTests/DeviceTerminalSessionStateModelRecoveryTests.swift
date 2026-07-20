@@ -20,6 +20,10 @@ import spacesterminalcore
 ///   replaced it, while a current-stream disconnect still clears it. It drives the generation guard through
 ///   the model's install-for-testing seam because the concrete stream client offers no way to force
 ///   callback orderings.
+/// - Test C: a reachable daemon rejecting the subscribe surfaces `SpacesDeviceAPIRequestClientError`
+///   `.requestRejected` to `onDisconnect` carrying the daemon's error code (`.unauthorized`), which the
+///   disconnect handler branches on to re-authenticate. It drives a real in-process `SpacesDeviceAPIServer`
+///   whose pairing store rejects the token, because the stream client has no seam to fake the wire response.
 ///
 /// XCTest rather than Swift Testing deliberately, matching `DeviceTerminalSessionStateModelTranscriptTests`:
 /// Test A round-trips per-session filesystem and profile-database state that the server re-resolves from
@@ -180,6 +184,43 @@ final class DeviceTerminalSessionStateModelRecoveryTests: XCTestCase {
         XCTAssertFalse(model.hasActiveStreamClientForTesting)
     }
 
+    /// Fix B1: a reachable daemon that rejects the subscribe must surface the rejection to `onDisconnect`
+    /// as `SpacesDeviceAPIRequestClientError.requestRejected` carrying the daemon's error code, not an
+    /// opaque `.connectionFailed`. The disconnect handler branches on `.unauthorized` to re-authenticate,
+    /// so the code has to survive the stream client's decode-error mapping. Drives a real in-process
+    /// `SpacesDeviceAPIServer` whose pairing store rejects the presented token (which the server maps to
+    /// `.unauthorized`), because the concrete stream client has no seam to fake the wire response.
+    @MainActor func testStreamSubscribeRejectionSurfacesRequestRejectedWithErrorCode() throws {
+        let identity = try TerminalServiceTLSIdentityStore.loadOrCreate(root: Self.tlsRoot)
+        let pairingStore = AlwaysAuthorizedRecoveryPairingStore()
+        let clientApp = Self.makeClientApp(installationID: "INSTALLATION-STREAM-REJECT-\(UUID().uuidString)")
+
+        let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore)
+        try server.start()
+        defer { server.stop() }
+
+        // Present a token the store rejects, so the reachable daemon answers the subscribe with an
+        // `.unauthorized` response line rather than a connection failure.
+        let request = SpacesDeviceAPIRequest(
+            command: .subscribe(SpacesDeviceTerminalSubscriptionRequest(sessionID: "session-\(UUID().uuidString)", clientID: nil)),
+            authToken: "revoked-token", clientApp: clientApp)
+
+        let disconnected = expectation(description: "onDisconnect received the rejection")
+        let received = DisconnectErrorBox()
+        let client = try SpacesDeviceAPIStateStreamClient(
+            request: request, host: "127.0.0.1", port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint,
+            onEvent: { _ in },
+            onDisconnect: { error in if received.storeFirst(error) { disconnected.fulfill() } })
+        try client.start()
+        defer { client.stop() }
+        wait(for: [disconnected], timeout: 5)
+
+        guard let error = received.error, case SpacesDeviceAPIRequestClientError.requestRejected(_, let code) = error else {
+            return XCTFail("expected requestRejected, got \(String(describing: received.error))")
+        }
+        XCTAssertEqual(code, .unauthorized)
+    }
+
     // MARK: Fixtures
 
     private static func makeClientApp(installationID: String) -> SpacesDeviceClientApp {
@@ -198,6 +239,28 @@ final class DeviceTerminalSessionStateModelRecoveryTests: XCTestCase {
 /// installed stream, which is all the generation-guard test needs.
 private final class FakeStreamClient: TerminalRemoteStateStreamClient, @unchecked Sendable {
     func stop() {}
+}
+
+/// Captures the first error the stream client reports to `onDisconnect`, thread-safely because that
+/// callback runs off the test thread. Only the first error is kept: after surfacing the coded rejection the
+/// stream client cancels its connection, which can fire `onDisconnect` again from the close path, so the
+/// first error is the one carrying the daemon's rejection.
+private final class DisconnectErrorBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored = false
+    private var value: (any Error)?
+
+    /// Stores the error and returns true only for the first call, so the caller fulfills its expectation once.
+    func storeFirst(_ error: (any Error)?) -> Bool {
+        lock.withLock {
+            guard !stored else { return false }
+            stored = true
+            value = error
+            return true
+        }
+    }
+
+    var error: (any Error)? { lock.withLock { value } }
 }
 
 /// A pairing store that authorizes any request carrying its fixed token. Mirrors the file-private fixture
