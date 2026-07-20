@@ -1004,7 +1004,7 @@ SHIM
             bin/spaces terminal list | grep -q '^linux-artifact-smoke\b'
 
         env SPACES_DB_PATH="$smoke_root/profile/spaces.db" SPACES_RUNTIME_DIR="$smoke_root/profile/runtime" \
-            bin/spaces terminal send text linux-artifact-smoke post-handoff-marker --newline >/dev/null
+            bin/spaces terminal send text linux-artifact-smoke post-handoff-marker --submit >/dev/null
 
         post_handoff_deadline=$((SECONDS + 15))
         until env SPACES_DB_PATH="$smoke_root/profile/spaces.db" SPACES_RUNTIME_DIR="$smoke_root/profile/runtime" \
