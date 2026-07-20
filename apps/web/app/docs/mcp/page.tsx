@@ -81,7 +81,7 @@ args = ["mcp"]`}</CodeBlock>
           <Tool name="spaces_workspace_restart" description="Force a full stop and relaunch for a workspace." />
           <Tool name="spaces_terminal_list" description="List available Spaces terminal sessions." />
           <Tool name="spaces_terminal_tail" description="Read recent rendered output, omitting inline suggestions only in identified coding-agent sessions. Defaults to the last 20 lines." />
-          <Tool name="spaces_terminal_send" description="Send UTF-8 text or explicit raw byte values to a terminal session, with an optional trailing newline." />
+          <Tool name="spaces_terminal_send" description="Send UTF-8 text or explicit raw byte values to a terminal session, optionally submitting text with a separate, spaced Enter keystroke that every supported agent TUI (Claude Code, Codex, OpenCode) reads as a distinct submit rather than an unsubmitted paste." />
         </ul>
         <p className="mt-3 text-sm leading-7 text-foreground-soft">
           Agent lifecycle signals are intentionally not MCP tools. Coding agents report state through the CLI hook <Cmd>spaces agent signal</Cmd> so those hooks stay out of the agent-callable tool surface.

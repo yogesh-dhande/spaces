@@ -203,18 +203,18 @@ final class SpacesMCPStdioServer {
             MCPToolDescriptor(
                 name: "spaces_terminal_send",
                 description:
-                    "Send text or raw bytes to an explicit Spaces terminal session. Text with appendNewline=true reliably submits: the session host writes the text and the Enter keystroke as separate spaced writes so agent TUIs (Claude Code, Codex) run the line instead of leaving it as an unsubmitted paste — one call is enough, submit-safety is server-side. An empty text with appendNewline presses Enter alone (e.g. to answer a TUI dialog).",
+                    "Send text or raw bytes to an explicit Spaces terminal session. Text with submit=true reliably submits: the session host writes the text and a separate, spaced Enter keystroke (carriage return) so every supported agent TUI (Claude Code, Codex, OpenCode) runs the line instead of leaving it as an unsubmitted paste — one call is enough, submit-safety is server-side. An empty text with submit presses Enter alone (e.g. to answer a TUI dialog).",
                 properties: [
                     "session": stringSchema("Spaces terminal session ID."),
-                    "text": stringSchema("Text to send. Use an empty string with appendNewline to press Enter alone."),
+                    "text": stringSchema("Text to send. Use an empty string with submit to press Enter alone."),
                     "bytes": byteArraySchema("Raw byte values to send. Each value must be an integer from 0 through 255."),
-                    "appendNewline": boolSchema("Append an Enter keystroke after the payload; with text this submits the line."),
+                    "submit": boolSchema("Send a spaced Enter keystroke after the payload; with text this submits the line."),
                     "device": stringSchema("Paired device name or ID. Defaults to this machine."),
                 ], required: ["session"], oneOf: [["required": ["text"]], ["required": ["bytes"]]]
             ) { server, arguments in
                 let input = try server.terminalInputPayload(from: arguments)
                 let sessionID = try server.requiredString(arguments["session"], field: "session")
-                let appendNewline = server.optionalBool(arguments["appendNewline"]) ?? false
+                let appendNewline = server.optionalBool(arguments["submit"]) ?? false
                 if let device = try server.resolvedDevice(arguments) {
                     let text: String?
                     let bytes: Data?
