@@ -462,6 +462,10 @@ private enum SpacesMobileMutationTimeoutRecovery {
     var dismissedAlertIDs: Set<String> = []
     @ObservationIgnored private var bridgeClient: SpacesDeviceAPIClient
     @ObservationIgnored private var commandChannel: SpacesDeviceAPICommandChannel
+    /// The client bound to the active device, exposed so screens that open their own request/stream
+    /// paths (e.g. `TerminalViewerModel`) reuse the same backend instead of building a parallel client
+    /// from `settings`. Reflects the current device after a switch.
+    var deviceClient: SpacesDeviceAPIClient { bridgeClient }
     /// Monotonic identity of the connection the published overview belongs to. Bumped whenever the
     /// active connection changes (device switch or removal, new settings, auth reset) so an overview
     /// fetch begun against the previous connection can neither publish its stale payload nor satisfy

@@ -47,9 +47,10 @@ struct TerminalDetailView: View {
         self.onSessionChanged = onSessionChanged
         self.onBack = onBack
         let appModel = appModel
-        _model = State(initialValue: TerminalViewerModel(
-            session: session, settings: settings, onAuthenticationRequired: onAuthenticationRequired,
-            onOpenTerminalDeepLink: { link in Task { await appModel.openTerminalDeepLink(link) } }))
+        _model = State(
+            initialValue: TerminalViewerModel(
+                session: session, settings: settings, onAuthenticationRequired: onAuthenticationRequired,
+                onOpenTerminalDeepLink: { link in Task { await appModel.openTerminalDeepLink(link) } }, bridgeClient: appModel.deviceClient))
     }
 
     var body: some View {
