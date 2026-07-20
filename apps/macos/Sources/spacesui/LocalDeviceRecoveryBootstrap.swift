@@ -6,13 +6,13 @@ import spacesdevicecore
 /// `bootstrapLocalDevice` (pane preparation and the models' in-session recoveries) routes through it.
 ///
 /// Local pane events arrive in bursts: restoration prepares every pane at launch, and a
-/// pairing-state reset drops every open pane's stream at nearly the same moment.
-/// `SpacesDevicePairingStore.issueToken` mints a replacement token for every stale presentation, so
-/// N concurrent bootstraps would invalidate each other's freshly installed tokens and out-of-order
-/// secret-file saves could persist a non-current token. Coalescing means exactly one bootstrap
-/// round-trips the control socket; every concurrent caller awaits it and installs the same
-/// refreshed record and token. All GUI models share one client-app identity, so joiners receiving
-/// the initiator's bootstrap result is exact, not approximate.
+/// pairing-state reset drops every open pane's stream at nearly the same moment. Token-rotation
+/// correctness is owned by `bootstrapLocalDevice` itself, which serializes concurrent bootstraps
+/// process-wide (covering the sidebar, cold-resolve, and palette callers that do not route here);
+/// this coalescing is the burst-efficiency layer on top — exactly one bootstrap round-trips the
+/// control socket per pane burst instead of N serialized round-trips, and every concurrent caller
+/// awaits it and installs the same refreshed record and token. All GUI models share one client-app
+/// identity, so joiners receiving the initiator's bootstrap result is exact, not approximate.
 @MainActor enum LocalDeviceRecoveryBootstrap {
     struct Outcome {
         let record: SpacesPairedDeviceRecord
