@@ -187,6 +187,22 @@ PY
 configure_ghostty_cache
 "$repo_root/apps/macos/scripts/setup_ghostty.sh"
 "$repo_root/scripts/swiftpm.sh" build
+
+# Ad-hoc signed SwiftPM debug builds get a fresh cdhash on every rebuild, and the cdhash is the
+# app's TCC identity — so the macOS Automation grant for Chrome is lost each build. Re-signing with a
+# stable identity keeps that identity constant so the grant survives rebuilds. Opt in by setting
+# SPACES_DEV_CODESIGN_IDENTITY in the gitignored .env (e.g. an "Apple Development: …" identity).
+# The .env is read in a subshell so its e2e host variables never leak into the launched app.
+dev_codesign_identity="$(
+  set -euo pipefail
+  source "$repo_root/scripts/spaces-e2e-env.sh"
+  spaces_e2e_load_env "$repo_root"
+  printf '%s' "${SPACES_DEV_CODESIGN_IDENTITY:-}"
+)"
+if [[ -n "$dev_codesign_identity" ]]; then
+  codesign --force --preserve-metadata=entitlements --sign "$dev_codesign_identity" "$APP"
+fi
+
 spaces_profile_eval_shell_env "$CLI"
 if [[ -n "${SPACES_DEV_DB_PATH:-}" ]]; then
   export SPACES_DB_PATH="$SPACES_DEV_DB_PATH"
