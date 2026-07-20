@@ -7,159 +7,202 @@
   <style>
     :root {
       color-scheme: light;
-      --bg: #faf5ff;
+      --paper: #f6f6fb;
       --panel: #ffffff;
-      --ink: #1a1033;
-      --muted: #64748b;
-      --line: #e2e8f0;
-      --accent: #6d28d9;
-      --good: #059669;
-      --warn: #d97706;
+      --ink: #12132a;
+      --ink-2: #383a58;
+      --muted: #64668a;
+      --line: #e8e8f1;
+      --line-2: #d7d7e6;
+      --accent: #4f46e5;
+      --accent-ink: #4338ca;
+      --accent-wash: rgba(79, 70, 229, 0.10);
+      --ok: #0ea371;
+      --warn: #c2740a;
+      --warn-wash: rgba(217, 138, 5, 0.14);
+      --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
     }
     * { box-sizing: border-box; }
+    html { -webkit-text-size-adjust: 100%; }
     body {
-      margin: 0;
-      font-family: "SF Pro Text", "Inter", sans-serif;
-      color: var(--ink);
-      background:
-        radial-gradient(circle at top right, rgba(109, 40, 217, 0.12), transparent 26rem),
-        linear-gradient(180deg, #fdf8ff 0%, var(--bg) 100%);
+      margin: 0; font-family: var(--sans); color: var(--ink);
+      background: var(--paper); -webkit-font-smoothing: antialiased;
     }
-    .shell { max-width: 1240px; margin: 0 auto; padding: 28px; }
-    .bar {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 18px;
+    .shell { max-width: 1240px; margin: 0 auto; padding: 22px 26px 40px; }
+
+    .rail { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-bottom: 14px; }
+    .brand { display: flex; align-items: baseline; gap: 11px; }
+    .brand .glyph { width: 14px; height: 14px; position: relative; align-self: center; }
+    .brand .glyph::before {
+      content: ""; position: absolute; inset: 2px; border-radius: 50%;
+      background: var(--accent); box-shadow: 0 0 0 3px var(--accent-wash);
     }
-    .bar h1 {
-      margin: 0;
-      font-size: 28px;
-      letter-spacing: -0.04em;
+    .wordmark { font-weight: 700; font-size: 15px; letter-spacing: -0.01em; }
+    .brand .sep { color: var(--line-2); }
+    .brand .product {
+      font-family: var(--mono); font-size: 12px; font-weight: 600;
+      letter-spacing: 0.14em; text-transform: uppercase; color: var(--accent-ink);
     }
-    .bar small { color: var(--muted); font-size: 14px; }
-    .chip {
-      border-radius: 999px;
-      padding: 8px 12px;
-      background: rgba(109, 40, 217, 0.1);
-      color: var(--accent);
-      font-weight: 700;
-      font-size: 12px;
+    .brand .role {
+      font-family: var(--mono); font-size: 11px; letter-spacing: 0.1em;
+      text-transform: uppercase; color: var(--muted);
     }
-    .layout {
-      display: grid;
-      grid-template-columns: 1.2fr 0.8fr;
-      gap: 20px;
+    .rail-right { display: flex; align-items: center; gap: 12px; }
+    .live {
+      font-family: var(--mono); font-size: 11px; letter-spacing: 0.12em;
+      text-transform: uppercase; font-weight: 600; color: var(--ok);
+      display: inline-flex; align-items: center; gap: 7px;
+      padding: 6px 11px; border-radius: 7px; background: rgba(14, 163, 113, 0.12);
     }
-    .panel {
-      background: var(--panel);
-      border: 1px solid var(--line);
-      border-radius: 22px;
-      box-shadow: 0 18px 36px rgba(15, 23, 42, 0.06);
+    .live .led {
+      width: 7px; height: 7px; border-radius: 50%; background: var(--ok);
+      animation: pulse 2s infinite;
     }
-    .metrics {
-      display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: 14px;
-      padding: 20px;
+    @keyframes pulse {
+      0% { box-shadow: 0 0 0 0 rgba(14, 163, 113, 0.45); }
+      70% { box-shadow: 0 0 0 6px rgba(14, 163, 113, 0); }
+      100% { box-shadow: 0 0 0 0 rgba(14, 163, 113, 0); }
     }
-    .metric {
-      border-radius: 18px;
-      padding: 18px;
-      background: #fdf8ff;
-      border: 1px solid var(--line);
+    @media (prefers-reduced-motion: reduce) { .live .led { animation: none; } }
+    .tag {
+      font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.06em;
+      color: var(--muted); border: 1px solid var(--line-2);
+      border-radius: 6px; padding: 5px 9px; background: var(--panel);
     }
-    .metric span { display: block; color: var(--muted); font-size: 13px; margin-bottom: 6px; }
-    .metric strong { font-size: 30px; letter-spacing: -0.04em; }
-    .table { padding: 20px 22px 10px; }
-    .table h2, .side h2 { margin: 0 0 14px; font-size: 19px; letter-spacing: -0.03em; }
+
+    .beam {
+      height: 2px; border-radius: 2px; margin-bottom: 20px;
+      background: linear-gradient(90deg, var(--accent) 0%, var(--accent) 20%, rgba(79,70,229,0) 72%);
+    }
+
+    .console { display: grid; grid-template-columns: 1.3fr 0.7fr; gap: 20px; }
+    .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; }
+    .panel-head {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 16px 20px; border-bottom: 1px solid var(--line);
+    }
+    .panel-head h2 {
+      margin: 0; font-family: var(--mono); font-size: 12px; letter-spacing: 0.12em;
+      text-transform: uppercase; color: var(--muted); font-weight: 600;
+    }
+    .spark { display: block; }
+
+    .readout { display: grid; grid-template-columns: repeat(3, 1fr); border-bottom: 1px solid var(--line); }
+    .metric { padding: 18px 20px; border-right: 1px solid var(--line); }
+    .metric:last-child { border-right: 0; }
+    .metric span {
+      display: block; font-family: var(--mono); font-size: 10.5px;
+      letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); margin-bottom: 8px;
+    }
+    .metric b { font-size: 28px; letter-spacing: -0.03em; font-weight: 680; }
+
+    .board { padding: 6px 20px 12px; }
     table { width: 100%; border-collapse: collapse; }
-    th, td { padding: 14px 0; border-top: 1px solid var(--line); text-align: left; }
-    th { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; border-top: 0; }
-    td:last-child, th:last-child { text-align: right; }
+    thead th {
+      font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.08em;
+      text-transform: uppercase; color: var(--muted); font-weight: 600;
+      text-align: left; padding: 14px 0 12px;
+    }
+    tbody td { padding: 13px 0; border-top: 1px solid var(--line); font-size: 14px; }
+    td:first-child { font-weight: 560; }
+    .num { font-family: var(--mono); font-size: 13px; color: var(--ink-2); }
+    th.r, td.r { text-align: right; }
     .status {
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      padding: 6px 10px;
-      border-radius: 999px;
-      font-size: 12px;
-      font-weight: 700;
+      display: inline-flex; align-items: center; gap: 7px;
+      font-family: var(--mono); font-size: 11px; font-weight: 600;
+      letter-spacing: 0.04em; text-transform: uppercase;
     }
-    .healthy { background: rgba(5, 150, 105, 0.12); color: var(--good); }
-    .review { background: rgba(217, 119, 6, 0.12); color: var(--warn); }
-    .side {
-      padding: 20px 22px;
-      display: grid;
-      gap: 16px;
-      align-content: start;
+    .status::before { content: ""; width: 8px; height: 8px; border-radius: 50%; }
+    .status.ok { color: var(--ok); } .status.ok::before { background: var(--ok); }
+    .status.surge { color: var(--warn); } .status.surge::before { background: var(--warn); }
+
+    .telemetry-card {
+      margin: 4px 20px 20px; padding: 14px 16px; border-radius: 12px;
+      background: #12132a; border: 1px solid #232445;
     }
-    .note {
-      padding: 16px;
-      border-radius: 16px;
-      background: #f8fafc;
-      border: 1px solid var(--line);
+    .telemetry-card .th {
+      font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.1em;
+      text-transform: uppercase; color: #8688ad; margin-bottom: 10px;
+      display: flex; align-items: center; gap: 7px;
     }
-    .note b { display: block; margin-bottom: 6px; }
-    .note p { margin: 0; color: var(--muted); line-height: 1.5; }
-    .api-card {
-      margin-top: 18px;
-      padding: 18px 20px;
-      border-radius: 18px;
-      background: #fdf8ff;
-      border: 1px solid var(--line);
+    .telemetry-card .th::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+    .telemetry-card code {
+      display: block; font-family: var(--mono); font-size: 12.5px; line-height: 1.65;
+      color: #d0d0e6; white-space: pre-wrap; word-break: break-word;
     }
-    .api-card h2 { margin: 0 0 8px; font-size: 16px; }
-    .api-card code {
-      display: block;
-      margin-top: 8px;
-      color: var(--muted);
-      white-space: pre-wrap;
-      font-size: 13px;
+
+    .side { padding: 6px 20px 18px; }
+    .side .sh {
+      margin: 12px 0 4px; font-family: var(--mono); font-size: 12px;
+      letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); font-weight: 600;
     }
+    .note { padding: 16px 0; border-top: 1px solid var(--line); }
+    .note:first-of-type { border-top: 0; }
+    .note b { display: flex; align-items: center; gap: 8px; margin-bottom: 7px; font-size: 14px; }
+    .note b::before { content: ""; width: 5px; height: 16px; border-radius: 2px; background: var(--warn); }
+    .note.ctx b::before { background: var(--accent); }
+    .note p { margin: 0; color: var(--ink-2); font-size: 13.5px; line-height: 1.55; }
+    .note code { font-family: var(--mono); font-size: 12.5px; color: var(--accent-ink); }
+
+    @media (max-width: 900px) { .console { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
   <div class="shell">
-    <div class="bar">
-      <div>
-        <h1>Atlas Docs Admin</h1>
-        <small>Readership and search overview</small>
+    <header class="rail">
+      <div class="brand">
+        <span class="glyph"></span>
+        <span class="wordmark">Lighthouse</span>
+        <span class="sep">/</span>
+        <span class="product">Atlas</span>
+        <span class="role">Readership</span>
       </div>
-      <div class="chip">Atlas admin sentinel</div>
-    </div>
-    <div class="layout">
+      <div class="rail-right">
+        <span class="live"><span class="led"></span>Healthy</span>
+        <span class="tag">Atlas admin sentinel</span>
+      </div>
+    </header>
+    <div class="beam"></div>
+
+    <div class="console">
       <section class="panel">
-        <div class="metrics">
-          <div class="metric"><span>Monthly readers</span><strong>128,400</strong></div>
-          <div class="metric"><span>Search success rate</span><strong>91.4%</strong></div>
-          <div class="metric"><span>Avg time on page</span><strong>2m 41s</strong></div>
-        </div>
-        <div class="table">
+        <div class="panel-head">
           <h2>Top pages this week</h2>
+          <svg class="spark" width="96" height="22" viewBox="0 0 96 22" fill="none" aria-hidden="true">
+            <polyline points="0,16 12,15 24,14 36,13 48,12 60,10 72,7 84,4 96,2" stroke="#4f46e5" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"/>
+          </svg>
+        </div>
+        <div class="readout">
+          <div class="metric"><span>Monthly readers</span><b>128,400</b></div>
+          <div class="metric"><span>Search success</span><b>91.4%</b></div>
+          <div class="metric"><span>Avg time on page</span><b>2m 41s</b></div>
+        </div>
+        <div class="board">
           <table>
             <thead>
-              <tr><th>Page</th><th>Views</th><th>Trend</th></tr>
+              <tr><th>Page</th><th class="r">Views</th><th class="r">Trend</th></tr>
             </thead>
             <tbody>
-              <tr><td>Getting started</td><td>42,100</td><td><span class="status healthy">Steady</span></td></tr>
-              <tr><td>Checkout integration</td><td>31,800</td><td><span class="status healthy">Steady</span></td></tr>
-              <tr><td>Payment declined — troubleshooting</td><td>12,400</td><td><span class="status review">Surging</span></td></tr>
+              <tr><td>Getting started</td><td class="num r">42,100</td><td class="r"><span class="status ok">Steady</span></td></tr>
+              <tr><td>Checkout integration</td><td class="num r">31,800</td><td class="r"><span class="status ok">Steady</span></td></tr>
+              <tr><td>Payment declined — troubleshooting</td><td class="num r">12,400</td><td class="r"><span class="status surge">Surging</span></td></tr>
             </tbody>
           </table>
-          <div class="api-card">
-            <h2>Backend health</h2>
-            <code id="api-status">Loading backend status...</code>
-          </div>
+        </div>
+        <div class="telemetry-card">
+          <div class="th">Backend health · /api/launch-status</div>
+          <code id="api-status">connecting…</code>
         </div>
       </section>
+
       <aside class="panel side">
-        <h2>Content notes</h2>
+        <div class="sh">Content notes</div>
         <div class="note">
           <b>Troubleshooting page surge</b>
-          <p>Views on "Payment declined" jumped 3x today, tracking the Lantern <code>/api/checkout</code> 500 spike. Customers hitting the checkout incident are landing here for help.</p>
+          <p>Views on "Payment declined" jumped 3× today, tracking the Lantern <code>/api/checkout</code> 500 spike. Customers hitting the checkout incident are landing here for help.</p>
         </div>
-        <div class="note">
+        <div class="note ctx">
           <b>Top zero-result search</b>
           <p>"checkout 500" is this week's most common search with no matching page. Publish a dedicated guide so readers stop bouncing during the Harbor incident window.</p>
         </div>
