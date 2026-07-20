@@ -15,6 +15,14 @@ targets:
       - Sources
       - path: Resources
         buildPhase: resources
+        excludes:
+          - "DemoRecording/**"
+      # Folder reference: the demo recording must keep its grids/<cols>x<rows>/ directory
+      # structure in the app bundle (group resources copy flat, and the per-grid files share
+      # names), and re-recording must not require regenerating the project.
+      - path: Resources/DemoRecording
+        type: folder
+        buildPhase: resources
       - path: Assets.xcassets
         buildPhase: resources
       - path: PrivacyInfo.xcprivacy

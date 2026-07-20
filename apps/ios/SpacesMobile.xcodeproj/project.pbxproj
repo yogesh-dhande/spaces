@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		020ABBED293433DB8527ADCD /* DemoRecording in Resources */ = {isa = PBXBuildFile; fileRef = 6EEB37B2CC9ED6BDEB491044 /* DemoRecording */; };
 		030BFF03D2B9BF6C0F540BAB /* SubscriptionGateView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FBDC0E9523C09DFCE3694D10 /* SubscriptionGateView.swift */; };
 		04B9B8FE1DF35D0770AA024B /* SpacesMobileScreenshotUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01CF826C2C94E7C075B96D26 /* SpacesMobileScreenshotUITests.swift */; };
 		053C34166110A5C90FCCD9A9 /* SpacesMobileAppModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4159C5F22837F10A5A814E23 /* SpacesMobileAppModelTests.swift */; };
@@ -122,6 +123,7 @@
 		68ACEAFCA89C7E530880B3F0 /* StagedScreenshotStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StagedScreenshotStore.swift; sourceTree = "<group>"; };
 		6B6AD8F5E136746F49A212A1 /* SpacesTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacesTabView.swift; sourceTree = "<group>"; };
 		6E710F27AEEACD124B4C5ED8 /* TerminalImageAttachmentsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalImageAttachmentsTests.swift; sourceTree = "<group>"; };
+		6EEB37B2CC9ED6BDEB491044 /* DemoRecording */ = {isa = PBXFileReference; lastKnownFileType = folder; name = DemoRecording; path = Resources/DemoRecording; sourceTree = SOURCE_ROOT; };
 		70794A5FB7ED310FA4568364 /* AgentsTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentsTabView.swift; sourceTree = "<group>"; };
 		7507CC71C61F95FB1D0F26DA /* TerminalDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalDetailView.swift; sourceTree = "<group>"; };
 		75ADBC1DFE5DC487F78D5BC2 /* terminal-markdown.css */ = {isa = PBXFileReference; lastKnownFileType = text.css; path = "terminal-markdown.css"; sourceTree = "<group>"; };
@@ -198,6 +200,7 @@
 		21C5A9A4E04249D13D49172C /* Resources */ = {
 			isa = PBXGroup;
 			children = (
+				6EEB37B2CC9ED6BDEB491044 /* DemoRecording */,
 				B219C157E4D55E66E276E995 /* markdown-it.LICENSE */,
 				AC409090FBD5BEF19069F34E /* markdown-it.min.js */,
 				75ADBC1DFE5DC487F78D5BC2 /* terminal-markdown.css */,
@@ -520,6 +523,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				07BF7831235AE0F2E2CA97B3 /* Assets.xcassets in Resources */,
+				020ABBED293433DB8527ADCD /* DemoRecording in Resources */,
 				B75A9EE510496D35C5549ACC /* PrivacyInfo.xcprivacy in Resources */,
 				A36481FF653604E873C1A93B /* ghostty in Resources */,
 				7CC21253772D51391A1D51CE /* markdown-it.LICENSE in Resources */,

@@ -85,8 +85,32 @@ def serve_frontend(*, port: int, site_dir: Path, backend_url: str) -> None:
             self.end_headers()
             self.wfile.write(body)
 
+    # Deterministic, port-free startup banner so the dev-server terminal renders
+    # realistic, non-empty content in the App Store demo recording. The concrete
+    # port is workspace-assigned (nondeterministic across runs) and is deliberately
+    # omitted so the recorded terminal frame is byte-stable.
+    for line in FRONTEND_BANNER:
+        print(line, flush=True)
     with ThreadingHTTPServer(("127.0.0.1", port), Handler) as server:
         server.serve_forever()
+
+
+# Port-free dev-server banners printed once at startup. See serve_frontend for why
+# the assigned port is intentionally excluded (deterministic recorded terminal frame).
+FRONTEND_BANNER = (
+    "Lighthouse web · frontend",
+    "  serving   .spaces-e2e-demo/site",
+    "  proxying  /api → backend",
+    "  routes    /  /docs  /admin  /healthz",
+    "  ready — watching for requests",
+)
+
+BACKEND_BANNER = (
+    "Lighthouse web · backend",
+    "  serving   .spaces-e2e-demo/api",
+    "  routes    /api/launch-status  /healthz",
+    "  ready — watching for requests",
+)
 
 
 def serve_backend(*, port: int, data_dir: Path) -> None:
@@ -115,6 +139,8 @@ def serve_backend(*, port: int, data_dir: Path) -> None:
             self.end_headers()
             self.wfile.write(body)
 
+    for line in BACKEND_BANNER:
+        print(line, flush=True)
     with ThreadingHTTPServer(("127.0.0.1", port), Handler) as server:
         server.serve_forever()
 
