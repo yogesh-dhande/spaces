@@ -673,6 +673,12 @@ public struct TerminalServiceDaemonStatus: Codable, Sendable, Equatable {
     /// Daemon host OS: `"macOS"` or `"Linux"`. Lets clients tailor restart guidance — e.g. a remote
     /// Linux daemon must be updated from the Mac app.
     public let operatingSystem: String
+    /// The daemon device's current time-zone identifier (e.g. `"America/New_York"`), read fresh when the
+    /// status is built. Cron schedules are evaluated in the daemon's zone, so a client authoring an
+    /// automation for a remote device previews next-run times in this zone rather than its own. Optional
+    /// and `decodeIfPresent` so a peer that predates the field still decodes (frozen-core contract); `nil`
+    /// when unreported, in which case a client falls back to its own zone.
+    public let timeZoneIdentifier: String?
 
     /// Protocol version reported when a peer's status omits the field entirely — i.e. a daemon old
     /// enough to predate wire-version negotiation. It must compare as incompatible against any real
@@ -683,7 +689,7 @@ public struct TerminalServiceDaemonStatus: Codable, Sendable, Equatable {
     public init(
         version: String, installedVersion: String?, certificateFingerprint: String?, activeSessionCount: Int,
         protocolVersion: Int = SpacesWireProtocol.version, runningProcesses: Int = 0, activeAgents: Int = 0, waitingAgents: Int = 0,
-        operatingSystem: String = TerminalServiceDaemonStatus.currentOperatingSystem
+        operatingSystem: String = TerminalServiceDaemonStatus.currentOperatingSystem, timeZoneIdentifier: String? = nil
     ) {
         self.version = version
         self.installedVersion = installedVersion
@@ -694,6 +700,7 @@ public struct TerminalServiceDaemonStatus: Codable, Sendable, Equatable {
         self.activeAgents = activeAgents
         self.waitingAgents = waitingAgents
         self.operatingSystem = operatingSystem
+        self.timeZoneIdentifier = timeZoneIdentifier
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -706,6 +713,7 @@ public struct TerminalServiceDaemonStatus: Codable, Sendable, Equatable {
         case activeAgents
         case waitingAgents
         case operatingSystem
+        case timeZoneIdentifier
     }
 
     /// This is the frozen core's contract: its decode must tolerate version skew so an incompatible
@@ -725,6 +733,7 @@ public struct TerminalServiceDaemonStatus: Codable, Sendable, Equatable {
         activeAgents = try container.decodeIfPresent(Int.self, forKey: .activeAgents) ?? 0
         waitingAgents = try container.decodeIfPresent(Int.self, forKey: .waitingAgents) ?? 0
         operatingSystem = try container.decodeIfPresent(String.self, forKey: .operatingSystem) ?? Self.currentOperatingSystem
+        timeZoneIdentifier = try container.decodeIfPresent(String.self, forKey: .timeZoneIdentifier)
     }
 
     /// The OS of the process building this status (the daemon's own host).
@@ -734,6 +743,14 @@ public struct TerminalServiceDaemonStatus: Codable, Sendable, Equatable {
         #else
             "macOS"
         #endif
+    }
+
+    /// The daemon device's current time-zone identifier, read fresh. Foundation caches the system zone, so
+    /// the cache is reset first (mirroring the automation scheduler's zone provider) — this lets a status
+    /// built after the device changed zones report the new zone rather than a stale cached one.
+    public static var currentTimeZoneIdentifier: String {
+        NSTimeZone.resetSystemTimeZone()
+        return TimeZone.current.identifier
     }
 
     public var isLinuxDaemon: Bool { operatingSystem == "Linux" }

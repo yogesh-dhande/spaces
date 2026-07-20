@@ -282,6 +282,21 @@ struct SpacesDeviceAPIClient: Sendable {
             commandChannel: commandChannel)
     }
 
+    /// Reads one automation's retained run history from the daemon (the newest runs it keeps per automation),
+    /// rather than the recent-runs window the overview carries. The per-automation "View Runs" screen fetches
+    /// through this so a chatty automation filling the global overview window can't leave another automation's
+    /// history looking empty. Read-only (replay-safe), so it uses `sendRequest` rather than `mutation`.
+    func listAutomationRuns(automationID: String, commandChannel: SpacesDeviceAPICommandChannel? = nil) async throws
+        -> [TerminalServiceAutomationRunSummary]
+    {
+        let response = try await sendRequest(
+            .init(
+                command: .listAutomationRuns(.init(automationID: automationID)), authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity),
+            commandChannel: commandChannel)
+        guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message, code: response.errorCode) }
+        return response.automationRuns ?? []
+    }
+
     func fetchState(sessionID: String, timeout: Duration = .seconds(3), commandChannel: SpacesDeviceAPICommandChannel? = nil) async throws
         -> GhosttyRemoteSessionStatePayload
     {

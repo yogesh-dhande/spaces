@@ -312,4 +312,29 @@ struct AutomationsViewModelTests {
         let visible = [WorkspaceChoice(workspaceID: "ws-1", label: "P / A")]
         #expect(AutomationsViewModel.workspaceChoices(visible: visible, preservingWorkspaceID: nil) { _ in "unused" } == visible)
     }
+
+    // MARK: - Schedule preview zone
+
+    @Test func schedulePreviewZoneUsesCurrentForLocalDevice() {
+        // The local device previews in the Mac's own zone, ignoring any reported identifier.
+        #expect(AutomationsViewModel.schedulePreviewTimeZone(isLocalDevice: true, reportedTimeZoneIdentifier: "Asia/Tokyo") == .current)
+    }
+
+    @Test func schedulePreviewZoneUsesReportedIdentifierForRemoteDevice() {
+        let zone = AutomationsViewModel.schedulePreviewTimeZone(isLocalDevice: false, reportedTimeZoneIdentifier: "Asia/Tokyo")
+        #expect(zone == TimeZone(identifier: "Asia/Tokyo"))
+    }
+
+    @Test func schedulePreviewZoneFallsBackToCurrentForRemoteWithoutOrBadIdentifier() {
+        #expect(AutomationsViewModel.schedulePreviewTimeZone(isLocalDevice: false, reportedTimeZoneIdentifier: nil) == .current)
+        #expect(AutomationsViewModel.schedulePreviewTimeZone(isLocalDevice: false, reportedTimeZoneIdentifier: "   ") == .current)
+        #expect(AutomationsViewModel.schedulePreviewTimeZone(isLocalDevice: false, reportedTimeZoneIdentifier: "Not/AZone") == .current)
+    }
+
+    @Test func schedulePreviewZoneSuffixShownOnlyWhenDifferentFromLocal() {
+        let tokyo = TimeZone(identifier: "Asia/Tokyo")!
+        let newYork = TimeZone(identifier: "America/New_York")!
+        #expect(AutomationsViewModel.schedulePreviewZoneSuffix(previewTimeZone: tokyo, localTimeZone: newYork) == "Asia/Tokyo")
+        #expect(AutomationsViewModel.schedulePreviewZoneSuffix(previewTimeZone: tokyo, localTimeZone: tokyo) == nil)
+    }
 }

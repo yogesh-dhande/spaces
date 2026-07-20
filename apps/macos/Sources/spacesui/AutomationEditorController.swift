@@ -106,8 +106,13 @@ import workspacecore
 
     private func present(title: String, seed: TerminalServiceAutomationSummary?) {
         // Preserve the edited automation's stored workspace even when it has since been hidden, so saving an
-        // unrelated edit never retargets it to the first visible workspace.
-        workspaceChoices = host.automationWorkspaceChoices(deviceID: deviceID, preservingWorkspaceID: seed?.workspaceID)
+        // unrelated edit never retargets it to the first visible workspace. Preservation applies ONLY to a
+        // fixed-device edit: in edit mode the device can't change, so the stored workspace always belongs to
+        // this device. During creation the device CAN change (a rebuild carries the old device's workspace
+        // id forward), so preserving it there would append the previous device's workspace as a raw-id choice
+        // the new device's daemon doesn't have; instead the popup resets to the new device's first choice.
+        let preservingWorkspaceID = editingAutomationID != nil ? seed?.workspaceID : nil
+        workspaceChoices = host.automationWorkspaceChoices(deviceID: deviceID, preservingWorkspaceID: preservingWorkspaceID)
 
         let stack = NSStackView()
         stack.orientation = .vertical
@@ -591,7 +596,13 @@ import workspacecore
             return
         }
         do {
-            let runs = try AutomationSchedulePreview.nextRuns(cronExpression: preset.cronExpression, after: Date(), timeZone: .current, count: 3)
+            // Preview in the zone the target device evaluates cron in: the Mac's own zone for the local
+            // device, else the remote device's daemon-reported zone. A cross-zone remote preview would
+            // otherwise show the Mac's wall-clock times, not the device's.
+            let reportedZoneID = deviceInputs.first(where: { $0.deviceID == deviceID })?.timeZoneIdentifier
+            let previewZone = AutomationsViewModel.schedulePreviewTimeZone(
+                isLocalDevice: isLocalDevice, reportedTimeZoneIdentifier: reportedZoneID)
+            let runs = try AutomationSchedulePreview.nextRuns(cronExpression: preset.cronExpression, after: Date(), timeZone: previewZone, count: 3)
             previewLabel.textColor = .secondaryLabelColor
             if runs.isEmpty {
                 previewLabel.stringValue = "This schedule has no upcoming runs."
@@ -599,7 +610,11 @@ import workspacecore
                 let formatter = DateFormatter()
                 formatter.dateStyle = .medium
                 formatter.timeStyle = .short
-                previewLabel.stringValue = "Next runs: " + runs.map { formatter.string(from: $0) }.joined(separator: ", ")
+                formatter.timeZone = previewZone
+                var text = "Next runs: " + runs.map { formatter.string(from: $0) }.joined(separator: ", ")
+                // Show the zone only when it differs from the Mac's, so local authoring stays uncluttered.
+                if let zoneSuffix = AutomationsViewModel.schedulePreviewZoneSuffix(previewTimeZone: previewZone) { text += " (\(zoneSuffix))" }
+                previewLabel.stringValue = text
             }
         } catch {
             previewLabel.textColor = .systemRed

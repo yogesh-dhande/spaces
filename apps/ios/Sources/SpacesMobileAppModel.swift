@@ -641,6 +641,20 @@ private enum SpacesMobileMutationTimeoutRecovery {
         } catch { handleBridgeError(error) }
     }
 
+    /// Fetches one automation's retained run history directly from the daemon for the per-automation "View
+    /// Runs" screen, so it reads the daemon's kept-per-automation rows instead of the overview's global
+    /// recent-runs window (which a chatty automation can fill, leaving a quiet automation's history empty).
+    /// Returns nil on error, and the caller keeps whatever it was already showing. Not a mutation, so it
+    /// does not touch `isMutating` or trigger an overview refresh.
+    func fetchAutomationRuns(automationID: String) async -> [TerminalServiceAutomationRunSummary]? {
+        do {
+            return try await bridgeClient.listAutomationRuns(automationID: automationID, commandChannel: commandChannel)
+        } catch {
+            handleBridgeError(error)
+            return nil
+        }
+    }
+
     func toggleWorkspaceCollapsed(_ workspaceID: String) {
         if collapsedWorkspaceIDs.contains(workspaceID) {
             collapsedWorkspaceIDs.remove(workspaceID)

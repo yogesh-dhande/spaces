@@ -17,10 +17,14 @@ struct AutomationDeviceInput: Sendable, Equatable {
     let offlineMessage: String?
     let automations: [TerminalServiceAutomationSummary]
     let runs: [TerminalServiceAutomationRunSummary]
+    /// The device's daemon-reported time-zone identifier, used by the editor to preview cron next-run times
+    /// in the zone the device actually evaluates the schedule in. Nil for the local device (which uses the
+    /// Mac's current zone) or when the device's daemon didn't report one.
+    let timeZoneIdentifier: String?
 
     init(
         deviceID: String, deviceName: String, isLocal: Bool, isReachable: Bool, offlineMessage: String? = nil,
-        automations: [TerminalServiceAutomationSummary] = [], runs: [TerminalServiceAutomationRunSummary] = []
+        automations: [TerminalServiceAutomationSummary] = [], runs: [TerminalServiceAutomationRunSummary] = [], timeZoneIdentifier: String? = nil
     ) {
         self.deviceID = deviceID
         self.deviceName = deviceName
@@ -29,6 +33,7 @@ struct AutomationDeviceInput: Sendable, Equatable {
         self.offlineMessage = offlineMessage
         self.automations = automations
         self.runs = runs
+        self.timeZoneIdentifier = timeZoneIdentifier
     }
 }
 
@@ -183,6 +188,25 @@ enum AutomationsViewModel {
         default: outcome = run.status
         }
         return "\(name) \(outcome) on \(deviceName)"
+    }
+
+    // MARK: - Schedule preview zone (pure, unit-testable)
+
+    /// The time zone to preview a cron schedule in for the automation's target device: the Mac's own current
+    /// zone for the local device, else the remote device's daemon-reported zone (so the preview matches the
+    /// absolute times the remote daemon will actually fire at). Falls back to the Mac's current zone when the
+    /// device reported no zone or an unparseable identifier.
+    static func schedulePreviewTimeZone(isLocalDevice: Bool, reportedTimeZoneIdentifier: String?) -> TimeZone {
+        guard !isLocalDevice, let identifier = reportedTimeZoneIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines), !identifier.isEmpty,
+            let zone = TimeZone(identifier: identifier)
+        else { return .current }
+        return zone
+    }
+
+    /// The zone-identifier suffix to append to the schedule preview text, shown only when the preview zone
+    /// differs from the Mac's own so local authoring stays uncluttered; nil when they match.
+    static func schedulePreviewZoneSuffix(previewTimeZone: TimeZone, localTimeZone: TimeZone = .current) -> String? {
+        previewTimeZone.identifier == localTimeZone.identifier ? nil : previewTimeZone.identifier
     }
 
     // MARK: - Editor form logic (pure, unit-testable)

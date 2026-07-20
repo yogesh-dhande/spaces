@@ -216,6 +216,47 @@ import spacesterminalcore
         XCTAssertFalse(FileManager.default.fileExists(atPath: try XCTUnwrap(oldestRunDir).path), "a pruned run's artifact directory is deleted")
     }
 
+    /// Retention never prunes a run whose attributed agent session is still live: a succeeded agent-kind run
+    /// deliberately leaves its agent open, and pruning it would terminate that live agent (the no-kill
+    /// guarantee). The run stays retained past the cap until its session ends, after which the next prune
+    /// removes it.
+    func testRetentionSkipsRunWithLiveAttributedSessionUntilItEnds() throws {
+        // A small cap so a handful of newer terminal rows push the live-session run past the window.
+        let harness = try Harness(self, retentionLimit: 2)
+        let (_, workspace) = try harness.makeProjectAndWorkspace()
+        let automation = try harness.insertAgentAutomation(workspaceID: workspace.id)
+
+        // The oldest run is a succeeded agent run whose agent session is deliberately left live.
+        let liveRun = try harness.insertRun(automationID: automation.id, status: .succeeded, createdAt: harness.now())
+        let liveSessionID = UUID().uuidString
+        let agent = try harness.writeAttributedAgentSession(
+            workspaceID: workspace.id, runID: liveRun.id, sessionID: liveSessionID, live: true, status: .done)
+        XCTAssertTrue(harness.orchestrator.automationSessionIsLive(sessionID: liveSessionID))
+
+        // More newer terminal (skipped) rows than the cap, so the live-session run is beyond the newest 2.
+        for offset in 1...4 {
+            _ = try harness.insertRun(automationID: automation.id, status: .skipped, createdAt: harness.now().addingTimeInterval(TimeInterval(offset)))
+        }
+
+        // Retention runs on a real terminal transition; cancel a fresh session-less running run to drive one.
+        func triggerPrune(at offset: TimeInterval) throws {
+            let throwaway = try harness.insertRun(automationID: automation.id, status: .running, createdAt: harness.now().addingTimeInterval(offset))
+            harness.service.cancelRun(runID: throwaway.id)
+        }
+
+        // The prune leaves the live-session run and its agent: pruning it would kill the live agent.
+        try triggerPrune(at: 100)
+        XCTAssertNotNil(try harness.store.automationRun(id: liveRun.id), "a run with a live attributed session is retained past the cap")
+        XCTAssertTrue(harness.orchestrator.automationSessionIsLive(sessionID: liveSessionID), "its live agent session is never killed by retention")
+        XCTAssertNotNil(try harness.store.agentWindow(id: agent.id), "its agent row survives")
+
+        // Once the session ends, the next prune removes the now-prunable run.
+        harness.host.markSessionEnded(sessionID: liveSessionID)
+        XCTAssertFalse(harness.orchestrator.automationSessionIsLive(sessionID: liveSessionID), "the session is no longer live once ended")
+        try triggerPrune(at: 101)
+        XCTAssertNil(try harness.store.automationRun(id: liveRun.id), "once its session ends the run is pruned on the next prune")
+    }
+
     // MARK: - Executor exit codes
 
     func testExecutorRecordsZeroExitAsSucceeded() throws {
@@ -573,6 +614,36 @@ import spacesterminalcore
         try harness.assertProcessDies(pid: childPID, drivingTicks: harness.service.tick)
     }
 
+    /// SIGKILL escalation tracks the whole process group, not just the leader: a canceled run whose command's
+    /// shell group leader exits on SIGTERM while a descendant ignores it must still escalate to SIGKILL and
+    /// kill the survivor. If escalation keyed only on the leader pid, the leader's death would drop the
+    /// pending kill and leave the descendant running forever.
+    func testCancelEscalatesToSIGKILLForSurvivingChildAfterLeaderExits() throws {
+        let harness = try Harness(self, realCommands: true)
+        let pidFile = FileManager.default.temporaryDirectory.appendingPathComponent("automation-survivor-\(UUID().uuidString).pid")
+        defer { try? FileManager.default.removeItem(at: pidFile) }
+        // The user script backgrounds a child shell that ignores SIGTERM (the ignore survives `exec sleep`)
+        // and records its own pid, then keeps the group leader alive with its own `sleep`. On cancel the
+        // group gets SIGTERM: the leader (and its foreground sleep) die, but the backgrounded child ignores
+        // it and lives on in the same process group.
+        // The temp pid-file path is a `/var/folders/...` path with no spaces or shell metacharacters, so
+        // double-quoting it inside the single-quoted `sh -c '…'` is enough to keep it one argument.
+        let script = """
+            sh -c 'trap "" TERM; echo $$ > "\(pidFile.path)"; exec sleep 60' &
+            sleep 60
+            """
+        let automation = try harness.insertAutomation(script: script, concurrency: .allow)
+        let run = try XCTUnwrap(harness.service.triggerManually(automationID: automation.id))
+
+        let survivorPID = try harness.waitForRecordedPID(at: pidFile)
+        harness.service.cancelRun(runID: run.id)
+        XCTAssertEqual(try harness.store.automationRun(id: run.id)?.status, .canceled)
+        // SIGTERM alone does not kill the survivor (it ignores it); only the group SIGKILL escalation does.
+        XCTAssertEqual(kill(survivorPID, 0), 0, "the TERM-ignoring child survives the initial SIGTERM")
+
+        try harness.assertProcessDies(pid: survivorPID, drivingTicks: harness.service.tick)
+    }
+
     // MARK: - Delete terminates live attributed sessions
 
     /// Deleting an automation whose succeeded agent-kind run deliberately left its agent session live must
@@ -673,10 +744,11 @@ import spacesterminalcore
     let service: AutomationService
     let now: () -> Date
     private let timeZone: @Sendable () -> TimeZone
+    private let retentionLimit: Int
 
     init(
         _ testCase: XCTestCase, realCommands: Bool = false, now: @escaping () -> Date = Date.init,
-        timeZone: @escaping @Sendable () -> TimeZone = { .current }
+        timeZone: @escaping @Sendable () -> TimeZone = { .current }, retentionLimit: Int = 100
     ) throws {
         store = try testCase.makeTemporaryStore()
         let host = FakeAutomationTerminalHost(realCommands: realCommands)
@@ -686,9 +758,10 @@ import spacesterminalcore
         orchestrator = WorkspaceOrchestrator(store: store)
         self.now = now
         self.timeZone = timeZone
+        self.retentionLimit = retentionLimit
         service = AutomationService(
             store: store, orchestrator: orchestrator, binaryDirectory: "/usr/bin", timeZone: timeZone, now: now, terminationGrace: 0.2,
-            logError: { _ in })
+            retentionLimit: retentionLimit, logError: { _ in })
     }
 
     /// Builds a fresh `AutomationService` over the same store/orchestrator, modeling a daemon restart:
@@ -696,7 +769,7 @@ import spacesterminalcore
     func makeService() -> AutomationService {
         AutomationService(
             store: store, orchestrator: orchestrator, binaryDirectory: "/usr/bin", timeZone: timeZone, now: now, terminationGrace: 0.2,
-            logError: { _ in })
+            retentionLimit: retentionLimit, logError: { _ in })
     }
 
     func insertAutomation(
@@ -791,6 +864,21 @@ import spacesterminalcore
             usleep(30_000)
         }
         throw XCTSkip("run \(runID) did not reach a terminal status within \(timeout)s")
+    }
+
+    /// Polls a pid file a spawned child writes its own pid into, returning the pid once present and the
+    /// process is confirmed alive. Fails if it does not appear within the deadline.
+    func waitForRecordedPID(at url: URL, timeout: TimeInterval = 5) throws -> Int32 {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if let text = try? String(contentsOf: url, encoding: .utf8), let pid = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)),
+                pid > 0, kill(pid, 0) == 0
+            {
+                return pid
+            }
+            usleep(30_000)
+        }
+        throw XCTSkip("child pid was not recorded at \(url.path) within \(timeout)s")
     }
 
     /// Asserts a process is killed within a deadline, driving the escalation ticks so a SIGTERM that the

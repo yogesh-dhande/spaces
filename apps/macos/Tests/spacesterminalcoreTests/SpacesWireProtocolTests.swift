@@ -31,19 +31,21 @@ final class SpacesWireProtocolTests: XCTestCase {
     func testDaemonStatusRoundTripsAllFields() throws {
         let status = TerminalServiceDaemonStatus(
             version: "0.2.0", installedVersion: "abc", certificateFingerprint: "ff", activeSessionCount: 3, protocolVersion: 7, runningProcesses: 2,
-            activeAgents: 1, waitingAgents: 4, operatingSystem: "Linux")
+            activeAgents: 1, waitingAgents: 4, operatingSystem: "Linux", timeZoneIdentifier: "America/New_York")
         let decoded = try JSONDecoder().decode(TerminalServiceDaemonStatus.self, from: JSONEncoder().encode(status))
         XCTAssertEqual(decoded, status)
         XCTAssertTrue(decoded.isLinuxDaemon)
+        XCTAssertEqual(decoded.timeZoneIdentifier, "America/New_York")
     }
 
     func testDaemonStatusDecodesWhenPeerOmitsNewerFields() throws {
-        // A peer whose field set predates this build (no protocolVersion / counts / OS). The frozen
-        // core must still decode instead of throwing keyNotFound on the negotiation handshake.
+        // A peer whose field set predates this build (no protocolVersion / counts / OS / time zone). The
+        // frozen core must still decode instead of throwing keyNotFound on the negotiation handshake.
         let json = Data(#"{"version":"0.1.0","activeSessionCount":2}"#.utf8)
         let status = try JSONDecoder().decode(TerminalServiceDaemonStatus.self, from: json)
         XCTAssertEqual(status.version, "0.1.0")
         XCTAssertEqual(status.activeSessionCount, 2)
+        XCTAssertNil(status.timeZoneIdentifier, "an omitted time zone decodes to nil so a client falls back to its own zone")
         // Missing protocolVersion is treated as "unknown / too old", not as a match.
         XCTAssertEqual(status.protocolVersion, TerminalServiceDaemonStatus.unknownProtocolVersion)
         XCTAssertEqual(SpacesWireCompatibility.evaluate(daemonStatus: status), .daemonTooOld)

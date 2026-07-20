@@ -4143,7 +4143,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             let offlineMessage: String? = if case .offline(let message) = section.loadState { message } else { nil }
             return AutomationDeviceInput(
                 deviceID: section.deviceID, deviceName: section.deviceName, isLocal: section.isLocal, isReachable: isReachable,
-                offlineMessage: offlineMessage, automations: section.overview?.automations ?? [], runs: section.overview?.automationRuns ?? [])
+                offlineMessage: offlineMessage, automations: section.overview?.automations ?? [], runs: section.overview?.automationRuns ?? [],
+                timeZoneIdentifier: section.overview?.daemonStatus.timeZoneIdentifier)
         }
     }
 

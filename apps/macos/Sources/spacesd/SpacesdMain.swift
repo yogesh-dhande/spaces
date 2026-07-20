@@ -398,7 +398,7 @@ import workspacecore
     private func daemonStatus() -> TerminalServiceDaemonStatus {
         TerminalServiceDaemonStatus(
             version: AppVersion.current, installedVersion: InstalledSpacesVersion.current(), certificateFingerprint: daemonIdentityFingerprint,
-            activeSessionCount: sessionCores.count)
+            activeSessionCount: sessionCores.count, timeZoneIdentifier: TerminalServiceDaemonStatus.currentTimeZoneIdentifier)
     }
 
     // Exec-in-place update trigger: after a short grace so the already-sent RPC response can flush,

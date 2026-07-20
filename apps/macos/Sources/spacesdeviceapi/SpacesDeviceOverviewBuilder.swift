@@ -48,17 +48,20 @@ struct SpacesDeviceOverviewBuilder {
     /// for a client to render run lists and derive alert entries from recent failed/timed-out runs.
     static let recentAutomationRunLimit = 50
 
-    /// Selects the automation runs the overview carries: the newest terminal runs (already limited to
-    /// `recentAutomationRunLimit` by the caller's query) unioned with every currently-active run, so a
-    /// live run is never dropped by the recent-window cap, de-duplicated and returned newest first. Pure
-    /// and static so the selection contract is unit-testable without a store or a running server.
-    static func selectOverviewRuns(recentTerminal: [AutomationRun], active: [AutomationRun]) -> [AutomationRun] {
-        var seen = Set(recentTerminal.map(\.id))
-        var merged = recentTerminal
-        for run in active where !seen.contains(run.id) {
-            seen.insert(run.id)
-            merged.append(run)
-        }
+    /// Selects the automation runs the overview carries, from three inputs, de-duplicated and returned
+    /// newest first:
+    /// - `recentTerminal`: the newest terminal runs globally (already limited to `recentAutomationRunLimit`
+    ///   by the caller's query) — the recent-history window.
+    /// - `latestPerAutomation`: each automation's single newest terminal run, so a chatty automation
+    ///   filling the global recent window can never evict quieter automations' last-run status (a client
+    ///   would otherwise read them as "never run" with empty history).
+    /// - `active`: every currently-active (queued/running) run, so a live run is never dropped by the cap.
+    /// Pure and static so the selection contract is unit-testable without a store or a running server.
+    static func selectOverviewRuns(recentTerminal: [AutomationRun], latestPerAutomation: [AutomationRun], active: [AutomationRun]) -> [AutomationRun]
+    {
+        var seen = Set<String>()
+        var merged: [AutomationRun] = []
+        for run in recentTerminal + latestPerAutomation + active where seen.insert(run.id).inserted { merged.append(run) }
         return merged.sorted { $0.createdAt > $1.createdAt }
     }
 

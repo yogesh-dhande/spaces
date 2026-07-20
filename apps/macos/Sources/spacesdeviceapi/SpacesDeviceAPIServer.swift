@@ -1629,7 +1629,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         TerminalServiceDaemonStatus(
             version: AppVersion.current, installedVersion: InstalledSpacesVersion.current(), certificateFingerprint: nil,
             activeSessionCount: activeSessionCount, runningProcesses: impact.runningProcesses, activeAgents: impact.activeAgents,
-            waitingAgents: impact.waitingAgents)
+            waitingAgents: impact.waitingAgents, timeZoneIdentifier: TerminalServiceDaemonStatus.currentTimeZoneIdentifier)
     }
 
     /// Builds the device overview. Request handlers pass their shared per-request `store` so a
@@ -1697,7 +1697,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
 
     /// Builds the overview's automation section: every automation, plus the runs a client needs — all
     /// currently-active (queued/running) runs unioned with the newest `recentAutomationRunLimit` terminal
-    /// runs, newest first, de-duplicated. Each run summary carries its automation name and its attributed
+    /// runs and each automation's latest terminal run, newest first, de-duplicated. Each run summary carries its automation name and its attributed
     /// coding-agent breakdown (computed against the live-session set the overview already scanned), so a
     /// client can render run history and derive alert entries without extra calls.
     private func loadAutomationOverview(store: SQLiteStore, liveSessions: [TerminalSessionCatalogEntry]) throws -> (
@@ -1707,11 +1707,13 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         let automationSummaries = automations.map(TerminalServiceAutomationSummary.init)
         let namesByAutomationID = Dictionary(automations.map { ($0.id, $0.name) }, uniquingKeysWith: { first, _ in first })
 
-        // Active runs are always included regardless of the recent window; recent terminal runs fill in
-        // history. The selection contract lives in a pure builder helper so it can be unit-tested.
+        // Active runs are always included regardless of the recent window; the recent terminal window fills
+        // in history, and each automation's latest terminal run is unioned in so a chatty automation can't
+        // evict quieter automations' last-run status. The selection contract lives in a pure builder helper
+        // so it can be unit-tested.
         let ordered = SpacesDeviceOverviewBuilder.selectOverviewRuns(
             recentTerminal: try store.terminalAutomationRuns(limit: SpacesDeviceOverviewBuilder.recentAutomationRunLimit),
-            active: try store.activeAutomationRuns())
+            latestPerAutomation: try store.latestTerminalAutomationRunPerAutomation(), active: try store.activeAutomationRuns())
         let attributedAgentsByRunID = try AutomationAttributedAgents.summariesByRunID(runs: ordered, store: store, liveSessions: liveSessions)
         let runSummaries = ordered.map { run in
             TerminalServiceAutomationRunSummary(

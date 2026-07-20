@@ -103,26 +103,39 @@ struct AutomationRunsView: View {
     let title: String
     @State private var pendingCancelRunID: String?
     @State private var pendingEndAgentsRunID: String?
+    /// Retained per-automation run history fetched directly from the daemon (nil until first fetched). Only
+    /// used for the per-automation screen (`automationID != nil`); the global "Recent Runs" screen stays
+    /// overview-derived because it genuinely is the recent-runs window.
+    @State private var fetchedRuns: [TerminalServiceAutomationRunSummary]?
 
     private var rows: [SpacesMobileAutomationRunRow] {
-        SpacesMobileAutomations.runRows(model.overview?.automationRuns ?? [], automationID: automationID)
+        if let automationID, let fetchedRuns { return SpacesMobileAutomations.runRows(fetchedRuns, automationID: automationID) }
+        return SpacesMobileAutomations.runRows(model.overview?.automationRuns ?? [], automationID: automationID)
     }
 
     var body: some View {
         content.navigationTitle(title).tint(Theme.accent).overviewPolling(model: model, tab: .automations, activeDetailRouteID: nil)
+            .task { await loadRuns() }
             .confirmationDialog("Cancel this run?", isPresented: cancelDialogBinding, titleVisibility: .visible) {
                 Button("Cancel Run", role: .destructive) {
                     guard let pendingCancelRunID else { return }
-                    Task { await model.cancelAutomationRun(runID: pendingCancelRunID) }
+                    Task { await model.cancelAutomationRun(runID: pendingCancelRunID); await loadRuns() }
                 }
                 Button("Keep Running", role: .cancel) {}
             }.confirmationDialog("End this run's agents?", isPresented: endAgentsDialogBinding, titleVisibility: .visible) {
                 Button("End Agents", role: .destructive) {
                     guard let pendingEndAgentsRunID else { return }
-                    Task { await model.endAutomationAgents(runID: pendingEndAgentsRunID) }
+                    Task { await model.endAutomationAgents(runID: pendingEndAgentsRunID); await loadRuns() }
                 }
                 Button("Keep Agents Running", role: .cancel) {}
             }
+    }
+
+    /// Fetches the per-automation run history through the daemon's retained-runs endpoint. A no-op for the
+    /// global "Recent Runs" screen, which stays overview-derived.
+    private func loadRuns() async {
+        guard let automationID else { return }
+        if let runs = await model.fetchAutomationRuns(automationID: automationID) { fetchedRuns = runs }
     }
 
     private var cancelDialogBinding: Binding<Bool> { Binding(get: { pendingCancelRunID != nil }, set: { if !$0 { pendingCancelRunID = nil } }) }
@@ -140,7 +153,7 @@ struct AutomationRunsView: View {
             }.background(Theme.bg.ignoresSafeArea())
         } else {
             ScrollView { LazyVStack(spacing: 0) { ForEach(rows) { row in runRow(row) } }.padding(.vertical, 12) }.scrollContentBackground(.hidden)
-                .background(Theme.bg.ignoresSafeArea()).refreshable { await model.refresh() }
+                .background(Theme.bg.ignoresSafeArea()).refreshable { await model.refresh(); await loadRuns() }
         }
     }
 

@@ -173,6 +173,27 @@ extension SQLiteStore {
         ).compactMap(Self.decodeAutomationRun)
     }
 
+    /// Each automation's single newest terminal-status run (one row per automation), newest first. The
+    /// overview unions this with the recent-run window so every automation's last-run status stays accurate
+    /// even when a chatty automation's runs fill the global recent window and evict the quieter ones. The
+    /// status filter is derived from `AutomationRunStatus.isTerminal` (same pattern as `terminalAutomationRuns`)
+    /// so it can't drift from the enum; ties on `created_at` break on `id` for a deterministic single winner.
+    public func latestTerminalAutomationRunPerAutomation() throws -> [AutomationRun] {
+        let terminalStatuses = AutomationRunStatus.allCases.filter(\.isTerminal).map { "'\($0.rawValue)'" }.joined(separator: ", ")
+        return try queryRows(
+            sql: """
+                SELECT \(Self.automationRunColumns) FROM automation_runs a
+                WHERE a.status IN (\(terminalStatuses))
+                  AND NOT EXISTS (
+                    SELECT 1 FROM automation_runs b
+                    WHERE b.automation_id = a.automation_id AND b.status IN (\(terminalStatuses))
+                      AND (b.created_at > a.created_at OR (b.created_at = a.created_at AND b.id > a.id))
+                  )
+                ORDER BY a.created_at DESC, a.id DESC
+                """
+        ).compactMap(Self.decodeAutomationRun)
+    }
+
     /// Runs across every automation that are still active (queued or running), oldest first — the overview
     /// always includes these regardless of the recent-run window so a live run is never dropped.
     public func activeAutomationRuns() throws -> [AutomationRun] {
