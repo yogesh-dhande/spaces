@@ -21,8 +21,7 @@ struct AutomationsViewModelTests {
     ) -> TerminalServiceAutomationRunSummary {
         TerminalServiceAutomationRunSummary(
             id: id, automationID: automationID, automationName: name, status: status, trigger: trigger, skipReason: skipReason, exitCode: exitCode,
-            terminalSessionID: sessionID, startedAt: startedAt, endedAt: endedAt, createdAt: createdAt,
-            liveAttributedSessionCount: attributedAgents.filter(\.live).count, attributedAgents: attributedAgents)
+            terminalSessionID: sessionID, startedAt: startedAt, endedAt: endedAt, createdAt: createdAt, attributedAgents: attributedAgents)
     }
 
     private func agent(sessionID: String, status: AgentWindowStatus, live: Bool, title: String? = nil, workspaceID: String? = "ws-1")
@@ -283,5 +282,34 @@ struct AutomationsViewModelTests {
 
         let scriptAutomation = automation(id: "s1", name: "Script")  // script "echo hi"
         #expect(AutomationsViewModel.excerpt(for: scriptAutomation) == "echo hi")
+    }
+
+    // MARK: - Workspace choice preservation
+
+    private typealias WorkspaceChoice = AutomationsViewModel.WorkspaceChoice
+
+    @Test func workspaceChoicesLeaveVisibleUnchangedWhenStoredWorkspaceVisible() {
+        let visible = [WorkspaceChoice(workspaceID: "ws-1", label: "P / A"), WorkspaceChoice(workspaceID: "ws-2", label: "P / B")]
+        let result = AutomationsViewModel.workspaceChoices(visible: visible, preservingWorkspaceID: "ws-1") { _ in "unused" }
+        #expect(result == visible)
+    }
+
+    @Test func workspaceChoicesAppendHiddenResolvableWorkspaceWithRealNameAndSuffix() {
+        let visible = [WorkspaceChoice(workspaceID: "ws-1", label: "P / A")]
+        let result = AutomationsViewModel.workspaceChoices(visible: visible, preservingWorkspaceID: "ws-hidden") { id in
+            id == "ws-hidden" ? "P / Hidden" : nil
+        }
+        #expect(result == visible + [WorkspaceChoice(workspaceID: "ws-hidden", label: "P / Hidden (hidden)")])
+    }
+
+    @Test func workspaceChoicesAppendGoneWorkspaceWithRawIDFallback() {
+        let visible = [WorkspaceChoice(workspaceID: "ws-1", label: "P / A")]
+        let result = AutomationsViewModel.workspaceChoices(visible: visible, preservingWorkspaceID: "ws-gone") { _ in nil }
+        #expect(result == visible + [WorkspaceChoice(workspaceID: "ws-gone", label: "ws-gone")])
+    }
+
+    @Test func workspaceChoicesLeaveVisibleUnchangedForNilStoredID() {
+        let visible = [WorkspaceChoice(workspaceID: "ws-1", label: "P / A")]
+        #expect(AutomationsViewModel.workspaceChoices(visible: visible, preservingWorkspaceID: nil) { _ in "unused" } == visible)
     }
 }

@@ -21,20 +21,17 @@ extension TerminalServiceAutomationSummary {
 
 extension TerminalServiceAutomationRunSummary {
     /// `automationName` is denormalized in by the caller (from the run's automation lookup, when it still
-    /// exists); `liveAttributedSessionCount` is the number of the run's stamped terminal sessions currently
-    /// live, which the caller computes from the live-session set; `attributedAgents` is the run's coding-agent
-    /// breakdown, which the caller builds once for the whole listing (see `AutomationAttributedAgents`).
+    /// exists); `attributedAgents` is the run's coding-agent breakdown, which the caller builds once for the
+    /// whole listing (see `AutomationAttributedAgents`).
     public init(
-        _ run: AutomationRun, automationName: String?, liveAttributedSessionCount: Int,
-        attributedAgents: [TerminalServiceAutomationAgentSummary] = []
+        _ run: AutomationRun, automationName: String?, attributedAgents: [TerminalServiceAutomationAgentSummary] = []
     ) {
         self.init(
             id: run.id, automationID: run.automationID, automationName: automationName, status: run.status.rawValue, trigger: run.trigger.rawValue,
             skipReason: run.skipReason?.rawValue, exitCode: run.exitCode, terminalSessionID: run.terminalSessionID,
             startedAt: run.startedAt.map(TerminalSessionTimestamp.string(from:)),
             endedAt: run.endedAt.map(TerminalSessionTimestamp.string(from:)),
-            createdAt: TerminalSessionTimestamp.string(from: run.createdAt), liveAttributedSessionCount: liveAttributedSessionCount,
-            attributedAgents: attributedAgents)
+            createdAt: TerminalSessionTimestamp.string(from: run.createdAt), attributedAgents: attributedAgents)
     }
 }
 

@@ -4186,12 +4186,21 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// The workspaces available to an `agent`-kind automation on a device, read from the sidebar's already
     /// loaded project/workspace model (the same source the sidebar renders), so the editor adds no new fetch
     /// path. Ordered by the sidebar's project order, visible (non-archived, non-hidden) workspaces only.
-    func automationWorkspaceChoices(deviceID: String) -> [AutomationWorkspaceChoice] {
-        deviceProjects(deviceID: deviceID).flatMap { project in
+    /// `preservingWorkspaceID` keeps an automation's stored target in the list even when that workspace has
+    /// since been hidden, so editing an unrelated field never silently retargets it (see
+    /// `AutomationsViewModel.workspaceChoices`); the hidden target's real name is resolved through
+    /// `findWorkspace`, which includes hidden workspaces.
+    func automationWorkspaceChoices(deviceID: String, preservingWorkspaceID: String? = nil) -> [AutomationWorkspaceChoice] {
+        let visible = deviceProjects(deviceID: deviceID).flatMap { project in
             visibleWorkspaces(projectID: project.id).map { workspace in
-                AutomationWorkspaceChoice(workspaceID: workspace.id, label: "\(project.name) / \(workspace.displayName)")
+                AutomationsViewModel.WorkspaceChoice(workspaceID: workspace.id, label: "\(project.name) / \(workspace.displayName)")
             }
         }
+        let merged = AutomationsViewModel.workspaceChoices(visible: visible, preservingWorkspaceID: preservingWorkspaceID) { workspaceID in
+            guard let (project, workspace) = findWorkspace(id: workspaceID) else { return nil }
+            return "\(project.name) / \(workspace.displayName)"
+        }
+        return merged.map { AutomationWorkspaceChoice(workspaceID: $0.workspaceID, label: $0.label) }
     }
 
     /// The status glyph name and tint for a settled (non-spinning) agent status. Single source of truth shared

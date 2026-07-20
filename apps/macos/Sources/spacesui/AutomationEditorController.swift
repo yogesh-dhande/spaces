@@ -105,7 +105,9 @@ import workspacecore
     }
 
     private func present(title: String, seed: TerminalServiceAutomationSummary?) {
-        workspaceChoices = host.automationWorkspaceChoices(deviceID: deviceID)
+        // Preserve the edited automation's stored workspace even when it has since been hidden, so saving an
+        // unrelated edit never retargets it to the first visible workspace.
+        workspaceChoices = host.automationWorkspaceChoices(deviceID: deviceID, preservingWorkspaceID: seed?.workspaceID)
 
         let stack = NSStackView()
         stack.orientation = .vertical

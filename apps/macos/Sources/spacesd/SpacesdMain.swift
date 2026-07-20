@@ -944,14 +944,12 @@ import workspacecore
             missedRunPolicy: missedRunPolicy)
     }
 
-    /// Maps runs to wire summaries, denormalizing each run's automation name and counting its live
-    /// attributed sessions against the daemon's current live-session set (a coding agent a run spawned that
-    /// is still running, or the run's own command session before it ends).
+    /// Maps runs to wire summaries, denormalizing each run's automation name and its attributed coding-agent
+    /// breakdown (built once for the whole listing against the daemon's current live-session set).
     private func automationRunSummaries(_ runs: [AutomationRun]) throws -> [TerminalServiceAutomationRunSummary] {
         guard !runs.isEmpty else { return [] }
         let store = try makeProfileOrchestrator().store
         let liveSessions = (try? TerminalSessionCatalog.listLiveSessions()) ?? []
-        let liveSessionIDs = Set(liveSessions.map(\.sessionID))
         let attributedAgentsByRunID = try AutomationAttributedAgents.summariesByRunID(runs: runs, store: store, liveSessions: liveSessions)
         var namesByAutomationID: [String: String] = [:]
         return try runs.map { run in
@@ -963,10 +961,8 @@ import workspacecore
                 if let resolved { namesByAutomationID[run.automationID] = resolved }
                 name = resolved
             }
-            let attributed = (try? store.terminalSessionIDs(automationRunID: run.id)) ?? []
-            let liveCount = attributed.filter { liveSessionIDs.contains($0) }.count
             return TerminalServiceAutomationRunSummary(
-                run, automationName: name, liveAttributedSessionCount: liveCount, attributedAgents: attributedAgentsByRunID[run.id] ?? [])
+                run, automationName: name, attributedAgents: attributedAgentsByRunID[run.id] ?? [])
         }
     }
 

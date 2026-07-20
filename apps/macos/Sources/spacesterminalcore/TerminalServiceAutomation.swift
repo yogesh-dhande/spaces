@@ -95,10 +95,10 @@ public struct TerminalServiceAutomationAgentSummary: Codable, Sendable, Equatabl
 /// Client-facing wire summary of one automation execution attempt. Carries the identity a client needs to
 /// display run history and derive alert entries: the run's status, trigger origin, skip reason, exit code,
 /// its command terminal session, and its timestamps. `automationName` is denormalized in so a run-centric
-/// list (e.g. an alerts feed) can render without a second lookup. `liveAttributedSessionCount` is the
-/// number of terminal sessions stamped with this run that are currently live — non-zero only for a running
-/// or recently-ended run whose spawned coding-agent sessions have not been swept yet. `attributedAgents` is
-/// the per-agent breakdown of those attributed sessions that carry a coding agent, each with its own status.
+/// list (e.g. an alerts feed) can render without a second lookup. `attributedAgents` is the per-agent
+/// breakdown of the run's attributed sessions that carry a coding agent, each with its own status and its
+/// own `live` flag (a live-agent count is derived from these; a script run's own workspace-less wrapper
+/// session is never one of them).
 public struct TerminalServiceAutomationRunSummary: Codable, Sendable, Equatable, Identifiable {
     public let id: String
     public let automationID: String
@@ -111,12 +111,11 @@ public struct TerminalServiceAutomationRunSummary: Codable, Sendable, Equatable,
     public let startedAt: String?
     public let endedAt: String?
     public let createdAt: String
-    public let liveAttributedSessionCount: Int
     public let attributedAgents: [TerminalServiceAutomationAgentSummary]
 
     public init(
         id: String, automationID: String, automationName: String?, status: String, trigger: String, skipReason: String?, exitCode: Int?,
-        terminalSessionID: String?, startedAt: String?, endedAt: String?, createdAt: String, liveAttributedSessionCount: Int,
+        terminalSessionID: String?, startedAt: String?, endedAt: String?, createdAt: String,
         attributedAgents: [TerminalServiceAutomationAgentSummary] = []
     ) {
         self.id = id
@@ -130,7 +129,6 @@ public struct TerminalServiceAutomationRunSummary: Codable, Sendable, Equatable,
         self.startedAt = startedAt
         self.endedAt = endedAt
         self.createdAt = createdAt
-        self.liveAttributedSessionCount = liveAttributedSessionCount
         self.attributedAgents = attributedAgents
     }
 }

@@ -413,7 +413,7 @@
             TerminalServiceAutomationRunSummary(
                 id: id, automationID: automationID, automationName: automationName, status: status, trigger: trigger, skipReason: nil,
                 exitCode: exitCode, terminalSessionID: nil, startedAt: startedAt, endedAt: endedAt, createdAt: createdAt,
-                liveAttributedSessionCount: attributedAgents.filter(\.live).count, attributedAgents: attributedAgents)
+                attributedAgents: attributedAgents)
         }
     }
 #endif

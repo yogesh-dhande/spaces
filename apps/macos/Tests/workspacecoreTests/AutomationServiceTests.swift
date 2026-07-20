@@ -509,6 +509,96 @@ import spacesterminalcore
         XCTAssertEqual(try harness.store.automationRun(id: run.id)?.status, .canceled)
         try harness.assertProcessDies(pid: childPID, drivingTicks: harness.service.tick)
     }
+
+    // MARK: - Delete terminates live attributed sessions
+
+    /// Deleting an automation whose succeeded agent-kind run deliberately left its agent session live must
+    /// terminate that session and finalize its agent row before the run's records are removed, so no orphaned
+    /// process survives running-but-unreachable. Retention pruning shares the same helper, so this covers both.
+    func testDeleteAutomationTerminatesLiveAttributedAgentSession() throws {
+        let harness = try Harness(self)
+        let (_, workspace) = try harness.makeProjectAndWorkspace()
+        let automation = try harness.insertAgentAutomation(workspaceID: workspace.id)
+        let run = try harness.insertRun(automationID: automation.id, status: .succeeded)
+        let sessionID = UUID().uuidString
+        let agent = try harness.writeAttributedAgentSession(workspaceID: workspace.id, runID: run.id, sessionID: sessionID, live: true, status: .done)
+        try harness.store.insertAgentSubscription(subscriberTerminalSessionID: "watcher", agentSessionID: agent.id, createdAt: "t")
+        XCTAssertTrue(harness.orchestrator.automationSessionIsLive(sessionID: sessionID))
+
+        harness.service.deleteAutomation(id: automation.id)
+
+        XCTAssertFalse(
+            harness.orchestrator.automationSessionIsLive(sessionID: sessionID), "the live attributed session is terminated before its records are removed")
+        XCTAssertNil(try harness.store.agentWindow(id: agent.id), "the agent row is finalized through the kill chokepoint")
+        XCTAssertTrue(
+            harness.host.delivered.contains { $0.sessionID == "watcher" && $0.line.contains("exited") }, "the subscriber is told the agent exited")
+        XCTAssertNil(try harness.store.automation(id: automation.id), "the automation is deleted")
+    }
+
+    // MARK: - Kind-change guard
+
+    /// Switching an automation between Script and Agent while a run is queued or running is rejected — the
+    /// poll path dispatches on the current kind, so the change would misclassify the in-flight run. Only the
+    /// kind change is blocked; every other edit stays allowed mid-run.
+    func testUpdateRejectsKindChangeWhileRunActive() throws {
+        let harness = try Harness(self)
+        let automation = try harness.insertAutomation(script: "sleep 60", concurrency: .allow)
+        let run = try XCTUnwrap(harness.service.triggerManually(automationID: automation.id))
+        XCTAssertEqual(run.status, .running)
+
+        let switchToAgent = AutomationDraft(
+            name: automation.name, enabled: true, triggerKind: .manual, cronExpression: nil, kind: .agent, script: "", agentCommand: "claude",
+            agentPrompt: "do the thing", workspaceID: "ws-1", workingDirectory: "", timeoutSeconds: nil, concurrencyPolicy: .allow,
+            missedRunPolicy: .runOnce)
+        XCTAssertThrowsError(try harness.service.updateAutomation(id: automation.id, draft: switchToAgent)) { error in
+            XCTAssertTrue(error is AutomationValidationError, "the kind cannot change while a run is active")
+        }
+        XCTAssertEqual(try harness.store.automation(id: automation.id)?.kind, .script, "the rejected change never persists")
+
+        let renameOnly = AutomationDraft(
+            name: "Renamed", enabled: true, triggerKind: .manual, cronExpression: nil, kind: .script, script: "sleep 60", agentCommand: nil,
+            agentPrompt: nil, workspaceID: nil, workingDirectory: "/tmp", timeoutSeconds: nil, concurrencyPolicy: .allow, missedRunPolicy: .runOnce)
+        let updated = try harness.service.updateAutomation(id: automation.id, draft: renameOnly)
+        XCTAssertEqual(updated.name, "Renamed", "a non-kind edit is allowed while the run is active")
+
+        harness.service.cancelRun(runID: run.id)
+    }
+
+    /// With no active run, switching kind is allowed.
+    func testUpdateAllowsKindChangeWithNoActiveRuns() throws {
+        let harness = try Harness(self)
+        let automation = try harness.insertAutomation(script: "echo hi", concurrency: .allow)
+        let switchToAgent = AutomationDraft(
+            name: automation.name, enabled: true, triggerKind: .manual, cronExpression: nil, kind: .agent, script: "", agentCommand: "claude",
+            agentPrompt: "do the thing", workspaceID: "ws-1", workingDirectory: "", timeoutSeconds: nil, concurrencyPolicy: .allow,
+            missedRunPolicy: .runOnce)
+        let updated = try harness.service.updateAutomation(id: automation.id, draft: switchToAgent)
+        XCTAssertEqual(updated.kind, .agent)
+    }
+
+    // MARK: - startRun returns the persisted row
+
+    /// A trigger whose launch fails returns the persisted `failed` row, not the pre-launch `running` local
+    /// value: an agent automation targeting a nonexistent workspace fails at spawn.
+    func testTriggerReturnsPersistedFailedRunOnAgentLaunchFailure() throws {
+        let harness = try Harness(self)
+        let automation = try harness.insertAgentAutomation(workspaceID: "missing-workspace")
+        let run = try XCTUnwrap(harness.service.triggerManually(automationID: automation.id))
+        XCTAssertEqual(run.status, .failed, "the returned run reflects the persisted launch failure")
+        XCTAssertNil(run.terminalSessionID)
+    }
+
+    /// A successful script trigger returns the persisted `running` row carrying its launched terminal session
+    /// id, not the pre-launch value whose session id was still nil.
+    func testTriggerReturnsPersistedRunningRunWithSessionForScript() throws {
+        let harness = try Harness(self)
+        let automation = try harness.insertAutomation(script: "true", concurrency: .allow)
+        let run = try XCTUnwrap(harness.service.triggerManually(automationID: automation.id))
+        XCTAssertEqual(run.status, .running)
+        let sessionID = try XCTUnwrap(run.terminalSessionID, "the returned run carries the launched session id")
+        XCTAssertEqual(sessionID, try harness.store.automationRun(id: run.id)?.terminalSessionID)
+        harness.service.cancelRun(runID: run.id)
+    }
 }
 
 // MARK: - Test harness

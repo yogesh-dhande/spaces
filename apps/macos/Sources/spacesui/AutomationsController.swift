@@ -268,8 +268,11 @@ import workspacecore
         var metaParts = [row.deviceName, runTriggerDescription(run), startedDescription(run), durationDescription(run)]
         if let exitCode = run.exitCode { metaParts.append("exit \(exitCode)") }
         if status == .skipped, let reason = run.skipReason { metaParts.append("skipped: \(reason)") }
-        if run.liveAttributedSessionCount > 0 {
-            metaParts.append("\(run.liveAttributedSessionCount) live agent\(run.liveAttributedSessionCount == 1 ? "" : "s")")
+        // Count only live coding agents (attributedAgents already excludes a script run's own workspace-less
+        // wrapper session), so a running script automation with no agent shows no "live agent" meta.
+        let liveAgentCount = run.attributedAgents.filter(\.live).count
+        if liveAgentCount > 0 {
+            metaParts.append("\(liveAgentCount) live agent\(liveAgentCount == 1 ? "" : "s")")
         }
         let meta = NSTextField(labelWithString: metaParts.filter { !$0.isEmpty }.joined(separator: "  •  "))
         meta.font = .systemFont(ofSize: 11)

@@ -148,6 +148,12 @@ import spacesterminalcore
     public func updateAutomation(id: String, draft: AutomationDraft) throws -> Automation {
         let existing = try requireAutomation(id: id)
         let validated = try draft.validated()
+        // The poll path dispatches on the automation's current kind, so switching Script↔Agent while a run is
+        // queued or running would misclassify that in-flight run. Reject only the kind change; every other
+        // edit stays allowed even mid-run.
+        if validated.kind != existing.kind, try !store.activeAutomationRuns(automationID: id).isEmpty {
+            throw AutomationValidationError("Automation type can't be changed while a run is queued or running.")
+        }
         let automation = Automation(
             id: existing.id, name: validated.name, enabled: validated.enabled, triggerKind: validated.triggerKind,
             cronExpression: validated.cronExpression, kind: validated.kind, script: validated.script, agentCommand: validated.agentCommand,
@@ -338,7 +344,9 @@ import spacesterminalcore
         case .script: try launchScriptRun(automation: automation, runID: runID, startedAt: currentTime)
         case .agent: try launchAgentRun(automation: automation, runID: runID, startedAt: currentTime)
         }
-        return run
+        // The launch paths update the stored row with the session id (or a launch failure), so return the
+        // persisted row rather than the pre-launch local value, which still reads `running` with no session.
+        return try requireAutomationRun(id: runID)
     }
 
     /// Launches a script-kind run's workspace-less command session and records its terminal session id. A
@@ -674,7 +682,18 @@ import spacesterminalcore
     }
 
     private func deleteRunArtifactsAndSessions(runID: String) throws {
-        for sessionID in try store.terminalSessionIDs(automationRunID: runID) {
+        let sessionIDs = try store.terminalSessionIDs(automationRunID: runID)
+        // A live session must be terminated (and its agent row finalized) before its persistence is removed,
+        // so deleting a run's records can never orphan a running process: a succeeded agent-kind run
+        // deliberately leaves its agent session live, and dropping its rows/directories without ending it
+        // would leave that process running but unreachable through the product. No transcript is captured
+        // here — the run's entire artifacts directory is deleted in this same call, so a capture would be
+        // written and immediately removed.
+        for sessionID in sessionIDs where orchestrator.automationSessionIsLive(sessionID: sessionID) {
+            orchestrator.automationTerminateSession(sessionID: sessionID)
+            try finalizeAttributedAgentRow(sessionID: sessionID)
+        }
+        for sessionID in sessionIDs {
             try store.deleteTerminalSession(sessionID: sessionID)
             if let paths = try? TerminalSessionPaths.forSession(id: sessionID) {
                 try? FileManager.default.removeItem(atPath: paths.rootDirectory)

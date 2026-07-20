@@ -1697,8 +1697,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
 
     /// Builds the overview's automation section: every automation, plus the runs a client needs — all
     /// currently-active (queued/running) runs unioned with the newest `recentAutomationRunLimit` terminal
-    /// runs, newest first, de-duplicated. Each run summary carries its automation name and its live
-    /// attributed-session count (computed against the live-session set the overview already scanned), so a
+    /// runs, newest first, de-duplicated. Each run summary carries its automation name and its attributed
+    /// coding-agent breakdown (computed against the live-session set the overview already scanned), so a
     /// client can render run history and derive alert entries without extra calls.
     private func loadAutomationOverview(store: SQLiteStore, liveSessions: [TerminalSessionCatalogEntry]) throws -> (
         [TerminalServiceAutomationSummary], [TerminalServiceAutomationRunSummary]
@@ -1706,7 +1706,6 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         let automations = try store.automations()
         let automationSummaries = automations.map(TerminalServiceAutomationSummary.init)
         let namesByAutomationID = Dictionary(automations.map { ($0.id, $0.name) }, uniquingKeysWith: { first, _ in first })
-        let liveSessionIDs = Set(liveSessions.map(\.sessionID))
 
         // Active runs are always included regardless of the recent window; recent terminal runs fill in
         // history. The selection contract lives in a pure builder helper so it can be unit-tested.
@@ -1714,12 +1713,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             recentTerminal: try store.allAutomationRuns(limit: SpacesDeviceOverviewBuilder.recentAutomationRunLimit),
             active: try store.activeAutomationRuns())
         let attributedAgentsByRunID = try AutomationAttributedAgents.summariesByRunID(runs: ordered, store: store, liveSessions: liveSessions)
-        let runSummaries = try ordered.map { run -> TerminalServiceAutomationRunSummary in
-            let attributed = (try? store.terminalSessionIDs(automationRunID: run.id)) ?? []
-            let liveCount = attributed.filter { liveSessionIDs.contains($0) }.count
-            return TerminalServiceAutomationRunSummary(
-                run, automationName: namesByAutomationID[run.automationID], liveAttributedSessionCount: liveCount,
-                attributedAgents: attributedAgentsByRunID[run.id] ?? [])
+        let runSummaries = ordered.map { run in
+            TerminalServiceAutomationRunSummary(
+                run, automationName: namesByAutomationID[run.automationID], attributedAgents: attributedAgentsByRunID[run.id] ?? [])
         }
         return (automationSummaries, runSummaries)
     }
@@ -2456,12 +2452,11 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             missedRunPolicy: missedRunPolicy)
     }
 
-    /// Maps runs to wire summaries, denormalizing each run's automation name and counting its live
-    /// attributed sessions against the daemon's current live-session set.
+    /// Maps runs to wire summaries, denormalizing each run's automation name and its attributed coding-agent
+    /// breakdown (built once for the whole listing against the daemon's current live-session set).
     private func automationRunSummaries(_ runs: [AutomationRun], store: SQLiteStore) throws -> [TerminalServiceAutomationRunSummary] {
         guard !runs.isEmpty else { return [] }
         let liveSessions = (try? TerminalSessionCatalog.listLiveSessions()) ?? []
-        let liveSessionIDs = Set(liveSessions.map(\.sessionID))
         let attributedAgentsByRunID = try AutomationAttributedAgents.summariesByRunID(runs: runs, store: store, liveSessions: liveSessions)
         var namesByAutomationID: [String: String] = [:]
         return try runs.map { run in
@@ -2473,10 +2468,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 if let resolved { namesByAutomationID[run.automationID] = resolved }
                 name = resolved
             }
-            let attributed = (try? store.terminalSessionIDs(automationRunID: run.id)) ?? []
-            let liveCount = attributed.filter { liveSessionIDs.contains($0) }.count
             return TerminalServiceAutomationRunSummary(
-                run, automationName: name, liveAttributedSessionCount: liveCount, attributedAgents: attributedAgentsByRunID[run.id] ?? [])
+                run, automationName: name, attributedAgents: attributedAgentsByRunID[run.id] ?? [])
         }
     }
 

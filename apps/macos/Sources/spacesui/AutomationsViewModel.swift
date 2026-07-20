@@ -187,6 +187,27 @@ enum AutomationsViewModel {
 
     // MARK: - Editor form logic (pure, unit-testable)
 
+    /// One workspace choice offered by the editor's Agent form: the workspace id and its display label. A
+    /// plain value (no AppKit dependency) so the choice-merging logic stays unit-testable.
+    struct WorkspaceChoice: Sendable, Equatable {
+        let workspaceID: String
+        let label: String
+    }
+
+    /// Merges the editor's visible workspace choices with the automation's stored target so editing an
+    /// automation whose workspace has since been hidden (or archived) never silently retargets it: the stored
+    /// workspace is appended when it is not already visible, labeled with its real "<project> / <workspace>"
+    /// name plus a " (hidden)" suffix when it still resolves, or a plain raw-id fallback when its row is gone
+    /// entirely. A nil stored id (a new automation, or a script automation) leaves the visible list unchanged.
+    static func workspaceChoices(
+        visible: [WorkspaceChoice], preservingWorkspaceID: String?, resolveLabel: (String) -> String?
+    ) -> [WorkspaceChoice] {
+        guard let preservingWorkspaceID, !preservingWorkspaceID.isEmpty else { return visible }
+        guard !visible.contains(where: { $0.workspaceID == preservingWorkspaceID }) else { return visible }
+        let label = resolveLabel(preservingWorkspaceID).map { "\($0) (hidden)" } ?? preservingWorkspaceID
+        return visible + [WorkspaceChoice(workspaceID: preservingWorkspaceID, label: label)]
+    }
+
     /// A fail-fast validation problem from `buildAutomationFields`, carrying the message shown inline in the
     /// editor.
     struct ValidationError: Error, Equatable {

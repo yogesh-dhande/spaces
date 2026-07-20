@@ -245,7 +245,7 @@ import spacesterminalcore
             id: "run-1", automationID: "auto-1", status: .failed, skipReason: nil, trigger: .cron, exitCode: 3,
             terminalSessionID: "session-1", startedAt: Date(timeIntervalSince1970: 100), endedAt: Date(timeIntervalSince1970: 105),
             createdAt: Date(timeIntervalSince1970: 99))
-        let summary = TerminalServiceAutomationRunSummary(failed, automationName: "Deploy", liveAttributedSessionCount: 0)
+        let summary = TerminalServiceAutomationRunSummary(failed, automationName: "Deploy")
         XCTAssertEqual(summary.status, "failed")
         XCTAssertEqual(summary.exitCode, 3)
         XCTAssertEqual(summary.automationName, "Deploy")
@@ -254,7 +254,7 @@ import spacesterminalcore
         let timedOut = AutomationRun(
             id: "run-2", automationID: "auto-1", status: .timedOut, skipReason: nil, trigger: .manual, exitCode: nil, terminalSessionID: "session-2",
             startedAt: Date(timeIntervalSince1970: 200), endedAt: Date(timeIntervalSince1970: 260), createdAt: Date(timeIntervalSince1970: 199))
-        XCTAssertEqual(TerminalServiceAutomationRunSummary(timedOut, automationName: "Deploy", liveAttributedSessionCount: 1).status, "timed_out")
+        XCTAssertEqual(TerminalServiceAutomationRunSummary(timedOut, automationName: "Deploy").status, "timed_out")
     }
 
     /// A run summary carrying attributed agents survives a JSON encode/decode round-trip unchanged — the
@@ -271,7 +271,7 @@ import spacesterminalcore
                 terminalSessionID: "session-2", status: "idle", live: true, title: nil, workspaceID: "ws-1"),
         ]
         let summary = TerminalServiceAutomationRunSummary(
-            run, automationName: "Deploy", liveAttributedSessionCount: 2, attributedAgents: agents)
+            run, automationName: "Deploy", attributedAgents: agents)
         let decoded = try JSONDecoder().decode(TerminalServiceAutomationRunSummary.self, from: JSONEncoder().encode(summary))
         XCTAssertEqual(decoded, summary)
         XCTAssertEqual(decoded.attributedAgents, agents)
