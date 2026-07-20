@@ -221,6 +221,39 @@ final class DeviceTerminalSessionStateModelRecoveryTests: XCTestCase {
         XCTAssertEqual(code, .unauthorized)
     }
 
+    /// Fix 1: a transcript request the reachable daemon rejects for an unauthorized (revoked) token must
+    /// surface as `SpacesDeviceClientError.requestRejected` carrying the daemon's `.unauthorized` error code,
+    /// not an opaque `.unavailable`. The instance-level transcript recovery branches on that code to
+    /// re-bootstrap credentials, so the code has to survive the request/response mapping. Drives a real
+    /// in-process `SpacesDeviceAPIServer` whose pairing store rejects the presented token (which the server
+    /// maps to `.unauthorized`), because the concrete request client has no seam to fake the wire response.
+    func testTranscriptRejectedAsUnauthorizedSurfacesRequestRejectedWithErrorCode() throws {
+        let identity = try TerminalServiceTLSIdentityStore.loadOrCreate(root: Self.tlsRoot)
+        let pairingStore = AlwaysAuthorizedRecoveryPairingStore()
+        let clientApp = Self.makeClientApp(installationID: "INSTALLATION-TRANSCRIPT-REJECT-\(UUID().uuidString)")
+
+        let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore)
+        try server.start()
+        defer { server.stop() }
+
+        let client = try SpacesDeviceAPIRequestSessionClient(
+            host: "127.0.0.1", port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
+        defer { client.cancel() }
+
+        // Present a token the store rejects, so the reachable daemon answers the transcript request with an
+        // `.unauthorized` response rather than a connection failure.
+        XCTAssertThrowsError(
+            try DeviceTerminalSessionStateModel.fetchTranscript(
+                sessionID: "session-\(UUID().uuidString)", maxBytes: 1000, requestClient: client, authToken: "revoked-token",
+                clientApp: clientApp)
+        ) { error in
+            guard case SpacesDeviceClientError.requestRejected(_, let code) = error else {
+                return XCTFail("expected requestRejected, got \(error)")
+            }
+            XCTAssertEqual(code, .unauthorized)
+        }
+    }
+
     // MARK: Fixtures
 
     private static func makeClientApp(installationID: String) -> SpacesDeviceClientApp {

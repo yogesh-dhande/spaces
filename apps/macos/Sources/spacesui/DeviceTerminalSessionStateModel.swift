@@ -218,10 +218,19 @@
                 // and the bootstrap re-reads that current identity over the trusted local control socket. This
                 // guard is already local-device-only, so accepting it here stays safe. The connector throws
                 // `TerminalServiceTLSError.certificatePinMismatch` unwrapped, so match it directly.
+                //
+                // A coded unauthorized rejection is likewise accepted: the daemon is reachable but the boxed
+                // token was revoked (e.g. a pairing-state reset rotated it). Ended sessions get no stream
+                // reconnect, so without this the pane's scrollback would fail on every fetch until the pane is
+                // recreated. This mirrors the stream-side unauthorized handling in `handleStreamDisconnect`.
                 let isLocalPinMismatch: Bool
                 if case TerminalServiceTLSError.certificatePinMismatch = error { isLocalPinMismatch = true } else { isLocalPinMismatch = false }
+                let isLocalUnauthorizedRejection: Bool
+                if case SpacesDeviceClientError.requestRejected(_, .unauthorized) = error { isLocalUnauthorizedRejection = true } else {
+                    isLocalUnauthorizedRejection = false
+                }
                 guard device.id == SpacesPairedDeviceRecord.localDeviceID,
-                    isLocalPinMismatch || SpacesDeviceClient.isLocalDaemonUnreachableError(error),
+                    isLocalPinMismatch || isLocalUnauthorizedRejection || SpacesDeviceClient.isLocalDaemonUnreachableError(error),
                     await ensureLocalDeviceReachableForRetry()
                 else { throw error }
                 return try await sendTranscriptRequest(maxBytes: maxBytes)
@@ -262,7 +271,11 @@
                 // gesture; every other failure stays transient and throws so the host retries. The server
                 // does not report a run identity on the error response, so it is nil here.
                 if response.errorCode == .sessionNotAvailable { return RemoteGhosttyTranscript(data: Data(), runIdentity: nil) }
-                throw SpacesDeviceClientError.unavailable(response.message)
+                // Preserve the response's error code so the instance-level recovery can recognize an
+                // unauthorized rejection (a revoked local token) and re-bootstrap credentials rather than
+                // retrying the doomed send. A nil code is fine; the render host treats any thrown transcript
+                // error as transient and retries regardless of case.
+                throw SpacesDeviceClientError.requestRejected(message: response.message, code: response.errorCode)
             }
             return RemoteGhosttyTranscript(data: transcript.data, runIdentity: transcript.runIdentity)
         }
@@ -407,8 +420,11 @@
 
         /// For the local device, ensures the daemon is running and re-resolves its current Device API
         /// endpoint via `SpacesDeviceClient.bootstrapLocalDevice` — the same per-request resolution the CLI
-        /// uses, which starts the daemon if it idle-shut-down — rebuilding the persistent request client
-        /// when the port, host, certificate fingerprint, or auth token moved so catch-up `.state`,
+        /// uses, which starts the daemon if it idle-shut-down. The bootstrap is coalesced process-wide
+        /// through `LocalDeviceRecoveryBootstrap`, so when a pairing-state reset drops every open local
+        /// pane's stream at once, concurrent per-pane recoveries share one bootstrap and install the same
+        /// refreshed record and token instead of racing each other's token mints. It rebuilds the persistent
+        /// request client when the port, host, certificate fingerprint, or auth token moved so catch-up `.state`,
         /// transcript fetches, and the retried subscribe reach the live daemon under its current identity and
         /// credentials. `bootstrapLocalDevice` presents the stored token so the daemon normally keeps it, but
         /// a daemon whose pairing state was reset mints and persists a fresh token, revoking the one the box
@@ -431,19 +447,11 @@
             let previousPort = device.port
             let previousFingerprint = certificateFingerprint
             let previousToken = requestClientBox.current.authToken
-            let bootstrapResult = await Task.detached(priority: .userInitiated) { () -> (record: SpacesPairedDeviceRecord, token: String?)? in
-                guard let refreshed = try? SpacesDeviceClient.bootstrapLocalDevice(clientApp: clientApp) else { return nil }
-                // The bootstrap persisted the daemon's (possibly rotated) token. Read it back so a
-                // pairing-state reset that minted a new token re-authenticates every sender. A successful
-                // read of `nil` is a legitimate "no token"; only a failed read falls back to the token the
-                // box already holds, so a transient secret-store hiccup does not drop auth.
-                let refreshedToken =
-                    (try? SpacesDeviceCredentialStore.token(deviceID: SpacesPairedDeviceRecord.localDeviceID, profile: nil)) ?? previousToken
-                return (refreshed, refreshedToken)
-            }.value
-            guard let bootstrapResult else { return false }
-            let refreshed = bootstrapResult.record
-            let refreshedToken = bootstrapResult.token
+            guard let outcome = await LocalDeviceRecoveryBootstrap.run(clientApp: clientApp) else { return false }
+            let refreshed = outcome.record
+            // A failed persisted-token read (outer nil) keeps the token the box already holds; a successful
+            // read of nil is a legitimate "no token".
+            let refreshedToken = outcome.persistedToken ?? previousToken
             let endpointOrIdentityChanged =
                 refreshed.port != previousPort || refreshed.host != previousHost || refreshed.certificateFingerprint != previousFingerprint
             // Rebuild on an endpoint/identity move or a token rotation through one branch — a token-only
