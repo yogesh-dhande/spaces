@@ -3798,6 +3798,39 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             workspaceID: fallbackWorkspaceID, sessionID: sessionID, title: row.title, workingDirectory: row.workingDirectory, kind: .shell)
     }
 
+    /// Builds the terminal-open request for an automation run, dispatching on the automation's kind.
+    ///
+    /// A `script`-kind run's session is workspace-less and deliberately excluded from the overview's
+    /// `sessions`, so its request is synthesized as a `.automation` pane. The seeded shell is display
+    /// metadata only — the pane attaches to the daemon's existing session and streams its real render — so
+    /// the user's login shell is a faithful label locally and a reasonable one remotely.
+    ///
+    /// An `agent`-kind run's session IS a real workspace agent session present in the device overview, so it
+    /// is resolved through `deviceTerminalOpenRequest` for its true workspace/kind/command/shell (which is
+    /// what makes pane dedup and correct labeling work), falling back to a synthesized `.agent` request. The
+    /// fallback carries a nil shell so an ended session can still cold-resolve, is titled with the automation
+    /// name, and seeds its initial state from the run's status.
+    nonisolated static func automationRunTerminalOpenRequest(
+        deviceID: String, sessionID: String, run: TerminalServiceAutomationRunSummary, automation: TerminalServiceAutomationSummary?,
+        overview: SpacesDeviceOverviewPayload?, loginShell: String
+    ) -> DeviceTerminalOpenRequest {
+        let initialState: TerminalSessionState = AutomationRunStatus(rawValue: run.status) == .running ? .running : .exited
+        guard automation?.kind == AutomationKind.agent.rawValue else {
+            return DeviceTerminalOpenRequest(
+                workspaceID: "", deviceID: deviceID, sessionID: sessionID, title: automation?.name ?? "Automation",
+                workingDirectory: automation?.workingDirectory ?? "", kind: .automation, shell: loginShell, command: automation?.script,
+                initialState: initialState)
+        }
+        let workspaceID = automation?.workspaceID ?? ""
+        let resolved = deviceTerminalOpenRequest(workspaceID: workspaceID, sessionID: sessionID, overview: overview)
+        return DeviceTerminalOpenRequest(
+            workspaceID: resolved?.workspaceID ?? workspaceID, deviceID: deviceID, sessionID: sessionID,
+            title: resolved?.title ?? automation?.name ?? "Automation", workingDirectory: resolved?.workingDirectory ?? "",
+            kind: resolved?.kind ?? .agent, shell: resolved?.shell, command: resolved?.command,
+            initialState: resolved?.initialState ?? initialState, servicePID: resolved?.servicePID, childPID: resolved?.childPID,
+            createdAt: resolved?.createdAt, updatedAt: resolved?.updatedAt)
+    }
+
     nonisolated private static func terminalSessionKind(rowKind: SpacesDeviceTerminalSessionRowKind) -> TerminalSessionKind {
         switch rowKind {
         case .process: .process
@@ -4136,15 +4169,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             concurrencyPolicy: summary.concurrencyPolicy, missedRunPolicy: summary.missedRunPolicy)
     }
 
-    /// Opens an automation run's terminal: a live pane for a running run, or the read-only transcript replay
-    /// for an ended one (the pane shows its read-only banner once the ended session's final render lands).
+    /// Opens an automation run's terminal in a standalone panel window: a live pane for a running run, or the
+    /// read-only transcript replay for an ended one (the pane shows its read-only banner once the ended
+    /// session's final render lands).
     ///
-    /// Automation sessions are workspace-less and deliberately excluded from the workspace-scoped overview's
-    /// `sessions`, so the normal session→pane resolution (which reads `overview.sessions`) cannot find them.
-    /// The request is therefore synthesized from the run and its automation and opened in a standalone panel
-    /// window (automation sessions are not workspace panes). The seeded shell is display metadata only — the
-    /// pane attaches to the daemon's existing session and streams its real render — so the user's login shell
-    /// is a faithful label for a local run and a reasonable one for a remote run.
+    /// A `script`-kind run's session is workspace-less and deliberately excluded from the workspace-scoped
+    /// overview's `sessions`, so its request is synthesized as a `.automation` pane. An `agent`-kind run's
+    /// session is a real workspace agent session present in the overview, so it resolves its true
+    /// workspace/kind/command identity from that overview instead (see `automationRunTerminalOpenRequest`),
+    /// which is what keeps pane dedup and labeling correct.
     func openAutomationRunTerminal(deviceID: String, run: TerminalServiceAutomationRunSummary) {
         guard let sessionID = run.terminalSessionID else {
             showError(Self.terminalSessionNotFoundError())
@@ -4152,10 +4185,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
         let automation = automationSummary(deviceID: deviceID, automationID: run.automationID)
         let loginShell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
-        let request = DeviceTerminalOpenRequest(
-            workspaceID: "", deviceID: deviceID, sessionID: sessionID, title: automation?.name ?? "Automation",
-            workingDirectory: automation?.workingDirectory ?? "", kind: .automation, shell: loginShell, command: automation?.script,
-            initialState: AutomationRunStatus(rawValue: run.status) == .running ? .running : .exited)
+        let request = Self.automationRunTerminalOpenRequest(
+            deviceID: deviceID, sessionID: sessionID, run: run, automation: automation, overview: deviceSection(id: deviceID)?.overview,
+            loginShell: loginShell)
         panelCoordinator.moveSessionToNewPanelWindow(request)
     }
 

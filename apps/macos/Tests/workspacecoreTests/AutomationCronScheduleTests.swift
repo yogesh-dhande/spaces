@@ -399,4 +399,15 @@ final class AutomationCronScheduleTests: XCTestCase {
             XCTAssertTrue(error.localizedDescription.contains("missing value"))
         }
     }
+
+    // Tests a step at Int.max does not trap while expanding the field: a step wider than the field's span
+    // yields only the lower bound (00), and the parsed schedule still computes a next fire. The step is
+    // validated only as `> 0`, so this guards the expansion loop against integer overflow on `current + step`.
+    func testMaximumStepExpandsToLowerBoundWithoutOverflow() throws {
+        let schedule = try AutomationCronSchedule.parse("*/9223372036854775807 * * * *")
+        // The minute field expands to just {0}; every hour/day/month is `*`, so the next fire is the next
+        // top-of-hour after the start.
+        let next = schedule.nextFireDate(after: date(2024, 1, 15, 10, 30), timeZone: utc)
+        XCTAssertEqual(next, date(2024, 1, 15, 11, 0))
+    }
 }

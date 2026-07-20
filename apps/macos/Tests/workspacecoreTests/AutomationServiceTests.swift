@@ -106,6 +106,69 @@ import spacesterminalcore
         XCTAssertTrue(try harness.store.automationRuns(automationID: automation.id).isEmpty)
     }
 
+    // MARK: - Overview recent-run window
+
+    /// The overview's recent-run window (`terminalAutomationRuns`) counts only terminal runs, so a burst of
+    /// active (queued/running) runs — always the newest rows — can never crowd completed history out of the
+    /// newest-N window. The overview unions the active runs back in separately, so they are never lost.
+    func testTerminalRunWindowExcludesActiveRunsAndCapsToLimit() throws {
+        let harness = try Harness(self)
+        let automation = try harness.insertAutomation(concurrency: .allow)
+        let base = Date(timeIntervalSince1970: 1_700_000_000)
+
+        // Ten active runs, all newer than every terminal run: if they counted against the window they would
+        // fill it and starve the completed history.
+        for offset in 0..<10 {
+            _ = try harness.insertRun(automationID: automation.id, status: .running, createdAt: base.addingTimeInterval(Double(1_000 + offset)))
+        }
+        // Six older terminal runs; the window is capped below that so the cap is exercised too.
+        var terminalIDs: [String] = []
+        for offset in 0..<6 {
+            let run = try harness.insertRun(automationID: automation.id, status: .succeeded, createdAt: base.addingTimeInterval(Double(offset)))
+            terminalIDs.append(run.id)
+        }
+
+        let window = try harness.store.terminalAutomationRuns(limit: 5)
+        XCTAssertEqual(window.count, 5, "the window is capped at the limit")
+        XCTAssertTrue(window.allSatisfy { $0.status.isTerminal }, "no active run consumes the window")
+        // Newest-first: the five newest terminal runs (offsets 5..1), not the oldest (offset 0).
+        XCTAssertEqual(window.map(\.id), Array(terminalIDs.reversed().prefix(5)))
+    }
+
+    // MARK: - Time-zone changes
+
+    /// A device carried into a new time zone recomputes its cron anchors: a daily schedule keeps firing at
+    /// the same wall-clock hour in the new zone, without waiting for a daemon restart. The provider closure
+    /// models the device's current zone; a tick after it changes triggers the recompute.
+    func testCronAnchorsRecomputeWhenDeviceTimeZoneChanges() throws {
+        let newYork = TimeZone(identifier: "America/New_York")!
+        let losAngeles = TimeZone(identifier: "America/Los_Angeles")!
+        let zone = MutableTimeZone(newYork)
+        // A fixed winter instant so both zones are on standard time (no DST ambiguity), ~2024-01-15.
+        let clock = MutableClock(start: Date(timeIntervalSince1970: 1_705_341_600))
+        let harness = try Harness(self, now: clock.now, timeZone: zone.provide)
+
+        // Daily at 09:00 local; the initial anchor is computed in New_York.
+        let automation = try harness.insertAutomation(triggerKind: .cron, cronExpression: "0 9 * * *")
+        harness.service.computeInitialNextFireTime(automationID: automation.id)
+        harness.service.tick()  // zone unchanged: the anchor stays in New_York
+        let nyFire = try XCTUnwrap(harness.store.automation(id: automation.id)?.nextFireTime)
+        XCTAssertEqual(hour(of: nyFire, in: newYork), 9, "the anchor fires at 09:00 New_York wall-clock")
+
+        // The device moves to Los Angeles; the next tick recomputes the anchor in the new zone.
+        zone.set(losAngeles)
+        harness.service.tick()
+        let laFire = try XCTUnwrap(harness.store.automation(id: automation.id)?.nextFireTime)
+        XCTAssertNotEqual(laFire, nyFire, "an absolute anchor moves when the zone changes")
+        XCTAssertEqual(hour(of: laFire, in: losAngeles), 9, "the anchor now fires at 09:00 Los_Angeles wall-clock")
+    }
+
+    private func hour(of date: Date, in timeZone: TimeZone) -> Int {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = timeZone
+        return calendar.component(.hour, from: date)
+    }
+
     // MARK: - Attributed-session sweep
 
     func testSweepFinalizesEndedAttributedSessionAndKeepsLiveOne() throws {
@@ -609,8 +672,12 @@ import spacesterminalcore
     let host: FakeAutomationTerminalHost
     let service: AutomationService
     let now: () -> Date
+    private let timeZone: @Sendable () -> TimeZone
 
-    init(_ testCase: XCTestCase, realCommands: Bool = false, now: @escaping () -> Date = Date.init) throws {
+    init(
+        _ testCase: XCTestCase, realCommands: Bool = false, now: @escaping () -> Date = Date.init,
+        timeZone: @escaping @Sendable () -> TimeZone = { .current }
+    ) throws {
         store = try testCase.makeTemporaryStore()
         let host = FakeAutomationTerminalHost(realCommands: realCommands)
         self.host = host
@@ -618,8 +685,9 @@ import spacesterminalcore
         testCase.addTeardownBlock { host.uninstall() }
         orchestrator = WorkspaceOrchestrator(store: store)
         self.now = now
+        self.timeZone = timeZone
         service = AutomationService(
-            store: store, orchestrator: orchestrator, binaryDirectory: "/usr/bin", timeZone: .current, now: now, terminationGrace: 0.2,
+            store: store, orchestrator: orchestrator, binaryDirectory: "/usr/bin", timeZone: timeZone, now: now, terminationGrace: 0.2,
             logError: { _ in })
     }
 
@@ -627,7 +695,7 @@ import spacesterminalcore
     /// nothing is carried in memory, so a new instance must resume purely from the persisted run rows.
     func makeService() -> AutomationService {
         AutomationService(
-            store: store, orchestrator: orchestrator, binaryDirectory: "/usr/bin", timeZone: .current, now: now, terminationGrace: 0.2,
+            store: store, orchestrator: orchestrator, binaryDirectory: "/usr/bin", timeZone: timeZone, now: now, terminationGrace: 0.2,
             logError: { _ in })
     }
 
@@ -735,6 +803,23 @@ import spacesterminalcore
             usleep(30_000)
         }
         XCTFail("process \(pid) was not terminated within \(timeout)s")
+    }
+}
+
+/// A settable time-zone provider so the zone-change test can move the "device" across zones between ticks.
+private final class MutableTimeZone: @unchecked Sendable {
+    private let lock = NSLock()
+    private var current: TimeZone
+    init(_ start: TimeZone) { current = start }
+    func provide() -> TimeZone {
+        lock.lock()
+        defer { lock.unlock() }
+        return current
+    }
+    func set(_ zone: TimeZone) {
+        lock.lock()
+        current = zone
+        lock.unlock()
     }
 }
 

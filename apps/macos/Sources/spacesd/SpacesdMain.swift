@@ -217,8 +217,14 @@ import workspacecore
             let orchestrator = try makeProfileOrchestrator()
             let binaryDirectory = URL(fileURLWithPath: launchExecutablePath, isDirectory: false).deletingLastPathComponent().path
             let service = AutomationService(
-                store: orchestrator.store, orchestrator: orchestrator, binaryDirectory: binaryDirectory, timeZone: .current,
-                logError: { writeStandardError("spacesd automation_error \($0)\n") })
+                store: orchestrator.store, orchestrator: orchestrator, binaryDirectory: binaryDirectory,
+                // Foundation caches the system zone, so re-read it fresh each tick: reset the cache, then
+                // return the current zone. This is what lets a running daemon notice a device zone change and
+                // recompute cron anchors without a restart.
+                timeZone: {
+                    NSTimeZone.resetSystemTimeZone()
+                    return TimeZone.current
+                }, logError: { writeStandardError("spacesd automation_error \($0)\n") })
             service.reconcileMissedRunsOnStart()
             automationService = service
             let timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in

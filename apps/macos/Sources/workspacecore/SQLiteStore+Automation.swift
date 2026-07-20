@@ -150,12 +150,26 @@ extension SQLiteStore {
         ).compactMap(Self.decodeAutomationRun)
     }
 
-    /// Runs across every automation, newest first — the unfiltered runs listing. `limit` of nil returns
-    /// all rows; a positive limit caps the newest N (the overview's recent-run window uses this).
-    public func allAutomationRuns(limit: Int? = nil) throws -> [AutomationRun] {
-        let limitClause = limit.map { " LIMIT \($0)" } ?? ""
+    /// Runs across every automation, newest first — the unfiltered runs listing.
+    public func allAutomationRuns() throws -> [AutomationRun] {
+        try queryRows(
+            sql: "SELECT \(Self.automationRunColumns) FROM automation_runs ORDER BY created_at DESC, id DESC"
+        ).compactMap(Self.decodeAutomationRun)
+    }
+
+    /// The newest terminal-status runs across every automation, capped at `limit` — the overview's recent-run
+    /// window. Only terminal runs count against the window so a burst of active (queued/running) runs can
+    /// never crowd out completed history; the overview unions these with the active runs separately. The
+    /// status filter is derived from `AutomationRunStatus.isTerminal` so it can't drift from the enum.
+    public func terminalAutomationRuns(limit: Int) throws -> [AutomationRun] {
+        let terminalStatuses = AutomationRunStatus.allCases.filter(\.isTerminal).map { "'\($0.rawValue)'" }.joined(separator: ", ")
         return try queryRows(
-            sql: "SELECT \(Self.automationRunColumns) FROM automation_runs ORDER BY created_at DESC, id DESC\(limitClause)"
+            sql: """
+                SELECT \(Self.automationRunColumns) FROM automation_runs
+                WHERE status IN (\(terminalStatuses))
+                ORDER BY created_at DESC, id DESC
+                LIMIT \(limit)
+                """
         ).compactMap(Self.decodeAutomationRun)
     }
 

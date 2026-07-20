@@ -449,13 +449,18 @@ private func resolvedAgentRowIDIfPresent(forChildTerminalSessionID childSessionI
 /// only once the child has an agent row on the device (cross-device subscribe validates against the
 /// remote agent listing, which is empty until the first hook signal) — no row → skip cleanly, matching
 /// local. Returns the spawn result carrying the device id so the `open` deep link is device-qualified.
+///
+/// Automation-run attribution is deliberately NOT forwarded here: an `SPACES_AUTOMATION_RUN_ID` names a run
+/// row that exists only in the local daemon's database, so stamping it on a session the remote daemon owns
+/// would leave a dangling reference the remote's sweep/prune/end-agents can never match. Only local spawns
+/// carry the run id (see `performAgentSpawn`).
 func performRemoteAgentSpawn(
     device: SpacesPairedDeviceRecord, workspace: String, command: String, title: String?, timeoutSeconds: Int, subscriberSessionID: String?,
-    automationRunID: String? = nil, pollInterval: TimeInterval = 0.5
+    pollInterval: TimeInterval = 0.5
 ) throws -> AgentSpawnResult {
     let clientApp = cliDeviceClientApp()
     let spawnResponse = try SpacesDeviceClient.spawnAgentSession(
-        workspaceID: workspace, command: command, title: title, automationRunID: automationRunID, device: device, clientApp: clientApp)
+        workspaceID: workspace, command: command, title: title, device: device, clientApp: clientApp)
     guard let childSessionID = spawnResponse.sessionID else {
         throw WorkspaceError.invalidArgument(message: "\(device.name) did not return an agent session.")
     }
@@ -571,9 +576,11 @@ struct AgentSpawnCommand: ParsableCommand {
                 throw ValidationError("--workspace is required with --device: a remote spawn cannot infer the workspace from the current directory.")
             }
             let record = try SpacesPairedDeviceSelection.resolve(device)
+            // Automation-run attribution is intentionally not forwarded to a remote daemon: the run id names
+            // a row in the local daemon's database only. `automationRunID` still stamps the local spawn below.
             result = try performRemoteAgentSpawn(
                 device: record, workspace: workspace, command: command, title: title, timeoutSeconds: timeout,
-                subscriberSessionID: subscriberSessionID, automationRunID: automationRunID)
+                subscriberSessionID: subscriberSessionID)
         } else {
             result = try performAgentSpawn(
                 cwd: context.currentDirectoryPath(), workspace: workspace, command: command, title: title, timeoutSeconds: timeout,

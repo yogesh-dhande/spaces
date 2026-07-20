@@ -1710,7 +1710,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         // Active runs are always included regardless of the recent window; recent terminal runs fill in
         // history. The selection contract lives in a pure builder helper so it can be unit-tested.
         let ordered = SpacesDeviceOverviewBuilder.selectOverviewRuns(
-            recentTerminal: try store.allAutomationRuns(limit: SpacesDeviceOverviewBuilder.recentAutomationRunLimit),
+            recentTerminal: try store.terminalAutomationRuns(limit: SpacesDeviceOverviewBuilder.recentAutomationRunLimit),
             active: try store.activeAutomationRuns())
         let attributedAgentsByRunID = try AutomationAttributedAgents.summariesByRunID(runs: ordered, store: store, liveSessions: liveSessions)
         let runSummaries = ordered.map { run in

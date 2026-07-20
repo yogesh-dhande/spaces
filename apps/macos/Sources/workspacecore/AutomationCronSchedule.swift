@@ -173,7 +173,13 @@ public struct AutomationCronSchedule: Equatable, Sendable {
         var current = bounds.lowerBound
         while current <= bounds.upperBound {
             values.insert(current)
-            current += step
+            // Advance with overflow reporting rather than `current += step`: a step is only validated as
+            // `> 0`, so a huge step (e.g. `*/9223372036854775807`) would trap on the addition. A step
+            // wider than the field's span already yields just the lower bound, so an overflow means there
+            // is no further value to add and the loop is done.
+            let (next, overflowed) = current.addingReportingOverflow(step)
+            if overflowed { break }
+            current = next
         }
         return values
     }

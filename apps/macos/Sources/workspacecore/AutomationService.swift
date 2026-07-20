@@ -29,7 +29,14 @@ import spacesterminalcore
     private let orchestrator: WorkspaceOrchestrator
     /// Prepended to the automation command's PATH so `spaces` resolves to the running daemon's sibling CLI.
     private let binaryDirectory: String
-    private let timeZone: TimeZone
+    /// Supplies the device's current time zone on demand (rather than a value captured once), so a tick can
+    /// notice a zone change. Cron `nextFireDate` is computed in whatever zone this returns at that moment.
+    private let timeZone: @Sendable () -> TimeZone
+    /// The time-zone identifier the persisted cron anchors were last computed in. Each tick compares the
+    /// provider's current zone against this and recomputes every enabled cron automation's anchor when it
+    /// changed, so a laptop carried into a new zone fires daily/weekly schedules at the new zone's wall-clock
+    /// time instead of the old one's until a daemon restart.
+    private var anchorTimeZoneIdentifier: String
     private let now: () -> Date
     /// Grace between the SIGTERM sent to a timed-out/canceled run's command process group and the SIGKILL
     /// that follows if it has not exited. Production uses 10s; tests shrink it to exercise escalation fast.
@@ -47,14 +54,15 @@ import spacesterminalcore
     private var pendingKills: [String: PendingKill] = [:]
 
     public init(
-        store: SQLiteStore, orchestrator: WorkspaceOrchestrator, binaryDirectory: String, timeZone: TimeZone = .current,
-        now: @escaping () -> Date = Date.init, terminationGrace: TimeInterval = 10, retentionLimit: Int = 100,
-        logError: @escaping (String) -> Void = { _ in }
+        store: SQLiteStore, orchestrator: WorkspaceOrchestrator, binaryDirectory: String,
+        timeZone: @escaping @Sendable () -> TimeZone = { .current }, now: @escaping () -> Date = Date.init, terminationGrace: TimeInterval = 10,
+        retentionLimit: Int = 100, logError: @escaping (String) -> Void = { _ in }
     ) {
         self.store = store
         self.orchestrator = orchestrator
         self.binaryDirectory = binaryDirectory
         self.timeZone = timeZone
+        self.anchorTimeZoneIdentifier = timeZone().identifier
         self.now = now
         self.terminationGrace = terminationGrace
         self.retentionLimit = retentionLimit
@@ -70,7 +78,7 @@ import spacesterminalcore
             guard let automation = try store.automation(id: automationID), automation.enabled, let schedule = automation.parsedCronSchedule else {
                 return
             }
-            try store.setAutomationNextFireTime(id: automationID, nextFireTime: schedule.nextFireDate(after: now(), timeZone: timeZone))
+            try store.setAutomationNextFireTime(id: automationID, nextFireTime: schedule.nextFireDate(after: now(), timeZone: timeZone()))
         } catch { logError("automation_next_fire_time_error id=\(automationID) error=\(error)") }
     }
 
@@ -78,10 +86,25 @@ import spacesterminalcore
     /// completion/timeout, and promote a queued run whose automation is now idle. Idempotent per minute:
     /// a cron automation fires once when its `nextFireTime` elapses because firing recomputes it forward.
     public func tick() {
+        recomputeCronAnchorsIfTimeZoneChanged()
         fireDueCronAutomations()
         processPendingKills()
         pollRunningRuns()
         promoteQueuedRuns()
+    }
+
+    /// Recomputes every enabled cron automation's next fire time from now when the device's current zone
+    /// differs from the one the persisted anchors were computed in. Anchors are absolute instants, so a zone
+    /// change (e.g. a laptop moved across time zones) would otherwise keep firing daily/weekly schedules at
+    /// the old zone's wall-clock time until the daemon restarts. Caches the new identifier so the recompute
+    /// runs only on an actual change, not every tick.
+    private func recomputeCronAnchorsIfTimeZoneChanged() {
+        let zone = timeZone()
+        guard zone.identifier != anchorTimeZoneIdentifier else { return }
+        anchorTimeZoneIdentifier = zone.identifier
+        do {
+            for automation in try store.enabledCronAutomations() { computeInitialNextFireTime(automationID: automation.id) }
+        } catch { logError("automation_timezone_recompute_error error=\(error)") }
     }
 
     /// Daemon-start reconciliation: for each enabled cron automation whose persisted `nextFireTime` already
@@ -99,7 +122,7 @@ import spacesterminalcore
                     case .skip: _ = try recordSkippedRun(automation: automation, trigger: .missedCatchUp, reason: .missed)
                     }
                 }
-                try store.setAutomationNextFireTime(id: automation.id, nextFireTime: schedule.nextFireDate(after: currentTime, timeZone: timeZone))
+                try store.setAutomationNextFireTime(id: automation.id, nextFireTime: schedule.nextFireDate(after: currentTime, timeZone: timeZone()))
             }
         } catch { logError("automation_missed_run_reconcile_error error=\(error)") }
     }
@@ -250,7 +273,7 @@ import spacesterminalcore
                     continue
                 }
                 _ = fire(automation: automation, trigger: .cron)
-                try store.setAutomationNextFireTime(id: automation.id, nextFireTime: schedule.nextFireDate(after: currentTime, timeZone: timeZone))
+                try store.setAutomationNextFireTime(id: automation.id, nextFireTime: schedule.nextFireDate(after: currentTime, timeZone: timeZone()))
             }
         } catch { logError("automation_fire_due_error error=\(error)") }
     }
