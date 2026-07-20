@@ -102,6 +102,34 @@ bool spaces_ghostty_vt_session_format_plain(
     size_t *out_len
 );
 
+// Serializes the session's current persistent terminal state as a self-contained escape-sequence
+// preamble, so a from-zero replay of a head-trimmed transcript restores the terminal state that the
+// dropped head had established (alt-screen, mouse reporting, bracketed paste, DECCKM, Kitty keyboard
+// flags, cursor position). The buffer is malloc'd and must be freed with
+// `spaces_ghostty_vt_free_buffer`. Returns false (and leaves `*out_ptr` NULL) on failure.
+bool spaces_ghostty_vt_session_state_preamble(
+    SpacesGhosttyVtSession *session,
+    char **out_ptr,
+    size_t *out_len
+);
+
+// Test-support: reports whether a DEC private (ansi=false) or ANSI (ansi=true) mode is currently set
+// on the session's terminal. Returns false if the underlying query fails. Used by trim tests to
+// assert that a preamble round-trips terminal modes.
+bool spaces_ghostty_vt_session_mode_is_set(
+    SpacesGhosttyVtSession *session,
+    uint16_t mode_value,
+    bool ansi,
+    bool *out_set
+);
+
+// Test-support: reports the session's current Kitty keyboard protocol flags. Returns false if the
+// underlying query fails (e.g. the library predates the getter).
+bool spaces_ghostty_vt_session_kitty_keyboard_flags(
+    SpacesGhosttyVtSession *session,
+    uint8_t *out_flags
+);
+
 void spaces_ghostty_vt_snapshot_free(SpacesGhosttyVtSnapshot *snapshot);
 
 bool spaces_ghostty_vt_render_plain(

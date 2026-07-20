@@ -376,7 +376,8 @@
                 // long-running session stops accumulating disk without bound; `outputByteCount` tracks the
                 // (possibly reduced) end offset. See `TerminalTranscriptTrim`.
                 let newEndOffset = try TerminalTranscriptTrim.trimIfNeeded(
-                    outputPath: paths.outputPath, writeHandle: outputHandle, currentEndOffset: UInt64(outputByteCount))
+                    outputPath: paths.outputPath, writeHandle: outputHandle, currentEndOffset: UInt64(outputByteCount),
+                    columns: terminalSize.columns, rows: terminalSize.rows)
                 outputByteCount = Int(newEndOffset)
                 return true
             } catch { return false }

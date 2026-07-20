@@ -6,6 +6,7 @@
 #if defined(__APPLE__)
 #include <mach-o/dyld.h>
 #endif
+#include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1018,6 +1019,206 @@ bool spaces_ghostty_vt_render_plain(
     bool succeeded = spaces_ghostty_vt_session_format_plain(session, out_ptr, out_len);
     spaces_ghostty_vt_session_free(session);
     return succeeded;
+}
+
+// The persistent DEC private / ANSI modes the state preamble round-trips. Each is diffed against a
+// fresh reference terminal, so this list is the SET of modes we consider (not their defaults): a mode
+// only produces a sequence when the live session disagrees with a brand-new terminal. Alt-screen
+// modes (47/1047/1049) are part of this set and, because cursor positioning is emitted after every
+// mode below, always land before the CUP so the cursor is placed on the active screen.
+// {numeric value, ANSI flag}. Stored as raw pairs (not GHOSTTY_MODE_* macros) because those macros
+// expand to the static-inline ghostty_mode_new(), which is not a compile-time constant and so cannot
+// initialize a static array.
+typedef struct {
+    uint16_t value;
+    bool ansi;
+} SpacesGhosttyVtPreambleMode;
+
+static const SpacesGhosttyVtPreambleMode kSpacesGhosttyVtPreambleModes[] = {
+    {1, false},    // DECCKM cursor keys
+    {4, true},     // INSERT mode (ANSI)
+    {5, false},    // REVERSE_COLORS reverse video
+    {6, false},    // ORIGIN mode
+    {7, false},    // WRAPAROUND auto-wrap
+    {12, false},   // CURSOR_BLINKING
+    {25, false},   // CURSOR_VISIBLE (DECTCEM)
+    {47, false},   // ALT_SCREEN_LEGACY
+    {66, false},   // KEYPAD_KEYS application keypad
+    {1000, false}, // NORMAL_MOUSE
+    {1002, false}, // BUTTON_MOUSE
+    {1003, false}, // ANY_MOUSE
+    {1004, false}, // FOCUS_EVENT
+    {1005, false}, // UTF8_MOUSE
+    {1006, false}, // SGR_MOUSE
+    {1007, false}, // ALT_SCROLL
+    {1015, false}, // URXVT_MOUSE
+    {1016, false}, // SGR_PIXELS_MOUSE
+    {1047, false}, // ALT_SCREEN
+    {1048, false}, // SAVE_CURSOR
+    {1049, false}, // ALT_SCREEN_SAVE
+    {2004, false}, // BRACKETED_PASTE
+    {2027, false}, // GRAPHEME_CLUSTER
+    {2048, false}, // IN_BAND_RESIZE
+};
+
+typedef struct {
+    char *data;
+    size_t len;
+    size_t cap;
+    bool ok;
+} SpacesGhosttyVtPreambleBuffer;
+
+static void spaces_ghostty_vt_preamble_append(SpacesGhosttyVtPreambleBuffer *buf, const char *fmt, ...) {
+    if (buf == NULL || !buf->ok) return;
+
+    va_list measure_args;
+    va_start(measure_args, fmt);
+    int needed = vsnprintf(NULL, 0, fmt, measure_args);
+    va_end(measure_args);
+    if (needed < 0) {
+        buf->ok = false;
+        return;
+    }
+
+    size_t required = buf->len + (size_t)needed + 1;
+    if (required > buf->cap) {
+        size_t new_cap = buf->cap == 0 ? 256 : buf->cap;
+        while (new_cap < required) new_cap *= 2;
+        char *new_data = (char *)realloc(buf->data, new_cap);
+        if (new_data == NULL) {
+            buf->ok = false;
+            return;
+        }
+        buf->data = new_data;
+        buf->cap = new_cap;
+    }
+
+    va_list write_args;
+    va_start(write_args, fmt);
+    vsnprintf(buf->data + buf->len, buf->cap - buf->len, fmt, write_args);
+    va_end(write_args);
+    buf->len += (size_t)needed;
+}
+
+// Serializes the session's current persistent terminal state as escape sequences, diffed against a
+// fresh reference terminal created at the same cols/rows via the already-loaded symbols. Only state
+// that differs from a brand-new terminal is emitted, so the library's own defaults define "emit
+// nothing" and there is no hardcoded mode-default table to drift from the library.
+//
+// Emission order:
+//   1. Modes (ANSI: CSI <n> h/l; DEC private: CSI ? <n> h/l), including alt-screen modes.
+//   2. Kitty keyboard flags (CSI = <flags> ; 1 u) when nonzero.
+//   3. Cursor position (CSI <y+1> ; <x+1> H), after all mode/screen changes so it lands on the
+//      active screen.
+//   4. SGR reset (CSI 0 m) so pen state is deterministic.
+//
+// ACCEPTED v1 GAPS (intentionally NOT restored): scroll region, tab stops, charset designations,
+// saved-cursor (DECSC), pending-wrap, OSC color/title overrides, and pen SGR restoration. In
+// addition, the pinned libghostty-vt exposes no cursor-SHAPE getter
+// (GHOSTTY_TERMINAL_DATA_CURSOR_STYLE returns the pen SGR style, not a block/underline/bar shape),
+// so DECSCUSR is not emitted. These are acceptable because from-zero handoff replay only needs the
+// mode/cursor state that changes how the retained tail's bytes are interpreted.
+bool spaces_ghostty_vt_session_state_preamble(SpacesGhosttyVtSession *session, char **out_ptr, size_t *out_len) {
+    if (out_ptr == NULL || out_len == NULL) return false;
+    *out_ptr = NULL;
+    *out_len = 0;
+    if (session == NULL || session->terminal == NULL) return false;
+
+    uint16_t columns = 0;
+    uint16_t rows = 0;
+    if (
+        session->symbols.terminal_get(session->terminal, GHOSTTY_TERMINAL_DATA_COLS, &columns) != GHOSTTY_SUCCESS ||
+        session->symbols.terminal_get(session->terminal, GHOSTTY_TERMINAL_DATA_ROWS, &rows) != GHOSTTY_SUCCESS ||
+        columns == 0 || rows == 0
+    ) {
+        return false;
+    }
+
+    // Fresh reference terminal at the same size: the diff baseline for every mode below.
+    GhosttyTerminal reference = NULL;
+    GhosttyTerminalOptions reference_options = {
+        .cols = columns,
+        .rows = rows,
+        .max_scrollback = 0,
+    };
+    if (session->symbols.terminal_new(NULL, &reference, reference_options) != GHOSTTY_SUCCESS) {
+        return false;
+    }
+
+    SpacesGhosttyVtPreambleBuffer buf = {0};
+    buf.ok = true;
+
+    // 1. Modes.
+    for (size_t i = 0; i < sizeof(kSpacesGhosttyVtPreambleModes) / sizeof(kSpacesGhosttyVtPreambleModes[0]); i++) {
+        SpacesGhosttyVtPreambleMode entry = kSpacesGhosttyVtPreambleModes[i];
+        GhosttyMode mode = ghostty_mode_new(entry.value, entry.ansi);
+        bool live_set = false;
+        bool ref_set = false;
+        if (session->symbols.terminal_mode_get(session->terminal, mode, &live_set) != GHOSTTY_SUCCESS) continue;
+        if (session->symbols.terminal_mode_get(reference, mode, &ref_set) != GHOSTTY_SUCCESS) continue;
+        if (live_set == ref_set) continue;
+        spaces_ghostty_vt_preamble_append(
+            &buf, "\x1b[%s%u%c", entry.ansi ? "" : "?", (unsigned)entry.value, live_set ? 'h' : 'l');
+    }
+
+    // 2. Kitty keyboard flags. A fresh terminal reports 0, so nonzero is the diff.
+    uint8_t kitty_flags = 0;
+    if (
+        session->symbols.terminal_get(session->terminal, GHOSTTY_TERMINAL_DATA_KITTY_KEYBOARD_FLAGS, &kitty_flags) == GHOSTTY_SUCCESS &&
+        kitty_flags != 0
+    ) {
+        spaces_ghostty_vt_preamble_append(&buf, "\x1b[=%u;1u", (unsigned)kitty_flags);
+    }
+
+    // 3. Cursor position (0-indexed getters, 1-indexed CUP). Always emitted so the retained tail
+    //    begins with a deterministic cursor location.
+    uint16_t cursor_x = 0;
+    uint16_t cursor_y = 0;
+    if (
+        session->symbols.terminal_get(session->terminal, GHOSTTY_TERMINAL_DATA_CURSOR_X, &cursor_x) == GHOSTTY_SUCCESS &&
+        session->symbols.terminal_get(session->terminal, GHOSTTY_TERMINAL_DATA_CURSOR_Y, &cursor_y) == GHOSTTY_SUCCESS
+    ) {
+        spaces_ghostty_vt_preamble_append(&buf, "\x1b[%u;%uH", (unsigned)cursor_y + 1, (unsigned)cursor_x + 1);
+    }
+
+    // 4. SGR reset.
+    spaces_ghostty_vt_preamble_append(&buf, "\x1b[0m");
+
+    session->symbols.terminal_free(reference);
+
+    if (!buf.ok) {
+        free(buf.data);
+        return false;
+    }
+    if (buf.data == NULL) {
+        // Every path above appends at least the SGR reset, so this only happens if the first
+        // allocation failed. Report failure rather than hand back a NULL buffer.
+        return false;
+    }
+
+    *out_ptr = buf.data;
+    *out_len = buf.len;
+    return true;
+}
+
+bool spaces_ghostty_vt_session_mode_is_set(SpacesGhosttyVtSession *session, uint16_t mode_value, bool ansi, bool *out_set) {
+    if (session == NULL || session->terminal == NULL || out_set == NULL) return false;
+    bool value = false;
+    if (session->symbols.terminal_mode_get(session->terminal, ghostty_mode_new(mode_value, ansi), &value) != GHOSTTY_SUCCESS) {
+        return false;
+    }
+    *out_set = value;
+    return true;
+}
+
+bool spaces_ghostty_vt_session_kitty_keyboard_flags(SpacesGhosttyVtSession *session, uint8_t *out_flags) {
+    if (session == NULL || session->terminal == NULL || out_flags == NULL) return false;
+    uint8_t flags = 0;
+    if (session->symbols.terminal_get(session->terminal, GHOSTTY_TERMINAL_DATA_KITTY_KEYBOARD_FLAGS, &flags) != GHOSTTY_SUCCESS) {
+        return false;
+    }
+    *out_flags = flags;
+    return true;
 }
 
 void spaces_ghostty_vt_free_buffer(char *ptr) {

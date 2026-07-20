@@ -1170,7 +1170,12 @@
             do {
                 let outputHandle = try ensureOutputHandle()
                 try outputHandle.write(contentsOf: data)
-                let outputEndByteOffset = (try? Self.appendedTranscriptEndOffset(outputHandle: outputHandle, outputPath: paths.outputPath)).map(
+                // The preamble grid only affects cursor placement (mode capture is size-independent), so
+                // an unobserved surface size falls back to the universal 80x24 default rather than
+                // skipping the trim and letting the transcript grow unbounded.
+                let terminalSize = observedSurfaceSize() ?? (columns: 80, rows: 24)
+                let outputEndByteOffset = (try? Self.appendedTranscriptEndOffset(
+                    outputHandle: outputHandle, outputPath: paths.outputPath, columns: terminalSize.columns, rows: terminalSize.rows)).map(
                     Self.clampedInt)
                 requestSurfaceRefreshAction()
                 GhosttyEmbeddedAppService.shared.tick()
@@ -1398,9 +1403,10 @@
         /// Positions `outputHandle` at the transcript's end and returns that offset, head-truncating the
         /// durable `output.log` first when it has grown past the live-transcript bound so a long-running
         /// session stops accumulating disk without bound. See `TerminalTranscriptTrim`.
-        private static func appendedTranscriptEndOffset(outputHandle: FileHandle, outputPath: String) throws -> UInt64 {
+        private static func appendedTranscriptEndOffset(outputHandle: FileHandle, outputPath: String, columns: Int, rows: Int) throws -> UInt64 {
             let endOffset = try outputHandle.seekToEnd()
-            return try TerminalTranscriptTrim.trimIfNeeded(outputPath: outputPath, writeHandle: outputHandle, currentEndOffset: endOffset)
+            return try TerminalTranscriptTrim.trimIfNeeded(
+                outputPath: outputPath, writeHandle: outputHandle, currentEndOffset: endOffset, columns: columns, rows: rows)
         }
 
         private static func normalizedSessionMetadataValue(_ value: String?) -> String? {
