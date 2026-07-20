@@ -4366,6 +4366,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 deviceSections[index].alertsGroups = Self.buildOverviewAlertsGroups(from: overview, deviceID: deviceID)
             }
         }
+        // This is an authoritative catalog for `deviceID`: close any open pane whose session
+        // it no longer lists (its product row was removed, possibly from another device), so
+        // the pane cannot outlive the daemon's transcript garbage-collection. Ended sessions
+        // still carrying their row remain in `sessions` and stay open for scrollback.
+        panelCoordinator.pruneOpenPanes(deviceID: deviceID, catalogSessionIDs: Set(overview.sessions.map(\.id)))
         if deviceID != localDeviceID, let device = deviceRecord(forDeviceID: deviceID) {
             reconcileRemoteBrowserForwards(device: device, overview: overview)
         }

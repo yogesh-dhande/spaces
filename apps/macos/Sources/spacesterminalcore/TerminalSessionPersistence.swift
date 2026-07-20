@@ -709,7 +709,18 @@ public enum TerminalSessionPersistence {
     /// no longer shown by the product (see `TerminalSessionGarbageCollector`). Removing every table's row
     /// for the root — not just `terminal_remote_session_states` — keeps the persisted footprint from
     /// outliving the session it belongs to.
+    ///
+    /// The directory is removed before the rows, not after, so a failure stays retryable: sessions are
+    /// discovered by `listKnownSessions`, which is DB-driven, so a `terminal_sessions` row is what makes a
+    /// session visible to the next collection sweep. If `removeItem` threw after the rows were already
+    /// deleted, the directory would be orphaned with nothing left to rediscover it — a permanent leak. With
+    /// the directory removed first, a `removeItem` failure leaves the rows intact and the whole purge (not
+    /// just the row deletion) is retried on the next sweep; if `removeItem` succeeds but the row deletion
+    /// then fails, the next sweep still lists the session, still reads its runtime/attachment state (those
+    /// are rows, not files), and skips the already-removed directory via the `fileExists` guard below before
+    /// retrying the row deletion.
     public static func purgeSession(paths: TerminalSessionPaths, fileManager: FileManager = .default) throws {
+        if fileManager.fileExists(atPath: paths.rootDirectory) { try fileManager.removeItem(atPath: paths.rootDirectory) }
         let root = normalizedRootDirectory(paths.rootDirectory)
         try withDatabase(paths: paths) { database in
             try database.withImmediateTransaction {
@@ -721,7 +732,6 @@ public enum TerminalSessionPersistence {
                 }
             }
         }
-        if fileManager.fileExists(atPath: paths.rootDirectory) { try fileManager.removeItem(atPath: paths.rootDirectory) }
     }
 
     public static func listKnownSessions(fileManager _: FileManager = .default) throws -> [TerminalSessionLaunchConfiguration] {

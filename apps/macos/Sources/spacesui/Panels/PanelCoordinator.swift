@@ -94,6 +94,30 @@ import spacesterminalcore
         }
     }
 
+    /// Every open terminal pane's owning device and session id across all panels, read
+    /// from each pane's content descriptor — the input to live overview-driven pruning.
+    func openPanes() -> [OpenPanePruning.OpenPane] {
+        var result: [OpenPanePruning.OpenPane] = []
+        for state in panels.values {
+            for pane in PanelLayoutEngine.allPanes(in: state.layout) {
+                guard case .terminalSession(let deviceID, let sessionID) = pane.content else { continue }
+                result.append(OpenPanePruning.OpenPane(deviceID: deviceID, sessionID: sessionID))
+            }
+        }
+        return result
+    }
+
+    /// Closes any open pane owned by `deviceID` whose session dropped out of that device's
+    /// authoritative session catalog (its product row was removed on some device, so the
+    /// daemon garbage-collector will purge its transcript). The pane is torn down as an
+    /// already-terminating session, so no terminate/close request is sent to the daemon for
+    /// the gone session. Call only with a successfully received catalog for `deviceID`; see
+    /// `OpenPanePruning.sessionsToClose`.
+    func pruneOpenPanes(deviceID: String, catalogSessionIDs: Set<String>) {
+        let sessionIDs = OpenPanePruning.sessionsToClose(openPanes: openPanes(), deviceID: deviceID, catalogSessionIDs: catalogSessionIDs)
+        for sessionID in sessionIDs { closePane(forSessionID: sessionID, sessionIsTerminating: true) }
+    }
+
     private func scopeSortKey(_ scope: PanelScope) -> String {
         switch scope {
         case .workspace(let deviceID, let workspaceID): return "0:\(deviceID):\(workspaceID)"

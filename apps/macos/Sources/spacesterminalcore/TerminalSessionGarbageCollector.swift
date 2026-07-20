@@ -45,9 +45,13 @@ public enum TerminalSessionGarbageCollector {
     /// service, or a client holds a live attachment to its (possibly ended) pane. Either way its transcript
     /// is in use and must not be collected. `TerminalSessionAttachmentSnapshot.liveAttachments` is the same
     /// lease-aware rule the reaper and clients use, so an expired remote viewer never keeps a session pinned.
+    /// A failed attachment read is treated as "shown" (fails closed), the same way the caller's
+    /// `isReferencedByProduct` check does: this is the only signal that a client currently holds the
+    /// session's ended pane, so guessing "no attachments" on a read failure risks purging a session someone
+    /// is actively viewing. A false "shown" only defers collection to the next sweep, which costs nothing.
     static func isSessionShown(runtimeState: TerminalSessionRuntimeState, paths: TerminalSessionPaths, now: Date) -> Bool {
         if TerminalSessionCatalog.isInteractiveServiceAlive(for: runtimeState) { return true }
-        let liveAttachments = (try? TerminalSessionPersistence.liveAttachments(paths: paths, now: now)) ?? []
+        guard let liveAttachments = try? TerminalSessionPersistence.liveAttachments(paths: paths, now: now) else { return true }
         return !liveAttachments.isEmpty
     }
 }

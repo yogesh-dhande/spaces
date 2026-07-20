@@ -61,9 +61,17 @@ final class TerminalSessionGarbageCollectorTests: XCTestCase {
         return paths
     }
 
-    private func collect(active: Set<String> = [], referenced: Set<String> = []) throws -> [String] {
+    private func collect(active: Set<String> = [], referenced: Set<String> = [], fileManager: FileManager = .default) throws -> [String] {
         try TerminalSessionGarbageCollector.collectRemovedSessions(
-            activeSessionIDs: active, isReferencedByProduct: { referenced.contains($0) }, now: now)
+            activeSessionIDs: active, isReferencedByProduct: { referenced.contains($0) }, fileManager: fileManager, now: now)
+    }
+
+    /// Stands in for a `removeItem` failure (e.g. a permissions error or a busy file handle) so purge
+    /// retryability can be tested without relying on the real filesystem to reject a delete. Everything
+    /// else (fileExists, createDirectory, ...) falls back to the real `FileManager` behavior via `super`.
+    private final class RemoveItemThrowingFileManager: FileManager {
+        struct RemovalFailure: Error {}
+        override func removeItem(atPath path: String) throws { throw RemovalFailure() }
     }
 
     // (b) Removal deletes the dir and prunes every persisted row, including the final-render state row.
@@ -131,5 +139,52 @@ final class TerminalSessionGarbageCollectorTests: XCTestCase {
 
         XCTAssertEqual(purged, ["gone"])
         XCTAssertEqual(Set(try TerminalSessionPersistence.listKnownSessions().map(\.sessionID)), ["alive", "kept-ref"])
+    }
+
+    // (P2) A failed attachment read must fail closed: an unreadable attachment snapshot must not be
+    // mistaken for "no attachments", or a session an active viewer holds could be purged out from under it.
+    func testIsSessionShownFailsClosedWhenAttachmentReadThrows() throws {
+        let paths = try seedSession(id: "corrupt-attachments", state: .exited, servicePID: 999_999)
+        // Corrupt the profile database so the live-attachments query throws instead of returning rows.
+        try Data("not a sqlite database".utf8).write(to: URL(fileURLWithPath: root.appendingPathComponent("spaces.db").path))
+        let runtimeState = TerminalSessionRuntimeState(
+            sessionID: "corrupt-attachments", backend: .ghosttyEmbedded, servicePID: 999_999, childPID: nil, state: .exited,
+            updatedAt: "2026-07-19T00:00:00Z", exitedAt: "2026-07-19T00:00:01Z")
+
+        XCTAssertTrue(
+            TerminalSessionGarbageCollector.isSessionShown(runtimeState: runtimeState, paths: paths, now: now),
+            "An attachment read failure must fail closed and keep the session shown, not be treated as no attachments.")
+    }
+
+    // (P3) A `removeItem` failure must leave the DB rows intact so the whole purge is retried on the next
+    // sweep, instead of orphaning the directory with no row left to rediscover it.
+    func testPurgeSessionKeepsRowsWhenDirectoryRemovalFails() throws {
+        let paths = try seedSession(id: "leaky", state: .exited, servicePID: 999_999)
+
+        XCTAssertThrowsError(try TerminalSessionPersistence.purgeSession(paths: paths, fileManager: RemoveItemThrowingFileManager()))
+
+        XCTAssertEqual(try TerminalSessionPersistence.listKnownSessions().map(\.sessionID), ["leaky"], "Rows must survive a failed removeItem.")
+        XCTAssertNoThrow(try TerminalSessionPersistence.readRuntimeState(paths: paths), "Runtime row must survive a failed removeItem.")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: paths.rootDirectory))
+
+        // The next sweep, with a working FileManager, retries and completes the purge.
+        try TerminalSessionPersistence.purgeSession(paths: paths, fileManager: .default)
+        XCTAssertTrue(try TerminalSessionPersistence.listKnownSessions().isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: paths.rootDirectory))
+    }
+
+    // (P3) Same guarantee through the collector's own entry point: a removeItem failure must not drop the
+    // session from the next sweep, and the next sweep must finish the purge it left behind.
+    func testCollectRemovedSessionsRetriesPurgeAfterDirectoryRemovalFailure() throws {
+        _ = try seedSession(id: "leaky", state: .exited, servicePID: 999_999)
+
+        XCTAssertThrowsError(try collect(fileManager: RemoveItemThrowingFileManager()))
+        XCTAssertEqual(
+            try TerminalSessionPersistence.listKnownSessions().map(\.sessionID), ["leaky"],
+            "A removeItem failure must not drop the session's row, or the next sweep can never rediscover it.")
+
+        let purged = try collect()
+        XCTAssertEqual(purged, ["leaky"])
+        XCTAssertTrue(try TerminalSessionPersistence.listKnownSessions().isEmpty)
     }
 }
