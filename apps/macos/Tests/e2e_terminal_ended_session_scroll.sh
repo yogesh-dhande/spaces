@@ -28,15 +28,12 @@ SESSION_COMMAND="seq -f endedline-%03g 1 300"
 APP_PID=""
 SERVICE_PID=""
 session_id=""
-keepalive_session_id=""
 
 cleanup() {
   release_terminal_harness_lock
-  for cleanup_session_id in "$session_id" "$keepalive_session_id"; do
-    if [[ -n "$cleanup_session_id" ]] && [[ -x "$SPACES_E2E" ]]; then
-      env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_E2E" terminate-terminal-session "$cleanup_session_id" >/dev/null 2>&1 || true
-    fi
-  done
+  if [[ -n "$session_id" ]] && [[ -x "$SPACES_E2E" ]]; then
+    env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_E2E" terminate-terminal-session "$session_id" >/dev/null 2>&1 || true
+  fi
   if [[ -n "$APP_PID" ]] && kill -0 "$APP_PID" >/dev/null 2>&1; then
     kill "$APP_PID" >/dev/null 2>&1 || true
     wait "$APP_PID" >/dev/null 2>&1 || true
@@ -111,6 +108,23 @@ wait_for_session_exited() {
     sleep 0.2
   done
   fail "Timed out waiting for terminal session to exit (last state: '${state:-<none>}')"
+}
+
+# With only the ended session on the profile, the hosting daemon idle-shuts-down on its own once the
+# child exits. Poll its process (the session's recorded service_pid) until it is gone so the rest of the
+# run exercises the real endpoint recovery: `spaces terminal show` then restarts the daemon on a new
+# ephemeral port while the app's model still points at the dead one. If the daemon does not exit on its
+# own within the deadline, fail loudly rather than forcing it down — the scroll path's transcript-fetch
+# recovery is only exercised when the daemon genuinely idle-shut-down.
+wait_for_daemon_exited() {
+  local deadline=$((SECONDS + 30))
+  while (( SECONDS < deadline )); do
+    if ! kill -0 "$SERVICE_PID" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.2
+  done
+  fail "Timed out waiting for the hosting daemon (pid $SERVICE_PID) to idle-shut-down after the session ended"
 }
 
 dump_terminal_state() {
@@ -227,17 +241,6 @@ env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" DEBUG=1 "$SPACES
 APP_PID="$!"
 sleep 3
 
-# A long-running keep-alive session pins the profile's spacesd (and its Device API
-# endpoint) for the whole run: with only the ended session, the daemon idle-shuts-down
-# after the child exits, and the app's state model then blocks on reconnecting to the
-# dead endpoint, starving the dump IPC this harness observes the pane with.
-keepalive_output="$(
-  env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal command \
-    --workspace "$FIXTURE_WORKSPACE_ID" --command "sleep 600" --title "${SESSION_TITLE}-keepalive"
-)"
-keepalive_session_id="$(extract_session_id "$keepalive_output")"
-[[ -n "$keepalive_session_id" ]] || fail "Failed to parse keep-alive session ID from: $keepalive_output"
-
 command_output="$(
   env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" "$SPACES_CLI" terminal command \
     --workspace "$FIXTURE_WORKSPACE_ID" --command "$SESSION_COMMAND" --title "$SESSION_TITLE"
@@ -249,6 +252,13 @@ SERVICE_PID="$(terminal_service_pid "$session_id")"
 # The command exits on its own; wait until spacesd records the session as exited so the
 # pane is showing its final render behind the "Session ended" banner.
 wait_for_session_exited
+
+# The run deliberately lets the daemon idle-shut-down under the open ended pane: with no other
+# session pinning it, spacesd exits once the child does. Waiting for that exit is what makes the
+# scroll below exercise the transcript path's own endpoint recovery — the app's model is left
+# pointing at the dead Device API port, and only the fetch-side recovery can reach the daemon that
+# `spaces terminal show` restarts on a fresh ephemeral port.
+wait_for_daemon_exited
 
 focus_ended_pane
 wait_for_terminal_surface_ready

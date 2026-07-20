@@ -13,7 +13,9 @@ import spacesterminalcore
 ///   rebuilt request client, not keep targeting the cancelled stale-endpoint client. It drives a real
 ///   in-process `SpacesDeviceAPIServer` because `SpacesDeviceAPIRequestSessionClient` has no protocol seam
 ///   to fake, then swings the model's `requestClientBox` to a second server the way the local recovery
-///   does (that recovery bootstraps through the real local control socket and cannot run hermetically).
+///   does (that recovery bootstraps through the real local control socket and cannot run hermetically). A
+///   companion test proves the same vended sender — and a transcript fetch — present the box's rotated auth
+///   token to the second server, because the box carries the client and its token together.
 /// - Test B: a superseded stream client's late disconnect callback must not tear down the client that
 ///   replaced it, while a current-stream disconnect still clears it. It drives the generation guard through
 ///   the model's install-for-testing seam because the concrete stream client offers no way to force
@@ -82,7 +84,7 @@ final class DeviceTerminalSessionStateModelRecoveryTests: XCTestCase {
         defer { serverB.stop() }
         let clientB = try SpacesDeviceAPIRequestSessionClient(
             host: "127.0.0.1", port: serverB.listeningPort, certificateFingerprint: identity.certificateFingerprint)
-        model.requestClientBox.replace(with: clientB).cancel()
+        model.requestClientBox.replace(with: clientB, authToken: pairingStore.authToken).cancel()
 
         // The previously vended sender must now reach server B. The session does not exist there, so the
         // server answers `ok == false` — a real response, not the connection error a stale-endpoint client
@@ -91,6 +93,61 @@ final class DeviceTerminalSessionStateModelRecoveryTests: XCTestCase {
         let response = try sender(
             TerminalServiceRequest(command: .state(TerminalServiceSessionRequest(sessionID: "missing-session-\(UUID().uuidString)"))))
         XCTAssertFalse(response.ok)
+    }
+
+    /// Fix A: a sender vended before a recovery — and a transcript fetch — authenticate with the box's
+    /// rotated auth token, not the token captured at init. A local daemon whose pairing state was reset
+    /// mints a fresh token that the recovery swings into the box alongside the rebuilt client, so every
+    /// vended sender must present the new token. Asserts on the token the in-process server actually
+    /// received on the wire, driving the same box replacement the local recovery performs (that recovery
+    /// bootstraps through the real local control socket and cannot run hermetically).
+    @MainActor func testVendedSenderAndTranscriptFetchFollowRebuiltAuthToken() async throws {
+        let identity = try TerminalServiceTLSIdentityStore.loadOrCreate(root: Self.tlsRoot)
+        let clientApp = Self.makeClientApp(installationID: "INSTALLATION-TOKEN-\(UUID().uuidString)")
+
+        // Server A is the stale endpoint the model is seeded against with the pre-rotation token.
+        let storeA = AlwaysAuthorizedRecoveryPairingStore()
+        let serverA = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: storeA)
+        try serverA.start()
+
+        let device = SpacesPairedDeviceRecord(
+            id: "recovery-device-\(UUID().uuidString)", name: "Mac", platform: "macos", host: "127.0.0.1", port: serverA.listeningPort,
+            certificateFingerprint: identity.certificateFingerprint, createdAt: "2026-07-20T00:00:00Z", updatedAt: "2026-07-20T00:00:00Z",
+            lastSelectedAt: "2026-07-20T00:00:00Z")
+        let model = try DeviceTerminalSessionStateModel(
+            device: device, sessionID: "session-\(UUID().uuidString)",
+            launchConfiguration: TerminalSessionLaunchConfiguration(
+                sessionID: "session", title: "t", workingDirectory: "/tmp", shell: "/bin/zsh", command: nil, createdAt: "2026-07-20T00:00:00Z",
+                workspaceID: "workspace", kind: .shell),
+            clientApp: clientApp,
+            preparedCredentials: .init(certificateFingerprint: identity.certificateFingerprint, authToken: storeA.authToken))
+
+        // Vend the sender BEFORE any recovery, as the render host does.
+        let sender = model.terminalServiceRequestSender
+
+        // The daemon's pairing state resets: a fresh server mints a new token, and the recovery swings the
+        // box to the rebuilt client AND the rotated token together.
+        serverA.stop()
+        let rotatedToken = "rotated-token-\(UUID().uuidString)"
+        let storeB = RecordingRecoveryPairingStore()
+        let serverB = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: storeB)
+        try serverB.start()
+        defer { serverB.stop() }
+        let clientB = try SpacesDeviceAPIRequestSessionClient(
+            host: "127.0.0.1", port: serverB.listeningPort, certificateFingerprint: identity.certificateFingerprint)
+        model.requestClientBox.replace(with: clientB, authToken: rotatedToken).cancel()
+
+        // The previously vended sender routes through the box, so it presents the rotated token to server B.
+        _ = try sender(TerminalServiceRequest(command: .state(TerminalServiceSessionRequest(sessionID: "missing-session-\(UUID().uuidString)"))))
+        // fetchTranscript routes through the same box, so it too presents the rotated token (server B has no
+        // such session, so it answers `.sessionNotAvailable`, which fetchTranscript maps to an empty
+        // transcript without recovering — the device is not the local device).
+        _ = try await model.fetchTranscript(maxBytes: 1000)
+
+        XCTAssertFalse(storeB.presentedTokens.isEmpty, "server B received no request to authorize")
+        XCTAssertTrue(
+            storeB.presentedTokens.allSatisfy { $0 == rotatedToken },
+            "a request reached server B without the rotated token: \(storeB.presentedTokens)")
     }
 
     /// Fix 3: a superseded stream client's late disconnect is ignored; a current-stream disconnect clears it.
@@ -157,6 +214,30 @@ private final class AlwaysAuthorizedRecoveryPairingStore: SpacesDevicePairingSto
             throw NSError(
                 domain: "DeviceTerminalSessionStateModelRecoveryTests", code: 401,
                 userInfo: [NSLocalizedDescriptionKey: "Invalid device auth token."])
+        }
+    }
+    func validate(clientApp _: SpacesDeviceClientApp) throws {}
+}
+
+/// Records every auth token presented to it and authorizes any request carrying a real client app, so a
+/// test can assert on the token the in-process server actually received on the wire. Thread-safe because
+/// `authorize` runs on the server's own queue.
+private final class RecordingRecoveryPairingStore: SpacesDevicePairingStoreProtocol, @unchecked Sendable {
+    private let lock = NSLock()
+    private var tokens: [String?] = []
+
+    var presentedTokens: [String?] { lock.withLock { tokens } }
+
+    func issueToken(for _: SpacesDeviceClientApp, presentedToken _: String?) throws -> String { "recording-token" }
+    func listDevices() throws -> [SpacesDevicePairedClient] { [] }
+    func revoke(installationID _: String) throws {}
+    func removeAll() throws {}
+    func authorize(clientApp: SpacesDeviceClientApp?, authToken: String?) throws {
+        lock.withLock { tokens.append(authToken) }
+        guard clientApp != nil else {
+            throw NSError(
+                domain: "DeviceTerminalSessionStateModelRecoveryTests", code: 401,
+                userInfo: [NSLocalizedDescriptionKey: "Missing device client app."])
         }
     }
     func validate(clientApp _: SpacesDeviceClientApp) throws {}

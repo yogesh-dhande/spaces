@@ -41,7 +41,6 @@
         private var device: SpacesPairedDeviceRecord
         private let sessionID: String
         private let clientApp: SpacesDeviceClientApp
-        private let authToken: String?
         private var certificateFingerprint: String
         // Internal (not `private`) so `spacesuiTests` can swing the box to a second in-process server to
         // prove vended senders follow a local endpoint recovery: `ensureLocalDeviceReachableForRetry`
@@ -97,10 +96,10 @@
             self.sessionID = sessionID
             self.clientApp = clientApp
             certificateFingerprint = preparedCredentials.certificateFingerprint
-            authToken = preparedCredentials.authToken
             requestClientBox = DeviceAPIRequestClientBox(
                 try SpacesDeviceAPIRequestSessionClient(
-                    host: device.host, port: device.port, certificateFingerprint: preparedCredentials.certificateFingerprint))
+                    host: device.host, port: device.port, certificateFingerprint: preparedCredentials.certificateFingerprint),
+                authToken: preparedCredentials.authToken)
             currentLaunchConfiguration = launchConfiguration
             currentRuntimeState = initialRuntimeState
             // Seed the owner from the overview so an owner-seeking open sees the existing
@@ -122,7 +121,7 @@
                 streamClient?.stop()
                 stateRefreshRetryTask?.cancel()
                 subscriptionConnectTask?.cancel()
-                requestClientBox.current.cancel()
+                requestClientBox.current.client.cancel()
             }
         }
 
@@ -132,12 +131,12 @@
             guard !refreshInFlight else { return }
             refreshInFlight = true
             let sessionID = self.sessionID
-            let authToken = self.authToken
             let clientApp = self.clientApp
             let requestClientBox = self.requestClientBox
             Task { @MainActor [weak self] in
                 let result = await Task.detached(priority: .userInitiated) {
-                    Self.fetchState(sessionID: sessionID, requestClient: requestClientBox.current, authToken: authToken, clientApp: clientApp)
+                    let (client, token) = requestClientBox.current
+                    return Self.fetchState(sessionID: sessionID, requestClient: client, authToken: token, clientApp: clientApp)
                 }.value
                 guard let self else { return }
                 self.refreshInFlight = false
@@ -162,12 +161,12 @@
         /// the owning device's Device API endpoint.
         var terminalServiceRequestSender: RemoteGhosttyTerminalServiceRequestSender {
             let sessionID = self.sessionID
-            let authToken = self.authToken
             let clientApp = self.clientApp
             let requestClientBox = self.requestClientBox
             return { request in
-                try Self.sendTerminalServiceRequest(
-                    request, defaultSessionID: sessionID, requestClient: requestClientBox.current, authToken: authToken, clientApp: clientApp)
+                let (client, token) = requestClientBox.current
+                return try Self.sendTerminalServiceRequest(
+                    request, defaultSessionID: sessionID, requestClient: client, authToken: token, clientApp: clientApp)
             }
         }
 
@@ -183,14 +182,17 @@
         }
 
         func pasteImage(_ image: TerminalPasteboardImage, clientID: String, ownerEpoch: UInt64) async throws -> TerminalControlResponse {
+            let sessionID = self.sessionID
+            let clientApp = self.clientApp
             let requestClientBox = self.requestClientBox
-            let request = SpacesDeviceAPIRequest(
-                command: .terminalPasteImage(
-                    SpacesDeviceTerminalPasteImageRequest(
-                        sessionID: sessionID, clientID: clientID, ownerEpoch: ownerEpoch, fileExtension: image.fileExtension,
-                        imageData: image.imageData)), authToken: authToken, clientApp: clientApp)
             return try await Task.detached(priority: .userInitiated) {
-                let response = try requestClientBox.current.send(request)
+                let (client, token) = requestClientBox.current
+                let request = SpacesDeviceAPIRequest(
+                    command: .terminalPasteImage(
+                        SpacesDeviceTerminalPasteImageRequest(
+                            sessionID: sessionID, clientID: clientID, ownerEpoch: ownerEpoch, fileExtension: image.fileExtension,
+                            imageData: image.imageData)), authToken: token, clientApp: clientApp)
+                let response = try client.send(request)
                 return TerminalControlResponse(ok: response.ok, message: response.message)
             }.value
         }
@@ -198,14 +200,34 @@
         /// Fetches a suffix of the session's persisted output transcript for the render host's
         /// client-local ended-session scrollback replay. Read-only; routes through the owning device's
         /// Device API endpoint like every other request, so it serves local and remote sessions alike.
+        ///
+        /// This is the only request path an ended session still exercises, so — unlike every other request
+        /// path — it recovers a dead local endpoint itself. `scheduleReconnect` bails for a non-interactive
+        /// session, so an ended pane gets no stream reconnect; when the local daemon idle-shuts-down under an
+        /// open ended pane nothing else ever rebuilds the shared request client, and each scroll's fetch
+        /// would retry the dead endpoint forever. On a local-daemon reachability failure it re-resolves the
+        /// daemon's current endpoint through `ensureLocalDeviceReachableForRetry` (which swings the shared
+        /// box) and retries the send once; any other failure, or a failed recovery, rethrows the original
+        /// error. No other request path gets this recovery — the stream side owns it for interactive sessions.
         func fetchTranscript(maxBytes: Int) async throws -> RemoteGhosttyTranscript {
+            do { return try await sendTranscriptRequest(maxBytes: maxBytes) } catch {
+                guard device.id == SpacesPairedDeviceRecord.localDeviceID, SpacesDeviceClient.isLocalDaemonUnreachableError(error),
+                    await ensureLocalDeviceReachableForRetry()
+                else { throw error }
+                return try await sendTranscriptRequest(maxBytes: maxBytes)
+            }
+        }
+
+        /// Off-main transcript send against the box's current client and token. Factored out so
+        /// `fetchTranscript`'s try/recover/retry reads as one flow.
+        private func sendTranscriptRequest(maxBytes: Int) async throws -> RemoteGhosttyTranscript {
             let sessionID = self.sessionID
-            let authToken = self.authToken
             let clientApp = self.clientApp
             let requestClientBox = self.requestClientBox
             return try await Task.detached(priority: .userInitiated) {
-                try Self.fetchTranscript(
-                    sessionID: sessionID, maxBytes: maxBytes, requestClient: requestClientBox.current, authToken: authToken, clientApp: clientApp)
+                let (client, token) = requestClientBox.current
+                return try Self.fetchTranscript(
+                    sessionID: sessionID, maxBytes: maxBytes, requestClient: client, authToken: token, clientApp: clientApp)
             }.value
         }
 
@@ -326,8 +348,8 @@
         /// that the disconnect path has taken over its lifecycle.
         @discardableResult private func openStateStream(port: Int) async -> Bool {
             let request = SpacesDeviceAPIRequest(
-                command: .subscribe(SpacesDeviceTerminalSubscriptionRequest(sessionID: sessionID, clientID: nil)), authToken: authToken,
-                clientApp: clientApp)
+                command: .subscribe(SpacesDeviceTerminalSubscriptionRequest(sessionID: sessionID, clientID: nil)),
+                authToken: requestClientBox.current.authToken, clientApp: clientApp)
             let host = device.host
             let fingerprint = certificateFingerprint
             streamClientGeneration &+= 1
@@ -364,11 +386,11 @@
         /// render reliably reloads against the fresh port. Reuses the same `fetchState` mapping.
         private func reloadCatchUpState() async {
             let sessionID = self.sessionID
-            let authToken = self.authToken
             let clientApp = self.clientApp
             let requestClientBox = self.requestClientBox
             let result = await Task.detached(priority: .userInitiated) {
-                Self.fetchState(sessionID: sessionID, requestClient: requestClientBox.current, authToken: authToken, clientApp: clientApp)
+                let (client, token) = requestClientBox.current
+                return Self.fetchState(sessionID: sessionID, requestClient: client, authToken: token, clientApp: clientApp)
             }.value
             if case .success(let payload) = result { apply(payload) }
         }
@@ -376,28 +398,46 @@
         /// For the local device, ensures the daemon is running and re-resolves its current Device API
         /// endpoint via `SpacesDeviceClient.bootstrapLocalDevice` — the same per-request resolution the CLI
         /// uses, which starts the daemon if it idle-shut-down — rebuilding the persistent request client
-        /// when the port, host, or certificate fingerprint moved so catch-up `.state` and transcript
-        /// fetches reach the live daemon under its current identity. The rebuild swings the shared
-        /// `requestClientBox`, so senders already vended to the render host follow the new client. Returns
-        /// true when a connect retry is worthwhile: this is the local device and the bootstrap succeeded,
-        /// so the daemon is now reachable whether or not it rebound the same port or rotated its
-        /// certificate. Returns false for remote devices (stable endpoint, nothing to re-resolve) and when
-        /// the local bootstrap itself failed (the daemon could not be reached or started).
+        /// when the port, host, certificate fingerprint, or auth token moved so catch-up `.state`,
+        /// transcript fetches, and the retried subscribe reach the live daemon under its current identity and
+        /// credentials. `bootstrapLocalDevice` presents the stored token so the daemon normally keeps it, but
+        /// a daemon whose pairing state was reset mints and persists a fresh token, revoking the one the box
+        /// still holds; this reads that persisted token back and rebuilds the box with it, so every vended
+        /// sender re-authenticates. The rebuild swings the shared `requestClientBox` (client and token
+        /// together), so senders already vended to the render host follow the new client and token. Returns
+        /// true when a connect retry is worthwhile: this is the local device and the bootstrap succeeded, so
+        /// the daemon is now reachable whether or not it rebound the same port, rotated its certificate, or
+        /// rotated its token. Returns false for remote devices (stable endpoint, nothing to re-resolve) and
+        /// when the local bootstrap itself failed (the daemon could not be reached or started).
         @discardableResult private func ensureLocalDeviceReachableForRetry() async -> Bool {
             guard device.id == SpacesPairedDeviceRecord.localDeviceID else { return false }
             let clientApp = self.clientApp
             let previousHost = device.host
             let previousPort = device.port
             let previousFingerprint = certificateFingerprint
-            let refreshed = await Task.detached(priority: .userInitiated) { () -> SpacesPairedDeviceRecord? in
-                try? SpacesDeviceClient.bootstrapLocalDevice(clientApp: clientApp)
+            let previousToken = requestClientBox.current.authToken
+            let bootstrapResult = await Task.detached(priority: .userInitiated) { () -> (record: SpacesPairedDeviceRecord, token: String?)? in
+                guard let refreshed = try? SpacesDeviceClient.bootstrapLocalDevice(clientApp: clientApp) else { return nil }
+                // The bootstrap persisted the daemon's (possibly rotated) token. Read it back so a
+                // pairing-state reset that minted a new token re-authenticates every sender. A successful
+                // read of `nil` is a legitimate "no token"; only a failed read falls back to the token the
+                // box already holds, so a transient secret-store hiccup does not drop auth.
+                let refreshedToken =
+                    (try? SpacesDeviceCredentialStore.token(deviceID: SpacesPairedDeviceRecord.localDeviceID, profile: nil)) ?? previousToken
+                return (refreshed, refreshedToken)
             }.value
-            guard let refreshed else { return false }
-            if refreshed.port != previousPort || refreshed.host != previousHost || refreshed.certificateFingerprint != previousFingerprint,
+            guard let bootstrapResult else { return false }
+            let refreshed = bootstrapResult.record
+            let refreshedToken = bootstrapResult.token
+            let endpointOrIdentityChanged =
+                refreshed.port != previousPort || refreshed.host != previousHost || refreshed.certificateFingerprint != previousFingerprint
+            // Rebuild on an endpoint/identity move or a token rotation through one branch — a token-only
+            // change rebuilds the client too rather than carrying a special-cased in-place token swap.
+            if endpointOrIdentityChanged || refreshedToken != previousToken,
                 let rebuiltClient = try? SpacesDeviceAPIRequestSessionClient(
                     host: refreshed.host, port: refreshed.port, certificateFingerprint: refreshed.certificateFingerprint)
             {
-                let previousClient = requestClientBox.replace(with: rebuiltClient)
+                let previousClient = requestClientBox.replace(with: rebuiltClient, authToken: refreshedToken)
                 // `cancel()` contends with `send()`'s request lock, which an in-flight request against the
                 // stale endpoint can hold for its full timeout — so the previous client must be cancelled
                 // off the main actor.
@@ -587,7 +627,8 @@
         }
     }
 
-    /// Mutable, thread-safe holder for the model's persistent Device API request client.
+    /// Mutable, thread-safe holder for the model's persistent Device API request client and the auth
+    /// token that authenticates its requests.
     ///
     /// The render host vends request senders (`terminalServiceRequestSender`, and the closures behind
     /// `refreshState`/`pasteImage`/`fetchTranscript`/`reloadCatchUpState`) that run off the main actor and
@@ -596,19 +637,33 @@
     /// port and identity; capturing the client by value would leave those already-vended senders forever
     /// targeting the cancelled stale-endpoint client. Capturing this box instead and reading `current` at
     /// send time lets every vended sender observe the rebuilt client.
+    ///
+    /// The token is boxed with the client because a local recovery can rotate both: a daemon whose pairing
+    /// state was reset mints a fresh token on the next bootstrap, revoking the one captured at init. Storing
+    /// them together and reading them as one pair at send time keeps every vended sender authenticating with
+    /// the token that belongs to the client it is about to send through.
     final class DeviceAPIRequestClientBox: @unchecked Sendable {
         private let lock = NSLock()
         private var client: SpacesDeviceAPIRequestSessionClient
+        private var authToken: String?
 
-        init(_ client: SpacesDeviceAPIRequestSessionClient) { self.client = client }
+        init(_ client: SpacesDeviceAPIRequestSessionClient, authToken: String?) {
+            self.client = client
+            self.authToken = authToken
+        }
 
-        var current: SpacesDeviceAPIRequestSessionClient { lock.withLock { client } }
+        /// The current client and its auth token, read together under the lock so a concurrent recovery
+        /// cannot hand back a client paired with the other one's token.
+        var current: (client: SpacesDeviceAPIRequestSessionClient, authToken: String?) { lock.withLock { (client, authToken) } }
 
-        /// Swaps in a new client and returns the previous one so the caller can cancel it.
-        func replace(with newClient: SpacesDeviceAPIRequestSessionClient) -> SpacesDeviceAPIRequestSessionClient {
+        /// Swaps in a new client and its auth token, returning the previous client so the caller can cancel it.
+        @discardableResult func replace(with newClient: SpacesDeviceAPIRequestSessionClient, authToken newAuthToken: String?)
+            -> SpacesDeviceAPIRequestSessionClient
+        {
             lock.withLock {
                 let previous = client
                 client = newClient
+                authToken = newAuthToken
                 return previous
             }
         }
