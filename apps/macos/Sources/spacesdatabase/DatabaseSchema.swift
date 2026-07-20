@@ -131,8 +131,12 @@ public enum DatabaseSchema {
     /// is removed with it, an app-managed cascade. `skip_reason` records why a `skipped` run never ran
     /// (`concurrency` when a policy blocked an overlapping run, `missed` when a catch-up decision skipped
     /// it); `trigger_kind` records how the run was initiated (`manual`, `cron`, or `missed_catch_up`).
-    /// `terminal_session_id` links to the workspace-less session that carried the command. Named
-    /// separately so the fresh-schema SQL and the v7→v8 migration step share one definition.
+    /// `terminal_session_id` links to the workspace-less session that carried the command.
+    /// `prompt_delivered_at` is set (epoch seconds) once an `agent`-kind run's seed prompt has been written
+    /// to its session; it makes prompt delivery survive a daemon restart deterministically — the two
+    /// agent-run phases (detecting/sending while NULL, awaiting done/end once set) derive from it so no
+    /// in-memory state is lost on restart. Named separately so the fresh-schema SQL and the v7→v8 migration
+    /// step share one definition.
     static let automationRunsSQL = """
             CREATE TABLE IF NOT EXISTS automation_runs (
               id TEXT PRIMARY KEY,
@@ -145,6 +149,7 @@ public enum DatabaseSchema {
               started_at REAL,
               ended_at REAL,
               created_at REAL NOT NULL,
+              prompt_delivered_at REAL,
               FOREIGN KEY (automation_id) REFERENCES automations(id) ON DELETE CASCADE
             );
 

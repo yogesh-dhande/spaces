@@ -9,9 +9,15 @@ import spacesterminalcore
 
 /// Daemon-side scheduler and executor for scheduled automations. One instance owns the whole automation
 /// lifecycle: firing cron automations on their persisted schedule, catching up (or skipping) runs missed
-/// while the daemon was down, executing a run in a workspace-less terminal session, watching it to
+/// while the daemon was down, executing a run — a `script`-kind run in a workspace-less command session, or
+/// an `agent`-kind run as a coding agent spawned into a workspace and seeded with a prompt — watching it to
 /// completion, enforcing concurrency and timeout policies, sweeping and finalizing the coding-agent
 /// sessions a run spawned, and pruning old run history.
+///
+/// No run state lives only in memory: an `agent`-kind run has two phases, both derived from
+/// `promptDeliveredAt` — NULL means it is detecting the agent and sending the prompt, set means it is
+/// awaiting the agent's `done` signal or its session end — so a daemon restart resumes the correct phase
+/// from the store through the same `pollRunningRun` path rather than a parallel recovery path.
 ///
 /// All firing (cron, manual, missed catch-up) funnels through one concurrency gate so every path applies
 /// the same allow/skip/queue rules. Execution is poll-based: `tick()` advances the schedule, polls running
@@ -225,20 +231,25 @@ import spacesterminalcore
     // MARK: - Concurrency gate
 
     /// The single fire chokepoint every trigger routes through, applying the automation's concurrency
-    /// policy against its currently active (queued/running) runs.
+    /// policy. Script-kind gating is against the automation's active (queued/running) run rows. Agent-kind
+    /// gating additionally counts a live attributed session as a conflict: an agent session outlives its
+    /// run row (a `done` agent's session stays open with the run already `succeeded`), so `skip`/`queue`
+    /// must keep blocking while any attributed session of the automation is still live, not just while a
+    /// run row is running.
     @discardableResult private func fire(automation: Automation, trigger: AutomationRunTrigger) -> AutomationRun? {
         do {
             let active = try store.activeAutomationRuns(automationID: automation.id)
+            let running = active.contains { $0.status == .running }
+            let queued = active.contains { $0.status == .queued }
+            let blocking = try running || (automation.kind == .agent && automationHasLiveAttributedSession(automationID: automation.id))
             switch automation.concurrencyPolicy {
             case .allow:
                 return try startRun(automation: automation, trigger: trigger)
             case .skip:
-                if active.isEmpty { return try startRun(automation: automation, trigger: trigger) }
+                if !blocking && !queued { return try startRun(automation: automation, trigger: trigger) }
                 return try recordSkippedRun(automation: automation, trigger: trigger, reason: .concurrency)
             case .queue:
-                let running = active.contains { $0.status == .running }
-                let queued = active.contains { $0.status == .queued }
-                if !running && !queued { return try startRun(automation: automation, trigger: trigger) }
+                if !blocking && !queued { return try startRun(automation: automation, trigger: trigger) }
                 if queued { return try recordSkippedRun(automation: automation, trigger: trigger, reason: .concurrency) }
                 return try enqueueRun(automation: automation, trigger: trigger)
             }
@@ -246,6 +257,18 @@ import spacesterminalcore
             logError("automation_fire_error id=\(automation.id) error=\(error)")
             return nil
         }
+    }
+
+    /// Whether any terminal session attributed to any run of this automation is still live. Agent-kind
+    /// concurrency gates on this (not just run-row status) because an agent session persists past its run's
+    /// terminal status; the ended-only sweep and retention eventually reap the ended ones.
+    private func automationHasLiveAttributedSession(automationID: String) throws -> Bool {
+        for run in try store.automationRuns(automationID: automationID) {
+            for sessionID in try store.terminalSessionIDs(automationRunID: run.id) where orchestrator.automationSessionIsLive(sessionID: sessionID) {
+                return true
+            }
+        }
+        return false
     }
 
     private func recordSkippedRun(automation: Automation, trigger: AutomationRunTrigger, reason: AutomationRunSkipReason) throws -> AutomationRun {
@@ -284,22 +307,22 @@ import spacesterminalcore
             try store.insertAutomationRun(run)
         } else {
             try store.updateAutomationRun(
-                id: runID, status: .running, skipReason: nil, exitCode: nil, terminalSessionID: nil, startedAt: currentTime, endedAt: nil)
+                id: runID, status: .running, skipReason: nil, exitCode: nil, terminalSessionID: nil, startedAt: currentTime, endedAt: nil,
+                promptDeliveredAt: nil)
         }
 
         sweepPriorRunSessions(automationID: automation.id, excludingRunID: runID)
 
-        // An agent-kind automation has no executable path yet (commit 9 adds it): fail the run immediately
-        // through the same launch-failure path a script-launch error takes, rather than attempting to
-        // launch a session for a command that does not exist.
-        guard automation.kind == .script else {
-            logError("automation_agent_kind_not_yet_executable run=\(runID)")
-            try store.updateAutomationRun(
-                id: runID, status: .failed, skipReason: nil, exitCode: nil, terminalSessionID: nil, startedAt: currentTime, endedAt: now())
-            try pruneRetention(automationID: automation.id)
-            return run
+        switch automation.kind {
+        case .script: try launchScriptRun(automation: automation, runID: runID, startedAt: currentTime)
+        case .agent: try launchAgentRun(automation: automation, runID: runID, startedAt: currentTime)
         }
+        return run
+    }
 
+    /// Launches a script-kind run's workspace-less command session and records its terminal session id. A
+    /// launch failure records the run `failed`.
+    private func launchScriptRun(automation: Automation, runID: String, startedAt: Date) throws {
         let sessionID = UUID().uuidString
         do {
             try AutomationPaths.ensureRunDirectory(runID: runID)
@@ -308,14 +331,46 @@ import spacesterminalcore
                 runID: runID, sessionID: sessionID, title: automation.name, workingDirectory: automation.workingDirectory, command: command,
                 environment: [WorkspaceOrchestrator.automationRunIDEnvVar: runID])
             try store.updateAutomationRun(
-                id: runID, status: .running, skipReason: nil, exitCode: nil, terminalSessionID: sessionID, startedAt: currentTime, endedAt: nil)
+                id: runID, status: .running, skipReason: nil, exitCode: nil, terminalSessionID: sessionID, startedAt: startedAt, endedAt: nil,
+                promptDeliveredAt: nil)
         } catch {
             logError("automation_launch_error run=\(runID) error=\(error)")
-            try store.updateAutomationRun(
-                id: runID, status: .failed, skipReason: nil, exitCode: nil, terminalSessionID: nil, startedAt: currentTime, endedAt: now())
-            try pruneRetention(automationID: automation.id)
+            try recordLaunchFailure(automationID: automation.id, runID: runID, startedAt: startedAt)
         }
-        return run
+    }
+
+    /// Spawns an agent-kind run's coding agent into the automation's workspace, seeded (later) with its
+    /// prompt. The spawned session IS the run's session — no wrapper terminal. The prompt is not sent here:
+    /// `pollRunningAgentRun` waits for foreground detection first, then delivers it, so the tick never
+    /// blocks. A missing workspace, an unsupported command, or a spawn error records the run `failed`
+    /// through the same launch-failure path a script-launch error takes.
+    private func launchAgentRun(automation: Automation, runID: String, startedAt: Date) throws {
+        do {
+            guard let workspaceID = automation.workspaceID, let command = automation.agentCommand else {
+                throw AutomationValidationError("Agent automation is missing its workspace or command.")
+            }
+            // Same command gate the interactive `agent spawn` uses: the command must launch a supported
+            // coding agent so foreground detection knows which kind to await.
+            _ = try AgentSpawnCommandGate.resolveSpawnableAgent(command: command)
+            try AutomationPaths.ensureRunDirectory(runID: runID)
+            let session = try orchestrator.createWorkspaceAgentSession(
+                workspaceID: workspaceID, command: command, title: automation.name, automationRunID: runID)
+            try store.updateAutomationRun(
+                id: runID, status: .running, skipReason: nil, exitCode: nil, terminalSessionID: session.id, startedAt: startedAt, endedAt: nil,
+                promptDeliveredAt: nil)
+        } catch {
+            logError("automation_agent_launch_error run=\(runID) error=\(error)")
+            try recordLaunchFailure(automationID: automation.id, runID: runID, startedAt: startedAt)
+        }
+    }
+
+    /// Records a run `failed` after a launch error and prunes retention, the shared failure tail for both
+    /// kinds' launch paths.
+    private func recordLaunchFailure(automationID: String, runID: String, startedAt: Date) throws {
+        try store.updateAutomationRun(
+            id: runID, status: .failed, skipReason: nil, exitCode: nil, terminalSessionID: nil, startedAt: startedAt, endedAt: now(),
+            promptDeliveredAt: nil)
+        try pruneRetention(automationID: automationID)
     }
 
     /// Builds the shell command string the automation session runs. Prepends the daemon binary directory
@@ -353,6 +408,13 @@ import spacesterminalcore
     }
 
     private func pollRunningRun(_ run: AutomationRun, automation: Automation) {
+        switch automation.kind {
+        case .script: pollRunningScriptRun(run, automation: automation)
+        case .agent: pollRunningAgentRun(run, automation: automation)
+        }
+    }
+
+    private func pollRunningScriptRun(_ run: AutomationRun, automation: Automation) {
         do {
             guard let sessionID = run.terminalSessionID else { return }
             let runtimeState = try? terminalRuntimeState(sessionID: sessionID)
@@ -374,6 +436,94 @@ import spacesterminalcore
         } catch { logError("automation_poll_run_error run=\(run.id) error=\(error)") }
     }
 
+    /// Detection deadline for an agent-kind run: how long to wait for the daemon's foreground classifier to
+    /// identify the coding agent before failing the run. Matches the interactive `agent spawn` default (90s).
+    private static let agentDetectionDeadline: TimeInterval = 90
+
+    /// Drives an agent-kind run through its two phases, both derived from the run row so a restart resumes
+    /// deterministically: `promptDeliveredAt == nil` is the detecting/sending phase, otherwise the run is
+    /// awaiting the agent's `done` signal or its session end. The timeout budget applies to the agent
+    /// session in either phase (capture-then-kill via the agent-kill flow).
+    private func pollRunningAgentRun(_ run: AutomationRun, automation: Automation) {
+        do {
+            guard let sessionID = run.terminalSessionID else { return }
+            let sessionLive = orchestrator.automationSessionIsLive(sessionID: sessionID)
+
+            if let timeoutSeconds = automation.timeoutSeconds, let startedAt = run.startedAt,
+                now().timeIntervalSince(startedAt) >= TimeInterval(timeoutSeconds), sessionLive
+            {
+                try teardownAgentRunSession(run)
+                try finishRun(run, status: .timedOut, exitCode: nil)
+                return
+            }
+
+            if run.promptDeliveredAt == nil {
+                try pollAgentDetectionPhase(run, automation: automation, sessionID: sessionID, sessionLive: sessionLive)
+            } else {
+                try pollAgentAwaitingPhase(run, sessionID: sessionID, sessionLive: sessionLive)
+            }
+        } catch { logError("automation_poll_run_error run=\(run.id) error=\(error)") }
+    }
+
+    /// Detecting/sending phase (`promptDeliveredAt == nil`): wait for foreground detection, then deliver the
+    /// seed prompt. A session that ends before delivery fails the run (the agent never received its work). A
+    /// detection deadline miss also fails the run but leaves the session running for inspection (mirrors
+    /// `spaces agent spawn`, which reports a detection timeout without killing the session).
+    private func pollAgentDetectionPhase(_ run: AutomationRun, automation: Automation, sessionID: String, sessionLive: Bool) throws {
+        guard sessionLive else {
+            try finishRun(run, status: .failed, exitCode: nil)
+            return
+        }
+        if let startedAt = run.startedAt, now().timeIntervalSince(startedAt) >= Self.agentDetectionDeadline {
+            logError("automation_agent_detection_timeout run=\(run.id) session=\(sessionID)")
+            try finishRun(run, status: .failed, exitCode: nil)
+            return
+        }
+        let runtimeState = try? terminalRuntimeState(sessionID: sessionID)
+        guard runtimeState?.foregroundDetectedAgentKind != nil else { return }
+        try deliverAgentPrompt(run, automation: automation, sessionID: sessionID)
+    }
+
+    /// Delivers the agent's seed prompt as TWO independent writes — the prompt text, then a separate CR
+    /// (byte 13). This is the provider-neutral submit: a single write with a trailing CR is exactly what
+    /// OpenCode leaves unsubmitted (issue #187), so the CR is always its own write. The prompt is sent
+    /// verbatim (nothing stripped). `promptDeliveredAt` is persisted only after the CR write succeeds, so a
+    /// restart or a partial write retries the whole send rather than resuming into a never-submitted prompt.
+    private func deliverAgentPrompt(_ run: AutomationRun, automation: Automation, sessionID: String) throws {
+        guard let prompt = automation.agentPrompt else { return }
+        try orchestrator.writeAutomationSessionInput(sessionID: sessionID, input: .text(prompt))
+        try orchestrator.writeAutomationSessionInput(sessionID: sessionID, input: .bytes(Data([0x0D])))
+        try store.updateAutomationRun(
+            id: run.id, status: .running, skipReason: nil, exitCode: nil, terminalSessionID: sessionID, startedAt: run.startedAt, endedAt: nil,
+            promptDeliveredAt: now())
+    }
+
+    /// Awaiting phase (`promptDeliveredAt != nil`): the run completes on the first of — the agent row
+    /// signaling `done` (→ succeeded, the session is deliberately left open, never killed), or the session
+    /// ending. On session end the status comes from the recorded exit status when the platform provides one:
+    /// the embedded terminal backend records a `.failed` end state on a launch/crash failure (→ failed) but
+    /// no numeric exit code for a normal exit. When no failure is recorded, a session that ended after a
+    /// successful prompt delivery is treated as succeeded, since a deliberate close is the common case.
+    private func pollAgentAwaitingPhase(_ run: AutomationRun, sessionID: String, sessionLive: Bool) throws {
+        if let agent = try store.agentWindowByTerminalSession(terminalSessionID: sessionID), agent.status == .done {
+            try finishRun(run, status: .succeeded, exitCode: nil)
+            return
+        }
+        guard !sessionLive else { return }
+        let recordedFailure = (try? terminalRuntimeState(sessionID: sessionID))?.state == .failed
+        try finishRun(run, status: recordedFailure ? .failed : .succeeded, exitCode: nil)
+    }
+
+    /// Timeout/cancel teardown for an agent-kind run: capture the agent session's transcript, then kill it
+    /// through the agent-kill flow so its subscribers get their exited notice and the agent row is finalized.
+    /// `killAgentSession` also handles a not-yet-signaled `.agent` session (no row yet) by terminating it
+    /// directly; only if it recognizes neither do we fall back to a plain session termination.
+    private func teardownAgentRunSession(_ run: AutomationRun) throws {
+        guard let sessionID = run.terminalSessionID else { return }
+        if orchestrator.automationSessionIsLive(sessionID: sessionID) { try captureAttributedTranscript(runID: run.id, sessionID: sessionID) }
+        if try !orchestrator.killAgentSession(terminalSessionID: sessionID) { orchestrator.automationTerminateSession(sessionID: sessionID) }
+    }
+
     /// Promotes each automation's single pending queued run to running once no run of that automation is
     /// still running.
     private func promoteQueuedRuns() {
@@ -385,6 +535,9 @@ import spacesterminalcore
                 guard !queuedAutomationIDs.contains(automation.id) else { continue }
                 guard try !store.activeAutomationRuns(automationID: automation.id).contains(where: { $0.status == .running }) else { continue }
                 guard let queued = try store.queuedAutomationRun(automationID: automation.id) else { continue }
+                // An agent automation's session outlives its run row, so a queued run waits for every
+                // attributed session to end (not just for the running run row to clear) before promoting.
+                if automation.kind == .agent, try automationHasLiveAttributedSession(automationID: automation.id) { continue }
                 _ = try startRun(automation: automation, trigger: queued.trigger, promoting: queued)
             }
         } catch { logError("automation_promote_error error=\(error)") }
@@ -392,12 +545,19 @@ import spacesterminalcore
 
     // MARK: - Cancellation
 
-    /// Cancels a run: the same teardown as a timeout (capture + terminate attributed sessions, signal the
-    /// command process group) but recorded `canceled`. A no-op for an already-terminal run.
+    /// Cancels a run, recorded `canceled`. A script-kind run gets the same teardown as a timeout (capture +
+    /// terminate attributed sessions, signal the command process group); an agent-kind run is torn down
+    /// through the agent-kill flow so its subscribers are notified and the agent row finalized. A run whose
+    /// automation was deleted out from under it falls back to the plain-session teardown. A no-op for an
+    /// already-terminal run.
     public func cancelRun(runID: String) {
         do {
             guard let run = try store.automationRun(id: runID), !run.status.isTerminal else { return }
-            try teardownRunSessions(run, terminate: true)
+            if try store.automation(id: run.automationID)?.kind == .agent {
+                try teardownAgentRunSession(run)
+            } else {
+                try teardownRunSessions(run, terminate: true)
+            }
             try finishRun(run, status: .canceled, exitCode: nil)
         } catch { logError("automation_cancel_error run=\(runID) error=\(error)") }
     }
@@ -410,7 +570,7 @@ import spacesterminalcore
     private func finishRun(_ run: AutomationRun, status: AutomationRunStatus, exitCode: Int?) throws {
         try store.updateAutomationRun(
             id: run.id, status: status, skipReason: nil, exitCode: exitCode, terminalSessionID: run.terminalSessionID, startedAt: run.startedAt,
-            endedAt: now())
+            endedAt: now(), promptDeliveredAt: run.promptDeliveredAt)
         try pruneRetention(automationID: run.automationID)
     }
 

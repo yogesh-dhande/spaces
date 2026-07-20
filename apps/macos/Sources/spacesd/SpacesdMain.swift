@@ -265,6 +265,19 @@ import workspacecore
                 }
             }.get()
         }
+        // The automation executor delivers an agent-kind automation's seed prompt through this writer. It
+        // sends with `appendNewline: false` because the executor issues the submitting CR as its own
+        // separate byte write (the provider-neutral two-write submit), routing through the same
+        // terminal-send chokepoint the `.terminalSend` profile command uses.
+        WorkspaceOrchestrator.setProcessWideBuiltInTerminalSessionInputWriter { [weak self] sessionID, input in
+            try Self.runOnMainActorSynchronously {
+                Result {
+                    guard let self else { throw Self.requestFailedError("spacesd is shutting down.") }
+                    _ = try self.sendProfileTerminalInput(
+                        TerminalServiceTerminalSendPayload(sessionID: sessionID, input: input, appendNewline: false))
+                }
+            }.get()
+        }
         #if os(macOS)
             WorkspaceOrchestrator.setProcessWideNotificationDeliverer { title, body, subtitle in
                 var userInfo = [IPCNotification.titleUserInfoKey: title, IPCNotification.detailUserInfoKey: body]

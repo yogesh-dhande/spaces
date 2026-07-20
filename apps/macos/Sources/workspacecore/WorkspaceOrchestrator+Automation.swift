@@ -33,4 +33,14 @@ extension WorkspaceOrchestrator {
 
     /// Terminates a built-in terminal session through the daemon's existing termination machinery.
     func automationTerminateSession(sessionID: String) { builtInTerminalSessionTerminator(sessionID) }
+
+    /// Writes raw input to an automation's terminal session (no trailing newline), used by the agent-kind
+    /// executor to deliver a seed prompt. Routes through the process-wide input writer the daemon installs;
+    /// with none installed (non-daemon callers, which never spawn agent automations) the write throws.
+    func writeAutomationSessionInput(sessionID: String, input: TerminalProfileInput) throws {
+        guard let writer = Self.builtInTerminalSessionInputWriterOverrideStore.get() else {
+            throw WorkspaceError.invalidArgument(message: "No terminal session input writer is configured.")
+        }
+        try writer(sessionID, input)
+    }
 }

@@ -56,10 +56,16 @@ public struct AutomationRun: Equatable, Sendable, Identifiable {
     public let startedAt: Date?
     public let endedAt: Date?
     public let createdAt: Date
+    /// When an `agent`-kind run's seed prompt was written to its session, or nil if not yet delivered (or
+    /// a `script`-kind run, which has no prompt). This is the agent-run phase marker: NULL means the run is
+    /// still detecting the agent / sending the prompt, set means it is awaiting the agent's done signal or
+    /// session end. Persisting it (rather than holding it in memory) is what lets a daemon restart resume
+    /// the correct phase instead of re-sending the prompt.
+    public let promptDeliveredAt: Date?
 
     public init(
         id: String, automationID: String, status: AutomationRunStatus, skipReason: AutomationRunSkipReason?, trigger: AutomationRunTrigger,
-        exitCode: Int?, terminalSessionID: String?, startedAt: Date?, endedAt: Date?, createdAt: Date
+        exitCode: Int?, terminalSessionID: String?, startedAt: Date?, endedAt: Date?, createdAt: Date, promptDeliveredAt: Date? = nil
     ) {
         self.id = id
         self.automationID = automationID
@@ -71,5 +77,6 @@ public struct AutomationRun: Equatable, Sendable, Identifiable {
         self.startedAt = startedAt
         self.endedAt = endedAt
         self.createdAt = createdAt
+        self.promptDeliveredAt = promptDeliveredAt
     }
 }

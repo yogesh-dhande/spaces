@@ -29,6 +29,12 @@ public final class WorkspaceOrchestrator {
     /// and cannot reach the daemon's terminal-send path directly, so the daemon installs a process-wide
     /// override that routes to the same send chokepoint its request-path notification engine uses.
     public typealias AgentNotificationLineSubmitter = @Sendable (String, String) throws -> Void
+    /// `(sessionID, input)`. Writes raw input to a built-in terminal session without appending a newline,
+    /// the seam the automation executor uses to deliver an agent-kind automation's seed prompt. The daemon
+    /// installs a process-wide override routing to the same terminal-send chokepoint the `.terminalSend`
+    /// profile command uses; workspacecore has no session I/O of its own, so with none installed the write
+    /// throws (non-daemon callers never spawn agent automations).
+    public typealias BuiltInTerminalSessionInputWriter = @Sendable (String, TerminalProfileInput) throws -> Void
 
     public static let terminalTrackingIDEnvVar = "SPACES_TERMINAL_TRACKING_ID"
     /// Set by the CLI's `agent spawn` on the automation orchestrator's own terminal to identify the
@@ -43,6 +49,7 @@ public final class WorkspaceOrchestrator {
     private static let builtInTerminalSessionTerminatorOverrideStore = LockedBox<BuiltInTerminalSessionTerminator?>(nil)
     private static let notificationDelivererOverrideStore = LockedBox<NotificationDeliverer?>(nil)
     static let agentNotificationLineSubmitterOverrideStore = LockedBox<AgentNotificationLineSubmitter?>(nil)
+    static let builtInTerminalSessionInputWriterOverrideStore = LockedBox<BuiltInTerminalSessionInputWriter?>(nil)
 
     public struct WorkspaceStopOutcome: Sendable {
         public let skippedStopScriptBecauseWorkspaceDirectoryMissing: Bool
@@ -122,6 +129,13 @@ public final class WorkspaceOrchestrator {
     /// identically to the hook-signaled exit path.
     public static func setProcessWideAgentNotificationLineSubmitter(_ submitter: AgentNotificationLineSubmitter?) {
         agentNotificationLineSubmitterOverrideStore.set(submitter)
+    }
+
+    /// Installs a process-wide writer for raw terminal-session input, used by the automation executor to
+    /// deliver an agent-kind automation's seed prompt. The daemon sets this to the same terminal-send
+    /// chokepoint the `.terminalSend` profile command routes through.
+    public static func setProcessWideBuiltInTerminalSessionInputWriter(_ writer: BuiltInTerminalSessionInputWriter?) {
+        builtInTerminalSessionInputWriterOverrideStore.set(writer)
     }
 
     /// Builds the notification engine the device-runtime reconcilers use to tell subscribers a coding

@@ -173,21 +173,200 @@ import spacesterminalcore
         XCTAssertEqual(finished.exitCode, 3)
     }
 
-    // MARK: - Agent kind (not yet executable)
+    // MARK: - Agent kind execution
 
-    /// An agent-kind automation has no execution path yet (commit 9 adds it): triggering one must fail the
-    /// run immediately through the same launch-failure path a script launch error takes, rather than
-    /// attempting to launch a session for a command that does not exist.
-    func testAgentKindRunFailsImmediately() throws {
+    /// Happy path: spawn the agent, wait for foreground detection, deliver the seed prompt as two
+    /// independent writes (text then a bare CR) in order, persist `promptDeliveredAt`, and complete
+    /// `succeeded` on the agent row's `done` signal with the session left open (never killed).
+    func testAgentRunSpawnsDetectsDeliversPromptAndSucceedsOnDone() throws {
         let harness = try Harness(self)
-        let automation = try harness.insertAutomation(kind: .agent, concurrency: .allow)
-        let triggered = try XCTUnwrap(harness.service.triggerManually(automationID: automation.id))
-        // The run object `triggerManually` returns reflects the run as started (`.running`); the executor
-        // persists the actual outcome to the store rather than mutating that in-flight value, the same
-        // convention a script launch failure follows. Re-read the store for the settled status.
-        let stored = try XCTUnwrap(harness.store.automationRun(id: triggered.id))
-        XCTAssertEqual(stored.status, .failed)
-        XCTAssertNil(stored.terminalSessionID)
+        let (_, workspace) = try harness.makeProjectAndWorkspace()
+        let automation = try harness.insertAgentAutomation(workspaceID: workspace.id, prompt: "investigate the failing test")
+        let run = try XCTUnwrap(harness.service.triggerManually(automationID: automation.id))
+        let sessionID = try XCTUnwrap(harness.store.automationRun(id: run.id)?.terminalSessionID, "the run records its spawned agent session")
+
+        // Before detection nothing is delivered.
+        harness.service.tick()
+        XCTAssertTrue(harness.host.writtenInput.isEmpty, "no prompt is delivered until the agent is detected")
+        XCTAssertNil(try harness.store.automationRun(id: run.id)?.promptDeliveredAt)
+
+        // Detection → the next tick delivers the prompt as two writes and records delivery.
+        harness.host.markSessionForegroundDetected(sessionID: sessionID)
+        harness.service.tick()
+        let writes = harness.host.writtenInput
+        XCTAssertEqual(writes.count, 2, "the prompt is delivered as two independent writes")
+        XCTAssertEqual(writes.first?.input, .text("investigate the failing test"), "the first write is the verbatim prompt text")
+        XCTAssertEqual(writes.last?.input, .bytes(Data([0x0D])), "the second write is a bare CR (byte 13)")
+        XCTAssertEqual(writes.map(\.sessionID), [sessionID, sessionID])
+        XCTAssertNotNil(try harness.store.automationRun(id: run.id)?.promptDeliveredAt, "delivery is persisted once the CR write succeeds")
+
+        // A second tick before `done` neither re-sends nor completes the run.
+        harness.service.tick()
+        XCTAssertEqual(harness.host.writtenInput.count, 2, "a delivered prompt is not re-sent")
+        XCTAssertEqual(try harness.store.automationRun(id: run.id)?.status, .running)
+
+        // The agent row signals done → succeeded, and the session is left open.
+        _ = try harness.registerAgentRow(workspaceID: workspace.id, sessionID: sessionID, status: .done)
+        harness.service.tick()
+        let finished = try XCTUnwrap(harness.store.automationRun(id: run.id))
+        XCTAssertEqual(finished.status, .succeeded)
+        XCTAssertNil(finished.exitCode)
+        XCTAssertTrue(harness.orchestrator.automationSessionIsLive(sessionID: sessionID), "a done agent's session stays open")
+    }
+
+    /// Detection deadline miss: the agent is never classified within the 90s budget, so the run fails but
+    /// its session is left running for inspection (mirrors `spaces agent spawn`).
+    func testAgentRunFailsOnDetectionDeadlineWithoutKillingSession() throws {
+        let clock = MutableClock(start: Date())
+        let harness = try Harness(self, now: clock.now)
+        let (_, workspace) = try harness.makeProjectAndWorkspace()
+        let automation = try harness.insertAgentAutomation(workspaceID: workspace.id)
+        let run = try XCTUnwrap(harness.service.triggerManually(automationID: automation.id))
+        let sessionID = try XCTUnwrap(harness.store.automationRun(id: run.id)?.terminalSessionID)
+
+        clock.advance(by: 91)  // past the 90s detection deadline, agent never detected
+        harness.service.tick()
+
+        XCTAssertEqual(try harness.store.automationRun(id: run.id)?.status, .failed)
+        XCTAssertTrue(harness.host.writtenInput.isEmpty, "no prompt is delivered when detection never succeeds")
+        XCTAssertTrue(harness.orchestrator.automationSessionIsLive(sessionID: sessionID), "the session is left running for inspection")
+    }
+
+    /// The session ends before the prompt is delivered → failed (the agent never received its work).
+    func testAgentRunFailsWhenSessionEndsBeforeDelivery() throws {
+        let harness = try Harness(self)
+        let (_, workspace) = try harness.makeProjectAndWorkspace()
+        let automation = try harness.insertAgentAutomation(workspaceID: workspace.id)
+        let run = try XCTUnwrap(harness.service.triggerManually(automationID: automation.id))
+        let sessionID = try XCTUnwrap(harness.store.automationRun(id: run.id)?.terminalSessionID)
+
+        harness.host.markSessionEnded(sessionID: sessionID)
+        harness.service.tick()
+
+        XCTAssertEqual(try harness.store.automationRun(id: run.id)?.status, .failed)
+        XCTAssertNil(try harness.store.automationRun(id: run.id)?.promptDeliveredAt)
+    }
+
+    /// After delivery, a clean session end (no recorded failure, no `done`) completes `succeeded` — a
+    /// deliberate close is the common case.
+    func testAgentRunSucceedsWhenSessionEndsCleanlyAfterDelivery() throws {
+        let harness = try Harness(self)
+        let (_, workspace) = try harness.makeProjectAndWorkspace()
+        let automation = try harness.insertAgentAutomation(workspaceID: workspace.id)
+        let run = try XCTUnwrap(harness.service.triggerManually(automationID: automation.id))
+        let sessionID = try XCTUnwrap(harness.store.automationRun(id: run.id)?.terminalSessionID)
+
+        harness.host.markSessionForegroundDetected(sessionID: sessionID)
+        harness.service.tick()  // delivers prompt
+        harness.host.markSessionEnded(sessionID: sessionID)
+        harness.service.tick()
+
+        XCTAssertEqual(try harness.store.automationRun(id: run.id)?.status, .succeeded)
+    }
+
+    /// After delivery, a session that ends with the platform's recorded failure state completes `failed`.
+    func testAgentRunFailsWhenSessionEndsWithRecordedFailureAfterDelivery() throws {
+        let harness = try Harness(self)
+        let (_, workspace) = try harness.makeProjectAndWorkspace()
+        let automation = try harness.insertAgentAutomation(workspaceID: workspace.id)
+        let run = try XCTUnwrap(harness.service.triggerManually(automationID: automation.id))
+        let sessionID = try XCTUnwrap(harness.store.automationRun(id: run.id)?.terminalSessionID)
+
+        harness.host.markSessionForegroundDetected(sessionID: sessionID)
+        harness.service.tick()  // delivers prompt
+        harness.host.markSessionFailed(sessionID: sessionID)
+        harness.service.tick()
+
+        XCTAssertEqual(try harness.store.automationRun(id: run.id)?.status, .failed)
+    }
+
+    /// The skip policy blocks a new agent run while a prior run's agent session is still live, even though
+    /// that prior run already reached a terminal (`succeeded`) status — agent concurrency gates on live
+    /// sessions, not just active run rows.
+    func testAgentSkipPolicyBlocksWhileAttributedSessionLive() throws {
+        let harness = try Harness(self)
+        let (_, workspace) = try harness.makeProjectAndWorkspace()
+        let automation = try harness.insertAgentAutomation(workspaceID: workspace.id, concurrency: .skip)
+        let first = try XCTUnwrap(harness.service.triggerManually(automationID: automation.id))
+        let sessionID = try XCTUnwrap(harness.store.automationRun(id: first.id)?.terminalSessionID)
+
+        // Drive the first run to succeeded with its session left live (done path).
+        harness.host.markSessionForegroundDetected(sessionID: sessionID)
+        harness.service.tick()
+        _ = try harness.registerAgentRow(workspaceID: workspace.id, sessionID: sessionID, status: .done)
+        harness.service.tick()
+        XCTAssertEqual(try harness.store.automationRun(id: first.id)?.status, .succeeded)
+        XCTAssertTrue(harness.orchestrator.automationSessionIsLive(sessionID: sessionID))
+
+        // A new fire is skipped for concurrency while that session is still live.
+        let second = try XCTUnwrap(harness.service.triggerManually(automationID: automation.id))
+        XCTAssertEqual(second.status, .skipped)
+        XCTAssertEqual(second.skipReason, .concurrency)
+    }
+
+    /// The allow policy spawns a new agent run regardless of a live prior session.
+    func testAgentAllowPolicySpawnsDespiteLiveAttributedSession() throws {
+        let harness = try Harness(self)
+        let (_, workspace) = try harness.makeProjectAndWorkspace()
+        let automation = try harness.insertAgentAutomation(workspaceID: workspace.id, concurrency: .allow)
+        let first = try XCTUnwrap(harness.service.triggerManually(automationID: automation.id))
+        let firstSessionID = try XCTUnwrap(harness.store.automationRun(id: first.id)?.terminalSessionID)
+
+        harness.host.markSessionForegroundDetected(sessionID: firstSessionID)
+        harness.service.tick()
+        _ = try harness.registerAgentRow(workspaceID: workspace.id, sessionID: firstSessionID, status: .done)
+        harness.service.tick()
+        XCTAssertEqual(try harness.store.automationRun(id: first.id)?.status, .succeeded)
+
+        let second = try XCTUnwrap(harness.service.triggerManually(automationID: automation.id))
+        XCTAssertEqual(second.status, .running)
+        let secondSessionID = try XCTUnwrap(harness.store.automationRun(id: second.id)?.terminalSessionID)
+        XCTAssertNotEqual(secondSessionID, firstSessionID, "allow spawns a fresh agent session")
+    }
+
+    /// Canceling a running agent run routes through the agent-kill flow, so the agent row is finalized and
+    /// its subscriber is told the child exited (not a plain process-group signal).
+    func testAgentCancelKillsThroughAgentKillFlow() throws {
+        let harness = try Harness(self)
+        let (_, workspace) = try harness.makeProjectAndWorkspace()
+        let automation = try harness.insertAgentAutomation(workspaceID: workspace.id)
+        let run = try XCTUnwrap(harness.service.triggerManually(automationID: automation.id))
+        let sessionID = try XCTUnwrap(harness.store.automationRun(id: run.id)?.terminalSessionID)
+        let agent = try harness.registerAgentRow(workspaceID: workspace.id, sessionID: sessionID, status: .spinning)
+        try harness.store.insertAgentSubscription(subscriberTerminalSessionID: "watcher", agentSessionID: agent.id, createdAt: "t")
+
+        harness.service.cancelRun(runID: run.id)
+
+        XCTAssertEqual(try harness.store.automationRun(id: run.id)?.status, .canceled)
+        XCTAssertNil(try harness.store.agentWindow(id: agent.id), "the agent row is finalized through the kill flow")
+        XCTAssertTrue(
+            harness.host.delivered.contains { $0.sessionID == "watcher" && $0.line.contains("exited") }, "the subscriber is told the agent exited")
+    }
+
+    /// Restart safety: the run row is the single source of truth for the agent-run phase, so a fresh
+    /// service instance (a restarted daemon) resumes deterministically — the detecting phase resumes into
+    /// prompt delivery, and the delivered phase resumes into awaiting done.
+    func testAgentRunResumesAcrossRestartInBothPhases() throws {
+        let harness = try Harness(self)
+        let (_, workspace) = try harness.makeProjectAndWorkspace()
+        let automation = try harness.insertAgentAutomation(workspaceID: workspace.id)
+        let run = try XCTUnwrap(harness.service.triggerManually(automationID: automation.id))
+        let sessionID = try XCTUnwrap(harness.store.automationRun(id: run.id)?.terminalSessionID)
+
+        // Phase 1 (detecting, promptDeliveredAt NULL): a restarted service resumes into delivery.
+        XCTAssertNil(try harness.store.automationRun(id: run.id)?.promptDeliveredAt)
+        harness.host.markSessionForegroundDetected(sessionID: sessionID)
+        let resumed1 = harness.makeService()
+        resumed1.tick()
+        XCTAssertEqual(harness.host.writtenInput.count, 2, "the detecting phase resumes into prompt delivery after a restart")
+        XCTAssertNotNil(try harness.store.automationRun(id: run.id)?.promptDeliveredAt)
+
+        // Phase 2 (delivered): another restarted service resumes into awaiting the done signal.
+        _ = try harness.registerAgentRow(workspaceID: workspace.id, sessionID: sessionID, status: .done)
+        let resumed2 = harness.makeService()
+        resumed2.tick()
+        XCTAssertEqual(harness.host.writtenInput.count, 2, "the delivered phase does not re-send the prompt after a restart")
+        XCTAssertEqual(try harness.store.automationRun(id: run.id)?.status, .succeeded)
     }
 
     // MARK: - Timeout + cancel
@@ -241,6 +420,14 @@ import spacesterminalcore
             logError: { _ in })
     }
 
+    /// Builds a fresh `AutomationService` over the same store/orchestrator, modeling a daemon restart:
+    /// nothing is carried in memory, so a new instance must resume purely from the persisted run rows.
+    func makeService() -> AutomationService {
+        AutomationService(
+            store: store, orchestrator: orchestrator, binaryDirectory: "/usr/bin", timeZone: .current, now: now, terminationGrace: 0.2,
+            logError: { _ in })
+    }
+
     func insertAutomation(
         script: String = "true", kind: AutomationKind = .script, triggerKind: AutomationTriggerKind = .manual, cronExpression: String? = nil,
         concurrency: AutomationConcurrencyPolicy = .allow, missedRunPolicy: AutomationMissedRunPolicy = .runOnce, timeoutSeconds: Int? = nil,
@@ -252,6 +439,25 @@ import spacesterminalcore
             concurrencyPolicy: concurrency, missedRunPolicy: missedRunPolicy, nextFireTime: nextFireTime, createdAt: now(), updatedAt: now())
         try store.upsertAutomation(automation)
         return automation
+    }
+
+    func insertAgentAutomation(
+        workspaceID: String, command: String = "codex", prompt: String = "investigate the failing test", concurrency: AutomationConcurrencyPolicy = .allow,
+        timeoutSeconds: Int? = nil
+    ) throws -> Automation {
+        let automation = Automation(
+            id: UUID().uuidString, name: "Agent Test", enabled: true, triggerKind: .manual, cronExpression: nil, kind: .agent, script: "",
+            agentCommand: command, agentPrompt: prompt, workspaceID: workspaceID, workingDirectory: "", timeoutSeconds: timeoutSeconds,
+            concurrencyPolicy: concurrency, missedRunPolicy: .runOnce, nextFireTime: nil, createdAt: now(), updatedAt: now())
+        try store.upsertAutomation(automation)
+        return automation
+    }
+
+    /// Registers a Spaces agent orchestration row bound to a spawned agent session's terminal id, modeling
+    /// the row that appears once the agent reports a hook signal.
+    @discardableResult func registerAgentRow(workspaceID: String, sessionID: String, status: AgentWindowStatus) throws -> AgentWindowRecord {
+        try orchestrator.registerAgentWindow(
+            workspaceID: workspaceID, provider: .spaces, label: "Codex CLI", terminalTrackingID: sessionID, status: status)
     }
 
     @discardableResult func insertRun(automationID: String, status: AutomationRunStatus, createdAt: Date? = nil) throws -> AutomationRun {
@@ -351,6 +557,14 @@ private final class FakeAutomationTerminalHost: @unchecked Sendable {
         return deliveredStore
     }
     private var deliveredStore: [(sessionID: String, line: String)] = []
+    /// Raw terminal-input writes the automation executor made, in order — the seam the agent-kind executor
+    /// delivers its seed prompt through. Agent-prompt tests assert the two-write text-then-CR submit.
+    var writtenInput: [(sessionID: String, input: TerminalProfileInput)] {
+        lock.lock()
+        defer { lock.unlock() }
+        return writtenInputStore
+    }
+    private var writtenInputStore: [(sessionID: String, input: TerminalProfileInput)] = []
     private var trackedPIDs: [Int32] = []
 
     init(realCommands: Bool) { self.realCommands = realCommands }
@@ -366,12 +580,18 @@ private final class FakeAutomationTerminalHost: @unchecked Sendable {
             self?.deliveredStore.append((sessionID: sessionID, line: line))
             self?.lock.unlock()
         }
+        WorkspaceOrchestrator.setProcessWideBuiltInTerminalSessionInputWriter { [weak self] sessionID, input in
+            self?.lock.lock()
+            self?.writtenInputStore.append((sessionID: sessionID, input: input))
+            self?.lock.unlock()
+        }
     }
 
     func uninstall() {
         WorkspaceOrchestrator.setProcessWideBuiltInTerminalSessionLauncher(nil)
         WorkspaceOrchestrator.setProcessWideBuiltInTerminalSessionTerminator(nil)
         WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter(nil)
+        WorkspaceOrchestrator.setProcessWideBuiltInTerminalSessionInputWriter(nil)
         lock.lock()
         let pids = trackedPIDs
         lock.unlock()
@@ -381,6 +601,23 @@ private final class FakeAutomationTerminalHost: @unchecked Sendable {
     func markSessionEnded(sessionID: String) {
         guard let paths = try? TerminalSessionPaths.forSession(id: sessionID) else { return }
         writeRuntimeState(sessionID: sessionID, paths: paths, state: .exited, childPID: nil)
+    }
+
+    /// Marks a session as ended with the platform's recorded failure state (`.failed`), modeling an agent
+    /// session that crashed rather than closed cleanly.
+    func markSessionFailed(sessionID: String) {
+        guard let paths = try? TerminalSessionPaths.forSession(id: sessionID) else { return }
+        writeRuntimeState(sessionID: sessionID, paths: paths, state: .failed, childPID: nil)
+    }
+
+    /// Publishes the daemon's foreground-detection result for a live session (still `.running`), the signal
+    /// the agent-kind executor waits for before delivering the prompt.
+    func markSessionForegroundDetected(sessionID: String, kind: TerminalDetectedAgentKind = .codex) {
+        guard let paths = try? TerminalSessionPaths.forSession(id: sessionID) else { return }
+        try? TerminalSessionPersistence.writeRuntimeState(
+            TerminalSessionRuntimeState(
+                sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: nil, state: .running,
+                updatedAt: ISO8601DateFormatter().string(from: Date()), foregroundDetectedAgentKind: kind), paths: paths)
     }
 
     private func launch(_ configuration: TerminalSessionLaunchConfiguration) throws -> TerminalServiceSessionSummary {
