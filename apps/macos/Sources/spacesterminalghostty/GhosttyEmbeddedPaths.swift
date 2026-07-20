@@ -62,7 +62,8 @@ public enum GhosttyEmbeddedLocator {
         }
 
         // Development artifacts keep resources beside GhosttyKit.xcframework's parent directory.
-        for frameworkRoot in candidateXCFrameworkRoots(environment: environment, fileManager: fileManager, currentDirectoryPath: currentDirectoryPath)
+        for frameworkRoot in candidateXCFrameworkRoots(
+            environment: environment, fileManager: fileManager, currentDirectoryPath: currentDirectoryPath, executableURL: executableURL)
         {
             candidates.append(
                 URL(fileURLWithPath: frameworkRoot, isDirectory: true).deletingLastPathComponent().appendingPathComponent(
@@ -76,32 +77,53 @@ public enum GhosttyEmbeddedLocator {
         }
     }
 
-    private static func candidateXCFrameworkRoots(environment: [String: String], fileManager: FileManager, currentDirectoryPath: String?) -> [String]
-    {
+    private static func candidateXCFrameworkRoots(
+        environment: [String: String], fileManager: FileManager, currentDirectoryPath: String?, executableURL: URL?
+    ) -> [String] {
         var candidates: [String] = []
         if let override = normalizedEnvironmentPath(environment[xcframeworkEnvironmentVariable]) {
             candidates.append(URL(fileURLWithPath: override).standardizedFileURL.path)
         }
 
-        for root in candidateSearchRoots(fileManager: fileManager, currentDirectoryPath: currentDirectoryPath) {
+        for root in candidateSearchRoots(fileManager: fileManager, currentDirectoryPath: currentDirectoryPath, executableURL: executableURL) {
             candidates.append(URL(fileURLWithPath: root, isDirectory: true).appendingPathComponent("GhosttyKit.xcframework").path)
             candidates.append(URL(fileURLWithPath: root, isDirectory: true).appendingPathComponent("GhosttyKit/GhosttyKit.xcframework").path)
         }
         return candidates
     }
 
-    private static func candidateSearchRoots(fileManager: FileManager, currentDirectoryPath: String?) -> [String] {
+    /// Directories to probe for `GhosttyKit.xcframework` (and thus its sibling `Resources/ghostty`).
+    ///
+    /// Roots come from two anchors. The current directory covers a daemon or tool launched from the repo
+    /// root or `apps/macos`. The running executable's own location covers a `spacesd` a client spawned
+    /// on demand: such a daemon inherits the client's working directory and environment, so it cannot be
+    /// found through the cwd alone. Anchoring to the binary keeps "where are my Ghostty resources" a fact
+    /// the daemon derives from itself rather than one that depends on which client happened to launch it
+    /// (issue #188). Production installs resolve earlier via the app bundle and never reach this search.
+    private static func candidateSearchRoots(fileManager: FileManager, currentDirectoryPath: String?, executableURL: URL?) -> [String] {
         let cwd = currentDirectoryPath ?? fileManager.currentDirectoryPath
         let cwdURL = URL(fileURLWithPath: cwd, isDirectory: true)
-        let parentURL = cwdURL.deletingLastPathComponent()
-        let roots = [
-            cwdURL, cwdURL.appendingPathComponent(".local/ghosttykit", isDirectory: true),
-            cwdURL.appendingPathComponent("apps/macos", isDirectory: true),
-            cwdURL.appendingPathComponent("apps/macos/.local/ghosttykit", isDirectory: true), parentURL,
-            parentURL.appendingPathComponent(".local/ghosttykit", isDirectory: true),
-            parentURL.appendingPathComponent("apps/macos", isDirectory: true),
-            parentURL.appendingPathComponent("apps/macos/.local/ghosttykit", isDirectory: true),
-        ].map(\.path)
+        var anchors = [cwdURL, cwdURL.deletingLastPathComponent()]
+        if let executableDirectory = executableURL?.resolvingSymlinksInPath().deletingLastPathComponent() {
+            // Walk up from the binary so `.build/<triple>/debug/spacesd` reaches the `apps/macos` package
+            // directory that holds `.local/ghosttykit`. The bound is generous enough for the deepest
+            // SwiftPM layout without turning into an unbounded filesystem climb.
+            var directory = executableDirectory
+            for _ in 0..<6 {
+                anchors.append(directory)
+                let parent = directory.deletingLastPathComponent()
+                if parent.path == directory.path { break }
+                directory = parent
+            }
+        }
+
+        let roots = anchors.flatMap { anchor in
+            [
+                anchor, anchor.appendingPathComponent(".local/ghosttykit", isDirectory: true),
+                anchor.appendingPathComponent("apps/macos", isDirectory: true),
+                anchor.appendingPathComponent("apps/macos/.local/ghosttykit", isDirectory: true),
+            ]
+        }.map(\.path)
         return Array(NSOrderedSet(array: roots)) as? [String] ?? roots
     }
 

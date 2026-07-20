@@ -854,14 +854,30 @@ public final class TerminalServiceServer {
     private let socketPath: String
     private let queue: DispatchQueue
     private let handleRequest: @Sendable (TerminalServiceRequest) throws -> TerminalServiceResponse
+    /// Fast-path responder for the liveness `.ping`. When present, ping is answered inline on the accept
+    /// queue without going through `handleRequest` or the work queue, so a client's liveness probe never
+    /// queues behind an in-flight heavy request (e.g. a session `.create` that holds the daemon's main
+    /// actor). A daemon that services every request on one actor would otherwise let concurrent spawns
+    /// starve pings past their 1s timeout, making healthy-but-busy daemons look dead and triggering
+    /// redundant relaunch races (issue #188). The responder must not touch the main actor.
+    private let livenessResponder: (@Sendable () -> TerminalServiceResponse)?
+    /// Heavy request handling runs on this serial queue, one `handleRequest` at a time, so the daemon's
+    /// main actor is never contended by a burst of concurrent session `.create`s (that congestion starves
+    /// the foreground-detection reconciler and makes spawns miss their readiness budget). The accept
+    /// source reads each request on `queue` and hands only the non-liveness ones here, keeping the accept
+    /// loop — and the ping fast path — free while a create runs.
+    private let workQueue = DispatchQueue(label: "spaces.terminal.service.work")
     private var listenSocketFD: Int32 = -1
     private var acceptSource: DispatchSourceRead?
 
     public init(
-        socketPath: String, queue: DispatchQueue, handleRequest: @escaping @Sendable (TerminalServiceRequest) throws -> TerminalServiceResponse
+        socketPath: String, queue: DispatchQueue,
+        livenessResponder: (@Sendable () -> TerminalServiceResponse)? = nil,
+        handleRequest: @escaping @Sendable (TerminalServiceRequest) throws -> TerminalServiceResponse
     ) {
         self.socketPath = socketPath
         self.queue = queue
+        self.livenessResponder = livenessResponder
         self.handleRequest = handleRequest
     }
 
@@ -893,6 +909,10 @@ public final class TerminalServiceServer {
             throw POSIXError(code)
         }
         try setNonBlocking(socketFD)
+        // Hygiene: `stop()` normally closes this before an exec-in-place handoff, but close-on-exec
+        // means a handoff that somehow reaches `execv` without going through `stop()` first still
+        // can't leak the listen socket into the new image.
+        _ = fcntl(socketFD, F_SETFD, FD_CLOEXEC)
 
         listenSocketFD = socketFD
         let source = DispatchSource.makeReadSource(fileDescriptor: socketFD, queue: queue)
@@ -918,22 +938,45 @@ public final class TerminalServiceServer {
                 if errno == EWOULDBLOCK || errno == EAGAIN { return }
                 return
             }
+            // Accepted sockets must not survive an exec-in-place daemon handoff: a request queued on
+            // `workQueue` but not yet answered when the old image execs would otherwise leave its FD
+            // open in the new image, leaking it while the caller hangs to its full RPC timeout instead
+            // of seeing the connection reset. `accept4` with `SOCK_CLOEXEC` would set this atomically,
+            // but it isn't portable to both of this file's targets (macOS/Linux), so it's set here instead.
+            _ = fcntl(clientFD, F_SETFD, FD_CLOEXEC)
 
+            // Read and decode on the accept queue (a request is small and sent in one go, so this stays
+            // fast). A liveness ping is answered inline off the main actor; every other request is handed
+            // to the serial work queue so a slow `handleRequest` never blocks the accept loop or a
+            // following ping. Passing the Sendable closures by value keeps the non-Sendable server
+            // instance off the worker.
+            let request: TerminalServiceRequest
             do {
-                try setBlocking(clientFD)
-                let requestData = try Self.readAll(from: clientFD)
-                let request = try TerminalServiceCodec.decodeRequest(requestData)
-                let response = try handleRequest(request)
-                let responseData = try TerminalServiceCodec.encodeResponse(response)
-                try Self.writeAll(data: responseData, to: clientFD)
+                try Self.setBlocking(clientFD)
+                request = try TerminalServiceCodec.decodeRequest(Self.readAll(from: clientFD))
             } catch {
-                let fallback = TerminalServiceResponse(ok: false, message: String(describing: error))
-                if let data = try? TerminalServiceCodec.encodeResponse(fallback) { try? Self.writeAll(data: data, to: clientFD) }
+                Self.respond(.init(ok: false, message: String(describing: error)), to: clientFD)
+                continue
             }
 
-            Self.shutdownSocket(clientFD)
-            close(clientFD)
+            if case .ping = request.command, let livenessResponder {
+                Self.respond(livenessResponder(), to: clientFD)
+                continue
+            }
+
+            let handleRequest = handleRequest
+            workQueue.async {
+                let response: TerminalServiceResponse
+                do { response = try handleRequest(request) } catch { response = .init(ok: false, message: String(describing: error)) }
+                Self.respond(response, to: clientFD)
+            }
         }
+    }
+
+    private static func respond(_ response: TerminalServiceResponse, to clientFD: Int32) {
+        if let data = try? TerminalServiceCodec.encodeResponse(response) { try? Self.writeAll(data: data, to: clientFD) }
+        Self.shutdownSocket(clientFD)
+        close(clientFD)
     }
 
     private func removeSocketIfPresent() throws {
@@ -958,7 +1001,7 @@ public final class TerminalServiceServer {
         guard fcntl(fileDescriptor, F_SETFL, currentFlags | O_NONBLOCK) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
     }
 
-    private func setBlocking(_ fileDescriptor: Int32) throws {
+    private static func setBlocking(_ fileDescriptor: Int32) throws {
         let currentFlags = fcntl(fileDescriptor, F_GETFL)
         guard currentFlags >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
         guard fcntl(fileDescriptor, F_SETFL, currentFlags & ~O_NONBLOCK) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
