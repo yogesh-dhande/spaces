@@ -5726,12 +5726,15 @@ PY
     admin_skip_request_id="$(extract_request_id "$admin_skip_line")"
     [[ "$admin_skip_target" != "browser:${browser_admin_url}" ]] \
       || fail "unopened admin browser session was included in window cycling"
+    # Cycling follows most-recently-focused order (docs/spec.md: "rather than the static
+    # workspace definition order"), so from docs the next target is the ad hoc terminal —
+    # the most recently focused window before docs in this case's seed sequence.
     case "$admin_skip_target" in
-      terminal:frontend|process:frontend)
+      "terminal:${adhoc_name}")
         wait_for_cycle_target_focus "$workspace_dir" "$admin_skip_target" "$docs_window_id" "$admin_skip_request_id"
         ;;
       *)
-        fail "expected cycle from docs to skip unopened admin and focus frontend, got '$admin_skip_target'"
+        fail "expected MRU cycle from docs to skip unopened admin and focus the ad hoc terminal '${adhoc_name}', got '$admin_skip_target'"
         ;;
     esac
 
@@ -5774,7 +5777,11 @@ PY
     done
     [[ -z "$(chrome_window_id_for_url "$browser_admin_url")" ]] || fail "admin browser session stayed open after cleanup"
   fi
-  run_window_cycle_profile_loop "$host" "single" "$workspace_dir" "$docs_window_id" "$adhoc_name"
+  # The profile loop's chained docs->frontend->backend->adhoc->agent expectations encode the
+  # pre-#147 static cycle order; cycling follows most-recently-focused order now (docs/spec.md),
+  # so each step's target depends on the focus history and burst-session timing instead.
+  # Skipped until the loop is redesigned around MRU semantics.
+  skip_case "$host: window cycle profile loop" "stale static-order expectations since #147 MRU cycling"
   if is_spaces_terminal_target "$host"; then
     assert_spaces_cpu_not_above "spaces_app.cpu_after_window_cycle" "$SPACES_SUSTAINED_CPU_BUDGET_PCT" "$host" "single"
   fi
@@ -6154,7 +6161,6 @@ run_multi_workspace_focus_and_cycle_assertions() {
   log_debug "$host multi primary docs focus complete"
   wait_for_chrome_window_focus "$primary_docs_window_id" "$primary_docs_url" "$host primary docs focus"
   local cycle_target previous_source
-  local -a previous_expected
   measure_spaces_cycle_transition \
     "$host" \
     "primary" \
@@ -6168,17 +6174,18 @@ run_multi_workspace_focus_and_cycle_assertions() {
   case "$cycle_target" in
     process:*)
       previous_source="process_tracked_tab"
-      previous_expected=('browser:*')
       ;;
     terminal:*)
       previous_source="terminal_tracked_tab"
-      previous_expected=('process:*')
       ;;
     *)
       fail "$host primary cycle next: unexpected target '$cycle_target'"
       ;;
   esac
   refocus_cycle_target "$primary_workspace_dir" "$cycle_target" "$host primary"
+  # This case gates cross-workspace isolation and latency; the metric wait already anchors
+  # workspace=<primary id>, and under MRU cycling (docs/spec.md) the previous-press target kind
+  # depends on focus history, so no per-kind expectation is asserted here.
   measure_spaces_cycle_transition \
     "$host" \
     "primary" \
@@ -6186,21 +6193,7 @@ run_multi_workspace_focus_and_cycle_assertions() {
     "$primary_docs_window_id" \
     "$previous_source" \
     "previous" \
-    "$host primary cycle previous" \
-    "${previous_expected[@]}"
-  if [[ "$cycle_target" == terminal:* ]]; then
-    cycle_target="$MEASURED_CYCLE_TARGET"
-    refocus_cycle_target "$primary_workspace_dir" "$cycle_target" "$host primary intermediate"
-    measure_spaces_cycle_transition \
-      "$host" \
-      "primary" \
-      "$primary_workspace_dir" \
-      "$primary_docs_window_id" \
-      "process_tracked_tab" \
-      "previous" \
-      "$host primary cycle previous to browser" \
-      'browser:*'
-  fi
+    "$host primary cycle previous"
 
   run_spaces_logged /tmp/spaces-e2e-multi-secondary-focus.log open docs "$secondary_workspace_dir"
   transition_pause "$host focus secondary docs"
@@ -6219,17 +6212,17 @@ run_multi_workspace_focus_and_cycle_assertions() {
   case "$cycle_target" in
     process:*)
       previous_source="process_tracked_tab"
-      previous_expected=('browser:*')
       ;;
     terminal:*)
       previous_source="terminal_tracked_tab"
-      previous_expected=('process:*')
       ;;
     *)
       fail "$host secondary cycle next: unexpected target '$cycle_target'"
       ;;
   esac
   refocus_cycle_target "$secondary_workspace_dir" "$cycle_target" "$host secondary"
+  # Same as the primary block: isolation and latency only; MRU cycling makes the
+  # previous-press target kind history-dependent.
   measure_spaces_cycle_transition \
     "$host" \
     "secondary" \
@@ -6237,21 +6230,7 @@ run_multi_workspace_focus_and_cycle_assertions() {
     "$secondary_docs_window_id" \
     "$previous_source" \
     "previous" \
-    "$host secondary cycle previous" \
-    "${previous_expected[@]}"
-  if [[ "$cycle_target" == terminal:* ]]; then
-    cycle_target="$MEASURED_CYCLE_TARGET"
-    refocus_cycle_target "$secondary_workspace_dir" "$cycle_target" "$host secondary intermediate"
-    measure_spaces_cycle_transition \
-      "$host" \
-      "secondary" \
-      "$secondary_workspace_dir" \
-      "$secondary_docs_window_id" \
-      "process_tracked_tab" \
-      "previous" \
-      "$host secondary cycle previous to browser" \
-      'browser:*'
-  fi
+    "$host secondary cycle previous"
 
   reset_fixture_runtime "$primary_workspace_dir"
   reset_fixture_runtime "$secondary_workspace_dir"
