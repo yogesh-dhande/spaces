@@ -899,12 +899,13 @@
                 }
                 markLocalOwnerCommandInputOutputResyncPending()
                 // Submit-safe send: a text payload with appendNewline is a "submit" (type this, press Enter).
-                // Agent TUIs (Claude Code, Codex) treat text bytes immediately followed by the carriage
-                // return, arriving in one PTY read burst, as a pasted block and leave it unsubmitted in the
-                // composer. So the text (which may itself contain newlines, e.g. a multi-line notification)
-                // is written first, and the CR (0x0D) is written as a separate burst after a short delay so
-                // the TUI reads it as a distinct Enter keystroke that submits. Enter is a CR because shells
-                // and Claude Code accept LF or CR while Codex submits only on CR. An empty text with
+                // Agent TUIs (Claude Code, Codex, OpenCode) treat text bytes immediately followed by the
+                // carriage return, arriving in one PTY read burst, as a pasted block and leave it
+                // unsubmitted in the composer. So the text (which may itself contain newlines, e.g. a
+                // multi-line notification) is written first, and the CR (0x0D) is written as a separate
+                // burst after a delay (see `TerminalControlInputSequencer`) so the TUI reads it as a
+                // distinct Enter keystroke that submits. Enter is a CR because shells and Claude Code
+                // accept LF or CR while Codex and OpenCode submit only on CR. An empty text with
                 // appendNewline is a bare Enter (e.g. answering a TUI dialog): send the CR immediately, there
                 // is nothing to separate. Byte payloads are opaque input rather than composer text, so they
                 // keep the single inline write. Writes land shortly after the response through the

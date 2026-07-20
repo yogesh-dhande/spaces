@@ -19,9 +19,26 @@ public enum ChromeAutomationStatus: String, Sendable, Equatable {
     case unavailable
 }
 
+/// The result of asking macOS to raise the automation consent prompt, classified so the UI can
+/// tell a genuine denial apart from macOS silently refusing to prompt at all.
+public enum ChromeAutomationAskOutcome: Sendable, Equatable {
+    /// Automation is permitted (or `unavailable`, which is non-blocking): nothing left to gate on.
+    case granted
+    /// The ask was refused and the passive re-read also reports a denial: a real, recorded "Don't Allow".
+    case deniedByUser
+    /// The ask was refused, yet the passive re-read still reports `notDetermined`, so macOS never
+    /// actually showed the consent prompt. This happens when a stale TCC automation record from a
+    /// different code signature is on file: the record's code-signing requirement no longer matches
+    /// the running binary, so macOS treats the ask as not-permitted without prompting. Ad-hoc signed
+    /// SwiftPM debug builds hit this on every rebuild because their cdhash — the TCC identity — changes
+    /// each time. The stale record must be reset (`tccutil reset AppleEvents <bundle id>`) before the
+    /// prompt can appear again.
+    case promptSuppressed
+}
+
 /// Reads and requests the Apple Events automation permission that lets Spaces control Google
 /// Chrome. There is no public TCC API to mutate the grant directly; the system consent prompt is
-/// raised by `requestAccess()`, and a denied grant is changed only by the user in System Settings.
+/// raised by `requestAccessOutcome()`, and a denied grant is changed only by the user in System Settings.
 public enum ChromeAutomationPermission {
     public static let chromeBundleID = "com.google.Chrome"
 
@@ -38,15 +55,28 @@ public enum ChromeAutomationPermission {
         #endif
     }
 
-    /// Raises the macOS consent prompt ("Spaces wants to control Google Chrome") when the
-    /// permission is still undetermined, and returns the resulting status. Once the user has
-    /// denied it, macOS no longer shows the prompt and this returns `.denied`; the caller should
-    /// then send the user to System Settings via `systemSettingsAutomationURL`.
-    @discardableResult public static func requestAccess() -> ChromeAutomationStatus {
+    /// Raises the macOS consent prompt ("Spaces wants to control Google Chrome") when the permission
+    /// is still undetermined, and classifies the result. On a refusal it re-reads the passive status
+    /// to separate a real user denial (`deniedByUser`) from macOS declining to prompt at all
+    /// (`promptSuppressed`) — the latter meaning a stale TCC record blocks the prompt and only a reset
+    /// can restore it. `granted` also covers `unavailable`, which is non-blocking.
+    public static func requestAccessOutcome() -> ChromeAutomationAskOutcome {
         #if canImport(CoreServices) && !os(Linux)
-            return determinePermission(askUserIfNeeded: true)
+            switch determinePermission(askUserIfNeeded: true) {
+            case .granted, .unavailable:
+                return .granted
+            case .denied:
+                // The ask was refused. A passive re-read that still says `notDetermined` means macOS
+                // never showed the prompt (a stale-signature TCC record suppressed it); a re-read that
+                // agrees on `denied` means the user really chose "Don't Allow".
+                return status() == .notDetermined ? .promptSuppressed : .deniedByUser
+            case .notDetermined:
+                // `askUserIfNeeded: true` resolves the undetermined state, so this is not expected;
+                // treat it as a suppressed prompt rather than silently advancing.
+                return .promptSuppressed
+            }
         #else
-            return .unavailable
+            return .granted
         #endif
     }
 
