@@ -37,7 +37,7 @@ struct RootTabView: View {
             }
             AgentsTabView(model: model).id(model.activeDeviceID).tag(SpacesMobileTab.agents).tabItem { Label("Agents", systemImage: "cpu") }
             SettingsTabView(model: model).tag(SpacesMobileTab.settings).tabItem { Label("Settings", systemImage: "gearshape") }
-        }.tint(Theme.accent).alert("Connection Error", isPresented: errorAlertBinding) {
+        }.tint(Theme.accent).safeAreaInset(edge: .top, spacing: 0) { demoModeBanner }.alert("Connection Error", isPresented: errorAlertBinding) {
             Button("OK", role: .cancel) { model.dismissError() }
         } message: {
             Text(model.errorMessage ?? "")
@@ -61,4 +61,22 @@ struct RootTabView: View {
     }
 
     private var errorAlertBinding: Binding<Bool> { Binding(get: { model.errorMessage != nil }, set: { if !$0 { model.dismissError() } }) }
+
+    /// Slim accent-tinted strip pinned above every tab while Demo Mode is on, so the sample-data context
+    /// stays visible on all four tabs and one tap turns it off. Absent (zero height) when Demo Mode is off.
+    @ViewBuilder private var demoModeBanner: some View {
+        if model.isDemoModeEnabled {
+            HStack(spacing: 8) {
+                Image(systemName: "wand.and.stars").font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.accent)
+                Text("Demo Mode — sample data").font(.system(size: 13, weight: .medium)).foregroundStyle(Theme.text)
+                Spacer(minLength: 0)
+                Button("Turn Off") {
+                    model.setDemoMode(false)
+                    Task { await model.refresh() }
+                }.font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.accent).buttonStyle(.plain)
+            }.padding(.horizontal, 16).padding(.vertical, 8).frame(maxWidth: .infinity).background(Theme.accentTint).overlay(
+                Rectangle().frame(height: 1).foregroundStyle(Theme.border), alignment: .bottom
+            ).accessibilityIdentifier("demo.banner")
+        }
+    }
 }

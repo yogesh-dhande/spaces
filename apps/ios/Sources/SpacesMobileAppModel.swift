@@ -888,6 +888,12 @@ private enum SpacesMobileMutationTimeoutRecovery {
     }
 
     func renameDevice(id: String, name: String) {
+        // The rename path reloads the on-disk device list, which would replace the synthetic
+        // Demo Mac with the parked real records mid-demo.
+        if isDemoModeEnabled {
+            connectionNotice = Self.demoModeGuardNotice
+            return
+        }
         let deviceState = SpacesMobileDeviceStore.rename(deviceID: id, name: name, fallbackSettings: settings)
         pairedDevices = deviceState.devices
     }

@@ -21,6 +21,7 @@ struct SettingsTabView: View {
                     }
                     SubscriptionSettingsSection(store: subscription)
                     settingsGroup("Appearance") { themeRow }
+                    demoModeGroup
                     settingsGroup("About") { versionRow }
                 }.padding(.vertical, 12)
             }.scrollContentBackground(.hidden).background(Theme.bg.ignoresSafeArea()).navigationTitle("Settings").tint(Theme.accent)
@@ -70,6 +71,27 @@ struct SettingsTabView: View {
         }.buttonStyle(.plain).accessibilityIdentifier(identifier)
     }
 
+    /// Demo Mode toggle plus its footer. Flipping it swaps the active client to the bundled sample data
+    /// (or restores the real devices) and refreshes so the tabs repopulate immediately.
+    private var demoModeGroup: some View {
+        settingsGroup("Demo Mode") {
+            Toggle(isOn: demoModeBinding) { settingsLabel("Demo Mode") }.settingsRowPadding().tint(Theme.accent).accessibilityIdentifier(
+                "settings.demoMode")
+            Text("Explore Spaces with sample data. Your paired devices are hidden until you turn this off.").font(.system(size: 12)).foregroundStyle(
+                Theme.mutedSecondary
+            ).frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 20).padding(.top, 2)
+        }
+    }
+
+    private var demoModeBinding: Binding<Bool> {
+        Binding(
+            get: { model.isDemoModeEnabled },
+            set: { enabled in
+                model.setDemoMode(enabled)
+                Task { await model.refresh() }
+            })
+    }
+
     private var themeRow: some View {
         HStack(spacing: 10) {
             settingsLabel("Theme")
@@ -108,7 +130,8 @@ struct PairedDevicesView: View {
     var body: some View {
         ConnectionSettingsView(
             initialSettings: model.settings, initialPairingLink: model.pendingPairingLink, pairedDevices: model.pairedDevices,
-            activeDeviceID: model.activeDeviceID, noticeMessage: model.connectionNotice, onPairingLinkConsumed: { model.clearPendingPairingLink() },
+            activeDeviceID: model.activeDeviceID, noticeMessage: model.connectionNotice, isDemoMode: model.isDemoModeEnabled,
+            onPairingLinkConsumed: { model.clearPendingPairingLink() },
             onSelectDevice: { deviceID in
                 model.selectDevice(id: deviceID)
                 Task { await model.refresh() }

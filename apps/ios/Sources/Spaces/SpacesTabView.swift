@@ -84,6 +84,10 @@ struct SpacesTabView: View {
                     Text(model.connectionNotice ?? "Open Settings and pair this device again.")
                 } actions: {
                     Button("Open Settings") { model.selectedTab = .settings }
+                    Button("Try Demo Mode") {
+                        model.setDemoMode(true)
+                        Task { await model.refresh() }
+                    }.buttonStyle(.bordered).accessibilityIdentifier("spaces.tryDemoMode")
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ScrollView {
