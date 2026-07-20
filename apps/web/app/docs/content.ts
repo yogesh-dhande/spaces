@@ -74,7 +74,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/automations",
     title: "Automations",
     summary:
-      "Run a shell command on your Mac or a paired Linux box, manually or on a schedule, even when Spaces is closed. Watch runs live, replay them later, and let spawned coding agents keep working after a run finishes.",
+      "Schedule a coding agent with a prompt, or run any shell command, on your Mac or a paired Linux box — manually or on a schedule, even when Spaces is closed. Watch runs live and replay them later.",
   },
   {
     href: "/docs/shortcuts",

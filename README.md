@@ -14,7 +14,7 @@ Manage parallel coding sessions across all of your devices
 - **Window management** — each workspace tracks its processes, browser sessions, and agent terminals so you can jump to any terminal or chrome tab with keyboard shortcuts.
 - **Caddy reverse proxy** — a bundled proxy serves every service at a stable URL like `http://api.my-branch.localhost:7391`. One address per service that never changes, and a separate cookie jar per workspace so logins don't collide across branches.
 - **Remote machines** — pair with a Mac or Ubuntu machine and drive its workspaces, terminals, and processes from your laptop. Sessions run on the remote daemon and survive app quits.
-- **Automations** — [run a shell command](https://usespaces.dev/docs/automations) on any paired device, manually or on a schedule, even when Spaces is closed. Watch it run live, replay it later, or have it spawn a coding agent for you.
+- **Automations** — [schedule a coding agent with a prompt, or run a shell script](https://usespaces.dev/docs/automations), on any paired device, manually or on a schedule, even when Spaces is closed. Watch it run live and replay it later.
 - **iPhone control** — the iOS client pairs by QR code and attaches to any live terminal session. Check on a long-running agent or process away from your desk.
 - **CLI** — [`spaces`](https://usespaces.dev/docs/cli) cli drives projects, workspaces, and terminal sessions from a shell. Scriptable, and the way coding agents report status.
 - **MCP server** — [`spaces mcp`](https://usespaces.dev/docs/mcp) exposes projects, workspaces, and terminals as tools. A coding agent can inspect and drive Spaces directly.
