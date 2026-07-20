@@ -29,6 +29,11 @@ final class DaemonLivenessState: @unchecked Sendable {
     private let lock = NSLock()
     private var sessionCount = 0
     private var certificateFingerprint: String?
+    /// Mirrors the main actor's `handoffInProgress` flag. Without this, the fast ping path would report
+    /// the daemon live for the entire up-to-10s exec-handoff preflight window during which `handle(_:)`
+    /// is already rejecting every real request with `.shuttingDown` — a client polling liveness would
+    /// see "ok" and adopt a daemon that refuses everything else.
+    private var handoffInProgress = false
 
     func storeSessionCount(_ value: Int) {
         lock.lock()
@@ -42,10 +47,34 @@ final class DaemonLivenessState: @unchecked Sendable {
         certificateFingerprint = value
     }
 
-    func snapshot() -> (sessionCount: Int, certificateFingerprint: String?) {
+    func storeHandoffInProgress(_ value: Bool) {
         lock.lock()
         defer { lock.unlock() }
-        return (sessionCount, certificateFingerprint)
+        handoffInProgress = value
+    }
+
+    func snapshot() -> (sessionCount: Int, certificateFingerprint: String?, handoffInProgress: Bool) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (sessionCount, certificateFingerprint, handoffInProgress)
+    }
+
+    /// Builds the liveness `.ping` response entirely off the main actor. It carries the same
+    /// `TerminalServiceDaemonStatus` shape as the controller's `daemonStatus()` (version, installed
+    /// version, fingerprint, and an eventually-consistent session count) so wire-compatibility
+    /// negotiation works identically, but it never blocks on the main actor — the point of the fast
+    /// path. While a handoff is in progress it instead mirrors `handle(_:)`'s own rejection exactly, so
+    /// a ping never reports the daemon live while every other request is being turned away.
+    func pingResponse() -> TerminalServiceResponse {
+        let snapshot = snapshot()
+        guard !snapshot.handoffInProgress else {
+            return TerminalServiceResponse(
+                ok: false, message: "spacesd is handing off to an updated daemon.", errorCode: .shuttingDown, servicePID: getpid())
+        }
+        let status = TerminalServiceDaemonStatus(
+            version: AppVersion.current, installedVersion: InstalledSpacesVersion.current(),
+            certificateFingerprint: snapshot.certificateFingerprint, activeSessionCount: snapshot.sessionCount)
+        return TerminalServiceResponse(ok: true, message: "pong", servicePID: getpid(), daemonStatus: status)
     }
 }
 
@@ -74,7 +103,13 @@ final class DaemonLivenessState: @unchecked Sendable {
     /// remains stable beyond the guard window starts a fresh generation chain on its next update.
     private var lastHandoffResumeUptime: TimeInterval?
     /// True while `performExecHandoff()` is between its first await and exec; see its reentrancy guard.
-    private var handoffInProgress = false
+    /// Backed by `livenessState` (rather than a plain stored property) so that single flag is also the
+    /// one the off-actor ping fast path reads — there is exactly one source of truth for "is a handoff
+    /// in progress", read from both the main actor and the socket worker.
+    private var handoffInProgress: Bool {
+        get { livenessState.snapshot().handoffInProgress }
+        set { livenessState.storeHandoffInProgress(newValue) }
+    }
     private let instanceLock: TerminalServiceInstanceLock
     private let serverQueue = DispatchQueue(label: "spaces.terminal.service")
     private lazy var server = TerminalServiceServer(
@@ -84,7 +119,7 @@ final class DaemonLivenessState: @unchecked Sendable {
         // else still funnels through `handle` on the main actor.
         livenessResponder: { [weak self] in
             guard let self else { return TerminalServiceResponse(ok: true, message: "pong", servicePID: getpid()) }
-            return self.livenessPingResponse()
+            return self.livenessState.pingResponse()
         }
     ) { [weak self] request in
         Self.runOnMainActorSynchronously {
@@ -393,18 +428,6 @@ final class DaemonLivenessState: @unchecked Sendable {
         TerminalServiceDaemonStatus(
             version: AppVersion.current, installedVersion: InstalledSpacesVersion.current(), certificateFingerprint: daemonIdentityFingerprint,
             activeSessionCount: sessionCores.count)
-    }
-
-    /// Builds the liveness `.ping` response entirely off the main actor from `livenessState`. It carries
-    /// the same `TerminalServiceDaemonStatus` shape as `daemonStatus()` (version, installed version,
-    /// fingerprint, and an eventually-consistent session count) so wire-compatibility negotiation works
-    /// identically, but it never blocks on the main actor — the point of the fast path.
-    private nonisolated func livenessPingResponse() -> TerminalServiceResponse {
-        let snapshot = livenessState.snapshot()
-        let status = TerminalServiceDaemonStatus(
-            version: AppVersion.current, installedVersion: InstalledSpacesVersion.current(),
-            certificateFingerprint: snapshot.certificateFingerprint, activeSessionCount: snapshot.sessionCount)
-        return TerminalServiceResponse(ok: true, message: "pong", servicePID: getpid(), daemonStatus: status)
     }
 
     // Exec-in-place update trigger: after a short grace so the already-sent RPC response can flush,
