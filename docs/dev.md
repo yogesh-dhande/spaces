@@ -461,6 +461,52 @@ The test reads the same `SPACES_MOBILE_UI_TEST_CONFIG_PATH` config file (and def
 
 `SPACES_MOBILE_SCREENSHOT_TAB` selects `alerts`, `spaces`, `agents`, or `settings`. `SPACES_MOBILE_SCREENSHOT_OPEN_ROW`, honored only with `SPACES_MOBILE_SCREENSHOT_TAB=spaces`, taps the first Spaces row whose visible title contains the given text, opening its terminal detail. `SPACES_MOBILE_SCREENSHOT_PAYWALL=1` launches the app without the paywall bypass so `PaywallView` renders — for the App Store Connect subscription-review screenshot — instead of navigating tabs. In the simulator the paywall's price line stays on its loading state because StoreKit has no product catalog without App Store Connect (the scheme's Run-action StoreKit configuration is not applied to a `test-without-building` UI-test launch); the real price and trial length render on TestFlight and production builds, where StoreKit serves the live product, so capture the final subscription-review screenshot from a real build.
 
+`SPACES_MOBILE_SCREENSHOT_DEMO=1` stages the same screenshots from Demo Mode instead of a paired daemon: it launches with the paywall bypass, resets to a clean not-paired state through the argument domain, enables Demo Mode, then honors the same `SPACES_MOBILE_SCREENSHOT_TAB`/`OPEN_ROW`/`HOLD_SECONDS` variables. No mobile-demo stack, config file, or `.env` is needed, so the App Store screenshot set can be produced on a plain simulator. The daemon-backed lane above is unchanged.
+
+## Demo Mode recording + App Review
+
+The iOS app ships an in-app Demo Mode that tours the whole app from a bundled sample recording with no daemon, network, or account (design in [`docs/implementation.md`](implementation.md#ios-demo-mode); UX in [`docs/spec.md`](spec.md)). It is what the App Store reviewer uses after a free sandbox purchase, and the review-notes template lives in [`docs/app-review-notes.md`](app-review-notes.md).
+
+Re-record the bundle when the recorded content or its encoding changes — the fixture content changes (`apps/macos/Tests/fixtures/e2e_demo`), the render-update wire format changes, or the iOS viewer grids change (font metrics or supported device classes). Regenerate with:
+
+```bash
+apps/macos/Tests/record_ios_demo_recording.sh
+```
+
+The script builds the debug products, seeds the storytelling fixture into an isolated profile, stages the three workspace states, records each session at the iOS-native grids, enforces the 10 MB bundle budget, and writes `apps/ios/Resources/DemoRecording/`. It is idempotent (fresh temp profile per run) and deterministic up to semantically identical decoded output, not byte-identical. Commit the regenerated bundle.
+
+The pre-submission verification is a single UI test that proves the entire feature end to end with no daemon running. Run it on a booted simulator before every submission:
+
+```bash
+xcodebuild -project apps/ios/SpacesMobile.xcodeproj -scheme SpacesMobile \
+  -only-testing:SpacesMobileUITests/SpacesMobileDemoModeUITests \
+  -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
+  -derivedDataPath apps/macos/.build/ios-derived-data test
+```
+
+It launches with only `SPACES_MOBILE_PAYWALL_BYPASS=1` and a render-dump path — no host, seed, or daemon env — enters Demo Mode from the empty state, and asserts the sample workspaces, alerts, agents, the read-only terminal transcript and its notice, and that turning Demo Mode off returns to the not-paired empty state. It shadows the persistence keys through the argument domain so a shared simulator's prior state cannot make it flaky. This test is not part of `scripts/verify.sh`; it is the manual submission gate.
+
+Produce the App Store screenshots from Demo Mode with the same `testScreenshotStaging` invocation documented above, adding `TEST_RUNNER_SPACES_MOBILE_SCREENSHOT_DEMO=1` (no mobile-demo stack or config file needed), for example:
+
+```bash
+IPHONE_UDID=<booted-udid>
+xcodebuild -project apps/ios/SpacesMobile.xcodeproj -scheme SpacesMobile \
+  -destination "platform=iOS Simulator,id=$IPHONE_UDID" \
+  -derivedDataPath apps/macos/.build/ios-derived-data \
+  -only-testing:SpacesMobileUITests/SpacesMobileScreenshotUITests build-for-testing
+
+TEST_RUNNER_SPACES_MOBILE_SCREENSHOT_DEMO=1 \
+TEST_RUNNER_SPACES_MOBILE_SCREENSHOT_TAB=agents \
+TEST_RUNNER_SPACES_MOBILE_SCREENSHOT_HOLD_SECONDS=45 \
+xcodebuild -project apps/ios/SpacesMobile.xcodeproj -scheme SpacesMobile \
+  -destination "platform=iOS Simulator,id=$IPHONE_UDID" \
+  -derivedDataPath apps/macos/.build/ios-derived-data \
+  -only-testing:SpacesMobileUITests/SpacesMobileScreenshotUITests/testScreenshotStaging \
+  test-without-building &
+sleep 33 && xcrun simctl io "$IPHONE_UDID" screenshot /tmp/agents-tab.png
+wait
+```
+
 For targeted mobile E2E runs, use `--scenario`:
 
 ```bash
