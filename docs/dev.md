@@ -63,6 +63,10 @@ apps/macos/.build/debug/spaces terminal list
 
 Override `SPACES_DB_PATH` when you need a one-off isolated profile root. Override `SPACES_RUNTIME_DIR` only when the runtime files themselves also need to move with that profile.
 
+### Keeping the Chrome Automation grant across rebuilds
+
+Ad-hoc signed SwiftPM debug builds get a fresh cdhash on every rebuild, and the cdhash is the app's TCC identity. So the macOS Automation grant that lets Spaces control Chrome — and any other TCC permission — is lost each rebuild, and the first-run setup screen reappears. Set `SPACES_DEV_CODESIGN_IDENTITY` in the gitignored repo-root `.env` to a stable signing identity (an "Apple Development: …" line from `security find-identity -v -p codesigning`); `dev-build-and-launch.sh` re-signs the built app with it after SwiftPM, keeping the TCC identity constant so the grant survives rebuilds. For a build whose stale record is already blocking the consent prompt, clear it once with `tccutil reset AppleEvents dev.usespaces.spaces`, then click Recheck (or relaunch).
+
 For branch-local Ghostty artifact setup, run:
 
 ```bash
