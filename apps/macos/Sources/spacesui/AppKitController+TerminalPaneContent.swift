@@ -32,14 +32,19 @@ extension AppKitController {
         }
     }
 
-    /// Picker-backed new tab (⌘T and the tab strip's "+"): choose a not-yet-open
-    /// session or create a fresh one; the result lands as a new selected, focused
-    /// tab in `scope`.
+    /// Picker-backed new tab (⌘T and the workspace tab strip's "+"): choose a
+    /// not-yet-open target or create a fresh session; the result lands as a new
+    /// selected, focused tab in the workspace's panel. Only `.workspace` scopes reach
+    /// this (a panel window's "+" creates directly), so the request's workspace panel
+    /// and `scope` are the same panel — the completion routes through the
+    /// open-or-focus chokepoint rather than appending unconditionally, so a session
+    /// that opened elsewhere while the picker was up (panel-window restore, IPC)
+    /// focuses its existing pane instead of duplicating it.
     func presentNewTabSessionPicker(scope: PanelScope) {
         guard let workspaceID = newTerminalWorkspaceID(for: scope) else { return }
         presentPaneSessionPicker(scope: scope, newTerminalWorkspaceID: workspaceID) { [weak self] request in
             guard let self, let request else { return }
-            self.panelCoordinator.openSessionInNewTab(request, in: scope)
+            self.panelCoordinator.openOrFocusTerminalPane(request)
         }
     }
 
