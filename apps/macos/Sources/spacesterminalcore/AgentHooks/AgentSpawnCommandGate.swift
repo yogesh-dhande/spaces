@@ -1,6 +1,6 @@
 import Foundation
 
-extension SupportedCodingAgentHook {
+extension CodingAgent {
     /// Parses the executable token from a shell command line and matches it against a supported coding
     /// agent by executable name. Leading `VAR=value` environment assignments and a leading `env` (with
     /// its own assignments) are skipped, then the executable's basename is compared to each agent's
@@ -8,7 +8,7 @@ extension SupportedCodingAgentHook {
     ///
     /// Used both to gate `spaces agent spawn` (only supported agents report the lifecycle signals spawn
     /// readiness depends on) and to derive a spawned session's default title from the agent it launches.
-    public static func matching(command: String) -> SupportedCodingAgentHook? {
+    public static func matching(command: String) -> CodingAgent? {
         guard let token = executableToken(inCommand: command) else { return nil }
         let name = (token as NSString).lastPathComponent
         return allCases.first { $0.executableNames.contains(name) }
@@ -55,8 +55,8 @@ public enum AgentSpawnCommandGate {
 
     /// Resolves the supported agent a spawn command launches, throwing `GateError.unsupportedCommand`
     /// when the command does not launch one. Pure over the command string.
-    public static func resolveSpawnableAgent(command: String) throws -> SupportedCodingAgentHook {
-        guard let hook = SupportedCodingAgentHook.matching(command: command) else { throw GateError.unsupportedCommand }
+    public static func resolveSpawnableAgent(command: String) throws -> CodingAgent {
+        guard let hook = CodingAgent.matching(command: command) else { throw GateError.unsupportedCommand }
         return hook
     }
 }

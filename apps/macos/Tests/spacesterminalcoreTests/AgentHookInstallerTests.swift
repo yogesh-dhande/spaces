@@ -50,7 +50,7 @@ import Testing
     private func read(_ url: URL) -> String { (try? String(contentsOf: url, encoding: .utf8)) ?? "" }
 
     @discardableResult private func install(
-        _ kinds: [SupportedCodingAgentHook], home: URL, fileManager: FileManager? = nil, shell: ShellProbeSpy = ShellProbeSpy()
+        _ kinds: [CodingAgent], home: URL, fileManager: FileManager? = nil, shell: ShellProbeSpy = ShellProbeSpy()
     ) throws -> AgentHookInstallOutcome {
         try AgentHookInstaller.install(
             kinds, home: home, fileManager: fileManager ?? HomeScopedFileManager(home: home), environment: environment,
@@ -80,7 +80,7 @@ import Testing
 
     /// Every install resolves the Spaces CLI to embed in the hook commands, so a home that has agents
     /// but no `spaces` cannot install anything. Tests that install put both in `~/.local/bin`.
-    private func makeAgentsAvailable(_ kinds: [SupportedCodingAgentHook], home: URL) throws {
+    private func makeAgentsAvailable(_ kinds: [CodingAgent], home: URL) throws {
         try makeSpacesCLIAvailable(home: home)
         for name in Set(kinds.flatMap(\.executableNames)) {
             let contents = name == "codex" ? Self.codexFeatureCLIScript : "#!/bin/sh\n"
@@ -154,16 +154,16 @@ import Testing
     @Test func installIsByteIdenticalOnReplayForEveryAgent() throws {
         let home = try makeHome()
         defer { try? FileManager.default.removeItem(at: home) }
-        try makeAgentsAvailable(SupportedCodingAgentHook.allCases, home: home)
+        try makeAgentsAvailable(CodingAgent.allCases, home: home)
 
-        try install(SupportedCodingAgentHook.allCases, home: home)
+        try install(CodingAgent.allCases, home: home)
         let files = [
             home.appendingPathComponent(".claude/settings.json"), home.appendingPathComponent(".codex/hooks.json"),
             home.appendingPathComponent(".codex/config.toml"), home.appendingPathComponent(".config/opencode/plugin/spaces-agent-signal.js"),
         ]
         let firstPass = files.map(read)
 
-        let replayOutcome = try install(SupportedCodingAgentHook.allCases, home: home)
+        let replayOutcome = try install(CodingAgent.allCases, home: home)
         let secondPass = files.map(read)
 
         #expect(replayOutcome.failures.isEmpty)
@@ -181,7 +181,7 @@ import Testing
         let contents = read(home.appendingPathComponent(".claude/settings.json"))
         // Exactly one Spaces command per mapped event across three installs.
         let markerCount = contents.components(separatedBy: "# \(AgentHookCommand.marker)").count - 1
-        #expect(markerCount == SupportedCodingAgentHook.claudeCode.jsonEventBindings.count)
+        #expect(markerCount == CodingAgent.claudeCode.jsonEventBindings.count)
     }
 
     // MARK: - Preserving the user's existing config

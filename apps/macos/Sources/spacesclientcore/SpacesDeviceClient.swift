@@ -270,7 +270,7 @@ public enum SpacesDeviceClient {
     /// be installed — an install lands partially, so a non-empty `failures` does not mean nothing
     /// happened. Throws only when the request itself fails.
     @discardableResult public static func installAgentHooks(
-        _ kinds: [SupportedCodingAgentHook], device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
+        _ kinds: [CodingAgent], device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(),
         profile: SpacesProfile? = nil
     ) throws -> AgentHookInstallOutcome {
         let response = try request(.init(command: .installAgentHooks(.init(kinds: kinds))), device: device, clientApp: clientApp, profile: profile)

@@ -68,7 +68,7 @@ extension SpacesDeviceAPICommand {
 
 public final class SpacesDeviceAPIServer: @unchecked Sendable {
     typealias AgentHookStatusLoader = @Sendable () -> [AgentHookStatus]
-    typealias AgentHookInstallHandler = @Sendable ([SupportedCodingAgentHook]) throws -> AgentHookInstallOutcome
+    typealias AgentHookInstallHandler = @Sendable ([CodingAgent]) throws -> AgentHookInstallOutcome
 
     private static let streamRelayReadBufferSize = 256 * 1024
     private static let defaultTerminalLinkTransferAuthorizationTTL: TimeInterval = 10 * 60

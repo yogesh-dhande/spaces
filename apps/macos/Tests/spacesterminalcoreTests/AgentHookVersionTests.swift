@@ -175,13 +175,13 @@ import Testing
         let codexDirectory = home.appendingPathComponent(".codex", isDirectory: true)
         try FileManager.default.createDirectory(at: codexDirectory, withIntermediateDirectories: true)
         try AgentHookJSONWriter.install(
-            fileURL: codexDirectory.appendingPathComponent("hooks.json"), bindings: SupportedCodingAgentHook.codex.jsonEventBindings,
+            fileURL: codexDirectory.appendingPathComponent("hooks.json"), bindings: CodingAgent.codex.jsonEventBindings,
             spacesExecutablePath: "/usr/local/bin/spaces")
 
         let disabledCodex = try makeCodexFeatureListExecutable(in: home, enabled: false)
-        #expect(SupportedCodingAgentHook.codex.installState(home: home, fileManager: .default, agentExecutablePath: disabledCodex) == .outdated)
+        #expect(CodingAgent.codex.installState(home: home, fileManager: .default, agentExecutablePath: disabledCodex) == .outdated)
 
         let enabledCodex = try makeCodexFeatureListExecutable(in: home, enabled: true)
-        #expect(SupportedCodingAgentHook.codex.installState(home: home, fileManager: .default, agentExecutablePath: enabledCodex) == .current)
+        #expect(CodingAgent.codex.installState(home: home, fileManager: .default, agentExecutablePath: enabledCodex) == .current)
     }
 }
