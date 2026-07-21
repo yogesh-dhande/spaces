@@ -15,7 +15,9 @@ struct WorkspaceControlBar: View {
     let onStart: () -> Void
     let onRestart: () -> Void
     let onStop: () -> Void
-    let onNewTerminal: () -> Void
+    /// Opens an ad hoc terminal. `nil` hides the Terminal action for backends that cannot open one
+    /// (Demo Mode), so the bar never offers a control the backend rejects.
+    let onNewTerminal: (() -> Void)?
 
     var body: some View {
         HStack(spacing: 8) {
@@ -29,8 +31,10 @@ struct WorkspaceControlBar: View {
                 WorkspaceControlButton(
                     title: "Start", systemImage: "play.fill", tint: Theme.accent, identifier: "workspace.start.\(workspace.id)", action: onStart)
             }
-            WorkspaceControlButton(
-                title: "Terminal", systemImage: "plus", tint: Theme.muted, identifier: "workspace.newTerminal.\(workspace.id)", action: onNewTerminal)
+            if let onNewTerminal {
+                WorkspaceControlButton(
+                    title: "Terminal", systemImage: "plus", tint: Theme.muted, identifier: "workspace.newTerminal.\(workspace.id)", action: onNewTerminal)
+            }
             Spacer(minLength: 0)
         }.disabled(isMutating).opacity(isMutating ? 0.5 : 1).padding(.horizontal, 20).padding(.top, 8)
     }

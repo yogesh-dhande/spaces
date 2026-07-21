@@ -143,6 +143,53 @@
             XCTAssertGreaterThan(model.undismissedAlertCount, 0)
         }
 
+        // MARK: - Gating unsupported controls
+
+        func testCanRenameIsFalseInDemoModeForOtherwiseRenamableRow() async throws {
+            let model = SpacesMobileAppModel()
+            model.setDemoMode(true)
+            await model.refresh()
+
+            let capturedOverview = try XCTUnwrap(model.overview)
+            let row = try XCTUnwrap(
+                model.workspaceGroups.flatMap(\.rows).first { $0.type == .processes }, "The demo bundle should surface a configured process row.")
+            XCTAssertFalse(model.canRename(row: row), "Demo Mode must offer no Rename; its backend rejects config edits.")
+
+            // The same row is renamable once Demo Mode is off, so only the demo guard flips it to false.
+            model.setDemoMode(false)
+            model.overview = capturedOverview
+            XCTAssertTrue(model.canRename(row: row), "A configured process row is renamable outside Demo Mode.")
+        }
+
+        // MARK: - Mutation identity guard across a Demo Mode toggle
+
+        func testMutationInFlightAcrossDemoToggleDoesNotPublishStaleOverview() async throws {
+            let staleOverview = try DemoRecordingLibrary.load(bundle: .main).overview
+            let workspace = try XCTUnwrap(staleOverview.workspaces.first)
+            var connectionSettings = SpacesMobileConnectionSettings()
+            connectionSettings.host = "127.0.0.1"
+            connectionSettings.port = 12_345
+            connectionSettings.authToken = "token"
+            connectionSettings.certificateFingerprint = "SHA256:test"
+
+            // A backend that only answers after the caller has had a chance to toggle Demo Mode, returning
+            // the previous backend's overview — which the model must drop because the identity moved on.
+            let client = SpacesDeviceAPIClient(settings: connectionSettings) { _ in
+                try? await Task.sleep(for: .milliseconds(100))
+                return SpacesDeviceAPIResponse(
+                    ok: true, message: "ok", result: .mutation(SpacesDeviceMutationResult(overview: staleOverview, workspaceID: workspace.id)))
+            }
+            let model = SpacesMobileAppModel(settings: connectionSettings, bridgeClient: client)
+
+            let mutation = Task { await model.launchWorkspace(workspace) }
+            try await Task.sleep(for: .milliseconds(20))
+            model.setDemoMode(true)
+            await mutation.value
+
+            XCTAssertTrue(model.isDemoModeEnabled)
+            XCTAssertNil(model.overview, "A mutation that lands after the Demo Mode toggle must not publish the previous backend's overview.")
+        }
+
         // MARK: - Helpers
 
         private func seedRealDevices() -> [SpacesMobilePairedDeviceRecord] {

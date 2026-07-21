@@ -1026,13 +1026,18 @@ private enum SpacesMobileMutationTimeoutRecovery {
         guard !isMutating else { return }
         isMutating = true
         defer { isMutating = false }
+        let identity = overviewIdentity
         do {
             let response = try await bridgeClient.createWorkspace(
                 projectID: projectID, branch: branch, baseBranch: baseBranch, directoryName: directoryName,
                 allowExistingBranchReuse: allowExistingBranchReuse, commandChannel: commandChannel)
-            await applyMutationResponse(response)
+            await applyMutationResponse(response, identity: identity)
+            guard identity == overviewIdentity else { return }
             isShowingWorkspaceCreateSheet = false
-        } catch { handleBridgeError(error) }
+        } catch {
+            guard identity == overviewIdentity else { return }
+            handleBridgeError(error)
+        }
     }
 
     func openWorkspaceTerminal(workspaceID: String) async -> SpacesDeviceTerminalSessionSummary? {
@@ -1070,6 +1075,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         guard !isMutating else { return }
         isMutating = true
         defer { isMutating = false }
+        let identity = overviewIdentity
         do {
             let response: SpacesDeviceAPIResponse
             switch row.source {
@@ -1087,8 +1093,11 @@ private enum SpacesMobileMutationTimeoutRecovery {
                     workspaceID: terminal.workspaceID, sessionID: sessionID, commandChannel: commandChannel)
             case .browserSession: return
             }
-            await applyMutationResponse(response)
-        } catch { handleBridgeError(error) }
+            await applyMutationResponse(response, identity: identity)
+        } catch {
+            guard identity == overviewIdentity else { return }
+            handleBridgeError(error)
+        }
     }
 
     func restart(row: SpacesMobileWorkspaceRuntimeRow) async -> SpacesDeviceTerminalSessionSummary? {
@@ -1143,7 +1152,11 @@ private enum SpacesMobileMutationTimeoutRecovery {
         guard !isMutating else { return }
         isMutating = true
         defer { isMutating = false }
-        do { await applyMutationResponse(try await operation()) } catch { handleBridgeError(error) }
+        let identity = overviewIdentity
+        do { await applyMutationResponse(try await operation(), identity: identity) } catch {
+            guard identity == overviewIdentity else { return }
+            handleBridgeError(error)
+        }
     }
 
     // MARK: - Renaming runtime rows
@@ -1165,8 +1178,12 @@ private enum SpacesMobileMutationTimeoutRecovery {
 
     /// Whether the row has a name the daemon can rename. A process or coding agent running without a
     /// configured entry has no name to edit — its name comes from the running process — and a terminal row
-    /// whose session has ended has no session to rename, so those rows offer no Rename.
-    func canRename(row: SpacesMobileWorkspaceRuntimeRow) -> Bool { renameTarget(for: row) != nil }
+    /// whose session has ended has no session to rename, so those rows offer no Rename. Demo Mode's backend
+    /// rejects config edits, so no row is renamable while it is on.
+    func canRename(row: SpacesMobileWorkspaceRuntimeRow) -> Bool {
+        guard !isDemoModeEnabled else { return false }
+        return renameTarget(for: row) != nil
+    }
 
     /// Renames a runtime row. Renaming a configured process, coding agent, or browser session edits its
     /// workspace-config entry, so a running process keeps its current name until it is restarted — the same
@@ -1352,30 +1369,40 @@ private enum SpacesMobileMutationTimeoutRecovery {
         guard !isMutating else { return nil }
         isMutating = true
         defer { isMutating = false }
+        let identity = overviewIdentity
         do {
             let response = try await operation()
-            await applyMutationResponse(response)
+            await applyMutationResponse(response, identity: identity)
+            // The connection changed while the mutation was in flight: the published overview belongs to
+            // the previous backend, so resolving a session from it would hand back the wrong device's row.
+            guard identity == overviewIdentity else { return nil }
             if let sessionID = response.sessionID { return overview?.sessions.first(where: { $0.id == sessionID }) }
             if let fallbackRowID { return refreshedSession(forRowID: fallbackRowID) }
             return nil
         } catch {
+            guard identity == overviewIdentity else { return nil }
             if let fallbackRowID, isMutationTimeout(error),
-                let session = await reconciledSessionAfterMutationTimeout(rowID: fallbackRowID, timeoutRecovery: timeoutRecovery)
+                let session = await reconciledSessionAfterMutationTimeout(rowID: fallbackRowID, timeoutRecovery: timeoutRecovery, identity: identity)
             {
                 return session
             }
+            guard identity == overviewIdentity else { return nil }
             handleBridgeError(error)
             return nil
         }
     }
 
-    private func applyMutationResponse(_ response: SpacesDeviceAPIResponse) async {
-        if let overview = response.overview {
-            await updateBrowserRoutes(overview: overview)
-            self.overview = overview
-            connectionNotice = nil
-            errorMessage = nil
-        }
+    /// Publishes a mutation's refreshed overview, but only while the connection it was issued against is
+    /// still active. `identity` is captured before the mutation's await; a device switch, removal, auth
+    /// reset, or Demo Mode toggle bumps `overviewIdentity`, so a mutation that lands after one of those
+    /// must not overwrite the new connection's state with the previous backend's overview.
+    private func applyMutationResponse(_ response: SpacesDeviceAPIResponse, identity: Int) async {
+        guard let overview = response.overview, identity == overviewIdentity else { return }
+        await updateBrowserRoutes(overview: overview)
+        guard identity == overviewIdentity else { return }
+        self.overview = overview
+        connectionNotice = nil
+        errorMessage = nil
     }
 
     private func handleBridgeError(_ error: Error) {
@@ -1387,7 +1414,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         errorMessage = error.localizedDescription
     }
 
-    private func reconciledSessionAfterMutationTimeout(rowID: String, timeoutRecovery: SpacesMobileMutationTimeoutRecovery) async
+    private func reconciledSessionAfterMutationTimeout(rowID: String, timeoutRecovery: SpacesMobileMutationTimeoutRecovery, identity: Int) async
         -> SpacesDeviceTerminalSessionSummary?
     {
         if timeoutRecovery.acceptsCachedOverview, let session = refreshedSession(forRowID: rowID) {
@@ -1397,7 +1424,11 @@ private enum SpacesMobileMutationTimeoutRecovery {
         }
         do {
             let refreshedOverview = try await bridgeClient.fetchOverview(commandChannel: commandChannel)
+            // The connection changed while reconciling: this overview is the previous backend's, so it must
+            // not be published as the current connection's state.
+            guard identity == overviewIdentity else { return nil }
             await updateBrowserRoutes(overview: refreshedOverview)
+            guard identity == overviewIdentity else { return nil }
             overview = refreshedOverview
             errorMessage = nil
             connectionNotice = nil

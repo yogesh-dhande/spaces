@@ -164,6 +164,134 @@
                 refreshed.overview?.workspaces.first { $0.id == running.workspaceID }?.processRows.first { $0.id == running.id })
             XCTAssertEqual(refreshedRow.runState, .exited)
         }
+
+        // MARK: - Synthesizing sessions for not-started rows
+
+        /// The atlas workspace and its not-started "frontend" process row (nil process/session ids).
+        private func notStartedProcessRow(in library: DemoRecordingLibrary, named name: String = "frontend") throws -> (
+            workspace: SpacesDeviceWorkspaceSummary, row: SpacesDeviceWorkspaceProcessRow
+        ) {
+            try XCTUnwrap(
+                library.overview.workspaces.lazy.compactMap { workspace -> (SpacesDeviceWorkspaceSummary, SpacesDeviceWorkspaceProcessRow)? in
+                    guard let row = workspace.processRows.first(where: { $0.name == name && $0.runState == .notStarted && $0.sessionID == nil })
+                    else { return nil }
+                    return (workspace, row)
+                }.first, "Expected a not-started \(name) process row.")
+        }
+
+        func testRunningNotStartedProcessRowSynthesizesConsistentSession() async throws {
+            let library = try loadLibrary()
+            let backend = DemoDeviceBackend(library: library)
+            let (workspace, row) = try notStartedProcessRow(in: library)
+
+            let response = await backend.serve(
+                SpacesDeviceAPIRequest(
+                    command: .runWorkspaceProcess(.init(workspaceID: workspace.id, processKey: row.name, processTemplateID: row.templateID ?? row.id))))
+            XCTAssertTrue(response.ok)
+
+            let mutated = try XCTUnwrap(response.overview?.workspaces.first { $0.id == workspace.id }?.processRows.first { $0.id == row.id })
+            XCTAssertEqual(mutated.runState, .running)
+            let processID = try XCTUnwrap(mutated.processID, "A started row must carry a synthetic process id so it can be stopped.")
+            let sessionID = try XCTUnwrap(mutated.sessionID, "A started row must carry a synthetic session id so it can be opened.")
+
+            let summary = try XCTUnwrap(
+                response.overview?.sessions.first { $0.id == sessionID }, "overview.sessions must carry the synthesized session summary.")
+            XCTAssertEqual(summary.workspaceID, workspace.id)
+            XCTAssertEqual(summary.state, .running)
+            XCTAssertEqual(summary.title, row.name)
+
+            // Opening the synthesized session replays a recorded frame.
+            let state = await backend.serve(SpacesDeviceAPIRequest(command: .state(.init(sessionID: sessionID))))
+            XCTAssertTrue(state.ok)
+            XCTAssertNotNil(state.sessionState?.renderSnapshot, "The synthesized session must replay a recorded terminal frame.")
+
+            // Stopping the synthesized row through the normal process path flips it to exited.
+            let stop = await backend.serve(
+                SpacesDeviceAPIRequest(command: .stopWorkspaceProcess(.init(workspaceID: workspace.id, processID: processID, processKey: row.name))))
+            XCTAssertTrue(stop.ok)
+            let stopped = try XCTUnwrap(stop.overview?.workspaces.first { $0.id == workspace.id }?.processRows.first { $0.id == row.id })
+            XCTAssertEqual(stopped.runState, .exited)
+        }
+
+        func testWorkspaceLaunchSynthesizesEveryNotStartedRow() async throws {
+            let library = try loadLibrary()
+            let backend = DemoDeviceBackend(library: library)
+            let (workspace, _) = try notStartedProcessRow(in: library)
+
+            let response = await backend.serve(SpacesDeviceAPIRequest(command: .launchWorkspace(.init(workspaceID: workspace.id))))
+            XCTAssertTrue(response.ok)
+
+            let startedRows = try XCTUnwrap(response.overview?.workspaces.first { $0.id == workspace.id }?.processRows)
+            let sessionIDs = startedRows.compactMap(\.sessionID)
+            XCTAssertEqual(startedRows.count, sessionIDs.count, "Launching the workspace must synthesize a session for every process row.")
+            XCTAssertEqual(Set(sessionIDs).count, sessionIDs.count, "Each synthesized session id must be distinct.")
+            for row in startedRows {
+                XCTAssertEqual(row.runState, .running)
+                XCTAssertNotNil(row.processID)
+                let sessionID = try XCTUnwrap(row.sessionID)
+                let state = await backend.serve(SpacesDeviceAPIRequest(command: .state(.init(sessionID: sessionID))))
+                XCTAssertNotNil(state.sessionState?.renderSnapshot)
+            }
+        }
+
+        // MARK: - Viewport-appropriate grid
+
+        func testResizeServesNearestGridRecording() async throws {
+            let library = try loadLibrary()
+            let backend = DemoDeviceBackend(library: library)
+            let sessionID = "demo-harbor-backend"
+            // The recorder captures whatever grid the terminal actually settled on, which can differ by a
+            // cell from the manifest's requested grid — so expectations come from the recordings
+            // themselves, and the assertion is grid *selection*, not exact dimensions.
+            let phoneRecording = try XCTUnwrap(library.payload(forSessionSlug: sessionID, requested: nil)?.renderSnapshot)
+            let padRecording = try XCTUnwrap(
+                library.payload(forSessionSlug: sessionID, requested: DemoRecordingGrid(columns: 116, rows: 78))?.renderSnapshot)
+            XCTAssertNotEqual(
+                [phoneRecording.columns, phoneRecording.rows], [padRecording.columns, padRecording.rows],
+                "The two grid recordings must be distinguishable for this test to prove selection.")
+
+            // Without any resize the smallest (phone) recording is served.
+            let phone = await backend.serve(SpacesDeviceAPIRequest(command: .state(.init(sessionID: sessionID))))
+            let phoneSnapshot = try XCTUnwrap(phone.sessionState?.renderSnapshot)
+            XCTAssertEqual(phoneSnapshot.columns, phoneRecording.columns)
+            XCTAssertEqual(phoneSnapshot.rows, phoneRecording.rows)
+
+            // After a resize toward the iPad grid, the iPad recording is served.
+            let resize = await backend.serve(
+                SpacesDeviceAPIRequest(command: .terminalControl(.init(action: .resize, sessionID: sessionID, clientID: "c", columns: 116, rows: 78))))
+            XCTAssertTrue(resize.ok)
+            let pad = await backend.serve(SpacesDeviceAPIRequest(command: .state(.init(sessionID: sessionID))))
+            let padSnapshot = try XCTUnwrap(pad.sessionState?.renderSnapshot)
+            XCTAssertEqual(padSnapshot.columns, padRecording.columns)
+            XCTAssertEqual(padSnapshot.rows, padRecording.rows)
+        }
+
+        func testDemoViewportResizeSwapsInNearestGridFrame() async throws {
+            let library = try loadLibrary()
+            let backend = DemoDeviceBackend(library: library)
+            let padRecording = try XCTUnwrap(
+                library.payload(forSessionSlug: "demo-harbor-backend", requested: DemoRecordingGrid(columns: 116, rows: 78))?.renderSnapshot)
+            let client = SpacesDeviceAPIClient(settings: settings(), backend: backend)
+            let session = SpacesDeviceTerminalSessionSummary(
+                id: "demo-harbor-backend", title: "backend", workingDirectory: "/tmp", shell: "/bin/zsh", command: nil, state: .running,
+                backend: .ghosttyEmbedded, lifetimePolicy: .persistent, servicePID: 0, childPID: nil, workspaceID: "workspace", workspaceTitle: nil,
+                projectID: nil, projectName: nil, createdAt: "2026-06-04T14:23:10Z", updatedAt: "2026-06-04T14:23:23Z", isControlAvailable: true,
+                isSubscriptionAvailable: true, attachmentSnapshot: TerminalSessionAttachmentSnapshot(), rowKind: .process, rowSourceID: nil,
+                hasFinalRender: false)
+            let model = TerminalViewerModel(
+                session: session, settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in }, bridgeClient: client,
+                isDemoMode: true)
+
+            // In Demo Mode a viewport change sends a resize and refreshes; the backend then serves the
+            // recording captured nearest that viewport (the iPad grid here), which the model applies.
+            model.updateViewportSize(columns: 116, rows: 78)
+            for _ in 0..<200 {
+                if model.snapshotColumns == padRecording.columns { break }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            XCTAssertEqual(model.snapshotColumns, padRecording.columns)
+            XCTAssertEqual(model.snapshotRows, padRecording.rows)
+        }
     }
 
     /// Lock-guarded string box so the synchronous subscribe callback can hand text back to the test.

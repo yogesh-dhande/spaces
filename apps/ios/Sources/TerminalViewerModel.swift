@@ -540,9 +540,18 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     }
 
     func updateViewportSize(columns: Int, rows: Int) {
-        guard !isEndedState else { return }
         let resolved = (columns: max(columns, 1), rows: max(rows, 1))
         guard viewportSize?.columns != resolved.columns || viewportSize?.rows != resolved.rows else { return }
+        if isDemoMode {
+            // Demo Mode never takes ownership, so the owner resize handshake below never runs and the
+            // in-memory backend would only ever serve its smallest (phone) recording. Report the viewport
+            // to the backend and refresh so it serves the recording captured nearest this size. Applies
+            // regardless of run state: the read-only recorded surface reports its viewport once mounted.
+            viewportSize = resolved
+            Task { [weak self] in await self?.applyDemoViewportResize(columns: resolved.columns, rows: resolved.rows) }
+            return
+        }
+        guard !isEndedState else { return }
         viewportSize = resolved
         trace(
             "viewport_update columns=\(resolved.columns) rows=\(resolved.rows) owner=\(isOwner ? 1 : 0) busy=\(isBusy ? 1 : 0) syncing=\(isSynchronizingOwnership ? 1 : 0) sync_scheduled=\(isOwnershipSynchronizationScheduled ? 1 : 0)"
@@ -555,6 +564,24 @@ extension SpacesDeviceTerminalLinkArtifactKind {
                 scheduleOwnershipSynchronization()
             }
         }
+    }
+
+    /// Tells the demo backend the current viewport and refreshes so it swaps in the recording captured
+    /// nearest this size. The demo backend ignores the epoch/serial and just records the requested grid,
+    /// so the available (nil) owner state is fine to pass. A full-frame recording always replaces the
+    /// prior frame in the state reducer, so the refreshed grid's frame renders without any revision
+    /// bookkeeping.
+    private func applyDemoViewportResize(columns: Int, rows: Int) async {
+        do {
+            try await bridgeClient.resize(
+                sessionID: session.id, clientID: remoteClient.id, columns: columns, rows: rows, ownerEpoch: currentOwnerEpoch, resizeSerial: nil,
+                timeout: Self.stateRequestTimeout)
+        } catch {
+            // A demo resize only records the viewport in memory; a failure leaves the current frame in
+            // place, so there is nothing to recover.
+            trace("demo_viewport_resize_failure error=\(sanitizedTraceDetail(error.localizedDescription))")
+        }
+        await refreshLatestState(timeout: Self.stateRequestTimeout, ignoreTransientTimeout: true, reason: "demo_viewport_resize")
     }
 
     func sendText(_ text: String, appendNewline: Bool = false, asPaste: Bool = false) async {

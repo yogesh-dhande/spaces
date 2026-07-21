@@ -65,7 +65,9 @@ struct SpacesTabView: View {
 
     @ToolbarContentBuilder private var toolbarContent: some ToolbarContent {
         ToolbarItem(placement: .topBarTrailing) {
-            if model.settings.isPaired {
+            // Demo Mode's backend cannot create workspaces, so the New Workspace action is hidden rather
+            // than shown and left to fail.
+            if model.settings.isPaired && !model.isDemoModeEnabled {
                 Button {
                     model.isShowingWorkspaceCreateSheet = true
                 } label: {
@@ -240,20 +242,15 @@ struct SpacesTabView: View {
                     Image(systemName: isCollapsed ? "chevron.right" : "chevron.down").font(.system(size: 12, weight: .semibold)).foregroundStyle(
                         Theme.mutedSecondary)
                 }.contentShape(Rectangle())
-            }.buttonStyle(.plain).accessibilityIdentifier("workspace.band.\(group.id)").contextMenu {
-                Button {
-                    pendingHideWorkspace = group.workspace
-                } label: {
-                    Label("Hide", systemImage: "eye.slash")
-                }.disabled(model.isMutating)
-            }
+            }.buttonStyle(.plain).accessibilityIdentifier("workspace.band.\(group.id)").modifier(WorkspaceBandContextMenu(model: model, workspace: group.workspace) { pendingHideWorkspace = group.workspace })
             if !isCollapsed {
                 VStack(spacing: 0) {
                     WorkspaceControlBar(
                         workspace: group.workspace, isMutating: model.isMutating, onStart: { Task { await model.launchWorkspace(group.workspace) } },
                         onRestart: { Task { await model.restartWorkspace(group.workspace) } },
                         onStop: { Task { await model.stopWorkspace(group.workspace) } },
-                        onNewTerminal: { pendingTerminalLaunch = PendingTerminalLaunch(workspace: group.workspace) })
+                        // Demo Mode's backend does not open ad hoc terminals; hide the action there.
+                        onNewTerminal: model.isDemoModeEnabled ? nil : { pendingTerminalLaunch = PendingTerminalLaunch(workspace: group.workspace) })
                     if group.rows.isEmpty {
                         Text("No configured rows").font(.system(size: 12)).foregroundStyle(Theme.muted).frame(
                             maxWidth: .infinity, alignment: .leading
@@ -394,6 +391,29 @@ struct SpacesTabView: View {
             ) { RowChevron() }
         }.buttonStyle(.plain).disabled(model.isMutating || (!session.isControlAvailable && !session.hasFinalRender)).accessibilityIdentifier(
             "terminal.row.\(session.id)")
+    }
+}
+
+/// The workspace band's context menu — its only entry is Hide. Demo Mode's backend cannot hide a
+/// workspace, and the band has no other menu entry, so in Demo Mode the band presents no context menu
+/// rather than an empty one.
+private struct WorkspaceBandContextMenu: ViewModifier {
+    let model: SpacesMobileAppModel
+    let workspace: SpacesDeviceWorkspaceSummary
+    let onHide: () -> Void
+
+    func body(content: Content) -> some View {
+        if model.isDemoModeEnabled {
+            content
+        } else {
+            content.contextMenu {
+                Button {
+                    onHide()
+                } label: {
+                    Label("Hide", systemImage: "eye.slash")
+                }.disabled(model.isMutating)
+            }
+        }
     }
 }
 
