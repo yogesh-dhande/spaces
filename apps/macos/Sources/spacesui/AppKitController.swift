@@ -1752,12 +1752,33 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let deviceID = request.deviceID ?? deviceID(forWorkspaceID: request.workspaceID)
         guard let device = deviceForMutation(deviceID: deviceID) else { return .failure(Self.deviceNotLoadedError()) }
         let clientApp = SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)
+        let isLocalDevice = device.id == SpacesPairedDeviceRecord.localDeviceID
+        // For the local device, re-resolve the daemon's current Device API port (and ensure it is
+        // running) the way the CLI does per request. The stored paired_devices row goes stale when
+        // the local daemon idle-shuts-down and rebinds a port; seeding the fresh endpoint here — off
+        // the main actor, before the model and its request client are built — keeps the pane's first
+        // control connect fast instead of blocking the main actor on a dead port. The bootstrap goes
+        // through the process-wide single-flight shared with the models' recovery paths: pane
+        // restoration prepares many panes concurrently, and uncoalesced bootstraps presenting the
+        // same stale token would each mint a distinct replacement, seeding all but the last-prepared
+        // pane with an already-revoked token. Best-effort: a failed re-resolution falls back to the
+        // stored row, and the model's connect-time recovery still heals the port later.
+        let refreshedLocalDevice = isLocalDevice ? await LocalDeviceRecoveryBootstrap.run(clientApp: clientApp)?.record : nil
         let result: Result<DeviceTerminalSessionStateModel.PreparedCredentials, Error> = await Task.detached(priority: .userInitiated) {
-            do { return .success(try DeviceTerminalSessionStateModel.resolveCredentials(device: device, clientApp: clientApp)) } catch {
-                return .failure(error)
-            }
+            do {
+                // Resolve credentials from the same record the endpoint came from: the bootstrap above may
+                // have re-paired against a daemon whose TLS identity rotated, so `resolveCredentials` must
+                // read the refreshed record's fingerprint. Resolving before the bootstrap would pair the
+                // rotated daemon's fresh host/port with the stale token file's fingerprint — its
+                // re-bootstrap branch only fires on a missing token — and pin-fail every connect.
+                let credentials = try DeviceTerminalSessionStateModel.resolveCredentials(
+                    device: refreshedLocalDevice ?? device, clientApp: clientApp)
+                return .success(credentials)
+            } catch { return .failure(error) }
         }.value
-        return result.map { request.prepared(credentials: $0) }
+        return result.map { credentials in
+            request.prepared(credentials: credentials, resolvedLocalDevice: refreshedLocalDevice)
+        }
     }
 
     /// Resolves a session's pane open request. An open/focus IPC can arrive before the
@@ -1852,7 +1873,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             // A global-window pane can mix devices, so its request carries deviceID
             // directly; otherwise it derives from the request's workspace.
             let resolvedDeviceID = request.deviceID ?? deviceID(forWorkspaceID: request.workspaceID)
-            let device = deviceForMutation(deviceID: resolvedDeviceID)
+            // Prefer the local device endpoint re-resolved during preparation (current port, daemon
+            // ensured running) over the possibly-stale stored row, so the model's request client and
+            // subscription stream target a live port from the start (issue #185). Remote devices carry
+            // `nil` here and use the stored record.
+            let device = request.resolvedLocalDevice ?? deviceForMutation(deviceID: resolvedDeviceID)
             guard let preparedCredentials = request.preparedCredentials else {
                 throw WorkspaceError.invalidArgument(message: "Terminal credentials are still preparing.")
             }
@@ -3254,11 +3279,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         let createdAt: String?
         let updatedAt: String?
         let preparedCredentials: DeviceTerminalSessionStateModel.PreparedCredentials?
+        /// For the local device, the daemon's current Device API endpoint re-resolved off the main actor
+        /// during preparation (the same per-request resolution the CLI does), which also ensures the
+        /// daemon is running. The pane's state model seeds its request client and subscription stream from
+        /// this instead of the possibly-stale stored `paired_devices` row, so the model's first control
+        /// connect — which runs synchronously on the main actor — targets a live port and never blocks the
+        /// UI on a dead one (issue #185). `nil` for remote devices (stable port) and until preparation runs.
+        let resolvedLocalDevice: SpacesPairedDeviceRecord?
 
         init(
             workspaceID: String, deviceID: String? = nil, sessionID: String, title: String, workingDirectory: String, kind: TerminalSessionKind,
             shell: String? = nil, command: String? = nil, initialState: TerminalSessionState? = nil, servicePID: Int32? = nil, childPID: Int32? = nil,
-            createdAt: String? = nil, updatedAt: String? = nil, preparedCredentials: DeviceTerminalSessionStateModel.PreparedCredentials? = nil
+            createdAt: String? = nil, updatedAt: String? = nil, preparedCredentials: DeviceTerminalSessionStateModel.PreparedCredentials? = nil,
+            resolvedLocalDevice: SpacesPairedDeviceRecord? = nil
         ) {
             self.workspaceID = workspaceID
             self.deviceID = deviceID
@@ -3274,13 +3307,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             self.createdAt = createdAt
             self.updatedAt = updatedAt
             self.preparedCredentials = preparedCredentials
+            self.resolvedLocalDevice = resolvedLocalDevice
         }
 
-        func prepared(credentials: DeviceTerminalSessionStateModel.PreparedCredentials) -> DeviceTerminalOpenRequest {
+        func prepared(credentials: DeviceTerminalSessionStateModel.PreparedCredentials, resolvedLocalDevice: SpacesPairedDeviceRecord?)
+            -> DeviceTerminalOpenRequest
+        {
             DeviceTerminalOpenRequest(
                 workspaceID: workspaceID, deviceID: deviceID, sessionID: sessionID, title: title, workingDirectory: workingDirectory, kind: kind,
                 shell: shell, command: command, initialState: initialState, servicePID: servicePID, childPID: childPID, createdAt: createdAt,
-                updatedAt: updatedAt, preparedCredentials: credentials)
+                updatedAt: updatedAt, preparedCredentials: credentials, resolvedLocalDevice: resolvedLocalDevice)
         }
     }
 
