@@ -84,10 +84,11 @@ final class TerminalTranscriptTrimTests: XCTestCase {
         let payload = Data(repeating: 0x61, count: 500)
         try handle.write(contentsOf: payload)
 
-        let newEnd = try TerminalTranscriptTrim.trimIfNeeded(
+        let result = try TerminalTranscriptTrim.trimIfNeeded(
             outputPath: url.path, writeHandle: handle, currentEndOffset: 500, columns: 80, rows: 24, triggerBytes: 1000, retainedBytes: 400)
 
-        XCTAssertEqual(newEnd, 500)
+        XCTAssertEqual(result.endOffset, 500)
+        XCTAssertTrue(result.writeHandle === handle, "A no-op trim must return the caller's own handle unchanged.")
         XCTAssertEqual(try Data(contentsOf: url), payload, "Transcript below the trigger must be left untouched.")
     }
 
@@ -96,12 +97,13 @@ final class TerminalTranscriptTrimTests: XCTestCase {
         let filler = lineFiller(prefix: "SEQ", minBytes: 6000)
         try handle.write(contentsOf: filler.data)
 
-        let newEnd = try TerminalTranscriptTrim.trimIfNeeded(
+        let result = try TerminalTranscriptTrim.trimIfNeeded(
             outputPath: url.path, writeHandle: handle, currentEndOffset: UInt64(filler.data.count), columns: 80, rows: 24,
             triggerBytes: 4000, retainedBytes: 2000)
+        addTeardownBlock { [writeHandle = result.writeHandle] in try? writeHandle.close() }
 
         let onDisk = try Data(contentsOf: url)
-        XCTAssertEqual(onDisk.count, Int(newEnd))
+        XCTAssertEqual(onDisk.count, Int(result.endOffset))
         XCTAssertEqual(onDisk.first, 0x1B, "A trimmed transcript must begin with the state preamble, not raw retained bytes.")
         let (_, tail) = try splitPreambleAndTail(onDisk)
         let tailText = String(decoding: tail, as: UTF8.self)
@@ -114,15 +116,18 @@ final class TerminalTranscriptTrimTests: XCTestCase {
         let filler = lineFiller(prefix: "SEQ", minBytes: 6000)
         try handle.write(contentsOf: filler.data)
 
-        let newEnd = try TerminalTranscriptTrim.trimIfNeeded(
+        let result = try TerminalTranscriptTrim.trimIfNeeded(
             outputPath: url.path, writeHandle: handle, currentEndOffset: UInt64(filler.data.count), columns: 80, rows: 24,
             triggerBytes: 4000, retainedBytes: 2000)
-        // The write handle must be positioned at the new end so appends do not overwrite retained bytes.
+        XCTAssertFalse(result.writeHandle === handle, "A trim must return a fresh handle on the replaced file, not the caller's old one.")
+        addTeardownBlock { [writeHandle = result.writeHandle] in try? writeHandle.close() }
+        // Appends must go through the RETURNED handle (the old one points at the unlinked pre-trim inode),
+        // positioned at the new end so they do not overwrite retained bytes.
         let appended = Data("APPENDED\n".utf8)
-        try handle.write(contentsOf: appended)
+        try result.writeHandle.write(contentsOf: appended)
 
         let onDisk = try Data(contentsOf: url)
-        XCTAssertEqual(onDisk.count, Int(newEnd) + appended.count)
+        XCTAssertEqual(onDisk.count, Int(result.endOffset) + appended.count)
         XCTAssertEqual(onDisk.suffix(appended.count), appended)
     }
 
@@ -357,18 +362,20 @@ final class TerminalTranscriptTrimTests: XCTestCase {
         payload.append(lineFiller(prefix: "FIRST", minBytes: 8000).data)
         try handle.write(contentsOf: payload)
 
-        var endOffset = try TerminalTranscriptTrim.trimIfNeeded(
+        var trim = try TerminalTranscriptTrim.trimIfNeeded(
             outputPath: url.path, writeHandle: handle, currentEndOffset: UInt64(payload.count), columns: 80, rows: 24,
             triggerBytes: 4000, retainedBytes: 2000)
 
         // Append more filler to cross the trigger again, then trim a second time. The second trim's
-        // head replay [0..cut] starts from the FIRST trim's preamble, so state must remain correct.
+        // head replay [0..cut] starts from the FIRST trim's preamble, so state must remain correct. All
+        // appends and trims must flow through the adopted handle (each trim replaces the inode).
         let more = lineFiller(prefix: "SECOND", minBytes: 4000).data
-        try handle.write(contentsOf: more)
-        endOffset = try TerminalTranscriptTrim.trimIfNeeded(
-            outputPath: url.path, writeHandle: handle, currentEndOffset: endOffset + UInt64(more.count), columns: 80, rows: 24,
+        try trim.writeHandle.write(contentsOf: more)
+        let endOffsetBeforeSecondTrim = trim.endOffset + UInt64(more.count)
+        trim = try TerminalTranscriptTrim.trimIfNeeded(
+            outputPath: url.path, writeHandle: trim.writeHandle, currentEndOffset: endOffsetBeforeSecondTrim, columns: 80, rows: 24,
             triggerBytes: 4000, retainedBytes: 2000)
-        _ = endOffset
+        addTeardownBlock { [writeHandle = trim.writeHandle] in try? writeHandle.close() }
 
         let restored = try replaySession(try Data(contentsOf: url))
         defer { spaces_ghostty_vt_session_free(restored) }
@@ -377,5 +384,84 @@ final class TerminalTranscriptTrimTests: XCTestCase {
         XCTAssertTrue(modeIsSet(restored, 1006), "SGR mouse must survive two successive trims")
         XCTAssertTrue(modeIsSet(restored, 1), "DECCKM must survive two successive trims")
         XCTAssertTrue(String(decoding: try Data(contentsOf: url), as: UTF8.self).contains("SECOND"), "Newest content must survive the second trim.")
+    }
+
+    // MARK: - Failure safety (atomic replace)
+
+    /// A trim that fails before the atomic rename must leave `output.log` byte-identical and the caller's
+    /// ORIGINAL handle still valid at the original end. The failure is forced by making the transcript's
+    /// directory read-only so the sibling temp file (`output.log.trim`) cannot be created — a
+    /// deterministic seam that trips after the head/tail are read but before the rename. The pre-opened
+    /// write handle keeps working because its descriptor was opened before the directory was locked, so
+    /// this isolates "temp staging fails" from "the transcript is inaccessible".
+    ///
+    /// Red-first note: against the old in-place rewrite this seam would NOT throw — the old code created
+    /// no temp file and wrote preamble+tail straight through the already-open descriptor, so a read-only
+    /// directory left it free to rewrite the file. `XCTAssertThrowsError` plus the byte-identical
+    /// assertion is exactly the atomic-replace contract the old code violated. (True crash-mid-rewrite
+    /// injection is not practical in a unit test and is intentionally not attempted here.)
+    func testFailedTrimLeavesOriginalIntactAndHandleUsable() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("output.log")
+        FileManager.default.createFile(atPath: url.path, contents: nil)
+        let handle = try FileHandle(forWritingTo: url)
+        addTeardownBlock {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)
+            try? handle.close()
+            try? FileManager.default.removeItem(at: dir)
+        }
+
+        let filler = lineFiller(prefix: "SEQ", minBytes: 6000)
+        try handle.write(contentsOf: filler.data)
+        let before = try Data(contentsOf: url)
+
+        // Lock the directory: the sibling temp file can no longer be created, so the trim throws before
+        // it can rename anything over output.log.
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: dir.path)
+
+        XCTAssertThrowsError(
+            try TerminalTranscriptTrim.trimIfNeeded(
+                outputPath: url.path, writeHandle: handle, currentEndOffset: UInt64(filler.data.count), columns: 80, rows: 24,
+                triggerBytes: 4000, retainedBytes: 2000),
+            "A trim that cannot stage its temp file must throw, not rewrite output.log in place.")
+
+        // The original transcript is byte-identical: the trim never touched it.
+        XCTAssertEqual(try Data(contentsOf: url), before, "A failed trim must leave output.log byte-identical.")
+
+        // Restore write access, then confirm the ORIGINAL handle still appends at the original end — the
+        // trim never seeked or wrote it, so its position is exactly where the last append left it.
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)
+        let appended = Data("AFTER-FAILURE\n".utf8)
+        try handle.write(contentsOf: appended)
+        let after = try Data(contentsOf: url)
+        XCTAssertEqual(after.count, before.count + appended.count, "The original handle must append at the original end after a failed trim.")
+        XCTAssertEqual(after.suffix(appended.count), appended)
+        XCTAssertEqual(after.prefix(before.count), before, "A failed trim plus a later append must preserve every pre-existing byte.")
+    }
+
+    /// The successful-trim contract: appends through the RETURNED handle land immediately after the
+    /// bounded content, and the on-disk file is exactly preamble+tail (no stale middle bytes from the
+    /// pre-trim file, which the in-place rewrite risked leaving behind).
+    func testSuccessfulTrimReplacesFileAndReturnedHandleAppendsAtEnd() throws {
+        let (url, handle) = try makeTranscriptFile()
+        let filler = lineFiller(prefix: "SEQ", minBytes: 6000)
+        try handle.write(contentsOf: filler.data)
+
+        let result = try TerminalTranscriptTrim.trimIfNeeded(
+            outputPath: url.path, writeHandle: handle, currentEndOffset: UInt64(filler.data.count), columns: 80, rows: 24,
+            triggerBytes: 4000, retainedBytes: 2000)
+        addTeardownBlock { [writeHandle = result.writeHandle] in try? writeHandle.close() }
+
+        let trimmed = try Data(contentsOf: url)
+        XCTAssertEqual(trimmed.count, Int(result.endOffset), "The replaced file's size must equal the reported end offset.")
+        let (preamble, tail) = try splitPreambleAndTail(trimmed)
+        XCTAssertEqual(
+            trimmed, preamble + tail, "The replaced file must be exactly preamble+tail with no stale bytes from the pre-trim transcript.")
+
+        let appended = Data("NEXT\n".utf8)
+        try result.writeHandle.write(contentsOf: appended)
+        let afterAppend = try Data(contentsOf: url)
+        XCTAssertEqual(afterAppend, trimmed + appended, "An append through the returned handle must land exactly at the new end.")
     }
 }

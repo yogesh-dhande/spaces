@@ -1,6 +1,12 @@
 import Foundation
 import ghosttyvtshim
 
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
+
 /// Bounds a live session's durable `output.log` transcript so a long-running session stops growing
 /// without bound, while keeping the file self-contained for a from-zero replay.
 ///
@@ -22,6 +28,13 @@ import ghosttyvtshim
 /// trims: each trim's head replay `[0..cut]` itself starts from the previous trim's preamble, so the
 /// serialized state always reflects the true accumulated state at the cut. The retained tail is copied
 /// verbatim after the preamble, and its cut is newline-aligned so replay begins on a line boundary.
+///
+/// A trim never mutates `output.log` in place. It writes preamble+tail to a sibling temp file
+/// (`output.log.trim`), fsyncs it, then atomically `rename(2)`s it over `output.log`. A daemon crash or
+/// a thrown write error therefore never leaves a half-rewritten transcript: either the original file is
+/// fully intact (rename never ran) or the new bounded file is fully in place (rename committed). Because
+/// the rename swaps in a fresh inode, the caller's previous append handle points at the unlinked old
+/// inode and must be replaced — `trimIfNeeded` opens and returns a fresh handle for the caller to adopt.
 public enum TerminalTranscriptTrim {
     /// A `nil`/empty vt library, or a failure to build the preamble, aborts the trim (throws) rather
     /// than truncating without a preamble: an un-preambled from-zero replay would render the wrong
@@ -31,6 +44,22 @@ public enum TerminalTranscriptTrim {
         case vtSessionUnavailable
         case vtReplayFailed
         case preambleFailed
+        /// The atomic same-volume `rename(2)` of the fully-written temp file over `output.log` failed
+        /// (carries `errno`). Thrown after the temp file is written but before the original is replaced,
+        /// so the original transcript and the caller's append handle are untouched.
+        case atomicReplaceFailed(errno: Int32)
+    }
+
+    /// The outcome of a (possibly no-op) trim: the transcript's new end offset and the write handle the
+    /// caller must use for subsequent appends.
+    ///
+    /// A trim replaces `output.log` with a fresh inode (see `trimIfNeeded`), so the caller's previous
+    /// handle points at the now-unlinked old inode and must be discarded. `writeHandle` is that fresh
+    /// handle, positioned at the new end. When no trim is performed it is the caller's original handle,
+    /// returned unchanged (identity-comparable with `===`), and `endOffset` is the unchanged end offset.
+    public struct TrimResult {
+        public let endOffset: UInt64
+        public let writeHandle: FileHandle
     }
 
     /// Upper bound on the forward newline scan used to align the cut to a line boundary. This is a
@@ -45,14 +74,16 @@ public enum TerminalTranscriptTrim {
     private static let replayChunkBytes = 256 * 1024
     private static let newlineScanBlockBytes = 64 * 1024
 
-    /// Bounds `output.log` in place when it exceeds
-    /// `TerminalScrollbackBudget.liveTranscriptTrimTriggerBytes`, keeping the newest
-    /// `TerminalScrollbackBudget.liveTranscriptRetainedBytes` behind a state preamble. Returns the
-    /// transcript's new end offset, unchanged when no trim was needed. `columns`/`rows` are the
-    /// session's current terminal size, used to build the preamble at the same grid the session
-    /// replays at.
+    /// Bounds `output.log` when it exceeds `TerminalScrollbackBudget.liveTranscriptTrimTriggerBytes`,
+    /// keeping the newest `TerminalScrollbackBudget.liveTranscriptRetainedBytes` behind a state preamble.
+    /// Returns the transcript's new end offset and the write handle to append through from now on (see
+    /// `TrimResult`). When no trim was needed both are the caller's unchanged offset and handle.
+    /// `columns`/`rows` are the session's current terminal size, used to build the preamble at the same
+    /// grid the session replays at.
     @discardableResult
-    public static func trimIfNeeded(outputPath: String, writeHandle: FileHandle, currentEndOffset: UInt64, columns: Int, rows: Int) throws -> UInt64 {
+    public static func trimIfNeeded(outputPath: String, writeHandle: FileHandle, currentEndOffset: UInt64, columns: Int, rows: Int) throws
+        -> TrimResult
+    {
         try trimIfNeeded(
             outputPath: outputPath, writeHandle: writeHandle, currentEndOffset: currentEndOffset, columns: columns, rows: rows,
             triggerBytes: UInt64(TerminalScrollbackBudget.liveTranscriptTrimTriggerBytes),
@@ -61,17 +92,23 @@ public enum TerminalTranscriptTrim {
 
     /// Testable core with explicit bounds. `retainedBytes` must be `< triggerBytes`.
     ///
-    /// `writeHandle` is the session core's sole append handle for the transcript (the session core runs
-    /// on its main actor, so there is one writer). Transient read handles read the pre-trim head (to
-    /// build the preamble) and the retained tail; the file is then rewritten as preamble + tail and
-    /// truncated, and the write handle is left positioned at the new end so appends continue seamlessly.
-    /// Readers open their own handles and read an end-relative window, so a concurrent read during the
-    /// rare rewrite at worst returns a slightly shorter tail once.
+    /// The trim is failure-safe: it never mutates the live `output.log` in place. Transient read handles
+    /// read the pre-trim head (to build the preamble) and the retained tail; preamble+tail is then
+    /// written to a sibling temp file, fsynced, and atomically `rename(2)`d over `output.log`, replacing
+    /// it with a fresh inode. On ANY error before the rename — a failed temp write (disk full), a preamble
+    /// failure, or a crash — the original file and the caller's `writeHandle` are untouched, so the
+    /// caller's catch-and-continue simply retries on the next append. The passed `writeHandle` is never
+    /// seeked or written by this function, so the caller's append position stays valid on failure.
+    ///
+    /// On success the rename unlinks the old inode `writeHandle` still points at, so the caller MUST adopt
+    /// the returned `TrimResult.writeHandle` (a fresh handle on the replaced file, positioned at the new
+    /// end) and discard its old one. When no trim is performed the caller's original handle is returned
+    /// unchanged.
     @discardableResult
     static func trimIfNeeded(
         outputPath: String, writeHandle: FileHandle, currentEndOffset: UInt64, columns: Int, rows: Int, triggerBytes: UInt64, retainedBytes: UInt64
-    ) throws -> UInt64 {
-        guard currentEndOffset > triggerBytes else { return currentEndOffset }
+    ) throws -> TrimResult {
+        guard currentEndOffset > triggerBytes else { return TrimResult(endOffset: currentEndOffset, writeHandle: writeHandle) }
         let nominalStart = currentEndOffset - retainedBytes
 
         let readHandle = try FileHandle(forReadingFrom: URL(fileURLWithPath: outputPath))
@@ -83,13 +120,40 @@ public enum TerminalTranscriptTrim {
         try readHandle.seek(toOffset: cutOffset)
         let tail = try readHandle.read(upToCount: Int(currentEndOffset - cutOffset)) ?? Data()
 
-        try writeHandle.seek(toOffset: 0)
-        try writeHandle.write(contentsOf: preamble)
-        try writeHandle.write(contentsOf: tail)
-        let newEndOffset = UInt64(preamble.count + tail.count)
-        try writeHandle.truncate(atOffset: newEndOffset)
-        try writeHandle.seekToEnd()
-        return newEndOffset
+        // Stage preamble+tail into a sibling temp file, then atomically rename it over output.log. The
+        // temp path is a fixed sibling (not a unique name), created/truncated fresh each time so a stale
+        // leftover from a crashed earlier attempt is simply overwritten; no leftover-scan recovery is
+        // needed. It sits in the SAME directory as output.log so the rename is a same-volume operation
+        // (atomic on APFS and ext4). fsync before the rename guarantees the data is durable before the
+        // directory entry flips, so a crash can never surface a renamed-but-empty file.
+        let tempPath = outputPath + ".trim"
+        _ = FileManager.default.createFile(atPath: tempPath, contents: nil)
+        let tempHandle = try FileHandle(forWritingTo: URL(fileURLWithPath: tempPath))
+        do {
+            try tempHandle.write(contentsOf: preamble)
+            try tempHandle.write(contentsOf: tail)
+            try tempHandle.synchronize()
+            try tempHandle.close()
+        } catch {
+            try? tempHandle.close()
+            throw error
+        }
+
+        // Atomic same-volume rename. POSIX rename(2) atomically replaces the destination; readers see
+        // either the old or the new file, never a partial one. Chosen over FileManager.replaceItemAt
+        // because it is the simplest call that is truly atomic on both APFS (macOS) and ext4 (Linux) and
+        // is identical on both platforms via Darwin/Glibc.
+        let renamed = tempPath.withCString { tempC in outputPath.withCString { outC in rename(tempC, outC) } }
+        guard renamed == 0 else {
+            let renameErrno = errno
+            try? FileManager.default.removeItem(atPath: tempPath)
+            throw TrimError.atomicReplaceFailed(errno: renameErrno)
+        }
+
+        // The old inode is now unlinked; open a fresh handle on the replaced file for the caller to adopt.
+        let newHandle = try FileHandle(forWritingTo: URL(fileURLWithPath: outputPath))
+        let newEndOffset = try newHandle.seekToEnd()
+        return TrimResult(endOffset: newEndOffset, writeHandle: newHandle)
     }
 
     /// Scans forward from `nominalStart` for the next newline and returns the offset just past it, so the

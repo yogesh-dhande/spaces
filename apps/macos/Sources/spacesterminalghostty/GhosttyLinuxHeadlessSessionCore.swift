@@ -375,10 +375,16 @@
                 // Head-truncate the durable transcript once it grows past the live-transcript bound so a
                 // long-running session stops accumulating disk without bound; `outputByteCount` tracks the
                 // (possibly reduced) end offset. See `TerminalTranscriptTrim`.
-                let newEndOffset = try TerminalTranscriptTrim.trimIfNeeded(
+                let trim = try TerminalTranscriptTrim.trimIfNeeded(
                     outputPath: paths.outputPath, writeHandle: outputHandle, currentEndOffset: UInt64(outputByteCount),
                     columns: terminalSize.columns, rows: terminalSize.rows)
-                outputByteCount = Int(newEndOffset)
+                if trim.writeHandle !== outputHandle {
+                    // A trim replaced output.log with a fresh inode; adopt its handle before closing the
+                    // old one so the stored property always holds a valid handle even if the close fails.
+                    self.outputHandle = trim.writeHandle
+                    try? outputHandle.close()
+                }
+                outputByteCount = Int(trim.endOffset)
                 return true
             } catch { return false }
         }

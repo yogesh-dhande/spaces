@@ -287,6 +287,20 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         // If the local block was showing and the daemon is now compatible, drop the obsolete block
         // (canPreserveDetailPaneAfterSidebarReload was evaluated against the stale pre-reload verdict).
         host.clearCompatibilityBlockIfResolved(deviceID: snapshot.localDeviceID)
+        // Authoritative local overview: close any open local pane whose session the local daemon no
+        // longer retains (its product row was removed by the CLI or another paired client), so the pane
+        // cannot outlive the local daemon's transcript garbage-collection. The keep-set is the daemon's
+        // own published retention rule (`overview.retainedTerminalSessionIDs`), so an ended session held
+        // by any product row — including a `runtime_targets` row after its shell exits — stays open for
+        // scrollback. Prune only when the local overview is authoritative — reachable (loaded, not
+        // offline) and wire-compatible. An offline or wire-incompatible local daemon carries an empty
+        // placeholder overview (mirroring the remote path's `load.overview == nil` branch), and absence
+        // of a real overview is never evidence a session's product row was removed.
+        if AppKitController.localSnapshotAuthorizesPanePrune(loadState: localLoadState, compatibility: snapshot.localCompatibility) {
+            host.panelCoordinator.pruneOpenPanes(
+                deviceID: snapshot.localDeviceID,
+                catalogSessionIDs: OpenPanePruning.referencedTerminalSessionIDs(overview: snapshot.localDeviceOverview))
+        }
         tearDownBrowserSessionsForLocallyStoppedWorkspaces(
             previous: previousLocalSection?.workspaceRuntimeStatusByID, current: snapshot.workspaceRuntimeStatusByID,
             previousOverview: previousLocalSection?.overview)

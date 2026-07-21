@@ -254,7 +254,8 @@ import workspacecore
             switch result {
             case .success(let response):
                 if isHidden, host.selectedWorkspaceID == workspaceID { host.selectedWorkspaceID = nil }
-                host.applyDeviceMutationResponse(response, selectedProjectID: project.id, selectedWorkspaceID: isHidden ? nil : workspaceID)
+                host.applyDeviceMutationResponse(
+                    response, deviceID: device.id, selectedProjectID: project.id, selectedWorkspaceID: isHidden ? nil : workspaceID)
                 completion(true)
             case .failure(let error):
                 host.showError(error)

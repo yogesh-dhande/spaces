@@ -1395,7 +1395,15 @@ static bool spaces_ghostty_vt_preamble_append_grid(SpacesGhosttyVtSession *sessi
                 }
 
                 spaces_ghostty_vt_preamble_append(buf, "\x1b[0m");
-                if (last_content_column < (int)columns - 1) spaces_ghostty_vt_preamble_append(buf, "\x1b[K");
+                // Spacer cells immediately after the last content cell belong to the wide glyph just
+                // painted, which filled those columns. Skip past them before deciding on a trailing EL:
+                // when the wide glyph ends at the right edge the cursor sits in deferred-wrap on the
+                // last column, and a `CSI K` there would erase half the glyph, which terminals treat as
+                // erasing the whole glyph. Only a genuinely blank non-spacer cell before end-of-row
+                // needs clearing.
+                int trailing = last_content_column + 1;
+                while (trailing < (int)columns && row_cells[trailing].spacer) trailing++;
+                if (trailing < (int)columns) spaces_ghostty_vt_preamble_append(buf, "\x1b[K");
             }
         }
     }

@@ -60,4 +60,26 @@ enum OpenPanePruning {
         }
         return referenced
     }
+
+    /// The keep-set startup restore prunes persisted layouts against, from one device's overview.
+    ///
+    /// Restore must apply the same contract as live pruning: keep a pane only while the owning
+    /// daemon still retains its session (`referencedTerminalSessionIDs`), not merely while the
+    /// session is live in `overview.sessions`. An ad hoc shell that exited leaves `sessions` but its
+    /// `runtime_targets` row still holds the transcript, so the daemon keeps its id in
+    /// `retainedTerminalSessionIDs`; restoring against the live-session list alone would silently drop
+    /// that ended-but-retained pane on relaunch even though a live overview refresh keeps it open. A
+    /// nil overview (device not loaded) contributes nothing, so its persisted rows stay pending rather
+    /// than pruning against an empty catalog.
+    static func restorationKeepSet(overview: SpacesDeviceOverviewPayload?) -> Set<String> {
+        guard let overview else { return [] }
+        return referencedTerminalSessionIDs(overview: overview)
+    }
+
+    /// The restoration keep-set unioned across several devices' overviews, for a global panel window
+    /// whose panes can reference more than one device. Each overview follows the single-overview
+    /// contract above; a nil overview contributes nothing.
+    static func restorationKeepSet(overviews: some Sequence<SpacesDeviceOverviewPayload?>) -> Set<String> {
+        overviews.reduce(into: Set<String>()) { $0.formUnion(restorationKeepSet(overview: $1)) }
+    }
 }

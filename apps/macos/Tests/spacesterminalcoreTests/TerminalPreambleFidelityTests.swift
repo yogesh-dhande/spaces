@@ -212,4 +212,42 @@ import ghosttyvtshim
         #expect(joined.contains("START"), "reflowed line head must survive the resize")
         #expect(joined.contains("END"), "reflowed line tail must survive the resize")
     }
+
+    // MARK: - Wide glyph ending at the right edge
+
+    /// A two-column glyph whose spacer lands on the final column fills the row: its leading cell (the
+    /// last content cell) sits at `columns-2`, so a naive `last_content_column < columns-1` check emits
+    /// a trailing `CSI K`. On replay the cursor sits in deferred-wrap on the last column after printing
+    /// the glyph, and EL erases the just-painted wide glyph (terminals clear the whole glyph when asked
+    /// to erase half of it). Feeding `AA漢` into a 4-column grid puts 漢's spacer exactly on the last
+    /// column; same-size replay must keep the glyph intact.
+    @Test func wideGlyphAtRightEdgeSurvivesReplay() throws {
+        let source = try makeSession(columns: 4, rows: 4)
+        defer { spaces_ghostty_vt_session_free(source) }
+        write(source, "\u{1B}[1;1HAA\u{6F22}")  // 漢 is a two-column glyph filling columns 2-3.
+
+        let bytes = try preamble(source)
+        let replayed = try replay(bytes, columns: 4, rows: 4)
+        defer { spaces_ghostty_vt_session_free(replayed) }
+
+        #expect(visibleRows(replayed) == visibleRows(source), "wide glyph ending at the right edge must survive same-size replay")
+        #expect(plainText(replayed).contains("\u{6F22}"), "the wide glyph must not be erased by a trailing EL")
+    }
+
+    /// A wide glyph followed by genuine blank cells still needs a trailing EL to clear them; the
+    /// spacer-aware check must advance only past the glyph's own spacer, not suppress EL for real
+    /// blanks that follow. `漢` at the start of a 6-column row leaves columns 2-5 blank, so the
+    /// preamble must still carry an EL.
+    @Test func wideGlyphWithTrailingBlanksStillClears() throws {
+        let source = try makeSession(columns: 6, rows: 4)
+        defer { spaces_ghostty_vt_session_free(source) }
+        write(source, "\u{1B}[1;1H\u{6F22}")  // 漢 fills columns 0-1; columns 2-5 stay blank.
+
+        let bytes = try preamble(source)
+        #expect(bytes.range(of: Data("\u{1B}[K".utf8)) != nil, "trailing blank cells after a wide glyph must still emit EL")
+
+        let replayed = try replay(bytes, columns: 6, rows: 4)
+        defer { spaces_ghostty_vt_session_free(replayed) }
+        #expect(visibleRows(replayed) == visibleRows(source), "wide glyph with trailing blanks must replay identically")
+    }
 }

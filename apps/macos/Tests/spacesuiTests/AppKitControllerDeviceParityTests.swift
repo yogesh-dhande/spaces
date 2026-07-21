@@ -29,6 +29,25 @@ import workspacecore
         #expect(AppKitController.localDeviceLoadState(offlineMessage: nil) == .loaded)
     }
 
+    @Test func localSnapshotPrunesPanesOnlyAgainstAReachableCompatibleOverview() {
+        // A reachable, wire-compatible local daemon carries an authoritative overview: its snapshot may
+        // prune open local panes against the retained keep-set. `.compatible` and a nil verdict (steady
+        // state exposes no verdict) both authorize pruning.
+        #expect(AppKitController.localSnapshotAuthorizesPanePrune(loadState: .loaded, compatibility: .compatible))
+        #expect(AppKitController.localSnapshotAuthorizesPanePrune(loadState: .loaded, compatibility: nil))
+
+        // An offline local daemon carries only the empty placeholder overview; pruning against it would
+        // wrongly close every live local pane, so it must never prune (the CRITICAL invariant).
+        #expect(!AppKitController.localSnapshotAuthorizesPanePrune(loadState: .offline("daemon down"), compatibility: nil))
+        #expect(!AppKitController.localSnapshotAuthorizesPanePrune(loadState: .loading, compatibility: nil))
+
+        // A reachable-but-wire-incompatible daemon is rendered loaded but also carries only the
+        // placeholder overview (mirroring the remote path's `load.overview == nil` branch), so it must
+        // not prune either.
+        #expect(!AppKitController.localSnapshotAuthorizesPanePrune(loadState: .loaded, compatibility: .daemonTooOld))
+        #expect(!AppKitController.localSnapshotAuthorizesPanePrune(loadState: .loaded, compatibility: .clientTooOld))
+    }
+
     @Test func singleOfflineLocalDeviceStillRendersADeviceHeaderRow() {
         // A single loaded device stays a flat project list (no header).
         #expect(!AppKitController.sidebarShowsDeviceHeaders(deviceCount: 1, hasOfflineSection: false))
