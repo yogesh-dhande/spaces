@@ -166,8 +166,10 @@ The boundary is strict. A client reads daemon-owned data over the Device API rat
 - `SPACES_DB_PATH` wins whenever it is set for the current process.
 - Otherwise repo-local development binaries derive one profile root from the current git branch plus the canonical worktree path.
 - Installed binaries fall back to `~/.spaces/`.
+- A binary built inside a Spaces checkout — detected by finding `apps/macos/Package.swift` above the executable — never falls back to the installed profile. When that binary reaches automatic detection (no `SPACES_DB_PATH`) and the git probe throws or returns nothing, resolution raises a descriptive startup error naming the executable, the repo root, and the git failure instead of silently resolving to `~/.spaces`. This is deliberate: a swallowed git failure once let a development daemon open the installed daemon's production database and, on a schema mismatch, crash-loop it. There is no retry or fallback — the failure is loud, and supervised callers that already catch and retry (the Device API supervisor) surface it in logs.
 - The runtime root is `<profile-root>/runtime` unless `SPACES_RUNTIME_DIR` overrides it.
 - Client paired-device metadata follows the resolved profile root, so separate profiles never share paired remotes. Distributed-notification IPC is likewise scoped by a token derived from the profile root.
+- The fixed canonical Device API port belongs to the installed profile alone. Any other profile whose stored (or freshly defaulted) port equals the canonical default binds an ephemeral port (`0`) instead, so a leftover development daemon can't steal the well-known port from the installed daemon. Normalization happens at load only — the stored `device-api.json` keeps its canonical default, so existing stale dev-profile configs are covered without a migration — and an environment override applied afterward still wins. That is how the Linux systemd install (which sets `SPACES_DEVICE_API_PORT` together with `SPACES_DB_PATH`) keeps binding the canonical port. A non-canonical stored port is respected as-is.
 
 ### Migration rules
 
