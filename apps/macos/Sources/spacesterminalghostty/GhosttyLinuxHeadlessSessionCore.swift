@@ -369,12 +369,16 @@
 
         @discardableResult private func appendTranscript(_ data: Data) -> Bool {
             guard let outputHandle else { return false }
+            // The write is the only step that can fail the append: if the durable bytes never landed, the
+            // caller must know (it keys live-renderer application off this return value).
             do {
                 try outputHandle.write(contentsOf: data)
-                outputByteCount += data.count
-                // Head-truncate the durable transcript once it grows past the live-transcript bound so a
-                // long-running session stops accumulating disk without bound; `outputByteCount` tracks the
-                // (possibly reduced) end offset. See `TerminalTranscriptTrim`.
+            } catch { return false }
+            outputByteCount += data.count
+            // Head-truncate the durable transcript once it grows past the live-transcript bound so a
+            // long-running session stops accumulating disk without bound; `outputByteCount` tracks the
+            // (possibly reduced) end offset. See `TerminalTranscriptTrim`.
+            do {
                 let trim = try TerminalTranscriptTrim.trimIfNeeded(
                     outputPath: paths.outputPath, writeHandle: outputHandle, currentEndOffset: UInt64(outputByteCount),
                     columns: terminalSize.columns, rows: terminalSize.rows)
@@ -385,8 +389,16 @@
                     try? outputHandle.close()
                 }
                 outputByteCount = Int(trim.endOffset)
-                return true
-            } catch { return false }
+            } catch {
+                // A trim failure AFTER the write already committed must not fail the append. The
+                // just-appended bytes are already durable in output.log — TerminalTranscriptTrim
+                // guarantees no post-commit failure path: on any throw the original file and this write
+                // handle are untouched, so `outputByteCount` (already advanced by the write) stays
+                // correct and the skipped trim simply retries on the next append. Returning false here
+                // would make callers drop the mutation from the live renderer while it stays in the
+                // transcript, diverging live state from a future replay.
+            }
+            return true
         }
 
         private func ensureOutputHandle() throws {

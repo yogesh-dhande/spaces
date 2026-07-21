@@ -19,12 +19,22 @@ rsync -a --delete \
 
 cd /root/src/apps/macos
 export SPACES_GHOSTTY_VT_DYLIB_PATH=/root/src/apps/macos/.local/ghosttyvt/lib/libghostty-vt.so
-# Resize suite only: the older XCTest-based Linux suites (handoff, submit-ordering) use
-# async @MainActor test methods, which deadlock under corelibs-xctest before the first
-# line — the test job is queued to the main executor while XCTest's main thread waits in
-# a poll that never drains it. Linux suites must use Swift Testing (async-main runner) to
-# actually execute; convert a suite and add it to this filter to bring it into the lane.
-swift test \
-  --scratch-path /root/spaces-test-build \
-  --jobs 4 \
-  --filter 'GhosttyLinuxHeadlessSessionResizeTests' 2>&1
+# The older XCTest-based Linux suites (handoff, submit-ordering) use async @MainActor test
+# methods, which deadlock under corelibs-xctest before the first line — the test job is
+# queued to the main executor while XCTest's main thread waits in a poll that never drains
+# it. Linux suites must use Swift Testing (async-main runner) to actually execute; convert a
+# suite and add it below to bring it into the lane.
+#
+# Each Swift Testing suite here mutates the process-wide SPACES_DB_PATH/SPACES_RUNTIME_DIR
+# in its init/deinit, and `.serialized` only orders tests WITHIN a suite — Swift Testing
+# still runs distinct suites in parallel, so two env-mutating suites in one `swift test` run
+# clobber each other's environment. Run each suite in its OWN invocation so each gets an
+# isolated process; the shared build is cached, so the extra invocations are cheap.
+for suite in \
+  GhosttyLinuxHeadlessSessionResizeTests \
+  GhosttyLinuxHeadlessSessionTranscriptTrimTests; do
+  swift test \
+    --scratch-path /root/spaces-test-build \
+    --jobs 4 \
+    --filter "$suite" 2>&1
+done

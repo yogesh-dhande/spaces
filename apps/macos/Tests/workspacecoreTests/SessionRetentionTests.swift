@@ -175,6 +175,49 @@ final class SessionRetentionTests: XCTestCase {
         XCTAssertTrue(try store.terminalSessionIsReferencedByProduct(other))
     }
 
+    /// A workspace whose ONLY tracked runtime indicator is an agent row bound to the expired session must
+    /// be marked stopped after release. `finalizeAgentRow` (used in step 1) deliberately does not recompute
+    /// the workspace's running flag itself — its interactive callers do that at their own call sites — so
+    /// the release path must do it for GC-driven deletes, or the workspace would stay `isRunning` forever
+    /// once its last runtime row is gone.
+    func testReleaseClearsRunningFlagForAgentOnlyWorkspace() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
+        let sessionID = "agent-only-session"
+        let agent = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: sessionID, status: .exited)
+        XCTAssertTrue(try XCTUnwrap(store.workspace(id: workspace.id)).isRunning)
+
+        try orchestrator.releaseEndedTerminalSessionReferences(sessionID: sessionID)
+
+        XCTAssertNil(try store.agentWindow(id: agent.id))
+        XCTAssertFalse(try XCTUnwrap(store.workspace(id: workspace.id)).isRunning)
+    }
+
+    /// A workspace whose ONLY tracked runtime indicator is a bare `runtime_targets` window (an ad-hoc
+    /// terminal pane, no process or agent row) referencing the expired session must be marked stopped after
+    /// release. `store.deleteWindow` (used in step 3) does not recompute the workspace's running flag, so
+    /// the release path must do it explicitly for the workspace the deleted window belonged to.
+    func testReleaseClearsRunningFlagForAdHocTerminalOnlyWorkspace() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
+        let sessionID = "ad-hoc-only-session"
+        try store.upsert(
+            window: WindowRecord(
+                id: "ad-hoc-only-pane", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell", detail: nil, targetURL: nil,
+                terminalTrackingID: sessionID, role: "terminal", orderIndex: 300, lastSeenAt: "now"))
+        XCTAssertTrue(try XCTUnwrap(store.workspace(id: workspace.id)).isRunning)
+
+        try orchestrator.releaseEndedTerminalSessionReferences(sessionID: sessionID)
+
+        XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
+        XCTAssertFalse(try XCTUnwrap(store.workspace(id: workspace.id)).isRunning)
+    }
+
     // MARK: - Fixtures
 
     private func makeProjectAndWorkspace(store: SQLiteStore) throws -> (ProjectRecord, WorkspaceRecord) {

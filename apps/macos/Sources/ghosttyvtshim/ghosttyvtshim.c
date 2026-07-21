@@ -1308,7 +1308,11 @@ static bool spaces_ghostty_vt_preamble_append_grid(SpacesGhosttyVtSession *sessi
             model->pen = spaces_ghostty_vt_pen_from_style(&style);
             model->spacer = (wide == GHOSTTY_CELL_WIDE_SPACER_HEAD || wide == GHOSTTY_CELL_WIDE_SPACER_TAIL);
             model->base_codepoint = codepoint;
-            model->grapheme_len = grapheme_len > 0xFFFF ? 0xFFFF : (uint16_t)grapheme_len;
+            // GRAPHEMES_BUF writes the full reported graphemes_len elements (see render.h), so the buffer
+            // must be sized from that exact count. A cluster over 0xFFFF codepoints cannot be stored in the
+            // uint16_t model field and would also let output drive an arbitrarily large allocation, so such a
+            // degenerate cell (combining-mark spam) falls back to its base codepoint alone.
+            model->grapheme_len = grapheme_len > 0xFFFF ? 1 : (uint16_t)grapheme_len;
 
             // Only copy the cluster out when it holds more than the base codepoint; a single-codepoint
             // cell is emitted from base_codepoint alone. The buffer receives base first, then extras.

@@ -28,7 +28,17 @@ extension WorkspaceOrchestrator {
     /// a dead session. Running it here unconditionally covers that case; `subscriberDidExit` is idempotent
     /// (it deletes rows keyed solely by subscriber id), so a session that also owned an agent row — already
     /// torn down in step 1 — is a harmless no-op the second time.
+    ///
+    /// Finally, any workspace touched by steps 1 or 3 is re-checked for tracked runtime indicators and
+    /// marked stopped if none remain. `finalizeAgentRow` and `store.deleteWindow` deliberately do not
+    /// recompute the workspace's running flag themselves — their interactive callers (`stopCodingAgent`,
+    /// terminal close) do that at their own call sites — so a workspace whose only runtime row was an
+    /// agent row or an ad-hoc terminal window would otherwise stay `isRunning` forever once GC deletes it.
+    /// Step 2 already covers itself via `releaseEndedRunningProcessRow`, so re-clearing those workspaces
+    /// here is a harmless no-op.
     public func releaseEndedTerminalSessionReferences(sessionID: String) throws {
+        var workspaceIDsToRecheck: Set<String> = []
+
         // 1. Agent rows — routed through the finalization chokepoint so inbound watch edges
         //    (`agent_subscriptions`, ON DELETE RESTRICT) are dropped and any subscriber is notified before
         //    the row is deleted. `terminateTerminalSession: false`: the backing terminal is already dead, so
@@ -36,6 +46,7 @@ extension WorkspaceOrchestrator {
         //    of its status, which is correct here — the terminal is provably gone.
         for record in try store.agentWindowsByTerminalSession(terminalSessionID: sessionID) {
             try finalizeAgentRow(record, reason: .destroyed(terminateTerminalSession: false))
+            workspaceIDsToRecheck.insert(record.workspaceID)
         }
 
         // 2. Running-process rows — mirror the row-cleanup half of `stopRunningProcess` without its
@@ -50,6 +61,13 @@ extension WorkspaceOrchestrator {
         //    source `terminalSessionIsReferencedByProduct` checks.
         for window in try store.windowsReferencingTerminalSession(terminalSessionID: sessionID) {
             try store.deleteWindow(id: window.id)
+            workspaceIDsToRecheck.insert(window.workspaceID)
+        }
+
+        // Steps 1 and 3 delete rows without recomputing the owning workspace's running flag, so do it
+        // here for every workspace either step touched.
+        for workspaceID in workspaceIDsToRecheck {
+            try clearWorkspaceRunningIfNoTrackedRuntimeIndicators(workspaceID: workspaceID)
         }
 
         // 4. Retire the session's own standing as a SUBSCRIBER: drop its pending inbound queue and every

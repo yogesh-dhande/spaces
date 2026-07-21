@@ -170,6 +170,30 @@ import ghosttyvtshim
         #expect(plainText(replayed).contains("e\u{0301}"), "replayed grid must reproduce the full grapheme cluster")
     }
 
+    /// A degenerate cell whose cluster is one base letter followed by tens of thousands of combining
+    /// marks must not crash or corrupt preamble construction. The shim sizes its grapheme buffer from a
+    /// uint16_t and the library writes the full reported cluster length, so a count above 0xFFFF must
+    /// fall back to the base codepoint alone rather than overflow the buffer. The contract this guards is
+    /// only that the preamble still builds and the base character survives; the excess combining marks may
+    /// be dropped. (Ghostty's internal storage may cap the cluster below 65,535, in which case this input
+    /// never reaches the overflow path; the test still stands as the regression guard for the contract.)
+    @Test func oversizedGraphemeClusterDoesNotCorruptPreamble() throws {
+        let source = try makeSession(columns: 80, rows: 24)
+        defer { spaces_ghostty_vt_session_free(source) }
+        // Grapheme clustering (mode 2027) folds the base + every combining mark into one cell, with no
+        // cursor movement between them, so the single cell reports an enormous cluster length.
+        write(source, "\u{1B}[?2027h")
+        write(source, "\u{1B}[1;1HZ" + String(repeating: "\u{0301}", count: 70_000))
+        write(source, "\u{1B}[3;1Hordinary trailing row")
+
+        let bytes = try preamble(source)
+
+        let replayed = try replay(bytes, columns: 80, rows: 24)
+        defer { spaces_ghostty_vt_session_free(replayed) }
+        #expect(plainText(replayed).contains("Z"), "the base codepoint of a degenerate cluster must survive preamble replay")
+        #expect(plainText(replayed).contains("ordinary trailing row"), "content after a degenerate cluster must survive")
+    }
+
     // MARK: - FIX C: palette-indexed color semantics
 
     /// A palette-indexed foreground (SGR 31 -> palette index 1) must serialize as a palette SGR
