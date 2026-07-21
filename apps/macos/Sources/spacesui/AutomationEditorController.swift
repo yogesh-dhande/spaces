@@ -67,6 +67,14 @@ import workspacecore
     private var missedRunPopUp: NSPopUpButton?
     private var previewLabel: NSTextField?
     private var errorLabel: NSTextField?
+    private var saveButton: NSButton?
+
+    /// Guards against a double Save: the async create/update request has no synchronous completion, so a second
+    /// click or Return press before the window closes would otherwise fire a second request with its own
+    /// automation id, producing a duplicate. Set before the Task is spawned, cleared on error and on the next
+    /// `present` — this controller instance is reused across opens, so a successful save (which closes the
+    /// window without clearing the flag) must not leave the next editor session unsaveable.
+    private var isSaving = false
 
     // Rows whose visibility depends on the type toggle.
     private var workspaceRow: NSView?
@@ -105,6 +113,7 @@ import workspacecore
     }
 
     private func present(title: String, seed: TerminalServiceAutomationSummary?) {
+        isSaving = false
         // Preserve the edited automation's stored workspace even when it has since been hidden, so saving an
         // unrelated edit never retargets it to the first visible workspace. Preservation applies ONLY to a
         // fixed-device edit: in edit mode the device can't change, so the stored workspace always belongs to
@@ -495,6 +504,8 @@ import workspacecore
         let save = host.actionButton(title: "Save", symbol: nil, tooltip: "Save", action: #selector(saveTapped), primary: true)
         save.target = self
         save.keyEquivalent = "\r"
+        save.isEnabled = !isSaving
+        saveButton = save
         let row = NSStackView(views: [NSView(), cancel, save])
         row.orientation = .horizontal
         row.alignment = .centerY
@@ -676,6 +687,7 @@ import workspacecore
     @objc private func cancelTapped() { window?.performClose(nil) }
 
     @objc private func saveTapped() {
+        guard !isSaving else { return }
         guard let fields = collectFields() else { return }
         let deviceID = self.deviceID
         let editingID = editingAutomationID
@@ -684,6 +696,12 @@ import workspacecore
             return
         }
         let forceRemoteRefresh = host.isRemoteAutomationDevice(deviceID: deviceID)
+        // Set the flag synchronously before spawning the Task, so a second click or Return press arriving
+        // before the first request completes is rejected at the guard above. Disabling the button gives
+        // immediate visual feedback and is a second line of defense against a rebuild (device/kind change)
+        // recreating the button mid-save with an unrelated NSButton instance.
+        isSaving = true
+        saveButton?.isEnabled = false
         Task { @MainActor [weak self] in
             let error = await Task.detached(priority: .userInitiated) { () -> Error? in
                 do {
@@ -698,6 +716,8 @@ import workspacecore
             }.value
             guard let self else { return }
             if let error {
+                self.isSaving = false
+                self.saveButton?.isEnabled = true
                 showError(error.localizedDescription)
                 return
             }

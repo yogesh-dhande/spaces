@@ -150,7 +150,7 @@ import spacesterminalcore
 
         // Daily at 09:00 local; the initial anchor is computed in New_York.
         let automation = try harness.insertAutomation(triggerKind: .cron, cronExpression: "0 9 * * *")
-        harness.service.computeInitialNextFireTime(automationID: automation.id)
+        try harness.service.computeInitialNextFireTime(automationID: automation.id)
         harness.service.tick()  // zone unchanged: the anchor stays in New_York
         let nyFire = try XCTUnwrap(harness.store.automation(id: automation.id)?.nextFireTime)
         XCTAssertEqual(hour(of: nyFire, in: newYork), 9, "the anchor fires at 09:00 New_York wall-clock")
@@ -528,6 +528,44 @@ import spacesterminalcore
         harness.service.cancelRun(runID: run.id)
     }
 
+    /// End-agents prunes retention after ending the run's live agent. A terminal run beyond the retention
+    /// cap that lingered only because its attributed agent session was live (the no-kill guard) is removed —
+    /// its run row and artifacts — as soon as End agents ends that session, rather than waiting for some
+    /// later run to prune.
+    func testEndAttributedAgentsPrunesOverCapRunAfterEndingItsLiveAgent() throws {
+        // A small cap so a handful of newer terminal rows push the live-session run past the window.
+        let harness = try Harness(self, retentionLimit: 2)
+        let (_, workspace) = try harness.makeProjectAndWorkspace()
+        let automation = try harness.insertAgentAutomation(workspaceID: workspace.id)
+
+        // The oldest run is a succeeded agent run whose agent session is deliberately left live; retention
+        // would prune it were its session not live.
+        let overCapRun = try harness.insertRun(automationID: automation.id, status: .succeeded, createdAt: harness.now())
+        let liveSessionID = UUID().uuidString
+        let agent = try harness.writeAttributedAgentSession(
+            workspaceID: workspace.id, runID: overCapRun.id, sessionID: liveSessionID, live: true, status: .done)
+        let runDirectory = try AutomationPaths.ensureRunDirectory(runID: overCapRun.id)
+
+        // More newer terminal (skipped) rows than the cap, so the live-session run is beyond the newest 2.
+        for offset in 1...4 {
+            _ = try harness.insertRun(automationID: automation.id, status: .skipped, createdAt: harness.now().addingTimeInterval(TimeInterval(offset)))
+        }
+
+        // A prune while the session is live leaves the over-cap run (pruning it would kill the live agent).
+        let throwaway = try harness.insertRun(automationID: automation.id, status: .running, createdAt: harness.now().addingTimeInterval(100))
+        harness.service.cancelRun(runID: throwaway.id)
+        XCTAssertNotNil(try harness.store.automationRun(id: overCapRun.id), "a run with a live attributed session survives pruning")
+
+        // End agents ends the live session, then prunes: the now-prunable over-cap run is removed here.
+        let returned = try harness.service.endAttributedAgents(runID: overCapRun.id)
+        XCTAssertEqual(returned.status, .succeeded, "end-agents returns the run's final (untouched) status")
+
+        XCTAssertNil(try harness.store.automationRun(id: overCapRun.id), "the over-cap run is pruned once End agents ends its live session")
+        XCTAssertNil(try harness.store.agentWindow(id: agent.id), "its agent row is finalized")
+        XCTAssertFalse(harness.orchestrator.automationSessionIsLive(sessionID: liveSessionID), "its live agent session is ended")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: runDirectory.path), "the pruned run's artifact directory is deleted")
+    }
+
     // MARK: - Attributed-agent summaries
 
     /// Attributed-agent summaries reflect the agent row's status and the session's liveness: a live agent
@@ -659,7 +697,7 @@ import spacesterminalcore
         try harness.store.insertAgentSubscription(subscriberTerminalSessionID: "watcher", agentSessionID: agent.id, createdAt: "t")
         XCTAssertTrue(harness.orchestrator.automationSessionIsLive(sessionID: sessionID))
 
-        harness.service.deleteAutomation(id: automation.id)
+        try harness.service.deleteAutomation(id: automation.id)
 
         XCTAssertFalse(
             harness.orchestrator.automationSessionIsLive(sessionID: sessionID), "the live attributed session is terminated before its records are removed")

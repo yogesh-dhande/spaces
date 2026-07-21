@@ -66,6 +66,36 @@
             XCTAssertEqual(SpacesMobileAutomations.runRows(runs).map(\.id), ["run-a-new", "run-b", "run-a-old"])
         }
 
+        func testMergedRunRowsPrefersOverviewStatusAndKeepsHistoryTail() {
+            // "run-live" is running in the retained history (as it was when the screen first fetched it)
+            // but has since finished in the overview — the live overview snapshot must win so the row
+            // reflects the real outcome instead of freezing on "running".
+            let historyRuns = [
+                makeRun(id: "run-live", automationID: "automation-a", status: "running", startedAt: "2026-01-01T02:00:00Z"),
+                makeRun(id: "run-old", automationID: "automation-a", status: "succeeded", startedAt: "2026-01-01T00:00:00Z"),
+            ]
+            let overviewRuns = [
+                makeRun(id: "run-live", automationID: "automation-a", status: "succeeded", startedAt: "2026-01-01T02:00:00Z"),
+                // A brand-new run that fired after the initial fetch, so it only exists in the overview.
+                makeRun(id: "run-new", automationID: "automation-a", status: "running", startedAt: "2026-01-01T03:00:00Z"),
+            ]
+
+            let rows = SpacesMobileAutomations.mergedRunRows(overviewRuns: overviewRuns, historyRuns: historyRuns, automationID: "automation-a")
+
+            XCTAssertEqual(rows.map(\.id), ["run-new", "run-live", "run-old"])
+            XCTAssertEqual(rows.first(where: { $0.id == "run-live" })?.run.status, "succeeded")
+            XCTAssertFalse(rows.first(where: { $0.id == "run-live" })?.isRunning ?? true)
+        }
+
+        func testMergedRunRowsFiltersToRequestedAutomation() {
+            let historyRuns = [makeRun(id: "run-other", automationID: "automation-b", status: "succeeded")]
+            let overviewRuns = [makeRun(id: "run-mine", automationID: "automation-a", status: "running")]
+
+            let rows = SpacesMobileAutomations.mergedRunRows(overviewRuns: overviewRuns, historyRuns: historyRuns, automationID: "automation-a")
+
+            XCTAssertEqual(rows.map(\.id), ["run-mine"])
+        }
+
         func testRunRowIsRunningReflectsStatus() {
             let running = SpacesMobileAutomationRunRow(run: makeRun(id: "run-1", automationID: "automation-a", status: "running"))
             let queued = SpacesMobileAutomationRunRow(run: makeRun(id: "run-2", automationID: "automation-a", status: "queued"))

@@ -74,6 +74,23 @@ enum SpacesMobileAutomations {
         }.map(SpacesMobileAutomationRunRow.init)
     }
 
+    /// Runs for the per-automation runs screen: the live overview window (refreshed by `.overviewPolling`
+    /// every 2 seconds while the screen is open) reconciled with the retained fetch history (a one-shot
+    /// fetch of older runs the overview window doesn't carry). Overview wins for any run ID present in
+    /// both — that keeps status, duration, and the Cancel/End Agents actions live for a run that completes
+    /// or times out while the screen is open, instead of freezing at whatever the one-shot fetch saw.
+    /// History fills in the older tail, and a run that only just appeared in the overview (fired after the
+    /// fetch completed) is included too, since it is simply a run ID the history dictionary doesn't have
+    /// yet. Ordering is newest-first, same as `runRows`.
+    static func mergedRunRows(
+        overviewRuns: [TerminalServiceAutomationRunSummary], historyRuns: [TerminalServiceAutomationRunSummary], automationID: String
+    ) -> [SpacesMobileAutomationRunRow] {
+        var byID: [String: TerminalServiceAutomationRunSummary] = [:]
+        for run in historyRuns where run.automationID == automationID { byID[run.id] = run }
+        for run in overviewRuns where run.automationID == automationID { byID[run.id] = run }
+        return runRows(Array(byID.values), automationID: automationID)
+    }
+
     static func triggerSummary(_ automation: TerminalServiceAutomationSummary) -> String {
         guard automation.triggerKind == "cron" else { return "Manual" }
         return automation.cronExpression.map { "Cron: \($0)" } ?? "Cron"

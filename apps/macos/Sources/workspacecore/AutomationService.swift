@@ -79,14 +79,14 @@ import spacesterminalcore
     // MARK: - Scheduling entry points
 
     /// Establishes a newly created or re-enabled cron automation's next fire time from now, with no
-    /// backfill of occurrences that fell before this moment.
-    public func computeInitialNextFireTime(automationID: String) {
-        do {
-            guard let automation = try store.automation(id: automationID), automation.enabled, let schedule = automation.parsedCronSchedule else {
-                return
-            }
-            try store.setAutomationNextFireTime(id: automationID, nextFireTime: schedule.nextFireDate(after: now(), timeZone: timeZone()))
-        } catch { logError("automation_next_fire_time_error id=\(automationID) error=\(error)") }
+    /// backfill of occurrences that fell before this moment. Throws when the anchor cannot be persisted, so
+    /// the create/update command surface reports the failure instead of returning an automation that
+    /// silently never fires; scheduler-side callers wrap it and log rather than propagate.
+    public func computeInitialNextFireTime(automationID: String) throws {
+        guard let automation = try store.automation(id: automationID), automation.enabled, let schedule = automation.parsedCronSchedule else {
+            return
+        }
+        try store.setAutomationNextFireTime(id: automationID, nextFireTime: schedule.nextFireDate(after: now(), timeZone: timeZone()))
     }
 
     /// One scheduler + executor step: fire due cron automations, advance escalations, poll running runs for
@@ -110,7 +110,12 @@ import spacesterminalcore
         guard zone.identifier != anchorTimeZoneIdentifier else { return }
         anchorTimeZoneIdentifier = zone.identifier
         do {
-            for automation in try store.enabledCronAutomations() { computeInitialNextFireTime(automationID: automation.id) }
+            for automation in try store.enabledCronAutomations() {
+                // Scheduler-side: one automation's anchor failing must not wedge the recompute for the rest,
+                // so each is isolated and logged rather than propagated (the command surface propagates).
+                do { try computeInitialNextFireTime(automationID: automation.id) }
+                catch { logError("automation_next_fire_time_error id=\(automation.id) error=\(error)") }
+            }
         } catch { logError("automation_timezone_recompute_error error=\(error)") }
     }
 
@@ -214,20 +219,22 @@ import spacesterminalcore
         return run
     }
 
-    /// Cancels a run, returning its resulting row. A terminal run is returned unchanged (idempotent).
-    /// Throws when the run does not exist.
+    /// Cancels a run, returning its resulting terminal row. A terminal run is returned unchanged
+    /// (idempotent). Throws when the run does not exist or its teardown/finalization fails, so the transport
+    /// surfaces the failure instead of reporting success over a still-running row.
     public func cancelAutomationRun(runID: String) throws -> AutomationRun {
         let run = try requireAutomationRun(id: runID)
         guard !run.status.isTerminal else { return run }
-        cancelRun(runID: runID)
+        try cancelRunThrowing(runID: runID)
         return try requireAutomationRun(id: runID)
     }
 
-    /// Ends every still-live coding-agent session attributed to a TERMINAL run, returning the run row
-    /// unchanged. This reaps the agent sessions a finished run left running — an `agent`-kind run whose agent
-    /// signalled `done` (succeeded) deliberately leaves its session open, and this is how a client stops it
-    /// on demand. The run's status, exit code, and timestamps are left untouched: end-agents cleans up
-    /// lingering sessions, it does not re-finalize the run. A non-terminal (queued/running) run is rejected
+    /// Ends every still-live coding-agent session attributed to a TERMINAL run, then prunes the automation's
+    /// retention and returns the run's final state. This reaps the agent sessions a finished run left
+    /// running — an `agent`-kind run whose agent signalled `done` (succeeded) deliberately leaves its
+    /// session open, and this is how a client stops it on demand. The run's status, exit code, and
+    /// timestamps are left untouched: end-agents cleans up lingering sessions, it does not re-finalize the
+    /// run. A non-terminal (queued/running) run is rejected
     /// loudly — a live run is stopped with cancel, not end-agents. Each live attributed session is torn down
     /// through the exact seams cancel's agent teardown uses: capture the transcript, then the agent-kill flow
     /// (which finalizes the agent row and notifies subscribers), falling back to a plain session termination
@@ -241,14 +248,20 @@ import spacesterminalcore
             try captureAttributedTranscript(runID: run.id, sessionID: sessionID)
             if try !orchestrator.killAgentSession(terminalSessionID: sessionID) { orchestrator.automationTerminateSession(sessionID: sessionID) }
         }
-        return try requireAutomationRun(id: runID)
+        // A run beyond the retention cap can be retained solely because its attributed agent was live (the
+        // no-kill guard in `pruneRetention`). Now that its sessions are ended, prune so it is removed here
+        // rather than lingering over-cap until some later run happens to prune. This may delete `run` itself,
+        // so return the local value — end-agents leaves the run row's status/exit/timestamps untouched, so it
+        // is the run's accurate final state whether or not the row survived pruning.
+        try pruneRetention(automationID: run.automationID)
+        return run
     }
 
     /// Deletes an automation (cancelling any running run and cleaning up its artifacts and attributed
     /// sessions). Throws when the automation does not exist.
     public func deleteAutomationCommand(id: String) throws {
         _ = try requireAutomation(id: id)
-        deleteAutomation(id: id)
+        try deleteAutomation(id: id)
     }
 
     private func requireAutomation(id: String) throws -> Automation {
@@ -266,7 +279,7 @@ import spacesterminalcore
     /// every other case has no schedule, so the anchor is explicitly cleared to drop any stale value.
     private func applyNextFireTime(automationID: String, enabled: Bool, triggerKind: AutomationTriggerKind) throws {
         if enabled, triggerKind == .cron {
-            computeInitialNextFireTime(automationID: automationID)
+            try computeInitialNextFireTime(automationID: automationID)
         } else {
             try store.setAutomationNextFireTime(id: automationID, nextFireTime: nil)
         }
@@ -608,17 +621,24 @@ import spacesterminalcore
     /// terminate attributed sessions, signal the command process group); an agent-kind run is torn down
     /// through the agent-kill flow so its subscribers are notified and the agent row finalized. A run whose
     /// automation was deleted out from under it falls back to the plain-session teardown. A no-op for an
-    /// already-terminal run.
+    /// already-terminal run. Teardown/finalization failures propagate so the command surface
+    /// (`cancelAutomationRun`) surfaces them; resilient internal callers use the log-only `cancelRun`.
+    private func cancelRunThrowing(runID: String) throws {
+        guard let run = try store.automationRun(id: runID), !run.status.isTerminal else { return }
+        if try store.automation(id: run.automationID)?.kind == .agent {
+            try teardownAgentRunSession(run)
+        } else {
+            try teardownRunSessions(run, terminate: true)
+        }
+        try finishRun(run, status: .canceled, exitCode: nil)
+    }
+
+    /// Log-only wrapper around the cancel core for resilient scheduler-side callers — the delete path (which
+    /// best-effort cancels every running run before tearing the automation down) — where one run's teardown
+    /// failure must not abort the surrounding sweep. Command-surface cancels go through `cancelAutomationRun`.
     public func cancelRun(runID: String) {
-        do {
-            guard let run = try store.automationRun(id: runID), !run.status.isTerminal else { return }
-            if try store.automation(id: run.automationID)?.kind == .agent {
-                try teardownAgentRunSession(run)
-            } else {
-                try teardownRunSessions(run, terminate: true)
-            }
-            try finishRun(run, status: .canceled, exitCode: nil)
-        } catch { logError("automation_cancel_error run=\(runID) error=\(error)") }
+        do { try cancelRunThrowing(runID: runID) }
+        catch { logError("automation_cancel_error run=\(runID) error=\(error)") }
     }
 
     // MARK: - Run finalization + teardown
@@ -758,13 +778,15 @@ import spacesterminalcore
     // MARK: - Automation deletion
 
     /// Deletes an automation: cancels any running run through the cancel path, removes every run's artifacts
-    /// and attributed sessions, then deletes the automation row (its run rows cascade away).
-    public func deleteAutomation(id: String) {
-        do {
-            for run in try store.activeAutomationRuns(automationID: id) where run.status == .running { cancelRun(runID: run.id) }
-            for run in try store.automationRuns(automationID: id) { try deleteRunArtifactsAndSessions(runID: run.id) }
-            try store.deleteAutomation(id: id)
-        } catch { logError("automation_delete_error id=\(id) error=\(error)") }
+    /// and attributed sessions, then deletes the automation row (its run rows cascade away). Throws when the
+    /// deletion cannot complete, so the command surface (`deleteAutomationCommand`) reports the failure
+    /// instead of leaving the automation row — and its cron schedule — in place while reporting success. Each
+    /// running run's cancel stays best-effort (the log-only `cancelRun`) so one stuck teardown does not abort
+    /// the surrounding deletion.
+    public func deleteAutomation(id: String) throws {
+        for run in try store.activeAutomationRuns(automationID: id) where run.status == .running { cancelRun(runID: run.id) }
+        for run in try store.automationRuns(automationID: id) { try deleteRunArtifactsAndSessions(runID: run.id) }
+        try store.deleteAutomation(id: id)
     }
 
     // MARK: - Process control

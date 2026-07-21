@@ -104,13 +104,18 @@ struct AutomationRunsView: View {
     @State private var pendingCancelRunID: String?
     @State private var pendingEndAgentsRunID: String?
     /// Retained per-automation run history fetched directly from the daemon (nil until first fetched). Only
-    /// used for the per-automation screen (`automationID != nil`); the global "Recent Runs" screen stays
-    /// overview-derived because it genuinely is the recent-runs window.
+    /// used for the per-automation screen (`automationID != nil`), where it is reconciled with the live
+    /// overview window via `SpacesMobileAutomations.mergedRunRows` rather than shown on its own — the
+    /// one-shot fetch supplies the older tail the overview window doesn't carry, but the overview stays the
+    /// source of truth for status so a run doesn't freeze mid-run once it actually finishes. The global
+    /// "Recent Runs" screen (`automationID == nil`) stays purely overview-derived because it genuinely is
+    /// the recent-runs window.
     @State private var fetchedRuns: [TerminalServiceAutomationRunSummary]?
 
     private var rows: [SpacesMobileAutomationRunRow] {
-        if let automationID, let fetchedRuns { return SpacesMobileAutomations.runRows(fetchedRuns, automationID: automationID) }
-        return SpacesMobileAutomations.runRows(model.overview?.automationRuns ?? [], automationID: automationID)
+        guard let automationID else { return SpacesMobileAutomations.runRows(model.overview?.automationRuns ?? [], automationID: nil) }
+        return SpacesMobileAutomations.mergedRunRows(
+            overviewRuns: model.overview?.automationRuns ?? [], historyRuns: fetchedRuns ?? [], automationID: automationID)
     }
 
     var body: some View {

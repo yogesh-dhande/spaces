@@ -1932,11 +1932,15 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         header.layer?.cornerRadius = UIRadius.regular
         header.translatesAutoresizingMaskIntoConstraints = false
         automationsHeaderStack = header
-        // The header (not the disclosure triangle) opens the detail pane; the triangle only expands.
+        // The header (not the disclosure triangle) opens the detail pane; the triangle only expands. The
+        // recognizer is attached to the whole header stack (not just the title/icon) so the badge, spacer,
+        // padding, and row background are all clickable too. A container-level recognizer would otherwise
+        // also swallow clicks meant for the disclosure button (a container recognizer gets first crack at
+        // events in its subtree), so `self` is the delegate and refuses recognition when the event lands
+        // inside the disclosure button's frame, letting the button's own click-through handle that toggle.
         let click = NSClickGestureRecognizer(target: host, action: #selector(AppKitController.automationsRowClicked))
-        titleLabel.addGestureRecognizer(click)
-        let iconClick = NSClickGestureRecognizer(target: host, action: #selector(AppKitController.automationsRowClicked))
-        icon.addGestureRecognizer(iconClick)
+        click.delegate = self
+        header.addGestureRecognizer(click)
 
         let children = NSStackView()
         children.orientation = .vertical
@@ -2161,5 +2165,19 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             view.layer?.backgroundColor = isShowingAlerts ? self?.sidebarSelectedCardBackgroundColor().cgColor : NSColor.clear.cgColor
             view.layer?.borderColor = self?.sidebarCardBorderColor(isSelected: true).cgColor
         }
+    }
+}
+
+extension SidebarController: NSGestureRecognizerDelegate {
+    /// The automations header row's click recognizer is attached to the whole `header` stack so the badge,
+    /// spacer, and padding all open the detail pane, not just the title/icon. A container-level recognizer
+    /// would otherwise also capture clicks on the disclosure triangle nested inside it, which must keep
+    /// toggling expand/collapse instead. Refuse recognition for events that land inside the disclosure
+    /// button's frame so its own click target handles those.
+    func gestureRecognizer(_ gestureRecognizer: NSGestureRecognizer, shouldAttemptToRecognizeWith event: NSEvent) -> Bool {
+        guard let disclosure = automationsDisclosureButton, !disclosure.isHidden, let header = automationsHeaderStack else { return true }
+        let locationInHeader = header.convert(event.locationInWindow, from: nil)
+        let disclosureFrameInHeader = disclosure.convert(disclosure.bounds, to: header)
+        return !disclosureFrameInHeader.contains(locationInHeader)
     }
 }
