@@ -4876,6 +4876,35 @@ measure_spaces_cycle_transition() {
   MEASURED_CYCLE_TARGET="$cycle_target"
 }
 
+# Seeds a focus-history chain for MRU cycle measurements: each target name is focused in
+# order through the normal open path ("docs" focuses the tracked Chrome tab; anything else a
+# Spaces window). Relies on the caller's $host, $workspace_dir, $browser_docs_url, and
+# $docs_window_id via bash dynamic scoping. Seeding through the focus paths also clears any
+# lingering cycle-burst session, so the following press starts a fresh burst.
+seed_cycle_focus_history() {
+  local seed_label="$1"
+  shift
+  local seed_target
+  for seed_target in "$@"; do
+    run_spaces_logged "/tmp/spaces-e2e-cycle-seed-${seed_label}-${seed_target// /-}.log" open "$seed_target" "$workspace_dir"
+    transition_pause "$host seed $seed_target focus ($seed_label)"
+    if [[ "$seed_target" == "docs" ]]; then
+      activate_google_chrome
+      chrome_focus_window_if_present "$docs_window_id"
+      wait_for_condition "chrome_front_url" "$browser_docs_url"
+    else
+      wait_for_spaces_front_window_title "$seed_target"
+    fi
+  done
+}
+
+# Cycling follows most-recently-focused order (docs/spec.md): a fresh press orders targets
+# [current, most-recent..., least-recent, never-focused in natural order]; `next` steps to the
+# most recently focused other window and `previous` to the least recently focused one. Every
+# measurement seeds an explicit focus history first, so each expected target is deterministic:
+# `next` measurements seed <expected> then <origin>; `previous` measurements tour every open
+# target starting with <expected> (making it least-recent) and ending on <origin>.
+# measure_spaces_cycle_transition fails on an expectation mismatch, so no re-checks follow.
 run_window_cycle_profile_loop() {
   local host="$1"
   local workspace_scope="$2"
@@ -4886,12 +4915,14 @@ run_window_cycle_profile_loop() {
   local cycle_profile_warmups=0
   local cycle_profile_iteration
   local cycle_profile_recording_before="$PROFILE_RECORD_METRICS"
-  local browser_docs_url cycle_target
+  local browser_docs_url
 
   if (( ONLY_WINDOW_CYCLE_PROFILE == 1 || ONLY_WINDOW_CYCLE_SMALL == 1 )); then
     cycle_profile_iterations="$REAL_SYSTEM_PROFILE_REPETITIONS"
     cycle_profile_warmups="$REAL_SYSTEM_PROFILE_WARMUPS"
   fi
+
+  browser_docs_url="$(wait_for_workspace_window_url_by_name "$workspace_dir" "docs")"
 
   for (( cycle_profile_iteration = 1; cycle_profile_iteration <= cycle_profile_warmups + cycle_profile_iterations; cycle_profile_iteration++ )); do
     if (( cycle_profile_iteration <= cycle_profile_warmups )); then
@@ -4900,126 +4931,54 @@ run_window_cycle_profile_loop() {
       PROFILE_RECORD_METRICS="$cycle_profile_recording_before"
     fi
 
-    run_spaces_logged /tmp/spaces-e2e-cycle-seed-docs-final.log open docs "$workspace_dir"
-    activate_google_chrome
-    chrome_focus_window_if_present "$docs_window_id"
-    transition_pause "$host seed docs focus for cycling"
-    browser_docs_url="$(wait_for_workspace_window_url_by_name "$workspace_dir" "docs")"
-    wait_for_condition "chrome_front_url" "$browser_docs_url"
+    seed_cycle_focus_history "browser-to-frontend" frontend docs
     measure_spaces_cycle_transition \
-      "$host" \
-      "$workspace_scope" \
-      "$workspace_dir" \
-      "$docs_window_id" \
-      "browser_tracked_tab" \
-      "next" \
+      "$host" "$workspace_scope" "$workspace_dir" "$docs_window_id" \
+      "browser_tracked_tab" "next" \
       "$host cycle next browser to frontend" \
-      "terminal:frontend" \
-      "process:frontend"
-    cycle_target="$MEASURED_CYCLE_TARGET"
-    case "$cycle_target" in
-      terminal:frontend|process:frontend) ;;
-      *) fail "browser to frontend cycle target: expected frontend, got '$cycle_target'" ;;
-    esac
+      "terminal:frontend" "process:frontend"
 
+    seed_cycle_focus_history "frontend-to-browser" docs backend "$adhoc_name" "$MOCK_AGENT_LABEL" frontend
     measure_spaces_cycle_transition \
-      "$host" \
-      "$workspace_scope" \
-      "$workspace_dir" \
-      "$docs_window_id" \
-      "process_tracked_tab" \
-      "previous" \
+      "$host" "$workspace_scope" "$workspace_dir" "$docs_window_id" \
+      "process_tracked_tab" "previous" \
       "$host cycle previous frontend to browser" \
       "browser:*"
-    cycle_target="$MEASURED_CYCLE_TARGET"
-    case "$cycle_target" in
-      browser:*) ;;
-      *) fail "frontend to browser cycle target: expected browser, got '$cycle_target'" ;;
-    esac
 
-    run_spaces_logged /tmp/spaces-e2e-cycle-reseed-frontend-post-browser.log open frontend "$workspace_dir"
-    transition_pause "$host reseed frontend focus after browser round trip"
-    wait_for_spaces_front_window_title "frontend"
-
+    seed_cycle_focus_history "frontend-to-backend" backend frontend
     measure_spaces_cycle_transition \
-      "$host" \
-      "$workspace_scope" \
-      "$workspace_dir" \
-      "$docs_window_id" \
-      "process_tracked_tab" \
-      "next" \
+      "$host" "$workspace_scope" "$workspace_dir" "$docs_window_id" \
+      "process_tracked_tab" "next" \
       "$host cycle next frontend to backend" \
-      "terminal:backend" \
-      "process:backend"
-    cycle_target="$MEASURED_CYCLE_TARGET"
-    case "$cycle_target" in
-      terminal:backend|process:backend) ;;
-      *) fail "frontend to backend cycle target: expected backend, got '$cycle_target'" ;;
-    esac
+      "terminal:backend" "process:backend"
 
+    seed_cycle_focus_history "backend-to-adhoc" "$adhoc_name" backend
     measure_spaces_cycle_transition \
-      "$host" \
-      "$workspace_scope" \
-      "$workspace_dir" \
-      "$docs_window_id" \
-      "process_tracked_tab" \
-      "next" \
+      "$host" "$workspace_scope" "$workspace_dir" "$docs_window_id" \
+      "process_tracked_tab" "next" \
       "$host cycle next backend to ad hoc terminal" \
       "terminal:${adhoc_name}"
-    cycle_target="$MEASURED_CYCLE_TARGET"
-    case "$cycle_target" in
-      terminal:${adhoc_name}) ;;
-      *) fail "backend to ad hoc cycle target: expected ${adhoc_name}, got '$cycle_target'" ;;
-    esac
 
+    seed_cycle_focus_history "adhoc-to-agent" "$MOCK_AGENT_LABEL" "$adhoc_name"
     measure_spaces_cycle_transition \
-      "$host" \
-      "$workspace_scope" \
-      "$workspace_dir" \
-      "$docs_window_id" \
-      "terminal_tracked_tab" \
-      "next" \
+      "$host" "$workspace_scope" "$workspace_dir" "$docs_window_id" \
+      "terminal_tracked_tab" "next" \
       "$host cycle next ad hoc terminal to agent" \
       "agent:*"
-    cycle_target="$MEASURED_CYCLE_TARGET"
-    case "$cycle_target" in
-      agent:*) ;;
-      *) fail "ad hoc terminal to agent cycle target: expected agent, got '$cycle_target'" ;;
-    esac
 
+    seed_cycle_focus_history "agent-to-browser" docs "$MOCK_AGENT_LABEL"
     measure_spaces_cycle_transition \
-      "$host" \
-      "$workspace_scope" \
-      "$workspace_dir" \
-      "$docs_window_id" \
-      "agent_tracked_tab" \
-      "next" \
+      "$host" "$workspace_scope" "$workspace_dir" "$docs_window_id" \
+      "agent_tracked_tab" "next" \
       "$host cycle next agent to browser" \
       "browser:*"
-    cycle_target="$MEASURED_CYCLE_TARGET"
-    case "$cycle_target" in
-      browser:*) ;;
-      *) fail "agent to browser cycle target: expected browser, got '$cycle_target'" ;;
-    esac
 
-    run_spaces_logged /tmp/spaces-e2e-cycle-reseed-agent-post-browser.log open "$MOCK_AGENT_LABEL" "$workspace_dir"
-    transition_pause "$host reseed agent focus after browser round trip"
-    wait_for_spaces_front_window_title "$MOCK_AGENT_LABEL"
-
+    seed_cycle_focus_history "agent-to-adhoc" "$adhoc_name" docs backend frontend "$MOCK_AGENT_LABEL"
     measure_spaces_cycle_transition \
-      "$host" \
-      "$workspace_scope" \
-      "$workspace_dir" \
-      "$docs_window_id" \
-      "agent_tracked_tab" \
-      "previous" \
+      "$host" "$workspace_scope" "$workspace_dir" "$docs_window_id" \
+      "agent_tracked_tab" "previous" \
       "$host cycle previous agent to ad hoc terminal" \
       "terminal:${adhoc_name}"
-    cycle_target="$MEASURED_CYCLE_TARGET"
-    case "$cycle_target" in
-      terminal:${adhoc_name}) ;;
-      *) fail "agent to ad hoc cycle target: expected ${adhoc_name}, got '$cycle_target'" ;;
-    esac
   done
 
   PROFILE_RECORD_METRICS="$cycle_profile_recording_before"
@@ -5777,11 +5736,7 @@ PY
     done
     [[ -z "$(chrome_window_id_for_url "$browser_admin_url")" ]] || fail "admin browser session stayed open after cleanup"
   fi
-  # The profile loop's chained docs->frontend->backend->adhoc->agent expectations encode the
-  # pre-#147 static cycle order; cycling follows most-recently-focused order now (docs/spec.md),
-  # so each step's target depends on the focus history and burst-session timing instead.
-  # Skipped until the loop is redesigned around MRU semantics.
-  skip_case "$host: window cycle profile loop" "stale static-order expectations since #147 MRU cycling"
+  run_window_cycle_profile_loop "$host" "single" "$workspace_dir" "$docs_window_id" "$adhoc_name"
   if is_spaces_terminal_target "$host"; then
     assert_spaces_cpu_not_above "spaces_app.cpu_after_window_cycle" "$SPACES_SUSTAINED_CPU_BUDGET_PCT" "$host" "single"
   fi

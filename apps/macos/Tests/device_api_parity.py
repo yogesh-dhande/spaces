@@ -228,11 +228,13 @@ def cleanup_prior_e2e_projects(args: argparse.Namespace, app: dict, overview: di
 
 
 def workspace_overview(args: argparse.Namespace, app: dict, workspace_id: str) -> dict:
-    overview = current_overview(args, app)
-    workspace = find_workspace(overview, workspace_id)
-    if not workspace:
-        raise AssertionError(f"overview did not include workspace {workspace_id}: {json.dumps(overview, indent=2, sort_keys=True)}")
-    return workspace
+    # The daemon rebuilds the overview asynchronously after a mutation, so a read issued
+    # right after createWorkspace can race the rebuild; poll like the other overview waits.
+    def attempt():
+        overview = current_overview(args, app)
+        return find_workspace(overview, workspace_id)
+
+    return wait_for(attempt, f"overview to include workspace {workspace_id}")
 
 
 def wait_for_terminal_state(args: argparse.Namespace, app: dict, session_id: str) -> dict:
