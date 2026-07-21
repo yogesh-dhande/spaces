@@ -31,12 +31,30 @@ public enum CodingAgent: String, CaseIterable, Sendable, Codable {
         }
     }
 
-    /// Executable names to probe on PATH / common install dirs for availability.
+    /// Executable names to probe on PATH / common install dirs for availability. The first entry is the
+    /// agent's canonical CLI command (see `primaryCommandName`); probing/matching against the rest of
+    /// the list is set-like and does not depend on this order.
     var executableNames: [String] {
         switch self {
         case .claudeCode: ["claude"]
         case .codex: ["codex"]
         case .opencode: ["opencode"]
+        }
+    }
+
+    /// The agent's canonical CLI command — `executableNames`' first entry.
+    public var primaryCommandName: String { executableNames[0] }
+
+    /// All agents' `primaryCommandName`s joined in prose, Oxford-comma style: "claude, codex, or
+    /// opencode". Derived from `allCases` so a new agent appears automatically in help/error text that
+    /// enumerates supported commands.
+    public static var commandListText: String {
+        let names = allCases.map(\.primaryCommandName)
+        switch names.count {
+        case 0: return ""
+        case 1: return names[0]
+        case 2: return "\(names[0]) or \(names[1])"
+        default: return "\(names.dropLast().joined(separator: ", ")), or \(names.last!)"
         }
     }
 

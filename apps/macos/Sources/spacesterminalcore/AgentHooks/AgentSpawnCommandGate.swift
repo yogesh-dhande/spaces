@@ -35,8 +35,8 @@ extension CodingAgent {
     }
 }
 
-/// Gate for `spaces agent spawn`: the command must launch a supported coding agent (claude, codex, or
-/// opencode). This is only a command-shape gate — it identifies *which* coding agent the command
+/// Gate for `spaces agent spawn`: the command must launch a supported coding agent (see `CodingAgent`).
+/// This is only a command-shape gate — it identifies *which* coding agent the command
 /// launches so spawn readiness knows which foreground kind to await. Hooks are deliberately NOT a
 /// prerequisite: spawn readiness is foreground-detection-based (the daemon's foreground classification
 /// identifies the running agent), and a promptless Codex never emits `SessionStart`, so requiring a
@@ -48,7 +48,7 @@ public enum AgentSpawnCommandGate {
 
         public var errorDescription: String? {
             switch self {
-            case .unsupportedCommand: return "Agent spawn requires a supported coding agent command (claude, codex, or opencode)."
+            case .unsupportedCommand: return "Agent spawn requires a supported coding agent command (\(CodingAgent.commandListText))."
             }
         }
     }

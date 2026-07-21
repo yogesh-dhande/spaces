@@ -2229,8 +2229,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     }
 
     /// Spawns a coding-agent terminal session on the daemon host. Runs the same command gate as the
-    /// local `spaces agent spawn` — the command must launch a supported coding agent (claude, codex, or
-    /// opencode). Hooks are not required. Unlike the local path there is no cwd to infer the workspace
+    /// local `spaces agent spawn` — the command must launch a supported coding agent (see `CodingAgent`).
+    /// Hooks are not required. Unlike the local path there is no cwd to infer the workspace
     /// from, so `workspaceID` is required. Returns the created session id (as a mutation).
     ///
     /// Remote spawn readiness is detection-based, matching the local path: the client polls the device

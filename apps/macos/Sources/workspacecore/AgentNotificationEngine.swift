@@ -14,7 +14,7 @@ public struct AgentNotificationEngine {
     /// (a dead/absent session), which the engine treats as the subscriber having vanished.
     public typealias DeliverLine = (_ subscriberTerminalSessionID: String, _ line: String) throws -> Void
 
-    /// Resolves the coding-agent kind label (claude/codex/opencode, or a launch title) for a local watched
+    /// Resolves the coding-agent kind label (a `TerminalDetectedAgentKind` raw value, or a launch title) for a local watched
     /// agent, used for the `(<kind>)` parenthetical. The daemon wires this to the same runtime-label
     /// resolution `agent list` uses; a `nil` result renders as `coding agent`. Defaults to `nil` so tests
     /// and non-daemon callers do not have to supply session-file access.
@@ -211,7 +211,7 @@ public struct AgentNotificationEngine {
     /// deep link is device-qualified (`?device=<id>`) and targets the remote child's terminal session
     /// (the watched key). Project/workspace/branch/label/note all come straight off the `listAgentSessions`
     /// row — the remote device already resolved them, so this path does no store lookups. The kind is the
-    /// row's `agent` field (the remote daemon's detected agent kind — claude/codex/opencode, never the
+    /// row's `agent` field (the remote daemon's detected agent kind — a `TerminalDetectedAgentKind` raw value, never the
     /// launch title), falling back to `coding agent` when no kind is detected yet.
     func renderRemoteLine(terminalSessionID: String, row: SpacesDeviceAgentSessionRow, deviceID: String, transition: ChildTransition) -> String {
         let kind = row.agent ?? "coding agent"

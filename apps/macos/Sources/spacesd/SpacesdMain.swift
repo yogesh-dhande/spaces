@@ -306,8 +306,9 @@ final class DaemonLivenessState: @unchecked Sendable {
             Self.runOnMainActorSynchronously { self?.terminateBuiltInTerminalSession(id: sessionID) }
         }
         // The device-runtime reconcilers detect coding-agent exits that never fired a session-end hook
-        // (codex/opencode, SIGKILL'd claude) and notify subscribers through this submitter. They run on a
-        // detached task, so the send hops to the main actor exactly like the terminator override above.
+        // (a supported coding agent exiting without signaling, or being SIGKILL'd) and notify subscribers
+        // through this submitter. They run on a detached task, so the send hops to the main actor exactly
+        // like the terminator override above.
         WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter { [weak self] sessionID, line in
             try Self.runOnMainActorSynchronously {
                 Result {
@@ -1178,7 +1179,7 @@ final class DaemonLivenessState: @unchecked Sendable {
                 guard let self else { throw Self.requestFailedError("spacesd is shutting down.") }
                 try self.submitAgentNotificationLine(sessionID: sessionID, line: line)
             },
-            // The `(<kind>)` parenthetical is the detected agent kind (claude/codex/opencode) from the
+            // The `(<kind>)` parenthetical is the detected supported coding agent (see `CodingAgent`) from the
             // child's persisted runtime state — the same identity `agentRuntimeKind` puts in an
             // orchestration row's `agent:` field, kept off the launch title so the label is not
             // duplicated (`smoke-hello (smoke-hello)`). Reads disk, so it works at exit time too (the row
@@ -1222,7 +1223,7 @@ final class DaemonLivenessState: @unchecked Sendable {
     }
 
     /// Spawns a coding-agent terminal session after gating the command against the supported-agent set:
-    /// the command must launch a supported coding agent (claude, codex, or opencode) so spawn readiness
+    /// the command must launch a supported coding agent (see `CodingAgent`) so spawn readiness
     /// knows which foreground kind to await. Hooks are not a prerequisite — readiness is
     /// foreground-detection-based, polled CLI-side against the session's terminal id.
     private func spawnProfileAgentSession(_ payload: TerminalServiceAgentSpawnPayload, orchestrator: WorkspaceOrchestrator) throws

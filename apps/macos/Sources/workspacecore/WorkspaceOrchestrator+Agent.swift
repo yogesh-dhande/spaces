@@ -988,11 +988,11 @@ extension WorkspaceOrchestrator {
         return value
     }
 
-    /// The coding agent's detected kind (claude/codex/opencode) for a terminal session — the `agent:`
+    /// The coding agent's detected kind (a `TerminalDetectedAgentKind` raw value) for a terminal session — the `agent:`
     /// field of an orchestration row — read only from the session's persisted foreground runtime state,
     /// never the `.agent` launch title. This is the machine-readable identity remote notification
     /// rendering uses as the `(<kind>)` parenthetical; keeping it off the launch title is what prevents a
-    /// "Reviewer (Reviewer)" duplication and preserves the claude/codex/opencode identity in listings.
+    /// "Reviewer (Reviewer)" duplication and preserves the detected-kind identity in listings.
     /// Nil until a kind is detected, which renders honestly as "coding agent" downstream.
     func agentRuntimeKind(terminalSessionID: String) -> String? {
         guard let paths = try? TerminalSessionPaths.forSession(id: terminalSessionID),
@@ -1014,7 +1014,7 @@ extension WorkspaceOrchestrator {
                 for agent in try store.agentWindows(workspaceID: workspace.id) where agent.provider == .spaces {
                     let terminalSessionID = trimmedOrNilAgentField(agent.terminalTrackingID)
                     if let sessionID, terminalSessionID != sessionID { continue }
-                    // `agent:` carries the detected kind (claude/codex/opencode), never the launch title;
+                    // `agent:` carries the detected kind (`TerminalDetectedAgentKind` raw value), never the launch title;
                     // `label:` carries the row's stored label — the workspace-unique visible name, which
                     // signals keep fresh and collisions uniquify ("Reviewer 2"), so two children never
                     // report the same label. Collapsing kind and label made remote rendering emit
