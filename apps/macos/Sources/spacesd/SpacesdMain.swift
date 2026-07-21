@@ -21,6 +21,63 @@ import workspacecore
     import spacesdeviceapi
 #endif
 
+/// Thread-safe snapshot of the daemon facts a liveness `.ping` reports, shared between the main actor
+/// (which writes them) and the socket connection worker (which reads them off-actor). Keeping this off
+/// the main actor is what lets a busy daemon answer pings promptly instead of queuing them behind an
+/// in-flight session `.create` — the core of the issue #188 relaunch-race fix.
+final class DaemonLivenessState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var sessionCount = 0
+    private var certificateFingerprint: String?
+    /// Mirrors the main actor's `handoffInProgress` flag. Without this, the fast ping path would report
+    /// the daemon live for the entire up-to-10s exec-handoff preflight window during which `handle(_:)`
+    /// is already rejecting every real request with `.shuttingDown` — a client polling liveness would
+    /// see "ok" and adopt a daemon that refuses everything else.
+    private var handoffInProgress = false
+
+    func storeSessionCount(_ value: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+        sessionCount = value
+    }
+
+    func storeFingerprint(_ value: String?) {
+        lock.lock()
+        defer { lock.unlock() }
+        certificateFingerprint = value
+    }
+
+    func storeHandoffInProgress(_ value: Bool) {
+        lock.lock()
+        defer { lock.unlock() }
+        handoffInProgress = value
+    }
+
+    func snapshot() -> (sessionCount: Int, certificateFingerprint: String?, handoffInProgress: Bool) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (sessionCount, certificateFingerprint, handoffInProgress)
+    }
+
+    /// Builds the liveness `.ping` response entirely off the main actor. It carries the same
+    /// `TerminalServiceDaemonStatus` shape as the controller's `daemonStatus()` (version, installed
+    /// version, fingerprint, and an eventually-consistent session count) so wire-compatibility
+    /// negotiation works identically, but it never blocks on the main actor — the point of the fast
+    /// path. While a handoff is in progress it instead mirrors `handle(_:)`'s own rejection exactly, so
+    /// a ping never reports the daemon live while every other request is being turned away.
+    func pingResponse() -> TerminalServiceResponse {
+        let snapshot = snapshot()
+        guard !snapshot.handoffInProgress else {
+            return TerminalServiceResponse(
+                ok: false, message: "spacesd is handing off to an updated daemon.", errorCode: .shuttingDown, servicePID: getpid())
+        }
+        let status = TerminalServiceDaemonStatus(
+            version: AppVersion.current, installedVersion: InstalledSpacesVersion.current(),
+            certificateFingerprint: snapshot.certificateFingerprint, activeSessionCount: snapshot.sessionCount)
+        return TerminalServiceResponse(ok: true, message: "pong", servicePID: getpid(), daemonStatus: status)
+    }
+}
+
 @MainActor private final class SpacesDaemonController {
     private static let ownerGatedTerminalCommands: Set<String> = ["send", "key", "clearScreen", "resize", "scroll"]
     private static let terminalLinkTransferAuthorizationTTL: TimeInterval = 10 * 60
@@ -46,17 +103,38 @@ import workspacecore
     /// remains stable beyond the guard window starts a fresh generation chain on its next update.
     private var lastHandoffResumeUptime: TimeInterval?
     /// True while `performExecHandoff()` is between its first await and exec; see its reentrancy guard.
-    private var handoffInProgress = false
+    /// Backed by `livenessState` (rather than a plain stored property) so that single flag is also the
+    /// one the off-actor ping fast path reads — there is exactly one source of truth for "is a handoff
+    /// in progress", read from both the main actor and the socket worker.
+    private var handoffInProgress: Bool {
+        get { livenessState.snapshot().handoffInProgress }
+        set { livenessState.storeHandoffInProgress(newValue) }
+    }
     private let instanceLock: TerminalServiceInstanceLock
     private let serverQueue = DispatchQueue(label: "spaces.terminal.service")
-    private lazy var server = TerminalServiceServer(socketPath: socketPath, queue: serverQueue) { [weak self] request in
+    private lazy var server = TerminalServiceServer(
+        socketPath: socketPath, queue: serverQueue,
+        // Liveness `.ping` is answered off the main actor from `livenessState`, so a client's health probe
+        // stays fast even while the main actor is saturated by concurrent session `.create`s. Everything
+        // else still funnels through `handle` on the main actor.
+        livenessResponder: { [weak self] in
+            guard let self else { return TerminalServiceResponse(ok: true, message: "pong", servicePID: getpid()) }
+            return self.livenessState.pingResponse()
+        }
+    ) { [weak self] request in
         Self.runOnMainActorSynchronously {
             guard let self else { return TerminalServiceResponse(ok: false, message: "spacesd is shutting down.", errorCode: .shuttingDown) }
             return self.handle(request)
         }
     }
     private lazy var daemonIdentityFingerprint: String? = (try? TerminalServiceTLSIdentityStore.loadOrCreate())?.certificateFingerprint
-    private var sessionCores: [String: GhosttyEmbeddedSessionCore] = [:]
+    /// Off-actor snapshot the liveness `.ping` responder reads without touching the main actor. The main
+    /// actor writes the certificate fingerprint once at startup and the session count on every
+    /// `sessionCores` mutation; the socket worker reads both under the box's lock.
+    private nonisolated let livenessState = DaemonLivenessState()
+    private var sessionCores: [String: GhosttyEmbeddedSessionCore] = [:] {
+        didSet { livenessState.storeSessionCount(sessionCores.count) }
+    }
     private var terminalLinkTransferAuthorizations: [String: TerminalLinkTransferAuthorization] = [:]
     private var lifecycleTimer: Timer?
     #if os(Linux)
@@ -133,6 +211,10 @@ import workspacecore
     /// Starts the shared (non-per-session) services. Shared by the normal `start()` tail and the
     /// failed-`execv` fallback, which stopped them in `stopSharedServices()` before quiescing.
     private func startSharedServices() throws {
+        // Seed the off-actor liveness snapshot before the socket accepts connections so the very first
+        // `.ping` already carries this daemon's identity. Runs on both fresh start and handoff resume.
+        livenessState.storeFingerprint(daemonIdentityFingerprint)
+        livenessState.storeSessionCount(sessionCores.count)
         try server.start()
         deviceAPISupervisor.start()
         startLifecycleTimer()
@@ -275,12 +357,12 @@ import workspacecore
         // sends with `appendNewline: false` because the executor issues the submitting CR as its own
         // separate byte write (the provider-neutral two-write submit), routing through the same
         // terminal-send chokepoint the `.terminalSend` profile command uses.
-        WorkspaceOrchestrator.setProcessWideBuiltInTerminalSessionInputWriter { [weak self] sessionID, input in
+        WorkspaceOrchestrator.setProcessWideBuiltInTerminalSessionInputWriter { [weak self] sessionID, input, appendNewline in
             try Self.runOnMainActorSynchronously {
                 Result {
                     guard let self else { throw Self.requestFailedError("spacesd is shutting down.") }
                     _ = try self.sendProfileTerminalInput(
-                        TerminalServiceTerminalSendPayload(sessionID: sessionID, input: input, appendNewline: false))
+                        TerminalServiceTerminalSendPayload(sessionID: sessionID, input: input, appendNewline: appendNewline))
                 }
             }.get()
         }

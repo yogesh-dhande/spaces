@@ -89,7 +89,7 @@ CERTIFICATE_FINGERPRINT=""
 
 cleanup() {
   if [[ -n "$REMOTE_SESSION_ID" && -n "$REMOTE_ENV_PREFIX" ]]; then
-    remote_ssh "$REMOTE_ENV_PREFIX $REMOTE_INSTALL/bin/spaces terminal send text $REMOTE_SESSION_ID exit --newline" >/dev/null 2>&1 || true
+    remote_ssh "$REMOTE_ENV_PREFIX $REMOTE_INSTALL/bin/spaces terminal send text $REMOTE_SESSION_ID exit --submit" >/dev/null 2>&1 || true
   fi
   if [[ -n "$REMOTE_PROJECT_DIR" ]]; then
     remote_ssh "rm -rf $(shell_quote "$REMOTE_PROJECT_DIR")" >/dev/null 2>&1 || true
@@ -264,7 +264,7 @@ echo "$LIST_OUTPUT"
 printf '%s\n' "$LIST_OUTPUT" | grep -q "$REMOTE_SESSION_ID" || fail "terminal list --device did not show $REMOTE_SESSION_ID"
 
 echo "== sending input through the device =="
-"$SPACES_BIN" terminal send text "$REMOTE_SESSION_ID" "echo $MARKER" --newline --device "$DEVICE_ID"
+"$SPACES_BIN" terminal send text "$REMOTE_SESSION_ID" "echo $MARKER" --submit --device "$DEVICE_ID"
 
 echo "== tailing output through the device =="
 deadline=$((SECONDS + 30))

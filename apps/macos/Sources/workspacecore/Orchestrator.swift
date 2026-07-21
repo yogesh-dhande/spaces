@@ -34,7 +34,7 @@ public final class WorkspaceOrchestrator {
     /// installs a process-wide override routing to the same terminal-send chokepoint the `.terminalSend`
     /// profile command uses; workspacecore has no session I/O of its own, so with none installed the write
     /// throws (non-daemon callers never spawn agent automations).
-    public typealias BuiltInTerminalSessionInputWriter = @Sendable (String, TerminalProfileInput) throws -> Void
+    public typealias BuiltInTerminalSessionInputWriter = @Sendable (String, TerminalProfileInput, _ appendNewline: Bool) throws -> Void
 
     public static let terminalTrackingIDEnvVar = "SPACES_TERMINAL_TRACKING_ID"
     /// Set by the CLI's `agent spawn` on the automation orchestrator's own terminal to identify the

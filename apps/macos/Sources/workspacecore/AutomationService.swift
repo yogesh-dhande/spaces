@@ -556,15 +556,16 @@ import spacesterminalcore
         try deliverAgentPrompt(run, automation: automation, sessionID: sessionID)
     }
 
-    /// Delivers the agent's seed prompt as TWO independent writes — the prompt text, then a separate CR
-    /// (byte 13). This is the provider-neutral submit: a single write with a trailing CR is exactly what
-    /// OpenCode leaves unsubmitted (issue #187), so the CR is always its own write. The prompt is sent
-    /// verbatim (nothing stripped). `promptDeliveredAt` is persisted only after the CR write succeeds, so a
-    /// restart or a partial write retries the whole send rather than resuming into a never-submitted prompt.
+    /// Delivers the agent's seed prompt as one submit-send (`appendNewline: true`): the session host's send
+    /// chokepoint writes the text and a separate, spaced Enter keystroke, which every supported agent TUI
+    /// (Claude Code, Codex, OpenCode) reads as a real submit — a client-side follow-up CR write would land
+    /// inline within the paste burst and is exactly what OpenCode leaves unsubmitted (issue #187). The
+    /// prompt is sent verbatim (nothing stripped). `promptDeliveredAt` is persisted only after the write
+    /// succeeds, so a restart or a failed write retries the whole send rather than resuming into a
+    /// never-submitted prompt.
     private func deliverAgentPrompt(_ run: AutomationRun, automation: Automation, sessionID: String) throws {
         guard let prompt = automation.agentPrompt else { return }
-        try orchestrator.writeAutomationSessionInput(sessionID: sessionID, input: .text(prompt))
-        try orchestrator.writeAutomationSessionInput(sessionID: sessionID, input: .bytes(Data([0x0D])))
+        try orchestrator.writeAutomationSessionInput(sessionID: sessionID, input: .text(prompt), appendNewline: true)
         try store.updateAutomationRun(
             id: run.id, status: .running, skipReason: nil, exitCode: nil, terminalSessionID: sessionID, startedAt: run.startedAt, endedAt: nil,
             promptDeliveredAt: now())

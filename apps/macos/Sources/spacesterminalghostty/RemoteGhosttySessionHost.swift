@@ -166,12 +166,19 @@
 
         public func releaseRendererSurface() { terminalView.releaseSurface() }
 
+        // `setFocused` is a passive focus-state sync driven by metadata refreshes and app
+        // activation (a coding agent rewriting the terminal title fires it many times per
+        // second). It must not steal first responder from other controls such as the sidebar or
+        // tab rename editor, so the focused branch uses the guarded reclaim, which only grabs
+        // focus back when it has fallen to the window floor during mirror re-parenting.
+        // Deliberate, user-intent focus (pane clicked, ownership promoted) goes through
+        // `focusWindow`, which does steal.
         public func setFocused(_ focused: Bool, for clientID: String) {
             guard clientID == attachedClient?.id else {
                 if !focused, terminalView.window?.firstResponder === terminalView { terminalView.window?.makeFirstResponder(nil) }
                 return
             }
-            if focused { terminalView.focusWindow(terminalView.window) }
+            if focused { terminalView.restoreFirstResponderIfWindowReady() }
         }
 
         public func focusWindow(_ window: NSWindow?) { terminalView.focusWindow(window) }

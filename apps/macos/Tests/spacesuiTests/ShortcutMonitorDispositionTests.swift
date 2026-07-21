@@ -48,4 +48,52 @@ import workspacecore
         #expect(!AppKitController.isClosePaneShortcut(charactersIgnoringModifiers: "q", eventModifiers: [.command]))
         #expect(!AppKitController.isClosePaneShortcut(charactersIgnoringModifiers: nil, eventModifiers: [.command]))
     }
+
+    // MARK: - ⌘T new-tab session picker gating
+
+    @Test func newTabShortcutConsumesWhilePickerIsActiveRegardlessOfEverythingElse() {
+        #expect(
+            AppKitController.newTabShortcutAction(
+                sessionPickerIsActive: true, textInputIsFocused: true, keyWindowIsPanelWindow: true, keyWindowIsMainWindow: false,
+                selectedWorkspaceID: nil) == .consume)
+        #expect(
+            AppKitController.newTabShortcutAction(
+                sessionPickerIsActive: true, textInputIsFocused: false, keyWindowIsPanelWindow: false, keyWindowIsMainWindow: true,
+                selectedWorkspaceID: "workspace-1") == .consume)
+    }
+
+    @Test func newTabShortcutPassesWhenAFocusedTextInputIsNotThePicker() {
+        #expect(
+            AppKitController.newTabShortcutAction(
+                sessionPickerIsActive: false, textInputIsFocused: true, keyWindowIsPanelWindow: false, keyWindowIsMainWindow: true,
+                selectedWorkspaceID: "workspace-1") == .pass)
+    }
+
+    @Test func newTabShortcutConsumesWhenAPanelWindowIsKey() {
+        #expect(
+            AppKitController.newTabShortcutAction(
+                sessionPickerIsActive: false, textInputIsFocused: false, keyWindowIsPanelWindow: true, keyWindowIsMainWindow: false,
+                selectedWorkspaceID: nil) == .consume)
+    }
+
+    @Test func newTabShortcutPresentsPickerForMainWindowWithSelectedWorkspace() {
+        #expect(
+            AppKitController.newTabShortcutAction(
+                sessionPickerIsActive: false, textInputIsFocused: false, keyWindowIsPanelWindow: false, keyWindowIsMainWindow: true,
+                selectedWorkspaceID: "workspace-1") == .presentPicker)
+    }
+
+    @Test func newTabShortcutPassesForMainWindowWithoutASelectedWorkspace() {
+        #expect(
+            AppKitController.newTabShortcutAction(
+                sessionPickerIsActive: false, textInputIsFocused: false, keyWindowIsPanelWindow: false, keyWindowIsMainWindow: true,
+                selectedWorkspaceID: nil) == .pass)
+    }
+
+    @Test func newTabShortcutPassesWhenNeitherWindowKindIsKey() {
+        #expect(
+            AppKitController.newTabShortcutAction(
+                sessionPickerIsActive: false, textInputIsFocused: false, keyWindowIsPanelWindow: false, keyWindowIsMainWindow: false,
+                selectedWorkspaceID: "workspace-1") == .pass)
+    }
 }

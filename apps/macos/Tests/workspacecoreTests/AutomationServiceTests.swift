@@ -294,19 +294,19 @@ import spacesterminalcore
         XCTAssertTrue(harness.host.writtenInput.isEmpty, "no prompt is delivered until the agent is detected")
         XCTAssertNil(try harness.store.automationRun(id: run.id)?.promptDeliveredAt)
 
-        // Detection → the next tick delivers the prompt as two writes and records delivery.
+        // Detection → the next tick delivers the prompt as one submit-send and records delivery.
         harness.host.markSessionForegroundDetected(sessionID: sessionID)
         harness.service.tick()
         let writes = harness.host.writtenInput
-        XCTAssertEqual(writes.count, 2, "the prompt is delivered as two independent writes")
-        XCTAssertEqual(writes.first?.input, .text("investigate the failing test"), "the first write is the verbatim prompt text")
-        XCTAssertEqual(writes.last?.input, .bytes(Data([0x0D])), "the second write is a bare CR (byte 13)")
-        XCTAssertEqual(writes.map(\.sessionID), [sessionID, sessionID])
-        XCTAssertNotNil(try harness.store.automationRun(id: run.id)?.promptDeliveredAt, "delivery is persisted once the CR write succeeds")
+        XCTAssertEqual(writes.count, 1, "the prompt is delivered as one submit-send")
+        XCTAssertEqual(writes.first?.input, .text("investigate the failing test"), "the write is the verbatim prompt text")
+        XCTAssertEqual(writes.first?.appendNewline, true, "the send submits (the chokepoint writes the spaced Enter)")
+        XCTAssertEqual(writes.map(\.sessionID), [sessionID])
+        XCTAssertNotNil(try harness.store.automationRun(id: run.id)?.promptDeliveredAt, "delivery is persisted once the write succeeds")
 
         // A second tick before `done` neither re-sends nor completes the run.
         harness.service.tick()
-        XCTAssertEqual(harness.host.writtenInput.count, 2, "a delivered prompt is not re-sent")
+        XCTAssertEqual(harness.host.writtenInput.count, 1, "a delivered prompt is not re-sent")
         XCTAssertEqual(try harness.store.automationRun(id: run.id)?.status, .running)
 
         // The agent row signals done → succeeded, and the session is left open.
@@ -462,14 +462,14 @@ import spacesterminalcore
         harness.host.markSessionForegroundDetected(sessionID: sessionID)
         let resumed1 = harness.makeService()
         resumed1.tick()
-        XCTAssertEqual(harness.host.writtenInput.count, 2, "the detecting phase resumes into prompt delivery after a restart")
+        XCTAssertEqual(harness.host.writtenInput.count, 1, "the detecting phase resumes into prompt delivery after a restart")
         XCTAssertNotNil(try harness.store.automationRun(id: run.id)?.promptDeliveredAt)
 
         // Phase 2 (delivered): another restarted service resumes into awaiting the done signal.
         _ = try harness.registerAgentRow(workspaceID: workspace.id, sessionID: sessionID, status: .done)
         let resumed2 = harness.makeService()
         resumed2.tick()
-        XCTAssertEqual(harness.host.writtenInput.count, 2, "the delivered phase does not re-send the prompt after a restart")
+        XCTAssertEqual(harness.host.writtenInput.count, 1, "the delivered phase does not re-send the prompt after a restart")
         XCTAssertEqual(try harness.store.automationRun(id: run.id)?.status, .succeeded)
     }
 
@@ -984,13 +984,14 @@ private final class FakeAutomationTerminalHost: @unchecked Sendable {
     }
     private var deliveredStore: [(sessionID: String, line: String)] = []
     /// Raw terminal-input writes the automation executor made, in order — the seam the agent-kind executor
-    /// delivers its seed prompt through. Agent-prompt tests assert the two-write text-then-CR submit.
-    var writtenInput: [(sessionID: String, input: TerminalProfileInput)] {
+    /// delivers its seed prompt through. Agent-prompt tests assert the single submit-send
+    /// (`appendNewline: true`), whose spaced text+Enter split lives at the session host's send chokepoint.
+    var writtenInput: [(sessionID: String, input: TerminalProfileInput, appendNewline: Bool)] {
         lock.lock()
         defer { lock.unlock() }
         return writtenInputStore
     }
-    private var writtenInputStore: [(sessionID: String, input: TerminalProfileInput)] = []
+    private var writtenInputStore: [(sessionID: String, input: TerminalProfileInput, appendNewline: Bool)] = []
     private var trackedPIDs: [Int32] = []
 
     init(realCommands: Bool) { self.realCommands = realCommands }
@@ -1006,9 +1007,9 @@ private final class FakeAutomationTerminalHost: @unchecked Sendable {
             self?.deliveredStore.append((sessionID: sessionID, line: line))
             self?.lock.unlock()
         }
-        WorkspaceOrchestrator.setProcessWideBuiltInTerminalSessionInputWriter { [weak self] sessionID, input in
+        WorkspaceOrchestrator.setProcessWideBuiltInTerminalSessionInputWriter { [weak self] sessionID, input, appendNewline in
             self?.lock.lock()
-            self?.writtenInputStore.append((sessionID: sessionID, input: input))
+            self?.writtenInputStore.append((sessionID: sessionID, input: input, appendNewline: appendNewline))
             self?.lock.unlock()
         }
     }

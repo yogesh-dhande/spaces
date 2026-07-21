@@ -16,8 +16,11 @@
 #
 # Part B (opt-in, real coding agents; SPACES_E2E_AGENT_MATRIX=1): for each provider whose binary is on
 # PATH, spawn the agent (detection-only — spawn delivers no prompt), then drive the real orchestrator
-# flow itself: `terminal send text --submit` the prompt text, poll `terminal tail` for the reply, and
-# record the hook signal sequence via `agent status` polling. A non-zero spawn (detection
+# flow itself: `terminal send text ... --submit`, poll `terminal tail` for the reply, and record the
+# hook signal sequence via `agent status` polling. `--submit` is the one intended way to submit a
+# prompt — it sends the text, then a separate, spaced Enter keystroke, so every supported agent TUI
+# (Claude Code, Codex, OpenCode) runs the line instead of leaving it as an unsubmitted paste; no
+# per-provider send sequence is needed here. A non-zero spawn (detection
 # failure) or a row surviving kill is a per-provider FAIL; a missing reply is only recorded, because it
 # depends on the environment (an auth-gated or trust/onboarding-dialog-blocked provider answers nothing
 # until a human clears the dialog, which is exactly the state spawn no longer tries to handle). Hooks are
@@ -299,10 +302,10 @@ matrix_provider() {
   spawn_ms=$((end_ms - start_ms))
   detected="$(json_field "$spawn_out" 'd.get("detectedAgent") or "?"')"
 
-  # This is the real orchestrator flow spawn no longer does: send the prompt text with --submit, which
-  # presses Return as a second, independent send after the text (every supported TUI, including
-  # OpenCode's composer, accepts that as submit — see issue #187). If a trust/onboarding/auth dialog is
-  # holding input, the send lands in the dialog and no reply comes — recorded, not failed.
+  # This is the real orchestrator flow spawn no longer does: submit the prompt text with one call.
+  # `--submit` is provider-neutral (Claude Code, Codex, OpenCode all submit on it), so no separate
+  # carriage-return send is needed. If a trust/onboarding/auth dialog is holding input, the send lands
+  # in the dialog and no reply comes — recorded, not failed.
   "$SPACES_CLI" terminal send text "$child" 'reply with exactly: pong' --submit >/dev/null 2>&1 || true
 
   # Poll the hook status sequence (distinct consecutive statuses), the first-signal marker (lastSignalAt

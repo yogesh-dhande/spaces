@@ -1024,21 +1024,14 @@ struct TerminalSendTextCommand: ParsableCommand {
 
     @Argument(help: "Terminal session ID.") var sessionID: String
     @Argument(help: "Text to send.") var text: String
-    @Flag(name: .long, help: "Insert a newline character after the text.") var newline = false
-    @Flag(name: .long, help: "Press Return after the text (provider-neutral prompt submit for Claude, Codex, and OpenCode).")
-    var submit = false
+    @Flag(
+        name: .long,
+        help:
+            "Submit the text: send it, then a separate, spaced Enter keystroke (carriage return) so every supported agent TUI (Claude Code, Codex, OpenCode) runs the line instead of leaving it as an unsubmitted paste."
+    ) var submit = false
     @Option(name: .long, help: "Paired device name or ID. Defaults to this machine's local sessions.") var device: String?
 
-    func run() throws {
-        try sendTerminalInput(.text(text), sessionID: sessionID, appendNewline: newline, device: device)
-        // OpenCode's composer (unlike Claude Code's and Codex's) does not treat --newline's server-side
-        // spaced text+CR write as a submit — see issue #187. The only sequence verified to submit it is
-        // two independent top-level sends: this text send, then a second, later CR (byte 13) send. That
-        // second send reuses the same helper as `terminal send bytes <id> 13`, rather than appending \r
-        // to the text in one write, because a single write's trailing CR is exactly the case OpenCode
-        // leaves unsubmitted.
-        if submit { try sendTerminalInput(.bytes(Data([0x0D])), sessionID: sessionID, appendNewline: false, device: device) }
-    }
+    func run() throws { try sendTerminalInput(.text(text), sessionID: sessionID, appendNewline: submit, device: device) }
 }
 
 struct TerminalSendBytesCommand: ParsableCommand {
