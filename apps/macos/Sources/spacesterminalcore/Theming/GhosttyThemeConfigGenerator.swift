@@ -1,17 +1,19 @@
 import Foundation
 
-/// Generates the Spaces-managed Ghostty config for embedded terminals under
-/// `<profile-root>/ghostty/`. Embedded surfaces load ONLY this generated config — never the
-/// user's `~/.config/ghostty` files — so the default look stays predictable and matches the
-/// active Spaces theme. The root config references one generated light and one generated dark
-/// theme file; Ghostty's own light/dark switching (`ghostty_app_set_color_scheme`) picks the
-/// variant, so an OS appearance change never requires regenerating files.
+/// Generates the Spaces-managed Ghostty config for embedded terminals under the caller-supplied
+/// config root — the macOS embedded service passes `<profile-root>/ghostty/`, the iOS app a
+/// directory inside its Application Support scope (an iOS app container's home root, where a
+/// desktop-style `~/.spaces` profile root would land, is not writable on a physical device).
+/// Embedded surfaces load ONLY this generated config — never the user's `~/.config/ghostty`
+/// files — so the default look stays predictable and matches the active Spaces theme. The root
+/// config references one generated light and one generated dark theme file; Ghostty's own
+/// light/dark switching (`ghostty_app_set_color_scheme`) picks the variant, so an OS appearance
+/// change never requires regenerating files.
 public enum GhosttyThemeConfigGenerator {
-    /// Regenerates the config for the active profile and returns the root config file path.
+    /// Regenerates the config under `configRootDirectory` and returns the root config file path.
     /// Called at every embedded-app start so the files always reflect the shipped theme values.
-    public static func writeConfiguration(theme: ThemeDescriptor) throws -> String {
-        let root = URL(fileURLWithPath: try SpacesProfile.current().rootDirectory, isDirectory: true).appendingPathComponent(
-            "ghostty", isDirectory: true)
+    public static func writeConfiguration(theme: ThemeDescriptor, configRootDirectory: URL) throws -> String {
+        let root = configRootDirectory
         let themesDirectory = root.appendingPathComponent("themes", isDirectory: true)
         try FileManager.default.createDirectory(at: themesDirectory, withIntermediateDirectories: true)
 
