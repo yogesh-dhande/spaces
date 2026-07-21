@@ -1547,6 +1547,111 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         waitForCondition("owner first responder restored from window floor") { window.firstResponder is GhosttyMirrorTerminalView }
     }
 
+    /// `setFocused` is a passive focus-state sync driven by metadata refreshes and app
+    /// activation (a coding agent rewriting the terminal title fires it many times per second).
+    /// It must never steal first responder from another focused control such as the sidebar or
+    /// tab rename editor; deliberate focus goes through `focusWindow`.
+    @MainActor func testSetFocusedDoesNotStealFirstResponderFromOtherControl() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let queue = DispatchQueue(label: "spaces.remote-device.set-focused-no-steal-test")
+        let initialPayload = GhosttyRemoteSessionStatePayload(
+            sessionID: "remote-set-focused", reason: "initial", emittedAt: "2026-06-02T00:00:00Z", sessionStateRevision: 1, sessionStateFlags: 1,
+            screenStateRevision: 1,
+            runtimeState: TerminalSessionRuntimeState(
+                sessionID: "remote-set-focused", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running,
+                updatedAt: "2026-06-02T00:00:00Z", title: "owner", workingDirectory: "/tmp/live", columns: 8, rows: 1),
+            attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "owner", workingDirectory: "/tmp/live", outputByteCount: nil,
+            renderUpdate: try renderUpdate(text: "alpha", sessionRevision: 1))
+        let server = GhosttyRemoteSessionStateStreamServer(socketPath: paths.subscriptionSocketPath, queue: queue) { initialPayload }
+        try server.start()
+        defer { server.stop() }
+
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: .init(
+                sessionID: "remote-set-focused", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
+                createdAt: "2026-06-02T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 900, height: 520))
+        let window = KeyTestWindow(contentRect: container.bounds, styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = container
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
+
+        let client = TerminalClient(
+            id: "owner-client", kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-06-02T00:00:00Z")
+        try host.attach(client: client, mode: .owner, into: container)
+        waitForCondition("initial owner first responder") { window.firstResponder is GhosttyMirrorTerminalView }
+
+        // The user is editing another control (stands in for the sidebar/tab rename NSTextField).
+        let renameEditor = FocusableView(frame: NSRect(x: 0, y: 0, width: 10, height: 10))
+        container.addSubview(renameEditor)
+        XCTAssertTrue(window.makeFirstResponder(renameEditor))
+        XCTAssertTrue(window.firstResponder === renameEditor)
+
+        host.setFocused(true, for: client.id)
+        XCTAssertTrue(window.firstResponder === renameEditor, "setFocused stole first responder from a focused control")
+
+        // The reclaim schedules a deferred restore task; let it run and confirm it also leaves the
+        // editor alone (its guard only reclaims from the window floor).
+        let stealDeadline = Date().addingTimeInterval(0.3)
+        while Date() < stealDeadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+            XCTAssertTrue(window.firstResponder === renameEditor, "deferred restore stole first responder from a focused control")
+        }
+    }
+
+    /// The reclaim path stays intact: when focus has fallen back to the window floor (mirror
+    /// re-parenting resigns it during structural updates), a passive `setFocused` restores the
+    /// mirror as first responder so surface re-parenting recovery is not broken.
+    @MainActor func testSetFocusedReclaimsFirstResponderWhenFocusFellBackToWindow() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let queue = DispatchQueue(label: "spaces.remote-device.set-focused-reclaim-test")
+        let initialPayload = GhosttyRemoteSessionStatePayload(
+            sessionID: "remote-set-focused-reclaim", reason: "initial", emittedAt: "2026-06-02T00:00:00Z", sessionStateRevision: 1,
+            sessionStateFlags: 1, screenStateRevision: 1,
+            runtimeState: TerminalSessionRuntimeState(
+                sessionID: "remote-set-focused-reclaim", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running,
+                updatedAt: "2026-06-02T00:00:00Z", title: "owner", workingDirectory: "/tmp/live", columns: 8, rows: 1),
+            attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "owner", workingDirectory: "/tmp/live", outputByteCount: nil,
+            renderUpdate: try renderUpdate(text: "alpha", sessionRevision: 1))
+        let server = GhosttyRemoteSessionStateStreamServer(socketPath: paths.subscriptionSocketPath, queue: queue) { initialPayload }
+        try server.start()
+        defer { server.stop() }
+
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: .init(
+                sessionID: "remote-set-focused-reclaim", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
+                createdAt: "2026-06-02T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 900, height: 520))
+        let window = KeyTestWindow(contentRect: container.bounds, styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = container
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
+
+        let client = TerminalClient(
+            id: "owner-client", kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-06-02T00:00:00Z")
+        try host.attach(client: client, mode: .owner, into: container)
+        waitForCondition("initial owner first responder") { window.firstResponder is GhosttyMirrorTerminalView }
+
+        // Focus falls back to the window floor, as it does when the mirror resigns during re-parenting.
+        XCTAssertTrue(window.makeFirstResponder(nil))
+        XCTAssertTrue(window.firstResponder === window)
+
+        host.setFocused(true, for: client.id)
+        XCTAssertTrue(window.firstResponder is GhosttyMirrorTerminalView, "setFocused did not reclaim first responder from the window floor")
+    }
+
     @MainActor func testRemoteRenderableViewerPreservesSnapshotAcrossAttachmentStateChanges() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

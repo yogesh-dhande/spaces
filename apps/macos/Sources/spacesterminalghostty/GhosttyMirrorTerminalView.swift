@@ -409,7 +409,7 @@
 
         private func focusWindow() { focusWindow(window) }
 
-        private func restoreFirstResponderIfWindowReady(deferIfNeeded: Bool = true) {
+        func restoreFirstResponderIfWindowReady(deferIfNeeded: Bool = true) {
             guard acceptsTerminalInput, let window, window.isKeyWindow else {
                 updateSurfaceFocus()
                 return
