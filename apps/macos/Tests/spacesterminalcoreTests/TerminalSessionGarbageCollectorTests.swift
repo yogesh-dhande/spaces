@@ -29,11 +29,19 @@ final class TerminalSessionGarbageCollectorTests: XCTestCase {
         try super.tearDownWithError()
     }
 
-    private let now = Date()
+    /// A fixed reference instant, close to the seeded session timestamps, so age-sensitive assertions do
+    /// not drift with the wall clock. Whole-second ISO8601 matches the format `TerminalSessionTimestamp`
+    /// writes for `exitedAt`.
+    private static let referenceNow = ISO8601DateFormatter().date(from: "2026-07-19T12:00:00Z")!
+    private let now = TerminalSessionGarbageCollectorTests.referenceNow
+
+    /// Renders a whole-second ISO8601 stamp the way the runtime writes `exitedAt`, for age-relative seeds.
+    private func iso(_ date: Date) -> String { TerminalSessionTimestamp.string(from: date) }
 
     @discardableResult
     private func seedSession(
-        id: String, state: TerminalSessionState, servicePID: Int32, attachment: Bool = false, remoteState: Bool = false
+        id: String, state: TerminalSessionState, servicePID: Int32, attachment: Bool = false, remoteState: Bool = false,
+        exitedAt: String? = "2026-07-19T00:00:01Z"
     ) throws -> TerminalSessionPaths {
         let paths = try TerminalSessionPaths.forSession(id: id)
         try paths.ensureDirectories()
@@ -44,7 +52,7 @@ final class TerminalSessionGarbageCollectorTests: XCTestCase {
         try TerminalSessionPersistence.writeRuntimeState(
             TerminalSessionRuntimeState(
                 sessionID: id, backend: .ghosttyEmbedded, servicePID: servicePID, childPID: nil, state: state, updatedAt: "2026-07-19T00:00:00Z",
-                exitedAt: state.isInteractive ? nil : "2026-07-19T00:00:01Z"), paths: paths)
+                exitedAt: state.isInteractive ? nil : exitedAt), paths: paths)
         FileManager.default.createFile(atPath: paths.outputPath, contents: Data("transcript".utf8))
         if attachment {
             let client = TerminalClient(id: "client-\(id)", kind: .localWindow, identity: TerminalClientIdentity(label: "Mac"), connectedAt: "2026-07-19T00:00:00Z")
@@ -61,13 +69,18 @@ final class TerminalSessionGarbageCollectorTests: XCTestCase {
         return paths
     }
 
+    /// The tier-1 harness: sessions are either purged outright (unreferenced, not shown) or kept. The
+    /// injected `releaseExpiredReferences` fails the test if called, since these fixtures are never old
+    /// enough to age-expire and never large enough to trip the budget, so no release should ever fire.
     private func collect(
         active: Set<String> = [], referenced: Set<String> = [], fileManager: FileManager = .default,
+        release: @escaping (String) throws -> Void = { XCTFail("releaseExpiredReferences called unexpectedly for \($0)") },
         onPurgeFailure: (String, any Error) -> Void = { _, _ in }
     ) throws -> [String] {
         try TerminalSessionGarbageCollector.collectRemovedSessions(
-            activeSessionIDs: active, isReferencedByProduct: { referenced.contains($0) }, fileManager: fileManager, now: now,
-            onPurgeFailure: onPurgeFailure)
+            activeSessionIDs: active, isReferencedByProduct: { referenced.contains($0) }, releaseExpiredReferences: release,
+            fileManager: fileManager, now: now, onPurgeFailure: onPurgeFailure,
+            onBudgetExceeded: { XCTFail("onBudgetExceeded called unexpectedly with \($0)") })
     }
 
     /// Stands in for a `removeItem` failure (e.g. a permissions error or a busy file handle) so purge
@@ -238,6 +251,177 @@ final class TerminalSessionGarbageCollectorTests: XCTestCase {
         // The next sweep, with a working FileManager, retries and completes the deferred purge.
         let retried = try collect()
         XCTAssertEqual(retried, ["a-leaky"])
+        XCTAssertTrue(try TerminalSessionPersistence.listKnownSessions().isEmpty)
+    }
+
+    // A struct error stand-in so a `releaseExpiredReferences` failure can be exercised deterministically.
+    private struct ReleaseFailure: Error {}
+
+    // Tier 2 (age): a referenced ended session whose end is exactly at the 7-day boundary expires — its
+    // product rows are released and, once that clears the last reference, its footprint is purged. The
+    // 7-day clock is the session's own end time (`exitedAt`).
+    func testEndedSessionExpiresAtSevenDayBoundary() throws {
+        let paths = try seedSession(id: "old", state: .exited, servicePID: 999_999, exitedAt: iso(now.addingTimeInterval(-7 * 86_400)))
+        var referenced: Set<String> = ["old"]
+        var released: [String] = []
+
+        let purged = try TerminalSessionGarbageCollector.collectRemovedSessions(
+            activeSessionIDs: [], isReferencedByProduct: { referenced.contains($0) },
+            releaseExpiredReferences: { released.append($0); referenced.remove($0) }, now: now)
+
+        XCTAssertEqual(released, ["old"], "An ended session at the age limit must have its product rows released.")
+        XCTAssertEqual(purged, ["old"], "Once the release clears the last reference the session must be purged.")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: paths.rootDirectory))
+    }
+
+    // Tier 2 (age): a referenced ended session that ended 6d23h ago is inside the retention window, so it
+    // must not be released or purged.
+    func testEndedSessionYoungerThanMaxAgeDoesNotExpire() throws {
+        let paths = try seedSession(
+            id: "young", state: .exited, servicePID: 999_999, exitedAt: iso(now.addingTimeInterval(-(7 * 86_400 - 3_600))))
+
+        let purged = try TerminalSessionGarbageCollector.collectRemovedSessions(
+            activeSessionIDs: [], isReferencedByProduct: { _ in true },
+            releaseExpiredReferences: { XCTFail("release called for a session inside the retention window: \($0)") }, now: now)
+
+        XCTAssertTrue(purged.isEmpty)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: paths.rootDirectory))
+    }
+
+    // Tier 2 (age): when `exitedAt` is absent, the end time falls back to the newest of the directory and
+    // `output.log` modification times. The seeded files are stamped ~now, so a sweep dated eight days later
+    // sees them as past the age limit and expires the session.
+    func testEndedSessionExpiresViaModificationTimeFallbackWhenExitedAtMissing() throws {
+        let paths = try seedSession(id: "nostamp", state: .exited, servicePID: 999_999, exitedAt: nil)
+        var referenced: Set<String> = ["nostamp"]
+        var released: [String] = []
+
+        let purged = try TerminalSessionGarbageCollector.collectRemovedSessions(
+            activeSessionIDs: [], isReferencedByProduct: { referenced.contains($0) },
+            releaseExpiredReferences: { released.append($0); referenced.remove($0) }, now: Date().addingTimeInterval(8 * 86_400))
+
+        XCTAssertEqual(released, ["nostamp"], "A missing exitedAt must fall back to file mtime to drive expiry.")
+        XCTAssertEqual(purged, ["nostamp"])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: paths.rootDirectory))
+    }
+
+    // Tier 2 (age): a shown (live attachment) ended session past the age limit is still in use, so it must
+    // never be released or purged, no matter how old it is.
+    func testShownEndedSessionPastMaxAgeIsNotReleasedOrPurged() throws {
+        let paths = try seedSession(
+            id: "shown-old", state: .exited, servicePID: 999_999, attachment: true, exitedAt: iso(now.addingTimeInterval(-8 * 86_400)))
+
+        let purged = try TerminalSessionGarbageCollector.collectRemovedSessions(
+            activeSessionIDs: [], isReferencedByProduct: { _ in true },
+            releaseExpiredReferences: { XCTFail("release called for a shown ended session: \($0)") }, now: now,
+            onBudgetExceeded: { XCTFail("onBudgetExceeded called unexpectedly with \($0)") })
+
+        XCTAssertTrue(purged.isEmpty, "A still-attached ended pane must never be collected, even past the age limit.")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: paths.rootDirectory))
+    }
+
+    // Tier 2 (containment): a `releaseExpiredReferences` failure for one expired session must be contained
+    // to that session — reported through `onPurgeFailure` — while the remaining expired sessions still
+    // release and purge. "a-fails" sorts before "b-clean", so it is processed first.
+    func testReleaseFailureIsContainedAndOtherSessionsStillProcessed() throws {
+        let expiredAt = iso(now.addingTimeInterval(-8 * 86_400))
+        _ = try seedSession(id: "a-fails", state: .exited, servicePID: 999_999, exitedAt: expiredAt)
+        let cleanPaths = try seedSession(id: "b-clean", state: .exited, servicePID: 999_998, exitedAt: expiredAt)
+        var referenced: Set<String> = ["a-fails", "b-clean"]
+        var failures: [String] = []
+
+        let purged = try TerminalSessionGarbageCollector.collectRemovedSessions(
+            activeSessionIDs: [], isReferencedByProduct: { referenced.contains($0) },
+            releaseExpiredReferences: { sessionID in
+                if sessionID == "a-fails" { throw ReleaseFailure() }
+                referenced.remove(sessionID)
+            }, now: now, onPurgeFailure: { sessionID, _ in failures.append(sessionID) })
+
+        XCTAssertEqual(purged, ["b-clean"], "A contained release failure must not stop the remaining expired sessions.")
+        XCTAssertEqual(failures, ["a-fails"], "The release failure must be reported so the daemon can log it.")
+        XCTAssertEqual(
+            try TerminalSessionPersistence.listKnownSessions().map(\.sessionID), ["a-fails"],
+            "The failed session's row must remain for the next sweep; the purged session's row must be gone.")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: cleanPaths.rootDirectory))
+    }
+
+    // Tier 2 (fail closed): if the release runs but a reference survives, nothing is purged and no error is
+    // raised — the session is left for the next sweep.
+    func testReleaseThatDoesNotClearReferenceLeavesSessionForNextSweep() throws {
+        let paths = try seedSession(id: "sticky", state: .exited, servicePID: 999_999, exitedAt: iso(now.addingTimeInterval(-8 * 86_400)))
+        var released: [String] = []
+
+        let purged = try TerminalSessionGarbageCollector.collectRemovedSessions(
+            activeSessionIDs: [], isReferencedByProduct: { _ in true }, releaseExpiredReferences: { released.append($0) }, now: now)
+
+        XCTAssertEqual(released, ["sticky"], "The release must be attempted for an expired session.")
+        XCTAssertTrue(purged.isEmpty, "A reference surviving the release must leave the session intact (fail closed).")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: paths.rootDirectory))
+    }
+
+    // Tier 3 (budget): three referenced ended sessions younger than the age limit exceed the byte budget.
+    // Eviction must proceed oldest-ended-first and stop as soon as the total drops back under budget, so
+    // only the oldest is released and purged.
+    func testByteBudgetEvictsOldestEndedFirstUntilUnderBudget() throws {
+        let policy = TerminalSessionRetentionPolicy(endedSessionMaxAge: 7 * 86_400, endedTranscriptByteBudget: 2_500, orphanGracePeriod: 3_600)
+        let oldPaths = try seedSession(id: "old", state: .exited, servicePID: 999_999, exitedAt: iso(now.addingTimeInterval(-3 * 86_400)))
+        let midPaths = try seedSession(id: "mid", state: .exited, servicePID: 999_998, exitedAt: iso(now.addingTimeInterval(-2 * 86_400)))
+        let newPaths = try seedSession(id: "new", state: .exited, servicePID: 999_997, exitedAt: iso(now.addingTimeInterval(-1 * 86_400)))
+        for paths in [oldPaths, midPaths, newPaths] {
+            try Data(repeating: 0, count: 1_000).write(to: URL(fileURLWithPath: paths.outputPath))
+        }
+        var referenced: Set<String> = ["old", "mid", "new"]
+        var released: [String] = []
+
+        let purged = try TerminalSessionGarbageCollector.collectRemovedSessions(
+            activeSessionIDs: [], isReferencedByProduct: { referenced.contains($0) },
+            releaseExpiredReferences: { released.append($0); referenced.remove($0) }, retentionPolicy: policy, now: now,
+            onBudgetExceeded: { XCTFail("total should be back under budget after evicting the oldest, got \($0)") })
+
+        XCTAssertEqual(purged, ["old"], "Only the oldest ended session is evicted once the total drops under budget.")
+        XCTAssertEqual(released, ["old"])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: oldPaths.rootDirectory))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: midPaths.rootDirectory), "Younger sessions must survive once under budget.")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: newPaths.rootDirectory))
+    }
+
+    // Tier 3 (budget): shown sessions count toward the ended total but can never be evicted. When only shown
+    // sessions are over budget, nothing is evicted and the full total is reported for the daemon to log.
+    func testByteBudgetWithOnlyShownSessionsEvictsNothingAndReportsTotal() throws {
+        let policy = TerminalSessionRetentionPolicy(endedSessionMaxAge: 7 * 86_400, endedTranscriptByteBudget: 1_500, orphanGracePeriod: 3_600)
+        let aPaths = try seedSession(
+            id: "a", state: .exited, servicePID: 999_999, attachment: true, exitedAt: iso(now.addingTimeInterval(-1 * 86_400)))
+        let bPaths = try seedSession(
+            id: "b", state: .exited, servicePID: 999_998, attachment: true, exitedAt: iso(now.addingTimeInterval(-1 * 86_400)))
+        for paths in [aPaths, bPaths] { try Data(repeating: 0, count: 1_000).write(to: URL(fileURLWithPath: paths.outputPath)) }
+        var reportedTotal: Int64?
+
+        let purged = try TerminalSessionGarbageCollector.collectRemovedSessions(
+            activeSessionIDs: [], isReferencedByProduct: { _ in true },
+            releaseExpiredReferences: { XCTFail("release called for a shown session: \($0)") }, retentionPolicy: policy, now: now,
+            onBudgetExceeded: { reportedTotal = $0 })
+
+        XCTAssertTrue(purged.isEmpty, "Shown sessions must never be evicted, even over budget.")
+        XCTAssertEqual(reportedTotal, 2_000, "The full ended total — including the un-evictable shown sessions — must be reported.")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: aPaths.rootDirectory))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: bPaths.rootDirectory))
+    }
+
+    // First sweep after deploy: a whole backlog of expired sessions is released and purged in one pass, with
+    // no rate limiting.
+    func testBacklogOfExpiredSessionsAllReleasedAndPurgedInOnePass() throws {
+        let expiredAt = iso(now.addingTimeInterval(-8 * 86_400))
+        let ids = (0..<12).map { "backlog-\(String(format: "%02d", $0))" }
+        for id in ids { _ = try seedSession(id: id, state: .exited, servicePID: 999_999, exitedAt: expiredAt) }
+        var referenced = Set(ids)
+        var released: [String] = []
+
+        let purged = try TerminalSessionGarbageCollector.collectRemovedSessions(
+            activeSessionIDs: [], isReferencedByProduct: { referenced.contains($0) },
+            releaseExpiredReferences: { released.append($0); referenced.remove($0) }, now: now)
+
+        XCTAssertEqual(Set(purged), Set(ids), "Every expired session must be purged in the same sweep.")
+        XCTAssertEqual(Set(released), Set(ids))
         XCTAssertTrue(try TerminalSessionPersistence.listKnownSessions().isEmpty)
     }
 }

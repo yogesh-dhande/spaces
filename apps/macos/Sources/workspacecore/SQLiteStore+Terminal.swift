@@ -155,6 +155,24 @@ extension SQLiteStore {
         return row != nil
     }
 
+    /// Every `runtime_targets` window (across all workspaces) whose `tracking_id` references a given
+    /// terminal session — the ad-hoc terminal panes a workspace layout holds directly, distinct from the
+    /// tracked windows a process or agent row owns. The session-retention release path
+    /// (`WorkspaceOrchestrator.releaseEndedTerminalSessionReferences`) sweeps these last so no focus row
+    /// keeps a long-ended session referenced after its process/agent rows are gone.
+    public func windowsReferencingTerminalSession(terminalSessionID: String) throws -> [WindowRecord] {
+        let rows = try queryRows(
+            sql: """
+                SELECT
+                  \(Self.windowColumns)
+                FROM runtime_targets rt
+                LEFT JOIN browser_targets bt ON bt.runtime_target_id = rt.id
+                WHERE rt.tracking_id = ?
+                ORDER BY rt.order_index
+                """, bindings: [terminalSessionID])
+        return rows.compactMap { decodeWindow(row: $0) }
+    }
+
     public func deleteWindows(workspaceID: String) throws {
         try execute(sql: "DELETE FROM runtime_targets WHERE workspace_id = ?", bindings: [workspaceID])
     }

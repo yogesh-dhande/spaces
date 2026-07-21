@@ -139,7 +139,7 @@ final class DaemonLivenessState: @unchecked Sendable {
     /// every second for attachment reaping, but collecting removed sessions scans every known session and
     /// need not run that often. `nil` until the first sweep.
     private var lastSessionGarbageCollectionAt: Date?
-    private static let sessionGarbageCollectionInterval: TimeInterval = 60
+    private static let sessionGarbageCollectionInterval: TimeInterval = 600
     #if os(Linux)
         private let databaseChangeSignalQueue = DispatchQueue(label: "spaces.database-change.signal")
     #endif
@@ -1698,8 +1698,12 @@ final class DaemonLivenessState: @unchecked Sendable {
     /// Reclaims the directory, transcript, and rows of sessions the product no longer shows, on a coarse
     /// cadence. The daemon is the sole owner of each session's on-disk footprint and the only party that
     /// can see authoritative attachment state across every client, so this GC lives here rather than in a
-    /// client. `TerminalSessionGarbageCollector` enforces the safety gate (ended, unattached, unreferenced);
-    /// the in-memory `sessionCores` are handed in so a live session the daemon owns is never collected.
+    /// client. `TerminalSessionGarbageCollector` enforces the safety gates (ended, unattached, unreferenced
+    /// / age-expired / over-budget); the in-memory `sessionCores` are handed in so a live session the daemon
+    /// owns is never collected. Age-expiry releases a long-ended session's product rows through the
+    /// orchestrator's `releaseEndedTerminalSessionReferences` (agent rows via the finalization chokepoint),
+    /// so the orchestrator is built lazily: the common sweep — nothing expired — never constructs it.
+    /// The orphan sweep runs after collection so its "known" set reflects the rows that survived it.
     private func garbageCollectRemovedSessionsIfDue(now: Date = Date()) {
         if let lastSessionGarbageCollectionAt, now.timeIntervalSince(lastSessionGarbageCollectionAt) < Self.sessionGarbageCollectionInterval {
             return
@@ -1707,10 +1711,28 @@ final class DaemonLivenessState: @unchecked Sendable {
         lastSessionGarbageCollectionAt = now
         do {
             let store = try SQLiteStore(path: try DatabaseLocator.defaultPath())
+            var expiryOrchestrator: WorkspaceOrchestrator?
             try TerminalSessionGarbageCollector.collectRemovedSessions(
-                activeSessionIDs: Set(sessionCores.keys), isReferencedByProduct: { try store.terminalSessionIsReferencedByProduct($0) }, now: now,
+                activeSessionIDs: Set(sessionCores.keys), isReferencedByProduct: { try store.terminalSessionIsReferencedByProduct($0) },
+                releaseExpiredReferences: { [self] sessionID in
+                    let orchestrator = try expiryOrchestrator ?? makeProfileOrchestrator()
+                    expiryOrchestrator = orchestrator
+                    try orchestrator.releaseEndedTerminalSessionReferences(sessionID: sessionID)
+                }, now: now,
                 onPurgeFailure: { sessionID, error in
                     writeStandardError("spaces: terminal session garbage collection failed to purge \(sessionID), will retry next sweep: \(error)\n")
+                },
+                onBudgetExceeded: { totalBytes in
+                    writeStandardError(
+                        "spaces: ended terminal sessions hold \(totalBytes) bytes, over the \(TerminalSessionRetentionPolicy.standard.endedTranscriptByteBudget)-byte budget with no evictable session; will retry next sweep\n"
+                    )
+                })
+            let knownSessionIDs = Set(try TerminalSessionPersistence.listKnownSessions().map(\.sessionID))
+            try TerminalSessionOrphanSweep.sweep(
+                knownSessionIDs: knownSessionIDs, activeSessionIDs: Set(sessionCores.keys),
+                gracePeriod: TerminalSessionRetentionPolicy.standard.orphanGracePeriod, now: now,
+                onFailure: { path, error in
+                    writeStandardError("spaces: terminal session orphan sweep failed to remove \(path), will retry next sweep: \(error)\n")
                 })
         } catch { writeStandardError("spaces: terminal session garbage collection failed: \(error)\n") }
     }

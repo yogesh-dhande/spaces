@@ -1,0 +1,150 @@
+import Foundation
+import XCTest
+import spacesterminalcore
+
+@testable import workspacecore
+
+/// Behavior coverage for `WorkspaceOrchestrator.releaseEndedTerminalSessionReferences` — the product-row
+/// release path the daemon's session garbage collector calls to age out a long-ended terminal session.
+/// After a release the session must no longer be referenced by any product row, so the collector may
+/// reclaim its on-disk state.
+final class SessionRetentionTests: XCTestCase {
+    /// An exited agent row that references the ended session is deleted through the finalization
+    /// chokepoint, which first drops its inbound `agent_subscriptions` edge (ON DELETE RESTRICT). Seeding
+    /// a subscription edge proves the release does not bypass the chokepoint: a raw delete would throw
+    /// under RESTRICT.
+    func testReleaseDeletesExitedAgentRowAndItsSubscriptionEdges() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        let sessionID = "ended-agent-session"
+        let agent = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: sessionID, status: .idle)
+        try store.updateAgentWindowStatus(id: agent.id, status: .exited, updatedAt: "2026-07-14T00:00:00Z")
+
+        // An inbound watch edge: a bypass delete of the watched row would fail loudly under RESTRICT, so a
+        // successful release proves the row went through the chokepoint that drops the edge first.
+        try store.insertAgentSubscription(subscriberTerminalSessionID: "watcher", agentSessionID: agent.id, createdAt: "2026-07-14T00:01:00Z")
+        XCTAssertTrue(try store.terminalSessionIsReferencedByProduct(sessionID))
+
+        try orchestrator.releaseEndedTerminalSessionReferences(sessionID: sessionID)
+
+        XCTAssertNil(try store.agentWindow(id: agent.id))
+        XCTAssertTrue(try store.agentSubscriptions(agentSessionID: agent.id).isEmpty)
+        XCTAssertFalse(try store.terminalSessionIsReferencedByProduct(sessionID))
+    }
+
+    /// A `.destroyed` release deletes the agent row regardless of its status: even a live-looking
+    /// `.spinning` row is released, because the caller has established the backing terminal is gone.
+    func testReleaseDeletesAgentRowRegardlessOfStatus() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        let sessionID = "spinning-agent-session"
+        let agent = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: sessionID, status: .spinning)
+
+        try orchestrator.releaseEndedTerminalSessionReferences(sessionID: sessionID)
+
+        XCTAssertNil(try store.agentWindow(id: agent.id))
+        XCTAssertFalse(try store.terminalSessionIsReferencedByProduct(sessionID))
+    }
+
+    /// An exited running-process row that references the ended session is deleted along with its tracked
+    /// terminal window, while a second process (and its window) on a different live session in the same
+    /// workspace is untouched.
+    func testReleaseDeletesProcessRowAndTrackedWindowLeavingOthers() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        let endedSession = "ended-process-session"
+        let liveSession = "live-process-session"
+
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: "proc-ended", workspaceID: workspace.id, templateName: "api", command: "zsh", terminalApp: TerminalHost.spaces.appName,
+                terminalTrackingID: endedSession, pid: 123, status: .exited, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: "now"))
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: "proc-live", workspaceID: workspace.id, templateName: "web", command: "zsh", terminalApp: TerminalHost.spaces.appName,
+                terminalTrackingID: liveSession, pid: 456, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+
+        // Upserting each process created its tracked runtime_targets window (id == process id).
+        XCTAssertTrue(try store.terminalSessionIsReferencedByProduct(endedSession))
+        XCTAssertEqual(Set(try store.windows(workspaceID: workspace.id).map(\.id)), ["proc-ended", "proc-live"])
+
+        try orchestrator.releaseEndedTerminalSessionReferences(sessionID: endedSession)
+
+        XCTAssertFalse(try store.terminalSessionIsReferencedByProduct(endedSession))
+        XCTAssertEqual(try store.runningProcesses(workspaceID: workspace.id).map(\.id), ["proc-live"])
+        XCTAssertEqual(try store.windows(workspaceID: workspace.id).map(\.id), ["proc-live"])
+        // The live process's own session is still referenced.
+        XCTAssertTrue(try store.terminalSessionIsReferencedByProduct(liveSession))
+    }
+
+    /// A session referenced only by a bare `runtime_targets` focus row (an ad-hoc terminal pane, no
+    /// process or agent) is released by deleting that window row.
+    func testReleaseDeletesBareRuntimeTargetRow() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        let sessionID = "ad-hoc-pane-session"
+        try store.upsert(
+            window: WindowRecord(
+                id: "pane-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "shell", detail: nil, targetURL: nil,
+                terminalTrackingID: sessionID, role: "terminal", orderIndex: 300, lastSeenAt: "now"))
+        XCTAssertTrue(try store.terminalSessionIsReferencedByProduct(sessionID))
+
+        try orchestrator.releaseEndedTerminalSessionReferences(sessionID: sessionID)
+
+        XCTAssertFalse(try store.terminalSessionIsReferencedByProduct(sessionID))
+        XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
+    }
+
+    /// Releasing a session that nothing references is a no-op that does not throw.
+    func testReleaseUnreferencedSessionIsNoOp() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        _ = try makeProjectAndWorkspace(store: store)
+
+        XCTAssertNoThrow(try orchestrator.releaseEndedTerminalSessionReferences(sessionID: "never-existed"))
+    }
+
+    /// Rows referencing a DIFFERENT session are left intact — the release is scoped to the given session id.
+    func testReleaseLeavesRowsReferencingOtherSessionsIntact() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let (_, workspace) = try makeProjectAndWorkspace(store: store)
+        let target = "target-session"
+        let other = "other-session"
+
+        let targetAgent = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: target, status: .idle)
+        let otherAgent = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: other, status: .idle)
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: "proc-other", workspaceID: workspace.id, templateName: "api", command: "zsh", terminalApp: TerminalHost.spaces.appName,
+                terminalTrackingID: other, pid: 789, status: .running, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: nil))
+
+        try orchestrator.releaseEndedTerminalSessionReferences(sessionID: target)
+
+        XCTAssertNil(try store.agentWindow(id: targetAgent.id))
+        XCTAssertFalse(try store.terminalSessionIsReferencedByProduct(target))
+        // Everything bound to the other session survives.
+        XCTAssertNotNil(try store.agentWindow(id: otherAgent.id))
+        XCTAssertEqual(try store.runningProcesses(workspaceID: workspace.id).map(\.id), ["proc-other"])
+        XCTAssertTrue(try store.terminalSessionIsReferencedByProduct(other))
+    }
+
+    // MARK: - Fixtures
+
+    private func makeProjectAndWorkspace(store: SQLiteStore) throws -> (ProjectRecord, WorkspaceRecord) {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
+        let project = makeProjectRecord(dir: dir)
+        try store.upsert(project: project)
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: dir + "/ws")
+        try store.upsert(workspace: workspace)
+        return (project, workspace)
+    }
+}
