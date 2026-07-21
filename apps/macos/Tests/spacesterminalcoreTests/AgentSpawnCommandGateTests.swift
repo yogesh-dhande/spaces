@@ -27,6 +27,15 @@ final class AgentSpawnCommandGateTests: XCTestCase {
         XCTAssertEqual(try AgentSpawnCommandGate.resolveSpawnableAgent(command: "env FOO=1 opencode"), .opencode)
     }
 
+    /// Registry-completeness check: every agent's own `primaryCommandName` must resolve through the
+    /// gate, driven by `CodingAgent.allCases` rather than a hard-coded list so an agent added to the
+    /// registry but missed here fails automatically instead of silently lacking spawn support.
+    func testResolveSpawnableAgentResolvesEveryRegisteredAgentsPrimaryCommand() throws {
+        for agent in CodingAgent.allCases {
+            XCTAssertEqual(try AgentSpawnCommandGate.resolveSpawnableAgent(command: agent.primaryCommandName), agent, "agent: \(agent)")
+        }
+    }
+
     func testResolveSpawnableAgentRejectsUnsupportedCommand() {
         XCTAssertThrowsError(try AgentSpawnCommandGate.resolveSpawnableAgent(command: "vim")) { error in
             XCTAssertEqual(error as? AgentSpawnCommandGate.GateError, .unsupportedCommand)

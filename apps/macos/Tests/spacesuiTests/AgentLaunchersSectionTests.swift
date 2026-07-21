@@ -2,6 +2,7 @@ import AppKit
 import Testing
 import workspacecore
 
+import spacesterminalcore
 @testable import spacesui
 
 @MainActor @Suite struct AgentLaunchersSectionTests {
@@ -111,6 +112,17 @@ import workspacecore
         let row = AgentLauncherRowView(launcher: AgentLauncher(name: "review-bot", command: "review notes"))
 
         #expect(row.agentTileTextForTesting == "RE")
+    }
+
+    /// Registry-completeness check: a launcher named after each registered agent's `displayName` and
+    /// commanded with its `primaryCommandName` must render that agent's own `tileText`, driven by
+    /// `CodingAgent.allCases` so an agent added to the registry but missed in the launcher-matching
+    /// table renders generic initials instead of failing loudly here.
+    @Test func agentRowTileTextMatchesEveryRegisteredAgent() {
+        for agent in CodingAgent.allCases {
+            let row = AgentLauncherRowView(launcher: AgentLauncher(name: agent.displayName, command: agent.primaryCommandName))
+            #expect(row.agentTileTextForTesting == agent.tileText, "agent: \(agent)")
+        }
     }
 
     @Test func rebindUpdatesAgentTileText() {
