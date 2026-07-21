@@ -61,7 +61,7 @@ public enum AgentSpawnCommandGate {
     /// Resolves the supported agent a spawn command launches, throwing `GateError.unsupportedCommand`
     /// when the command does not launch one. Pure over the command string.
     public static func resolveSpawnableAgent(command: String) throws -> CodingAgent {
-        guard let hook = CodingAgent.matching(command: command) else { throw GateError.unsupportedCommand }
-        return hook
+        guard let agent = CodingAgent.matching(command: command) else { throw GateError.unsupportedCommand }
+        return agent
     }
 }
