@@ -7,23 +7,44 @@ import workspacecore
 /// private state; the pane content factory itself (`makeTerminalPaneContent`) lives in
 /// `AppKitController.swift` beside the terminal state-model machinery it reuses.
 extension AppKitController {
-    /// Starts a fresh ad hoc terminal session for the panel's workspace and opens it as
-    /// a new tab (the "+" button and the New-terminal shortcut).
-    func openNewTerminalTab(scope: PanelScope) {
-        let workspaceID: String?
+    /// The workspace a fresh terminal session in `scope` belongs to: the panel's own
+    /// workspace for a workspace scope, or the focused pane's workspace (falling back to
+    /// the selected workspace) for a global panel window.
+    private func newTerminalWorkspaceID(for scope: PanelScope) -> String? {
         switch scope {
-        case .workspace(_, let scopeWorkspaceID): workspaceID = scopeWorkspaceID
+        case .workspace(_, let scopeWorkspaceID): return scopeWorkspaceID
         case .globalWindow:
             // A global panel's new tab targets the focused pane's workspace.
-            workspaceID = panelCoordinator.focusedSessionID().flatMap { clientWorkspaceID(forTerminalSession: $0) } ?? selectedWorkspaceID
+            return panelCoordinator.focusedSessionID().flatMap { clientWorkspaceID(forTerminalSession: $0) } ?? selectedWorkspaceID
         }
-        guard let workspaceID else { return }
+    }
+
+    /// Starts a fresh ad hoc terminal session for the panel's workspace and opens it as
+    /// a new tab (the leader `New terminal` shortcut, direct creation with no picker).
+    func openNewTerminalTab(scope: PanelScope) {
+        guard let workspaceID = newTerminalWorkspaceID(for: scope) else { return }
         guard beginNewTerminalSessionCreation(workspaceID: workspaceID) else { return }
         createTerminalSessionForPane(workspaceID: workspaceID) { [weak self] request in
             guard let self else { return }
             defer { self.finishNewTerminalSessionCreation(workspaceID: workspaceID) }
             guard let request else { return }
             self.panelCoordinator.openSessionInNewTab(request, in: scope)
+        }
+    }
+
+    /// Picker-backed new tab (⌘T and the workspace tab strip's "+"): choose a
+    /// not-yet-open target or create a fresh session; the result lands as a new
+    /// selected, focused tab in the workspace's panel. Only `.workspace` scopes reach
+    /// this (a panel window's "+" creates directly), so the request's workspace panel
+    /// and `scope` are the same panel — the completion routes through the
+    /// open-or-focus chokepoint rather than appending unconditionally, so a session
+    /// that opened elsewhere while the picker was up (panel-window restore, IPC)
+    /// focuses its existing pane instead of duplicating it.
+    func presentNewTabSessionPicker(scope: PanelScope) {
+        guard let workspaceID = newTerminalWorkspaceID(for: scope) else { return }
+        presentPaneSessionPicker(scope: scope, newTerminalWorkspaceID: workspaceID) { [weak self] request in
+            guard let self, let request else { return }
+            self.panelCoordinator.openOrFocusTerminalPane(request)
         }
     }
 
@@ -172,13 +193,20 @@ extension AppKitController {
     enum SessionPickerChoice {
         case newTerminalSession(workspaceID: String)
         case existingSession(DeviceTerminalOpenRequest)
+        /// A configured process that isn't running yet (its sidebar row is "not started"):
+        /// picking it starts the process via the Device API and completes with the resulting
+        /// session's open request. Mirrors `DeviceWindowShortcutResolution.runProcess`.
+        case startProcess(workspaceID: String, processKey: String, processTemplateID: String?)
+        /// An agent launcher that hasn't been started: picking it launches the agent via the
+        /// Device API and completes with the resulting session's open request. Mirrors
+        /// `DeviceWindowShortcutResolution.runCodingAgent`.
+        case startCodingAgent(workspaceID: String, agentName: String, agentLauncherID: String?)
     }
 
-    /// Presents the command palette in session-picker mode for filling a pane split and
-    /// delivers the resulting open request (creating a fresh session when "New terminal
-    /// session" is chosen), or nil when dismissed.
-    func presentPaneSplitSessionPicker(scope: PanelScope, newTerminalWorkspaceID: String, completion: @escaping (DeviceTerminalOpenRequest?) -> Void)
-    {
+    /// Presents the command palette in session-picker mode for filling a pane split or
+    /// opening a new tab, and delivers the resulting open request (creating a fresh
+    /// session when "New terminal session" is chosen), or nil when dismissed.
+    func presentPaneSessionPicker(scope: PanelScope, newTerminalWorkspaceID: String, completion: @escaping (DeviceTerminalOpenRequest?) -> Void) {
         let presentation = sessionPickerPresentation(scope: scope, newTerminalWorkspaceID: newTerminalWorkspaceID)
         commandPalette.presentSessionPicker(
             scope: scope, newTerminalWorkspaceID: newTerminalWorkspaceID, items: presentation.items, choicesByItemID: presentation.choices
@@ -200,65 +228,198 @@ extension AppKitController {
                     defer { self.finishNewTerminalSessionCreation(workspaceID: workspaceID) }
                     completion(request)
                 }
+            case .startProcess(let workspaceID, let processKey, let processTemplateID):
+                guard let self else {
+                    completion(nil)
+                    return
+                }
+                Task { @MainActor in
+                    completion(
+                        await self.runTerminalSessionMutation(workspaceID: workspaceID) { device in
+                            try SpacesDeviceClient.runWorkspaceProcess(
+                                workspaceID: workspaceID, processKey: processKey, processTemplateID: processTemplateID, device: device,
+                                clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                        })
+                }
+            case .startCodingAgent(let workspaceID, let agentName, let agentLauncherID):
+                guard let self else {
+                    completion(nil)
+                    return
+                }
+                Task { @MainActor in
+                    completion(
+                        await self.runTerminalSessionMutation(workspaceID: workspaceID) { device in
+                            try SpacesDeviceClient.runCodingAgent(
+                                workspaceID: workspaceID, agentName: agentName, agentLauncherID: agentLauncherID, device: device,
+                                clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+                        })
+                }
             }
         }
     }
 
-    /// Builds the picker rows: "New terminal session" first, then every terminal
-    /// session in scope (the selected workspace's sessions, or all sessions across
-    /// loaded devices for a global panel).
+    /// One workspace's row-building inputs for the session picker: the workspace id and
+    /// the overview that owns it. The static core derives the sidebar detail model and
+    /// runtime targets from these, so a global-window scope simply lists more of them.
+    struct SessionPickerWorkspaceContext: Sendable {
+        let workspaceID: String
+        let overview: SpacesDeviceOverviewPayload
+    }
+
+    /// Builds the picker rows: "New terminal session" first, then the scope's sidebar
+    /// runtime targets that aren't already open in a pane, in sidebar order. A workspace
+    /// scope lists one workspace's targets; a global panel window lists every loaded
+    /// device's workspaces in the same order the command palette walks them. Gathers the
+    /// ordered workspace contexts and the pane occupancy set, then defers to the pure
+    /// static core below.
     func sessionPickerPresentation(scope: PanelScope, newTerminalWorkspaceID: String) -> (
         items: [CommandPaletteItem], choices: [String: SessionPickerChoice]
     ) {
+        let scopedWorkspaces: [SessionPickerWorkspaceContext]
+        switch scope {
+        case .workspace(_, let workspaceID):
+            scopedWorkspaces = overview(forWorkspaceID: workspaceID).map { [SessionPickerWorkspaceContext(workspaceID: workspaceID, overview: $0)] } ?? []
+        case .globalWindow:
+            scopedWorkspaces = orderedSessionPickerWorkspaceContexts()
+        }
+        return Self.sessionPickerPresentation(
+            newTerminalWorkspaceID: newTerminalWorkspaceID, newTerminalOverview: overview(forWorkspaceID: newTerminalWorkspaceID),
+            scopedWorkspaces: scopedWorkspaces, openSessionIDs: panelCoordinator.openSessionIDs())
+    }
+
+    /// Every loaded device's workspaces in sidebar order (the command palette's device →
+    /// project → workspace walk), each paired with its owning overview for row building.
+    private func orderedSessionPickerWorkspaceContexts() -> [SessionPickerWorkspaceContext] {
+        var contexts: [SessionPickerWorkspaceContext] = []
+        for section in deviceSections where section.loadState == .loaded {
+            guard let overview = section.overview else { continue }
+            let mapped = Self.deviceSidebarData(from: overview, deviceID: section.deviceID)
+            for project in mapped.projects {
+                for workspace in mapped.workspacesByProject[project.id] ?? [] {
+                    contexts.append(SessionPickerWorkspaceContext(workspaceID: workspace.id, overview: overview))
+                }
+            }
+        }
+        return contexts
+    }
+
+    /// Pure picker-row builder: "New terminal session" first, then each workspace's
+    /// ordered sidebar runtime targets. Targets come from the same enumeration the sidebar
+    /// and command palette use (`orderedWorkspaceRunShortcutTargets`) and keep sidebar
+    /// order. Browser targets are excluded (they can't live in a terminal pane), and any
+    /// target whose live session already occupies a pane (`openSessionIDs`) is dropped.
+    /// Live and exited targets resolve to an open request exactly as
+    /// `windowShortcutTargetResolution` does — an exited target intentionally still shows,
+    /// so picking it reproduces its sidebar row's ended-state pane. Not-started configured
+    /// processes and agent launchers carry a start choice and are always listed.
+    /// `nonisolated static` so it's testable without a live `AppKitController`.
+    nonisolated static func sessionPickerPresentation(
+        newTerminalWorkspaceID: String, newTerminalOverview: SpacesDeviceOverviewPayload?,
+        scopedWorkspaces: [SessionPickerWorkspaceContext], openSessionIDs: Set<String>
+    ) -> (items: [CommandPaletteItem], choices: [String: SessionPickerChoice]) {
         var items: [CommandPaletteItem] = []
         var choices: [String: SessionPickerChoice] = [:]
 
-        func workspaceSummary(workspaceID: String, in overview: SpacesDeviceOverviewPayload) -> SpacesDeviceWorkspaceSummary? {
-            overview.workspaces.first { $0.id == workspaceID }
-        }
-
         func appendItem(
-            id: String, workspaceID: String, workspace: SpacesDeviceWorkspaceSummary?, label: String, detail: String?, choice: SessionPickerChoice
+            id: String, workspaceID: String, workspace: SpacesDeviceWorkspaceSummary?, kind: WorkspaceRunShortcutTarget.Kind, label: String,
+            detail: String?, status: CommandPaletteItem.Status, choice: SessionPickerChoice
         ) {
             items.append(
                 CommandPaletteItem(
                     id: id, source: .workspaceTarget, alertsAttentionID: nil, workspaceID: workspaceID,
                     workspaceTitle: workspace?.displayName ?? workspaceID, workspaceBranch: workspace?.branch,
-                    projectTitle: workspace?.projectName ?? "", kind: .window, label: label, detail: detail, status: .none,
+                    projectTitle: workspace?.projectName ?? "", kind: kind, label: label, detail: detail, status: status,
                     // Never executed: picker mode resolves the choice mapping instead of
                     // running a focus request.
                     focusRequest: .workspaceWindow(workspaceID: workspaceID, index: 1), recentFocusIdentity: ""))
             choices[id] = choice
         }
 
-        let newTerminalOverview = overview(forWorkspaceID: newTerminalWorkspaceID)
         appendItem(
             id: "picker:new", workspaceID: newTerminalWorkspaceID,
-            workspace: newTerminalOverview.flatMap { workspaceSummary(workspaceID: newTerminalWorkspaceID, in: $0) }, label: "New terminal session",
-            detail: "Start a fresh terminal", choice: .newTerminalSession(workspaceID: newTerminalWorkspaceID))
+            workspace: newTerminalOverview?.workspaces.first { $0.id == newTerminalWorkspaceID }, kind: .window, label: "New terminal session",
+            detail: "Start a fresh terminal", status: .none, choice: .newTerminalSession(workspaceID: newTerminalWorkspaceID))
 
-        func appendSessions(from overview: SpacesDeviceOverviewPayload, limitToWorkspaceID: String?) {
-            for session in overview.sessions {
-                let workspaceID = session.workspaceID
-                if let limitToWorkspaceID, workspaceID != limitToWorkspaceID { continue }
-                guard let request = Self.deviceTerminalOpenRequest(workspaceID: workspaceID, sessionID: session.id, overview: overview) else {
-                    continue
+        for context in scopedWorkspaces {
+            guard let deviceWorkspace = context.overview.workspaces.first(where: { $0.id == context.workspaceID }) else { continue }
+            let overview = context.overview
+            let workspaceID = context.workspaceID
+            let detail = SpacesDeviceWorkspaceDetailViewModel(workspace: deviceWorkspace)
+            let windows = deviceTerminalWindows(from: detail.terminalRows)
+            let processes = runningProcesses(from: detail.processRows)
+            let agentWindowRecords = agentWindows(from: detail.codingAgentRows)
+            let settings = localWorkspaceSettings(from: detail.config)
+            let browserSessions = detail.config.resolvedBrowserSessions.map(localBrowserSession(from:))
+            let processEntries = orderedWorkspaceRunProcessEntries(
+                configuredProcesses: settings.processes, windows: windows, processes: processes, agentWindows: agentWindowRecords)
+            let processesByID = Dictionary(uniqueKeysWithValues: processes.map { ($0.id, $0) })
+            let shortcutTargets = orderedWorkspaceRunShortcutTargets(
+                browserSessions: browserSessions, processEntries: processEntries, processesByID: processesByID,
+                configuredAgentLaunchers: settings.agentLaunchers, agentWindows: agentWindowRecords)
+            let runtimeWindowTitleByAgentID = codingAgentWindowTitleByAgentID(agentWindows: agentWindowRecords, trackedWindows: windows)
+            let configuredAgentByName = Dictionary(uniqueKeysWithValues: settings.agentLaunchers.map { ($0.name, $0) })
+
+            for (offset, target) in shortcutTargets.enumerated() {
+                // Browser targets can't live in a terminal pane, so the picker never offers them.
+                if target.kind == .browser { continue }
+                let label: String
+                let detailText: String?
+                let status: CommandPaletteItem.Status
+                switch target.kind {
+                case .process:
+                    guard let processID = target.processID, let process = processesByID[processID] else { continue }
+                    label = process.templateName
+                    detailText = process.command
+                    status = .process(process.status)
+                case .window:
+                    guard let windowListIndex = target.windowListIndex, windows.indices.contains(windowListIndex) else { continue }
+                    let window = windows[windowListIndex]
+                    if window.roleValue == .terminal {
+                        let fallback = terminalFallbackRowText(name: window.name, detail: window.detail, app: window.app)
+                        label = fallback.label
+                        detailText = fallback.detail
+                    } else {
+                        label = window.name?.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines).nilIfEmpty ?? "Window"
+                        detailText = window.detail?.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines).nilIfEmpty
+                    }
+                    status = .none
+                case .missingConfiguredProcess:
+                    guard let processKey = target.processKey else { continue }
+                    label = processKey
+                    detailText = nil
+                    status = .idle
+                case .agentLauncher:
+                    guard let launcherName = target.launcherName else { continue }
+                    label = launcherName
+                    detailText = configuredAgentByName[launcherName]?.command
+                    status = .none
+                case .agent:
+                    guard let agentWindow = target.agentWindow else { continue }
+                    label = agentWindow.label?.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines).nilIfEmpty ?? "Coding Agent"
+                    detailText = runtimeWindowTitleByAgentID[agentWindow.id]
+                    status = .agent(agentWindow.status)
+                case .browser: continue
                 }
-                appendItem(
-                    id: "picker:\(session.id)", workspaceID: workspaceID, workspace: workspaceSummary(workspaceID: workspaceID, in: overview),
-                    label: session.title, detail: session.workingDirectory, choice: .existingSession(request))
-            }
-        }
 
-        switch scope {
-        case .workspace(_, let workspaceID):
-            if let overview = overview(forWorkspaceID: workspaceID) { appendSessions(from: overview, limitToWorkspaceID: workspaceID) }
-        case .globalWindow:
-            for section in deviceSections where section.loadState == .loaded {
-                guard let overview = section.overview else { continue }
-                appendSessions(from: overview, limitToWorkspaceID: nil)
+                let choice: SessionPickerChoice
+                switch windowShortcutTargetResolution(target, workspaceID: workspaceID, detail: detail, overview: overview) {
+                case .openTerminal(let request):
+                    if openSessionIDs.contains(request.sessionID) { continue }
+                    choice = .existingSession(request)
+                case .runProcess(let ws, let processKey, let processTemplateID):
+                    choice = .startProcess(workspaceID: ws, processKey: processKey, processTemplateID: processTemplateID)
+                case .runCodingAgent(let ws, let agentName, let agentLauncherID):
+                    choice = .startCodingAgent(workspaceID: ws, agentName: agentName, agentLauncherID: agentLauncherID)
+                case .openURL, .noWorkspace, .noMatch: continue
+                }
+
+                appendItem(
+                    id: "picker:\(workspaceID)::\(offset)", workspaceID: workspaceID, workspace: deviceWorkspace, kind: target.kind, label: label,
+                    detail: detailText, status: status, choice: choice)
             }
         }
         return (items, choices)
     }
 }
+
+extension String { fileprivate var nilIfEmpty: String? { isEmpty ? nil : self } }

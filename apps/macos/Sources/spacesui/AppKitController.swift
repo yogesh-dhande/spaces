@@ -227,6 +227,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private var reloadShortcutSpec: HotkeySpec?
     private var openEditorShortcutSpec: HotkeySpec?
     private var openTerminalShortcutSpec: HotkeySpec?
+    private var newTabShortcutSpec: HotkeySpec?
     private var openFinderShortcutSpec: HotkeySpec?
     private var openSettingsShortcutSpec: HotkeySpec?
     private var nextShortcutSpec: HotkeySpec?
@@ -3092,7 +3093,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
-    nonisolated private static func runningProcesses(from rows: [SpacesDeviceWorkspaceProcessRow]) -> [RunningProcessRecord] {
+    nonisolated static func runningProcesses(from rows: [SpacesDeviceWorkspaceProcessRow]) -> [RunningProcessRecord] {
         rows.compactMap { row in
             guard row.runState != .notStarted || row.processID != nil || row.sessionID != nil else { return nil }
             return RunningProcessRecord(
@@ -3102,7 +3103,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
-    nonisolated private static func agentWindows(from rows: [SpacesDeviceWorkspaceCodingAgentRow]) -> [AgentWindowRecord] {
+    nonisolated static func agentWindows(from rows: [SpacesDeviceWorkspaceCodingAgentRow]) -> [AgentWindowRecord] {
         let now = staticISO8601Formatter.string(from: Date())
         return rows.compactMap { row in
             guard row.agentID != nil || row.sessionID != nil || row.runState != .notStarted else { return nil }
@@ -8855,6 +8856,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 return nil
             }
             if self.commandPalette.handleCommandPaletteShortcut(event: event) { return nil }
+            if self.handleNewTabSessionPickerShortcut(event: event) { return nil }
             if self.handleClosePaneShortcut(event: event) { return nil }
             if self.handleFocusedTextInputShortcut(event: event) { return nil }
             if self.isTextInputFocused() { return event }
@@ -8979,6 +8981,43 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     nonisolated static func isClosePaneShortcut(charactersIgnoringModifiers: String?, eventModifiers: NSEvent.ModifierFlags) -> Bool {
         guard charactersIgnoringModifiers?.lowercased() == "w" else { return false }
         return eventModifiers.intersection([.command, .option, .control, .shift]) == .command
+    }
+
+    enum NewTabShortcutAction: Equatable, Sendable { case presentPicker, consume, pass }
+
+    /// ⌘T gating: present only when the main window is key with a workspace selected.
+    /// While the session picker is up the chord is consumed so re-press is an explicit
+    /// no-op; in a global panel window it is consumed so it can't fall through to the
+    /// focused pane; other focused text inputs (rename editors) keep the chord.
+    nonisolated static func newTabShortcutAction(
+        sessionPickerIsActive: Bool, textInputIsFocused: Bool, keyWindowIsPanelWindow: Bool, keyWindowIsMainWindow: Bool,
+        selectedWorkspaceID: String?
+    ) -> NewTabShortcutAction {
+        if sessionPickerIsActive { return .consume }
+        if textInputIsFocused { return .pass }
+        if keyWindowIsPanelWindow { return .consume }
+        guard keyWindowIsMainWindow, selectedWorkspaceID != nil else { return .pass }
+        return .presentPicker
+    }
+
+    /// ⌘T (configurable): opens the session-picker new-tab flow. Placed ahead of the
+    /// `isTextInputFocused()` early-return in `setupShortcutMonitor` so the chord still
+    /// reaches this gate while the command-palette search field is focused; see
+    /// `newTabShortcutAction` for the full disposition table.
+    private func handleNewTabSessionPickerShortcut(event: NSEvent) -> Bool {
+        guard let newTabShortcutSpec, matches(event: event, spec: newTabShortcutSpec) else { return false }
+        switch Self.newTabShortcutAction(
+            sessionPickerIsActive: commandPalette.sessionPickerContext != nil, textInputIsFocused: isTextInputFocused(),
+            keyWindowIsPanelWindow: panelCoordinator.panelWindowID(forWindow: NSApp.keyWindow) != nil, keyWindowIsMainWindow: NSApp.keyWindow === window,
+            selectedWorkspaceID: selectedWorkspaceID)
+        {
+        case .pass: return false
+        case .consume: return true
+        case .presentPicker:
+            guard let workspaceID = selectedWorkspaceID else { return false }
+            presentNewTabSessionPicker(scope: .workspace(deviceID: deviceID(forWorkspaceID: workspaceID), workspaceID: workspaceID))
+            return true
+        }
     }
 
     private func handleLeaderShortcutCaptureFlagsChanged(event: NSEvent) -> Bool {
@@ -9273,6 +9312,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         sidebarPreviousShortcutSpec = loadShortcutSpec(setting: .guiSidebarPreviousShortcut)
         openEditorShortcutSpec = loadShortcutSpec(setting: .guiOpenEditorShortcut)
         openTerminalShortcutSpec = loadShortcutSpec(setting: .guiOpenTerminalShortcut)
+        newTabShortcutSpec = loadShortcutSpec(setting: .guiNewTabShortcut)
         openFinderShortcutSpec = loadShortcutSpec(setting: .guiOpenFinderShortcut)
         openSettingsShortcutSpec = loadShortcutSpec(setting: .guiOpenSettingsShortcut)
         windowShortcutSpec = loadShortcutSpec(setting: .guiWindowShortcut)
@@ -9308,6 +9348,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         case .guiSidebarPreviousShortcut: return sidebarPreviousShortcutSpec
         case .guiOpenEditorShortcut: return openEditorShortcutSpec
         case .guiOpenTerminalShortcut: return openTerminalShortcutSpec
+        case .guiNewTabShortcut: return newTabShortcutSpec
         case .guiOpenFinderShortcut: return openFinderShortcutSpec
         case .guiOpenSettingsShortcut: return openSettingsShortcutSpec
         case .guiWindowShortcut: return windowShortcutSpec
@@ -9783,25 +9824,35 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         !hasExistingPane && request.shell == nil
     }
 
-    private func runTerminalSessionMutationAndOpenPane(
+    /// Runs a workspace terminal-session mutation (start a configured process / launch a
+    /// coding agent) and returns the open request for the session it produced, applying the
+    /// response to local state along the way. Placement is the caller's decision: the window
+    /// shortcut path opens/focuses the pane, while the session picker lands it at the picker's
+    /// split or new tab.
+    func runTerminalSessionMutation(
         workspaceID: String, operation: @Sendable @escaping (SpacesPairedDeviceRecord) throws -> SpacesDeviceAPIResponse
-    ) async -> ExternalWindowAction? {
+    ) async -> DeviceTerminalOpenRequest? {
         guard let device = deviceForWorkspaceMutation(workspaceID: workspaceID) else {
             showDeviceNotLoadedError()
             return nil
         }
-        let result = await Self.deviceMutation(device: device, operation: operation)
-        switch result {
+        switch await Self.deviceMutation(device: device, operation: operation) {
         case .success(let response):
             applyDeviceMutationResponse(response, selectedWorkspaceID: workspaceID)
-            guard let request = terminalOpenRequest(fromMutationResponse: response, workspaceID: workspaceID),
-                await openOrFocusTerminalTarget(request)
-            else { return nil }
-            return .focus(hidesApp: false)
+            return terminalOpenRequest(fromMutationResponse: response, workspaceID: workspaceID)
         case .failure(let error):
             showError(error)
             return nil
         }
+    }
+
+    private func runTerminalSessionMutationAndOpenPane(
+        workspaceID: String, operation: @Sendable @escaping (SpacesPairedDeviceRecord) throws -> SpacesDeviceAPIResponse
+    ) async -> ExternalWindowAction? {
+        guard let request = await runTerminalSessionMutation(workspaceID: workspaceID, operation: operation),
+            await openOrFocusTerminalTarget(request)
+        else { return nil }
+        return .focus(hidesApp: false)
     }
 
     nonisolated private static func windowShortcutKind(for resolution: DeviceWindowShortcutResolution) -> String {
