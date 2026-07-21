@@ -214,6 +214,57 @@ import ghosttyvtshim
         #expect(occurrences(of: Data("38;2;".utf8), in: bytes) == 1, "palette cell must not be serialized as truecolor")
     }
 
+    // MARK: - Extended text decorations (blink / overline / underline style + color)
+
+    /// Blink, overline, underline STYLE (double/curly/dotted/dashed), and underline COLOR must survive
+    /// the transcript preamble. The pen used to be built only from `spaces_ghostty_vt_flags_for_style`,
+    /// which retains a generic underline bit but drops the underline *variant* and color and has no
+    /// blink/overline bits at all, so before the fix these attributes plained out: every underline
+    /// emitted as a bare `;4` and blink/overline/underline-color were dropped entirely, durably losing
+    /// them from the rewritten transcript.
+    ///
+    /// The oracle here is a ROUND-TRIP FIXPOINT of the preamble, not the client snapshot: the snapshot
+    /// pipeline (`GhosttyTerminalSnapshot.Cell.flags`) deliberately renders only a subset of decorations
+    /// and cannot represent underline variant/color or overline, so it cannot witness these attributes.
+    /// Instead we assert the source preamble carries the emitted colon-form fragments, then replay it and
+    /// assert the replayed session's preamble carries the SAME fragments — which only holds if the pinned
+    /// libghostty-vt actually parsed the colon forms and retained them in cell style state.
+    @Test func extendedTextDecorationsSurvivePreamble() throws {
+        let source = try makeSession(columns: 80, rows: 24)
+        defer { spaces_ghostty_vt_session_free(source) }
+        // Each cell is preceded by a full reset so its pen is isolated; the reset-first emitter then
+        // reproduces each pen deterministically from the cell alone.
+        write(source, "\u{1B}[1;1H")
+        write(source, "\u{1B}[0m\u{1B}[4:3m\u{1B}[58:5:196mC")     // curly underline + palette-196 underline color
+        write(source, "\u{1B}[0m\u{1B}[4:2mD")                     // double underline
+        write(source, "\u{1B}[0m\u{1B}[5mB")                       // blink
+        write(source, "\u{1B}[0m\u{1B}[53mO")                      // overline
+        write(source, "\u{1B}[0m\u{1B}[4m\u{1B}[58:2::10:20:30mR") // single underline + RGB underline color
+
+        // Distinctive, pen-boundary-anchored fragments (avoid substring collisions such as ";5" inside
+        // ";53" or "58:5"). The blink-only and overline-only cells assert the whole reset-first pen.
+        let fragments: [(String, Data)] = [
+            ("curly underline variant", Data("4:3".utf8)),
+            ("palette underline color", Data("58:5:196".utf8)),
+            ("double underline variant", Data("4:2".utf8)),
+            ("blink pen", Data("[0;5m".utf8)),
+            ("overline pen", Data("[0;53m".utf8)),
+            ("rgb underline color", Data("58:2::10:20:30".utf8)),
+        ]
+
+        let sourceBytes = try preamble(source)
+        for (label, fragment) in fragments {
+            #expect(sourceBytes.range(of: fragment) != nil, "source preamble must carry \(label)")
+        }
+
+        let replayed = try replay(sourceBytes, columns: 80, rows: 24)
+        defer { spaces_ghostty_vt_session_free(replayed) }
+        let replayedBytes = try preamble(replayed)
+        for (label, fragment) in fragments {
+            #expect(replayedBytes.range(of: fragment) != nil, "replayed preamble must carry \(label) (round-trip)")
+        }
+    }
+
     // MARK: - Enabling change: in-place resize with reflow
 
     /// `spaces_ghostty_vt_session_resize` resizes the live terminal in place; render-state reads after

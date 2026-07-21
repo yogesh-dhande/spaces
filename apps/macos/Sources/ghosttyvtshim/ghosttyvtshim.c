@@ -1151,12 +1151,24 @@ static void spaces_ghostty_vt_preamble_append_utf8_codepoint(SpacesGhosttyVtPrea
 // its own Spaces theme, and which adapt to light/dark) and reserve truecolor `38;2` / `48;2` for
 // genuinely RGB colors. Consequently a palette-1 cell and an RGB cell that happens to resolve to the
 // same RGB are different pens: the run-length comparison and the blank-cell test compare tags, not RGB.
+// The underline color is kept tagged for the same reason (palette `58:5:n` vs truecolor `58:2::r:g:b`).
+//
+// The pen also carries decorations that `spaces_ghostty_vt_flags_for_style` does NOT retain: blink,
+// overline, and the underline *variant* (single/double/curly/dotted/dashed) and its color. That flags
+// enum is the wire format for client render snapshots and deliberately renders only a subset; these
+// extra fields exist solely for durable transcript fidelity in the preamble, which permanently rewrites
+// the transcript and so must not silently drop these attributes.
 typedef struct {
     uint16_t flags;             // SPACES_GHOSTTY_VT_FLAG_* style bits (never the spacer bit)
     GhosttyStyleColorTag fg_tag;
     GhosttyStyleColorTag bg_tag;
     uint32_t fg_value;          // palette index (PALETTE) or packed 0x00RRGGBB (RGB); 0 for NONE
     uint32_t bg_value;
+    bool blink;
+    bool overline;
+    uint8_t underline_style;    // GHOSTTY_SGR_UNDERLINE_* (0 = none); drives the emitted `4[:n]` variant
+    GhosttyStyleColorTag ul_tag;
+    uint32_t ul_value;          // palette index (PALETTE) or packed 0x00RRGGBB (RGB); 0 for NONE
 } SpacesGhosttyVtPen;
 
 static uint32_t spaces_ghostty_vt_style_color_value(GhosttyStyleColor color) {
@@ -1173,28 +1185,51 @@ static SpacesGhosttyVtPen spaces_ghostty_vt_pen_from_style(const GhosttyStyle *s
     pen.bg_tag = style->bg_color.tag;
     pen.fg_value = spaces_ghostty_vt_style_color_value(style->fg_color);
     pen.bg_value = spaces_ghostty_vt_style_color_value(style->bg_color);
+    // memset above zeroed these; populate the decorations the flags enum does not carry.
+    pen.blink = style->blink;
+    pen.overline = style->overline;
+    pen.underline_style = (uint8_t)style->underline;  // GHOSTTY_SGR_UNDERLINE_* fits in a byte
+    pen.ul_tag = style->underline_color.tag;
+    pen.ul_value = spaces_ghostty_vt_style_color_value(style->underline_color);
     return pen;
 }
 
 static bool spaces_ghostty_vt_pen_equal(const SpacesGhosttyVtPen *a, const SpacesGhosttyVtPen *b) {
     return a->flags == b->flags && a->fg_tag == b->fg_tag && a->bg_tag == b->bg_tag &&
-           a->fg_value == b->fg_value && a->bg_value == b->bg_value;
+           a->fg_value == b->fg_value && a->bg_value == b->bg_value &&
+           a->blink == b->blink && a->overline == b->overline &&
+           a->underline_style == b->underline_style &&
+           a->ul_tag == b->ul_tag && a->ul_value == b->ul_value;
 }
 
 // Emits a full pen transition as `CSI 0 m` (reset) followed by only the non-default attributes of the
 // target cell. Resetting first and reapplying is larger than a minimal diff but is unconditionally
 // correct — the emitted pen depends on nothing but the target cell, so no attribute can leak forward.
 // Palette-tagged colors emit `38;5;n` / `48;5;n`; RGB-tagged colors emit truecolor; NONE emits nothing
-// (the default fg/bg stays in effect). Flags map to their SGR codes.
+// (the default fg/bg stays in effect). Flags map to their SGR codes. Underline is driven by
+// `underline_style` (not the generic underline flag bit) so the emitted variant can never disagree with
+// it: single -> `4`, double/curly/dotted/dashed -> the colon subparameter forms `4:2`/`4:3`/`4:4`/`4:5`.
+// Blink (`5`), overline (`53`), and the underline color (`58:5:n` palette / `58:2::r:g:b` truecolor,
+// where the empty subparam is the colorspace Ghostty's SGR parser expects) round out the decorations
+// that the snapshot flags enum does not carry.
 static void spaces_ghostty_vt_preamble_append_pen(SpacesGhosttyVtPreambleBuffer *buf, const SpacesGhosttyVtPen *pen) {
     spaces_ghostty_vt_preamble_append(buf, "\x1b[0");
     if (pen->flags & SPACES_GHOSTTY_VT_FLAG_BOLD) spaces_ghostty_vt_preamble_append(buf, ";1");
     if (pen->flags & SPACES_GHOSTTY_VT_FLAG_FAINT) spaces_ghostty_vt_preamble_append(buf, ";2");
     if (pen->flags & SPACES_GHOSTTY_VT_FLAG_ITALIC) spaces_ghostty_vt_preamble_append(buf, ";3");
-    if (pen->flags & SPACES_GHOSTTY_VT_FLAG_UNDERLINE) spaces_ghostty_vt_preamble_append(buf, ";4");
+    switch (pen->underline_style) {
+        case GHOSTTY_SGR_UNDERLINE_SINGLE: spaces_ghostty_vt_preamble_append(buf, ";4"); break;
+        case GHOSTTY_SGR_UNDERLINE_DOUBLE: spaces_ghostty_vt_preamble_append(buf, ";4:2"); break;
+        case GHOSTTY_SGR_UNDERLINE_CURLY: spaces_ghostty_vt_preamble_append(buf, ";4:3"); break;
+        case GHOSTTY_SGR_UNDERLINE_DOTTED: spaces_ghostty_vt_preamble_append(buf, ";4:4"); break;
+        case GHOSTTY_SGR_UNDERLINE_DASHED: spaces_ghostty_vt_preamble_append(buf, ";4:5"); break;
+        default: break;  // GHOSTTY_SGR_UNDERLINE_NONE -> emit nothing
+    }
+    if (pen->blink) spaces_ghostty_vt_preamble_append(buf, ";5");
     if (pen->flags & SPACES_GHOSTTY_VT_FLAG_INVERSE) spaces_ghostty_vt_preamble_append(buf, ";7");
     if (pen->flags & SPACES_GHOSTTY_VT_FLAG_INVISIBLE) spaces_ghostty_vt_preamble_append(buf, ";8");
     if (pen->flags & SPACES_GHOSTTY_VT_FLAG_STRIKE) spaces_ghostty_vt_preamble_append(buf, ";9");
+    if (pen->overline) spaces_ghostty_vt_preamble_append(buf, ";53");
     if (pen->fg_tag == GHOSTTY_STYLE_COLOR_PALETTE) {
         spaces_ghostty_vt_preamble_append(buf, ";38;5;%u", (unsigned)pen->fg_value);
     } else if (pen->fg_tag == GHOSTTY_STYLE_COLOR_RGB) {
@@ -1206,6 +1241,12 @@ static void spaces_ghostty_vt_preamble_append_pen(SpacesGhosttyVtPreambleBuffer 
     } else if (pen->bg_tag == GHOSTTY_STYLE_COLOR_RGB) {
         GhosttyColorRgb color = spaces_ghostty_vt_unpack_rgb(pen->bg_value);
         spaces_ghostty_vt_preamble_append(buf, ";48;2;%u;%u;%u", (unsigned)color.r, (unsigned)color.g, (unsigned)color.b);
+    }
+    if (pen->ul_tag == GHOSTTY_STYLE_COLOR_PALETTE) {
+        spaces_ghostty_vt_preamble_append(buf, ";58:5:%u", (unsigned)pen->ul_value);
+    } else if (pen->ul_tag == GHOSTTY_STYLE_COLOR_RGB) {
+        GhosttyColorRgb color = spaces_ghostty_vt_unpack_rgb(pen->ul_value);
+        spaces_ghostty_vt_preamble_append(buf, ";58:2::%u:%u:%u", (unsigned)color.r, (unsigned)color.g, (unsigned)color.b);
     }
     spaces_ghostty_vt_preamble_append(buf, "m");
 }
@@ -1336,11 +1377,16 @@ static bool spaces_ghostty_vt_preamble_append_grid(SpacesGhosttyVtSession *sessi
             }
 
             // A cell counts as content unless it is blank (no glyph or a space), keeps the default
-            // background (tag NONE), and carries no style flags — all compared in tagged terms. Spacer
+            // background (tag NONE), and carries no visible decoration — all compared in tagged terms.
+            // Beyond bg color and the style flag bits, the decorations `flags` does not carry are checked
+            // explicitly so a trailing cell whose only attribute is blink, overline, or an underline color
+            // is NOT folded into the EL erase (the underline *variant* is already reflected in the flag
+            // bits). Foreground color is deliberately excluded: it is invisible on a blank cell. Spacer
             // cells never count on their own; the wide glyph they trail already carries the content.
             bool blank = model->base_codepoint == 0 || model->base_codepoint == 0x20;
             model->has_content = !model->spacer &&
-                (!blank || model->pen.bg_tag != GHOSTTY_STYLE_COLOR_NONE || model->pen.flags != 0);
+                (!blank || model->pen.bg_tag != GHOSTTY_STYLE_COLOR_NONE || model->pen.flags != 0 ||
+                 model->pen.blink || model->pen.overline || model->pen.ul_tag != GHOSTTY_STYLE_COLOR_NONE);
             cell_index++;
         }
         cell_index = row_end;
