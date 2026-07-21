@@ -29,15 +29,22 @@ struct RootTabView: View {
     @Bindable var model: SpacesMobileAppModel
 
     var body: some View {
-        TabView(selection: $model.selectedTab) {
-            AlertsTabView(model: model).id(model.activeDeviceID).tag(SpacesMobileTab.alerts).tabItem { Label("Alerts", systemImage: "bell") }.badge(
-                model.undismissedAlertCount)
-            SpacesTabView(model: model).id(model.activeDeviceID).tag(SpacesMobileTab.spaces).tabItem {
-                Label("Spaces", systemImage: "rectangle.stack")
+        // The banner is stacked above the TabView rather than applied as a top safeAreaInset:
+        // the UIKit navigation bars inside each tab position their toolbar items against the
+        // scene's safe area, not SwiftUI's extra inset, so an inset banner would sit on top of
+        // nav-bar buttons (e.g. the Alerts "Clear" button under "Turn Off").
+        VStack(spacing: 0) {
+            demoModeBanner
+            TabView(selection: $model.selectedTab) {
+                AlertsTabView(model: model).id(model.activeDeviceID).tag(SpacesMobileTab.alerts).tabItem { Label("Alerts", systemImage: "bell") }
+                    .badge(model.undismissedAlertCount)
+                SpacesTabView(model: model).id(model.activeDeviceID).tag(SpacesMobileTab.spaces).tabItem {
+                    Label("Spaces", systemImage: "rectangle.stack")
+                }
+                AgentsTabView(model: model).id(model.activeDeviceID).tag(SpacesMobileTab.agents).tabItem { Label("Agents", systemImage: "cpu") }
+                SettingsTabView(model: model).tag(SpacesMobileTab.settings).tabItem { Label("Settings", systemImage: "gearshape") }
             }
-            AgentsTabView(model: model).id(model.activeDeviceID).tag(SpacesMobileTab.agents).tabItem { Label("Agents", systemImage: "cpu") }
-            SettingsTabView(model: model).tag(SpacesMobileTab.settings).tabItem { Label("Settings", systemImage: "gearshape") }
-        }.tint(Theme.accent).safeAreaInset(edge: .top, spacing: 0) { demoModeBanner }.alert("Connection Error", isPresented: errorAlertBinding) {
+        }.tint(Theme.accent).alert("Connection Error", isPresented: errorAlertBinding) {
             Button("OK", role: .cancel) { model.dismissError() }
         } message: {
             Text(model.errorMessage ?? "")
@@ -74,9 +81,12 @@ struct RootTabView: View {
                     model.setDemoMode(false)
                     Task { await model.refresh() }
                 }.font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.accent).buttonStyle(.plain)
-            }.padding(.horizontal, 16).padding(.vertical, 8).frame(maxWidth: .infinity).background(Theme.accentTint).overlay(
-                Rectangle().frame(height: 1).foregroundStyle(Theme.border), alignment: .bottom
-            ).accessibilityIdentifier("demo.banner")
+            }.padding(.horizontal, 16).padding(.vertical, 8).frame(maxWidth: .infinity)
+                // accentTint is translucent, so back it with the app background; both extend under
+                // the status bar because the banner is the topmost view while Demo Mode is on.
+                .background { Theme.accentTint.ignoresSafeArea(edges: .top) }.background { Theme.bg.ignoresSafeArea(edges: .top) }.overlay(
+                    Rectangle().frame(height: 1).foregroundStyle(Theme.border), alignment: .bottom
+                ).accessibilityIdentifier("demo.banner")
         }
     }
 }
