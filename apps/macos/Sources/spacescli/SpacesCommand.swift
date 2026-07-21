@@ -526,10 +526,12 @@ func resolvedSubscriberSessionID(_ subscriber: String?, environment: [String: St
     throw ValidationError("--subscriber is required, or run inside a Spaces terminal so \(WorkspaceOrchestrator.terminalTrackingIDEnvVar) is set.")
 }
 
-/// Resolves the automation run id to stamp onto an `agent spawn` request, read from
+/// Resolves the automation run id to stamp onto a local `agent spawn` request, read from
 /// `SPACES_AUTOMATION_RUN_ID` (trimmed; empty treated as absent). Set by an automation orchestrator on
 /// its own terminal so the daemon can attribute the spawned child session to the run that created it. nil
-/// when unset, which keeps ordinary interactive spawns unchanged.
+/// when unset, which keeps ordinary interactive spawns unchanged. Called by both the `agent spawn` CLI
+/// command and the `spaces_agent_spawn` MCP tool's local-spawn branch, since an MCP-capable orchestrator
+/// launched by a script automation inherits the same environment variable and must forward it identically.
 func resolvedAutomationRunID(environment: [String: String] = ProcessInfo.processInfo.environment) -> String? {
     guard let envValue = environment[WorkspaceOrchestrator.automationRunIDEnvVar]?.trimmingCharacters(in: .whitespacesAndNewlines), !envValue.isEmpty
     else { return nil }

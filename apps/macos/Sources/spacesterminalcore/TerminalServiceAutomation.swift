@@ -103,6 +103,11 @@ public struct TerminalServiceAutomationRunSummary: Codable, Sendable, Equatable,
     public let id: String
     public let automationID: String
     public let automationName: String?
+    /// The run's own `script`/`agent` kind (raw `AutomationKind` value), stamped at creation time. A client
+    /// opening a run's history dispatches on this, not on the automation's current kind: an automation's kind
+    /// can be edited once its runs are terminal, but a retained historical run keeps the session shape it ran
+    /// with, so this is what cold-resolves the run to the right workspace/kind/command.
+    public let kind: String
     public let status: String
     public let trigger: String
     public let skipReason: String?
@@ -114,13 +119,14 @@ public struct TerminalServiceAutomationRunSummary: Codable, Sendable, Equatable,
     public let attributedAgents: [TerminalServiceAutomationAgentSummary]
 
     public init(
-        id: String, automationID: String, automationName: String?, status: String, trigger: String, skipReason: String?, exitCode: Int?,
-        terminalSessionID: String?, startedAt: String?, endedAt: String?, createdAt: String,
+        id: String, automationID: String, automationName: String?, kind: String, status: String, trigger: String, skipReason: String?,
+        exitCode: Int?, terminalSessionID: String?, startedAt: String?, endedAt: String?, createdAt: String,
         attributedAgents: [TerminalServiceAutomationAgentSummary] = []
     ) {
         self.id = id
         self.automationID = automationID
         self.automationName = automationName
+        self.kind = kind
         self.status = status
         self.trigger = trigger
         self.skipReason = skipReason

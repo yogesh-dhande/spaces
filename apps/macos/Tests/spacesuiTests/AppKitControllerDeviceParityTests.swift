@@ -437,18 +437,18 @@ import workspacecore
     }
 
     private func automationRunSummary(
-        automationID: String = "auto-1", status: String, terminalSessionID: String?
+        automationID: String = "auto-1", kind: AutomationKind, status: String, terminalSessionID: String?
     ) -> TerminalServiceAutomationRunSummary {
         TerminalServiceAutomationRunSummary(
-            id: "run-1", automationID: automationID, automationName: nil, status: status, trigger: "manual", skipReason: nil, exitCode: nil,
-            terminalSessionID: terminalSessionID, startedAt: nil, endedAt: nil, createdAt: "2026-06-22T12:00:00Z")
+            id: "run-1", automationID: automationID, automationName: nil, kind: kind.rawValue, status: status, trigger: "manual", skipReason: nil,
+            exitCode: nil, terminalSessionID: terminalSessionID, startedAt: nil, endedAt: nil, createdAt: "2026-06-22T12:00:00Z")
     }
 
     // A script-kind run's session is workspace-less, so its open request is synthesized as a `.automation`
     // pane carrying the automation's script/working-directory and the seeded login shell.
     @Test func automationRunTerminalRequestSynthesizesScriptKindPane() {
         let automation = automationSummary(name: "Nightly", kind: .script, script: "echo hi", workingDirectory: "/tmp/work")
-        let run = automationRunSummary(status: "running", terminalSessionID: "auto-session")
+        let run = automationRunSummary(kind: .script, status: "running", terminalSessionID: "auto-session")
 
         let request = AppKitController.automationRunTerminalOpenRequest(
             deviceID: "local", sessionID: "auto-session", run: run, automation: automation, overview: nil, loginShell: "/bin/zsh")
@@ -471,7 +471,7 @@ import workspacecore
             attachmentSnapshot: TerminalSessionAttachmentSnapshot(), rowKind: .agent)
         let overview = SpacesDeviceOverviewPayload(projects: [], workspaces: [], sessions: [session])
         let automation = automationSummary(name: "Reviewer", kind: .agent, workspaceID: "workspace-1")
-        let run = automationRunSummary(status: "running", terminalSessionID: "agent-session")
+        let run = automationRunSummary(kind: .agent, status: "running", terminalSessionID: "agent-session")
 
         let request = AppKitController.automationRunTerminalOpenRequest(
             deviceID: "local", sessionID: "agent-session", run: run, automation: automation, overview: overview, loginShell: "/bin/zsh")
@@ -489,7 +489,7 @@ import workspacecore
     @Test func automationRunTerminalRequestFallsBackForEndedAgentSession() {
         let overview = SpacesDeviceOverviewPayload(projects: [], workspaces: [], sessions: [])
         let automation = automationSummary(name: "Reviewer", kind: .agent, workspaceID: "workspace-1")
-        let run = automationRunSummary(status: "succeeded", terminalSessionID: "gone-session")
+        let run = automationRunSummary(kind: .agent, status: "succeeded", terminalSessionID: "gone-session")
 
         let request = AppKitController.automationRunTerminalOpenRequest(
             deviceID: "local", sessionID: "gone-session", run: run, automation: automation, overview: overview, loginShell: "/bin/zsh")
@@ -498,6 +498,42 @@ import workspacecore
             request
                 == AppKitController.DeviceTerminalOpenRequest(
                     workspaceID: "workspace-1", deviceID: "local", sessionID: "gone-session", title: "Reviewer", workingDirectory: "",
+                    kind: .agent, shell: nil, command: nil, initialState: .exited))
+    }
+
+    // Dispatch keys off the RUN's kind, not the automation's current kind. A historical script-kind run whose
+    // automation was later edited to Agent still opens as a workspace-less `.automation` pane carrying the
+    // automation's current script metadata — if it dispatched on the automation's kind it would take the agent
+    // branch, which supplies no shell and can't cold-resolve a workspace-less session.
+    @Test func automationRunTerminalRequestUsesRunKindWhenAutomationBecameAgent() {
+        let automation = automationSummary(name: "Nightly", kind: .agent, script: "echo hi", workspaceID: "workspace-1", workingDirectory: "/tmp/work")
+        let run = automationRunSummary(kind: .script, status: "succeeded", terminalSessionID: "auto-session")
+
+        let request = AppKitController.automationRunTerminalOpenRequest(
+            deviceID: "local", sessionID: "auto-session", run: run, automation: automation, overview: nil, loginShell: "/bin/zsh")
+
+        #expect(
+            request
+                == AppKitController.DeviceTerminalOpenRequest(
+                    workspaceID: "", deviceID: "local", sessionID: "auto-session", title: "Nightly", workingDirectory: "/tmp/work",
+                    kind: .automation, shell: "/bin/zsh", command: "echo hi", initialState: .exited))
+    }
+
+    // The reverse: a historical agent-kind run whose automation was later edited to Script still resolves as an
+    // agent (here falling back to a synthesized `.agent` request for its gone session), rather than opening as a
+    // workspace-less `.automation` pane with the script automation's metadata.
+    @Test func automationRunTerminalRequestUsesRunKindWhenAutomationBecameScript() {
+        let overview = SpacesDeviceOverviewPayload(projects: [], workspaces: [], sessions: [])
+        let automation = automationSummary(name: "Reviewer", kind: .script, script: "echo hi", workingDirectory: "/tmp/work")
+        let run = automationRunSummary(kind: .agent, status: "succeeded", terminalSessionID: "gone-session")
+
+        let request = AppKitController.automationRunTerminalOpenRequest(
+            deviceID: "local", sessionID: "gone-session", run: run, automation: automation, overview: overview, loginShell: "/bin/zsh")
+
+        #expect(
+            request
+                == AppKitController.DeviceTerminalOpenRequest(
+                    workspaceID: "", deviceID: "local", sessionID: "gone-session", title: "Reviewer", workingDirectory: "",
                     kind: .agent, shell: nil, command: nil, initialState: .exited))
     }
 

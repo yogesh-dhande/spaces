@@ -27,8 +27,8 @@ extension TerminalServiceAutomationRunSummary {
         _ run: AutomationRun, automationName: String?, attributedAgents: [TerminalServiceAutomationAgentSummary] = []
     ) {
         self.init(
-            id: run.id, automationID: run.automationID, automationName: automationName, status: run.status.rawValue, trigger: run.trigger.rawValue,
-            skipReason: run.skipReason?.rawValue, exitCode: run.exitCode, terminalSessionID: run.terminalSessionID,
+            id: run.id, automationID: run.automationID, automationName: automationName, kind: run.kind.rawValue, status: run.status.rawValue,
+            trigger: run.trigger.rawValue, skipReason: run.skipReason?.rawValue, exitCode: run.exitCode, terminalSessionID: run.terminalSessionID,
             startedAt: run.startedAt.map(TerminalSessionTimestamp.string(from:)),
             endedAt: run.endedAt.map(TerminalSessionTimestamp.string(from:)),
             createdAt: TerminalSessionTimestamp.string(from: run.createdAt), attributedAgents: attributedAgents)

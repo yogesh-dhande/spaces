@@ -96,7 +96,7 @@ extension SQLiteStore {
     // MARK: - Automation runs
 
     private static let automationRunColumns = """
-        id, automation_id, status, skip_reason, trigger_kind, exit_code, terminal_session_id, started_at, ended_at, created_at,
+        id, automation_id, kind, status, skip_reason, trigger_kind, exit_code, terminal_session_id, started_at, ended_at, created_at,
         prompt_delivered_at
         """
 
@@ -104,13 +104,13 @@ extension SQLiteStore {
         try execute(
             sql: """
                 INSERT INTO automation_runs(
-                  id, automation_id, status, skip_reason, trigger_kind, exit_code, terminal_session_id, started_at, ended_at, created_at,
+                  id, automation_id, kind, status, skip_reason, trigger_kind, exit_code, terminal_session_id, started_at, ended_at, created_at,
                   prompt_delivered_at
                 )
-                VALUES (?, ?, ?, NULLIF(?, ''), ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, NULLIF(?, ''))
+                VALUES (?, ?, ?, ?, NULLIF(?, ''), ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, NULLIF(?, ''))
                 """,
             bindings: [
-                run.id, run.automationID, run.status.rawValue, run.skipReason?.rawValue ?? "", run.trigger.rawValue,
+                run.id, run.automationID, run.kind.rawValue, run.status.rawValue, run.skipReason?.rawValue ?? "", run.trigger.rawValue,
                 run.exitCode.map(String.init) ?? "", run.terminalSessionID ?? "", run.startedAt.map(Self.epochString) ?? "",
                 run.endedAt.map(Self.epochString) ?? "", Self.epochString(run.createdAt), run.promptDeliveredAt.map(Self.epochString) ?? "",
             ])
@@ -249,14 +249,15 @@ extension SQLiteStore {
     }
 
     private static func decodeAutomationRun(row: [String]) -> AutomationRun? {
-        guard row.count >= 11 else { return nil }
-        guard let status = AutomationRunStatus(rawValue: row[2]) else { return nil }
-        guard let trigger = AutomationRunTrigger(rawValue: row[4]) else { return nil }
-        guard let createdAt = date(fromEpoch: row[9]) else { return nil }
+        guard row.count >= 12 else { return nil }
+        guard let kind = AutomationKind(rawValue: row[2]) else { return nil }
+        guard let status = AutomationRunStatus(rawValue: row[3]) else { return nil }
+        guard let trigger = AutomationRunTrigger(rawValue: row[5]) else { return nil }
+        guard let createdAt = date(fromEpoch: row[10]) else { return nil }
         return AutomationRun(
-            id: row[0], automationID: row[1], status: status, skipReason: row[3].isEmpty ? nil : AutomationRunSkipReason(rawValue: row[3]),
-            trigger: trigger, exitCode: row[5].isEmpty ? nil : Int(row[5]), terminalSessionID: row[6].isEmpty ? nil : row[6],
-            startedAt: date(fromEpoch: row[7]), endedAt: date(fromEpoch: row[8]), createdAt: createdAt, promptDeliveredAt: date(fromEpoch: row[10]))
+            id: row[0], automationID: row[1], kind: kind, status: status, skipReason: row[4].isEmpty ? nil : AutomationRunSkipReason(rawValue: row[4]),
+            trigger: trigger, exitCode: row[6].isEmpty ? nil : Int(row[6]), terminalSessionID: row[7].isEmpty ? nil : row[7],
+            startedAt: date(fromEpoch: row[8]), endedAt: date(fromEpoch: row[9]), createdAt: createdAt, promptDeliveredAt: date(fromEpoch: row[11]))
     }
 
     // MARK: - Attributed terminal sessions

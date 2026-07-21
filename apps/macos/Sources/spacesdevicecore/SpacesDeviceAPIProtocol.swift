@@ -655,6 +655,30 @@ public struct SpacesDeviceOverviewPayload: Codable, Sendable, Equatable {
         self.automations = automations
         self.automationRuns = automationRuns
     }
+
+    private enum CodingKeys: String, CodingKey {
+        case projects
+        case workspaces
+        case sessions
+        case daemonStatus
+        case automations
+        case automationRuns
+    }
+
+    /// Custom decode so an overview from a daemon that predates a given field (projects predates
+    /// nothing shipped, but automations/automationRuns predate the automations feature) still decodes
+    /// successfully. The synthesized initializer requires every key regardless of the memberwise-init
+    /// defaults above, so a missing key would fail decoding of the *entire* overview -- workspaces and
+    /// sessions included -- rather than just leaving the new field empty.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        projects = try container.decodeIfPresent([SpacesDeviceProjectSummary].self, forKey: .projects) ?? []
+        workspaces = try container.decode([SpacesDeviceWorkspaceSummary].self, forKey: .workspaces)
+        sessions = try container.decode([SpacesDeviceTerminalSessionSummary].self, forKey: .sessions)
+        daemonStatus = try container.decode(TerminalServiceDaemonStatus.self, forKey: .daemonStatus)
+        automations = try container.decodeIfPresent([TerminalServiceAutomationSummary].self, forKey: .automations) ?? []
+        automationRuns = try container.decodeIfPresent([TerminalServiceAutomationRunSummary].self, forKey: .automationRuns) ?? []
+    }
 }
 
 public struct SpacesDeviceWorkspaceCreateOptions: Codable, Sendable, Equatable {

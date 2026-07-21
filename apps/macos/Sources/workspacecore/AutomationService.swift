@@ -344,8 +344,8 @@ import spacesterminalcore
     private func recordSkippedRun(automation: Automation, trigger: AutomationRunTrigger, reason: AutomationRunSkipReason) throws -> AutomationRun {
         let currentTime = now()
         let run = AutomationRun(
-            id: UUID().uuidString, automationID: automation.id, status: .skipped, skipReason: reason, trigger: trigger, exitCode: nil,
-            terminalSessionID: nil, startedAt: nil, endedAt: currentTime, createdAt: currentTime)
+            id: UUID().uuidString, automationID: automation.id, kind: automation.kind, status: .skipped, skipReason: reason, trigger: trigger,
+            exitCode: nil, terminalSessionID: nil, startedAt: nil, endedAt: currentTime, createdAt: currentTime)
         try store.insertAutomationRun(run)
         try pruneRetention(automationID: automation.id)
         return run
@@ -354,8 +354,8 @@ import spacesterminalcore
     private func enqueueRun(automation: Automation, trigger: AutomationRunTrigger) throws -> AutomationRun {
         let currentTime = now()
         let run = AutomationRun(
-            id: UUID().uuidString, automationID: automation.id, status: .queued, skipReason: nil, trigger: trigger, exitCode: nil,
-            terminalSessionID: nil, startedAt: nil, endedAt: nil, createdAt: currentTime)
+            id: UUID().uuidString, automationID: automation.id, kind: automation.kind, status: .queued, skipReason: nil, trigger: trigger,
+            exitCode: nil, terminalSessionID: nil, startedAt: nil, endedAt: nil, createdAt: currentTime)
         try store.insertAutomationRun(run)
         return run
     }
@@ -371,8 +371,8 @@ import spacesterminalcore
         let currentTime = now()
         let runID = existing?.id ?? UUID().uuidString
         let run = AutomationRun(
-            id: runID, automationID: automation.id, status: .running, skipReason: nil, trigger: existing?.trigger ?? trigger, exitCode: nil,
-            terminalSessionID: nil, startedAt: currentTime, endedAt: nil, createdAt: existing?.createdAt ?? currentTime)
+            id: runID, automationID: automation.id, kind: automation.kind, status: .running, skipReason: nil, trigger: existing?.trigger ?? trigger,
+            exitCode: nil, terminalSessionID: nil, startedAt: currentTime, endedAt: nil, createdAt: existing?.createdAt ?? currentTime)
         if existing == nil {
             try store.insertAutomationRun(run)
         } else {
@@ -668,9 +668,13 @@ import spacesterminalcore
 
         guard terminate, let ownSessionID else { return }
         if let runtimeState = try? terminalRuntimeState(sessionID: ownSessionID), let childPID = runtimeState.childPID, childPID > 0 {
-            signalProcessGroup(childPID: childPID, signal: SIGTERM)
+            // The group id is read ONCE, before SIGTERM: a leader that dies on the signal would make a
+            // second getpgid fail, storing no group and dropping the escalation while a SIGTERM-ignoring
+            // descendant survives. The signal and the pending kill must see the same group.
+            let processGroupID = signalableProcessGroupID(childPID: childPID)
+            signalProcessGroup(childPID: childPID, processGroupID: processGroupID, signal: SIGTERM)
             pendingKills[run.id] = PendingKill(
-                childPID: childPID, processGroupID: signalableProcessGroupID(childPID: childPID),
+                childPID: childPID, processGroupID: processGroupID,
                 sigkillDeadline: now().addingTimeInterval(terminationGrace))
         }
     }
@@ -837,11 +841,11 @@ import spacesterminalcore
         kill(pending.childPID, SIGKILL)
     }
 
-    /// Signals a command's process group (and the leader itself). Only signals the group when the child is
-    /// its own group leader and that group is not the daemon's own — the same guard the PTY driver uses, so
-    /// a session whose child did not become a group leader never sends a signal to the daemon's group.
-    private func signalProcessGroup(childPID: Int32, signal signalNumber: Int32) {
-        if let processGroupID = signalableProcessGroupID(childPID: childPID) { kill(-processGroupID, signalNumber) }
+    /// Signals a command's process group (and the leader itself). `processGroupID` is the caller's
+    /// already-captured `signalableProcessGroupID` — passed in rather than recomputed so the signaled group
+    /// and the one stored for SIGKILL escalation can never diverge.
+    private func signalProcessGroup(childPID: Int32, processGroupID: Int32?, signal signalNumber: Int32) {
+        if let processGroupID { kill(-processGroupID, signalNumber) }
         kill(childPID, signalNumber)
     }
 

@@ -436,12 +436,12 @@
         }
 
         private func makeRun(
-            id: String, automationID: String, automationName: String? = nil, status: String = "queued", trigger: String = "manual",
-            exitCode: Int? = nil, startedAt: String? = "2026-01-01T00:00:00Z", endedAt: String? = nil, createdAt: String = "2026-01-01T00:00:00Z",
-            attributedAgents: [TerminalServiceAutomationAgentSummary] = []
+            id: String, automationID: String, automationName: String? = nil, kind: String = "script", status: String = "queued",
+            trigger: String = "manual", exitCode: Int? = nil, startedAt: String? = "2026-01-01T00:00:00Z", endedAt: String? = nil,
+            createdAt: String = "2026-01-01T00:00:00Z", attributedAgents: [TerminalServiceAutomationAgentSummary] = []
         ) -> TerminalServiceAutomationRunSummary {
             TerminalServiceAutomationRunSummary(
-                id: id, automationID: automationID, automationName: automationName, status: status, trigger: trigger, skipReason: nil,
+                id: id, automationID: automationID, automationName: automationName, kind: kind, status: status, trigger: trigger, skipReason: nil,
                 exitCode: exitCode, terminalSessionID: nil, startedAt: startedAt, endedAt: endedAt, createdAt: createdAt,
                 attributedAgents: attributedAgents)
         }

@@ -15,13 +15,14 @@ struct AutomationsViewModelTests {
     }
 
     private func run(
-        id: String, automationID: String, name: String?, status: String, exitCode: Int? = nil, trigger: String = "manual", skipReason: String? = nil,
-        sessionID: String? = nil, startedAt: String?, endedAt: String? = nil, createdAt: String,
+        id: String, automationID: String, name: String?, status: String, kind: String = "script", exitCode: Int? = nil, trigger: String = "manual",
+        skipReason: String? = nil, sessionID: String? = nil, startedAt: String?, endedAt: String? = nil, createdAt: String,
         attributedAgents: [TerminalServiceAutomationAgentSummary] = []
     ) -> TerminalServiceAutomationRunSummary {
         TerminalServiceAutomationRunSummary(
-            id: id, automationID: automationID, automationName: name, status: status, trigger: trigger, skipReason: skipReason, exitCode: exitCode,
-            terminalSessionID: sessionID, startedAt: startedAt, endedAt: endedAt, createdAt: createdAt, attributedAgents: attributedAgents)
+            id: id, automationID: automationID, automationName: name, kind: kind, status: status, trigger: trigger, skipReason: skipReason,
+            exitCode: exitCode, terminalSessionID: sessionID, startedAt: startedAt, endedAt: endedAt, createdAt: createdAt,
+            attributedAgents: attributedAgents)
     }
 
     private func agent(sessionID: String, status: AgentWindowStatus, live: Bool, title: String? = nil, workspaceID: String? = "ws-1")

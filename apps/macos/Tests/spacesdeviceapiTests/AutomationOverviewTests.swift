@@ -11,7 +11,7 @@ import workspacecore
 final class AutomationOverviewTests: XCTestCase {
     private func run(id: String, status: AutomationRunStatus, createdAt: TimeInterval, automationID: String = "auto") -> AutomationRun {
         AutomationRun(
-            id: id, automationID: automationID, status: status, skipReason: nil, trigger: .cron, exitCode: status == .failed ? 1 : nil,
+            id: id, automationID: automationID, kind: .script, status: status, skipReason: nil, trigger: .cron, exitCode: status == .failed ? 1 : nil,
             terminalSessionID: nil, startedAt: status.isTerminal ? nil : Date(timeIntervalSince1970: createdAt), endedAt: nil,
             createdAt: Date(timeIntervalSince1970: createdAt))
     }

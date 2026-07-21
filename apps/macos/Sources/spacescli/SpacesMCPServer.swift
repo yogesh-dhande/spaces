@@ -329,10 +329,15 @@ final class SpacesMCPStdioServer {
                         device: device, workspace: workspace, command: command, title: server.optionalString(arguments["title"]),
                         timeoutSeconds: server.optionalInt(arguments["timeout"]) ?? 90, subscriberSessionID: subscriberSessionID)
                 } else {
+                    // The MCP server itself inherits SPACES_AUTOMATION_RUN_ID whenever a script automation
+                    // launches an MCP-capable orchestrator, exactly like the `agent spawn` CLI path (see
+                    // AgentSpawnCommand.run() and resolvedAutomationRunID()'s doc comment). Forward it so the
+                    // spawned agent is attributed to the run and stays reachable through Cancel, End agents,
+                    // and retention cleanup.
                     result = try performAgentSpawn(
                         cwd: FileManager.default.currentDirectoryPath, workspace: server.optionalString(arguments["workspace"]), command: command,
                         title: server.optionalString(arguments["title"]), timeoutSeconds: server.optionalInt(arguments["timeout"]) ?? 90,
-                        subscriberSessionID: subscriberSessionID)
+                        subscriberSessionID: subscriberSessionID, automationRunID: resolvedAutomationRunID())
                 }
                 let deviceNote = result.deviceID.map { " on device \($0)" } ?? ""
                 return .profile(

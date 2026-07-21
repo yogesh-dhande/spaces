@@ -131,8 +131,11 @@ public enum DatabaseSchema {
     /// is removed with it, an app-managed cascade. `skip_reason` records why a `skipped` run never ran
     /// (`concurrency` when a policy blocked an overlapping run, `missed` when a catch-up decision skipped
     /// it); `trigger_kind` records how the run was initiated (`manual`, `cron`, or `missed_catch_up`).
-    /// `terminal_session_id` links to the workspace-less session that carried the command.
-    /// `prompt_delivered_at` is set (epoch seconds) once an `agent`-kind run's seed prompt has been written
+    /// `terminal_session_id` links to the workspace-less session that carried the command. `kind` is the
+    /// automation's `script`/`agent` kind stamped onto the run at creation time: an automation's kind can be
+    /// edited once its runs are terminal, but a retained historical run keeps the session shape it actually
+    /// ran with, so opening its history dispatches on the run's own kind rather than the automation's current
+    /// one. `prompt_delivered_at` is set (epoch seconds) once an `agent`-kind run's seed prompt has been written
     /// to its session; it makes prompt delivery survive a daemon restart deterministically — the two
     /// agent-run phases (detecting/sending while NULL, awaiting done/end once set) derive from it so no
     /// in-memory state is lost on restart. Named separately so the fresh-schema SQL and the v7→v8 migration
@@ -141,6 +144,7 @@ public enum DatabaseSchema {
             CREATE TABLE IF NOT EXISTS automation_runs (
               id TEXT PRIMARY KEY,
               automation_id TEXT NOT NULL,
+              kind TEXT NOT NULL,
               status TEXT NOT NULL,
               skip_reason TEXT,
               trigger_kind TEXT NOT NULL,

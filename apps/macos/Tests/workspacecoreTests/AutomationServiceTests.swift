@@ -277,6 +277,30 @@ import spacesterminalcore
         XCTAssertEqual(finished.exitCode, 3)
     }
 
+    // MARK: - Per-run kind
+
+    /// A run row records its automation's kind at fire time and keeps it even after the automation's kind is
+    /// edited (which is only allowed once the run is terminal). This is what lets opening a historical run's
+    /// terminal dispatch on the shape the run actually ran with rather than the automation's current kind.
+    func testRunKindIsStampedAtFireTimeAndSurvivesAutomationKindEdit() throws {
+        let harness = try Harness(self, realCommands: true)
+        let automation = try harness.insertAutomation(script: "exit 0", concurrency: .allow)
+        let run = try XCTUnwrap(harness.service.triggerManually(automationID: automation.id))
+        XCTAssertEqual(run.kind, .script, "the run is stamped with the automation's kind when it fires")
+        let finished = try harness.runUntilTerminal(runID: run.id)
+        XCTAssertTrue(finished.status.isTerminal)
+
+        // Editing the automation to Agent is allowed only now that the run is terminal; the historical run
+        // must keep its original script kind.
+        let agentDraft = AutomationDraft(
+            name: automation.name, enabled: true, triggerKind: .manual, cronExpression: nil, kind: .agent, script: "", agentCommand: "codex",
+            agentPrompt: "investigate", workspaceID: "ws-1", workingDirectory: "", timeoutSeconds: nil, concurrencyPolicy: .allow,
+            missedRunPolicy: .runOnce)
+        let updated = try harness.service.updateAutomation(id: automation.id, draft: agentDraft)
+        XCTAssertEqual(updated.kind, .agent)
+        XCTAssertEqual(try harness.store.automationRun(id: run.id)?.kind, .script, "the retained run keeps the kind it ran with, not the new one")
+    }
+
     // MARK: - Agent kind execution
 
     /// Happy path: spawn the agent, wait for foreground detection, deliver the seed prompt as two
@@ -842,9 +866,11 @@ import spacesterminalcore
             workspaceID: workspaceID, provider: .spaces, label: "Codex CLI", terminalTrackingID: sessionID, status: status)
     }
 
-    @discardableResult func insertRun(automationID: String, status: AutomationRunStatus, createdAt: Date? = nil) throws -> AutomationRun {
+    @discardableResult func insertRun(automationID: String, kind: AutomationKind = .script, status: AutomationRunStatus, createdAt: Date? = nil) throws
+        -> AutomationRun
+    {
         let run = AutomationRun(
-            id: UUID().uuidString, automationID: automationID, status: status, skipReason: nil, trigger: .manual, exitCode: nil,
+            id: UUID().uuidString, automationID: automationID, kind: kind, status: status, skipReason: nil, trigger: .manual, exitCode: nil,
             terminalSessionID: nil, startedAt: status == .running ? (createdAt ?? now()) : nil, endedAt: status.isTerminal ? (createdAt ?? now()) : nil,
             createdAt: createdAt ?? now())
         try store.insertAutomationRun(run)

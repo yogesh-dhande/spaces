@@ -242,18 +242,21 @@ import spacesterminalcore
 
     func testRunSummaryPreservesAlertRelevantFields() {
         let failed = AutomationRun(
-            id: "run-1", automationID: "auto-1", status: .failed, skipReason: nil, trigger: .cron, exitCode: 3,
+            id: "run-1", automationID: "auto-1", kind: .script, status: .failed, skipReason: nil, trigger: .cron, exitCode: 3,
             terminalSessionID: "session-1", startedAt: Date(timeIntervalSince1970: 100), endedAt: Date(timeIntervalSince1970: 105),
             createdAt: Date(timeIntervalSince1970: 99))
         let summary = TerminalServiceAutomationRunSummary(failed, automationName: "Deploy")
         XCTAssertEqual(summary.status, "failed")
+        XCTAssertEqual(summary.kind, "script")
         XCTAssertEqual(summary.exitCode, 3)
         XCTAssertEqual(summary.automationName, "Deploy")
         XCTAssertEqual(summary.terminalSessionID, "session-1")
 
         let timedOut = AutomationRun(
-            id: "run-2", automationID: "auto-1", status: .timedOut, skipReason: nil, trigger: .manual, exitCode: nil, terminalSessionID: "session-2",
-            startedAt: Date(timeIntervalSince1970: 200), endedAt: Date(timeIntervalSince1970: 260), createdAt: Date(timeIntervalSince1970: 199))
+            id: "run-2", automationID: "auto-1", kind: .agent, status: .timedOut, skipReason: nil, trigger: .manual, exitCode: nil,
+            terminalSessionID: "session-2", startedAt: Date(timeIntervalSince1970: 200), endedAt: Date(timeIntervalSince1970: 260),
+            createdAt: Date(timeIntervalSince1970: 199))
+        XCTAssertEqual(TerminalServiceAutomationRunSummary(timedOut, automationName: "Deploy").kind, "agent")
         XCTAssertEqual(TerminalServiceAutomationRunSummary(timedOut, automationName: "Deploy").status, "timed_out")
     }
 
@@ -261,7 +264,7 @@ import spacesterminalcore
     /// contract every transport (profile response, Device API result, device overview) relies on.
     func testRunSummaryAttributedAgentsRoundTripThroughJSON() throws {
         let run = AutomationRun(
-            id: "run-1", automationID: "auto-1", status: .succeeded, skipReason: nil, trigger: .manual, exitCode: nil,
+            id: "run-1", automationID: "auto-1", kind: .agent, status: .succeeded, skipReason: nil, trigger: .manual, exitCode: nil,
             terminalSessionID: "session-1", startedAt: Date(timeIntervalSince1970: 100), endedAt: Date(timeIntervalSince1970: 105),
             createdAt: Date(timeIntervalSince1970: 99))
         let agents = [

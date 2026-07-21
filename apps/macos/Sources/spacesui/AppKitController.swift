@@ -3835,7 +3835,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             workspaceID: fallbackWorkspaceID, sessionID: sessionID, title: row.title, workingDirectory: row.workingDirectory, kind: .shell)
     }
 
-    /// Builds the terminal-open request for an automation run, dispatching on the automation's kind.
+    /// Builds the terminal-open request for an automation run, dispatching on the run's persisted kind.
+    ///
+    /// Dispatches on the RUN's own kind, not the automation's current kind: an automation's kind can be edited
+    /// once its runs are terminal, but a retained historical run keeps the session shape it actually ran with,
+    /// so a script run whose automation later became Agent must still open as a script pane (and vice versa).
     ///
     /// A `script`-kind run's session is workspace-less and deliberately excluded from the overview's
     /// `sessions`, so its request is synthesized as a `.automation` pane. The seeded shell is display
@@ -3846,13 +3850,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// is resolved through `deviceTerminalOpenRequest` for its true workspace/kind/command/shell (which is
     /// what makes pane dedup and correct labeling work), falling back to a synthesized `.agent` request. The
     /// fallback carries a nil shell so an ended session can still cold-resolve, is titled with the automation
-    /// name, and seeds its initial state from the run's status.
+    /// name, and seeds its initial state from the run's status. Metadata (name, script, workspace) still comes
+    /// from the automation when it exists, with the same nil-automation fallbacks for a deleted automation.
     nonisolated static func automationRunTerminalOpenRequest(
         deviceID: String, sessionID: String, run: TerminalServiceAutomationRunSummary, automation: TerminalServiceAutomationSummary?,
         overview: SpacesDeviceOverviewPayload?, loginShell: String
     ) -> DeviceTerminalOpenRequest {
         let initialState: TerminalSessionState = AutomationRunStatus(rawValue: run.status) == .running ? .running : .exited
-        guard automation?.kind == AutomationKind.agent.rawValue else {
+        guard run.kind == AutomationKind.agent.rawValue else {
             return DeviceTerminalOpenRequest(
                 workspaceID: "", deviceID: deviceID, sessionID: sessionID, title: automation?.name ?? "Automation",
                 workingDirectory: automation?.workingDirectory ?? "", kind: .automation, shell: loginShell, command: automation?.script,

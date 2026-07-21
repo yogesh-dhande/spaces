@@ -47,6 +47,11 @@ public enum AutomationRunTrigger: String, Codable, Sendable, CaseIterable {
 public struct AutomationRun: Equatable, Sendable, Identifiable {
     public let id: String
     public let automationID: String
+    /// The automation's `script`/`agent` kind stamped onto the run at creation time. An automation's kind can
+    /// be edited once its runs are terminal, so a retained historical run keeps the session shape it actually
+    /// ran with. Opening a run's history dispatches on this, not on the automation's current kind, so a run
+    /// whose automation later switched kind still cold-resolves with the right workspace/kind/command.
+    public let kind: AutomationKind
     public let status: AutomationRunStatus
     public let skipReason: AutomationRunSkipReason?
     public let trigger: AutomationRunTrigger
@@ -64,11 +69,13 @@ public struct AutomationRun: Equatable, Sendable, Identifiable {
     public let promptDeliveredAt: Date?
 
     public init(
-        id: String, automationID: String, status: AutomationRunStatus, skipReason: AutomationRunSkipReason?, trigger: AutomationRunTrigger,
-        exitCode: Int?, terminalSessionID: String?, startedAt: Date?, endedAt: Date?, createdAt: Date, promptDeliveredAt: Date? = nil
+        id: String, automationID: String, kind: AutomationKind, status: AutomationRunStatus, skipReason: AutomationRunSkipReason?,
+        trigger: AutomationRunTrigger, exitCode: Int?, terminalSessionID: String?, startedAt: Date?, endedAt: Date?, createdAt: Date,
+        promptDeliveredAt: Date? = nil
     ) {
         self.id = id
         self.automationID = automationID
+        self.kind = kind
         self.status = status
         self.skipReason = skipReason
         self.trigger = trigger
