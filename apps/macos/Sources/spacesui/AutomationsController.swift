@@ -279,22 +279,28 @@ import workspacecore
         meta.textColor = .secondaryLabelColor
         meta.lineBreakMode = .byTruncatingTail
 
-        var columnViews: [NSView] = [name, meta]
-        // Attributed coding agents (an agent-kind run's own agent, plus any a script-kind run's command
-        // spawned): one clickable chip each, its status dot reusing the app's shared agent-state language.
-        if !run.attributedAgents.isEmpty {
-            let chips = run.attributedAgents.map { makeAgentChip(deviceID: row.deviceID, agent: $0) }
-            let chipsRow = NSStackView(views: chips + [NSView()])
-            chipsRow.orientation = .horizontal
-            chipsRow.alignment = .centerY
-            chipsRow.spacing = 6
-            columnViews.append(chipsRow)
-        }
-
-        let textColumn = NSStackView(views: columnViews)
+        let textColumn = NSStackView(views: [name, meta])
         textColumn.orientation = .vertical
         textColumn.alignment = .leading
         textColumn.spacing = 4
+
+        // The status icon and name/meta labels form the clickable open-terminal region. The chips row and
+        // the trailing buttons are interactive on their own, so they sit outside this gesture area (the
+        // contentArea idiom used in ProcessesSection / AgentLaunchersSection) to stop an ancestor gesture
+        // from also firing when those descendants are clicked. The trailing spacer keeps the clickable
+        // region spanning the whole icon+text band, not just the label glyphs.
+        let contentArea = NSStackView(views: [statusIcon, textColumn, NSView()])
+        contentArea.orientation = .horizontal
+        contentArea.alignment = .centerY
+        contentArea.spacing = 8
+        contentArea.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        // A running run's live terminal, or an ended run's read-only transcript replay, opens on click; a
+        // skipped/queued run that never had a session is inert.
+        if run.terminalSessionID != nil, status != .skipped, status != .queued {
+            attachRowClickAction(to: contentArea) { [weak self] in
+                self?.host.openAutomationRunTerminal(deviceID: row.deviceID, run: run)
+            }
+        }
 
         var trailing: [NSView] = []
         if status == .running {
@@ -313,21 +319,38 @@ import workspacecore
             trailing.append(endButton)
         }
 
-        let content = NSStackView(views: [statusIcon, textColumn, NSView()] + trailing)
-        content.orientation = .horizontal
-        content.alignment = .centerY
-        content.spacing = 8
+        let topRow = NSStackView(views: [contentArea] + trailing)
+        topRow.orientation = .horizontal
+        topRow.alignment = .centerY
+        topRow.spacing = 8
+
+        let content: NSStackView
+        // Attributed coding agents (an agent-kind run's own agent, plus any a script-kind run's command
+        // spawned): one clickable chip each, its status dot reusing the app's shared agent-state language.
+        // The chips stack below the top row so their own click actions stay clear of the row gesture.
+        if !run.attributedAgents.isEmpty {
+            let chips = run.attributedAgents.map { makeAgentChip(deviceID: row.deviceID, agent: $0) }
+            let chipsRow = NSStackView(views: chips + [NSView()])
+            chipsRow.orientation = .horizontal
+            chipsRow.alignment = .centerY
+            chipsRow.spacing = 6
+            // Indent the chips to align under the name/meta text (status icon width + its spacing).
+            chipsRow.edgeInsets = NSEdgeInsets(top: 0, left: 24, bottom: 0, right: 0)
+
+            content = NSStackView(views: [topRow, chipsRow])
+            content.orientation = .vertical
+            content.alignment = .leading
+            content.spacing = 6
+            // Leading alignment gives arranged rows their intrinsic width, so pin the top row to the full
+            // content width (minus the 10pt left/right edge insets applied below) to keep its trailing
+            // buttons right-aligned.
+            NSLayoutConstraint.activate([topRow.widthAnchor.constraint(equalTo: content.widthAnchor, constant: -20)])
+        } else {
+            content = topRow
+        }
         content.edgeInsets = NSEdgeInsets(top: 8, left: 10, bottom: 8, right: 10)
 
-        let card = cardContainer(content)
-        // A running run's live terminal, or an ended run's read-only transcript replay, opens on click; a
-        // skipped/queued run that never had a session is inert.
-        if run.terminalSessionID != nil, status != .skipped, status != .queued {
-            attachRowClickAction(to: card) { [weak self] in
-                self?.host.openAutomationRunTerminal(deviceID: row.deviceID, run: run)
-            }
-        }
-        return card
+        return cardContainer(content)
     }
 
     // MARK: - Shared row helpers
@@ -546,6 +569,11 @@ import workspacecore
     /// Runs a Device API automation mutation off the main actor, then reloads overviews so the pane
     /// re-renders with the daemon's authoritative state. Automation mutation responses do not carry an
     /// overview, so a reload (rather than an optimistic local merge) is the single refresh path.
+    ///
+    /// Failures reload too: mutation controls (e.g. the enable switch) flip their own AppKit state before
+    /// the daemon confirms, so on rejection or an offline remote we must re-render from the daemon's truth
+    /// to clear the stale flip rather than leave the UI asserting a change that never landed. For an
+    /// offline remote this renders whatever cached overview exists, which is acceptable.
     private func performMutation(deviceID: String, _ operation: @escaping @Sendable (SpacesPairedDeviceRecord, SpacesDeviceClientApp) throws -> Void) {
         guard let device = host.automationDeviceRecord(deviceID: deviceID) else {
             host.showDeviceNotLoadedError()
@@ -562,7 +590,6 @@ import workspacecore
             guard let self else { return }
             if let error {
                 host.showError(error)
-                return
             }
             host.requestSidebarReload(forceRemoteRefresh: forceRemoteRefresh)
         }

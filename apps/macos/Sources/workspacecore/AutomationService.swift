@@ -124,6 +124,15 @@ import spacesterminalcore
     /// skipped row), then recompute the next fire time from now. Automations with no elapsed anchor (freshly
     /// created, or whose next time is still in the future) are left untouched.
     public func reconcileMissedRunsOnStart() {
+        // Reconcile stale `running` run rows left by the previous daemon lifetime BEFORE firing any catch-up.
+        // A run whose command finished (or died with the daemon) while the daemon was down is still `running`
+        // in the store; the catch-up routes through the same concurrency gate, which would read that stale row
+        // as an active run and skip/queue the catch-up — permanently losing a `runOnce` catch-up under the
+        // `skip` policy once the cron anchor is advanced below. `recoverStaleSessions` (daemon startup) has
+        // already flipped a crashed daemon's sessions to a non-interactive state, so this poll observes the
+        // completion and finalizes the row. A genuinely-still-running session (adopted across a graceful
+        // handoff, whose service pid is alive) stays `running` and correctly keeps blocking the catch-up.
+        pollRunningRuns()
         let currentTime = now()
         do {
             for automation in try store.enabledCronAutomations() {
@@ -225,8 +234,12 @@ import spacesterminalcore
     public func cancelAutomationRun(runID: String) throws -> AutomationRun {
         let run = try requireAutomationRun(id: runID)
         guard !run.status.isTerminal else { return run }
-        try cancelRunThrowing(runID: runID)
-        return try requireAutomationRun(id: runID)
+        // `cancelRunThrowing` returns the finalized `canceled` row built from what it persisted, so the result
+        // is accurate even when finalizing this run made it immediately prunable and removed it from the store
+        // — a re-fetch would then throw "run not found" despite a successful cancel. The nil branch is only the
+        // already-terminal/missing race the guard above already excludes on this single-actor path.
+        guard let canceled = try cancelRunThrowing(runID: runID) else { return run }
+        return canceled
     }
 
     /// Ends every still-live coding-agent session attributed to a TERMINAL run, then prunes the automation's
@@ -624,14 +637,14 @@ import spacesterminalcore
     /// automation was deleted out from under it falls back to the plain-session teardown. A no-op for an
     /// already-terminal run. Teardown/finalization failures propagate so the command surface
     /// (`cancelAutomationRun`) surfaces them; resilient internal callers use the log-only `cancelRun`.
-    private func cancelRunThrowing(runID: String) throws {
-        guard let run = try store.automationRun(id: runID), !run.status.isTerminal else { return }
+    @discardableResult private func cancelRunThrowing(runID: String) throws -> AutomationRun? {
+        guard let run = try store.automationRun(id: runID), !run.status.isTerminal else { return nil }
         if try store.automation(id: run.automationID)?.kind == .agent {
             try teardownAgentRunSession(run)
         } else {
             try teardownRunSessions(run, terminate: true)
         }
-        try finishRun(run, status: .canceled, exitCode: nil)
+        return try finishRun(run, status: .canceled, exitCode: nil)
     }
 
     /// Log-only wrapper around the cancel core for resilient scheduler-side callers — the delete path (which
@@ -647,11 +660,20 @@ import spacesterminalcore
     /// Records a run's terminal status and prunes retention for its automation. Any SIGKILL escalation a
     /// timeout/cancel registered is tracked separately in `pendingKills` (keyed by run id) and continues
     /// on later ticks regardless of the now-terminal run status.
-    private func finishRun(_ run: AutomationRun, status: AutomationRunStatus, exitCode: Int?) throws {
+    @discardableResult private func finishRun(_ run: AutomationRun, status: AutomationRunStatus, exitCode: Int?) throws -> AutomationRun {
+        let endedAt = now()
         try store.updateAutomationRun(
             id: run.id, status: status, skipReason: nil, exitCode: exitCode, terminalSessionID: run.terminalSessionID, startedAt: run.startedAt,
-            endedAt: now(), promptDeliveredAt: run.promptDeliveredAt)
+            endedAt: endedAt, promptDeliveredAt: run.promptDeliveredAt)
         try pruneRetention(automationID: run.automationID)
+        // Return the finalized row constructed from exactly what was just persisted, NOT a re-fetch: finalizing
+        // an old run can make it immediately prunable (enough newer terminal runs already exist), so its row
+        // may no longer be in the store. This is the run's accurate final state (mirrors `endAttributedAgents`,
+        // which returns its captured local value for the same pruning reason).
+        return AutomationRun(
+            id: run.id, automationID: run.automationID, kind: run.kind, status: status, skipReason: nil, trigger: run.trigger, exitCode: exitCode,
+            terminalSessionID: run.terminalSessionID, startedAt: run.startedAt, endedAt: endedAt, createdAt: run.createdAt,
+            promptDeliveredAt: run.promptDeliveredAt)
     }
 
     /// Teardown for a timeout/cancel: capture + terminate + finalize the run's still-live coding-agent

@@ -2212,15 +2212,31 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     /// Resolves a session's kind from the loaded device overview (not the daemon
-    /// database): top-level sessions carry their row kind, and process/agent rows
-    /// identify configured sessions. Used to decide whether an ad hoc session stops
-    /// once it has no live attachments.
+    /// database). Used to decide whether an ad hoc session stops once it has no live
+    /// attachments. See `terminalSessionKind(sessionID:overviews:)` for the resolution
+    /// rules.
     private func remoteTerminalSessionKind(sessionID: String) -> TerminalSessionKind {
-        for overview in deviceSections.compactMap({ $0.overview }) {
-            if let session = overview.sessions.first(where: { $0.id == sessionID }) { return Self.terminalSessionKind(rowKind: session.rowKind) }
+        Self.terminalSessionKind(sessionID: sessionID, overviews: deviceSections.compactMap { $0.overview })
+    }
+
+    /// Pure kind resolution over the loaded device overviews: top-level sessions carry
+    /// their row kind, and process/agent rows identify configured workspace sessions.
+    /// Automation runs are also consulted before falling back to `.shell`: a run's own
+    /// command session resolves to `.automation` and any coding agent it spawned resolves
+    /// to `.agent`. Those sessions are workspace-less and never appear in
+    /// `overview.sessions`, so without this they would fall through to `.shell` and the
+    /// ad-hoc cleanup would reap a live scheduled command (or automation-spawned agent)
+    /// when its pane closes.
+    nonisolated static func terminalSessionKind(sessionID: String, overviews: [SpacesDeviceOverviewPayload]) -> TerminalSessionKind {
+        for overview in overviews {
+            if let session = overview.sessions.first(where: { $0.id == sessionID }) { return terminalSessionKind(rowKind: session.rowKind) }
             for workspace in overview.workspaces {
                 if workspace.processRows.contains(where: { $0.sessionID == sessionID }) { return .process }
                 if workspace.codingAgentRows.contains(where: { $0.sessionID == sessionID }) { return .agent }
+            }
+            for run in overview.automationRuns {
+                if run.terminalSessionID == sessionID { return .automation }
+                if run.attributedAgents.contains(where: { $0.terminalSessionID == sessionID }) { return .agent }
             }
         }
         return .shell

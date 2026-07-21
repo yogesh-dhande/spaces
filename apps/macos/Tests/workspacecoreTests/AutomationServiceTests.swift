@@ -106,6 +106,39 @@ import spacesterminalcore
         XCTAssertTrue(try harness.store.automationRuns(automationID: automation.id).isEmpty)
     }
 
+    /// A stale `running` run row left by the previous daemon lifetime — its command finished (or died with
+    /// the daemon) while the daemon was down, so its session is dead — must not suppress a `runOnce` catch-up.
+    /// Reconciliation polls the stale row to its real terminal state before the concurrency gate evaluates the
+    /// catch-up, so the catch-up starts a real run instead of being recorded concurrency-skipped and then lost
+    /// forever when the cron anchor advances.
+    func testStaleRunningRunDoesNotSuppressMissedCatchUp() throws {
+        let harness = try Harness(self)
+        let automation = try harness.insertAutomation(
+            triggerKind: .cron, cronExpression: "* * * * *", concurrency: .skip, missedRunPolicy: .runOnce,
+            nextFireTime: harness.now().addingTimeInterval(-3 * 24 * 60 * 60))
+
+        // A run row still `running` from the previous daemon lifetime, pointing at a now-dead session (the
+        // daemon's stale-session recovery already flipped it to a non-interactive `.exited` state on start).
+        let staleSessionID = UUID().uuidString
+        let staleStart = harness.now().addingTimeInterval(-4 * 24 * 60 * 60)
+        let staleRun = AutomationRun(
+            id: UUID().uuidString, automationID: automation.id, kind: .script, status: .running, skipReason: nil, trigger: .cron, exitCode: nil,
+            terminalSessionID: staleSessionID, startedAt: staleStart, endedAt: nil, createdAt: staleStart)
+        try harness.store.insertAutomationRun(staleRun)
+        try harness.writeAttributedSessionFiles(workspaceID: nil, runID: staleRun.id, sessionID: staleSessionID, kind: .automation, live: false)
+
+        harness.service.reconcileMissedRunsOnStart()
+
+        XCTAssertTrue(
+            try XCTUnwrap(harness.store.automationRun(id: staleRun.id)).status.isTerminal,
+            "the stale running row is reconciled to its real terminal state before the catch-up fires")
+        let catchUp = try XCTUnwrap(
+            harness.store.automationRuns(automationID: automation.id).first { $0.trigger == .missedCatchUp },
+            "a catch-up run is recorded")
+        XCTAssertEqual(catchUp.status, .running, "the catch-up starts a real run rather than being concurrency-skipped")
+        XCTAssertNil(catchUp.skipReason)
+    }
+
     // MARK: - Overview recent-run window
 
     /// The overview's recent-run window (`terminalAutomationRuns`) counts only terminal runs, so a burst of
@@ -674,6 +707,30 @@ import spacesterminalcore
 
         XCTAssertEqual(try harness.store.automationRun(id: run.id)?.status, .canceled)
         try harness.assertProcessDies(pid: childPID, drivingTicks: harness.service.tick)
+    }
+
+    /// Canceling a run whose finalization makes it immediately prunable returns the run's `canceled` final
+    /// state without throwing: converting an old queued run to a terminal status can push it past the
+    /// retention cap (enough newer terminal rows already exist), so a naive re-fetch after the cancel would
+    /// throw "run not found" even though the cancel succeeded and pruned the row.
+    func testCancelReturnsCanceledRunEvenWhenRetentionPrunesIt() throws {
+        let harness = try Harness(self, retentionLimit: 2)
+        let automation = try harness.insertAutomation(concurrency: .allow)
+
+        // The oldest run is queued; canceling it makes it terminal — and thus prunable.
+        let queued = try harness.insertRun(automationID: automation.id, status: .queued, createdAt: harness.now())
+        // More newer terminal rows than the cap, so once the queued run becomes `canceled` (the oldest terminal
+        // run) it falls beyond the newest `retentionLimit` and is pruned within the same cancel.
+        for offset in 1...4 {
+            _ = try harness.insertRun(automationID: automation.id, status: .succeeded, createdAt: harness.now().addingTimeInterval(TimeInterval(offset)))
+        }
+
+        let canceled = try harness.service.cancelAutomationRun(runID: queued.id)
+        XCTAssertEqual(canceled.id, queued.id)
+        XCTAssertEqual(canceled.status, .canceled, "the returned run carries the canceled final state")
+        XCTAssertNil(canceled.exitCode)
+        XCTAssertNotNil(canceled.endedAt, "the canceled run's end time is set")
+        XCTAssertNil(try harness.store.automationRun(id: queued.id), "the canceled run was indeed pruned from the store")
     }
 
     /// SIGKILL escalation tracks the whole process group, not just the leader: a canceled run whose command's
