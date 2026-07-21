@@ -101,6 +101,44 @@ final class SessionRetentionTests: XCTestCase {
         XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
     }
 
+    /// A bare terminal (no agent row of its own — just a `runtime_targets` focus row) that is itself a
+    /// SUBSCRIBER of another workspace's live agent must have its outgoing watch edges torn down on release,
+    /// even though it owns no agent row to route through the finalization chokepoint. Subscribing does not
+    /// require an agent row, so `finalizeAgentRow` (which only runs for agent-row owners) never sees this
+    /// session; the release must retire it as a subscriber unconditionally, or the edge and its pending
+    /// queue survive the session's purge and keep targeting a dead session. The watched agent, being in
+    /// another workspace and still live, must be left untouched.
+    func testReleaseTearsDownSubscriberEdgesOfBareTerminalWithNoAgentRow() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let (_, subscriberWorkspace) = try makeProjectAndWorkspace(store: store)
+        let (_, watchedWorkspace) = try makeProjectAndWorkspace(store: store)
+
+        // The expired bare terminal: referenced only by a runtime_targets focus row, no agent row of its own.
+        let subscriberSession = "bare-subscriber-session"
+        try store.upsert(
+            window: WindowRecord(
+                id: "subscriber-pane", workspaceID: subscriberWorkspace.id, app: TerminalHost.spaces.appName, name: "shell", detail: nil,
+                targetURL: nil, terminalTrackingID: subscriberSession, role: "terminal", orderIndex: 300, lastSeenAt: "now"))
+
+        // A live agent in ANOTHER workspace that the bare terminal watches.
+        let watchedAgent = try orchestrator.registerAgentWindow(
+            workspaceID: watchedWorkspace.id, provider: .spaces, terminalTrackingID: "watched-agent-session", status: .spinning)
+        try store.insertAgentSubscription(
+            subscriberTerminalSessionID: subscriberSession, agentSessionID: watchedAgent.id, createdAt: "2026-07-14T00:01:00Z")
+
+        XCTAssertTrue(try store.terminalSessionIsReferencedByProduct(subscriberSession))
+        XCTAssertFalse(try store.agentSubscriptions(subscriberTerminalSessionID: subscriberSession).isEmpty)
+
+        try orchestrator.releaseEndedTerminalSessionReferences(sessionID: subscriberSession)
+
+        // The subscriber's outgoing watch edges are gone, the watched agent survives, and the session is
+        // no longer referenced by any product row.
+        XCTAssertTrue(try store.agentSubscriptions(subscriberTerminalSessionID: subscriberSession).isEmpty)
+        XCTAssertNotNil(try store.agentWindow(id: watchedAgent.id), "The watched agent in another workspace must survive the subscriber's release.")
+        XCTAssertFalse(try store.terminalSessionIsReferencedByProduct(subscriberSession))
+    }
+
     /// Releasing a session that nothing references is a no-op that does not throw.
     func testReleaseUnreferencedSessionIsNoOp() throws {
         let store = try makeTemporaryStore()

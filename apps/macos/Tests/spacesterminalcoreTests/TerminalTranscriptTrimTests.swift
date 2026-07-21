@@ -455,6 +455,11 @@ final class TerminalTranscriptTrimTests: XCTestCase {
 
         let trimmed = try Data(contentsOf: url)
         XCTAssertEqual(trimmed.count, Int(result.endOffset), "The replaced file's size must equal the reported end offset.")
+        // The reported end offset is now COMPUTED (preamble.count + tail.count) rather than queried via
+        // seekToEnd(), so pin it to both the on-disk file size and the adopted handle's actual write
+        // position: all three must agree, or a subsequent append would land at the wrong offset.
+        XCTAssertEqual(UInt64(trimmed.count), result.endOffset, "The computed end offset must equal the on-disk file size after the trim.")
+        XCTAssertEqual(try result.writeHandle.offset(), result.endOffset, "The adopted handle must sit at the computed end offset, ready to append.")
         let (preamble, tail) = try splitPreambleAndTail(trimmed)
         XCTAssertEqual(
             trimmed, preamble + tail, "The replaced file must be exactly preamble+tail with no stale bytes from the pre-trim transcript.")

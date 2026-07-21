@@ -17,6 +17,17 @@ extension WorkspaceOrchestrator {
     /// After this returns, `store.terminalSessionIsReferencedByProduct(sessionID)` is false: the three
     /// reference sources it checks are cleared in order. It throws on the first failure; the GC contains
     /// per-session errors so one poisoned session cannot stall the sweep.
+    ///
+    /// The release also retires the session's OWN standing as a subscriber (`subscriberDidExit`) — its
+    /// pending inbound notification queue and every outgoing `agent_subscriptions` /
+    /// `agent_remote_subscriptions` watch edge. This must NOT depend on the session having owned an agent
+    /// row: subscribing does not require an agent row (see `killAgentSession`), so a plain shell or process
+    /// terminal can itself watch other agents. `finalizeAgentRow` only runs `subscriberDidExit` for
+    /// sessions that owned an agent row, so a bare subscriber's edges would otherwise survive its purge and
+    /// keep re-queuing undeliverable notices (and holding a paired device's overview stream open) targeting
+    /// a dead session. Running it here unconditionally covers that case; `subscriberDidExit` is idempotent
+    /// (it deletes rows keyed solely by subscriber id), so a session that also owned an agent row — already
+    /// torn down in step 1 — is a harmless no-op the second time.
     public func releaseEndedTerminalSessionReferences(sessionID: String) throws {
         // 1. Agent rows — routed through the finalization chokepoint so inbound watch edges
         //    (`agent_subscriptions`, ON DELETE RESTRICT) are dropped and any subscriber is notified before
@@ -40,6 +51,12 @@ extension WorkspaceOrchestrator {
         for window in try store.windowsReferencingTerminalSession(terminalSessionID: sessionID) {
             try store.deleteWindow(id: window.id)
         }
+
+        // 4. Retire the session's own standing as a SUBSCRIBER: drop its pending inbound queue and every
+        //    outgoing local/remote watch edge. Unconditional because a bare shell/process terminal can be a
+        //    subscriber without owning an agent row (step 1 only covers agent-row owners). Idempotent, so
+        //    re-running it for a session that also owned an agent row (torn down in step 1) is a no-op.
+        try makeAgentNotificationEngine().subscriberDidExit(subscriberTerminalSessionID: sessionID)
     }
 
     /// Row-cleanup half of `stopRunningProcess` for a process whose backing terminal is already dead:

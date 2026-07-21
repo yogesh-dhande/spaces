@@ -34,7 +34,11 @@ import Glibc
 /// a thrown write error therefore never leaves a half-rewritten transcript: either the original file is
 /// fully intact (rename never ran) or the new bounded file is fully in place (rename committed). Because
 /// the rename swaps in a fresh inode, the caller's previous append handle points at the unlinked old
-/// inode and must be replaced — `trimIfNeeded` opens and returns a fresh handle for the caller to adopt.
+/// inode and must be replaced. Rather than reopening the replaced file (a fallible call after the swap
+/// has already committed), `trimIfNeeded` keeps the temp file's write handle OPEN across the rename —
+/// POSIX `rename(2)` does not disturb open descriptors, so that handle keeps referencing the same inode,
+/// now reachable as `output.log`, already positioned at the end of the written data — and returns it for
+/// the caller to adopt. There is thus no fallible step after the swap commits.
 public enum TerminalTranscriptTrim {
     /// A `nil`/empty vt library, or a failure to build the preamble, aborts the trim (throws) rather
     /// than truncating without a preamble: an un-preambled from-zero replay would render the wrong
@@ -54,9 +58,10 @@ public enum TerminalTranscriptTrim {
     /// caller must use for subsequent appends.
     ///
     /// A trim replaces `output.log` with a fresh inode (see `trimIfNeeded`), so the caller's previous
-    /// handle points at the now-unlinked old inode and must be discarded. `writeHandle` is that fresh
-    /// handle, positioned at the new end. When no trim is performed it is the caller's original handle,
-    /// returned unchanged (identity-comparable with `===`), and `endOffset` is the unchanged end offset.
+    /// handle points at the now-unlinked old inode and must be discarded. `writeHandle` is the temp file's
+    /// handle, kept open across the rename and positioned at the new end. When no trim is performed it is
+    /// the caller's original handle, returned unchanged (identity-comparable with `===`), and `endOffset`
+    /// is the unchanged end offset.
     public struct TrimResult {
         public let endOffset: UInt64
         public let writeHandle: FileHandle
@@ -92,18 +97,22 @@ public enum TerminalTranscriptTrim {
 
     /// Testable core with explicit bounds. `retainedBytes` must be `< triggerBytes`.
     ///
-    /// The trim is failure-safe: it never mutates the live `output.log` in place. Transient read handles
-    /// read the pre-trim head (to build the preamble) and the retained tail; preamble+tail is then
-    /// written to a sibling temp file, fsynced, and atomically `rename(2)`d over `output.log`, replacing
-    /// it with a fresh inode. On ANY error before the rename — a failed temp write (disk full), a preamble
-    /// failure, or a crash — the original file and the caller's `writeHandle` are untouched, so the
-    /// caller's catch-and-continue simply retries on the next append. The passed `writeHandle` is never
-    /// seeked or written by this function, so the caller's append position stays valid on failure.
+    /// The trim is failure-safe with no post-commit failure path: it either throws with `output.log` and
+    /// the caller's `writeHandle` untouched, or returns the adopted handle with the swap fully committed.
+    /// It never mutates the live `output.log` in place. Transient read handles read the pre-trim head (to
+    /// build the preamble) and the retained tail; preamble+tail is then written to a sibling temp file,
+    /// fsynced, and atomically `rename(2)`d over `output.log`, replacing it with a fresh inode. On ANY
+    /// error before the rename — a failed temp write (disk full), a preamble failure, a rename failure, or
+    /// a crash — the original file and the caller's `writeHandle` are untouched, so the caller's
+    /// catch-and-continue simply retries on the next append. The passed `writeHandle` is never seeked or
+    /// written by this function, so the caller's append position stays valid on failure.
     ///
-    /// On success the rename unlinks the old inode `writeHandle` still points at, so the caller MUST adopt
-    /// the returned `TrimResult.writeHandle` (a fresh handle on the replaced file, positioned at the new
-    /// end) and discard its old one. When no trim is performed the caller's original handle is returned
-    /// unchanged.
+    /// On success the rename unlinks the old inode the caller's previous handle points at. The temp file's
+    /// write handle is kept OPEN across the rename, so it now references the renamed inode (`output.log`)
+    /// with its offset already at the end of preamble+tail; the returned `endOffset` is COMPUTED from
+    /// those sizes, not queried, so nothing fallible runs once the swap commits. The caller MUST adopt the
+    /// returned `TrimResult.writeHandle` and discard its old one. When no trim is performed the caller's
+    /// original handle is returned unchanged.
     @discardableResult
     static func trimIfNeeded(
         outputPath: String, writeHandle: FileHandle, currentEndOffset: UInt64, columns: Int, rows: Int, triggerBytes: UInt64, retainedBytes: UInt64
@@ -129,31 +138,40 @@ public enum TerminalTranscriptTrim {
         let tempPath = outputPath + ".trim"
         _ = FileManager.default.createFile(atPath: tempPath, contents: nil)
         let tempHandle = try FileHandle(forWritingTo: URL(fileURLWithPath: tempPath))
+        // Write preamble+tail and fsync, but do NOT close: the handle stays open across the rename so it
+        // can be adopted as the caller's new append handle without a fallible reopen afterwards. Its write
+        // offset ends at preamble.count + tail.count, which is exactly the post-trim end.
         do {
             try tempHandle.write(contentsOf: preamble)
             try tempHandle.write(contentsOf: tail)
             try tempHandle.synchronize()
-            try tempHandle.close()
         } catch {
+            // Pre-rename write/fsync failure: discard the temp file. output.log and the caller's handle are
+            // untouched, so the caller's catch-and-continue retries on the next append.
             try? tempHandle.close()
+            try? FileManager.default.removeItem(atPath: tempPath)
             throw error
         }
 
         // Atomic same-volume rename. POSIX rename(2) atomically replaces the destination; readers see
         // either the old or the new file, never a partial one. Chosen over FileManager.replaceItemAt
         // because it is the simplest call that is truly atomic on both APFS (macOS) and ext4 (Linux) and
-        // is identical on both platforms via Darwin/Glibc.
+        // is identical on both platforms via Darwin/Glibc. The still-open tempHandle survives the rename
+        // untouched: rename moves the directory entry, not the open descriptor.
         let renamed = tempPath.withCString { tempC in outputPath.withCString { outC in rename(tempC, outC) } }
         guard renamed == 0 else {
+            // The swap never happened. Close and remove the temp file; the caller's old handle still points
+            // at the intact output.log, so its append position stays valid and semantics are unchanged.
             let renameErrno = errno
+            try? tempHandle.close()
             try? FileManager.default.removeItem(atPath: tempPath)
             throw TrimError.atomicReplaceFailed(errno: renameErrno)
         }
 
-        // The old inode is now unlinked; open a fresh handle on the replaced file for the caller to adopt.
-        let newHandle = try FileHandle(forWritingTo: URL(fileURLWithPath: outputPath))
-        let newEndOffset = try newHandle.seekToEnd()
-        return TrimResult(endOffset: newEndOffset, writeHandle: newHandle)
+        // The rename committed: tempHandle now references the renamed inode (output.log), its offset at the
+        // end of preamble+tail. Return that handle and a COMPUTED end offset — no seekToEnd(), no reopen —
+        // so there is no fallible call after the swap commits.
+        return TrimResult(endOffset: UInt64(preamble.count + tail.count), writeHandle: tempHandle)
     }
 
     /// Scans forward from `nominalStart` for the next newline and returns the offset just past it, so the
