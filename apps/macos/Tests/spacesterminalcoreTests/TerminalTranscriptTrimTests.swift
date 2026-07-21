@@ -292,28 +292,75 @@ final class TerminalTranscriptTrimTests: XCTestCase {
         XCTAssertLessThan(tail.count, Int(retainedBytes), "Newline alignment should drop the partial leading line.")
     }
 
-    func testCutFallsBackToNominalOffsetWithoutNewlineWithinBound() throws {
-        // A retained region larger than the 1MB forward-scan bound with neither a newline nor an ESC byte
-        // (an all-'X' span) forces the nominal (unaligned) offset — the last-resort fallback for a window
-        // with no parser-safe boundary at all. The bounded scan must not run past its limit hunting for one.
+    /// A retained region whose 1 MiB forward-scan window holds neither a newline nor an ESC (an oversized
+    /// LF/ESC-free run — a multi-megabyte DCS/OSC payload, or a long plain-text run) has no parser-safe
+    /// cut: every candidate lands mid-sequence/mid-codepoint, which a from-zero replay would render as
+    /// garbage. The trim must DEFER rather than cut blind — returning the caller's own handle unchanged,
+    /// the offset unchanged, `output.log` byte-identical, and no `.trim` temp staged.
+    ///
+    /// Red-first: the old code fell back to the nominal offset and trimmed at an arbitrary byte, so it
+    /// returned a fresh handle over a rewritten file — these identity and byte-identical assertions fail
+    /// against it.
+    func testTrimDefersWhenScanWindowHasNoParserSafeBoundary() throws {
         let (url, handle) = try makeTranscriptFile()
-        let retainedBytes = TerminalTranscriptTrim.maxNewlineAlignScanBytes + 100_000  // > 1 MiB newline-free retained span
+        // retained > 1 MiB so the whole forward-scan window sits inside the run when the run ends the file.
+        let retainedBytes = TerminalTranscriptTrim.maxNewlineAlignScanBytes + 100_000
         var payload = Data()
         payload.append(lineFiller(prefix: "HEADER", minBytes: 400_000).data)
-        let newlineFreeStart = payload.count
-        payload.append(Data(repeating: 0x58, count: Int(retainedBytes) + 200_000))  // 'X' * (>retained), no newlines
+        // A >1.5 MiB run of a single non-ESC, non-LF byte at the end of the file: the nominal cut lands
+        // inside it and the entire 1 MiB scan window stays inside it, so the scan finds no boundary.
+        payload.append(Data(repeating: 0x41, count: Int(retainedBytes) + 200_000))  // 'A' * (>retained), no LF, no ESC
         let triggerBytes = retainedBytes + 300_000
         XCTAssertGreaterThan(UInt64(payload.count), triggerBytes)
-        XCTAssertLessThan(UInt64(newlineFreeStart), UInt64(payload.count) - retainedBytes, "Nominal cut must land inside the newline-free span.")
         try handle.write(contentsOf: payload)
 
-        _ = try TerminalTranscriptTrim.trimIfNeeded(
+        let result = try TerminalTranscriptTrim.trimIfNeeded(
             outputPath: url.path, writeHandle: handle, currentEndOffset: UInt64(payload.count), columns: 80, rows: 24,
             triggerBytes: triggerBytes, retainedBytes: retainedBytes)
 
-        let (_, tail) = try splitPreambleAndTail(try Data(contentsOf: url))
-        XCTAssertEqual(UInt64(tail.count), retainedBytes, "Fallback must keep exactly the nominal retained span (cut = nominal offset).")
-        XCTAssertTrue(tail.allSatisfy { $0 == 0x58 }, "Retained tail must be the newline-free span.")
+        XCTAssertTrue(result.writeHandle === handle, "A deferred trim must return the caller's own handle unchanged.")
+        XCTAssertEqual(result.endOffset, UInt64(payload.count), "A deferred trim must leave the end offset unchanged.")
+        XCTAssertEqual(try Data(contentsOf: url), payload, "A deferred trim must leave output.log byte-identical.")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path + ".trim"), "A deferred trim must stage no temp file.")
+    }
+
+    /// The deferral is self-limiting: the nominal cut advances with every append, so once enough ordinary
+    /// (newline-terminated) content is appended past the oversized run, the sliding scan window reaches a
+    /// newline and the trim lands, retaining a parser-safe, line-aligned tail.
+    func testTrimDefersThenSucceedsOnceWindowSlidesPastTheRun() throws {
+        let (url, handle) = try makeTranscriptFile()
+        let retainedBytes = TerminalTranscriptTrim.maxNewlineAlignScanBytes + 100_000
+        var payload = Data()
+        payload.append(lineFiller(prefix: "HEADER", minBytes: 400_000).data)
+        payload.append(Data(repeating: 0x41, count: Int(retainedBytes) + 200_000))  // oversized LF/ESC-free run
+        let triggerBytes = retainedBytes + 300_000
+        try handle.write(contentsOf: payload)
+
+        // First trim: the scan window is entirely inside the run, so the trim defers (no-op, same handle).
+        let deferred = try TerminalTranscriptTrim.trimIfNeeded(
+            outputPath: url.path, writeHandle: handle, currentEndOffset: UInt64(payload.count), columns: 80, rows: 24,
+            triggerBytes: triggerBytes, retainedBytes: retainedBytes)
+        XCTAssertTrue(deferred.writeHandle === handle, "The first trim must defer while the scan window is inside the run.")
+        XCTAssertEqual(deferred.endOffset, UInt64(payload.count))
+
+        // Append enough newline-terminated content that the nominal cut slides past the run's end into
+        // ordinary lines, bringing a newline into the scan window.
+        let tailLines = lineFiller(prefix: "TAIL", minBytes: Int(retainedBytes) + 400_000).data
+        try deferred.writeHandle.write(contentsOf: tailLines)
+        let newEndOffset = deferred.endOffset + UInt64(tailLines.count)
+
+        let trimmed = try TerminalTranscriptTrim.trimIfNeeded(
+            outputPath: url.path, writeHandle: deferred.writeHandle, currentEndOffset: newEndOffset, columns: 80, rows: 24,
+            triggerBytes: triggerBytes, retainedBytes: retainedBytes)
+        addTeardownBlock { [writeHandle = trimmed.writeHandle] in try? writeHandle.close() }
+
+        XCTAssertFalse(trimmed.writeHandle === handle, "Once the window slides past the run the trim must land, returning a fresh handle.")
+        XCTAssertLessThan(trimmed.endOffset, newEndOffset, "The landed trim must shrink the transcript.")
+
+        let onDisk = try Data(contentsOf: url)
+        XCTAssertEqual(onDisk.count, Int(trimmed.endOffset), "The replaced file's size must equal the reported end offset.")
+        let (_, tail) = try splitPreambleAndTail(onDisk)
+        XCTAssertTrue(String(decoding: tail, as: UTF8.self).hasPrefix("TAIL "), "The landed trim must retain a line-aligned tail past the run.")
     }
 
     // An LF-free megabyte span is realistic for alt-screen TUIs (the exact sessions that trim): repeated

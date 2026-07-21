@@ -69,12 +69,14 @@ final class TerminalSessionGarbageCollectorTests: XCTestCase {
         return paths
     }
 
-    /// The tier-1 harness: sessions are either purged outright (unreferenced, not shown) or kept. The
-    /// injected `releaseExpiredReferences` fails the test if called, since these fixtures are never old
-    /// enough to age-expire and never large enough to trip the budget, so no release should ever fire.
+    /// The tier-1 harness: sessions are either released-then-purged outright (unreferenced, not shown) or
+    /// kept. These fixtures are never old enough to age-expire and never large enough to trip the budget, so
+    /// any release the injected `releaseExpiredReferences` sees is a tier-1 call; the default is a no-op so
+    /// tests that don't care about the release call don't need to stub it. Tests that must assert a release
+    /// was (or was not) called, or that a release failure is contained, pass an explicit closure.
     private func collect(
         active: Set<String> = [], referenced: Set<String> = [], fileManager: FileManager = .default,
-        release: @escaping (String) throws -> Void = { XCTFail("releaseExpiredReferences called unexpectedly for \($0)") },
+        release: @escaping (String) throws -> Void = { _ in },
         onPurgeFailure: (String, any Error) -> Void = { _, _ in }
     ) throws -> [String] {
         try TerminalSessionGarbageCollector.collectRemovedSessions(
@@ -119,6 +121,43 @@ final class TerminalSessionGarbageCollectorTests: XCTestCase {
         XCTAssertThrowsError(try TerminalSessionPersistence.readRuntimeState(paths: paths), "Runtime row must be pruned.")
         XCTAssertThrowsError(try TerminalSessionPersistence.readRemoteSessionState(paths: paths), "Final-render row must be pruned.")
         XCTAssertTrue(try TerminalSessionPersistence.listKnownSessions().isEmpty, "terminal_sessions row must be pruned.")
+    }
+
+    // (P2, tier 1) A tier-1 purge (ended, not shown, unreferenced) must still retire the session's own
+    // subscriber standing before deleting it: a plain shell/process terminal that subscribed to agents has
+    // queued inbound notices and outgoing agent_subscriptions/agent_remote_subscriptions watch edges that
+    // have no foreign key to terminal_sessions and are not counted by isReferencedByProduct, so tier 1 must
+    // not depend on an interactive close having already retired them.
+    func testTier1PurgeReleasesReferencesBeforePurging() throws {
+        let paths = try seedSession(id: "ended", state: .exited, servicePID: 999_999)
+        var released: [String] = []
+
+        let purged = try collect(release: { released.append($0) })
+
+        XCTAssertEqual(released, ["ended"], "Tier 1 must release the session's own subscriber standing even though it has no product reference.")
+        XCTAssertEqual(purged, ["ended"])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: paths.rootDirectory))
+    }
+
+    // (P2, tier 1 containment) A releaseExpiredReferences failure for a tier-1 session must not be treated
+    // as a purge: it is contained to that session, reported through onPurgeFailure, and left for the next
+    // sweep (fail closed), while other unreferenced sessions in the same sweep still collect.
+    func testTier1ReleaseFailureIsContainedAndOtherSessionsStillProcessed() throws {
+        _ = try seedSession(id: "a-fails", state: .exited, servicePID: 999_999)
+        let cleanPaths = try seedSession(id: "b-clean", state: .exited, servicePID: 999_998)
+        var failures: [String] = []
+
+        let purged = try collect(
+            release: { sessionID in if sessionID == "a-fails" { throw ReleaseFailure() } },
+            onPurgeFailure: { sessionID, _ in failures.append(sessionID) })
+
+        XCTAssertEqual(purged, ["b-clean"], "A contained tier-1 release failure must not stop the remaining unreferenced sessions.")
+        XCTAssertEqual(failures, ["a-fails"], "The release failure must be reported so the daemon can log it.")
+        XCTAssertEqual(
+            try TerminalSessionPersistence.listKnownSessions().map(\.sessionID), ["a-fails"],
+            "The failed session's row must remain for the next sweep; the purged session's row must be gone.")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: try TerminalSessionPaths.forSession(id: "a-fails").rootDirectory))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: cleanPaths.rootDirectory))
     }
 
     // (c) A live, interactive session is still shown and must be left untouched.

@@ -10,9 +10,13 @@ import Foundation
 /// sweep rather than deleting):
 ///
 ///  1. Already gone from the product. A session that is not shown (not interactive-alive, no live
-///     attachment) and has no referencing product row is purged outright — deleting a session's rows
-///     (e.g. `finalizeAgentRow`'s `.destroyed` path, or process/window removal) is what makes it
-///     collectable, and this is the executor. This tier keeps its exact prior semantics.
+///     attachment) and has no referencing product row is released and then purged outright — deleting a
+///     session's rows (e.g. `finalizeAgentRow`'s `.destroyed` path, or process/window removal) is what
+///     makes it collectable, and this is the executor. The release runs first so the session's own
+///     subscriber standing (its queued inbound notices and outgoing watch edges — state with no foreign
+///     key to `terminal_sessions` and not counted by `isReferencedByProduct`) is retired regardless of
+///     which path dropped the product rows; interactive closes already retire it themselves, so the call
+///     is a no-op in that case.
 ///  2. Aged out. A session that is still referenced but ended (`.exited`/`.failed`) longer than
 ///     `endedSessionMaxAge` ago has kept its ended pane reopenable for the full retention window; its
 ///     product rows are released via `releaseExpiredReferences`, and if that clears the last reference
@@ -34,7 +38,9 @@ public enum TerminalSessionGarbageCollector {
     /// owns in memory (live cores) and never collects. `isReferencedByProduct` reports whether a session
     /// still has a product row keeping it visible; `releaseExpiredReferences` deletes those product rows for
     /// an expired/over-budget session (there is no default — every caller must decide how the product side
-    /// releases). `onBudgetExceeded` reports the residual ended-session byte total when it cannot be brought
+    /// releases). It also runs immediately before every purge, including tier 1's already-unreferenced case,
+    /// so the invariant "a purged session has no surviving subscriber state" holds no matter which tier
+    /// retires it. `onBudgetExceeded` reports the residual ended-session byte total when it cannot be brought
     /// under `endedTranscriptByteBudget`. Returns the IDs of the sessions purged.
     ///
     /// A single session's purge failure (an undeletable directory — e.g. a permissions error or a busy
@@ -79,8 +85,13 @@ public enum TerminalSessionGarbageCollector {
                     continue
                 }
 
-                // Tier 1: an unreferenced, not-shown session is purged outright (prior behavior).
+                // Tier 1: an unreferenced, not-shown session is released, then purged outright. The release
+                // must run even though the product side is already unreferenced: it is what retires the
+                // session's own subscriber standing (queued inbound notices, outgoing watch edges), which
+                // survives a product-row drop that bypassed the interactive close chokepoints. For an
+                // already-fully-released session this is a no-op, so it is safe to call unconditionally.
                 if !((try? isReferencedByProduct(sessionID)) ?? true) {
+                    try releaseExpiredReferences(sessionID)
                     try TerminalSessionPersistence.purgeSession(paths: paths, fileManager: fileManager)
                     purged.append(sessionID)
                     continue
