@@ -980,13 +980,20 @@ private enum SpacesMobileMutationTimeoutRecovery {
         Task { await previousCommandChannel.close() }
     }
 
-    func preparePairingLink(_ url: URL) {
+    func preparePairingLink(_ url: URL) { stagePairingLink { try SpacesDevicePairingLink.parse(url) } }
+
+    /// A QR payload scanned from the Spaces tab's not-paired empty state rides the same
+    /// confirm-and-pair flow as a `spaces://pair` deep link: stage the link and raise the
+    /// connection-settings surface, which presents the pairing confirmation.
+    func prepareScannedPairingLink(_ payload: String) { stagePairingLink { try SpacesDevicePairingLink.parse(payload) } }
+
+    private func stagePairingLink(_ parse: () throws -> SpacesDevicePairingLink) {
         guard !isDemoModeEnabled else {
             connectionNotice = Self.demoModeGuardNotice
             return
         }
         do {
-            pendingPairingLink = try SpacesDevicePairingLink.parse(url)
+            pendingPairingLink = try parse()
             connectionNotice = nil
             errorMessage = nil
             isShowingConnectionSettings = true

@@ -13,6 +13,7 @@ struct SpacesTabView: View {
     @State private var terminalListRefreshGeneration = 0
     @State private var renamingRowID: String?
     @State private var renameText = ""
+    @State private var isShowingPairingScanner = false
     @FocusState private var isRenameFieldFocused: Bool
 
     var body: some View {
@@ -83,14 +84,20 @@ struct SpacesTabView: View {
                 ContentUnavailableView {
                     Label("Pair This Device", systemImage: "iphone.gen3.radiowaves.left.and.right")
                 } description: {
-                    Text(model.connectionNotice ?? "Open Settings and pair this device again.")
+                    Text(model.connectionNotice ?? "Scan the QR code shown in the Mac app's Devices settings.")
                 } actions: {
-                    Button("Open Settings") { model.selectedTab = .settings }
+                    Button {
+                        isShowingPairingScanner = true
+                    } label: {
+                        Label("Scan QR Code", systemImage: "qrcode.viewfinder")
+                    }.buttonStyle(.borderedProminent).accessibilityIdentifier("spaces.scanToPair")
                     Button("Try Demo Mode") {
                         model.setDemoMode(true)
                         Task { await model.refresh() }
                     }.buttonStyle(.bordered).accessibilityIdentifier("spaces.tryDemoMode")
-                }.frame(maxWidth: .infinity, maxHeight: .infinity)
+                }.frame(maxWidth: .infinity, maxHeight: .infinity).fullScreenCover(isPresented: $isShowingPairingScanner) {
+                    QRCodeScannerView { payload in model.prepareScannedPairingLink(payload) }
+                }
             } else {
                 ScrollView {
                     LazyVStack(spacing: 0) {
