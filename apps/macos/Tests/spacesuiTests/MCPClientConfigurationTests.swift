@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 
+import spacesterminalcore
 @testable import spacesui
 
 @Suite struct MCPClientConfigurationTests {
@@ -66,9 +67,22 @@ import Testing
     }
 
     @Test func clientSnippetsMatchConfiguration() {
-        #expect(MCPClient.allCases == [.claudeCode, .codexCLI, .opencode])
-        #expect(MCPClient.claudeCode.configSnippet(cliPath: "/usr/local/bin/spaces") == "claude mcp add spaces -s user -- /usr/local/bin/spaces mcp")
-        #expect(MCPClient.codexCLI.configSnippet(cliPath: "/usr/local/bin/spaces").hasPrefix("[mcp_servers.spaces]"))
-        #expect(MCPClient.opencode.configSnippet(cliPath: "/usr/local/bin/spaces").contains("\"type\": \"local\""))
+        #expect(CodingAgent.allCases == [.claudeCode, .codex, .opencode])
+        #expect(
+            CodingAgent.claudeCode.mcpConfigSnippet(cliPath: "/usr/local/bin/spaces")
+                == "claude mcp add spaces -s user -- /usr/local/bin/spaces mcp")
+        #expect(CodingAgent.codex.mcpConfigSnippet(cliPath: "/usr/local/bin/spaces").hasPrefix("[mcp_servers.spaces]"))
+        #expect(CodingAgent.opencode.mcpConfigSnippet(cliPath: "/usr/local/bin/spaces").contains("\"type\": \"local\""))
+    }
+
+    /// Every registered coding agent must yield a usable MCP client tab: a non-empty title, a
+    /// non-empty setup hint, and a config snippet that actually embeds the resolved CLI path.
+    @Test func everyCodingAgentYieldsAUsableMCPClientTab() {
+        let cliPath = "/usr/local/bin/spaces"
+        for agent in CodingAgent.allCases {
+            #expect(!agent.mcpClientTitle.isEmpty)
+            #expect(!agent.mcpConfigHint.isEmpty)
+            #expect(agent.mcpConfigSnippet(cliPath: cliPath).contains(cliPath))
+        }
     }
 }
