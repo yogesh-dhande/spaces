@@ -276,6 +276,9 @@ final class TerminalTranscriptTrimTests: XCTestCase {
 
     // MARK: - Newline alignment
 
+    /// The newline fallback: in an ESC-free window (plain text, the region where the newline cut is
+    /// parser-safe — there is no open OSC/DCS to sit an LF inside), the cut lands just past the next
+    /// newline so the retained tail begins on a line boundary.
     func testCutIsNewlineAlignedWhenNewlineNearNominalOffset() throws {
         let (url, handle) = try makeTranscriptFile()
         let filler = lineFiller(prefix: "SEQ", minBytes: 6000)
@@ -304,7 +307,7 @@ final class TerminalTranscriptTrimTests: XCTestCase {
     func testTrimDefersWhenScanWindowHasNoParserSafeBoundary() throws {
         let (url, handle) = try makeTranscriptFile()
         // retained > 1 MiB so the whole forward-scan window sits inside the run when the run ends the file.
-        let retainedBytes = TerminalTranscriptTrim.maxNewlineAlignScanBytes + 100_000
+        let retainedBytes = TerminalTranscriptTrim.maxParserSafeCutScanBytes + 100_000
         var payload = Data()
         payload.append(lineFiller(prefix: "HEADER", minBytes: 400_000).data)
         // A >1.5 MiB run of a single non-ESC, non-LF byte at the end of the file: the nominal cut lands
@@ -329,7 +332,7 @@ final class TerminalTranscriptTrimTests: XCTestCase {
     /// newline and the trim lands, retaining a parser-safe, line-aligned tail.
     func testTrimDefersThenSucceedsOnceWindowSlidesPastTheRun() throws {
         let (url, handle) = try makeTranscriptFile()
-        let retainedBytes = TerminalTranscriptTrim.maxNewlineAlignScanBytes + 100_000
+        let retainedBytes = TerminalTranscriptTrim.maxParserSafeCutScanBytes + 100_000
         var payload = Data()
         payload.append(lineFiller(prefix: "HEADER", minBytes: 400_000).data)
         payload.append(Data(repeating: 0x41, count: Int(retainedBytes) + 200_000))  // oversized LF/ESC-free run
@@ -363,20 +366,21 @@ final class TerminalTranscriptTrimTests: XCTestCase {
         XCTAssertTrue(String(decoding: tail, as: UTF8.self).hasPrefix("TAIL "), "The landed trim must retain a line-aligned tail past the run.")
     }
 
-    // An LF-free megabyte span is realistic for alt-screen TUIs (the exact sessions that trim): repeated
-    // cursor positioning with no trailing newline. Cutting at the arbitrary nominal offset would land
-    // mid-CSI-sequence, and a from-zero replay of the retained tail would then start parsing mid-sequence
-    // and render garbage. ESC (0x1B) is always the start of a new escape sequence and can never sit inside
-    // a UTF-8 continuation byte (those are all >= 0x80), so cutting immediately before the first ESC in the
-    // scan window is always a clean parser boundary.
+    // ESC-first is the primary cut path: whenever the scan window holds any ESC, the cut lands just
+    // before the window's first ESC — parser-safe from any state (ESC can never sit inside a UTF-8
+    // continuation byte, and a mid-string ESC begins that string's ST terminator, harmless in ground-state
+    // replay). An LF-free megabyte span is realistic for alt-screen TUIs (the exact sessions that trim):
+    // repeated cursor positioning with no trailing newline. Here every candidate is dense with ESCs, so
+    // the cut lands on one; cutting at the arbitrary nominal offset would instead land mid-CSI-sequence and
+    // a from-zero replay of the retained tail would start parsing mid-sequence and render garbage.
     //
     // Fails against a nominal-offset fallback: the retained tail then begins mid-CSI-sequence, not at 0x1B.
-    func testCutFallsBackToFirstEscByteWhenNoNewlineWithinBound() throws {
+    func testCutLandsBeforeFirstEscByteWhenWindowHasEsc() throws {
         let (url, handle) = try makeTranscriptFile()
         // The `+ 100_007` (vs. a round number) is deliberate: it makes the nominal offset land a few bytes
         // into a record rather than coincidentally on a record's leading ESC, so this test cannot pass by
         // accident against the old nominal-offset fallback.
-        let retainedBytes = TerminalTranscriptTrim.maxNewlineAlignScanBytes + 100_007  // > 1 MiB newline-free retained span
+        let retainedBytes = TerminalTranscriptTrim.maxParserSafeCutScanBytes + 100_007  // > 1 MiB newline-free retained span
         var payload = Data()
         payload.append(lineFiller(prefix: "HEADER", minBytes: 400_000).data)
 
@@ -398,7 +402,73 @@ final class TerminalTranscriptTrimTests: XCTestCase {
             triggerBytes: triggerBytes, retainedBytes: retainedBytes)
 
         let (_, tail) = try splitPreambleAndTail(try Data(contentsOf: url))
-        XCTAssertEqual(tail.first, 0x1B, "Without a newline in the scan window, the cut must land just before the first ESC, not mid-sequence.")
+        XCTAssertEqual(tail.first, 0x1B, "With an ESC in the scan window, the cut must land just before the first ESC, not mid-sequence.")
+    }
+
+    /// Regression (P2): the nominal cut landing inside an OSC string whose payload carries raw LFs must
+    /// NOT cut just past one of those embedded LFs. Ghostty's parser swallows LF inside `osc_string` (it
+    /// exits only on BEL/ESC/CAN/SUB), so a cut just past an embedded payload LF starts the retained tail
+    /// mid-payload; the from-zero replay begins in ground state after the preamble and renders the payload
+    /// bytes as visible text. The parser-safe (ESC-first) cut instead lands just before the window's first
+    /// ESC — here the OSC's `ESC \` (ST) terminator — so the tail begins on a clean parser boundary and the
+    /// payload never surfaces.
+    ///
+    /// Red-first: against the newline-preferring cut the tail begins at a fresh payload line (not ESC) and
+    /// the from-zero frame renders the payload marker as visible text.
+    func testCutSkipsNewlineInsideOscPayloadAndLandsBeforeEsc() throws {
+        let (url, handle) = try makeTranscriptFile()
+
+        // Dropped head: ordinary lines.
+        let header = lineFiller(prefix: "HEAD", minBytes: 6000).data
+
+        // An OSC 5555 string whose multi-KB payload is packed with raw LFs and a distinctive marker,
+        // closed by an ESC \ (ST) terminator. The parser stays in osc_string across every embedded LF.
+        let oscPrefix = Data("\u{1B}]5555;".utf8)
+        var oscPayload = Data()
+        var lineIndex = 0
+        while oscPayload.count < 4000 {
+            oscPayload.append(Data("OSCPAYLOAD-\(String(format: "%04d", lineIndex))\n".utf8))
+            lineIndex += 1
+        }
+        let stTerminator = Data("\u{1B}\\".utf8)
+
+        // Newest content after the OSC, kept under one screen so it cannot scroll the leaked payload off a
+        // pre-fix frame (which must expose the leak).
+        let newest = Data("NEWEST alpha\nNEWEST bravo\nNEWEST charlie\n".utf8)
+
+        var payload = Data()
+        payload.append(header)
+        let oscPayloadStart = payload.count + oscPrefix.count
+        payload.append(oscPrefix)
+        payload.append(oscPayload)
+        payload.append(stTerminator)
+        payload.append(newest)
+        try handle.write(contentsOf: payload)
+
+        // Position the nominal cut in the MIDDLE of the OSC payload — before an embedded LF and before the
+        // ST — by choosing retainedBytes = endOffset - (payloadStart + payload/2).
+        let nominalStart = UInt64(oscPayloadStart + oscPayload.count / 2)
+        let retainedBytes = UInt64(payload.count) - nominalStart
+        let triggerBytes = retainedBytes + 2000
+        XCTAssertGreaterThan(UInt64(payload.count), triggerBytes)
+
+        _ = try TerminalTranscriptTrim.trimIfNeeded(
+            outputPath: url.path, writeHandle: handle, currentEndOffset: UInt64(payload.count), columns: 80, rows: 24,
+            triggerBytes: triggerBytes, retainedBytes: retainedBytes)
+        let trimmed = try Data(contentsOf: url)
+
+        let (_, tail) = try splitPreambleAndTail(trimmed)
+        XCTAssertEqual(
+            tail.first, 0x1B,
+            "The cut must skip the LFs inside the OSC payload and land just before the ST's ESC, so the tail starts on a clean parser boundary.")
+        XCTAssertFalse(
+            String(decoding: tail, as: UTF8.self).hasPrefix("OSCPAYLOAD"), "The retained tail must not begin mid-OSC-payload.")
+
+        // From-zero replay must not surface the OSC payload as visible text, and must still show the newest
+        // content that follows the terminated OSC.
+        let trimmedFrame = try renderPlain(trimmed)
+        XCTAssertFalse(trimmedFrame.contains("OSCPAYLOAD"), "A from-zero replay must not render the OSC payload as visible text: \(trimmedFrame)")
+        XCTAssertTrue(trimmedFrame.contains("NEWEST"), "The newest content after the OSC must survive the trim: \(trimmedFrame)")
     }
 
     // MARK: - Induction across successive trims

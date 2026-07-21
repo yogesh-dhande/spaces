@@ -171,14 +171,16 @@ final class TerminalSessionGarbageCollectorTests: XCTestCase {
         XCTAssertNoThrow(try TerminalSessionPersistence.readRuntimeState(paths: paths))
     }
 
-    // (c) An ended session whose pane a client still holds (live attachment) must keep its transcript.
-    func testKeepsEndedSessionWithLiveAttachment() throws {
+    // (c) Tier 1: an ended session carrying only a stale local-window attachment (a crash leftover — the
+    // exit path detaches every client, and the ended-pane viewer holds no attachment) is not "shown", so an
+    // unreferenced one is collected like any other. A surviving attachment must not pin an ended session.
+    func testCollectsEndedSessionWithStaleAttachment() throws {
         let paths = try seedSession(id: "attached", state: .exited, servicePID: 999_999, attachment: true)
 
         let purged = try collect()
 
-        XCTAssertTrue(purged.isEmpty, "A still-attached ended pane must not be collected.")
-        XCTAssertTrue(FileManager.default.fileExists(atPath: paths.rootDirectory))
+        XCTAssertEqual(purged, ["attached"], "A stale attachment must not keep an ended, unreferenced session from being collected.")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: paths.rootDirectory))
     }
 
     // (c) An ended session still referenced by a product row (exited process/agent) must be kept.
@@ -213,19 +215,38 @@ final class TerminalSessionGarbageCollectorTests: XCTestCase {
         XCTAssertEqual(Set(try TerminalSessionPersistence.listKnownSessions().map(\.sessionID)), ["alive", "kept-ref"])
     }
 
-    // (P2) A failed attachment read must fail closed: an unreadable attachment snapshot must not be
-    // mistaken for "no attachments", or a session an active viewer holds could be purged out from under it.
+    // (P2) A failed attachment read must fail closed for an interactive session whose service is momentarily
+    // dead (the daemon-crash/handoff window): an unreadable attachment snapshot must not be mistaken for "no
+    // attachments", or a session a client still holds through a daemon restart could be purged out from under
+    // it. The state is interactive (`.running`) with a dead servicePID, so the service is not alive and the
+    // decision falls to the attachment read, which throws on the corrupt database.
     func testIsSessionShownFailsClosedWhenAttachmentReadThrows() throws {
-        let paths = try seedSession(id: "corrupt-attachments", state: .exited, servicePID: 999_999)
+        let paths = try seedSession(id: "corrupt-attachments", state: .running, servicePID: 999_999)
         // Corrupt the profile database so the live-attachments query throws instead of returning rows.
+        try Data("not a sqlite database".utf8).write(to: URL(fileURLWithPath: root.appendingPathComponent("spaces.db").path))
+        let runtimeState = TerminalSessionRuntimeState(
+            sessionID: "corrupt-attachments", backend: .ghosttyEmbedded, servicePID: 999_999, childPID: nil, state: .running,
+            updatedAt: "2026-07-19T00:00:00Z", exitedAt: nil)
+
+        XCTAssertTrue(
+            TerminalSessionGarbageCollector.isSessionShown(runtimeState: runtimeState, paths: paths, now: now),
+            "An attachment read failure must fail closed and keep an interactive session shown, not be treated as no attachments.")
+    }
+
+    // (P2, ended sessions ignore attachments) An ended session never consults attachments: its exit path
+    // detached every client, so a surviving attachment row is a crash leftover and must not read as "shown".
+    // A corrupt attachment database would fail closed for an interactive session, but for an ended one the
+    // read is skipped entirely, so it must read as not shown.
+    func testIsSessionShownIgnoresAttachmentsForEndedSession() throws {
+        let paths = try seedSession(id: "corrupt-attachments", state: .exited, servicePID: 999_999)
         try Data("not a sqlite database".utf8).write(to: URL(fileURLWithPath: root.appendingPathComponent("spaces.db").path))
         let runtimeState = TerminalSessionRuntimeState(
             sessionID: "corrupt-attachments", backend: .ghosttyEmbedded, servicePID: 999_999, childPID: nil, state: .exited,
             updatedAt: "2026-07-19T00:00:00Z", exitedAt: "2026-07-19T00:00:01Z")
 
-        XCTAssertTrue(
+        XCTAssertFalse(
             TerminalSessionGarbageCollector.isSessionShown(runtimeState: runtimeState, paths: paths, now: now),
-            "An attachment read failure must fail closed and keep the session shown, not be treated as no attachments.")
+            "An ended session must not consult attachments; a surviving attachment row is a crash leftover, not a live viewer.")
     }
 
     // (P3) A `removeItem` failure must leave the DB rows intact so the whole purge is retried on the next
@@ -344,19 +365,26 @@ final class TerminalSessionGarbageCollectorTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: paths.rootDirectory))
     }
 
-    // Tier 2 (age): a shown (live attachment) ended session past the age limit is still in use, so it must
-    // never be released or purged, no matter how old it is.
-    func testShownEndedSessionPastMaxAgeIsNotReleasedOrPurged() throws {
+    // Tier 2 (age): a stale local-window attachment left on an ended session by an ungraceful kill of the app
+    // or daemon (SIGKILL/crash/power loss) must not exempt it from age expiry. The exit path detaches every
+    // client, so an attachment surviving on an ended session is a crash leftover, not a live viewer; a session
+    // referenced by a product row and past the age limit is released and purged like any other, regardless of
+    // the leftover attachment. (Local-window attachments have no lease, so before the shown gate excluded
+    // ended sessions this session read as "shown" forever and was never collected — the retention regression.)
+    func testEndedSessionWithStaleAttachmentPastMaxAgeIsPurged() throws {
         let paths = try seedSession(
-            id: "shown-old", state: .exited, servicePID: 999_999, attachment: true, exitedAt: iso(now.addingTimeInterval(-8 * 86_400)))
+            id: "stale-attached", state: .exited, servicePID: 999_999, attachment: true, exitedAt: iso(now.addingTimeInterval(-8 * 86_400)))
+        var referenced: Set<String> = ["stale-attached"]
+        var released: [String] = []
 
         let purged = try TerminalSessionGarbageCollector.collectRemovedSessions(
-            activeSessionIDs: [], isReferencedByProduct: { _ in true },
-            releaseExpiredReferences: { XCTFail("release called for a shown ended session: \($0)") }, now: now,
+            activeSessionIDs: [], isReferencedByProduct: { referenced.contains($0) },
+            releaseExpiredReferences: { released.append($0); referenced.remove($0) }, now: now,
             onBudgetExceeded: { XCTFail("onBudgetExceeded called unexpectedly with \($0)") })
 
-        XCTAssertTrue(purged.isEmpty, "A still-attached ended pane must never be collected, even past the age limit.")
-        XCTAssertTrue(FileManager.default.fileExists(atPath: paths.rootDirectory))
+        XCTAssertEqual(released, ["stale-attached"], "A stale attachment must not keep an expired ended session's product rows from being released.")
+        XCTAssertEqual(purged, ["stale-attached"], "An expired ended session with only a crash-leftover attachment must be purged by the age tier.")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: paths.rootDirectory))
     }
 
     // Tier 2 (containment): a `releaseExpiredReferences` failure for one expired session must be contained
@@ -424,26 +452,34 @@ final class TerminalSessionGarbageCollectorTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: newPaths.rootDirectory))
     }
 
-    // Tier 3 (budget): shown sessions count toward the ended total but can never be evicted. When only shown
-    // sessions are over budget, nothing is evicted and the full total is reported for the daemon to log.
-    func testByteBudgetWithOnlyShownSessionsEvictsNothingAndReportsTotal() throws {
-        let policy = TerminalSessionRetentionPolicy(endedSessionMaxAge: 7 * 86_400, endedTranscriptByteBudget: 1_500, orphanGracePeriod: 3_600)
-        let aPaths = try seedSession(
-            id: "a", state: .exited, servicePID: 999_999, attachment: true, exitedAt: iso(now.addingTimeInterval(-1 * 86_400)))
-        let bPaths = try seedSession(
-            id: "b", state: .exited, servicePID: 999_998, attachment: true, exitedAt: iso(now.addingTimeInterval(-1 * 86_400)))
-        for paths in [aPaths, bPaths] { try Data(repeating: 0, count: 1_000).write(to: URL(fileURLWithPath: paths.outputPath)) }
-        var reportedTotal: Int64?
+    // Tier 3 (budget): a stale local-window attachment left by an ungraceful kill does not protect an ended
+    // session from byte-budget eviction. An attachment surviving on an ended session is a crash leftover (the
+    // exit path detaches all clients), so these sessions are ordinary eviction candidates and are evicted
+    // oldest-ended-first exactly as unattached ended sessions are.
+    func testByteBudgetEvictsEndedSessionsWithStaleAttachments() throws {
+        let policy = TerminalSessionRetentionPolicy(endedSessionMaxAge: 7 * 86_400, endedTranscriptByteBudget: 2_500, orphanGracePeriod: 3_600)
+        let oldPaths = try seedSession(
+            id: "old", state: .exited, servicePID: 999_999, attachment: true, exitedAt: iso(now.addingTimeInterval(-3 * 86_400)))
+        let midPaths = try seedSession(
+            id: "mid", state: .exited, servicePID: 999_998, attachment: true, exitedAt: iso(now.addingTimeInterval(-2 * 86_400)))
+        let newPaths = try seedSession(
+            id: "new", state: .exited, servicePID: 999_997, attachment: true, exitedAt: iso(now.addingTimeInterval(-1 * 86_400)))
+        for paths in [oldPaths, midPaths, newPaths] {
+            try Data(repeating: 0, count: 1_000).write(to: URL(fileURLWithPath: paths.outputPath))
+        }
+        var referenced: Set<String> = ["old", "mid", "new"]
+        var released: [String] = []
 
         let purged = try TerminalSessionGarbageCollector.collectRemovedSessions(
-            activeSessionIDs: [], isReferencedByProduct: { _ in true },
-            releaseExpiredReferences: { XCTFail("release called for a shown session: \($0)") }, retentionPolicy: policy, now: now,
-            onBudgetExceeded: { reportedTotal = $0 })
+            activeSessionIDs: [], isReferencedByProduct: { referenced.contains($0) },
+            releaseExpiredReferences: { released.append($0); referenced.remove($0) }, retentionPolicy: policy, now: now,
+            onBudgetExceeded: { XCTFail("total should be back under budget after evicting the oldest, got \($0)") })
 
-        XCTAssertTrue(purged.isEmpty, "Shown sessions must never be evicted, even over budget.")
-        XCTAssertEqual(reportedTotal, 2_000, "The full ended total — including the un-evictable shown sessions — must be reported.")
-        XCTAssertTrue(FileManager.default.fileExists(atPath: aPaths.rootDirectory))
-        XCTAssertTrue(FileManager.default.fileExists(atPath: bPaths.rootDirectory))
+        XCTAssertEqual(purged, ["old"], "A stale local-window attachment must not protect an ended session from budget eviction.")
+        XCTAssertEqual(released, ["old"])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: oldPaths.rootDirectory))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: midPaths.rootDirectory), "Younger sessions must survive once under budget.")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: newPaths.rootDirectory))
     }
 
     // First sweep after deploy: a whole backlog of expired sessions is released and purged in one pass, with

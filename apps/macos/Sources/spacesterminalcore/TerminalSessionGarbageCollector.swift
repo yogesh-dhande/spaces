@@ -9,10 +9,10 @@ import Foundation
 /// footprint, and it retires a session through three tiers, all fail-closed (any doubt defers to the next
 /// sweep rather than deleting):
 ///
-///  1. Already gone from the product. A session that is not shown (not interactive-alive, no live
-///     attachment) and has no referencing product row is released and then purged outright — deleting a
-///     session's rows (e.g. `finalizeAgentRow`'s `.destroyed` path, or process/window removal) is what
-///     makes it collectable, and this is the executor. The release runs first so the session's own
+///  1. Already gone from the product. A session that is not shown (not interactive-alive, and — only while
+///     interactive — no live attachment) and has no referencing product row is released and then purged
+///     outright — deleting a session's rows (e.g. `finalizeAgentRow`'s `.destroyed` path, or
+///     process/window removal) is what makes it collectable, and this is the executor. The release runs first so the session's own
 ///     subscriber standing (its queued inbound notices and outgoing watch edges — state with no foreign
 ///     key to `terminal_sessions` and not counted by `isReferencedByProduct`) is retired regardless of
 ///     which path dropped the product rows; interactive closes already retire it themselves, so the call
@@ -26,10 +26,12 @@ import Foundation
 ///  3. Over budget. If the aggregate on-disk size of all ended sessions still exceeds
 ///     `endedTranscriptByteBudget` after the age pass, the collector evicts oldest-ended-first — via the
 ///     same release→recheck→purge path — even for sessions younger than the age limit, until the total
-///     is back under budget or no evictable session remains. Shown/attached ended sessions still count
-///     toward the total but are never evicted; a session whose end time cannot be resolved is never
-///     evicted either. If the total is still over budget once every eligible session has been evicted,
-///     that residual is reported through `onBudgetExceeded` for the daemon to log.
+///     is back under budget or no evictable session remains. Every ended session is a candidate: an ended
+///     session is never "shown" (its exit path detached all clients, so a surviving attachment row is a
+///     crash leftover, not a live viewer — see `isSessionShown`). Only a session whose end time cannot be
+///     resolved is never evicted (it cannot be ordered). If the total is still over budget once every
+///     eligible session has been evicted, that residual is reported through `onBudgetExceeded` for the
+///     daemon to log.
 ///
 /// Pre-existing accumulated sessions are collected the same way, so no migration is needed, and the first
 /// sweep after deploy mass-expires the whole backlog in one pass.
@@ -64,8 +66,9 @@ public enum TerminalSessionGarbageCollector {
         onBudgetExceeded: (Int64) -> Void = { _ in }
     ) throws -> [String] {
         var purged: [String] = []
-        // Ended sessions that survive the age pass and remain on disk. Tracked (including shown/attached
-        // ones) so the byte-budget backstop can weigh the full ended footprint, not just what it may evict.
+        // Ended sessions that survive the age pass and remain on disk, so the byte-budget backstop can weigh
+        // the full ended footprint. Every ended session here is an eviction candidate: "shown" is never true
+        // for an ended session (see `isSessionShown`), so none is exempt from the budget.
         var endedOnDisk: [EndedSession] = []
         let expiryCutoff = now.addingTimeInterval(-retentionPolicy.endedSessionMaxAge)
 
@@ -79,11 +82,9 @@ public enum TerminalSessionGarbageCollector {
                 let isShown = isSessionShown(runtimeState: runtimeState, paths: paths, now: now)
                 let isEnded = !runtimeState.state.isInteractive
 
-                // Tier 1: a shown session is never collected; if ended it still counts toward the budget total.
-                if isShown {
-                    if isEnded { endedOnDisk.append(EndedSession(sessionID: sessionID, paths: paths, runtimeState: runtimeState, isShown: true)) }
-                    continue
-                }
+                // Tier 1: a shown session is never collected. "shown" implies interactive (an ended session
+                // never reads as shown), so a shown session is never an ended-budget candidate either.
+                if isShown { continue }
 
                 // Tier 1: an unreferenced, not-shown session is released, then purged outright. The release
                 // must run even though the product side is already unreferenced: it is what retires the
@@ -110,7 +111,7 @@ public enum TerminalSessionGarbageCollector {
                 }
 
                 // Survived the age pass and remains on disk; if ended it is weighed by the budget backstop.
-                if isEnded { endedOnDisk.append(EndedSession(sessionID: sessionID, paths: paths, runtimeState: runtimeState, isShown: false)) }
+                if isEnded { endedOnDisk.append(EndedSession(sessionID: sessionID, paths: paths, runtimeState: runtimeState)) }
             } catch {
                 onPurgeFailure(sessionID, error)
             }
@@ -125,12 +126,12 @@ public enum TerminalSessionGarbageCollector {
     }
 
     /// An ended session that remains on disk after the age pass, retained so the byte-budget backstop can
-    /// size the full ended footprint. `isShown` sessions count toward the total but are never evicted.
+    /// size the full ended footprint and evict oldest-ended-first. Every ended session is an eviction
+    /// candidate; an ended session never reads as "shown", so there is no never-evict carve-out here.
     private struct EndedSession {
         let sessionID: String
         let paths: TerminalSessionPaths
         let runtimeState: TerminalSessionRuntimeState
-        let isShown: Bool
     }
 
     /// Releases a session's product rows and purges it only if that cleared the last reference. Returns
@@ -148,14 +149,14 @@ public enum TerminalSessionGarbageCollector {
     }
 
     /// The byte-budget backstop (tier 3). Sums the on-disk size of every ended session still present after
-    /// the age pass — including shown/attached ones, which reflect real disk pressure even though they are
-    /// never evicted — and, if that exceeds `endedTranscriptByteBudget`, evicts eligible sessions
-    /// oldest-ended-first via the shared release→recheck→purge path until the total is back under budget or
-    /// no evictable session remains. A session is eligible only if it is not shown and its end time is
-    /// resolvable (an unresolvable end time cannot be ordered against others, so such a session is never
-    /// evicted first — fail closed). A per-session eviction failure is contained through `onPurgeFailure`
-    /// and its bytes stay counted. If the total is still over budget once candidates are exhausted, the
-    /// residual is reported through `onBudgetExceeded`.
+    /// the age pass and, if that exceeds `endedTranscriptByteBudget`, evicts oldest-ended-first via the
+    /// shared release→recheck→purge path until the total is back under budget or no evictable session
+    /// remains. A session is eligible only if its end time is resolvable (an unresolvable end time cannot be
+    /// ordered against others, so such a session is never evicted — fail closed). A per-session eviction
+    /// failure is contained through `onPurgeFailure` and its bytes stay counted. If the total is still over
+    /// budget once candidates are exhausted — because only sessions with unresolvable end times remain, or a
+    /// contained eviction failure kept their bytes counted — the residual is reported through
+    /// `onBudgetExceeded`.
     private static func evictOverBudget(
         endedOnDisk: [EndedSession], purged: inout [String], retentionPolicy: TerminalSessionRetentionPolicy,
         isReferencedByProduct: (String) throws -> Bool, releaseExpiredReferences: (String) throws -> Void, fileManager: FileManager,
@@ -169,7 +170,7 @@ public enum TerminalSessionGarbageCollector {
         var total = sized.reduce(Int64(0)) { $0 + $1.size }
         guard total > retentionPolicy.endedTranscriptByteBudget else { return }
 
-        let candidates = sized.filter { !$0.session.isShown && $0.endedAt != nil }.sorted { $0.endedAt! < $1.endedAt! }
+        let candidates = sized.filter { $0.endedAt != nil }.sorted { $0.endedAt! < $1.endedAt! }
         for candidate in candidates {
             guard total > retentionPolicy.endedTranscriptByteBudget else { break }
             do {
@@ -226,16 +227,29 @@ public enum TerminalSessionGarbageCollector {
         (try? fileManager.attributesOfItem(atPath: path))?[.modificationDate] as? Date
     }
 
-    /// Whether the product is currently showing this session's pane: it is still interactive with a live
-    /// service, or a client holds a live attachment to its (possibly ended) pane. Either way its transcript
-    /// is in use and must not be collected. `TerminalSessionAttachmentSnapshot.liveAttachments` is the same
-    /// lease-aware rule the reaper and clients use, so an expired remote viewer never keeps a session pinned.
-    /// A failed attachment read is treated as "shown" (fails closed), the same way the caller's
-    /// `isReferencedByProduct` check does: this is the only signal that a client currently holds the
-    /// session's ended pane, so guessing "no attachments" on a read failure risks purging a session someone
-    /// is actively viewing. A false "shown" only defers collection to the next sweep, which costs nothing.
+    /// Whether the product is currently showing this session's pane, which pins its transcript against
+    /// collection. It is shown when it is still interactive with a live service, or — for an interactive
+    /// session whose service is momentarily dead (the daemon-crash/handoff window) — while a client still
+    /// holds a live attachment to the resumable session.
+    ///
+    /// Attachment rows only count toward "shown" for interactive-state sessions. An ended (`.exited`/
+    /// `.failed`) session's exit path (`terminate`) already detached every client, and the ended-pane
+    /// viewer is client-local (it holds no attachment row), so on the designed path an ended session never
+    /// has a live attachment. Any attachment row that does survive on an ended session is therefore a crash
+    /// leftover — an ungraceful kill of the app or daemon (SIGKILL, crash, power loss) that left a
+    /// local-window attachment undetached (local-window attachments have no lease, so `liveAttachments`
+    /// would otherwise treat them as live forever). Such a leftover must not exempt the session from age
+    /// expiry or budget eviction, so "shown" is `false` for ended sessions without consulting attachments.
+    ///
+    /// For interactive-state sessions the attachment check stays, including its fail-closed `return true`
+    /// on a read error, the same way the caller's `isReferencedByProduct` check does: an unreadable snapshot
+    /// must not be mistaken for "no attachments" and purge a session a client still holds through a daemon
+    /// restart. `TerminalSessionAttachmentSnapshot.liveAttachments` is the same lease-aware rule the reaper
+    /// and clients use, so an expired remote viewer never keeps a session pinned. A false "shown" only
+    /// defers collection to the next sweep, which costs nothing.
     static func isSessionShown(runtimeState: TerminalSessionRuntimeState, paths: TerminalSessionPaths, now: Date) -> Bool {
         if TerminalSessionCatalog.isInteractiveServiceAlive(for: runtimeState) { return true }
+        guard runtimeState.state.isInteractive else { return false }
         guard let liveAttachments = try? TerminalSessionPersistence.liveAttachments(paths: paths, now: now) else { return true }
         return !liveAttachments.isEmpty
     }

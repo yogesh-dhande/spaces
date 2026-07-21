@@ -27,7 +27,9 @@ import Glibc
 /// inductively correct across successive
 /// trims: each trim's head replay `[0..cut]` itself starts from the previous trim's preamble, so the
 /// serialized state always reflects the true accumulated state at the cut. The retained tail is copied
-/// verbatim after the preamble, and its cut is newline-aligned so replay begins on a line boundary.
+/// verbatim after the preamble, and its cut lands just before the window's first ESC byte — a boundary
+/// that is parser-safe from any original parser state (see `parserSafeCutOffset`) — falling back to a
+/// line boundary only in escape-free windows.
 ///
 /// A trim never mutates `output.log` in place. It writes preamble+tail to a sibling temp file
 /// (`output.log.trim`), fsyncs it, then atomically `rename(2)`s it over `output.log`. A daemon crash or
@@ -67,14 +69,15 @@ public enum TerminalTranscriptTrim {
         public let writeHandle: FileHandle
     }
 
-    /// Upper bound on the forward newline scan used to align the cut to a line boundary. If no newline
-    /// appears within this many bytes of the nominal offset, the cut falls back to the offset just before
-    /// the first ESC byte in the window (see `newlineAlignedCutOffset`); only when the window has neither
-    /// a newline nor an ESC does the trim DEFER to a later append rather than cut at an unsafe boundary. A
-    /// megabyte is far larger than any realistic single terminal line, so an LF-free scan window is already
-    /// the adversarial case (a long alt-screen TUI redraw run); this bound just caps how far the scan looks
-    /// before conceding to the ESC boundary or, failing that, deferring.
-    static let maxNewlineAlignScanBytes: UInt64 = 1 << 20
+    /// Upper bound on the forward scan used to find a parser-safe cut. The scan prefers the offset just
+    /// before the window's first ESC byte (parser-safe from any state); only when the window holds no ESC
+    /// at all does it fall back to the offset just past the first newline (see `parserSafeCutOffset`), and
+    /// only when the window has neither an ESC nor a newline does the trim DEFER to a later append rather
+    /// than cut at an unsafe boundary. A megabyte is far larger than any realistic escape sequence or
+    /// terminal line, so an ESC-free, LF-free scan window is already the adversarial case (an oversized
+    /// single-sequence payload); this bound just caps how far the scan looks before conceding to the
+    /// newline fallback or, failing that, deferring.
+    static let maxParserSafeCutScanBytes: UInt64 = 1 << 20
 
     private static let replayChunkBytes = 256 * 1024
     private static let newlineScanBlockBytes = 64 * 1024
@@ -123,13 +126,13 @@ public enum TerminalTranscriptTrim {
         let readHandle = try FileHandle(forReadingFrom: URL(fileURLWithPath: outputPath))
         defer { try? readHandle.close() }
 
-        // A scan window with no newline and no ESC has no parser-safe cut: every candidate lands
+        // A scan window with no ESC and no newline has no parser-safe cut: every candidate lands
         // mid-sequence/mid-codepoint and the preamble (terminal *state*, not parser state) cannot rescue
         // it. Defer the trim to a later append — the nominal cut slides forward as the file grows, so the
-        // trim lands once the oversized run's terminator or the next newline enters the window (see
-        // `newlineAlignedCutOffset`). The no-op result matches the below-trigger case: unchanged handle
+        // trim lands once the oversized run's terminator ESC or the next newline enters the window (see
+        // `parserSafeCutOffset`). The no-op result matches the below-trigger case: unchanged handle
         // and offset, nothing staged on disk.
-        guard let cutOffset = try newlineAlignedCutOffset(readHandle: readHandle, nominalStart: nominalStart, endOffset: currentEndOffset)
+        guard let cutOffset = try parserSafeCutOffset(readHandle: readHandle, nominalStart: nominalStart, endOffset: currentEndOffset)
         else {
             return TrimResult(endOffset: currentEndOffset, writeHandle: writeHandle)
         }
@@ -183,20 +186,33 @@ public enum TerminalTranscriptTrim {
         return TrimResult(endOffset: UInt64(preamble.count + tail.count), writeHandle: tempHandle)
     }
 
-    /// Scans forward from `nominalStart` for the next newline and returns the offset just past it, so the
-    /// retained tail begins on a line boundary. Bounded by `maxNewlineAlignScanBytes`. Returns `nil` when
-    /// the scan window holds no parser-safe boundary at all, signalling the caller to DEFER the trim.
+    /// Scans forward from `nominalStart` for a parser-safe cut and returns it, or `nil` to signal the
+    /// caller to DEFER the trim. Bounded by `maxParserSafeCutScanBytes`.
     ///
-    /// A line boundary is preferred, but any cut must land on a parser-safe boundary or the retained tail
-    /// starts mid-sequence and a from-zero replay renders those bytes as garbage (the preamble serializes
-    /// terminal *state*, not mid-sequence *parser* state). If no newline turns up within the bound, the
-    /// cut falls back to the offset immediately before the first ESC (0x1B) byte seen while scanning:
-    /// ESC is always < 0x80, so it can never sit inside a UTF-8 continuation byte, and a tail beginning at
-    /// ESC starts a clean escape sequence from the ground state. The head ending just before that ESC at
-    /// worst leaves an unterminated escape/string sequence dangling in the throwaway preamble replay,
-    /// which is simply never applied there — harmless.
+    /// The cut must land on a boundary that is parser-safe from EVERY possible original parser state, or
+    /// the retained tail starts mid-sequence and the from-zero replay (which begins in ground state after
+    /// the preamble) renders those bytes as garbage — the preamble serializes terminal *state*, not
+    /// mid-sequence *parser* state. The offset immediately before the window's first ESC (0x1B) byte is
+    /// such a boundary by construction, so it is PREFERRED whenever the window holds any ESC: ESC is
+    /// always < 0x80 so it can never sit inside a UTF-8 continuation byte, and if the parser was mid-string
+    /// (OSC/DCS/APC) when it reached that ESC, the ESC is the start of that string's `ESC \` ST terminator
+    /// — which in ground-state replay is a harmless no-op, after which the stream is clean. The head
+    /// ending just before that ESC at worst leaves an unterminated sequence dangling in the throwaway
+    /// preamble replay, which is simply never applied there — also harmless.
     ///
-    /// When the window contains neither a newline nor an ESC — a single sequence or plain-text run longer
+    /// Line alignment is NOT preferred, because a cut just past a newline is only parser-safe when that
+    /// newline was processed in ground state: an LF inside an OSC string is swallowed (Ghostty's parser
+    /// exits `osc_string` only on BEL/ESC/CAN/SUB), and likewise inside DCS passthrough, so a cut just
+    /// past such an LF starts the retained tail mid-payload and the from-zero replay renders the payload
+    /// bytes as visible text. Whether a given LF sat in ground state is unknowable without replaying, so
+    /// the past-newline offset is used ONLY as a fallback for windows that contain no ESC at all — i.e.
+    /// plain-text regions, where an open OSC/DCS would have to span the entire scan window without its
+    /// terminator. Line alignment is thereby sacrificed for ESC-bearing windows: the retained tail may
+    /// start mid-line (e.g. right at an SGR). That is cosmetic — the suffix consumers (`terminalTail`,
+    /// ended-pane replay) are end-relative and already tolerate partial leading content, and from-zero
+    /// replay correctness does not depend on line alignment.
+    ///
+    /// When the window contains neither an ESC nor a newline — a single sequence or plain-text run longer
     /// than the scan bound, e.g. a multi-megabyte DCS/OSC payload (sixel, iTerm2 inline image, OSC 52) or
     /// an LF-free UTF-8 text run — every candidate cut lands mid-sequence or mid-codepoint, so no
     /// preamble could rescue it. This returns `nil` and the caller leaves the transcript untrimmed for
@@ -205,28 +221,31 @@ public enum TerminalTranscriptTrim {
     /// the trim lands as soon as the run's terminating ESC or the next newline enters view — a finite
     /// oversized payload defers the trim by roughly its own length, no more. An endless single-sequence
     /// stream would grow the transcript without bound, which is accepted: the alternative (cutting
-    /// mid-sequence) corrupts the from-zero replay instead of merely deferring the bound.
+    /// mid-sequence) corrupts the from-zero replay instead of merely deferring the bound. The newline
+    /// fallback carries a matching residual acceptance: an OSC/DCS whose payload contains a newline but
+    /// spans the entire scan window without its terminator would let an ESC-free window's newline cut land
+    /// mid-payload — the same pathological >1 MiB single-sequence class already accepted under deferral.
     ///
-    /// Single pass: the first ESC offset is remembered while scanning for the newline rather than
+    /// Single pass: the first newline offset is remembered while scanning for the first ESC rather than
     /// re-reading the window to find it separately.
-    private static func newlineAlignedCutOffset(readHandle: FileHandle, nominalStart: UInt64, endOffset: UInt64) throws -> UInt64? {
-        let scanLimit = min(nominalStart + maxNewlineAlignScanBytes, endOffset)
+    private static func parserSafeCutOffset(readHandle: FileHandle, nominalStart: UInt64, endOffset: UInt64) throws -> UInt64? {
+        let scanLimit = min(nominalStart + maxParserSafeCutScanBytes, endOffset)
         try readHandle.seek(toOffset: nominalStart)
         var scanned = nominalStart
-        var firstEscOffset: UInt64?
+        var firstNewlineOffset: UInt64?
         while scanned < scanLimit {
             let toRead = Int(min(UInt64(newlineScanBlockBytes), scanLimit - scanned))
             let chunk = try readHandle.read(upToCount: toRead) ?? Data()
             if chunk.isEmpty { break }
-            if let newlineIndex = chunk.firstIndex(of: 0x0A) {
-                return scanned + UInt64(chunk.distance(from: chunk.startIndex, to: newlineIndex)) + 1
+            if let escIndex = chunk.firstIndex(of: 0x1B) {
+                return scanned + UInt64(chunk.distance(from: chunk.startIndex, to: escIndex))
             }
-            if firstEscOffset == nil, let escIndex = chunk.firstIndex(of: 0x1B) {
-                firstEscOffset = scanned + UInt64(chunk.distance(from: chunk.startIndex, to: escIndex))
+            if firstNewlineOffset == nil, let newlineIndex = chunk.firstIndex(of: 0x0A) {
+                firstNewlineOffset = scanned + UInt64(chunk.distance(from: chunk.startIndex, to: newlineIndex)) + 1
             }
             scanned += UInt64(chunk.count)
         }
-        return firstEscOffset
+        return firstNewlineOffset
     }
 
     /// Builds the state preamble by streaming `[0..cutOffset]` through a throwaway vt session (created
