@@ -160,6 +160,9 @@ LAUNCH_SERVICE_PATH="$INSTALL_HOME/.spaces/bin/spacesd"
 /bin/mkdir -p /Applications /usr/local/bin
 /bin/rm -rf "$APP_PATH"
 /usr/bin/ditto "$SOURCE_APP" "$APP_PATH"
+# The source app is marked Finder-invisible on the DMG and ditto preserves that
+# attribute, so the installed copy must be made visible again.
+/usr/bin/chflags nohidden "$APP_PATH"
 /usr/bin/xattr -dr com.apple.quarantine "$APP_PATH" 2>/dev/null || true
 /bin/ln -sfn "$CLI_TARGET" "$CLI_PATH"
 /bin/ln -sfn "$SERVICE_TARGET" "$SERVICE_PATH"
