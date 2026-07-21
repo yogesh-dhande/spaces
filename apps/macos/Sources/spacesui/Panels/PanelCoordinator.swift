@@ -43,7 +43,15 @@ import spacesterminalcore
         view.onSelectTab = { [weak self] tabID in self?.selectTab(scope: scope, tabID: tabID) }
         view.onCloseTab = { [weak self] tabID in self?.closeTab(scope: scope, tabID: tabID) }
         view.onRenameTab = { [weak self] tabID, title in self?.renameTab(scope: scope, tabID: tabID, title: title) }
-        view.onNewTab = { [weak self] in self?.host.presentNewTabSessionPicker(scope: scope) }
+        view.onNewTab = { [weak self] in
+            guard let self else { return }
+            // A global panel window's "+" creates a fresh ad hoc session directly; only a
+            // workspace panel's "+" (in the main window) opens the target picker.
+            switch scope {
+            case .workspace: self.host.presentNewTabSessionPicker(scope: scope)
+            case .globalWindow: self.host.openNewTerminalTab(scope: scope)
+            }
+        }
         view.onSplitPane = { [weak self] paneID, direction in self?.beginSplit(scope: scope, paneID: paneID, direction: direction) }
         view.onFocusPane = { [weak self] paneID in self?.focusPane(scope: scope, paneID: paneID, moveKeyboardFocus: true) }
         view.onSplitWeightsChanged = { [weak self] splitID, weights in self?.updateSplitWeights(scope: scope, splitID: splitID, weights: weights) }

@@ -3093,7 +3093,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
-    nonisolated private static func runningProcesses(from rows: [SpacesDeviceWorkspaceProcessRow]) -> [RunningProcessRecord] {
+    nonisolated static func runningProcesses(from rows: [SpacesDeviceWorkspaceProcessRow]) -> [RunningProcessRecord] {
         rows.compactMap { row in
             guard row.runState != .notStarted || row.processID != nil || row.sessionID != nil else { return nil }
             return RunningProcessRecord(
@@ -3103,7 +3103,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
-    nonisolated private static func agentWindows(from rows: [SpacesDeviceWorkspaceCodingAgentRow]) -> [AgentWindowRecord] {
+    nonisolated static func agentWindows(from rows: [SpacesDeviceWorkspaceCodingAgentRow]) -> [AgentWindowRecord] {
         let now = staticISO8601Formatter.string(from: Date())
         return rows.compactMap { row in
             guard row.agentID != nil || row.sessionID != nil || row.runState != .notStarted else { return nil }
@@ -9824,25 +9824,35 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         !hasExistingPane && request.shell == nil
     }
 
-    private func runTerminalSessionMutationAndOpenPane(
+    /// Runs a workspace terminal-session mutation (start a configured process / launch a
+    /// coding agent) and returns the open request for the session it produced, applying the
+    /// response to local state along the way. Placement is the caller's decision: the window
+    /// shortcut path opens/focuses the pane, while the session picker lands it at the picker's
+    /// split or new tab.
+    func runTerminalSessionMutation(
         workspaceID: String, operation: @Sendable @escaping (SpacesPairedDeviceRecord) throws -> SpacesDeviceAPIResponse
-    ) async -> ExternalWindowAction? {
+    ) async -> DeviceTerminalOpenRequest? {
         guard let device = deviceForWorkspaceMutation(workspaceID: workspaceID) else {
             showDeviceNotLoadedError()
             return nil
         }
-        let result = await Self.deviceMutation(device: device, operation: operation)
-        switch result {
+        switch await Self.deviceMutation(device: device, operation: operation) {
         case .success(let response):
             applyDeviceMutationResponse(response, selectedWorkspaceID: workspaceID)
-            guard let request = terminalOpenRequest(fromMutationResponse: response, workspaceID: workspaceID),
-                await openOrFocusTerminalTarget(request)
-            else { return nil }
-            return .focus(hidesApp: false)
+            return terminalOpenRequest(fromMutationResponse: response, workspaceID: workspaceID)
         case .failure(let error):
             showError(error)
             return nil
         }
+    }
+
+    private func runTerminalSessionMutationAndOpenPane(
+        workspaceID: String, operation: @Sendable @escaping (SpacesPairedDeviceRecord) throws -> SpacesDeviceAPIResponse
+    ) async -> ExternalWindowAction? {
+        guard let request = await runTerminalSessionMutation(workspaceID: workspaceID, operation: operation),
+            await openOrFocusTerminalTarget(request)
+        else { return nil }
+        return .focus(hidesApp: false)
     }
 
     nonisolated private static func windowShortcutKind(for resolution: DeviceWindowShortcutResolution) -> String {
