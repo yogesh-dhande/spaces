@@ -227,6 +227,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private var reloadShortcutSpec: HotkeySpec?
     private var openEditorShortcutSpec: HotkeySpec?
     private var openTerminalShortcutSpec: HotkeySpec?
+    private var newTabShortcutSpec: HotkeySpec?
     private var openFinderShortcutSpec: HotkeySpec?
     private var openSettingsShortcutSpec: HotkeySpec?
     private var nextShortcutSpec: HotkeySpec?
@@ -8855,6 +8856,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 return nil
             }
             if self.commandPalette.handleCommandPaletteShortcut(event: event) { return nil }
+            if self.handleNewTabSessionPickerShortcut(event: event) { return nil }
             if self.handleClosePaneShortcut(event: event) { return nil }
             if self.handleFocusedTextInputShortcut(event: event) { return nil }
             if self.isTextInputFocused() { return event }
@@ -8979,6 +8981,43 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     nonisolated static func isClosePaneShortcut(charactersIgnoringModifiers: String?, eventModifiers: NSEvent.ModifierFlags) -> Bool {
         guard charactersIgnoringModifiers?.lowercased() == "w" else { return false }
         return eventModifiers.intersection([.command, .option, .control, .shift]) == .command
+    }
+
+    enum NewTabShortcutAction: Equatable, Sendable { case presentPicker, consume, pass }
+
+    /// ⌘T gating: present only when the main window is key with a workspace selected.
+    /// While the session picker is up the chord is consumed so re-press is an explicit
+    /// no-op; in a global panel window it is consumed so it can't fall through to the
+    /// focused pane; other focused text inputs (rename editors) keep the chord.
+    nonisolated static func newTabShortcutAction(
+        sessionPickerIsActive: Bool, textInputIsFocused: Bool, keyWindowIsPanelWindow: Bool, keyWindowIsMainWindow: Bool,
+        selectedWorkspaceID: String?
+    ) -> NewTabShortcutAction {
+        if sessionPickerIsActive { return .consume }
+        if textInputIsFocused { return .pass }
+        if keyWindowIsPanelWindow { return .consume }
+        guard keyWindowIsMainWindow, selectedWorkspaceID != nil else { return .pass }
+        return .presentPicker
+    }
+
+    /// ⌘T (configurable): opens the session-picker new-tab flow. Placed ahead of the
+    /// `isTextInputFocused()` early-return in `setupShortcutMonitor` so the chord still
+    /// reaches this gate while the command-palette search field is focused; see
+    /// `newTabShortcutAction` for the full disposition table.
+    private func handleNewTabSessionPickerShortcut(event: NSEvent) -> Bool {
+        guard let newTabShortcutSpec, matches(event: event, spec: newTabShortcutSpec) else { return false }
+        switch Self.newTabShortcutAction(
+            sessionPickerIsActive: commandPalette.sessionPickerContext != nil, textInputIsFocused: isTextInputFocused(),
+            keyWindowIsPanelWindow: panelCoordinator.panelWindowID(forWindow: NSApp.keyWindow) != nil, keyWindowIsMainWindow: NSApp.keyWindow === window,
+            selectedWorkspaceID: selectedWorkspaceID)
+        {
+        case .pass: return false
+        case .consume: return true
+        case .presentPicker:
+            guard let workspaceID = selectedWorkspaceID else { return false }
+            presentNewTabSessionPicker(scope: .workspace(deviceID: deviceID(forWorkspaceID: workspaceID), workspaceID: workspaceID))
+            return true
+        }
     }
 
     private func handleLeaderShortcutCaptureFlagsChanged(event: NSEvent) -> Bool {
@@ -9273,6 +9312,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         sidebarPreviousShortcutSpec = loadShortcutSpec(setting: .guiSidebarPreviousShortcut)
         openEditorShortcutSpec = loadShortcutSpec(setting: .guiOpenEditorShortcut)
         openTerminalShortcutSpec = loadShortcutSpec(setting: .guiOpenTerminalShortcut)
+        newTabShortcutSpec = loadShortcutSpec(setting: .guiNewTabShortcut)
         openFinderShortcutSpec = loadShortcutSpec(setting: .guiOpenFinderShortcut)
         openSettingsShortcutSpec = loadShortcutSpec(setting: .guiOpenSettingsShortcut)
         windowShortcutSpec = loadShortcutSpec(setting: .guiWindowShortcut)
@@ -9308,6 +9348,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         case .guiSidebarPreviousShortcut: return sidebarPreviousShortcutSpec
         case .guiOpenEditorShortcut: return openEditorShortcutSpec
         case .guiOpenTerminalShortcut: return openTerminalShortcutSpec
+        case .guiNewTabShortcut: return newTabShortcutSpec
         case .guiOpenFinderShortcut: return openFinderShortcutSpec
         case .guiOpenSettingsShortcut: return openSettingsShortcutSpec
         case .guiWindowShortcut: return windowShortcutSpec

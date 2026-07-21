@@ -43,7 +43,7 @@ import spacesterminalcore
         view.onSelectTab = { [weak self] tabID in self?.selectTab(scope: scope, tabID: tabID) }
         view.onCloseTab = { [weak self] tabID in self?.closeTab(scope: scope, tabID: tabID) }
         view.onRenameTab = { [weak self] tabID, title in self?.renameTab(scope: scope, tabID: tabID, title: title) }
-        view.onNewTab = { [weak self] in self?.host.openNewTerminalTab(scope: scope) }
+        view.onNewTab = { [weak self] in self?.host.presentNewTabSessionPicker(scope: scope) }
         view.onSplitPane = { [weak self] paneID, direction in self?.beginSplit(scope: scope, paneID: paneID, direction: direction) }
         view.onFocusPane = { [weak self] paneID in self?.focusPane(scope: scope, paneID: paneID, moveKeyboardFocus: true) }
         view.onSplitWeightsChanged = { [weak self] splitID, weights in self?.updateSplitWeights(scope: scope, splitID: splitID, weights: weights) }
@@ -68,6 +68,18 @@ import spacesterminalcore
             }
         }
         return nil
+    }
+
+    /// Session ids occupying a pane in any panel — workspace panels and global panel
+    /// windows alike. Source for the session picker's not-open-anywhere filter.
+    func openSessionIDs() -> Set<String> {
+        var ids: Set<String> = []
+        for state in panels.values {
+            for pane in PanelLayoutEngine.allPanes(in: state.layout) {
+                if let sessionID = pane.content.terminalSessionID { ids.insert(sessionID) }
+            }
+        }
+        return ids
     }
 
     /// Ordered open session ids for a workspace across all panels: its workspace panel
@@ -407,15 +419,17 @@ import spacesterminalcore
             guard let sourceWorkspaceID else { return }
             newTerminalWorkspaceID = sourceWorkspaceID
         }
-        host.presentPaneSplitSessionPicker(scope: scope, newTerminalWorkspaceID: newTerminalWorkspaceID) { [weak self] request in
+        host.presentPaneSessionPicker(scope: scope, newTerminalWorkspaceID: newTerminalWorkspaceID) { [weak self] request in
             guard let self, let request else { return }
             self.fillSplit(scope: scope, paneID: paneID, direction: direction, request: request)
         }
     }
 
     private func fillSplit(scope: PanelScope, paneID: String, direction: PaneSplitDirection, request: AppKitController.DeviceTerminalOpenRequest) {
-        // A session already open elsewhere moves into the new split rather than
-        // duplicating (one pane per session). Picking the source pane's own session is a
+        // The picker no longer offers sessions that are already open, so this branch
+        // isn't the normal path here — it only guards the race where a session opens
+        // elsewhere (sidebar click, IPC) while the picker is up, preserving the
+        // one-pane-per-session invariant. Picking the source pane's own session is a
         // no-op: removing it first would leave splitPane with no paneID to split,
         // orphaning the session's pane and its content controller.
         if let existing = placement(forSessionID: request.sessionID) {

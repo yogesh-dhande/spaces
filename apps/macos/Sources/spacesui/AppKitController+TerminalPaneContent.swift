@@ -7,22 +7,38 @@ import workspacecore
 /// private state; the pane content factory itself (`makeTerminalPaneContent`) lives in
 /// `AppKitController.swift` beside the terminal state-model machinery it reuses.
 extension AppKitController {
-    /// Starts a fresh ad hoc terminal session for the panel's workspace and opens it as
-    /// a new tab (the "+" button and the New-terminal shortcut).
-    func openNewTerminalTab(scope: PanelScope) {
-        let workspaceID: String?
+    /// The workspace a fresh terminal session in `scope` belongs to: the panel's own
+    /// workspace for a workspace scope, or the focused pane's workspace (falling back to
+    /// the selected workspace) for a global panel window.
+    private func newTerminalWorkspaceID(for scope: PanelScope) -> String? {
         switch scope {
-        case .workspace(_, let scopeWorkspaceID): workspaceID = scopeWorkspaceID
+        case .workspace(_, let scopeWorkspaceID): return scopeWorkspaceID
         case .globalWindow:
             // A global panel's new tab targets the focused pane's workspace.
-            workspaceID = panelCoordinator.focusedSessionID().flatMap { clientWorkspaceID(forTerminalSession: $0) } ?? selectedWorkspaceID
+            return panelCoordinator.focusedSessionID().flatMap { clientWorkspaceID(forTerminalSession: $0) } ?? selectedWorkspaceID
         }
-        guard let workspaceID else { return }
+    }
+
+    /// Starts a fresh ad hoc terminal session for the panel's workspace and opens it as
+    /// a new tab (the leader `New terminal` shortcut, direct creation with no picker).
+    func openNewTerminalTab(scope: PanelScope) {
+        guard let workspaceID = newTerminalWorkspaceID(for: scope) else { return }
         guard beginNewTerminalSessionCreation(workspaceID: workspaceID) else { return }
         createTerminalSessionForPane(workspaceID: workspaceID) { [weak self] request in
             guard let self else { return }
             defer { self.finishNewTerminalSessionCreation(workspaceID: workspaceID) }
             guard let request else { return }
+            self.panelCoordinator.openSessionInNewTab(request, in: scope)
+        }
+    }
+
+    /// Picker-backed new tab (⌘T and the tab strip's "+"): choose a not-yet-open
+    /// session or create a fresh one; the result lands as a new selected, focused
+    /// tab in `scope`.
+    func presentNewTabSessionPicker(scope: PanelScope) {
+        guard let workspaceID = newTerminalWorkspaceID(for: scope) else { return }
+        presentPaneSessionPicker(scope: scope, newTerminalWorkspaceID: workspaceID) { [weak self] request in
+            guard let self, let request else { return }
             self.panelCoordinator.openSessionInNewTab(request, in: scope)
         }
     }
@@ -174,11 +190,10 @@ extension AppKitController {
         case existingSession(DeviceTerminalOpenRequest)
     }
 
-    /// Presents the command palette in session-picker mode for filling a pane split and
-    /// delivers the resulting open request (creating a fresh session when "New terminal
-    /// session" is chosen), or nil when dismissed.
-    func presentPaneSplitSessionPicker(scope: PanelScope, newTerminalWorkspaceID: String, completion: @escaping (DeviceTerminalOpenRequest?) -> Void)
-    {
+    /// Presents the command palette in session-picker mode for filling a pane split or
+    /// opening a new tab, and delivers the resulting open request (creating a fresh
+    /// session when "New terminal session" is chosen), or nil when dismissed.
+    func presentPaneSessionPicker(scope: PanelScope, newTerminalWorkspaceID: String, completion: @escaping (DeviceTerminalOpenRequest?) -> Void) {
         let presentation = sessionPickerPresentation(scope: scope, newTerminalWorkspaceID: newTerminalWorkspaceID)
         commandPalette.presentSessionPicker(
             scope: scope, newTerminalWorkspaceID: newTerminalWorkspaceID, items: presentation.items, choicesByItemID: presentation.choices
@@ -206,10 +221,35 @@ extension AppKitController {
 
     /// Builds the picker rows: "New terminal session" first, then every terminal
     /// session in scope (the selected workspace's sessions, or all sessions across
-    /// loaded devices for a global panel).
+    /// loaded devices for a global panel), excluding sessions already open in any
+    /// pane. Gathers the live overviews and occupancy set, then defers to the pure
+    /// static core below.
     func sessionPickerPresentation(scope: PanelScope, newTerminalWorkspaceID: String) -> (
         items: [CommandPaletteItem], choices: [String: SessionPickerChoice]
     ) {
+        let scopedOverviews: [SpacesDeviceOverviewPayload]
+        let limitToWorkspaceID: String?
+        switch scope {
+        case .workspace(_, let workspaceID):
+            scopedOverviews = overview(forWorkspaceID: workspaceID).map { [$0] } ?? []
+            limitToWorkspaceID = workspaceID
+        case .globalWindow:
+            scopedOverviews = deviceSections.filter { $0.loadState == .loaded }.compactMap(\.overview)
+            limitToWorkspaceID = nil
+        }
+        return Self.sessionPickerPresentation(
+            newTerminalWorkspaceID: newTerminalWorkspaceID, newTerminalOverview: overview(forWorkspaceID: newTerminalWorkspaceID),
+            scopedOverviews: scopedOverviews, limitToWorkspaceID: limitToWorkspaceID, openSessionIDs: panelCoordinator.openSessionIDs())
+    }
+
+    /// Pure picker-row builder: "New terminal session" first, then every session
+    /// from `scopedOverviews` (already the caller's scope — one workspace's overview,
+    /// or every loaded device's), skipping anything in `openSessionIDs`. `nonisolated
+    /// static` so it's testable without a live `AppKitController`.
+    nonisolated static func sessionPickerPresentation(
+        newTerminalWorkspaceID: String, newTerminalOverview: SpacesDeviceOverviewPayload?,
+        scopedOverviews: [SpacesDeviceOverviewPayload], limitToWorkspaceID: String?, openSessionIDs: Set<String>
+    ) -> (items: [CommandPaletteItem], choices: [String: SessionPickerChoice]) {
         var items: [CommandPaletteItem] = []
         var choices: [String: SessionPickerChoice] = [:]
 
@@ -231,7 +271,6 @@ extension AppKitController {
             choices[id] = choice
         }
 
-        let newTerminalOverview = overview(forWorkspaceID: newTerminalWorkspaceID)
         appendItem(
             id: "picker:new", workspaceID: newTerminalWorkspaceID,
             workspace: newTerminalOverview.flatMap { workspaceSummary(workspaceID: newTerminalWorkspaceID, in: $0) }, label: "New terminal session",
@@ -239,6 +278,7 @@ extension AppKitController {
 
         func appendSessions(from overview: SpacesDeviceOverviewPayload, limitToWorkspaceID: String?) {
             for session in overview.sessions {
+                if openSessionIDs.contains(session.id) { continue }
                 let workspaceID = session.workspaceID
                 if let limitToWorkspaceID, workspaceID != limitToWorkspaceID { continue }
                 guard let request = Self.deviceTerminalOpenRequest(workspaceID: workspaceID, sessionID: session.id, overview: overview) else {
@@ -250,15 +290,7 @@ extension AppKitController {
             }
         }
 
-        switch scope {
-        case .workspace(_, let workspaceID):
-            if let overview = overview(forWorkspaceID: workspaceID) { appendSessions(from: overview, limitToWorkspaceID: workspaceID) }
-        case .globalWindow:
-            for section in deviceSections where section.loadState == .loaded {
-                guard let overview = section.overview else { continue }
-                appendSessions(from: overview, limitToWorkspaceID: nil)
-            }
-        }
+        for overview in scopedOverviews { appendSessions(from: overview, limitToWorkspaceID: limitToWorkspaceID) }
         return (items, choices)
     }
 }
