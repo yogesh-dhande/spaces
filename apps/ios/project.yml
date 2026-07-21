@@ -3,9 +3,18 @@ options:
   createIntermediateGroups: true
   deploymentTarget:
     iOS: "17.0"
+  # Scheme-relative paths (the StoreKit configuration reference) must resolve from the
+  # repo-root Spaces.xcworkspace, which is how the project is opened in Xcode. The XcodeGen
+  # default ("../../") only resolves when the .xcodeproj is opened standalone; with the
+  # workspace open, Xcode shows the StoreKit config in red and silently runs without it.
+  schemePathPrefix: "../apps/ios/"
 packages:
   SpacesPackage:
     path: ../macos
+# The StoreKit configuration must be a project navigator member (not part of any build phase)
+# for Xcode's scheme Options dropdown to list it and resolve the scheme's reference to it.
+fileGroups:
+  - SpacesMobile.storekit
 targets:
   SpacesMobile:
     type: application

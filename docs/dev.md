@@ -390,7 +390,7 @@ xcrun xctrace list devices
 $EDITOR .env
 ```
 
-3. Run the device installer. It builds `SpacesMobile`, installs it on the configured device, and attempts to launch it; if the device is locked, unlock it and tap SpacesMobile or rerun the script.
+3. Run the device installer. It builds `SpacesMobile`, installs it on the configured device, and attempts to launch it; if the device is locked, unlock it and tap SpacesMobile or rerun the script. The script launches with `SPACES_MOBILE_PAYWALL_BYPASS=1` so the Debug build skips the subscription gate; launching the app from the home screen instead shows the real gate, which cannot load a product until the subscription exists in App Store Connect (local StoreKit configuration only applies to Xcode-run sessions). To exercise the paywall UI with the fake product, run the app from Xcode.
 
 ```bash
 scripts/install-ios-device.sh
