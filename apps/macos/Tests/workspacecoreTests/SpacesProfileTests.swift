@@ -273,6 +273,9 @@ final class SpacesProfileTests: XCTestCase {
             XCTAssertTrue(message.contains(repoRoot.path), "Error should name the repo root: \(message)")
             XCTAssertTrue(message.contains("fatal: not a git repository"), "Error should carry the underlying git failure: \(message)")
             XCTAssertTrue(message.contains("~/.spaces"), "Error should say it refuses the installed profile: \(message)")
+            // The app's top-level launch catch prints `localizedDescription`; it must carry the same
+            // diagnostics, not the generic NSError stub for a non-LocalizedError.
+            XCTAssertEqual(error.localizedDescription, message, "localizedDescription should match the full diagnostic message")
         }
     }
 

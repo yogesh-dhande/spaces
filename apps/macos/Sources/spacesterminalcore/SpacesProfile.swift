@@ -297,7 +297,7 @@ public struct SpacesProfile: Sendable, Equatable {
 /// Raised while resolving `SpacesProfile` for a binary that was built inside a Spaces checkout.
 /// Such a binary must never fall back to the installed profile, so a failed git probe surfaces
 /// loudly instead of silently pointing a development build at the installed daemon's database.
-public enum SpacesProfileResolutionError: Error, CustomStringConvertible {
+public enum SpacesProfileResolutionError: Error, CustomStringConvertible, LocalizedError {
     /// The git probe for a repo-built executable threw or returned no development context. Carries the
     /// executable path, the detected repo root, and the underlying git failure (when there was one).
     case repoBuiltGitProbeFailed(executablePath: String, repoRoot: String, underlyingError: (any Error)?)
@@ -311,6 +311,10 @@ public enum SpacesProfileResolutionError: Error, CustomStringConvertible {
                 + "installed daemon's database."
         }
     }
+
+    /// The app's top-level launch catch prints `localizedDescription`; without this conformance that
+    /// renders as a generic NSError stub and drops the diagnostics this error exists to carry.
+    public var errorDescription: String? { description }
 }
 
 public protocol SpacesGitProfileProbe { func resolveDevelopmentContext(repoRootPath: String) throws -> SpacesDevelopmentContext? }
