@@ -286,8 +286,11 @@ enum SpacesDaemonProfileCommandRouting {
     /// run loop; shared services (the request-accepting socket server, device runtime services) start
     /// only after the resume completes, so a client can never observe a half-resumed daemon.
     func start() async throws {
-        try await resumeSessionsFromHandoffIfNeeded()
-        try recoverStaleSessions()
+        let adoptedSessionIDs = try await resumeSessionsFromHandoffIfNeeded()
+        // Reconcile stale runtime rows AFTER handoff adoption so the adopted sessions are exempt: the
+        // sweep repairs any live-state row that claims this pid but was not adopted, which is the backstop
+        // for a predecessor's exited-state write that was dropped across `execv` (see recoverStaleSessions).
+        try recoverStaleSessions(adoptedSessionIDs: adoptedSessionIDs)
         try startSharedServices()
     }
 
@@ -726,8 +729,10 @@ enum SpacesDaemonProfileCommandRouting {
                     // Nil quiesce returns BEFORE its own persistence drain, so `terminateSession` here only
                     // ENQUEUES the exited/detach/payload/durable-end writes. Drain this core before continuing
                     // to `execv`: exec destroys anything still queued, and — because exec keeps the same pid —
-                    // a dropped exited write would leave the `.running` row that `recoverStaleSessions` skips
-                    // forever (the pid is still alive), stranding the session.
+                    // a dropped exited write would leave a `.running` row whose `service_pid` matches the
+                    // successor image. The drain is the primary guard; the successor's post-resume
+                    // stale-session sweep (`recoverStaleSessions`, own-pid-not-adopted case) is the backstop
+                    // that finalizes such a row `.exited` if the drain's bounded retries were still exhausted.
                     _ = await TerminalEngineActor.run { self.terminateSession(id: sessionID) }
                     await core.drainPersistenceForShutdown()
                 }
@@ -830,13 +835,17 @@ enum SpacesDaemonProfileCommandRouting {
     /// Resume prologue for the staged image, run before `recoverStaleSessions()`. Consumes the handoff
     /// table (nil = fresh boot, unchanged startup) and adopts each surviving session. Awaited from the
     /// main actor so replay can pump ticks.
-    private func resumeSessionsFromHandoffIfNeeded() async throws {
-        guard let table = DaemonHandoffStore.consume() else { return }
+    private func resumeSessionsFromHandoffIfNeeded() async throws -> Set<String> {
+        guard let table = DaemonHandoffStore.consume() else { return [] }
         handoffGeneration = table.generation
         lastHandoffSourceVersion = table.sourceVersion
         writeStandardError("spacesd handoff_resume generation=\(table.generation) sessions=\(table.sessions.count)\n")
-        for record in table.sessions { await resumeHandoffSession(record) }
+        var adoptedSessionIDs: Set<String> = []
+        for record in table.sessions {
+            if let adoptedSessionID = await resumeHandoffSession(record) { adoptedSessionIDs.insert(adoptedSessionID) }
+        }
         lastHandoffResumeUptime = ProcessInfo.processInfo.systemUptime
+        return adoptedSessionIDs
     }
 
     /// Adopts a single handoff record. Validates the inherited descriptor is still a PTY master and
@@ -844,7 +853,12 @@ enum SpacesDaemonProfileCommandRouting {
     /// sessions are rebuilt through the normal session-core factory and `resumeFromHandoff`; dead or
     /// unusable ones are finalized `.exited` (via the normal teardown path) so one bad session can
     /// never abort the resume of the rest.
-    private func resumeHandoffSession(_ record: DaemonHandoffSessionRecord) async {
+    ///
+    /// Returns the session ID only when the record was successfully adopted (rebuilt and resumed and
+    /// therefore live under this pid). A failed adoption, a finalized-exited record, or an
+    /// invalid-descriptor record returns nil, so the post-resume stale-session sweep is NOT exempted
+    /// from them — if a failed-adoption teardown's exited write is also dropped, the sweep repairs it.
+    private func resumeHandoffSession(_ record: DaemonHandoffSessionRecord) async -> String? {
         let descriptorValid = DaemonHandoffStore.descriptorLooksLikePTYMaster(record.masterFD)
         // Reap-pass first so an already-exited child is collected before the liveness probe.
         var status: Int32 = 0
@@ -860,6 +874,7 @@ enum SpacesDaemonProfileCommandRouting {
                 // is a main-actor async context, so it uses the async hop rather than `runSynchronously`).
                 let core = try await TerminalEngineActor.run { try self.sessionCore(for: launchConfiguration) }
                 try await core.resumeFromHandoff(record)
+                return record.sessionID
             } catch {
                 writeStandardError("spacesd handoff_resume_session_failed session=\(record.sessionID) error=\(error)\n")
                 // `sessionCore(for:)` already inserted the core into `sessionCores`, and the local `core`
@@ -878,11 +893,15 @@ enum SpacesDaemonProfileCommandRouting {
                 // failure) leaks that one descriptor, which is preferable to the reuse hazard and there is no
                 // cross-platform signal here to distinguish the two cases without reaching into the engine core.
                 _ = await TerminalEngineActor.run { self.terminateSession(id: record.sessionID) }
+                return nil
             }
         case .finalizeExited:
             close(record.masterFD)
             _ = await TerminalEngineActor.run { self.terminateSession(id: record.sessionID) }
-        case .discardInvalidDescriptor: _ = await TerminalEngineActor.run { self.terminateSession(id: record.sessionID) }
+            return nil
+        case .discardInvalidDescriptor:
+            _ = await TerminalEngineActor.run { self.terminateSession(id: record.sessionID) }
+            return nil
         }
     }
 
@@ -2229,24 +2248,18 @@ enum SpacesDaemonProfileCommandRouting {
         }
     }
 
-    private func recoverStaleSessions() throws {
-        for launchConfiguration in try TerminalSessionPersistence.listKnownSessions() {
-            let paths = try TerminalSessionPaths.forSession(id: launchConfiguration.sessionID)
-            guard let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths) else { continue }
-            guard runtimeState.state == .starting || runtimeState.state == .running else { continue }
-            guard !Self.isProcessAlive(pid: Int(runtimeState.servicePID)) else { continue }
-
-            let now = ISO8601DateFormatter().string(from: Date())
-            let failedState = TerminalSessionRuntimeState(
-                sessionID: launchConfiguration.sessionID, backend: launchConfiguration.backend, servicePID: getpid(), childPID: runtimeState.childPID,
-                state: .failed, updatedAt: now, exitedAt: now, title: runtimeState.title ?? launchConfiguration.title,
-                workingDirectory: runtimeState.workingDirectory ?? launchConfiguration.workingDirectory, columns: runtimeState.columns,
-                rows: runtimeState.rows)
-            try? TerminalSessionPersistence.writeRuntimeState(failedState, paths: paths)
-            try? TerminalSessionPersistence.detachActiveClients(paths: paths, detachedAt: now)
-            try? FileManager.default.removeItem(atPath: paths.controlSocketPath)
-            try? FileManager.default.removeItem(atPath: paths.subscriptionSocketPath)
-        }
+    /// Single startup repair chokepoint for durable runtime rows a predecessor daemon image (or a
+    /// crashed prior process) left in a live state. Runs once, AFTER handoff adoption, so the sessions
+    /// this image adopted (`adoptedSessionIDs`) are exempt. The full repair matrix — dead pid → repair
+    /// `.failed`; own pid not adopted → repair `.exited`; own pid adopted → live; other live pid → leave
+    /// — lives in `TerminalSessionStaleRecovery.reconcile`, keyed on the injected `getpid()` and the
+    /// daemon's own `isProcessAlive` probe. The own-pid-not-adopted case is what closes the
+    /// lost-write-across-`execv` class (`execv` preserves the pid, so the plain dead-pid check can never
+    /// fire for a stranded row); a plain shutdown needs nothing more, since its successor runs under a
+    /// different pid and its rows fall to the dead-pid case.
+    private func recoverStaleSessions(adoptedSessionIDs: Set<String> = []) throws {
+        try TerminalSessionStaleRecovery.reconcile(
+            ownPID: getpid(), adoptedSessionIDs: adoptedSessionIDs, isProcessAlive: { Self.isProcessAlive(pid: Int($0)) })
     }
 
     private nonisolated static func isProcessAlive(pid: Int) -> Bool {
