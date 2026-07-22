@@ -685,9 +685,7 @@
                 do { transcript = try await transcriptProvider(maxBytes) } catch {
                     // A transport failure (timeout, daemon restarting, remote device offline) is
                     // transient: return to idle so the next scroll gesture retries the fetch.
-                    if generation == self.endedScrollbackGeneration, case .loading = self.endedScrollbackState {
-                        self.endedScrollbackState = .idle
-                    }
+                    if generation == self.endedScrollbackGeneration, case .loading = self.endedScrollbackState { self.endedScrollbackState = .idle }
                     return
                 }
                 // A relaunch (session went interactive again) discards the loading state mid-fetch,
@@ -749,14 +747,12 @@
             case .ready(let model):
                 endedScrollbackRevision &+= 1
                 let frame = GhosttyRenderFrame(
-                    sessionRevision: endedScrollbackRevision, ownerEpoch: latestState?.renderOwnerEpoch ?? 0,
-                    snapshot: model.currentSnapshot())
+                    sessionRevision: endedScrollbackRevision, ownerEpoch: latestState?.renderOwnerEpoch ?? 0, snapshot: model.currentSnapshot())
                 terminalView.update(frame: frame, renderStateKey: currentRenderStateKey())
             case .loading:
                 // No replay model yet — show the daemon's final frame until the load completes.
                 terminalView.update(frame: currentRenderFrameForRenderUpdate(), renderStateKey: currentRenderStateKey())
-            case .idle, .unavailable:
-                break
+            case .idle, .unavailable: break
             }
         }
 
@@ -778,9 +774,7 @@
         /// `TerminalSessionRuntimeState.runIdentity` format so the armed replay identity matches the one
         /// the transcript response carries. `nil` when there is no runtime state yet. Used to detect an
         /// ended->ended transition to a different run and to validate transcript responses.
-        private func currentEndedRunIdentity() -> String? {
-            latestState?.runtimeState?.runIdentity
-        }
+        private func currentEndedRunIdentity() -> String? { latestState?.runtimeState?.runIdentity }
 
         private func enqueueRemoteScrollBatch(_ batch: TerminalScrollCoalescer.Batch, onFinished: @escaping TerminalScrollCoalescer.FinishHandler) {
             guard isInteractiveRuntimeStateForControl(), let client = attachedClient, attachedMode == .owner else {

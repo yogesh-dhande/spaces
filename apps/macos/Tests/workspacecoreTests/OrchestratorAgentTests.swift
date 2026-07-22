@@ -138,8 +138,7 @@ extension OrchestratorTests {
         WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter { try recorder.submit($0, $1) }
         defer { WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter(nil) }
 
-        let orchestrator = WorkspaceOrchestrator(
-            store: store, builtInTerminalWindowCloser: { _ in }, builtInTerminalSessionTerminator: { _ in })
+        let orchestrator = WorkspaceOrchestrator(store: store, builtInTerminalWindowCloser: { _ in }, builtInTerminalSessionTerminator: { _ in })
 
         let child = try orchestrator.registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "child-session", status: .spinning)
@@ -190,8 +189,7 @@ extension OrchestratorTests {
         defer { WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter(nil) }
 
         let orchestrator = WorkspaceOrchestrator(
-            store: store, builtInTerminalWindowOpener: { _, _ in }, builtInTerminalWindowCloser: { _ in },
-            builtInTerminalSessionTerminator: { _ in },
+            store: store, builtInTerminalWindowOpener: { _, _ in }, builtInTerminalWindowCloser: { _ in }, builtInTerminalSessionTerminator: { _ in },
             builtInTerminalSessionLauncher: { configuration in
                 TerminalServiceSessionSummary(
                     id: configuration.sessionID, title: configuration.title, workingDirectory: configuration.workingDirectory,
@@ -784,8 +782,7 @@ extension OrchestratorTests {
             XCTAssertTrue(try orchestrator.reconcileTerminalForegroundAgentClassifications())
 
             XCTAssertEqual(
-                try store.agentWindow(id: promoted.id)?.status, .exited,
-                "A signaled detection row is recorded `.exited`, not silently deleted.")
+                try store.agentWindow(id: promoted.id)?.status, .exited, "A signaled detection row is recorded `.exited`, not silently deleted.")
             XCTAssertEqual(recorder.delivered.map(\.sessionID), [subscriberSessionID])
             XCTAssertTrue(
                 recorder.delivered.first?.line.contains("is exited") == true,
@@ -1739,7 +1736,8 @@ extension OrchestratorTests {
 
         // Failing-first: the store's bulk `agent_sessions` delete throws under RESTRICT while the watched row
         // still holds its inbound edge. The transaction rolls back, so the project remains intact.
-        XCTAssertThrowsError(try store.deleteProject(id: project.id), "the bulk delete must fail loudly while a watched agent retains an inbound edge")
+        XCTAssertThrowsError(
+            try store.deleteProject(id: project.id), "the bulk delete must fail loudly while a watched agent retains an inbound edge")
         XCTAssertNotNil(try store.project(id: project.id), "the failed bulk delete rolled back, leaving the project intact")
 
         try orchestrator.removeProject(dir: projectDir.path)

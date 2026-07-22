@@ -576,9 +576,7 @@
 
         /// Enqueue a durable write with no coalescing (unique mutations: expiry detaches, ownership transfer,
         /// the terminated payload). Runs on the serial persistence queue in enqueue (FIFO) order.
-        private func enqueuePersistenceWrite(_ write: @escaping @Sendable () -> Void) {
-            persistence.enqueueWrite(write)
-        }
+        private func enqueuePersistenceWrite(_ write: @escaping @Sendable () -> Void) { persistence.enqueueWrite(write) }
 
         /// Enqueue a latest-wins coalesced durable write for `key`: only the newest enqueue runs; a burst
         /// collapses to one write of the newest value. FIFO order across keys.
@@ -590,15 +588,11 @@
         /// persistence closures only ever hop BACK to the engine asynchronously (`Task { @TerminalEngineActor }`),
         /// never with a synchronous wait, so a blocked engine cannot cycle with the queue. Used only for the
         /// handoff/termination fences and test determinism — never on the per-keystroke path.
-        private func drainPersistenceQueue() {
-            persistence.drain()
-        }
+        private func drainPersistenceQueue() { persistence.drain() }
 
         /// Async drain for the handoff quiesce path: suspends (rather than blocking the engine) until the
         /// persistence queue is empty, so every mirror write is durable before the caller `execv`s.
-        private func drainPersistenceQueueAsync() async {
-            await persistence.drainAsync()
-        }
+        private func drainPersistenceQueueAsync() async { await persistence.drainAsync() }
 
         /// Awaitable drain used by daemon shutdown and the nil-quiesce handoff branch after `terminate()`.
         /// `terminate()` only ENQUEUES the exited runtime-state write, detach-all, terminated payload, and the
@@ -606,9 +600,7 @@
         /// `execv` both destroy anything still queued. SpacesdMain awaits this after terminating a core so
         /// those writes commit first — otherwise a session's durable runtime row stays stuck at `.running`
         /// (and, across `execv`, `recoverStaleSessions` keeps skipping it because the pid is unchanged).
-        public func drainPersistenceForShutdown() async {
-            await drainPersistenceQueueAsync()
-        }
+        public func drainPersistenceForShutdown() async { await drainPersistenceQueueAsync() }
 
         /// Enqueues the durable runtime-state write off the engine. Coalesced latest-wins, so a burst of
         /// persists (or an exited state superseding a still-queued running state) collapses to the newest.
@@ -665,8 +657,8 @@
             guard var snapshot = cachedAttachmentSnapshot, let index = snapshot.clients.firstIndex(where: { $0.id == clientID }) else { return }
             let client = snapshot.clients[index]
             snapshot.clients[index] = TerminalClient(
-                id: client.id, kind: client.kind, identity: client.identity, connectedAt: client.connectedAt,
-                disconnectedAt: client.disconnectedAt, leaseRefreshedAt: leaseRefreshedAt)
+                id: client.id, kind: client.kind, identity: client.identity, connectedAt: client.connectedAt, disconnectedAt: client.disconnectedAt,
+                leaseRefreshedAt: leaseRefreshedAt)
             cachedAttachmentSnapshot = snapshot
         }
 
@@ -1202,9 +1194,7 @@
             guard isRuntimeInteractiveForControl() else {
                 return TerminalControlResponse(ok: false, message: "Terminal session is not running.", errorCode: .sessionNotRunning)
             }
-            if touchClient, let clientID = request.clientID {
-                touchClientLease(clientID)
-            }
+            if touchClient, let clientID = request.clientID { touchClientLease(clientID) }
             if let rejection = ownerRequestRejection(for: request, commandName: "clear", startedAt: startedAt) { return rejection }
             let cleared = rendererHostStorage.clearScreenAndScrollback()
             if cleared { broadcastCurrentState(reason: TerminalRemoteSessionStateReason.clearScreen) }
@@ -1406,8 +1396,7 @@
             // Keep only fresh heartbeats: an entry older than the cutoff can no longer protect a client and
             // would otherwise accumulate for the daemon's lifetime.
             latestRemoteClientHeartbeat = latestRemoteClientHeartbeat.filter { $0.value >= cutoff }
-            guard let databaseStaleClients = try? TerminalSessionPersistence.staleRemoteClients(paths: paths, now: now),
-                !databaseStaleClients.isEmpty
+            guard let databaseStaleClients = try? TerminalSessionPersistence.staleRemoteClients(paths: paths, now: now), !databaseStaleClients.isEmpty
             else {
                 expiredRemoteClientIDs.removeAll(keepingCapacity: true)
                 return []
@@ -1416,7 +1405,8 @@
             // The `lease_refreshed_at` each stale row currently carries, keyed by client id. Carried into the
             // queued `expireClients` transaction so its per-client detach is a compare-and-set: a client whose
             // lease moved between this decision and the commit is skipped rather than re-disconnected.
-            let observedLeaseByClientID = Dictionary(databaseStaleClients.map { ($0.clientID, $0.leaseRefreshedAt) }, uniquingKeysWith: { first, _ in first })
+            let observedLeaseByClientID = Dictionary(
+                databaseStaleClients.map { ($0.clientID, $0.leaseRefreshedAt) }, uniquingKeysWith: { first, _ in first })
             // A client that reconnected (fresh DB lease) or whose durable detach has committed drops out of
             // the DB candidate set; forget it so a later genuine lapse can be expired again.
             expiredRemoteClientIDs.formIntersection(databaseStaleClientIDs)
@@ -1488,7 +1478,8 @@
                     }
                 } catch {
                     let failureDescription = String(describing: error)
-                    Task { @TerminalEngineActor in self?.rearmStaleClientExpiryAfterWriteFailure(clientIDs: staleClientIDs, error: failureDescription) }
+                    Task { @TerminalEngineActor in self?.rearmStaleClientExpiryAfterWriteFailure(clientIDs: staleClientIDs, error: failureDescription)
+                    }
                 }
             }
             // Mirror the atomic write into the in-memory cache BEFORE broadcasting, so the payload advertises
@@ -1866,8 +1857,8 @@
                         attachedAt: existing.attachedAt, detachedAt: nil)
                 } else {
                     attachments.append(
-                        TerminalAttachment(
-                            sessionID: launchConfiguration.sessionID, clientID: newOwnerClientID, mode: .owner, attachedAt: detachedAt))
+                        TerminalAttachment(sessionID: launchConfiguration.sessionID, clientID: newOwnerClientID, mode: .owner, attachedAt: detachedAt)
+                    )
                 }
             }
             cachedAttachmentSnapshot = TerminalSessionAttachmentSnapshot(clients: clients, attachments: attachments)

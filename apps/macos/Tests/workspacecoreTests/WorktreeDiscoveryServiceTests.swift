@@ -47,8 +47,7 @@ import Testing
         let blockingDelay: TimeInterval = 2
         let (entered, enteredContinuation) = AsyncStream<Void>.makeStream()
         let service = WorktreeDiscoveryService(
-            databasePath: databasePath,
-            watcherFactory: { _, _, _ in BlockingStartWatcher(delay: blockingDelay) { enteredContinuation.yield() } })
+            databasePath: databasePath, watcherFactory: { _, _, _ in BlockingStartWatcher(delay: blockingDelay) { enteredContinuation.yield() } })
 
         service.start()
         defer { service.stop() }
@@ -61,9 +60,7 @@ import Testing
         // free: several round-trips through its executor complete in a fraction of the
         // blocking delay.
         let clock = ContinuousClock()
-        let elapsed = await clock.measure {
-            for _ in 0..<5 { await Task { @MainActor in }.value }
-        }
+        let elapsed = await clock.measure { for _ in 0..<5 { await Task { @MainActor in }.value } }
         #expect(elapsed < .milliseconds(500))
     }
 
@@ -165,8 +162,7 @@ import Testing
 
         let counter = WatcherCounter()
         let service = WorktreeDiscoveryService(
-            databasePath: databasePath,
-            watcherFactory: { _, _, _ in CountingWatcher(counter: counter, startDelay: 0.05) })
+            databasePath: databasePath, watcherFactory: { _, _, _ in CountingWatcher(counter: counter, startDelay: 0.05) })
 
         service.start()
         defer { service.stop() }

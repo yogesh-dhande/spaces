@@ -62,9 +62,7 @@
             XCTAssertTrue(TerminalEngineActor.runSynchronously { condition() }, "waitAsync timed out", file: file, line: line)
         }
 
-        private static func occurrences(of needle: String, in haystack: String) -> Int {
-            haystack.components(separatedBy: needle).count - 1
-        }
+        private static func occurrences(of needle: String, in haystack: String) -> Int { haystack.components(separatedBy: needle).count - 1 }
 
         func testRapidSubmitSendsReachChildAsSeparateSubmissions() async throws {
             let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)

@@ -39,10 +39,8 @@ struct SpacesMobileBrowserTunnelDialer: BrowserTunnelDialing {
     private let connectTimeout: Duration
     private let responseTimeout: Duration
 
-    init(
-        installationID: String, deviceName: String = "iOS Device", connectTimeout: Duration = .seconds(10),
-        responseTimeout: Duration = .seconds(10)
-    ) {
+    init(installationID: String, deviceName: String = "iOS Device", connectTimeout: Duration = .seconds(10), responseTimeout: Duration = .seconds(10))
+    {
         self.installationID = installationID
         self.deviceName = deviceName
         self.connectTimeout = connectTimeout

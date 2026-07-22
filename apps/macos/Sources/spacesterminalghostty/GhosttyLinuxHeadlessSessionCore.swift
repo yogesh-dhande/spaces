@@ -255,8 +255,8 @@
                 workingDirectory: runtimeState.workingDirectory ?? launchConfiguration.workingDirectory, backend: launchConfiguration.backend,
                 lifetimePolicy: launchConfiguration.lifetimePolicy, state: runtimeState.state, servicePID: runtimeState.servicePID,
                 childPID: runtimeState.childPID, controlSocketPath: paths.controlSocketPath, outputPath: paths.outputPath,
-                launchConfiguration: launchConfiguration, runtimeState: runtimeState,
-                attachmentSnapshot: TerminalSessionAttachmentSnapshot(), hasFinalRender: false)
+                launchConfiguration: launchConfiguration, runtimeState: runtimeState, attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
+                hasFinalRender: false)
         }
 
         private func handleSessionClosed() {
@@ -271,9 +271,7 @@
         /// still queued. SpacesdMain awaits this after terminating a core so those writes commit first —
         /// otherwise a session's durable runtime row stays stuck at `.running` (and, across `execv`,
         /// `recoverStaleSessions` keeps skipping it because the pid is unchanged).
-        public func drainPersistenceForShutdown() async {
-            await persistence.drainAsync()
-        }
+        public func drainPersistenceForShutdown() async { await persistence.drainAsync() }
 
         // MARK: - Exec-in-place handoff
 
@@ -592,8 +590,7 @@
             }
             do {
                 guard try TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: nowISO8601()) else {
-                    return TerminalControlResponse(
-                        ok: false, message: "Terminal client is no longer attached.", errorCode: .notFound)
+                    return TerminalControlResponse(ok: false, message: "Terminal client is no longer attached.", errorCode: .notFound)
                 }
                 return TerminalControlResponse(ok: true, message: "Refreshed terminal client lease.")
             } catch { return TerminalControlResponse(ok: false, message: String(describing: error)) }
@@ -896,9 +893,7 @@
             forceNextBroadcastFullRenderUpdate = true
         }
 
-        private func writeRuntimeState(state: TerminalSessionState) {
-            persistRuntimeState(makeRuntimeStateSnapshot(state: state))
-        }
+        private func writeRuntimeState(state: TerminalSessionState) { persistRuntimeState(makeRuntimeStateSnapshot(state: state)) }
 
         /// Builds a runtime-state snapshot for `state`, stamping `updatedAt`/`exitedAt` once per call.
         /// Extracted so an exit can be captured a single time and reused for both the persisted runtime
@@ -937,9 +932,7 @@
             // queue — survives this core's release (e.g. a session-close that drops the core after termination).
             persistence.enqueueRuntimeStateWrite(
                 state, at: Date(), paths: paths,
-                onPersisted: { [weak self] persistedState, _ in
-                    Task { @TerminalEngineActor in self?.markRuntimeStatePersisted(persistedState) }
-                })
+                onPersisted: { [weak self] persistedState, _ in Task { @TerminalEngineActor in self?.markRuntimeStatePersisted(persistedState) } })
         }
 
         /// Advances the durable persist marker after a successful off-engine write and, when the persisted

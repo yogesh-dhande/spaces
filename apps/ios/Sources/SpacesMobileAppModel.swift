@@ -434,6 +434,10 @@ private enum SpacesMobileMutationTimeoutRecovery {
     var settings: SpacesMobileConnectionSettings
     var pairedDevices: [SpacesMobilePairedDeviceRecord]
     var activeDeviceID: String?
+    /// Whether Demo Mode is on. While on, the device list shows only the synthetic Demo Mac and the
+    /// active client is backed by the in-memory `DemoDeviceBackend`; the real paired devices are parked
+    /// in memory and left untouched on disk. Persisted across launches via `DemoModeStore`.
+    private(set) var isDemoModeEnabled: Bool
     var overview: SpacesDeviceOverviewPayload?
     /// Wire-protocol status of the active device, read on each successful refresh. `nil` until the
     /// first handshake. Drives the compatibility banner and blocks incompatible interaction.
@@ -463,6 +467,17 @@ private enum SpacesMobileMutationTimeoutRecovery {
     var dismissedAlertIDs: Set<String> = []
     @ObservationIgnored private var bridgeClient: SpacesDeviceAPIClient
     @ObservationIgnored private var commandChannel: SpacesDeviceAPICommandChannel
+    /// The real device-store state (records, active id, settings) parked in memory when Demo Mode is
+    /// enabled, so turning it off restores exactly what was on screen. `nil` when Demo Mode is off, or
+    /// when the app launched straight into Demo Mode — in that case turning it off reloads the real
+    /// state from `SpacesMobileDeviceStore` instead. Never written to disk.
+    @ObservationIgnored private var parkedRealDeviceState: SpacesMobileDeviceStoreState?
+    /// Shown when a device-management action is attempted while Demo Mode is on.
+    private static let demoModeGuardNotice = "Turn off Demo Mode to pair or switch devices."
+    /// The client bound to the active device, exposed so screens that open their own request/stream
+    /// paths (e.g. `TerminalViewerModel`) reuse the same backend instead of building a parallel client
+    /// from `settings`. Reflects the current device after a switch.
+    var deviceClient: SpacesDeviceAPIClient { bridgeClient }
     /// Monotonic identity of the connection the published overview belongs to. Bumped whenever the
     /// active connection changes (device switch or removal, new settings, auth reset) so an overview
     /// fetch begun against the previous connection can neither publish its stale payload nor satisfy
@@ -493,20 +508,39 @@ private enum SpacesMobileMutationTimeoutRecovery {
         // that call does a blocking reverse-DNS lookup and previously ran on this init's main thread,
         // tripping the launch watchdog on every fresh install.
         let deviceName = UIDevice.current.name
+        browserProxy = SpacesMobileBrowserProxy(installationID: deviceState.settings.installationID, deviceName: deviceName)
+        // The real settings are persisted regardless of Demo Mode; the demo device is never written to
+        // disk, so a launch that lands in Demo Mode still keeps the real records and settings intact.
+        SpacesMobileSettingsStore.save(deviceState.settings)
+
+        // When the persisted flag is on, construct the demo state directly and leave the real records
+        // parked on disk (parkedRealDeviceState stays nil, so disabling reloads them from the store).
+        if DemoModeStore.load(), let backend = try? DemoDeviceBackend.makeDefault() {
+            let demoSettings = SpacesMobileDemoDevice.settings(installationID: deviceState.settings.installationID)
+            let bridgeClient = SpacesDeviceAPIClient(settings: demoSettings, deviceName: deviceName, backend: backend)
+            settings = demoSettings
+            pairedDevices = [SpacesMobileDemoDevice.record()]
+            activeDeviceID = SpacesMobileDemoDevice.id
+            isDemoModeEnabled = true
+            self.bridgeClient = bridgeClient
+            commandChannel = bridgeClient.makeCommandChannel()
+            return
+        }
+
         let bridgeClient = SpacesDeviceAPIClient(settings: deviceState.settings, deviceName: deviceName)
         settings = deviceState.settings
         pairedDevices = deviceState.devices
         activeDeviceID = deviceState.activeDeviceID
+        isDemoModeEnabled = false
         self.bridgeClient = bridgeClient
         commandChannel = bridgeClient.makeCommandChannel()
-        browserProxy = SpacesMobileBrowserProxy(installationID: deviceState.settings.installationID, deviceName: deviceName)
-        SpacesMobileSettingsStore.save(deviceState.settings)
     }
 
     init(settings: SpacesMobileConnectionSettings, bridgeClient: SpacesDeviceAPIClient, browserProxy: SpacesMobileBrowserProxy? = nil) {
         self.settings = settings
         pairedDevices = []
         activeDeviceID = nil
+        isDemoModeEnabled = false
         self.bridgeClient = bridgeClient
         commandChannel = bridgeClient.makeCommandChannel()
         self.browserProxy = browserProxy ?? SpacesMobileBrowserProxy(installationID: settings.installationID)
@@ -780,6 +814,10 @@ private enum SpacesMobileMutationTimeoutRecovery {
     }
 
     func applyConnectionSettings(_ settings: SpacesMobileConnectionSettings, deviceName: String? = nil) {
+        guard !isDemoModeEnabled else {
+            connectionNotice = Self.demoModeGuardNotice
+            return
+        }
         let previousCommandChannel = commandChannel
         let deviceState =
             settings.isPaired
@@ -802,6 +840,10 @@ private enum SpacesMobileMutationTimeoutRecovery {
     }
 
     func selectDevice(id: String) {
+        guard !isDemoModeEnabled else {
+            connectionNotice = Self.demoModeGuardNotice
+            return
+        }
         guard let deviceState = SpacesMobileDeviceStore.select(deviceID: id, installationID: settings.installationID) else { return }
         let previousCommandChannel = commandChannel
         settings = deviceState.settings
@@ -821,6 +863,15 @@ private enum SpacesMobileMutationTimeoutRecovery {
     }
 
     func removeDevice(id: String) {
+        // The demo device is not a stored device; "removing" it means leaving Demo Mode.
+        if id == SpacesMobileDemoDevice.id {
+            setDemoMode(false)
+            return
+        }
+        guard !isDemoModeEnabled else {
+            connectionNotice = Self.demoModeGuardNotice
+            return
+        }
         let previousCommandChannel = commandChannel
         let deviceState = SpacesMobileDeviceStore.remove(deviceID: id, fallbackSettings: settings)
         settings = deviceState.settings
@@ -842,8 +893,74 @@ private enum SpacesMobileMutationTimeoutRecovery {
     }
 
     func renameDevice(id: String, name: String) {
+        // The rename path reloads the on-disk device list, which would replace the synthetic
+        // Demo Mac with the parked real records mid-demo.
+        if isDemoModeEnabled {
+            connectionNotice = Self.demoModeGuardNotice
+            return
+        }
         let deviceState = SpacesMobileDeviceStore.rename(deviceID: id, name: name, fallbackSettings: settings)
         pairedDevices = deviceState.devices
+    }
+
+    /// Turns Demo Mode on or off, swapping the active client the same way a device switch does (close and
+    /// rebuild the client and command channel, bump `overviewIdentity`, and clear the published overview,
+    /// status, and notices). Turning it on parks the real device-store state in memory and swaps in the
+    /// synthetic Demo Mac backed by `DemoDeviceBackend`, writing nothing to the device store or Keychain;
+    /// turning it off restores the parked state (or reloads it from the store when the app launched
+    /// straight into Demo Mode). The enabled flag itself is persisted via `DemoModeStore`.
+    func setDemoMode(_ enabled: Bool) {
+        guard enabled != isDemoModeEnabled else { return }
+        if enabled { enableDemoMode() } else { disableDemoMode() }
+    }
+
+    private func enableDemoMode() {
+        let backend: DemoDeviceBackend
+        do { backend = try DemoDeviceBackend.makeDefault() } catch {
+            // The recording could not load; leave the real connection exactly as it was.
+            errorMessage = error.localizedDescription
+            return
+        }
+        parkedRealDeviceState = SpacesMobileDeviceStoreState(devices: pairedDevices, activeDeviceID: activeDeviceID, settings: settings)
+        let previousCommandChannel = commandChannel
+        let demoSettings = SpacesMobileDemoDevice.settings(installationID: settings.installationID)
+        settings = demoSettings
+        pairedDevices = [SpacesMobileDemoDevice.record()]
+        activeDeviceID = SpacesMobileDemoDevice.id
+        isDemoModeEnabled = true
+        bridgeClient = SpacesDeviceAPIClient(settings: demoSettings, deviceName: UIDevice.current.name, backend: backend)
+        commandChannel = bridgeClient.makeCommandChannel()
+        overviewIdentity += 1
+        DemoModeStore.save(true)
+        clearActiveConnectionState()
+        Task { await previousCommandChannel.close() }
+    }
+
+    private func disableDemoMode() {
+        let restored = parkedRealDeviceState ?? SpacesMobileDeviceStore.load(fallbackSettings: SpacesMobileSettingsStore.load())
+        parkedRealDeviceState = nil
+        let previousCommandChannel = commandChannel
+        settings = restored.settings
+        pairedDevices = restored.devices
+        activeDeviceID = restored.activeDeviceID
+        isDemoModeEnabled = false
+        bridgeClient = SpacesDeviceAPIClient(settings: restored.settings, deviceName: UIDevice.current.name)
+        commandChannel = bridgeClient.makeCommandChannel()
+        overviewIdentity += 1
+        DemoModeStore.save(false)
+        clearActiveConnectionState()
+        Task { await previousCommandChannel.close() }
+    }
+
+    /// Clears every piece of published state tied to the previous active connection, matching what a
+    /// device switch resets so no stale overview, status, or notice bleeds across the swap.
+    private func clearActiveConnectionState() {
+        overview = nil
+        daemonStatus = nil
+        compatibility = nil
+        workspaceCreateOptions = nil
+        connectionNotice = nil
+        errorMessage = nil
     }
 
     func dismissError() { errorMessage = nil }
@@ -866,9 +983,20 @@ private enum SpacesMobileMutationTimeoutRecovery {
         Task { await previousCommandChannel.close() }
     }
 
-    func preparePairingLink(_ url: URL) {
+    func preparePairingLink(_ url: URL) { stagePairingLink { try SpacesDevicePairingLink.parse(url) } }
+
+    /// A QR payload scanned from the Spaces tab's not-paired empty state rides the same
+    /// confirm-and-pair flow as a `spaces://pair` deep link: stage the link and raise the
+    /// connection-settings surface, which presents the pairing confirmation.
+    func prepareScannedPairingLink(_ payload: String) { stagePairingLink { try SpacesDevicePairingLink.parse(payload) } }
+
+    private func stagePairingLink(_ parse: () throws -> SpacesDevicePairingLink) {
+        guard !isDemoModeEnabled else {
+            connectionNotice = Self.demoModeGuardNotice
+            return
+        }
         do {
-            pendingPairingLink = try SpacesDevicePairingLink.parse(url)
+            pendingPairingLink = try parse()
             connectionNotice = nil
             errorMessage = nil
             isShowingConnectionSettings = true
@@ -908,13 +1036,18 @@ private enum SpacesMobileMutationTimeoutRecovery {
         guard !isMutating else { return }
         isMutating = true
         defer { isMutating = false }
+        let identity = overviewIdentity
         do {
             let response = try await bridgeClient.createWorkspace(
                 projectID: projectID, branch: branch, baseBranch: baseBranch, directoryName: directoryName,
                 allowExistingBranchReuse: allowExistingBranchReuse, commandChannel: commandChannel)
-            await applyMutationResponse(response)
+            await applyMutationResponse(response, identity: identity)
+            guard identity == overviewIdentity else { return }
             isShowingWorkspaceCreateSheet = false
-        } catch { handleBridgeError(error) }
+        } catch {
+            guard identity == overviewIdentity else { return }
+            handleBridgeError(error)
+        }
     }
 
     func openWorkspaceTerminal(workspaceID: String) async -> SpacesDeviceTerminalSessionSummary? {
@@ -952,6 +1085,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         guard !isMutating else { return }
         isMutating = true
         defer { isMutating = false }
+        let identity = overviewIdentity
         do {
             let response: SpacesDeviceAPIResponse
             switch row.source {
@@ -969,8 +1103,11 @@ private enum SpacesMobileMutationTimeoutRecovery {
                     workspaceID: terminal.workspaceID, sessionID: sessionID, commandChannel: commandChannel)
             case .browserSession: return
             }
-            await applyMutationResponse(response)
-        } catch { handleBridgeError(error) }
+            await applyMutationResponse(response, identity: identity)
+        } catch {
+            guard identity == overviewIdentity else { return }
+            handleBridgeError(error)
+        }
     }
 
     func restart(row: SpacesMobileWorkspaceRuntimeRow) async -> SpacesDeviceTerminalSessionSummary? {
@@ -1025,7 +1162,11 @@ private enum SpacesMobileMutationTimeoutRecovery {
         guard !isMutating else { return }
         isMutating = true
         defer { isMutating = false }
-        do { await applyMutationResponse(try await operation()) } catch { handleBridgeError(error) }
+        let identity = overviewIdentity
+        do { await applyMutationResponse(try await operation(), identity: identity) } catch {
+            guard identity == overviewIdentity else { return }
+            handleBridgeError(error)
+        }
     }
 
     // MARK: - Renaming runtime rows
@@ -1047,8 +1188,12 @@ private enum SpacesMobileMutationTimeoutRecovery {
 
     /// Whether the row has a name the daemon can rename. A process or coding agent running without a
     /// configured entry has no name to edit — its name comes from the running process — and a terminal row
-    /// whose session has ended has no session to rename, so those rows offer no Rename.
-    func canRename(row: SpacesMobileWorkspaceRuntimeRow) -> Bool { renameTarget(for: row) != nil }
+    /// whose session has ended has no session to rename, so those rows offer no Rename. Demo Mode's backend
+    /// rejects config edits, so no row is renamable while it is on.
+    func canRename(row: SpacesMobileWorkspaceRuntimeRow) -> Bool {
+        guard !isDemoModeEnabled else { return false }
+        return renameTarget(for: row) != nil
+    }
 
     /// Renames a runtime row. Renaming a configured process, coding agent, or browser session edits its
     /// workspace-config entry, so a running process keeps its current name until it is restarted — the same
@@ -1234,30 +1379,40 @@ private enum SpacesMobileMutationTimeoutRecovery {
         guard !isMutating else { return nil }
         isMutating = true
         defer { isMutating = false }
+        let identity = overviewIdentity
         do {
             let response = try await operation()
-            await applyMutationResponse(response)
+            await applyMutationResponse(response, identity: identity)
+            // The connection changed while the mutation was in flight: the published overview belongs to
+            // the previous backend, so resolving a session from it would hand back the wrong device's row.
+            guard identity == overviewIdentity else { return nil }
             if let sessionID = response.sessionID { return overview?.sessions.first(where: { $0.id == sessionID }) }
             if let fallbackRowID { return refreshedSession(forRowID: fallbackRowID) }
             return nil
         } catch {
+            guard identity == overviewIdentity else { return nil }
             if let fallbackRowID, isMutationTimeout(error),
-                let session = await reconciledSessionAfterMutationTimeout(rowID: fallbackRowID, timeoutRecovery: timeoutRecovery)
+                let session = await reconciledSessionAfterMutationTimeout(rowID: fallbackRowID, timeoutRecovery: timeoutRecovery, identity: identity)
             {
                 return session
             }
+            guard identity == overviewIdentity else { return nil }
             handleBridgeError(error)
             return nil
         }
     }
 
-    private func applyMutationResponse(_ response: SpacesDeviceAPIResponse) async {
-        if let overview = response.overview {
-            await updateBrowserRoutes(overview: overview)
-            self.overview = overview
-            connectionNotice = nil
-            errorMessage = nil
-        }
+    /// Publishes a mutation's refreshed overview, but only while the connection it was issued against is
+    /// still active. `identity` is captured before the mutation's await; a device switch, removal, auth
+    /// reset, or Demo Mode toggle bumps `overviewIdentity`, so a mutation that lands after one of those
+    /// must not overwrite the new connection's state with the previous backend's overview.
+    private func applyMutationResponse(_ response: SpacesDeviceAPIResponse, identity: Int) async {
+        guard let overview = response.overview, identity == overviewIdentity else { return }
+        await updateBrowserRoutes(overview: overview)
+        guard identity == overviewIdentity else { return }
+        self.overview = overview
+        connectionNotice = nil
+        errorMessage = nil
     }
 
     private func handleBridgeError(_ error: Error) {
@@ -1269,7 +1424,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         errorMessage = error.localizedDescription
     }
 
-    private func reconciledSessionAfterMutationTimeout(rowID: String, timeoutRecovery: SpacesMobileMutationTimeoutRecovery) async
+    private func reconciledSessionAfterMutationTimeout(rowID: String, timeoutRecovery: SpacesMobileMutationTimeoutRecovery, identity: Int) async
         -> SpacesDeviceTerminalSessionSummary?
     {
         if timeoutRecovery.acceptsCachedOverview, let session = refreshedSession(forRowID: rowID) {
@@ -1279,7 +1434,11 @@ private enum SpacesMobileMutationTimeoutRecovery {
         }
         do {
             let refreshedOverview = try await bridgeClient.fetchOverview(commandChannel: commandChannel)
+            // The connection changed while reconciling: this overview is the previous backend's, so it must
+            // not be published as the current connection's state.
+            guard identity == overviewIdentity else { return nil }
             await updateBrowserRoutes(overview: refreshedOverview)
+            guard identity == overviewIdentity else { return nil }
             overview = refreshedOverview
             errorMessage = nil
             connectionNotice = nil

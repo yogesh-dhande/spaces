@@ -203,7 +203,8 @@ final class GhosttyEmbeddedSessionHandoffTests: XCTestCase {
         guard let record = try await sourceCore.quiesceForHandoff() else { return XCTFail("quiesce produced no handoff record for a live session") }
         XCTAssertEqual(record.columns, 100)
         XCTAssertEqual(record.rows, 30)
-        XCTAssertEqual(Self.occurrences(of: marker, in: try String(contentsOfFile: paths.outputPath)), 1, "transcript must hold the marker exactly once")
+        XCTAssertEqual(
+            Self.occurrences(of: marker, in: try String(contentsOfFile: paths.outputPath)), 1, "transcript must hold the marker exactly once")
         TerminalEngineActor.runSynchronously { sourceCore.terminate() }
 
         let pty = try Self.makeAdoptablePTY()
@@ -245,8 +246,7 @@ final class GhosttyEmbeddedSessionHandoffTests: XCTestCase {
         let paths = try Self.makeTemporaryPaths()
         defer { try? FileManager.default.removeItem(atPath: paths.rootDirectory) }
 
-        let configuration = Self.makeConfiguration(
-            sessionID: "handoff-adopt-teardown-\(UUID().uuidString)", command: "stty -echo; cat")
+        let configuration = Self.makeConfiguration(sessionID: "handoff-adopt-teardown-\(UUID().uuidString)", command: "stty -echo; cat")
         let sourceCoreBox = try await TerminalEngineActor.run { () -> Box<GhosttyEmbeddedSessionCore> in
             let sourceCore = GhosttyEmbeddedSessionCore(launchConfiguration: configuration, paths: paths)
             try sourceCore.startIfNeeded()
@@ -384,7 +384,8 @@ final class GhosttyEmbeddedSessionHandoffTests: XCTestCase {
         try await waitAsync { Self.snapshotText(of: sourceCore)?.contains(marker) == true }
 
         guard let record = try await sourceCore.quiesceForHandoff() else { return XCTFail("quiesce produced no handoff record") }
-        XCTAssertEqual(record.ownerEpoch, TerminalEngineActor.runSynchronously { sourceCore.debugOwnerEpoch }, "the record must carry the live owner epoch")
+        XCTAssertEqual(
+            record.ownerEpoch, TerminalEngineActor.runSynchronously { sourceCore.debugOwnerEpoch }, "the record must carry the live owner epoch")
         let recordedEpoch = record.ownerEpoch
         // Do NOT terminate the source core inline here: terminate() detaches active clients, and this test
         // relies on the owner attachment persisting across the handoff (quiesce itself never detaches). The
@@ -584,14 +585,11 @@ final class GhosttyEmbeddedSessionHandoffTests: XCTestCase {
 
         // Quiesce must have waited for the pending CR (its separation delay), not returned while it was queued.
         XCTAssertGreaterThanOrEqual(
-            quiesceDuration, .milliseconds(300),
-            "quiesce returned before draining the pending submit carriage return (\(quiesceDuration))")
+            quiesceDuration, .milliseconds(300), "quiesce returned before draining the pending submit carriage return (\(quiesceDuration))")
 
         // `cat` re-emits the line only after the CR lands, so its presence proves the CR was written before
         // the handoff record was returned. The direct-to-file writer installed by quiesce keeps appending.
-        try await waitAsync {
-            (try? String(contentsOfFile: paths.outputPath))?.contains(submitMarker) == true
-        }
+        try await waitAsync { (try? String(contentsOfFile: paths.outputPath))?.contains(submitMarker) == true }
     }
 }
 

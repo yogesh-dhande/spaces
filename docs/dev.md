@@ -173,7 +173,7 @@ For maintained simulator E2E coverage of the mobile terminal path:
 apps/macos/Tests/e2e.sh mobile
 ```
 
-The mobile lane builds the macOS debug products once, builds the iOS app and UI tests once with `xcodebuild build-for-testing`, launches one daemon-backed simulator demo stack with local Beacon and Scout workspaces, and then runs selected scenarios against that stack. Use `--list` to print scenarios, `--scenario <name>` to run one or more scenarios, and `--keep-root` to preserve the shared demo root. The `ownership-guard` scenario covers the control-plane ownership checks: viewer input is rejected, takeover enables mobile input, Mac retakeover removes mobile ownership, and mobile input is rejected again.
+The mobile lane builds the macOS debug products once, builds the iOS app and UI tests once with `xcodebuild build-for-testing`, launches one daemon-backed simulator demo stack with local Harbor and Lantern workspaces, and then runs selected scenarios against that stack. Use `--list` to print scenarios, `--scenario <name>` to run one or more scenarios, and `--keep-root` to preserve the shared demo root. The `ownership-guard` scenario covers the control-plane ownership checks: viewer input is rejected, takeover enables mobile input, Mac retakeover removes mobile ownership, and mobile input is rejected again.
 
 The E2E helpers source the worktree `.env` (gitignored, at the repo root) via `scripts/spaces-e2e-env.sh` when it exists. Local-only scenarios run without `.env`; remote-host lanes require it. A working remote test host is configured in the primary checkout's `.env`; a fresh worktree has none, so copy it in to run remote lanes from that worktree:
 
@@ -394,7 +394,7 @@ xcrun xctrace list devices
 $EDITOR .env
 ```
 
-3. Run the device installer. It builds `SpacesMobile`, installs it on the configured device, and attempts to launch it; if the device is locked, unlock it and tap SpacesMobile or rerun the script.
+3. Run the device installer. It builds `SpacesMobile`, installs it on the configured device, and attempts to launch it; if the device is locked, unlock it and tap SpacesMobile or rerun the script. The script launches with `SPACES_MOBILE_PAYWALL_BYPASS=1` so the Debug build skips the subscription gate; launching the app from the home screen instead shows the real gate, which cannot load a product until the subscription exists in App Store Connect (local StoreKit configuration only applies to Xcode-run sessions). To exercise the paywall UI with the fake product, run the app from Xcode.
 
 ```bash
 scripts/install-ios-device.sh
@@ -423,7 +423,7 @@ For a disposable one-command demo stack that launches the macOS app, uses the da
 apps/macos/Tests/e2e.sh mobile-demo
 ```
 
-The launcher expects the local Ghostty artifacts under `apps/macos/.local/ghosttykit/` and remote E2E SSH settings in `.env`. The runner builds the repo-local macOS debug products, the demo builds a fresh simulator `SpacesMobile.app` into a DerivedData directory under the demo root, and that same app bundle is installed on both the iPad and iPhone simulators. Demo runs use the current user's `HOME` and `XDG_CONFIG_HOME` so Ghostty themes and user settings match normal local debugging. By default, the demo uses isolated Spaces profile mode, which keeps the database and runtime under the demo root without moving user-level settings into a temporary home. Use `SPACES_MOBILE_DEMO_PROFILE_MODE=user` when the demo should attach to the repo-local Spaces profile instead. The E2E wrapper uses an ephemeral local Device API port unless `SPACES_MOBILE_DEMO_PORT` is set. The launcher stops the current-profile app owner, current-profile terminal service, and stale repo-local listeners on the selected Device API port before launch. It provisions live Beacon and Scout workspace terminal sessions, waits for their owner attachments, builds or reuses the repo-local Linux E2E artifact for the configured remote, installs it on the remote daemon account, pairs the simulators with the local daemon and configured remote daemon, then reads the daemon Device API details through `spacese2e mobile-status`. It prints the demo root, profile mode, PIDs, logs, screenshots, project directories, terminal session IDs, the iOS app path, iOS build paths, remote device details, and the simulator app stdout or stderr log paths as JSON, keeps the stack alive until `Ctrl+C`, and then tears the demo down cleanly.
+The launcher expects the local Ghostty artifacts under `apps/macos/.local/ghosttykit/` and remote E2E SSH settings in `.env`. The runner builds the repo-local macOS debug products, the demo builds a fresh simulator `SpacesMobile.app` into a DerivedData directory under the demo root, and that same app bundle is installed on both the iPad and iPhone simulators. Demo runs use the current user's `HOME` and `XDG_CONFIG_HOME` so Ghostty themes and user settings match normal local debugging. By default, the demo uses isolated Spaces profile mode, which keeps the database and runtime under the demo root without moving user-level settings into a temporary home. Use `SPACES_MOBILE_DEMO_PROFILE_MODE=user` when the demo should attach to the repo-local Spaces profile instead. The E2E wrapper uses an ephemeral local Device API port unless `SPACES_MOBILE_DEMO_PORT` is set. The launcher stops the current-profile app owner, current-profile terminal service, and stale repo-local listeners on the selected Device API port before launch. It provisions live Harbor and Lantern workspace terminal sessions, waits for their owner attachments, builds or reuses the repo-local Linux E2E artifact for the configured remote, installs it on the remote daemon account, pairs the simulators with the local daemon and configured remote daemon, then reads the daemon Device API details through `spacese2e mobile-status`. It prints the demo root, profile mode, PIDs, logs, screenshots, project directories, terminal session IDs, the iOS app path, iOS build paths, remote device details, and the simulator app stdout or stderr log paths as JSON, keeps the stack alive until `Ctrl+C`, and then tears the demo down cleanly.
 The same demo root also contains `mobile-terminal-performance.jsonl`, and the printed JSON includes its `performanceLogPath`. The mobile E2E lane consumes that file directly when it asserts one bootstrap epoch, first render timing, input-ready timing, and scrollback behavior.
 
 Useful overrides:
@@ -464,6 +464,52 @@ wait
 The test reads the same `SPACES_MOBILE_UI_TEST_CONFIG_PATH` config file (and default path) as `SpacesMobileUITests`, but only needs its `host`, `port`, `authToken`, `certificateFingerprint`, and `installationID` fields; build `$UI_TEST_CONFIG` from the mobile-demo stack's printed `deviceAPIHost`/`deviceAPIPort` plus the matching device entry (`ipad` or `iphone`) in `<demo root>/pairing.json`. Each screenshot env var must carry the `TEST_RUNNER_` prefix: `xcodebuild` forwards a prefixed variable to the in-simulator test runner with the prefix stripped, and a bare variable does not reach it. Connect a hardware keyboard for the simulator (`defaults write com.apple.iphonesimulator ConnectHardwareKeyboard -bool true`) so terminal screens capture without the software keyboard covering the lower half.
 
 `SPACES_MOBILE_SCREENSHOT_TAB` selects `alerts`, `spaces`, `agents`, or `settings`. `SPACES_MOBILE_SCREENSHOT_OPEN_ROW`, honored only with `SPACES_MOBILE_SCREENSHOT_TAB=spaces`, taps the first Spaces row whose visible title contains the given text, opening its terminal detail. `SPACES_MOBILE_SCREENSHOT_PAYWALL=1` launches the app without the paywall bypass so `PaywallView` renders — for the App Store Connect subscription-review screenshot — instead of navigating tabs. In the simulator the paywall's price line stays on its loading state because StoreKit has no product catalog without App Store Connect (the scheme's Run-action StoreKit configuration is not applied to a `test-without-building` UI-test launch); the real price and trial length render on TestFlight and production builds, where StoreKit serves the live product, so capture the final subscription-review screenshot from a real build.
+
+`SPACES_MOBILE_SCREENSHOT_DEMO=1` stages the same screenshots from Demo Mode instead of a paired daemon: it launches with the paywall bypass, resets to a clean not-paired state through the argument domain, enables Demo Mode, then honors the same `SPACES_MOBILE_SCREENSHOT_TAB`/`OPEN_ROW`/`HOLD_SECONDS` variables. No mobile-demo stack, config file, or `.env` is needed, so the App Store screenshot set can be produced on a plain simulator. The daemon-backed lane above is unchanged.
+
+## Demo Mode recording + App Review
+
+The iOS app ships an in-app Demo Mode that tours the whole app from a bundled sample recording with no daemon, network, or account (design in [`docs/implementation.md`](implementation.md#ios-demo-mode); UX in [`docs/spec.md`](spec.md)). It is what the App Store reviewer uses after a free sandbox purchase, and the review-notes template lives in [`docs/app-review-notes.md`](app-review-notes.md).
+
+Re-record the bundle when the recorded content or its encoding changes — the fixture content changes (`apps/macos/Tests/fixtures/e2e_demo`), the render-update wire format changes, or the iOS viewer grids change (font metrics or supported device classes). Regenerate with:
+
+```bash
+apps/macos/Tests/record_ios_demo_recording.sh
+```
+
+The script builds the debug products, seeds the storytelling fixture into an isolated profile, stages the three workspace states, records each session at the iOS-native grids, enforces the 10 MB bundle budget, and writes `apps/ios/Resources/DemoRecording/`. It is idempotent (fresh temp profile per run) and deterministic up to semantically identical decoded output, not byte-identical. Commit the regenerated bundle.
+
+The pre-submission verification is a single UI test that proves the entire feature end to end with no daemon running. Run it on a booted simulator before every submission:
+
+```bash
+xcodebuild -project apps/ios/SpacesMobile.xcodeproj -scheme SpacesMobile \
+  -only-testing:SpacesMobileUITests/SpacesMobileDemoModeUITests \
+  -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
+  -derivedDataPath apps/macos/.build/ios-derived-data test
+```
+
+It launches with only `SPACES_MOBILE_PAYWALL_BYPASS=1` and a render-dump path — no host, seed, or daemon env — enters Demo Mode from the empty state, and asserts the sample workspaces, alerts, agents, the read-only terminal transcript and its notice, and that turning Demo Mode off returns to the not-paired empty state. It shadows the persistence keys through the argument domain so a shared simulator's prior state cannot make it flaky. This test is not part of `scripts/verify.sh`; it is the manual submission gate.
+
+Produce the App Store screenshots from Demo Mode with the same `testScreenshotStaging` invocation documented above, adding `TEST_RUNNER_SPACES_MOBILE_SCREENSHOT_DEMO=1` (no mobile-demo stack or config file needed), for example:
+
+```bash
+IPHONE_UDID=<booted-udid>
+xcodebuild -project apps/ios/SpacesMobile.xcodeproj -scheme SpacesMobile \
+  -destination "platform=iOS Simulator,id=$IPHONE_UDID" \
+  -derivedDataPath apps/macos/.build/ios-derived-data \
+  -only-testing:SpacesMobileUITests/SpacesMobileScreenshotUITests build-for-testing
+
+TEST_RUNNER_SPACES_MOBILE_SCREENSHOT_DEMO=1 \
+TEST_RUNNER_SPACES_MOBILE_SCREENSHOT_TAB=agents \
+TEST_RUNNER_SPACES_MOBILE_SCREENSHOT_HOLD_SECONDS=45 \
+xcodebuild -project apps/ios/SpacesMobile.xcodeproj -scheme SpacesMobile \
+  -destination "platform=iOS Simulator,id=$IPHONE_UDID" \
+  -derivedDataPath apps/macos/.build/ios-derived-data \
+  -only-testing:SpacesMobileUITests/SpacesMobileScreenshotUITests/testScreenshotStaging \
+  test-without-building &
+sleep 33 && xcrun simctl io "$IPHONE_UDID" screenshot /tmp/agents-tab.png
+wait
+```
 
 For targeted mobile E2E runs, use `--scenario`:
 
@@ -618,7 +664,7 @@ apps/macos/Tests/e2e.sh app
 
 Before the suite launches its isolated app instance, it waits for desktop-global control. A timeout from that wait is an environment-contention result and should be retried without killing unrelated running Spaces instances.
 
-The macOS E2E suite seeds the shared Beacon, Scout, and Prism fixture repositories and runs the app-level launch, focus, cycling, workspace, and agent-status assertions against the current profile's same-machine daemon.
+The macOS E2E suite seeds the shared Harbor, Lantern, and Atlas fixture repositories and runs the app-level launch, focus, cycling, workspace, and agent-status assertions against the current profile's same-machine daemon.
 
 With `SPACES_E2E_RUN_REMOTE=1`, the suite also prepares a paired remote Linux daemon from the repo-root `.env`, seeds the Mac client with that device, starts a remote named service, focuses its browser session, and verifies the service through the Mac Caddy router backed by the SSH local forward. The remote lane reads the harness profile's Mac client identity through `spacese2e mac-client-installation-id` so pairing uses the same identity as the app.
 

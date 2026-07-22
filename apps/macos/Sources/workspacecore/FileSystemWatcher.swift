@@ -71,9 +71,7 @@
                     do {
                         try self.startOnQueue()
                         continuation.resume()
-                    } catch {
-                        continuation.resume(throwing: error)
-                    }
+                    } catch { continuation.resume(throwing: error) }
                 }
             }
         }
@@ -102,8 +100,7 @@
             let callbackContext = FSEventCallbackContext(onChange: onChange)
             let created: FSEventStreamRef? = withExtendedLifetime(callbackContext) {
                 var context = FSEventStreamContext(
-                    version: 0,
-                    info: Unmanaged.passUnretained(callbackContext).toOpaque(),
+                    version: 0, info: Unmanaged.passUnretained(callbackContext).toOpaque(),
                     retain: { info in
                         guard let info else { return nil }
                         _ = Unmanaged<FSEventCallbackContext>.fromOpaque(info).retain()
@@ -112,8 +109,7 @@
                     release: { info in
                         guard let info else { return }
                         Unmanaged<FSEventCallbackContext>.fromOpaque(info).release()
-                    },
-                    copyDescription: nil)
+                    }, copyDescription: nil)
                 return FSEventStreamCreate(
                     kCFAllocatorDefault, callback, &context, paths as CFArray, FSEventStreamEventId(kFSEventStreamEventIdSinceNow), latency, flags)
             }
@@ -133,9 +129,7 @@
         /// callback already in flight may still be delivered shortly after `stop()`
         /// returns; callers that must not act on late callbacks guard on their own
         /// stopped state.
-        public func stop() {
-            queue.async { self.stopOnQueue() }
-        }
+        public func stop() { queue.async { self.stopOnQueue() } }
 
         /// Serialized on `queue`; see the type's lifecycle invariant.
         private func stopOnQueue() {
@@ -237,9 +231,7 @@
                     do {
                         try self.startOnQueue()
                         continuation.resume()
-                    } catch {
-                        continuation.resume(throwing: error)
-                    }
+                    } catch { continuation.resume(throwing: error) }
                 }
             }
         }
@@ -275,9 +267,7 @@
         /// the caller's thread. Because the teardown is async, a callback already in
         /// flight may still be delivered shortly after `stop()` returns; callers that
         /// must not act on late callbacks guard on their own stopped state.
-        public func stop() {
-            queue.async { self.stopOnQueue() }
-        }
+        public func stop() { queue.async { self.stopOnQueue() } }
 
         /// Serialized on `queue`; see the type's lifecycle invariant.
         private func stopOnQueue() {

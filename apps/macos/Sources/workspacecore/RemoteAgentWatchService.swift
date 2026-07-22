@@ -152,8 +152,7 @@ import spacesdevicecore
                         try store.replaceAgentRemoteWatchBaseline(deviceID: deviceID, baseline: merged)
                     }
                 }
-            case .failure(let error):
-                self.logError("spacesd remote_agent_watch_error op=load_baselines error=\(error)\n")
+            case .failure(let error): self.logError("spacesd remote_agent_watch_error op=load_baselines error=\(error)\n")
             }
             self.reconcile()
         }
@@ -273,9 +272,7 @@ import spacesdevicecore
     private func openStream(deviceID: String) {
         connecting.insert(deviceID)
         let transport = transport
-        let onSignal: @Sendable () -> Void = { [weak self] in
-            Task { @MainActor in self?.handleOverviewSignal(deviceID: deviceID) }
-        }
+        let onSignal: @Sendable () -> Void = { [weak self] in Task { @MainActor in self?.handleOverviewSignal(deviceID: deviceID) } }
         let onDisconnect: @Sendable ((any Error)?) -> Void = { [weak self] error in
             Task { @MainActor in self?.handleDisconnected(deviceID: deviceID, error: error) }
         }
@@ -349,8 +346,7 @@ import spacesdevicecore
             // signal arriving during it coalesces into `listingQueued` instead of racing a second apply.
             if !self.isStopped, self.streams[deviceID] != nil {
                 switch result {
-                case .success(let rows):
-                    await self.applyRows(deviceID: deviceID, rows: rows)
+                case .success(let rows): await self.applyRows(deviceID: deviceID, rows: rows)
                 case .failure(RemoteAgentWatchListingError.deviceUnpaired):
                     // The device unpaired while its overview stream stayed connected, so the connect
                     // path's `.deviceUnpaired` handling — which only runs on a fresh connect — never
@@ -442,15 +438,14 @@ import spacesdevicecore
                             try engine.childDidResumeWorking(agentSessionID: transition.terminalSessionID)
                         }
                     } catch {
-                        logError("spacesd remote_agent_watch device=\(deviceID) deliver_failed agent=\(transition.terminalSessionID) error=\(error)\n")
+                        logError(
+                            "spacesd remote_agent_watch device=\(deviceID) deliver_failed agent=\(transition.terminalSessionID) error=\(error)\n")
                     }
                     // The remote child is gone and its terminating line has been delivered or queued, so
                     // its edges are torn down after the loop (off-main) — the watch is complete.
                     if transition.kind == .exited { exitedTerminalSessionIDs.append(transition.terminalSessionID) }
                 }
-            } catch {
-                logError("spacesd remote_agent_watch_error op=apply_rows device=\(deviceID) error=\(error)\n")
-            }
+            } catch { logError("spacesd remote_agent_watch_error op=apply_rows device=\(deviceID) error=\(error)\n") }
         }
 
         // Drop completed watch edges and mirror the baseline, after the transitions were delivered or queued
@@ -526,9 +521,7 @@ import spacesdevicecore
                 }
             }
         }.value
-        if case .failure(let error) = result {
-            logError("spacesd remote_agent_watch_error op=drop_edges device=\(deviceID) error=\(error)\n")
-        }
+        if case .failure(let error) = result { logError("spacesd remote_agent_watch_error op=drop_edges device=\(deviceID) error=\(error)\n") }
         snapshots[deviceID] = nil
         let generation = bumpSnapshotGeneration(deviceID)
         enqueueBaselineWrite(deviceID: deviceID, generation: generation, op: "drop_edges_baseline") { store in
@@ -542,9 +535,7 @@ import spacesdevicecore
     /// of the final snapshot. `write` runs off the main actor (the daemon keeps SQLite off its main terminal
     /// engine); only the chaining and the supersession gate touch main-actor state. The write is allowed to run
     /// even after `stop()` so an in-flight seed still reaches disk for the next daemon run.
-    private func enqueueBaselineWrite(
-        deviceID: String, generation: Int, op: String, _ write: @escaping @Sendable (SQLiteStore) throws -> Void
-    ) {
+    private func enqueueBaselineWrite(deviceID: String, generation: Int, op: String, _ write: @escaping @Sendable (SQLiteStore) throws -> Void) {
         let previous = baselineWriteChain[deviceID]
         let databasePath = databasePath
         let logError = logError
@@ -554,14 +545,11 @@ import spacesdevicecore
             let result = await Task.detached(priority: .utility) { () -> Result<Void, any Error> in
                 Result { try write(SQLiteStore(path: databasePath)) }
             }.value
-            if case .failure(let error) = result {
-                logError("spacesd remote_agent_watch_error op=\(op) device=\(deviceID) error=\(error)\n")
-            }
+            if case .failure(let error) = result { logError("spacesd remote_agent_watch_error op=\(op) device=\(deviceID) error=\(error)\n") }
         }
     }
 
-    @discardableResult
-    private func bumpSnapshotGeneration(_ deviceID: String) -> Int {
+    @discardableResult private func bumpSnapshotGeneration(_ deviceID: String) -> Int {
         let next = (snapshotGeneration[deviceID] ?? 0) + 1
         snapshotGeneration[deviceID] = next
         return next

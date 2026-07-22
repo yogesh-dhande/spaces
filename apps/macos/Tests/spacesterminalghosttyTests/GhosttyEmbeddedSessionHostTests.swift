@@ -442,12 +442,17 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         let client = GhosttyRemoteSessionStateStreamClient(socketPath: paths.subscriptionSocketPath) { payload in receivedPayloads.append(payload) }
         try client.start()
         defer { client.stop() }
-        try await waitUntil(timeout: 2) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.initial && $0.renderUpdate != nil } }
-        let initialPayload = try XCTUnwrap(receivedPayloads.snapshot.last { $0.reason == TerminalRemoteSessionStateReason.initial && $0.renderUpdate != nil })
+        try await waitUntil(timeout: 2) {
+            receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.initial && $0.renderUpdate != nil }
+        }
+        let initialPayload = try XCTUnwrap(
+            receivedPayloads.snapshot.last { $0.reason == TerminalRemoteSessionStateReason.initial && $0.renderUpdate != nil })
         let initialUpdate = try XCTUnwrap(initialPayload.decodedRenderUpdate)
         XCTAssertEqual(initialUpdate.kind, .full)
         var baseline: GhosttyRenderUpdateBaseline?
-        for payload in receivedPayloads.snapshot where payload.renderUpdate != nil { baseline = try Self.renderBaseline(from: payload, baseline: baseline) }
+        for payload in receivedPayloads.snapshot where payload.renderUpdate != nil {
+            baseline = try Self.renderBaseline(from: payload, baseline: baseline)
+        }
         let resolvedBaseline = try XCTUnwrap(baseline)
         receivedPayloads.removeAll()
 
@@ -463,7 +468,9 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             }
         }
         let payloadIndex = try XCTUnwrap(
-            receivedPayloads.snapshot.firstIndex { $0.reason == TerminalRemoteSessionStateReason.stateChange && $0.screenStateRevision == screenRevision })
+            receivedPayloads.snapshot.firstIndex {
+                $0.reason == TerminalRemoteSessionStateReason.stateChange && $0.screenStateRevision == screenRevision
+            })
         var stateChangeBaseline = resolvedBaseline
         for payload in receivedPayloads.snapshot[..<payloadIndex] where payload.renderUpdate != nil {
             stateChangeBaseline = try Self.renderBaseline(from: payload, baseline: stateChangeBaseline)
@@ -887,8 +894,8 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             defer { try? FileManager.default.removeItem(at: root) }
 
             let launchConfiguration = TerminalSessionLaunchConfiguration(
-                sessionID: "session-state-1", backend: .ghosttyEmbedded, title: "fallback-title", workingDirectory: "/tmp/original", shell: "/bin/zsh",
-                command: "cat", createdAt: "2026-05-19T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+                sessionID: "session-state-1", backend: .ghosttyEmbedded, title: "fallback-title", workingDirectory: "/tmp/original",
+                shell: "/bin/zsh", command: "cat", createdAt: "2026-05-19T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
             let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: .init(rootDirectory: root.path))
 
             host.applySessionStateChange(
@@ -909,8 +916,8 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             defer { try? FileManager.default.removeItem(at: root) }
 
             let launchConfiguration = TerminalSessionLaunchConfiguration(
-                sessionID: "session-state-2", backend: .ghosttyEmbedded, title: "fallback-title", workingDirectory: "/tmp/original", shell: "/bin/zsh",
-                command: nil, createdAt: "2026-05-19T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+                sessionID: "session-state-2", backend: .ghosttyEmbedded, title: "fallback-title", workingDirectory: "/tmp/original",
+                shell: "/bin/zsh", command: nil, createdAt: "2026-05-19T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
             let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: .init(rootDirectory: root.path))
 
             host.applySessionStateChange(.init(flags: [.title, .workingDirectory], revision: 1, title: "custom", workingDirectory: "/tmp/custom"))
@@ -931,8 +938,8 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             defer { try? FileManager.default.removeItem(at: root) }
 
             let launchConfiguration = TerminalSessionLaunchConfiguration(
-                sessionID: "session-renderer-adapter", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original", shell: "/bin/zsh",
-                command: nil, createdAt: "2026-05-18T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+                sessionID: "session-renderer-adapter", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original",
+                shell: "/bin/zsh", command: nil, createdAt: "2026-05-18T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
             let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: .init(rootDirectory: root.path))
 
             XCTAssertTrue((host.rendererHost as AnyObject) is GhosttyHeadlessRendererHost)
@@ -1064,8 +1071,8 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
 
             let paths = TerminalSessionPaths(rootDirectory: root.path)
             let launchConfiguration = TerminalSessionLaunchConfiguration(
-                sessionID: "session-3", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original", shell: "/bin/zsh", command: "zsh",
-                createdAt: "2026-05-10T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+                sessionID: "session-3", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original", shell: "/bin/zsh",
+                command: "zsh", createdAt: "2026-05-10T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
             var refreshCount = 0
             var outputAtRefresh: String?
             let host = GhosttyEmbeddedSessionHost(
@@ -1282,7 +1289,8 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         try await waitUntil(timeout: 2) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.stateChange } }
         try? await Task.sleep(for: .milliseconds(50))
 
-        XCTAssertFalse(receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.output && $0.outputByteCount == output.count })
+        XCTAssertFalse(
+            receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.output && $0.outputByteCount == output.count })
         XCTAssertTrue(try String(contentsOfFile: paths.outputPath).hasSuffix("queued output\n"))
     }
 
@@ -1315,8 +1323,8 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             let paths = TerminalSessionPaths(rootDirectory: root.path)
             try paths.ensureDirectories()
             let launchConfiguration = TerminalSessionLaunchConfiguration(
-                sessionID: "session-4", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original", shell: "/bin/zsh", command: "zsh",
-                createdAt: "2026-05-10T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+                sessionID: "session-4", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original", shell: "/bin/zsh",
+                command: "zsh", createdAt: "2026-05-10T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
             let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
 
             let process = Process()
@@ -1346,8 +1354,9 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             let paths = TerminalSessionPaths(rootDirectory: root.path)
             try paths.ensureDirectories()
             let launchConfiguration = TerminalSessionLaunchConfiguration(
-                sessionID: "session-foreground-agent-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original",
-                shell: "/bin/zsh", command: "zsh", createdAt: "2026-05-10T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+                sessionID: "session-foreground-agent-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "shell",
+                workingDirectory: "/tmp/original", shell: "/bin/zsh", command: "zsh", createdAt: "2026-05-10T00:00:00Z", workspaceID: "workspace-1",
+                kind: .shell)
             let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
             let childPID: Int32 = 900
             let foregroundPID: Int32 = 42
@@ -1379,8 +1388,9 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             let paths = TerminalSessionPaths(rootDirectory: root.path)
             try paths.ensureDirectories()
             let launchConfiguration = TerminalSessionLaunchConfiguration(
-                sessionID: "session-foreground-clear-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original",
-                shell: "/bin/zsh", command: "zsh", createdAt: "2026-05-10T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+                sessionID: "session-foreground-clear-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "shell",
+                workingDirectory: "/tmp/original", shell: "/bin/zsh", command: "zsh", createdAt: "2026-05-10T00:00:00Z", workspaceID: "workspace-1",
+                kind: .shell)
             let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
             let childPID: Int32 = 900
             host.debugSetLastKnownChildPID(childPID)
@@ -1493,8 +1503,8 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             let paths = TerminalSessionPaths(rootDirectory: root.path)
             try paths.ensureDirectories()
             let launchConfiguration = TerminalSessionLaunchConfiguration(
-                sessionID: "session-5", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original", shell: "/bin/zsh", command: "zsh",
-                createdAt: "2026-05-10T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+                sessionID: "session-5", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original", shell: "/bin/zsh",
+                command: "zsh", createdAt: "2026-05-10T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
             let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
 
             host.terminate()
@@ -1518,8 +1528,9 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             let paths = TerminalSessionPaths(rootDirectory: root.path)
             try paths.ensureDirectories()
             let launchConfiguration = TerminalSessionLaunchConfiguration(
-                sessionID: "session-deferred-refresh-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original",
-                shell: "/bin/zsh", command: "zsh", createdAt: "2026-05-10T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+                sessionID: "session-deferred-refresh-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "shell",
+                workingDirectory: "/tmp/original", shell: "/bin/zsh", command: "zsh", createdAt: "2026-05-10T00:00:00Z", workspaceID: "workspace-1",
+                kind: .shell)
             let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
 
             host.debugMarkStartedForTesting()
@@ -1670,8 +1681,8 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             let sessionDriver = GhosttyEmbeddedTerminalSessionDriver(
                 launchConfiguration: TerminalSessionLaunchConfiguration(
                     sessionID: "host-managed-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "host-managed",
-                    workingDirectory: FileManager.default.temporaryDirectory.path, shell: "/bin/sh", command: "cat", createdAt: "2026-05-17T00:00:00Z",
-                    workspaceID: "workspace-1", kind: .shell))
+                    workingDirectory: FileManager.default.temporaryDirectory.path, shell: "/bin/sh", command: "cat",
+                    createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1", kind: .shell))
             sessionDriver.setOutputHandler { data in transcript.append(data) }
             try sessionDriver.startIfNeeded()
             return Box(sessionDriver)
@@ -1729,7 +1740,8 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         try await waitUntil(timeout: 5) { cursor.applyingUpdates(receivedPayloads.snapshot).contains(readyMarker) }
 
         let marker = "local owner render marker"
-        XCTAssertTrue(TerminalEngineActor.runSynchronously { host.handleControlRequest(.init(command: "send", text: "\(marker)\n", clientID: owner.id)).ok })
+        XCTAssertTrue(
+            TerminalEngineActor.runSynchronously { host.handleControlRequest(.init(command: "send", text: "\(marker)\n", clientID: owner.id)).ok })
 
         try await waitUntil(timeout: 5) { cursor.applyingUpdates(receivedPayloads.snapshot).contains(marker) }
     }
@@ -1745,7 +1757,8 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
                 launchConfiguration: TerminalSessionLaunchConfiguration(
                     sessionID: "host-managed-clear-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "host-managed-clear",
                     workingDirectory: FileManager.default.temporaryDirectory.path, shell: "/bin/sh",
-                    command: "stty -echo; printf '\(readyMarker)\\n'; cat", createdAt: "2026-06-03T00:00:00Z", workspaceID: "workspace-1", kind: .shell))
+                    command: "stty -echo; printf '\(readyMarker)\\n'; cat", createdAt: "2026-06-03T00:00:00Z", workspaceID: "workspace-1",
+                    kind: .shell))
             sessionDriver.setOutputHandler { data in transcript.append(data) }
             try sessionDriver.startIfNeeded()
             return Box(sessionDriver)
@@ -1778,8 +1791,8 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             let sessionDriver = GhosttyEmbeddedTerminalSessionDriver(
                 launchConfiguration: TerminalSessionLaunchConfiguration(
                     sessionID: "host-managed-resize-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "owner",
-                    workingDirectory: FileManager.default.temporaryDirectory.path, shell: "/bin/sh", command: "cat", createdAt: "2026-05-19T00:00:00Z",
-                    workspaceID: "workspace-1", kind: .shell))
+                    workingDirectory: FileManager.default.temporaryDirectory.path, shell: "/bin/sh", command: "cat",
+                    createdAt: "2026-05-19T00:00:00Z", workspaceID: "workspace-1", kind: .shell))
             sessionDriver.setOutputHandler { data in transcript.append(data) }
             try sessionDriver.startIfNeeded()
             return Box(sessionDriver)
@@ -2051,8 +2064,8 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             let sessionDriver = GhosttyEmbeddedTerminalSessionDriver(
                 launchConfiguration: TerminalSessionLaunchConfiguration(
                     sessionID: "host-managed-sync-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "owner",
-                    workingDirectory: FileManager.default.temporaryDirectory.path, shell: "/bin/sh", command: "cat", createdAt: "2026-05-19T00:00:00Z",
-                    workspaceID: "workspace-1", kind: .shell))
+                    workingDirectory: FileManager.default.temporaryDirectory.path, shell: "/bin/sh", command: "cat",
+                    createdAt: "2026-05-19T00:00:00Z", workspaceID: "workspace-1", kind: .shell))
             sessionDriver.setOutputHandler { data in transcript.append(data) }
             try sessionDriver.startIfNeeded()
             return Box(sessionDriver)
@@ -2080,8 +2093,8 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             let sessionDriver = GhosttyEmbeddedTerminalSessionDriver(
                 launchConfiguration: TerminalSessionLaunchConfiguration(
                     sessionID: "host-managed-codex-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "owner",
-                    workingDirectory: FileManager.default.temporaryDirectory.path, shell: "/bin/sh", command: "cat", createdAt: "2026-05-19T00:00:00Z",
-                    workspaceID: "workspace-1", kind: .shell))
+                    workingDirectory: FileManager.default.temporaryDirectory.path, shell: "/bin/sh", command: "cat",
+                    createdAt: "2026-05-19T00:00:00Z", workspaceID: "workspace-1", kind: .shell))
             sessionDriver.setOutputHandler { data in transcript.append(data) }
             try sessionDriver.startIfNeeded()
             return Box(sessionDriver)
@@ -2156,8 +2169,8 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             let sessionDriver = GhosttyEmbeddedTerminalSessionDriver(
                 launchConfiguration: TerminalSessionLaunchConfiguration(
                     sessionID: "host-managed-scroll-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "scroll",
-                    workingDirectory: FileManager.default.temporaryDirectory.path, shell: "/bin/sh", command: "cat", createdAt: "2026-05-18T00:00:00Z",
-                    workspaceID: "workspace-1", kind: .shell))
+                    workingDirectory: FileManager.default.temporaryDirectory.path, shell: "/bin/sh", command: "cat",
+                    createdAt: "2026-05-18T00:00:00Z", workspaceID: "workspace-1", kind: .shell))
             defer { sessionDriver.terminate() }
 
             try sessionDriver.startIfNeeded()
@@ -2181,8 +2194,8 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             let sessionDriver = GhosttyEmbeddedTerminalSessionDriver(
                 launchConfiguration: TerminalSessionLaunchConfiguration(
                     sessionID: "host-managed-scroll-mods-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "scroll",
-                    workingDirectory: FileManager.default.temporaryDirectory.path, shell: "/bin/sh", command: "cat", createdAt: "2026-05-18T00:00:00Z",
-                    workspaceID: "workspace-1", kind: .shell))
+                    workingDirectory: FileManager.default.temporaryDirectory.path, shell: "/bin/sh", command: "cat",
+                    createdAt: "2026-05-18T00:00:00Z", workspaceID: "workspace-1", kind: .shell))
             defer { sessionDriver.terminate() }
 
             try sessionDriver.startIfNeeded()
@@ -2310,7 +2323,8 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
 
         XCTAssertTrue(
             TerminalEngineActor.runSynchronously {
-                sessionDriver.sendScroll(horizontal: 0, vertical: 48, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: pointerPosition)
+                sessionDriver.sendScroll(
+                    horizontal: 0, vertical: 48, scrollMods: TerminalScrollModifiers.precisionMask, pointerPosition: pointerPosition)
             })
         try await waitUntil { sessionDriver.snapshotText()?.contains("FIRST") == true }
         XCTAssertTrue(
@@ -2413,8 +2427,8 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             let paths = TerminalSessionPaths(rootDirectory: root.path)
             try paths.ensureDirectories()
             let launchConfiguration = TerminalSessionLaunchConfiguration(
-                sessionID: "session-stale-owner-epoch", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original", shell: "/bin/zsh",
-                command: "zsh", createdAt: "2026-05-31T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+                sessionID: "session-stale-owner-epoch", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original",
+                shell: "/bin/zsh", command: "zsh", createdAt: "2026-05-31T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
             let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
             try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
             let owner = TerminalClient(
@@ -2449,7 +2463,8 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             XCTAssertTrue(host.handleControlRequest(.init(command: "attach", client: owner, attachmentMode: .viewer)).ok)
             XCTAssertTrue(host.handleControlRequest(.init(command: "takeover", clientID: owner.id)).ok)
 
-            let response = host.handleControlRequest(.init(command: "scroll", clientID: owner.id, scrollHorizontal: 0, scrollVertical: 0, scrollMods: 7))
+            let response = host.handleControlRequest(
+                .init(command: "scroll", clientID: owner.id, scrollHorizontal: 0, scrollVertical: 0, scrollMods: 7))
 
             XCTAssertEqual(response, TerminalControlResponse(ok: true, message: "Ignored zero scroll delta."))
 
@@ -2479,8 +2494,8 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
 
             XCTAssertEqual(
                 response,
-                TerminalControlResponse(ok: false, message: "Terminal scroll pointer coordinates must be provided together.", errorCode: .invalidArgument)
-            )
+                TerminalControlResponse(
+                    ok: false, message: "Terminal scroll pointer coordinates must be provided together.", errorCode: .invalidArgument))
 
         }
     }
@@ -2516,7 +2531,8 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         }
 
         let marker = "command k clear marker"
-        XCTAssertTrue(TerminalEngineActor.runSynchronously { host.handleControlRequest(.init(command: "send", text: "\(marker)\n", clientID: owner.id)).ok })
+        XCTAssertTrue(
+            TerminalEngineActor.runSynchronously { host.handleControlRequest(.init(command: "send", text: "\(marker)\n", clientID: owner.id)).ok })
         try await waitUntil {
             guard let snapshot = host.snapshot() else { return false }
             return GhosttyTerminalSnapshotGrid.fullPlainText(for: snapshot).contains(marker)
@@ -2583,7 +2599,8 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             try TerminalSessionPersistence.attachClient(
                 sessionID: launchConfiguration.sessionID, client: owner, mode: .owner, paths: paths, attachedAt: "2026-05-31T00:00:00Z")
 
-            let accepted = host.handleControlRequest(.init(command: "resize", clientID: owner.id, columns: 80, rows: 24, ownerEpoch: 0, resizeSerial: 2))
+            let accepted = host.handleControlRequest(
+                .init(command: "resize", clientID: owner.id, columns: 80, rows: 24, ownerEpoch: 0, resizeSerial: 2))
             let stale = host.handleControlRequest(.init(command: "resize", clientID: owner.id, columns: 80, rows: 24, ownerEpoch: 0, resizeSerial: 1))
 
             XCTAssertTrue(accepted.ok)
@@ -2635,7 +2652,8 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             let refreshedClient = TerminalClient(
                 id: "remote-client", kind: .remoteViewer, identity: .init(label: "iPhone", deviceName: "iPhone"), connectedAt: "2026-05-17T00:00:00Z")
             let staleClient = TerminalClient(
-                id: "stale-remote-client", kind: .remoteViewer, identity: .init(label: "iPad", deviceName: "iPad"), connectedAt: "2026-05-17T00:00:00Z")
+                id: "stale-remote-client", kind: .remoteViewer, identity: .init(label: "iPad", deviceName: "iPad"),
+                connectedAt: "2026-05-17T00:00:00Z")
             try TerminalSessionPersistence.attachClient(
                 sessionID: "session-heartbeat", client: refreshedClient, mode: .viewer, paths: paths, attachedAt: "2026-05-17T00:00:00Z")
             try TerminalSessionPersistence.attachClient(
@@ -2704,7 +2722,8 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             let localClient = TerminalClient(
                 id: "local-window", kind: .localWindow, identity: .init(label: "Spaces window"), connectedAt: "2026-05-17T00:00:00Z")
             let remoteClient = TerminalClient(
-                id: "stale-remote-owner", kind: .remoteViewer, identity: .init(label: "iPad", deviceName: "iPad"), connectedAt: "2026-05-17T00:00:00Z")
+                id: "stale-remote-owner", kind: .remoteViewer, identity: .init(label: "iPad", deviceName: "iPad"), connectedAt: "2026-05-17T00:00:00Z"
+            )
             try TerminalSessionPersistence.attachClient(
                 sessionID: launchConfiguration.sessionID, client: localClient, mode: .owner, paths: paths, attachedAt: "2026-05-17T00:00:00Z")
             try TerminalSessionPersistence.attachClient(
@@ -2780,8 +2799,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             command: "zsh", createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
         // Attach with a very old lease so the committed DB row is stale at real-now.
         let staleClient = TerminalClient(
-            id: "remote-heartbeat", kind: .remoteViewer, identity: .init(label: "iPhone", deviceName: "iPhone"),
-            connectedAt: "2000-01-01T00:00:00Z")
+            id: "remote-heartbeat", kind: .remoteViewer, identity: .init(label: "iPhone", deviceName: "iPhone"), connectedAt: "2000-01-01T00:00:00Z")
         try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
         try TerminalSessionPersistence.attachClient(
             sessionID: launchConfiguration.sessionID, client: staleClient, mode: .viewer, paths: paths, attachedAt: "2000-01-01T00:00:00Z")
@@ -2834,7 +2852,8 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         lockHolder.waitUntilHolding()
         defer { lockHolder.release() }
 
-        let result = TerminalEngineActor.runSynchronously { () -> (first: [String], epochAfterFirst: UInt64, second: [String], epochAfterSecond: UInt64) in
+        let result = TerminalEngineActor.runSynchronously {
+            () -> (first: [String], epochAfterFirst: UInt64, second: [String], epochAfterSecond: UInt64) in
             let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
             let now = Date()
             let first = host.expireStaleRemoteClientsIfNeeded(now: now)
@@ -2845,8 +2864,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         }
         XCTAssertEqual(result.first, [remoteClient.id], "the first tick must expire the stale remote owner")
         XCTAssertEqual(result.second, [], "the second tick must not re-expire a client whose detach/transfer is still pending")
-        XCTAssertEqual(
-            result.epochAfterSecond, result.epochAfterFirst, "a duplicate ownership transfer must not bump the owner epoch a second time")
+        XCTAssertEqual(result.epochAfterSecond, result.epochAfterFirst, "a duplicate ownership transfer must not bump the owner epoch a second time")
     }
 
     /// Enforcement/advertisement coherence: a stale-client expiry promotes the transfer target to owner in the
@@ -2892,12 +2910,10 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             // its atomic durable transfer is still blocked on the held write lock.
             let epoch = host.core.debugOwnerEpoch
             XCTAssertEqual(
-                (try? TerminalSessionPersistence.activeAttachments(paths: paths))?.first(where: { $0.mode == .owner })?.clientID,
-                remoteClient.id, "the durable ownership transfer must still be pending under the held write lock")
-            let promoted = host.handleControlRequest(
-                .init(command: "send", text: "echo promoted\n", clientID: localClient.id, ownerEpoch: epoch))
-            let expiredOwner = host.handleControlRequest(
-                .init(command: "send", text: "echo stale\n", clientID: remoteClient.id, ownerEpoch: epoch))
+                (try? TerminalSessionPersistence.activeAttachments(paths: paths))?.first(where: { $0.mode == .owner })?.clientID, remoteClient.id,
+                "the durable ownership transfer must still be pending under the held write lock")
+            let promoted = host.handleControlRequest(.init(command: "send", text: "echo promoted\n", clientID: localClient.id, ownerEpoch: epoch))
+            let expiredOwner = host.handleControlRequest(.init(command: "send", text: "echo stale\n", clientID: remoteClient.id, ownerEpoch: epoch))
             return (expired, promoted, expiredOwner)
         }
         XCTAssertEqual(outcome.expired, [remoteClient.id], "the tick must expire the stale remote owner")
@@ -2962,8 +2978,8 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             try TerminalSessionPersistence.activeAttachments(paths: paths).map(\.clientID), [staleClient.id],
             "the heartbeated client must NOT be detached by the superseded expiry — it stays durably attached")
         let cachedClientIDs = TerminalEngineActor.runSynchronously { () -> [String] in
-            (hostBox.value.debugCurrentRemoteSessionState(reason: "test")?.attachmentSnapshot?.attachments ?? [])
-                .filter { $0.detachedAt == nil }.map(\.clientID)
+            (hostBox.value.debugCurrentRemoteSessionState(reason: "test")?.attachmentSnapshot?.attachments ?? []).filter { $0.detachedAt == nil }.map(
+                \.clientID)
         }
         XCTAssertEqual(cachedClientIDs, [staleClient.id], "the in-memory cache must agree the heartbeated client is still attached")
     }
@@ -2992,7 +3008,8 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             let localClient = TerminalClient(
                 id: "local-window", kind: .localWindow, identity: .init(label: "Spaces window"), connectedAt: "2000-01-01T00:00:00Z")
             let staleRemoteOwner = TerminalClient(
-                id: "stale-remote-owner", kind: .remoteViewer, identity: .init(label: "iPad", deviceName: "iPad"), connectedAt: "2000-01-01T00:00:00Z")
+                id: "stale-remote-owner", kind: .remoteViewer, identity: .init(label: "iPad", deviceName: "iPad"), connectedAt: "2000-01-01T00:00:00Z"
+            )
             // B attaches with a fresh lease so it is never itself a stale-expiry candidate.
             let takeoverClient = TerminalClient(
                 id: "takeover-remote", kind: .remoteViewer, identity: .init(label: "iPhone", deviceName: "iPhone"),
@@ -3030,7 +3047,8 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
                 "the queued expiry must not overwrite B's ack'd takeover — B stays the durable owner")
             XCTAssertFalse(
                 activeAttachments.contains { $0.clientID == staleRemoteOwner.id }, "the genuinely stale remote owner is still detached by the expiry")
-            XCTAssertEqual(host.activeOwnerClientID(), takeoverClient.id, "the cache agrees B is the owner (no regression off the reseeded durable state)")
+            XCTAssertEqual(
+                host.activeOwnerClientID(), takeoverClient.id, "the cache agrees B is the owner (no regression off the reseeded durable state)")
             XCTAssertTrue(host.isOwner(clientID: takeoverClient.id), "B is accepted as owner by enforcement")
             XCTAssertFalse(host.isOwner(clientID: localClient.id), "the local window A must not have been promoted by the superseded transfer")
         }
@@ -3059,7 +3077,8 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             let localClient = TerminalClient(
                 id: "local-window", kind: .localWindow, identity: .init(label: "Spaces window"), connectedAt: "2000-01-01T00:00:00Z")
             let staleRemoteOwner = TerminalClient(
-                id: "stale-remote-owner", kind: .remoteViewer, identity: .init(label: "iPad", deviceName: "iPad"), connectedAt: "2000-01-01T00:00:00Z")
+                id: "stale-remote-owner", kind: .remoteViewer, identity: .init(label: "iPad", deviceName: "iPad"), connectedAt: "2000-01-01T00:00:00Z"
+            )
             try TerminalSessionPersistence.attachClient(
                 sessionID: launchConfiguration.sessionID, client: localClient, mode: .owner, paths: paths, attachedAt: "2000-01-01T00:00:00Z")
             try TerminalSessionPersistence.attachClient(
@@ -3083,7 +3102,8 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             let activeAttachments = try TerminalSessionPersistence.activeAttachments(paths: paths)
             XCTAssertTrue(
                 activeAttachments.isEmpty,
-                "the detached transfer target must not be resurrected as a ghost owner — no active durable attachment remains, so the session can auto-close")
+                "the detached transfer target must not be resurrected as a ghost owner — no active durable attachment remains, so the session can auto-close"
+            )
         }
     }
 
@@ -3279,9 +3299,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             return expired
         }
         XCTAssertEqual(secondTickExpired, [client.id], "a failed expiry must be re-derived and re-enqueued on the next tick")
-        XCTAssertTrue(
-            try TerminalSessionPersistence.activeAttachments(paths: paths).isEmpty,
-            "the re-enqueued detach must land the client detached")
+        XCTAssertTrue(try TerminalSessionPersistence.activeAttachments(paths: paths).isEmpty, "the re-enqueued detach must land the client detached")
         _ = box
     }
 
@@ -3403,8 +3421,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             committed.attachments.contains { $0.clientID == remoteClient.id && $0.detachedAt == nil },
             "after the write commits the expired remote client must remain detached in the payload")
         // The durable mirror now matches the payload the engine advertised all along.
-        XCTAssertEqual(
-            try TerminalSessionPersistence.activeAttachments(paths: paths).first(where: { $0.mode == .owner })?.clientID, localClient.id)
+        XCTAssertEqual(try TerminalSessionPersistence.activeAttachments(paths: paths).first(where: { $0.mode == .owner })?.clientID, localClient.id)
         _ = box
     }
 
@@ -3430,7 +3447,8 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         let ownerClient = TerminalClient(
             id: "stale-remote-owner", kind: .remoteViewer, identity: .init(label: "iPad", deviceName: "iPad"), connectedAt: "2026-05-17T00:00:00Z")
         let viewerClient = TerminalClient(
-            id: "stale-remote-viewer", kind: .remoteViewer, identity: .init(label: "iPhone", deviceName: "iPhone"), connectedAt: "2026-05-17T00:00:00Z")
+            id: "stale-remote-viewer", kind: .remoteViewer, identity: .init(label: "iPhone", deviceName: "iPhone"),
+            connectedAt: "2026-05-17T00:00:00Z")
         try TerminalSessionPersistence.attachClient(
             sessionID: launchConfiguration.sessionID, client: localClient, mode: .viewer, paths: paths, attachedAt: "2026-05-17T00:00:00Z")
         try TerminalSessionPersistence.attachClient(
@@ -3450,9 +3468,8 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         // An unknown transfer target throws only after both detach UPDATEs have run inside the transaction.
         XCTAssertThrowsError(
             try TerminalSessionPersistence.expireClients(
-                [expiringOwner, expiringViewer], transferOwnershipTo: "client-that-does-not-exist",
-                sessionID: launchConfiguration.sessionID, paths: paths, detachedAt: "2026-05-17T00:01:05Z",
-                heartbeatGate: heartbeatGate, observedHeartbeatGenerations: [:]))
+                [expiringOwner, expiringViewer], transferOwnershipTo: "client-that-does-not-exist", sessionID: launchConfiguration.sessionID,
+                paths: paths, detachedAt: "2026-05-17T00:01:05Z", heartbeatGate: heartbeatGate, observedHeartbeatGenerations: [:]))
         let afterFailure = try TerminalSessionPersistence.activeAttachments(paths: paths)
         XCTAssertTrue(
             afterFailure.contains { $0.clientID == ownerClient.id }, "the failed transfer must roll back the owner's detach — all-or-nothing")
@@ -3504,8 +3521,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             sessionID: launchConfiguration.sessionID, newOwnerClientID: remoteOwner.id, paths: paths, transferredAt: "2000-01-01T00:00:01Z")
 
         // The expiry decision observed R's stale lease.
-        let observedStaleOwner = TerminalSessionPersistence.StaleRemoteClient(
-            clientID: remoteOwner.id, leaseRefreshedAt: "2000-01-01T00:00:00Z")
+        let observedStaleOwner = TerminalSessionPersistence.StaleRemoteClient(clientID: remoteOwner.id, leaseRefreshedAt: "2000-01-01T00:00:00Z")
 
         // R synchronously re-attaches as owner with a FRESH lease: its active owner row is updated in place, so it
         // stays the durable owner, but its lease_refreshed_at now differs from the decision's observed lease.
@@ -3525,8 +3541,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         XCTAssertEqual(
             after.first(where: { $0.mode == .owner })?.clientID, remoteOwner.id,
             "R must still be the durable owner — a skipped detach must not transfer ownership away from it")
-        XCTAssertFalse(
-            after.contains { $0.clientID == localViewer.id && $0.mode == .owner }, "the transfer target A must not have been promoted")
+        XCTAssertFalse(after.contains { $0.clientID == localViewer.id && $0.mode == .owner }, "the transfer target A must not have been promoted")
         XCTAssertTrue(after.contains { $0.clientID == remoteOwner.id }, "R must remain attached")
     }
 

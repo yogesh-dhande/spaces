@@ -356,8 +356,7 @@ extension SQLiteStore {
     /// stream open for edges that can never deliver again. `agent_remote_subscriptions` has no foreign
     /// key at all (the watched agent lives on another device's database), so nothing else drops these.
     public func deleteAgentRemoteSubscriptions(subscriberTerminalSessionID: String) throws {
-        try execute(
-            sql: "DELETE FROM agent_remote_subscriptions WHERE subscriber_terminal_session_id = ?", bindings: [subscriberTerminalSessionID])
+        try execute(sql: "DELETE FROM agent_remote_subscriptions WHERE subscriber_terminal_session_id = ?", bindings: [subscriberTerminalSessionID])
     }
 
     /// Remote agents a given local terminal is watching (used when that subscriber goes idle to flush its

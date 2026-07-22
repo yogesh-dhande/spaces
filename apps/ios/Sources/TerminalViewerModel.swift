@@ -91,6 +91,11 @@ extension SpacesDeviceTerminalLinkArtifactKind {
 @MainActor @Observable final class TerminalViewerModel {
     let session: SpacesDeviceTerminalSessionSummary
     let settings: SpacesMobileConnectionSettings
+    /// Demo Mode is view-only: the backend serves a recorded transcript and rejects every write. The
+    /// viewer honors that by rendering the recorded frame through the read-only ended-surface path,
+    /// never attempting ownership takeover, and never offering an input affordance — so the recorded
+    /// transcript stays visible and scrollable while typing, take-over, and the composer are absent.
+    let isDemoMode: Bool
     private let onAuthenticationRequired: @MainActor @Sendable (String) -> Void
     private let onOpenTerminalDeepLink: @MainActor @Sendable (SpacesTerminalDeepLink) -> Void
 
@@ -223,11 +228,13 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         session: SpacesDeviceTerminalSessionSummary, settings: SpacesMobileConnectionSettings,
         onAuthenticationRequired: @escaping @MainActor @Sendable (String) -> Void,
         onOpenTerminalDeepLink: @escaping @MainActor @Sendable (SpacesTerminalDeepLink) -> Void, bridgeClient: SpacesDeviceAPIClient? = nil,
+        isDemoMode: Bool = false,
         remoteMediaDownloader: @escaping @Sendable (URL, SpacesDeviceTerminalLinkArtifactKind) async throws -> URL = TerminalViewerModel
             .defaultRemoteMediaDownloader, linkPreviewCacheDirectory: URL? = nil
     ) {
         self.session = session
         self.settings = settings
+        self.isDemoMode = isDemoMode
         self.onAuthenticationRequired = onAuthenticationRequired
         self.onOpenTerminalDeepLink = onOpenTerminalDeepLink
         let resolvedBridgeClient = bridgeClient ?? SpacesDeviceAPIClient(settings: settings, deviceName: UIDevice.current.name)
@@ -366,7 +373,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         case .unavailable, .ended, .starting, .connecting, .takingOver, .viewingOtherOwner: false
         }
     }
-    var showsTakeOverAction: Bool { phase == .viewingOtherOwner }
+    var showsTakeOverAction: Bool { !isDemoMode && phase == .viewingOtherOwner }
     var isPreparingInput: Bool {
         switch phase {
         case .connecting(owner: true), .ownerBusy: return true
@@ -490,6 +497,8 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     }
 
     func takeOver() async {
+        // Demo Mode is view-only; the backend rejects takeover, so never enter the input path.
+        guard !isDemoMode else { return }
         guard !isEndedState else { return }
         guard !isBusy else { return }
         hasAttemptedAutomaticTakeover = true
@@ -531,9 +540,18 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     }
 
     func updateViewportSize(columns: Int, rows: Int) {
-        guard !isEndedState else { return }
         let resolved = (columns: max(columns, 1), rows: max(rows, 1))
         guard viewportSize?.columns != resolved.columns || viewportSize?.rows != resolved.rows else { return }
+        if isDemoMode {
+            // Demo Mode never takes ownership, so the owner resize handshake below never runs and the
+            // in-memory backend would only ever serve its smallest (phone) recording. Report the viewport
+            // to the backend and refresh so it serves the recording captured nearest this size. Applies
+            // regardless of run state: the read-only recorded surface reports its viewport once mounted.
+            viewportSize = resolved
+            Task { [weak self] in await self?.applyDemoViewportResize(columns: resolved.columns, rows: resolved.rows) }
+            return
+        }
+        guard !isEndedState else { return }
         viewportSize = resolved
         trace(
             "viewport_update columns=\(resolved.columns) rows=\(resolved.rows) owner=\(isOwner ? 1 : 0) busy=\(isBusy ? 1 : 0) syncing=\(isSynchronizingOwnership ? 1 : 0) sync_scheduled=\(isOwnershipSynchronizationScheduled ? 1 : 0)"
@@ -546,6 +564,24 @@ extension SpacesDeviceTerminalLinkArtifactKind {
                 scheduleOwnershipSynchronization()
             }
         }
+    }
+
+    /// Tells the demo backend the current viewport and refreshes so it swaps in the recording captured
+    /// nearest this size. The demo backend ignores the epoch/serial and just records the requested grid,
+    /// so the available (nil) owner state is fine to pass. A full-frame recording always replaces the
+    /// prior frame in the state reducer, so the refreshed grid's frame renders without any revision
+    /// bookkeeping.
+    private func applyDemoViewportResize(columns: Int, rows: Int) async {
+        do {
+            try await bridgeClient.resize(
+                sessionID: session.id, clientID: remoteClient.id, columns: columns, rows: rows, ownerEpoch: currentOwnerEpoch, resizeSerial: nil,
+                timeout: Self.stateRequestTimeout)
+        } catch {
+            // A demo resize only records the viewport in memory; a failure leaves the current frame in
+            // place, so there is nothing to recover.
+            trace("demo_viewport_resize_failure error=\(sanitizedTraceDetail(error.localizedDescription))")
+        }
+        await refreshLatestState(timeout: Self.stateRequestTimeout, ignoreTransientTimeout: true, reason: "demo_viewport_resize")
     }
 
     func sendText(_ text: String, appendNewline: Bool = false, asPaste: Bool = false) async {
@@ -1395,6 +1431,10 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     }
 
     private var shouldRenderEndedTerminalSurface: Bool {
+        // Demo terminals are never owned and never mutate, so they render their recorded frame through
+        // the same read-only, locally-scrollable surface an ended session uses — regardless of whether
+        // the recorded runtime state reads as running or exited.
+        if isDemoMode { return latestState?.renderSnapshot != nil }
         guard isOwner == false, isEndedState else { return false }
         return latestState?.renderSnapshot != nil
     }
@@ -1407,6 +1447,9 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     }
 
     private func attemptAutomaticTakeoverIfNeeded() {
+        // Demo Mode never takes over: the recorded frame renders read-only and the backend would reject
+        // the attempt anyway.
+        guard !isDemoMode else { return }
         guard !isEndedState else { return }
         guard !hasAttemptedAutomaticTakeover else { return }
         guard !isOwner else { return }

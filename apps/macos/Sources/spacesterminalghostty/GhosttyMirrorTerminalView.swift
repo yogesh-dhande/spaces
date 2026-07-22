@@ -544,9 +544,7 @@
             guard mirror == nil, window != nil else { return }
             do {
                 try GhosttyMirrorAppService.shared.startIfNeeded()
-                guard let app = GhosttyMirrorAppService.shared.app else {
-                    throw GhosttyEmbeddedAppServiceError.configuration("ghostty app missing")
-                }
+                guard let app = GhosttyMirrorAppService.shared.app else { throw GhosttyEmbeddedAppServiceError.configuration("ghostty app missing") }
                 var host = makeSurfaceHost()
                 var config = ghostty_session_config_new()
                 config.surface.platform_tag = host.platform_tag

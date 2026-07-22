@@ -1,0 +1,6 @@
+{
+  "workspace": "harbor-web",
+  "status": "degraded",
+  "incident_count": 1,
+  "next_action": "Trace the 500 spike on the /api/checkout route in Lantern."
+}

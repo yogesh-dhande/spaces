@@ -358,9 +358,7 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
     /// Suspends until every byte handed to `sendRawBytes` has been written to the PTY master. `writeQueue`
     /// is serial, so a trailing async barrier resolves only after all prior write blocks complete. Used by
     /// handoff quiesce so an `execv` cannot drop input still buffered in the write queue.
-    func drainPendingWrites() async {
-        await withCheckedContinuation { continuation in writeQueue.async { continuation.resume() } }
-    }
+    func drainPendingWrites() async { await withCheckedContinuation { continuation in writeQueue.async { continuation.resume() } } }
 
     @discardableResult func resizeCellGrid(columns: Int, rows: Int, pixelWidth: UInt32 = 0, pixelHeight: UInt32 = 0) -> Bool {
         let resolvedColumns = max(columns, 1)

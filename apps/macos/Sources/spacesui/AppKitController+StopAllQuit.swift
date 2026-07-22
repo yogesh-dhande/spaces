@@ -207,8 +207,7 @@ extension AppKitController {
                 workspaceForLiveSession: { sessionID in
                     guard let workspaceID = try store.workspaceIDForTerminalSession(sessionID) else { return nil }
                     return try store.workspace(id: workspaceID)
-                },
-                stopWorkspace: { workspaceID in _ = try orchestrator.stopWorkspace(workspaceID: workspaceID) },
+                }, stopWorkspace: { workspaceID in _ = try orchestrator.stopWorkspace(workspaceID: workspaceID) },
                 terminateSession: { sessionID in try TerminalService.terminateSession(id: sessionID) },
                 listLiveSessions: TerminalService.listSessions,
                 browserSessionTargetURLs: { workspaceID in

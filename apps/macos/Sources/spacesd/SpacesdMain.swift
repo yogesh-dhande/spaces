@@ -105,8 +105,8 @@ final class DaemonLivenessState: @unchecked Sendable {
                 ok: false, message: "spacesd is handing off to an updated daemon.", errorCode: .shuttingDown, servicePID: getpid())
         }
         let status = TerminalServiceDaemonStatus(
-            version: AppVersion.current, installedVersion: InstalledSpacesVersion.current(),
-            certificateFingerprint: snapshot.certificateFingerprint, activeSessionCount: snapshot.sessionCount)
+            version: AppVersion.current, installedVersion: InstalledSpacesVersion.current(), certificateFingerprint: snapshot.certificateFingerprint,
+            activeSessionCount: snapshot.sessionCount)
         return TerminalServiceResponse(ok: true, message: "pong", servicePID: getpid(), daemonStatus: status)
     }
 }
@@ -125,8 +125,7 @@ enum SpacesDaemonProfileCommandRouting {
         // Launcher-reaching: session create/send and workspace start/restart (`upWorkspace` launches
         // and tears down workspace terminals). Terminator-reaching: agent kill's stop chokepoint, and an
         // agent-signal `exit` whose `finalizeAgentRow`/`handleAgentExit` terminates the backing terminal.
-        case .terminalSend, .terminalCommand, .agentSpawn, .workspaceStart, .workspaceRestart, .agentKill, .agentSignal:
-            true
+        case .terminalSend, .terminalCommand, .agentSpawn, .workspaceStart, .workspaceRestart, .agentKill, .agentSignal: true
         // Engine-free: pure store/disk reads and metadata writes with no launcher/terminator reach.
         case .terminalList, .terminalTail, .projectList, .workspaceList, .workspaceCreate, .agentList, .agentAnnotate, .agentSubscribe,
             .agentUnsubscribe, .agentConsumePendingEvents:
@@ -506,8 +505,7 @@ enum SpacesDaemonProfileCommandRouting {
     /// main actor (`handle`) and the off-main handlers (via `livenessState`), it mirrors the rejection the
     /// fast ping path emits so no request is served while the daemon is handing off.
     private nonisolated static func handoffInProgressResponse() -> TerminalServiceResponse {
-        TerminalServiceResponse(
-            ok: false, message: "spacesd is handing off to an updated daemon.", errorCode: .shuttingDown, servicePID: getpid())
+        TerminalServiceResponse(ok: false, message: "spacesd is handing off to an updated daemon.", errorCode: .shuttingDown, servicePID: getpid())
     }
 
     /// Off-main request classifier, run on `serverQueue` (the transport thread), not the main actor.
@@ -805,9 +803,9 @@ enum SpacesDaemonProfileCommandRouting {
     /// validated; successful exec replaces the process, while a returned exec unwinds
     /// every lock before the in-place resume path runs. Isolated to the terminal engine actor because it
     /// recurses through each core's (engine-isolated) `withValidatedHandoffOutputForExec`.
-    @TerminalEngineActor private func withValidatedHandoffOutputsForExec(_ cores: ArraySlice<GhosttyEmbeddedSessionCore>, operation: () throws -> Void)
-        throws
-    {
+    @TerminalEngineActor private func withValidatedHandoffOutputsForExec(
+        _ cores: ArraySlice<GhosttyEmbeddedSessionCore>, operation: () throws -> Void
+    ) throws {
         guard let core = cores.first else {
             try operation()
             return
@@ -853,9 +851,7 @@ enum SpacesDaemonProfileCommandRouting {
         lastHandoffSourceVersion = table.sourceVersion
         writeStandardError("spacesd handoff_resume generation=\(table.generation) sessions=\(table.sessions.count)\n")
         var adoptedSessionIDs: Set<String> = []
-        for record in table.sessions {
-            if let adoptedSessionID = await resumeHandoffSession(record) { adoptedSessionIDs.insert(adoptedSessionID) }
-        }
+        for record in table.sessions { if let adoptedSessionID = await resumeHandoffSession(record) { adoptedSessionIDs.insert(adoptedSessionID) } }
         lastHandoffResumeUptime = ProcessInfo.processInfo.systemUptime
         return adoptedSessionIDs
     }
@@ -985,7 +981,8 @@ enum SpacesDaemonProfileCommandRouting {
     /// `latestRuntimeState`/`lastRuntimeState` by then), so the defensive branch returns a plain
     /// `internalError` without any core-terminate rollback: the summary is in-memory and the core is a live
     /// local reference, so there is nothing meaningful a disk-fallback rollback could reconcile.
-    @TerminalEngineActor private func startSessionCoreResponse(for launchConfiguration: TerminalSessionLaunchConfiguration) -> TerminalServiceResponse {
+    @TerminalEngineActor private func startSessionCoreResponse(for launchConfiguration: TerminalSessionLaunchConfiguration) -> TerminalServiceResponse
+    {
         if let rejection = livenessState.sessionCreateRejection() { return rejection }
         do {
             let sessionCore = try sessionCore(for: launchConfiguration)
@@ -1299,7 +1296,8 @@ enum SpacesDaemonProfileCommandRouting {
         case .bytes(let value): (text, bytes) = (nil, value)
         }
         let request = TerminalControlRequest(
-            command: .send(TerminalControlSendPayload(text: text, bytes: bytes, clientID: nil, ownerEpoch: nil, appendNewline: payload.appendNewline)))
+            command: .send(TerminalControlSendPayload(text: text, bytes: bytes, clientID: nil, ownerEpoch: nil, appendNewline: payload.appendNewline))
+        )
         do {
             let controlResponse = try sendProfileTerminalControlOffMain(sessionID: payload.sessionID, request: request)
             guard controlResponse.ok else { throw SpacesRuntimeError.invalidArgument(message: controlResponse.message) }
@@ -1484,7 +1482,9 @@ enum SpacesDaemonProfileCommandRouting {
     private nonisolated func launchBuiltInTerminalSession(_ launchConfiguration: TerminalSessionLaunchConfiguration) throws
         -> TerminalServiceSessionSummary
     {
-        let response = TerminalEngineActor.runSynchronously { self.createSession(TerminalServiceCreateRequest(launchConfiguration: launchConfiguration)) }
+        let response = TerminalEngineActor.runSynchronously {
+            self.createSession(TerminalServiceCreateRequest(launchConfiguration: launchConfiguration))
+        }
         guard response.ok else { throw Self.requestFailedError(response.message) }
         guard let summary = response.session else {
             throw Self.requestFailedError("Terminal session \(launchConfiguration.sessionID) started but produced no summary.")
@@ -1632,9 +1632,7 @@ enum SpacesDaemonProfileCommandRouting {
                 existingAgent, reason: .exited(eventType: type.rawValue, eventSource: "spaces_agent_signal", environmentKeys: environmentKeys))
             shouldFlushQueuedNotifications = false
         }
-        if shouldFlushQueuedNotifications {
-            try engine.subscriberDidBecomeIdle(subscriberTerminalSessionID: sessionID)
-        }
+        if shouldFlushQueuedNotifications { try engine.subscriberDidBecomeIdle(subscriberTerminalSessionID: sessionID) }
         postAgentEventNotification()
         return TerminalServiceProfileCommandResponse(message: "Agent \(type.rawValue) recorded.")
     }
@@ -1760,8 +1758,9 @@ enum SpacesDaemonProfileCommandRouting {
     private nonisolated func killProfileAgentSession(_ sessionID: String, orchestrator: WorkspaceOrchestrator) throws
         -> TerminalServiceProfileCommandResponse
     {
-        guard try orchestrator.killAgentSession(terminalSessionID: sessionID)
-        else { throw SpacesRuntimeError.invalidArgument(message: "No agent session for terminal \(sessionID).") }
+        guard try orchestrator.killAgentSession(terminalSessionID: sessionID) else {
+            throw SpacesRuntimeError.invalidArgument(message: "No agent session for terminal \(sessionID).")
+        }
         return TerminalServiceProfileCommandResponse(message: "Killed agent session \(sessionID).")
     }
 
@@ -1801,8 +1800,7 @@ enum SpacesDaemonProfileCommandRouting {
             // Seed before reconcile: both run synchronously on the main actor, so the seed is in place
             // before any pull's continuation resumes (see `seedBaseline`), and reconcile then opens or
             // refreshes the stream that pulls that first listing.
-            remoteAgentWatchService?.seedBaseline(
-                deviceID: deviceID, childTerminalSessionID: payload.agentSessionID, row: validatedRow)
+            remoteAgentWatchService?.seedBaseline(deviceID: deviceID, childTerminalSessionID: payload.agentSessionID, row: validatedRow)
             remoteAgentWatchService?.reconcile()
             return TerminalServiceProfileCommandResponse(message: "Subscribed to agent session \(payload.agentSessionID) on device \(deviceID).")
         }
@@ -2275,9 +2273,7 @@ enum SpacesDaemonProfileCommandRouting {
         // A repair write that could not commit within the sweep's bounded retry leaves the row in its
         // prior live state; it heals at the next daemon restart via the dead-pid branch. Log it so the
         // strand is observable rather than silent.
-        for sessionID in result.unrepaired {
-            writeStandardError("spacesd stale_session_repair_failed session=\(sessionID)\n")
-        }
+        for sessionID in result.unrepaired { writeStandardError("spacesd stale_session_repair_failed session=\(sessionID)\n") }
     }
 
     private nonisolated static func isProcessAlive(pid: Int) -> Bool {

@@ -48,9 +48,7 @@ public final class TerminalInputSerialQueue: @unchecked Sendable {
     /// Suspends until the task chain enqueued so far has finished. Because each task awaits its
     /// predecessor, awaiting the current tail awaits the whole outstanding chain. Tasks enqueued after
     /// this call began are not awaited. Used by handoff quiesce to flush pending input before `execv`.
-    public func drain() async {
-        await currentTail()?.value
-    }
+    public func drain() async { await currentTail()?.value }
 
     private func currentTail() -> Task<Void, Never>? {
         lock.lock()

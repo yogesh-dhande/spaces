@@ -78,12 +78,8 @@ public enum TerminalSessionStaleRecovery {
     ///   - isProcessAlive: liveness probe for a foreign pid, injected so the daemon shares its own
     ///     `kill(pid, 0)` implementation and tests can drive the foreign-pid branch deterministically.
     ///   - now: repair timestamp, injected for testability.
-    @discardableResult
-    public static func reconcile(
-        ownPID: Int32,
-        adoptedSessionIDs: Set<String>,
-        isProcessAlive: (Int32) -> Bool,
-        now: Date = Date()
+    @discardableResult public static func reconcile(
+        ownPID: Int32, adoptedSessionIDs: Set<String>, isProcessAlive: (Int32) -> Bool, now: Date = Date()
     ) throws -> ReconcileResult {
         let nowString = ISO8601DateFormatter().string(from: now)
         var finalized: [FinalizedSession] = []
@@ -110,11 +106,10 @@ public enum TerminalSessionStaleRecovery {
             }
 
             let finalizedState = TerminalSessionRuntimeState(
-                sessionID: launchConfiguration.sessionID, backend: launchConfiguration.backend, servicePID: ownPID,
-                childPID: runtimeState.childPID, state: terminalState, updatedAt: nowString, exitedAt: nowString,
-                title: runtimeState.title ?? launchConfiguration.title,
-                workingDirectory: runtimeState.workingDirectory ?? launchConfiguration.workingDirectory,
-                columns: runtimeState.columns, rows: runtimeState.rows)
+                sessionID: launchConfiguration.sessionID, backend: launchConfiguration.backend, servicePID: ownPID, childPID: runtimeState.childPID,
+                state: terminalState, updatedAt: nowString, exitedAt: nowString, title: runtimeState.title ?? launchConfiguration.title,
+                workingDirectory: runtimeState.workingDirectory ?? launchConfiguration.workingDirectory, columns: runtimeState.columns,
+                rows: runtimeState.rows)
             // The repair is a durable write. If it cannot commit within the bounded in-place retry (a
             // sustained writer lock or storage fault — the same failure that can drop a predecessor's
             // exited-state write), do NOT report the session as finalized: leave the row in its prior
@@ -140,9 +135,7 @@ public enum TerminalSessionStaleRecovery {
     /// failed repair heal at the next daemon restart via the dead-pid branch — a partial commit (row
     /// finalized but clients left attached) would strand ghost attachments the terminal-row-skipping
     /// sweep could never revisit.
-    private static func commitRepair(
-        _ finalizedState: TerminalSessionRuntimeState, detachedAt: String, paths: TerminalSessionPaths
-    ) -> Bool {
+    private static func commitRepair(_ finalizedState: TerminalSessionRuntimeState, detachedAt: String, paths: TerminalSessionPaths) -> Bool {
         var attempt = 0
         while true {
             do {

@@ -47,9 +47,11 @@ struct TerminalDetailView: View {
         self.onSessionChanged = onSessionChanged
         self.onBack = onBack
         let appModel = appModel
-        _model = State(initialValue: TerminalViewerModel(
-            session: session, settings: settings, onAuthenticationRequired: onAuthenticationRequired,
-            onOpenTerminalDeepLink: { link in Task { await appModel.openTerminalDeepLink(link) } }))
+        _model = State(
+            initialValue: TerminalViewerModel(
+                session: session, settings: settings, onAuthenticationRequired: onAuthenticationRequired,
+                onOpenTerminalDeepLink: { link in Task { await appModel.openTerminalDeepLink(link) } }, bridgeClient: appModel.deviceClient,
+                isDemoMode: appModel.isDemoModeEnabled))
     }
 
     var body: some View {
@@ -91,6 +93,7 @@ struct TerminalDetailView: View {
                 }
             }.overlay(alignment: .bottom) { linkPreviewBannerOverlay }
 
+            if model.isDemoMode { demoNoticeBanner }
             if let errorMessage = model.errorMessage { errorBanner(errorMessage) }
         }.background(Self.surfaceBackground.ignoresSafeArea()).accessibilityIdentifier("terminal.detail.\(session.id)").toolbar(
             .hidden, for: .navigationBar
@@ -294,6 +297,20 @@ struct TerminalDetailView: View {
         Text(message).font(.footnote).foregroundStyle(.primary).frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 16).padding(
             .vertical, 12
         ).background(Color(uiColor: .secondarySystemBackground)).accessibilityIdentifier("terminal.linkNotice")
+    }
+
+    /// Persistent read-only notice shown on every demo terminal. Like the session-ended banner, it names
+    /// a lasting fact about the pane (input is unavailable) rather than a transient state, so it carries no
+    /// dismiss affordance and stays for the life of the demo session. Accent-tinted to read as a Demo Mode
+    /// surface, matching the app's Demo Mode banner.
+    private var demoNoticeBanner: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "lock.desktopcomputer").font(.footnote.weight(.semibold)).foregroundStyle(Theme.accent)
+            Text("Demo Mode — terminal input requires a paired Mac").font(.footnote).foregroundStyle(.white.opacity(0.88))
+            Spacer(minLength: 0)
+        }.frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 16).padding(.vertical, 12).background(Theme.accentTint).overlay(
+            Rectangle().frame(height: 1).foregroundStyle(Theme.accent.opacity(0.4)), alignment: .top
+        ).accessibilityIdentifier("demo.terminalNotice")
     }
 
     private func previewStatusBanner(_ message: String) -> some View {

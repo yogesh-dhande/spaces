@@ -517,8 +517,7 @@ public enum TerminalSessionPersistence {
     /// NULL` guard makes a lease touch for a durably disconnected client a no-op (returning `false`) rather than
     /// silently resurrecting its lease: a client that was expired/detached must not be able to keep a corpse
     /// alive by heartbeating. Returns `true` only when a live client's lease was refreshed.
-    @discardableResult
-    public static func touchClient(id clientID: String, paths: TerminalSessionPaths, touchedAt: String) throws -> Bool {
+    @discardableResult public static func touchClient(id clientID: String, paths: TerminalSessionPaths, touchedAt: String) throws -> Bool {
         let root = normalizedRootDirectory(paths.rootDirectory)
         return try withDatabase(paths: paths) { database in
             try database.withImmediateTransaction {
@@ -633,17 +632,14 @@ public enum TerminalSessionPersistence {
     /// untouched, leaving the row in its prior live state so the next restart genuinely heals it via the
     /// dead-pid branch. Kept separate from `writeRuntimeState`/`detachActiveClients`, which still serve
     /// their own single-purpose callers.
-    public static func finalizeSessionRepair(
-        _ runtimeState: TerminalSessionRuntimeState, detachedAt: String, paths: TerminalSessionPaths
-    ) throws {
+    public static func finalizeSessionRepair(_ runtimeState: TerminalSessionRuntimeState, detachedAt: String, paths: TerminalSessionPaths) throws {
         try paths.ensureDirectories()
         let root = normalizedRootDirectory(paths.rootDirectory)
         let foregroundArgvJSON = try encodeForegroundArgv(runtimeState.foregroundArgv)
         try withDatabase(paths: paths) { database in
             try database.withImmediateTransaction {
                 try database.execute(
-                    sql: "DELETE FROM terminal_runtime_states WHERE root_directory = ? AND session_id <> ?",
-                    bindings: [root, runtimeState.sessionID])
+                    sql: "DELETE FROM terminal_runtime_states WHERE root_directory = ? AND session_id <> ?", bindings: [root, runtimeState.sessionID])
                 try database.execute(
                     sql: """
                         INSERT INTO terminal_runtime_states(
@@ -755,9 +751,7 @@ public enum TerminalSessionPersistence {
     public static func staleRemoteClientIDs(
         paths: TerminalSessionPaths, now: Date = Date(),
         remoteClientLeaseInterval: TimeInterval = TerminalSessionPersistence.remoteClientLeaseInterval
-    ) throws -> [String] {
-        try staleRemoteClients(paths: paths, now: now, remoteClientLeaseInterval: remoteClientLeaseInterval).map(\.clientID)
-    }
+    ) throws -> [String] { try staleRemoteClients(paths: paths, now: now, remoteClientLeaseInterval: remoteClientLeaseInterval).map(\.clientID) }
 
     public static func transferOwnership(sessionID: String, newOwnerClientID: String, paths: TerminalSessionPaths, transferredAt: String) throws {
         let root = normalizedRootDirectory(paths.rootDirectory)
@@ -844,8 +838,7 @@ public enum TerminalSessionPersistence {
     /// When any compare-and-set skips, the transaction still commits what it safely can and returns
     /// `.superseded` so the caller reconciles rather than retries the stale decision. Kept separate from
     /// `detachClient`/`transferOwnership`, which still serve their own single-purpose callers.
-    @discardableResult
-    public static func expireClients(
+    @discardableResult public static func expireClients(
         _ clients: [StaleRemoteClient], transferOwnershipTo newOwnerClientID: String?, sessionID: String, paths: TerminalSessionPaths,
         detachedAt: String, heartbeatGate: TerminalClientHeartbeatGenerationGate, observedHeartbeatGenerations: [String: UInt64]
     ) throws -> ExpireClientsOutcome {

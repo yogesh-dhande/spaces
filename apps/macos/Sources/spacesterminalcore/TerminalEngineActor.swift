@@ -20,8 +20,7 @@ import Foundation
 /// actor's executor and the synchronous `runSynchronously` bridge, so a transport thread can enter the
 /// actor's isolation domain synchronously (`queue.sync`) — the daemon's socket workers answer live-core
 /// control/state requests without an async hop, exactly as they previously did against the main actor.
-@globalActor
-public actor TerminalEngineActor {
+@globalActor public actor TerminalEngineActor {
     public static let shared = TerminalEngineActor()
 
     /// Marks the actor's own serial queue so `runSynchronously` can detect a same-queue reentrant call
@@ -78,9 +77,7 @@ public actor TerminalEngineActor {
     /// Async hop onto the engine actor for main-actor (or other) callers. Custom global actors have no
     /// `MainActor.run` equivalent, so this provides one; the suspension is the legal main→engine
     /// direction of the one-way rule.
-    public static func run<T: Sendable>(_ body: @TerminalEngineActor () throws -> T) async rethrows -> T {
-        try await body()
-    }
+    public static func run<T: Sendable>(_ body: @TerminalEngineActor () throws -> T) async rethrows -> T { try await body() }
 
     /// Runs `body` treating the current thread as already isolated to the engine actor. The caller MUST
     /// guarantee that dynamic isolation (it is called only from `runSynchronously`, which is either on
@@ -93,9 +90,7 @@ public actor TerminalEngineActor {
         // `withoutActuallyEscaping` hands `escapingBody` back as escaping (the whole point), so
         // `unsafeBitCast` accepts it; the isolation is dropped only after the caller has guaranteed we
         // are dynamically on the engine queue.
-        return withoutActuallyEscaping(body) { escapingBody in
-            unsafeBitCast(escapingBody, to: NonIsolated.self)()
-        }
+        return withoutActuallyEscaping(body) { escapingBody in unsafeBitCast(escapingBody, to: NonIsolated.self)() }
     }
 }
 

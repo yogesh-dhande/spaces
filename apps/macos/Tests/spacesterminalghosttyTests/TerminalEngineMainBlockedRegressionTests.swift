@@ -41,8 +41,8 @@ final class TerminalEngineMainBlockedRegressionTests: XCTestCase {
             try paths.ensureDirectories()
             let launch = TerminalSessionLaunchConfiguration(
                 sessionID: "engine-mainblock-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "shell",
-                workingDirectory: FileManager.default.temporaryDirectory.path, shell: "/bin/sh", command: "cat",
-                createdAt: "2026-07-21T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+                workingDirectory: FileManager.default.temporaryDirectory.path, shell: "/bin/sh", command: "cat", createdAt: "2026-07-21T00:00:00Z",
+                workspaceID: "workspace-1", kind: .shell)
             let core = GhosttyEmbeddedSessionCore(launchConfiguration: launch, paths: paths)
             try core.startIfNeeded()
             return CoreBox(core: core, outputPath: paths.outputPath, root: root)
@@ -85,8 +85,8 @@ final class TerminalEngineMainBlockedRegressionTests: XCTestCase {
         let echoDeadline = Date().addingTimeInterval(2.0)
         var sawEcho = false
         while Date() < echoDeadline {
-            if let data = FileManager.default.contents(atPath: box.outputPath),
-                let transcript = String(data: data, encoding: .utf8), transcript.contains(marker)
+            if let data = FileManager.default.contents(atPath: box.outputPath), let transcript = String(data: data, encoding: .utf8),
+                transcript.contains(marker)
             {
                 sawEcho = true
                 break

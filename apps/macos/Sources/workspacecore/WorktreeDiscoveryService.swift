@@ -40,9 +40,8 @@ extension FileSystemWatcher: FileSystemWatching {}
 
     /// Builds a watcher for a project's directories. Injected so tests can substitute
     /// a slow-starting watcher; production always uses `liveWatcherFactory`.
-    typealias WatcherFactory = @Sendable (
-        _ paths: [String], _ latency: TimeInterval, _ onChange: @escaping @Sendable ([String]) -> Void
-    ) -> any FileSystemWatching
+    typealias WatcherFactory =
+        @Sendable (_ paths: [String], _ latency: TimeInterval, _ onChange: @escaping @Sendable ([String]) -> Void) -> any FileSystemWatching
 
     private let databasePath: String
     private let onError: (@Sendable (any Error) -> Void)?

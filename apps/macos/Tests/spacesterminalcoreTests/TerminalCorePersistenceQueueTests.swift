@@ -3,7 +3,40 @@ import XCTest
 
 @testable import spacesterminalcore
 
+#if canImport(Darwin)
+    import Darwin
+#else
+    import Glibc
+#endif
+
 final class TerminalCorePersistenceQueueTests: XCTestCase {
+    private var originalDatabasePath: String?
+    private var originalRuntimeDirectory: String?
+    private var databaseRoot: URL?
+
+    /// The retry tests deliberately break the profile database, and parallel test workers share the
+    /// worktree profile, so every test in this suite runs against its own throwaway profile root — a
+    /// broken database here must never be observable from a concurrently running suite (or vice versa).
+    override func setUpWithError() throws {
+        try super.setUpWithError()
+        originalDatabasePath = ProcessInfo.processInfo.environment["SPACES_DB_PATH"]
+        originalRuntimeDirectory = ProcessInfo.processInfo.environment["SPACES_RUNTIME_DIR"]
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        databaseRoot = root
+        setenv("SPACES_DB_PATH", root.appendingPathComponent("spaces.db").path, 1)
+        setenv("SPACES_RUNTIME_DIR", root.appendingPathComponent("runtime", isDirectory: true).path, 1)
+    }
+
+    override func tearDownWithError() throws {
+        if let originalDatabasePath { setenv("SPACES_DB_PATH", originalDatabasePath, 1) } else { unsetenv("SPACES_DB_PATH") }
+        if let originalRuntimeDirectory { setenv("SPACES_RUNTIME_DIR", originalRuntimeDirectory, 1) } else { unsetenv("SPACES_RUNTIME_DIR") }
+        if let databaseRoot { try? FileManager.default.removeItem(at: databaseRoot) }
+        databaseRoot = nil
+        originalDatabasePath = nil
+        originalRuntimeDirectory = nil
+        try super.tearDownWithError()
+    }
     /// Records the order in which queued writes actually run, guarded so the serial queue and the draining
     /// test thread never race on the array.
     private final class OrderRecorder: @unchecked Sendable {
@@ -112,12 +145,11 @@ final class TerminalCorePersistenceQueueTests: XCTestCase {
         let paths = TerminalSessionPaths(rootDirectory: root.path)
         try paths.ensureDirectories()
         let launchConfiguration = TerminalSessionLaunchConfiguration(
-            sessionID: "session-r4-7-running-retry", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original",
-            shell: "/bin/zsh", command: "zsh", createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+            sessionID: "session-r4-7-running-retry", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original", shell: "/bin/zsh",
+            command: "zsh", createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
         try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
         // Seed a durable running row with the OLD title so a dropped write is observable as staleness.
-        try TerminalSessionPersistence.writeRuntimeState(
-            makeRunningState(sessionID: launchConfiguration.sessionID, title: "before"), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(makeRunningState(sessionID: launchConfiguration.sessionID, title: "before"), paths: paths)
         XCTAssertEqual(try TerminalSessionPersistence.readRuntimeState(paths: paths).title, "before")
 
         let databasePath = try SpacesProfile.current().databasePath
@@ -152,8 +184,8 @@ final class TerminalCorePersistenceQueueTests: XCTestCase {
         let paths = TerminalSessionPaths(rootDirectory: root.path)
         try paths.ensureDirectories()
         let launchConfiguration = TerminalSessionLaunchConfiguration(
-            sessionID: "session-r4-7-supersede", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original",
-            shell: "/bin/zsh", command: "zsh", createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+            sessionID: "session-r4-7-supersede", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original", shell: "/bin/zsh",
+            command: "zsh", createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
         try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
 
         let databasePath = try SpacesProfile.current().databasePath
@@ -161,24 +193,23 @@ final class TerminalCorePersistenceQueueTests: XCTestCase {
 
         let queue = TerminalCorePersistenceQueue(label: "test.persistence.supersede-retry")
         let recorder = PersistedTitleRecorder()
-        queue.enqueueRuntimeStateWrite(
-            makeRunningState(sessionID: launchConfiguration.sessionID, title: "old"), at: Date(), paths: paths
-        ) { state, _ in recorder.record(state.title ?? "") }
+        queue.enqueueRuntimeStateWrite(makeRunningState(sessionID: launchConfiguration.sessionID, title: "old"), at: Date(), paths: paths) {
+            state, _ in recorder.record(state.title ?? "")
+        }
         // Let the older write fail and enter its retry loop, then supersede it with a newer write for the same
         // coalescing key. The generation bump happens synchronously at enqueue, so the older write abandons on
         // its next retry check rather than looping to exhaustion.
         try await Task.sleep(nanoseconds: 100_000_000)
-        queue.enqueueRuntimeStateWrite(
-            makeRunningState(sessionID: launchConfiguration.sessionID, title: "new"), at: Date(), paths: paths
-        ) { state, _ in recorder.record(state.title ?? "") }
+        queue.enqueueRuntimeStateWrite(makeRunningState(sessionID: launchConfiguration.sessionID, title: "new"), at: Date(), paths: paths) {
+            state, _ in recorder.record(state.title ?? "")
+        }
         try await Task.sleep(nanoseconds: 50_000_000)
         try Self.restoreDatabase(at: databasePath)
 
         let deadline = Date().addingTimeInterval(3)
         while Date() < deadline, recorder.recorded.isEmpty { try? await Task.sleep(nanoseconds: 25_000_000) }
         await queue.drainAsync()
-        XCTAssertEqual(
-            recorder.recorded, ["new"], "only the superseding newer write may commit; the failing older write must abandon its retry")
+        XCTAssertEqual(recorder.recorded, ["new"], "only the superseding newer write may commit; the failing older write must abandon its retry")
         XCTAssertEqual(try TerminalSessionPersistence.readRuntimeState(paths: paths).title, "new")
     }
 

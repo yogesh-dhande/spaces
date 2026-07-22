@@ -83,8 +83,8 @@ final class TerminalEngineControlUnderDBContentionRegressionTests: XCTestCase {
             try paths.ensureDirectories()
             let launch = TerminalSessionLaunchConfiguration(
                 sessionID: "engine-dbcontention-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "shell",
-                workingDirectory: FileManager.default.temporaryDirectory.path, shell: "/bin/sh", command: "cat",
-                createdAt: "2026-07-21T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+                workingDirectory: FileManager.default.temporaryDirectory.path, shell: "/bin/sh", command: "cat", createdAt: "2026-07-21T00:00:00Z",
+                workspaceID: "workspace-1", kind: .shell)
             let core = GhosttyEmbeddedSessionCore(launchConfiguration: launch, paths: paths)
             try core.startIfNeeded()
             // Attach a local-window owner so owner-gated sends are accepted and their lease touch fires the
@@ -98,8 +98,7 @@ final class TerminalEngineControlUnderDBContentionRegressionTests: XCTestCase {
 
         // Attach a state-stream subscriber so the per-request broadcast pipeline actually runs (the product
         // scenario, a GUI mirror), matching the reproduction where broadcasts and control interleave.
-        let subscriber = GhosttyRemoteSessionStateStreamClient(
-            socketPath: box.paths.subscriptionSocketPath, onEvent: { _ in }, onDisconnect: {})
+        let subscriber = GhosttyRemoteSessionStateStreamClient(socketPath: box.paths.subscriptionSocketPath, onEvent: { _ in }, onDisconnect: {})
         try subscriber.start()
         defer { subscriber.stop() }
 
@@ -112,7 +111,12 @@ final class TerminalEngineControlUnderDBContentionRegressionTests: XCTestCase {
         // Release the lock BEFORE terminate: terminate drains the persistence queue, whose writes are blocked
         // on this held lock. Defers run LIFO, so this (registered after the removeItem defer) runs first.
         var released = false
-        let releaseLock = { if !released { released = true; lockHolder.release() } }
+        let releaseLock = {
+            if !released {
+                released = true
+                lockHolder.release()
+            }
+        }
         defer { releaseLock() }
 
         // Drive several owner sends through the engine bridge WHILE the write lock is held. Each must return
@@ -131,8 +135,7 @@ final class TerminalEngineControlUnderDBContentionRegressionTests: XCTestCase {
             worstRoundTrip = max(worstRoundTrip, roundTrip)
             XCTAssertTrue(ok, "owner send \(index) should be accepted while the write lock is held")
             XCTAssertLessThan(
-                roundTrip, 0.5,
-                "control send \(index) took \(roundTrip)s while the DB write lock was held — the engine blocked on a durable write")
+                roundTrip, 0.5, "control send \(index) took \(roundTrip)s while the DB write lock was held — the engine blocked on a durable write")
         }
         XCTAssertLessThan(worstRoundTrip, 0.5, "worst control-send round-trip \(worstRoundTrip)s exceeded the budget under DB contention")
 
@@ -141,8 +144,8 @@ final class TerminalEngineControlUnderDBContentionRegressionTests: XCTestCase {
         let echoDeadline = Date().addingTimeInterval(5.0)
         var sawEcho = false
         while Date() < echoDeadline {
-            if let data = FileManager.default.contents(atPath: box.outputPath),
-                let transcript = String(data: data, encoding: .utf8), transcript.contains(lastMarker)
+            if let data = FileManager.default.contents(atPath: box.outputPath), let transcript = String(data: data, encoding: .utf8),
+                transcript.contains(lastMarker)
             {
                 sawEcho = true
                 break
@@ -195,7 +198,12 @@ final class TerminalEngineControlUnderDBContentionRegressionTests: XCTestCase {
         lockHolder.startHolding(maxHoldSeconds: 10)
         lockHolder.waitUntilHolding()
         var released = false
-        let releaseLock = { if !released { released = true; lockHolder.release() } }
+        let releaseLock = {
+            if !released {
+                released = true
+                lockHolder.release()
+            }
+        }
         defer { releaseLock() }
 
         // Terminate one core on a background thread so it is in flight on the shared engine while the lock is
@@ -217,9 +225,11 @@ final class TerminalEngineControlUnderDBContentionRegressionTests: XCTestCase {
         XCTAssertTrue(ok, "the live core's owner send should be accepted while the other core terminates under the held lock")
         XCTAssertLessThan(
             roundTrip, 0.5,
-            "terminating one core under a held write lock stalled another core's control for \(roundTrip)s — the termination fence blocked the engine")
+            "terminating one core under a held write lock stalled another core's control for \(roundTrip)s — the termination fence blocked the engine"
+        )
         XCTAssertEqual(
-            terminated.wait(timeout: .now() + 1), .success, "terminate() did not return promptly — its durable fence blocked the engine on the write lock")
+            terminated.wait(timeout: .now() + 1), .success,
+            "terminate() did not return promptly — its durable fence blocked the engine on the write lock")
 
         releaseLock()
         TerminalEngineActor.runSynchronously { liveBox.core.terminate() }

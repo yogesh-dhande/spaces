@@ -328,7 +328,11 @@ fi
 
 if [[ "$SHOULD_LAUNCH" == "1" ]]; then
   launch_log="$LOG_DIR/devicectl-launch.log"
-  if ! run_with_log "Launching $BUNDLE_ID on device $DEVICE_UDID..." "$launch_log" xcrun devicectl device process launch --device "$DEVICE_UDID" "$BUNDLE_ID"; then
+  # The paywall bypass is honored only by DEBUG builds; devicectl cannot apply the local
+  # StoreKit configuration (that is an Xcode launch-session feature), so without the bypass a
+  # dev install shows the paywall with no product. Launching from the home screen (no env)
+  # still shows the real subscription gate.
+  if ! run_with_log "Launching $BUNDLE_ID on device $DEVICE_UDID..." "$launch_log" xcrun devicectl device process launch --device "$DEVICE_UDID" --environment-variables '{"SPACES_MOBILE_PAYWALL_BYPASS": "1"}' "$BUNDLE_ID"; then
     if ! explain_launch_failure "$launch_log"; then
       exit 1
     fi

@@ -11,9 +11,7 @@ import spacesdevicecore
 /// device runs at most one `listAgentSessions` pull at a time so a stale response can never overwrite
 /// newer state.
 final class RemoteAgentWatchServiceTests: XCTestCase {
-    private final class FakeStreamHandle: RemoteAgentOverviewStreamHandle {
-        func stop() {}
-    }
+    private final class FakeStreamHandle: RemoteAgentOverviewStreamHandle { func stop() {} }
 
     /// Scriptable transport: records every connection's callbacks so tests can fire overview signals
     /// and disconnects, serves a settable listing, and can gate listing pulls to observe concurrency.
@@ -179,21 +177,17 @@ final class RemoteAgentWatchServiceTests: XCTestCase {
 
     /// Store with one watch edge, service wired to the fake transport, connected with an applied
     /// baseline listing of `child-1` in `baselineStatus`.
-    @MainActor private func makeWatchedService(
-        transport: FakeTransport, recorder: DeliveryRecorder, baselineStatus: String
-    ) throws -> (service: RemoteAgentWatchService, store: SQLiteStore) {
+    @MainActor private func makeWatchedService(transport: FakeTransport, recorder: DeliveryRecorder, baselineStatus: String) throws -> (
+        service: RemoteAgentWatchService, store: SQLiteStore
+    ) {
         let (store, path) = try makeStoreAndPath()
-        try store.insertAgentRemoteSubscription(
-            subscriberTerminalSessionID: "sub-1", deviceID: "device-1", agentSessionID: "child-1", createdAt: "t")
+        try store.insertAgentRemoteSubscription(subscriberTerminalSessionID: "sub-1", deviceID: "device-1", agentSessionID: "child-1", createdAt: "t")
         transport.setListing([makeRow(status: baselineStatus)])
         let service = RemoteAgentWatchService(
-            databasePath: path, transport: transport.transport, deliver: { sessionID, line in recorder.record(sessionID, line) },
-            logError: { _ in })
+            databasePath: path, transport: transport.transport, deliver: { sessionID, line in recorder.record(sessionID, line) }, logError: { _ in })
         service.start()
         try waitUntil(message: "stream never connected") { service.debugStreamingDeviceIDs == ["device-1"] }
-        try waitUntil(message: "baseline listing never applied") {
-            service.debugSnapshot(deviceID: "device-1")?["child-1"]?.status == baselineStatus
-        }
+        try waitUntil(message: "baseline listing never applied") { service.debugSnapshot(deviceID: "device-1")?["child-1"]?.status == baselineStatus }
         // The baseline mirror is persisted off the main actor, so the in-memory snapshot landing above
         // no longer implies the row is durable. Wait for the persisted mirror before a test simulates a
         // daemon restart by reading it back from a fresh service on the same database.
@@ -459,8 +453,7 @@ final class RemoteAgentWatchServiceTests: XCTestCase {
         // Give a wrongly-scheduled retry ample time to (incorrectly) fire another listing pull.
         let settleDeadline = Date().addingTimeInterval(0.3)
         while Date() < settleDeadline { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
-        XCTAssertEqual(
-            transport.listCalls, listCallsBeforeSignal + 1, "a device dropped for being unpaired must not get a follow-up listing pull")
+        XCTAssertEqual(transport.listCalls, listCallsBeforeSignal + 1, "a device dropped for being unpaired must not get a follow-up listing pull")
     }
 
     /// Store with one watch edge and a service connected with its first `listAgentSessions` pull gated,
@@ -470,13 +463,11 @@ final class RemoteAgentWatchServiceTests: XCTestCase {
         transport: FakeTransport, recorder: DeliveryRecorder, firstListing: [SpacesDeviceAgentSessionRow], gate: DispatchSemaphore
     ) throws -> (service: RemoteAgentWatchService, store: SQLiteStore) {
         let (store, path) = try makeStoreAndPath()
-        try store.insertAgentRemoteSubscription(
-            subscriberTerminalSessionID: "sub-1", deviceID: "device-1", agentSessionID: "child-1", createdAt: "t")
+        try store.insertAgentRemoteSubscription(subscriberTerminalSessionID: "sub-1", deviceID: "device-1", agentSessionID: "child-1", createdAt: "t")
         transport.setListGate(gate)
         transport.setListing(firstListing)
         let service = RemoteAgentWatchService(
-            databasePath: path, transport: transport.transport, deliver: { sessionID, line in recorder.record(sessionID, line) },
-            logError: { _ in })
+            databasePath: path, transport: transport.transport, deliver: { sessionID, line in recorder.record(sessionID, line) }, logError: { _ in })
         service.start()
         try waitUntil(message: "stream never connected") { service.debugStreamingDeviceIDs == ["device-1"] }
         try waitUntil(message: "first listing pull never started") { transport.listCalls == 1 }
@@ -501,8 +492,7 @@ final class RemoteAgentWatchServiceTests: XCTestCase {
         }
 
         // The child was spinning when validation fetched it; seed that before the gated listing applies.
-        service.seedBaseline(
-            deviceID: "device-1", childTerminalSessionID: "child-1", row: makeRow(status: AgentWindowStatus.spinning.rawValue))
+        service.seedBaseline(deviceID: "device-1", childTerminalSessionID: "child-1", row: makeRow(status: AgentWindowStatus.spinning.rawValue))
         XCTAssertEqual(service.debugSnapshot(deviceID: "device-1")?["child-1"]?.status, AgentWindowStatus.spinning.rawValue)
 
         gate.signal()
@@ -519,16 +509,14 @@ final class RemoteAgentWatchServiceTests: XCTestCase {
         let recorder = DeliveryRecorder()
         let gate = DispatchSemaphore(value: 0)
         // The child exited during the connect gap: the first listing has no row for it.
-        let (service, store) = try makeServiceWithGatedFirstListing(
-            transport: transport, recorder: recorder, firstListing: [], gate: gate)
+        let (service, store) = try makeServiceWithGatedFirstListing(transport: transport, recorder: recorder, firstListing: [], gate: gate)
         defer {
             transport.setListGate(nil)
             for _ in 0..<8 { gate.signal() }
             service.stop()
         }
 
-        service.seedBaseline(
-            deviceID: "device-1", childTerminalSessionID: "child-1", row: makeRow(status: AgentWindowStatus.spinning.rawValue))
+        service.seedBaseline(deviceID: "device-1", childTerminalSessionID: "child-1", row: makeRow(status: AgentWindowStatus.spinning.rawValue))
 
         gate.signal()
         try waitUntil(message: "exit from the connect gap was never delivered") {
@@ -551,8 +539,7 @@ final class RemoteAgentWatchServiceTests: XCTestCase {
         defer { service.stop() }
 
         // A second subscribe validation happens to fetch an older `waiting` row; the seed must be ignored.
-        service.seedBaseline(
-            deviceID: "device-1", childTerminalSessionID: "child-1", row: makeRow(status: AgentWindowStatus.waiting.rawValue))
+        service.seedBaseline(deviceID: "device-1", childTerminalSessionID: "child-1", row: makeRow(status: AgentWindowStatus.waiting.rawValue))
         XCTAssertEqual(
             service.debugSnapshot(deviceID: "device-1")?["child-1"]?.status, AgentWindowStatus.spinning.rawValue,
             "an existing baseline entry must not be clobbered by a seed")
@@ -668,10 +655,8 @@ final class RemoteAgentWatchServiceTests: XCTestCase {
         defer { service.stop() }
         let databasePath = try XCTUnwrap(currentDatabasePath)
 
-        try store.insertAgentRemoteSubscription(
-            subscriberTerminalSessionID: "sub-x", deviceID: "device-1", agentSessionID: "child-x", createdAt: "t")
-        try store.insertAgentRemoteSubscription(
-            subscriberTerminalSessionID: "sub-b", deviceID: "device-1", agentSessionID: "child-b", createdAt: "t")
+        try store.insertAgentRemoteSubscription(subscriberTerminalSessionID: "sub-x", deviceID: "device-1", agentSessionID: "child-x", createdAt: "t")
+        try store.insertAgentRemoteSubscription(subscriberTerminalSessionID: "sub-b", deviceID: "device-1", agentSessionID: "child-b", createdAt: "t")
 
         // Hold an external write lock on the database on a second connection, so the next baseline write
         // this test triggers blocks mid-flight trying to commit — the "slow prior write" already in
@@ -735,8 +720,7 @@ final class RemoteAgentWatchServiceTests: XCTestCase {
         while Date() < chainSettleDeadline { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
         lockThreadFinished.wait()
 
-        XCTAssertNotNil(
-            service.debugSnapshot(deviceID: "device-1")?["child-b"], "the seeded child must remain in the in-memory snapshot")
+        XCTAssertNotNil(service.debugSnapshot(deviceID: "device-1")?["child-b"], "the seeded child must remain in the in-memory snapshot")
         XCTAssertNotNil(
             (try? store.agentRemoteWatchBaselines())?["device-1"]?["child-b"],
             "an unchanged listing must not suppress a seed's still-queued durable baseline write")
@@ -754,8 +738,7 @@ final class RemoteAgentWatchServiceTests: XCTestCase {
         let recorder = DeliveryRecorder()
         let (store, path) = try makeStoreAndPath()
         // Keep device-1 in the desired set so reconcile does not retire the loaded baseline.
-        try store.insertAgentRemoteSubscription(
-            subscriberTerminalSessionID: "sub-1", deviceID: "device-1", agentSessionID: "child-1", createdAt: "t")
+        try store.insertAgentRemoteSubscription(subscriberTerminalSessionID: "sub-1", deviceID: "device-1", agentSessionID: "child-1", createdAt: "t")
         // The previous daemon run persisted device-1 → {child-1}.
         try store.replaceAgentRemoteWatchBaseline(
             deviceID: "device-1", baseline: ["child-1": makeRow(status: AgentWindowStatus.spinning.rawValue, terminalSessionID: "child-1")])
@@ -766,8 +749,7 @@ final class RemoteAgentWatchServiceTests: XCTestCase {
         transport.setListGate(gate)
         transport.setListing([])
         let service = RemoteAgentWatchService(
-            databasePath: path, transport: transport.transport, deliver: { sessionID, line in recorder.record(sessionID, line) },
-            logError: { _ in })
+            databasePath: path, transport: transport.transport, deliver: { sessionID, line in recorder.record(sessionID, line) }, logError: { _ in })
         defer {
             transport.setListGate(nil)
             for _ in 0..<8 { gate.signal() }
@@ -793,8 +775,7 @@ final class RemoteAgentWatchServiceTests: XCTestCase {
         let stabilityDeadline = Date().addingTimeInterval(0.3)
         while Date() < stabilityDeadline {
             RunLoop.main.run(until: Date().addingTimeInterval(0.02))
-            XCTAssertEqual(
-                mirroredChildren(), ["child-1", "child-2"], "durable mirror regressed after converging to the seed-merged union")
+            XCTAssertEqual(mirroredChildren(), ["child-1", "child-2"], "durable mirror regressed after converging to the seed-merged union")
         }
     }
 

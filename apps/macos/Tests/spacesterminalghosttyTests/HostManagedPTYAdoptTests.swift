@@ -78,8 +78,7 @@ final class HostManagedPTYAdoptTests: XCTestCase {
     /// and the read loop's deferred close.
     func testTerminateReturnsPromptlyAndReapsChildHoldingPTYSlaveOpen() throws {
         let driver = HostManagedPTYTerminalSessionDriver(
-            launchConfiguration: makeConfiguration(sessionID: "terminate-live-child", command: "cat"),
-            terminationEscalationIntervals: fastEscalation)
+            launchConfiguration: makeConfiguration(sessionID: "terminate-live-child", command: "cat"), terminationEscalationIntervals: fastEscalation)
         try driver.startIfNeeded()
         XCTAssertTrue(waitUntil { driver.childPID() != nil }, "child never came up")
         let childPID = try XCTUnwrap(driver.childPID())
@@ -109,8 +108,7 @@ final class HostManagedPTYAdoptTests: XCTestCase {
         // after the leader exits.
         let command = "(trap '' HUP; exec sleep 30) & exit 0"
         let driver = HostManagedPTYTerminalSessionDriver(
-            launchConfiguration: makeConfiguration(sessionID: "terminate-survivor", command: command),
-            terminationEscalationIntervals: fastEscalation)
+            launchConfiguration: makeConfiguration(sessionID: "terminate-survivor", command: command), terminationEscalationIntervals: fastEscalation)
         let closedExpectation = expectation(description: "reader reaches EOF and the closed handler fires")
         driver.setSessionClosedHandler { closedExpectation.fulfill() }
         try driver.startIfNeeded()

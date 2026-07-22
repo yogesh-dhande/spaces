@@ -74,6 +74,14 @@ export default function IOSDocsPage() {
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Try Spaces without a Mac</h2>
+        <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
+          <li>• Not set up yet? Turn on <strong>Demo Mode</strong> from Settings, or tap <strong>Try Demo Mode</strong> on the Spaces tab, to tour the whole app with sample data — workspaces, coding agents, alerts, and terminals — before you pair a single device.</li>
+          <li>• Demo terminals are read-only: you can watch and scroll a session, and typing into a terminal starts once you pair your own Mac. A banner keeps the sample-data context clear, and one tap turns it off.</li>
+        </ul>
+      </article>
+
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <div className="flex flex-wrap items-center gap-3">
           <h2 className="text-2xl font-semibold tracking-tight">Pairing</h2>
           <span className="inline-flex rounded-full border border-accent-2/50 px-2 py-0.5 font-mono text-[0.62rem] uppercase tracking-[0.18em] text-accent-2">

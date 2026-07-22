@@ -600,13 +600,10 @@ extension OrchestratorTests {
         WorkspaceOrchestrator.setProcessWideDaemonHandoffInProgress { true }
         defer { WorkspaceOrchestrator.setProcessWideDaemonHandoffInProgress(nil) }
         let terminated = TerminalTerminateCapture()
-        let handoffScanOrchestrator = WorkspaceOrchestrator(
-            store: store, builtInTerminalSessionTerminator: { terminated.sessionIDs.append($0) })
+        let handoffScanOrchestrator = WorkspaceOrchestrator(store: store, builtInTerminalSessionTerminator: { terminated.sessionIDs.append($0) })
 
         XCTAssertThrowsError(try handoffScanOrchestrator.scanAndCreateWorkspacesFromWorktrees(projectID: project.id)) { error in
-            guard case WorkspaceError.daemonHandoffInProgress = error else {
-                return XCTFail("Expected daemonHandoffInProgress, got \(error)")
-            }
+            guard case WorkspaceError.daemonHandoffInProgress = error else { return XCTFail("Expected daemonHandoffInProgress, got \(error)") }
         }
         XCTAssertEqual(try store.workspace(id: workspace.id)?.isArchived, false)
         XCTAssertEqual(try store.runningProcesses(workspaceID: workspace.id).count, 1)
@@ -617,8 +614,7 @@ extension OrchestratorTests {
         // construction) so it resolves the `{ false }` default. The same scan now archives the workspace and
         // deletes its rows — the behavior this fix must leave intact when no handoff is active.
         WorkspaceOrchestrator.setProcessWideDaemonHandoffInProgress(nil)
-        let normalScanOrchestrator = WorkspaceOrchestrator(
-            store: store, builtInTerminalSessionTerminator: { terminated.sessionIDs.append($0) })
+        let normalScanOrchestrator = WorkspaceOrchestrator(store: store, builtInTerminalSessionTerminator: { terminated.sessionIDs.append($0) })
         let created = try normalScanOrchestrator.scanAndCreateWorkspacesFromWorktrees(projectID: project.id)
         XCTAssertTrue(created.isEmpty)
         XCTAssertEqual(try store.workspace(id: workspace.id)?.isArchived, true)

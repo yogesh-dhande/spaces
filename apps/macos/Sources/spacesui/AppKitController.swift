@@ -1772,14 +1772,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 // read the refreshed record's fingerprint. Resolving before the bootstrap would pair the
                 // rotated daemon's fresh host/port with the stale token file's fingerprint — its
                 // re-bootstrap branch only fires on a missing token — and pin-fail every connect.
-                let credentials = try DeviceTerminalSessionStateModel.resolveCredentials(
-                    device: refreshedLocalDevice ?? device, clientApp: clientApp)
+                let credentials = try DeviceTerminalSessionStateModel.resolveCredentials(device: refreshedLocalDevice ?? device, clientApp: clientApp)
                 return .success(credentials)
             } catch { return .failure(error) }
         }.value
-        return result.map { credentials in
-            request.prepared(credentials: credentials, resolvedLocalDevice: refreshedLocalDevice)
-        }
+        return result.map { credentials in request.prepared(credentials: credentials, resolvedLocalDevice: refreshedLocalDevice) }
     }
 
     /// Resolves a session's pane open request. An open/focus IPC can arrive before the
@@ -4136,9 +4133,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// Prefers the loaded section's `displayName` (so the local device reads "Local"); the fallback
     /// mirrors the old `?? localDeviceName` sites it replaces, which only ever missed a section for the
     /// local device, so it resolves to "Local" directly rather than the stored machine name.
-    func deviceDisplayName(id deviceID: String) -> String {
-        deviceSection(id: deviceID)?.displayName ?? "Local"
-    }
+    func deviceDisplayName(id deviceID: String) -> String { deviceSection(id: deviceID)?.displayName ?? "Local" }
     func visibleWorkspaces(projectID: String) -> [WorkspaceSummary] { sidebar.visibleWorkspaces(projectID: projectID) }
     func deviceProjects(deviceID: String) -> [ProjectSummary] { sidebar.deviceProjects(deviceID: deviceID) }
     func selectWorkspace(_ workspace: WorkspaceSummary) { sidebar.selectWorkspace(workspace) }
@@ -7761,8 +7756,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 sender.isEnabled = false
                 sender.title = "Creating..."
                 showOperationProgressOverlay(
-                    message: "Creating project...",
-                    detail: "Creating the project on \(deviceDisplayName(id: refs.selectedDeviceID)).", context: .global)
+                    message: "Creating project...", detail: "Creating the project on \(deviceDisplayName(id: refs.selectedDeviceID)).",
+                    context: .global)
                 Task { @MainActor [weak self, weak sender] in
                     guard let self else { return }
                     defer {
@@ -8012,8 +8007,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 sender.isEnabled = false
                 sender.title = "Creating..."
                 showOperationProgressOverlay(
-                    message: "Creating workspace...",
-                    detail: "Creating the workspace on \(deviceDisplayName(id: workspaceTargetDeviceID)).",
+                    message: "Creating workspace...", detail: "Creating the workspace on \(deviceDisplayName(id: workspaceTargetDeviceID)).",
                     context: .project(refs.projectID))
                 Task { @MainActor [weak self, weak sender] in
                     guard let self else { return }
@@ -9001,8 +8995,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// no-op; in a global panel window it is consumed so it can't fall through to the
     /// focused pane; other focused text inputs (rename editors) keep the chord.
     nonisolated static func newTabShortcutAction(
-        sessionPickerIsActive: Bool, textInputIsFocused: Bool, keyWindowIsPanelWindow: Bool, keyWindowIsMainWindow: Bool,
-        selectedWorkspaceID: String?
+        sessionPickerIsActive: Bool, textInputIsFocused: Bool, keyWindowIsPanelWindow: Bool, keyWindowIsMainWindow: Bool, selectedWorkspaceID: String?
     ) -> NewTabShortcutAction {
         if sessionPickerIsActive { return .consume }
         if textInputIsFocused { return .pass }
@@ -9019,8 +9012,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         guard let newTabShortcutSpec, matches(event: event, spec: newTabShortcutSpec) else { return false }
         switch Self.newTabShortcutAction(
             sessionPickerIsActive: commandPalette.sessionPickerContext != nil, textInputIsFocused: isTextInputFocused(),
-            keyWindowIsPanelWindow: panelCoordinator.panelWindowID(forWindow: NSApp.keyWindow) != nil, keyWindowIsMainWindow: NSApp.keyWindow === window,
-            selectedWorkspaceID: selectedWorkspaceID)
+            keyWindowIsPanelWindow: panelCoordinator.panelWindowID(forWindow: NSApp.keyWindow) != nil,
+            keyWindowIsMainWindow: NSApp.keyWindow === window, selectedWorkspaceID: selectedWorkspaceID)
         {
         case .pass: return false
         case .consume: return true
@@ -9840,9 +9833,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// response to local state along the way. Placement is the caller's decision: the window
     /// shortcut path opens/focuses the pane, while the session picker lands it at the picker's
     /// split or new tab.
-    func runTerminalSessionMutation(
-        workspaceID: String, operation: @Sendable @escaping (SpacesPairedDeviceRecord) throws -> SpacesDeviceAPIResponse
-    ) async -> DeviceTerminalOpenRequest? {
+    func runTerminalSessionMutation(workspaceID: String, operation: @Sendable @escaping (SpacesPairedDeviceRecord) throws -> SpacesDeviceAPIResponse)
+        async -> DeviceTerminalOpenRequest?
+    {
         guard let device = deviceForWorkspaceMutation(workspaceID: workspaceID) else {
             showDeviceNotLoadedError()
             return nil
@@ -9860,8 +9853,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private func runTerminalSessionMutationAndOpenPane(
         workspaceID: String, operation: @Sendable @escaping (SpacesPairedDeviceRecord) throws -> SpacesDeviceAPIResponse
     ) async -> ExternalWindowAction? {
-        guard let request = await runTerminalSessionMutation(workspaceID: workspaceID, operation: operation),
-            await openOrFocusTerminalTarget(request)
+        guard let request = await runTerminalSessionMutation(workspaceID: workspaceID, operation: operation), await openOrFocusTerminalTarget(request)
         else { return nil }
         return .focus(hidesApp: false)
     }

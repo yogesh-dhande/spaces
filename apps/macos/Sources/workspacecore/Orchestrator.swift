@@ -145,8 +145,7 @@ public final class WorkspaceOrchestrator {
             deliver: { sessionID, line in
                 guard let submitter else { throw WorkspaceError.invalidArgument(message: "No agent notification submitter is configured.") }
                 try submitter(sessionID, line)
-            },
-            resolveAgentKind: { [self] agent in agent.terminalTrackingID.flatMap { agentRuntimeKind(terminalSessionID: $0) } },
+            }, resolveAgentKind: { [self] agent in agent.terminalTrackingID.flatMap { agentRuntimeKind(terminalSessionID: $0) } },
             logError: { Self.writeStandardError($0) })
     }
 

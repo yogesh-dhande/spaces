@@ -33,9 +33,7 @@ import XCTest
     func testRunSynchronouslyReentrantRunsInline() {
         let expectation = expectation(description: "reentrant")
         DispatchQueue.global().async {
-            let value = TerminalEngineActor.runSynchronously {
-                TerminalEngineActor.runSynchronously { 41 } + 1
-            }
+            let value = TerminalEngineActor.runSynchronously { TerminalEngineActor.runSynchronously { 41 } + 1 }
             XCTAssertEqual(value, 42)
             expectation.fulfill()
         }
@@ -47,9 +45,7 @@ import XCTest
     func testEngineToMainSyncHopDoesNotDeadlock() {
         let expectation = expectation(description: "engine to main")
         DispatchQueue.global().async {
-            let onMain = TerminalEngineActor.runSynchronously {
-                DispatchQueue.main.sync { Thread.isMainThread }
-            }
+            let onMain = TerminalEngineActor.runSynchronously { DispatchQueue.main.sync { Thread.isMainThread } }
             XCTAssertTrue(onMain)
             expectation.fulfill()
         }

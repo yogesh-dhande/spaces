@@ -47,8 +47,8 @@ final class TerminalEngineInputUnderOutputLoadRegressionTests: XCTestCase {
             let launch = TerminalSessionLaunchConfiguration(
                 sessionID: "engine-inputload-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "shell",
                 workingDirectory: FileManager.default.temporaryDirectory.path, shell: "/bin/sh",
-                command: "cat & while : ; do printf . ; sleep 0.02 ; done",
-                createdAt: "2026-07-21T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+                command: "cat & while : ; do printf . ; sleep 0.02 ; done", createdAt: "2026-07-21T00:00:00Z", workspaceID: "workspace-1",
+                kind: .shell)
             let core = GhosttyEmbeddedSessionCore(launchConfiguration: launch, paths: paths)
             try core.startIfNeeded()
             return CoreBox(core: core, paths: paths, root: root)
@@ -60,8 +60,7 @@ final class TerminalEngineInputUnderOutputLoadRegressionTests: XCTestCase {
 
         // Attach the GUI mirror's own stream client as a subscriber so the per-output-chunk broadcast
         // pipeline runs (it is skipped entirely when there are no subscribers).
-        let subscriber = GhosttyRemoteSessionStateStreamClient(
-            socketPath: box.paths.subscriptionSocketPath, onEvent: { _ in }, onDisconnect: {})
+        let subscriber = GhosttyRemoteSessionStateStreamClient(socketPath: box.paths.subscriptionSocketPath, onEvent: { _ in }, onDisconnect: {})
         try subscriber.start()
         defer { subscriber.stop() }
 
@@ -95,8 +94,8 @@ final class TerminalEngineInputUnderOutputLoadRegressionTests: XCTestCase {
         let echoDeadline = Date().addingTimeInterval(5.0)
         var sawEcho = false
         while Date() < echoDeadline {
-            if let data = FileManager.default.contents(atPath: box.outputPath),
-                let transcript = String(data: data, encoding: .utf8), transcript.contains(marker)
+            if let data = FileManager.default.contents(atPath: box.outputPath), let transcript = String(data: data, encoding: .utf8),
+                transcript.contains(marker)
             {
                 sawEcho = true
                 break

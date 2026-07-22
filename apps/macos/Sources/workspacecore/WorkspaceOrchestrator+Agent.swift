@@ -92,8 +92,8 @@ extension WorkspaceOrchestrator {
         // these initial values are the ones written.
         let record = AgentWindowRecord(
             id: agentID, workspaceID: workspace.id, provider: .spaces, label: resolvedLabel, runtimeTargetID: terminalWindow?.id,
-            terminalTarget: terminalTarget, sessionKey: nil, claimedLauncherID: nil, claimedLauncherName: nil, status: .idle,
-            createdAt: now, updatedAt: now)
+            terminalTarget: terminalTarget, sessionKey: nil, claimedLauncherID: nil, claimedLauncherName: nil, status: .idle, createdAt: now,
+            updatedAt: now)
         let nextAgentWindows = try store.agentWindows(workspaceID: workspace.id).filter { $0.id != agentID } + [record]
         try validateWorkspaceFocusNames(
             workspaceID: workspace.id, processes: try store.workspaceProcesses(workspaceID: workspace.id),
@@ -128,9 +128,7 @@ extension WorkspaceOrchestrator {
     /// owed and lose the restart-reuse flush cue, so a signaled row must instead take the signaled-agent
     /// exit path (record `.exited`, notify subscribers). Foreground-detection events are a different
     /// source and are deliberately excluded by `lastAgentSignalAt`.
-    func agentRowHasRecordedHookSignal(_ record: AgentWindowRecord) throws -> Bool {
-        try store.lastAgentSignalAt(agentSessionID: record.id) != nil
-    }
+    func agentRowHasRecordedHookSignal(_ record: AgentWindowRecord) throws -> Bool { try store.lastAgentSignalAt(agentSessionID: record.id) != nil }
 
     /// Whether this agent row is already finalized — its exit has been delivered — so a termination path
     /// must neither re-notify its subscribers nor re-run its exit disposition. Finalized means either the
@@ -1044,11 +1042,10 @@ extension WorkspaceOrchestrator {
                     let detectedKind = terminalSessionID.flatMap { agentRuntimeKind(terminalSessionID: $0) }
                     rows.append(
                         TerminalServiceAgentSessionRow(
-                            id: agent.id, terminalSessionID: terminalSessionID, agent: detectedKind,
-                            label: trimmedOrNilAgentField(agent.label), status: agent.status.rawValue,
-                            note: trimmedOrNilAgentField(agent.note),
-                            projectID: project.id, projectName: project.name, workspaceID: workspace.id, workspaceName: workspace.displayName,
-                            workspaceDir: workspace.dir, branch: trimmedOrNilAgentField(workspace.branch), updatedAt: agent.updatedAt,
+                            id: agent.id, terminalSessionID: terminalSessionID, agent: detectedKind, label: trimmedOrNilAgentField(agent.label),
+                            status: agent.status.rawValue, note: trimmedOrNilAgentField(agent.note), projectID: project.id, projectName: project.name,
+                            workspaceID: workspace.id, workspaceName: workspace.displayName, workspaceDir: workspace.dir,
+                            branch: trimmedOrNilAgentField(workspace.branch), updatedAt: agent.updatedAt,
                             lastSignalAt: try store.lastAgentSignalAt(agentSessionID: agent.id)))
                 }
             }

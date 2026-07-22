@@ -95,15 +95,11 @@ public final class TerminalCorePersistenceQueue: Sendable {
     private let queue: DispatchQueue
     private let coalescingGate = PersistenceCoalescingGate()
 
-    public init(label: String) {
-        queue = DispatchQueue(label: label)
-    }
+    public init(label: String) { queue = DispatchQueue(label: label) }
 
     /// Enqueue a durable write with no coalescing (unique mutations: expiry detaches, ownership transfer,
     /// the terminated payload). Runs on the serial persistence queue in enqueue (FIFO) order.
-    public func enqueueWrite(_ write: @escaping @Sendable () -> Void) {
-        queue.async(execute: write)
-    }
+    public func enqueueWrite(_ write: @escaping @Sendable () -> Void) { queue.async(execute: write) }
 
     /// Enqueue a latest-wins coalesced durable write for `key`: only the newest enqueue runs; a burst
     /// collapses to one write of the newest value (see `PersistenceCoalescingGate`). FIFO order across keys.
@@ -120,16 +116,12 @@ public final class TerminalCorePersistenceQueue: Sendable {
     /// persistence closures only ever hop BACK to the engine asynchronously (`Task { @TerminalEngineActor }`),
     /// never with a synchronous wait, so a blocked engine cannot cycle with the queue. Used only for the
     /// handoff/termination fences and test determinism — never on the per-keystroke path.
-    public func drain() {
-        queue.sync {}
-    }
+    public func drain() { queue.sync {} }
 
     /// Async drain for the handoff quiesce and daemon-shutdown paths: suspends (rather than blocking the
     /// engine) until the persistence queue is empty, so every mirror write is durable before the caller
     /// `execv`s or `exit`s.
-    public func drainAsync() async {
-        await withCheckedContinuation { continuation in queue.async { continuation.resume() } }
-    }
+    public func drainAsync() async { await withCheckedContinuation { continuation in queue.async { continuation.resume() } } }
 
     /// Runs one durable runtime-state write on the serial queue. On failure it retries IN PLACE inside the
     /// single queued work item — looping up to `runtimeStateWriteMaxAttempts` with a `Thread.sleep` back-off
@@ -159,9 +151,7 @@ public final class TerminalCorePersistenceQueue: Sendable {
             var attempt = 0
             while true {
                 guard gate.isLatest(generation, forKey: key) else { return }
-                do {
-                    try TerminalSessionPersistence.writeRuntimeState(state, paths: paths)
-                } catch {
+                do { try TerminalSessionPersistence.writeRuntimeState(state, paths: paths) } catch {
                     attempt += 1
                     guard attempt < maxAttempts else { return }
                     Thread.sleep(forTimeInterval: retryDelay)

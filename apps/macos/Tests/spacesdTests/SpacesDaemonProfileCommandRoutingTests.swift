@@ -21,10 +21,8 @@ import XCTest
             let offMain: [TerminalServiceProfileCommand] = [
                 .terminalSend(TerminalServiceTerminalSendPayload(sessionID: "s", input: .text("hi"))),
                 .terminalCommand(TerminalServiceTerminalCommandPayload(cwd: "/tmp")),
-                .agentSpawn(TerminalServiceAgentSpawnPayload(cwd: "/tmp", command: "claude")),
-                .workspaceStart(workspaceID: "w"),
-                .workspaceRestart(workspaceID: "w"),
-                .agentKill(TerminalServiceAgentKillPayload(sessionID: "s")),
+                .agentSpawn(TerminalServiceAgentSpawnPayload(cwd: "/tmp", command: "claude")), .workspaceStart(workspaceID: "w"),
+                .workspaceRestart(workspaceID: "w"), .agentKill(TerminalServiceAgentKillPayload(sessionID: "s")),
                 .agentSignal(TerminalServiceProfileAgentSignalPayload(workspaceID: "w", terminalSessionID: "s", event: "exit")),
             ]
             for command in offMain {
@@ -38,12 +36,9 @@ import XCTest
         /// the main actor through the `profileCommandOffMain` bridge.
         func testEngineFreeCommandsRunOnMain() {
             let onMain: [TerminalServiceProfileCommand] = [
-                .projectList,
-                .terminalList,
-                .terminalTail(TerminalServiceTerminalTailPayload(sessionID: "s")),
+                .projectList, .terminalList, .terminalTail(TerminalServiceTerminalTailPayload(sessionID: "s")),
                 .workspaceList(TerminalServiceWorkspaceListPayload()),
-                .workspaceCreate(TerminalServiceWorkspaceCreatePayload(projectID: "p", branch: "b")),
-                .agentList(TerminalServiceAgentListPayload()),
+                .workspaceCreate(TerminalServiceWorkspaceCreatePayload(projectID: "p", branch: "b")), .agentList(TerminalServiceAgentListPayload()),
                 .agentAnnotate(TerminalServiceAgentAnnotatePayload(sessionID: "s", note: "n")),
                 .agentSubscribe(TerminalServiceAgentSubscriptionPayload(subscriberTerminalSessionID: "a", agentSessionID: "b")),
                 .agentUnsubscribe(TerminalServiceAgentSubscriptionPayload(subscriberTerminalSessionID: "a", agentSessionID: "b")),

@@ -64,9 +64,7 @@ final class GhosttyEmbeddedSubmitOrderingTests: XCTestCase {
         throw NSError(domain: "GhosttyEmbeddedSubmitOrderingTests", code: 1)
     }
 
-    private static func occurrences(of needle: String, in haystack: String) -> Int {
-        haystack.components(separatedBy: needle).count - 1
-    }
+    private static func occurrences(of needle: String, in haystack: String) -> Int { haystack.components(separatedBy: needle).count - 1 }
 
     func testRapidSubmitSendsReachChildAsSeparateSubmissions() async throws {
         let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
