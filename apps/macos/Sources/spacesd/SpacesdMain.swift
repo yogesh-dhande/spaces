@@ -2258,8 +2258,14 @@ enum SpacesDaemonProfileCommandRouting {
     /// fire for a stranded row); a plain shutdown needs nothing more, since its successor runs under a
     /// different pid and its rows fall to the dead-pid case.
     private func recoverStaleSessions(adoptedSessionIDs: Set<String> = []) throws {
-        try TerminalSessionStaleRecovery.reconcile(
+        let result = try TerminalSessionStaleRecovery.reconcile(
             ownPID: getpid(), adoptedSessionIDs: adoptedSessionIDs, isProcessAlive: { Self.isProcessAlive(pid: Int($0)) })
+        // A repair write that could not commit within the sweep's bounded retry leaves the row in its
+        // prior live state; it heals at the next daemon restart via the dead-pid branch. Log it so the
+        // strand is observable rather than silent.
+        for sessionID in result.unrepaired {
+            writeStandardError("spacesd stale_session_repair_failed session=\(sessionID)\n")
+        }
     }
 
     private nonisolated static func isProcessAlive(pid: Int) -> Bool {

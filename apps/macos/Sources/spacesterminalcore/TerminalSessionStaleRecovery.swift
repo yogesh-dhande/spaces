@@ -26,7 +26,22 @@ import Foundation
 ///
 /// A plain (non-`execv`) daemon shutdown needs nothing beyond the dead-pid case: the successor runs
 /// under a different pid, so the predecessor's rows fall to "dead pid → repair".
+///
+/// This sweep is a best-effort backstop, not a guarantee. The repair itself is a durable write, and a
+/// write that cannot commit within a bounded in-place retry — the same pathological writer-lock or
+/// storage fault that can drop a predecessor's exited-state write — leaves the row in its prior live
+/// state rather than falsely reporting it finalized. Those sessions are returned in `unrepaired` so the
+/// caller can log them, and they heal at the next daemon restart via the dead-pid branch (the successor
+/// runs under a new pid, so the still-`.running` row falls to "dead pid → repair"). The strand is
+/// therefore bounded to the current daemon's lifetime, never permanent.
 public enum TerminalSessionStaleRecovery {
+    /// Bounded in-place retry for a repair write that cannot commit, mirroring the per-core persistence
+    /// queue's exited-write policy. This runs once on a cold startup path, so blocking a few extra
+    /// seconds under a sustained storage fault is acceptable; each attempt already gets SQLite's own
+    /// ~5s busy handling, so the loop only matters for a fault that persists past that window.
+    static let repairWriteMaxAttempts = 5
+    static let repairWriteRetryDelay: TimeInterval = 0.2
+
     /// One repaired row: the session and the terminal state it was rewritten to.
     public struct FinalizedSession: Sendable, Equatable {
         public let sessionID: String
@@ -38,7 +53,23 @@ public enum TerminalSessionStaleRecovery {
         }
     }
 
-    /// Runs one reconciliation pass over every known session and returns the sessions it finalized.
+    /// Outcome of one reconciliation pass.
+    public struct ReconcileResult: Sendable, Equatable {
+        /// Sessions this pass rewrote to a terminal state.
+        public let finalized: [FinalizedSession]
+        /// Sessions whose repair write could not commit within the bounded in-place retry (a sustained
+        /// writer lock or storage fault). Left untouched in their prior live state; the caller logs them
+        /// and the next daemon restart heals them via the dead-pid branch.
+        public let unrepaired: [String]
+
+        public init(finalized: [FinalizedSession], unrepaired: [String]) {
+            self.finalized = finalized
+            self.unrepaired = unrepaired
+        }
+    }
+
+    /// Runs one reconciliation pass over every known session and reports the sessions it finalized and
+    /// the ones whose repair write could not commit.
     ///
     /// - Parameters:
     ///   - ownPID: this daemon image's pid (`getpid()`), matched against each row's `service_pid`.
@@ -53,9 +84,10 @@ public enum TerminalSessionStaleRecovery {
         adoptedSessionIDs: Set<String>,
         isProcessAlive: (Int32) -> Bool,
         now: Date = Date()
-    ) throws -> [FinalizedSession] {
+    ) throws -> ReconcileResult {
         let nowString = ISO8601DateFormatter().string(from: now)
         var finalized: [FinalizedSession] = []
+        var unrepaired: [String] = []
         for launchConfiguration in try TerminalSessionPersistence.listKnownSessions() {
             let paths = try TerminalSessionPaths.forSession(id: launchConfiguration.sessionID)
             guard let runtimeState = try? TerminalSessionPersistence.readRuntimeState(paths: paths) else { continue }
@@ -83,12 +115,41 @@ public enum TerminalSessionStaleRecovery {
                 title: runtimeState.title ?? launchConfiguration.title,
                 workingDirectory: runtimeState.workingDirectory ?? launchConfiguration.workingDirectory,
                 columns: runtimeState.columns, rows: runtimeState.rows)
-            try? TerminalSessionPersistence.writeRuntimeState(finalizedState, paths: paths)
-            try? TerminalSessionPersistence.detachActiveClients(paths: paths, detachedAt: nowString)
+            // The repair is a durable write. If it cannot commit within the bounded in-place retry (a
+            // sustained writer lock or storage fault — the same failure that can drop a predecessor's
+            // exited-state write), do NOT report the session as finalized: leave the row in its prior
+            // live state so nothing observes a false terminal state, record it as unrepaired for the
+            // caller to log, and let the next daemon restart heal it via the dead-pid branch.
+            guard commitRepair(finalizedState, detachedAt: nowString, paths: paths) else {
+                unrepaired.append(launchConfiguration.sessionID)
+                continue
+            }
             try? FileManager.default.removeItem(atPath: paths.controlSocketPath)
             try? FileManager.default.removeItem(atPath: paths.subscriptionSocketPath)
             finalized.append(FinalizedSession(sessionID: launchConfiguration.sessionID, state: terminalState))
         }
-        return finalized
+        return ReconcileResult(finalized: finalized, unrepaired: unrepaired)
+    }
+
+    /// Writes the finalized runtime state and detaches active clients as one repair, retrying in place
+    /// up to `repairWriteMaxAttempts` with a `repairWriteRetryDelay` back-off between attempts (mirroring
+    /// the persistence queue's exited-write pattern). Returns `true` once both writes commit, `false` if
+    /// every attempt fails. The runtime-state write is attempted first, so on failure neither write has
+    /// altered durable state and the row stays in its prior live state.
+    private static func commitRepair(
+        _ finalizedState: TerminalSessionRuntimeState, detachedAt: String, paths: TerminalSessionPaths
+    ) -> Bool {
+        var attempt = 0
+        while true {
+            do {
+                try TerminalSessionPersistence.writeRuntimeState(finalizedState, paths: paths)
+                try TerminalSessionPersistence.detachActiveClients(paths: paths, detachedAt: detachedAt)
+                return true
+            } catch {
+                attempt += 1
+                guard attempt < repairWriteMaxAttempts else { return false }
+                Thread.sleep(forTimeInterval: repairWriteRetryDelay)
+            }
+        }
     }
 }
