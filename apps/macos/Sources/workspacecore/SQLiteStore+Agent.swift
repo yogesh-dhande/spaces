@@ -29,7 +29,62 @@ extension SQLiteStore {
         agent_sessions.updated_at
         """
 
+    /// Lifecycle-owning upsert. Hook/lifecycle writers (`registerAgentWindow`, `updateAgentWindowStatus`,
+    /// `recordAgentExitStatus`, launcher launch) hold the authoritative record they just computed, so on
+    /// conflict the row's lifecycle columns take the caller's values: `status`, `session_key`, and
+    /// `claimed_launcher_name` are overwritten from `excluded`.
     public func upsertAgentWindow(_ record: AgentWindowRecord) throws {
+        try upsertAgentWindow(record, conflictClause: Self.lifecycleOwningConflictClause)
+    }
+
+    /// Detection/reconciler upsert. Foreground detection and the exited-session reconciler only ever
+    /// create or refresh a row's label/command/runtime-target binding; detection never owns lifecycle
+    /// state. The re-read they perform before upserting runs several intervening statements earlier on a
+    /// separate connection, during which a hook signal (its own connection) can commit a newer
+    /// status/session-key. An overwriting upsert would revert that live state to the caller's stale
+    /// snapshot; this guarantee is therefore enforced in SQL, not in the caller: on conflict the
+    /// lifecycle columns keep the STORED row's values — `status`, `session_key`, `claimed_launcher_name`
+    /// (coalesced), `created_at`, and `updated_at` — regardless of what the caller's record carried,
+    /// closing the read-modify-upsert race entirely. `updated_at` tracks when the row's lifecycle state
+    /// was entered (see `setAgentSessionNote`), so it must move in lockstep with `status`, not with a
+    /// detection refresh that leaves status untouched. On first insert (no conflict) the record's own
+    /// values are used, so a detection record must still carry sensible initial lifecycle values.
+    public func upsertDetectedAgentWindow(_ record: AgentWindowRecord) throws {
+        try upsertAgentWindow(record, conflictClause: Self.detectionPreservingConflictClause)
+    }
+
+    private static let lifecycleOwningConflictClause = """
+        ON CONFLICT(id) DO UPDATE SET
+          workspace_id = excluded.workspace_id,
+          provider = excluded.provider,
+          label = excluded.label,
+          status = excluded.status,
+          runtime_target_id = excluded.runtime_target_id,
+          terminal_session_id = COALESCE(excluded.terminal_session_id, agent_sessions.terminal_session_id),
+          session_key = excluded.session_key,
+          claimed_launcher_id = COALESCE(excluded.claimed_launcher_id, agent_sessions.claimed_launcher_id),
+          claimed_launcher_name = excluded.claimed_launcher_name,
+          note = COALESCE(excluded.note, agent_sessions.note),
+          updated_at = excluded.updated_at
+        """
+
+    private static let detectionPreservingConflictClause = """
+        ON CONFLICT(id) DO UPDATE SET
+          workspace_id = excluded.workspace_id,
+          provider = excluded.provider,
+          label = excluded.label,
+          status = agent_sessions.status,
+          runtime_target_id = excluded.runtime_target_id,
+          terminal_session_id = COALESCE(excluded.terminal_session_id, agent_sessions.terminal_session_id),
+          session_key = agent_sessions.session_key,
+          claimed_launcher_id = COALESCE(excluded.claimed_launcher_id, agent_sessions.claimed_launcher_id),
+          claimed_launcher_name = COALESCE(excluded.claimed_launcher_name, agent_sessions.claimed_launcher_name),
+          note = COALESCE(excluded.note, agent_sessions.note),
+          created_at = agent_sessions.created_at,
+          updated_at = agent_sessions.updated_at
+        """
+
+    private func upsertAgentWindow(_ record: AgentWindowRecord, conflictClause: String) throws {
         let runtimeTargetID = try ensureRuntimeTargetForAgentWindow(record)
         let terminalSessionID = spacesAgentTerminalSessionID(record)
         try withImmediateTransaction {
@@ -39,18 +94,7 @@ extension SQLiteStore {
                           id, workspace_id, provider, label, status, runtime_target_id, terminal_session_id, session_key, claimed_launcher_id, claimed_launcher_name, note, created_at, updated_at
                         )
                         VALUES (?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, ?)
-                        ON CONFLICT(id) DO UPDATE SET
-                          workspace_id = excluded.workspace_id,
-                          provider = excluded.provider,
-                          label = excluded.label,
-                          status = excluded.status,
-                          runtime_target_id = excluded.runtime_target_id,
-                          terminal_session_id = COALESCE(excluded.terminal_session_id, agent_sessions.terminal_session_id),
-                          session_key = excluded.session_key,
-                          claimed_launcher_id = COALESCE(excluded.claimed_launcher_id, agent_sessions.claimed_launcher_id),
-                          claimed_launcher_name = excluded.claimed_launcher_name,
-                          note = COALESCE(excluded.note, agent_sessions.note),
-                          updated_at = excluded.updated_at
+                        \(conflictClause)
                     """,
                 bindings: [
                     record.id, record.workspaceID, record.provider.rawValue, record.label ?? "", record.status.rawValue, runtimeTargetID ?? "",

@@ -1325,6 +1325,124 @@ extension OrchestratorTests {
         }
     }
 
+    /// Regression for a live rename bug: `TerminalForegroundAgentReconciler` and
+    /// `ProcessExitMonitorService` both run `reconcileTerminalForegroundAgentClassifications` detached, so
+    /// two overlapping passes can each read `existingRow == nil` for the same session and both call
+    /// `insertAdHocDetectedAgent`. The row id is deterministic, so the second call upserts the SAME row —
+    /// but must not treat the first call's own already-inserted row as a name conflict with itself and
+    /// suffix it "-2".
+    func testInsertAdHocDetectedAgentIsIdempotentAcrossOverlappingReconcilePasses() throws {
+        let store = try makeTemporaryStore()
+        let projectDir = try makeTempDirectory().path
+        let project = makeProjectRecord(dir: projectDir)
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: projectDir)
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace)
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let sessionID = "ad-hoc-overlapping-agent"
+        let detectedAgent = (label: "claude", displayCommand: "claude")
+
+        try orchestrator.insertAdHocDetectedAgent(detectedAgent: detectedAgent, workspace: workspace, sessionID: sessionID)
+        try orchestrator.insertAdHocDetectedAgent(detectedAgent: detectedAgent, workspace: workspace, sessionID: sessionID)
+
+        let agents = try store.agentWindows(workspaceID: workspace.id)
+        XCTAssertEqual(agents.count, 1)
+        XCTAssertEqual(agents.first?.label, "claude")
+
+        // A genuinely different session detecting the same label is a real collision and still suffixes.
+        let otherSessionID = "ad-hoc-overlapping-agent-other"
+        try orchestrator.insertAdHocDetectedAgent(detectedAgent: detectedAgent, workspace: workspace, sessionID: otherSessionID)
+        let labelsAfterDistinctSession = try store.agentWindows(workspaceID: workspace.id).compactMap(\.label)
+        XCTAssertEqual(Set(labelsAfterDistinctSession), Set(["claude", "claude-2"]))
+    }
+
+    /// Regression: the SAME overlapping-reconcile-pass race as
+    /// `testInsertAdHocDetectedAgentIsIdempotentAcrossOverlappingReconcilePasses`, but with a hook landing
+    /// in the window between the two passes' `insertAdHocDetectedAgent` calls. Pass A inserts the
+    /// detection row; a hook then advances it to `.spinning` with a session key; the delayed pass B (which
+    /// also read `existingRow == nil` before A's insert) must merge into that live state rather than
+    /// re-upserting its stale `.idle`/`sessionKey: nil` detection defaults over it.
+    func testInsertAdHocDetectedAgentPreservesHookStateFromDelayedOverlappingPass() throws {
+        let store = try makeTemporaryStore()
+        let projectDir = try makeTempDirectory().path
+        let project = makeProjectRecord(dir: projectDir)
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: projectDir)
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace)
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let sessionID = "ad-hoc-stale-detection-agent"
+        let detectedAgent = (label: "claude", displayCommand: "claude")
+
+        // Pass A's insert.
+        try orchestrator.insertAdHocDetectedAgent(detectedAgent: detectedAgent, workspace: workspace, sessionID: sessionID)
+        let agentID = orchestrator.adHocDetectedAgentID(sessionID: sessionID)
+        guard let inserted = try store.agentWindow(id: agentID) else { return XCTFail("expected inserted detection row") }
+
+        // A hook fires between the two passes, moving the row to spinning with a session key — real
+        // lifecycle state pass B must not clobber.
+        try store.upsertAgentWindow(
+            AgentWindowRecord(
+                id: inserted.id, workspaceID: inserted.workspaceID, provider: inserted.provider, label: inserted.label,
+                runtimeTargetID: inserted.runtimeTargetID, terminalTarget: inserted.terminalTarget, sessionKey: "session-key-from-hook",
+                claimedLauncherID: inserted.claimedLauncherID, claimedLauncherName: inserted.claimedLauncherName, status: .spinning,
+                note: inserted.note, createdAt: inserted.createdAt, updatedAt: "2026-01-01T00:00:01Z"))
+
+        // Pass B: the delayed second reconcile pass re-runs the same detection.
+        try orchestrator.insertAdHocDetectedAgent(detectedAgent: detectedAgent, workspace: workspace, sessionID: sessionID)
+
+        let agents = try store.agentWindows(workspaceID: workspace.id)
+        XCTAssertEqual(agents.count, 1)
+        XCTAssertEqual(agents.first?.label, "claude")
+        XCTAssertEqual(agents.first?.status, .spinning)
+        XCTAssertEqual(agents.first?.sessionKey, "session-key-from-hook")
+        XCTAssertEqual(agents.first?.createdAt, inserted.createdAt)
+    }
+
+    /// Pins the SQL contract that closes the detection read-modify-upsert race: the product invariant that
+    /// a detection refresh never regresses an agent's lifecycle state. `upsertDetectedAgentWindow` merges a
+    /// fresh label/binding onto a row while preserving whatever `status`, `session_key`, and `created_at`
+    /// the stored row already holds — enforced in the ON CONFLICT clause, so it holds even against a stale
+    /// caller snapshot with no injection seam between the read and the write.
+    func testUpsertDetectedAgentWindowPreservesLifecycleStateAgainstStaleRefresh() throws {
+        let store = try makeTemporaryStore()
+        let projectDir = try makeTempDirectory().path
+        let project = makeProjectRecord(dir: projectDir)
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: projectDir)
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace)
+
+        let agentID = "terminal-agent-detected-session"
+        let terminalTarget = TerminalTargetRecord(trackingID: "detected-session")
+
+        // Detection creates the row with fresh idle defaults.
+        try store.upsertDetectedAgentWindow(
+            AgentWindowRecord(
+                id: agentID, workspaceID: workspace.id, provider: .spaces, label: "claude", terminalTarget: terminalTarget, sessionKey: nil,
+                status: .idle, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z"))
+
+        // A hook advances the row to spinning with a session key through the lifecycle-owning upsert.
+        try store.upsertAgentWindow(
+            AgentWindowRecord(
+                id: agentID, workspaceID: workspace.id, provider: .spaces, label: "claude", terminalTarget: terminalTarget,
+                sessionKey: "session-key-from-hook", status: .spinning, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:01Z"))
+
+        // A delayed detection refresh carrying a stale idle/nil-session-key snapshot with a bogus creation
+        // time must not regress the live lifecycle state; its label binding still applies, but updated_at
+        // (the lifecycle-state-entered timestamp) must stay with the stored status rather than jump to
+        // this refresh's value.
+        try store.upsertDetectedAgentWindow(
+            AgentWindowRecord(
+                id: agentID, workspaceID: workspace.id, provider: .spaces, label: "claude-renamed", terminalTarget: terminalTarget, sessionKey: nil,
+                status: .idle, createdAt: "2099-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:02Z"))
+
+        guard let refreshed = try store.agentWindow(id: agentID) else { return XCTFail("expected agent row") }
+        XCTAssertEqual(refreshed.status, .spinning)
+        XCTAssertEqual(refreshed.sessionKey, "session-key-from-hook")
+        XCTAssertEqual(refreshed.createdAt, "2026-01-01T00:00:00Z")
+        XCTAssertEqual(refreshed.label, "claude-renamed")
+        XCTAssertEqual(refreshed.updatedAt, "2026-01-01T00:00:01Z")
+    }
+
     func testReconcileTerminalForegroundAgentClassificationsReservesConfiguredLauncherNames() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path

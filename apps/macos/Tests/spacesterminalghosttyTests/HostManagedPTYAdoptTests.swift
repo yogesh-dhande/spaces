@@ -69,6 +69,69 @@ final class HostManagedPTYAdoptTests: XCTestCase {
         XCTAssertEqual(completed.wait(timeout: .now() + 5), .success, "handoff buffering did not finish")
     }
 
+    // MARK: - Non-blocking terminate()
+
+    /// Regression for the daemon main-actor offload: `terminate()` runs on the terminal engine executor,
+    /// so it must never block on `close(master)` (which hangs until the PTY reader unblocks) or `waitpid`.
+    /// With a child that keeps the PTY slave open (the read loop is blocked in `read()`), terminate()
+    /// returns immediately and the child is reaped + the fd closed shortly after via the escalation ladder
+    /// and the read loop's deferred close.
+    func testTerminateReturnsPromptlyAndReapsChildHoldingPTYSlaveOpen() throws {
+        let driver = HostManagedPTYTerminalSessionDriver(
+            launchConfiguration: makeConfiguration(sessionID: "terminate-live-child", command: "cat"),
+            terminationEscalationIntervals: fastEscalation)
+        try driver.startIfNeeded()
+        XCTAssertTrue(waitUntil { driver.childPID() != nil }, "child never came up")
+        let childPID = try XCTUnwrap(driver.childPID())
+
+        // terminate() does only bookkeeping + SIGHUP + a detached escalation, so it returns well under any
+        // grace period — the pre-fix inline blocking close(master) would hang here indefinitely.
+        let start = Date()
+        driver.terminate()
+        let elapsed = Date().timeIntervalSince(start)
+        XCTAssertLessThan(elapsed, 0.2, "terminate() blocked for \(elapsed)s instead of deferring the PTY teardown")
+
+        // The child is reaped (kill reports ESRCH, i.e. the pid is fully gone, not a lingering zombie) and
+        // the driver drops it shortly after, driven by the escalation + the read loop's fd close.
+        XCTAssertTrue(waitUntil(timeout: 10) { kill(childPID, 0) != 0 && errno == ESRCH }, "child was not reaped after terminate()")
+        XCTAssertTrue(waitUntil(timeout: 10) { driver.childPID() == nil }, "driver still reports a live child after teardown")
+    }
+
+    /// Regression for the PTY escalation gap: reaping the leader is not enough to unblock the read loop.
+    /// The leader shell spawns a background descendant that ignores SIGHUP and keeps the PTY slave open,
+    /// then exits immediately. The reader stays blocked while that descendant lives, so terminate()'s
+    /// escalation must continue past the (already-reaped) leader to the process group (SIGTERM/SIGKILL)
+    /// until the reader actually reaches EOF — otherwise the master fd and the driver leak forever and the
+    /// closed handler never fires.
+    func testTerminateEscalatesPastReapedLeaderUntilSurvivingDescendantReleasesPTYSlave() throws {
+        // The subshell inherits the leader's PTY slave on fds 0/1/2; `trap '' HUP` sets SIG_IGN for SIGHUP
+        // (preserved across the `exec`), so the descendant survives the group SIGHUP and keeps the slave open
+        // after the leader exits.
+        let command = "(trap '' HUP; exec sleep 30) & exit 0"
+        let driver = HostManagedPTYTerminalSessionDriver(
+            launchConfiguration: makeConfiguration(sessionID: "terminate-survivor", command: command),
+            terminationEscalationIntervals: fastEscalation)
+        let closedExpectation = expectation(description: "reader reaches EOF and the closed handler fires")
+        driver.setSessionClosedHandler { closedExpectation.fulfill() }
+        try driver.startIfNeeded()
+        XCTAssertTrue(waitUntil { driver.childPID() != nil }, "child never came up")
+        let childPID = try XCTUnwrap(driver.childPID())
+
+        // Let the leader spawn the descendant and exit on its own; the read loop stays blocked because the
+        // descendant still holds the slave, so the leader is an unreaped zombie awaiting terminate().
+        usleep(200_000)
+
+        let start = Date()
+        driver.terminate()
+        XCTAssertLessThan(Date().timeIntervalSince(start), 0.2, "terminate() blocked instead of deferring teardown")
+
+        // Escalation must reap the leader AND drive the SIGHUP-immune descendant dead via the group signal so
+        // read() returns EOF: the closed handler fires and the driver drops the child within the bounded ladder.
+        wait(for: [closedExpectation], timeout: 10)
+        XCTAssertTrue(waitUntil(timeout: 10) { kill(childPID, 0) != 0 && errno == ESRCH }, "leader was not reaped after terminate()")
+        XCTAssertTrue(waitUntil(timeout: 10) { driver.childPID() == nil }, "driver still reports a live child after teardown")
+    }
+
     // MARK: - Adopt round-trip
 
     func testAdoptRoundTripHandsOffLiveChild() throws {

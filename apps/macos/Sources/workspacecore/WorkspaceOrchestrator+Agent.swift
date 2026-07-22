@@ -74,17 +74,32 @@ extension WorkspaceOrchestrator {
         }
         let terminalTarget = TerminalTargetRecord(runtimeTargetID: terminalWindow?.id, trackingID: sessionID)
         let now = nowISO8601()
-        let resolvedLabel = try uniqueAgentFocusLabel(workspaceID: workspace.id, preferredLabel: detectedAgent.label)
+        let agentID = adHocDetectedAgentID(sessionID: sessionID)
+        // Exclude this row's own deterministic id from both the label scan and the validation snapshot.
+        // Overlapping reconcile passes (TerminalForegroundAgentReconciler and ProcessExitMonitorService, both
+        // detached) can each observe no existing row and both call this for the same session; the row id is
+        // deterministic, so the later pass's upsert must never treat the earlier pass's already-inserted row
+        // — carrying the SAME detected label — as a name conflict with itself and rename it "-2".
+        let resolvedLabel = try uniqueAgentFocusLabel(workspaceID: workspace.id, preferredLabel: detectedAgent.label, excludingAgentWindowID: agentID)
+        // Detection only ever creates or refreshes the label/command/runtime-target binding; it never owns
+        // lifecycle state. Two overlapping reconciler passes (TerminalForegroundAgentReconciler and
+        // ProcessExitMonitorService) can both observe no existing row and both reach this call for the same
+        // deterministic id, and a hook signal can commit newer status/session-key state between this pass's
+        // reads and its upsert. So the record carries only fresh initial lifecycle values, and preserving
+        // any already-committed status, session key, claimed launcher fields, and lifecycle timestamps is enforced
+        // in SQL by `upsertDetectedAgentWindow`'s ON CONFLICT clause rather than by re-reading and carrying
+        // the snapshot forward here — closing the read-modify-upsert race. On first insert (no conflict)
+        // these initial values are the ones written.
         let record = AgentWindowRecord(
-            id: adHocDetectedAgentID(sessionID: sessionID), workspaceID: workspace.id, provider: .spaces, label: resolvedLabel,
-            runtimeTargetID: terminalWindow?.id, terminalTarget: terminalTarget, sessionKey: nil, claimedLauncherID: nil, claimedLauncherName: nil,
-            status: .idle, createdAt: now, updatedAt: now)
-        let nextAgentWindows = try store.agentWindows(workspaceID: workspace.id) + [record]
+            id: agentID, workspaceID: workspace.id, provider: .spaces, label: resolvedLabel, runtimeTargetID: terminalWindow?.id,
+            terminalTarget: terminalTarget, sessionKey: nil, claimedLauncherID: nil, claimedLauncherName: nil, status: .idle,
+            createdAt: now, updatedAt: now)
+        let nextAgentWindows = try store.agentWindows(workspaceID: workspace.id).filter { $0.id != agentID } + [record]
         try validateWorkspaceFocusNames(
             workspaceID: workspace.id, processes: try store.workspaceProcesses(workspaceID: workspace.id),
             browserSessions: try store.workspaceBrowserSessions(workspaceID: workspace.id), agentWindows: nextAgentWindows)
 
-        try store.upsertAgentWindow(record)
+        try store.upsertDetectedAgentWindow(record)
         _ = try updateAdHocAgentRuntimeTargetDetail(record, displayCommand: detectedAgent.displayCommand)
     }
 
@@ -836,6 +851,13 @@ extension WorkspaceOrchestrator {
         let alreadyFinalized = try agentRowIsFinalized(record)
         switch reason {
         case .destroyed(let terminateTerminalSession):
+            // Destroys delete the row and (usually) terminate the backing terminal. During a daemon
+            // handoff the terminal side becomes a silent no-op (`terminateBuiltInTerminalSession` defers to
+            // the successor daemon), so proceeding would delete rows for a terminal that survives the
+            // handoff. Veto at the chokepoint so every destroy path — workspace stop, agent kill, stale-slot
+            // eviction — either does both or neither. `.exited` stays admitted: it records an observed exit
+            // and performs no terminal-side work that a handoff could split.
+            guard !daemonHandoffInProgress() else { throw WorkspaceError.daemonHandoffInProgress }
             if !alreadyFinalized { try engine.childDidTransition(agent: record, transition: .exited) }
             if terminateTerminalSession, let sessionID = record.terminalTrackingID, !sessionID.isEmpty { terminateBuiltInTerminalSession(sessionID) }
             try store.deleteAgentSubscriptions(agentSessionID: record.id)
