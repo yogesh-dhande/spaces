@@ -225,6 +225,12 @@ public enum TerminalTranscriptTrim {
     /// fallback carries a matching residual acceptance: an OSC/DCS whose payload contains a newline but
     /// spans the entire scan window without its terminator would let an ESC-free window's newline cut land
     /// mid-payload — the same pathological >1 MiB single-sequence class already accepted under deferral.
+    /// A second residual shares that acceptance: a window that BEGINS inside an OSC whose payload holds a
+    /// raw newline before a bare-BEL (or CAN/SUB) terminator contains no ESC at all, so the newline cut
+    /// lands inside the payload even though the sequence terminates within the window. No byte-level scan
+    /// can close this — BEL ends an OSC but is inert data inside DCS passthrough, so terminator ordering
+    /// proves nothing without parser state; the sound fix (validating the cut against parser ground state
+    /// during the preamble replay, deferring otherwise) is tracked in issue #225.
     ///
     /// Single pass: the first newline offset is remembered while scanning for the first ESC rather than
     /// re-reading the window to find it separately.
