@@ -41,13 +41,22 @@ final class SpacesDeviceAPIStreamHandle: @unchecked Sendable {
 }
 
 struct SpacesDeviceAPIClient: Sendable {
+    /// Placeholder used only when a caller (in practice, only tests) doesn't supply a real device name.
+    /// Never used in production: every production call site passes `UIDevice.current.name` explicitly.
+    private static let fallbackDeviceName = "iOS Device"
+
     let settings: SpacesMobileConnectionSettings
+    /// This device's display name, captured once by the caller and stored rather than read here on
+    /// demand: `UIDevice.current.name` is main-actor-isolated, but this type's request path is not.
+    private let deviceName: String
     private let requestOverride: (@Sendable (SpacesDeviceAPIRequest) async throws -> SpacesDeviceAPIResponse)?
 
     init(
-        settings: SpacesMobileConnectionSettings, requestOverride: (@Sendable (SpacesDeviceAPIRequest) async throws -> SpacesDeviceAPIResponse)? = nil
+        settings: SpacesMobileConnectionSettings, deviceName: String = SpacesDeviceAPIClient.fallbackDeviceName,
+        requestOverride: (@Sendable (SpacesDeviceAPIRequest) async throws -> SpacesDeviceAPIResponse)? = nil
     ) {
         self.settings = settings
+        self.deviceName = deviceName
         self.requestOverride = requestOverride
     }
 
@@ -474,8 +483,7 @@ struct SpacesDeviceAPIClient: Sendable {
     private var clientAppIdentity: SpacesDeviceClientApp {
         SpacesDeviceClientApp(
             installationID: settings.installationID, bundleID: Bundle.main.bundleIdentifier ?? SpacesDeviceFirstPartyPolicy.allowedBundleID,
-            platform: "ios", deviceName: ProcessInfo.processInfo.hostName,
-            appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String)
+            platform: "ios", deviceName: deviceName, appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String)
     }
 
 }

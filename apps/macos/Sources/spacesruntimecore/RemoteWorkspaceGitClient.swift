@@ -72,7 +72,10 @@ public struct RemoteWorkspaceRefreshBlock: LocalizedError, Sendable, Equatable {
     }
 }
 
-public final class RemoteWorkspaceGitClient {
+/// Immutable (only `let` stored properties of Sendable types) and free of shared mutable state — every
+/// method spawns its own `git` subprocess — so it is safe to share across threads. `Sendable` lets the
+/// daemon hold one instance as a `nonisolated let` and drive git off the main actor from the transport thread.
+public final class RemoteWorkspaceGitClient: Sendable {
     public enum RemoteBranchLookupStatus {
         case exists
         case missing

@@ -18,9 +18,22 @@ public enum TerminalPerformance {
 
     public static func logLine(_ line: String) {
         guard ProcessInfo.processInfo.environment["DEBUG"] == "1" else { return }
-        FileHandle.standardError.write(Data(line.utf8))
-        appendToPerfLog(line)
+        let stamped = "\(timestamp()) \(line)"
+        FileHandle.standardError.write(Data(stamped.utf8))
+        appendToPerfLog(stamped)
     }
+
+    private static func timestamp() -> String {
+        let now = Date()
+        let ms = Int(now.timeIntervalSince1970 * 1000) % 1000
+        return "\(Self.timeFormatter.string(from: now)).\(String(format: "%03d", ms))"
+    }
+
+    private static let timeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss"
+        return formatter
+    }()
 
     private static func appendToPerfLog(_ line: String) {
         guard let data = line.data(using: .utf8) else { return }

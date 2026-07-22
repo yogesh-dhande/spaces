@@ -30,3 +30,7 @@ apps/macos/.artifacts/
 .venv
 __pycache__
 *.egg-info
+
+# Claude Code local state (skills stay tracked)
+.claude/worktrees/
+.claude/settings.local.json

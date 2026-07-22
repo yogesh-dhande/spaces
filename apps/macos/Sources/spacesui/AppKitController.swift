@@ -227,6 +227,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private var reloadShortcutSpec: HotkeySpec?
     private var openEditorShortcutSpec: HotkeySpec?
     private var openTerminalShortcutSpec: HotkeySpec?
+    private var newTabShortcutSpec: HotkeySpec?
     private var openFinderShortcutSpec: HotkeySpec?
     private var openSettingsShortcutSpec: HotkeySpec?
     private var nextShortcutSpec: HotkeySpec?
@@ -2507,6 +2508,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         /// the first successful handshake; drives the per-device compatibility banner and gating.
         var daemonStatus: TerminalServiceDaemonStatus?
         var compatibility: SpacesWireCompatibility?
+
+        /// The label shown for this device everywhere in the UI. The local device always renders as
+        /// "Local" regardless of its stored machine name; remote devices show their stored name.
+        var displayName: String { isLocal ? "Local" : deviceName }
     }
 
     /// Whether the current sidebar selection points at a workspace or project owned by `section`. Used
@@ -3100,7 +3105,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
-    nonisolated private static func runningProcesses(from rows: [SpacesDeviceWorkspaceProcessRow]) -> [RunningProcessRecord] {
+    nonisolated static func runningProcesses(from rows: [SpacesDeviceWorkspaceProcessRow]) -> [RunningProcessRecord] {
         rows.compactMap { row in
             guard row.runState != .notStarted || row.processID != nil || row.sessionID != nil else { return nil }
             return RunningProcessRecord(
@@ -3110,7 +3115,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
     }
 
-    nonisolated private static func agentWindows(from rows: [SpacesDeviceWorkspaceCodingAgentRow]) -> [AgentWindowRecord] {
+    nonisolated static func agentWindows(from rows: [SpacesDeviceWorkspaceCodingAgentRow]) -> [AgentWindowRecord] {
         let now = staticISO8601Formatter.string(from: Date())
         return rows.compactMap { row in
             guard row.agentID != nil || row.sessionID != nil || row.runState != .notStarted else { return nil }
@@ -4135,6 +4140,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     func findWorkspace(id: String) -> (ProjectSummary, WorkspaceSummary)? { sidebar.findWorkspace(id: id) }
     func deviceRecord(forDeviceID deviceID: String) -> SpacesPairedDeviceRecord? { sidebar.deviceRecord(forDeviceID: deviceID) }
     func deviceSection(id deviceID: String) -> DeviceSection? { sidebar.deviceSection(id: deviceID) }
+    /// The device label to render for `deviceID` wherever the New Project flow names a target device.
+    /// Prefers the loaded section's `displayName` (so the local device reads "Local"); the fallback
+    /// mirrors the old `?? localDeviceName` sites it replaces, which only ever missed a section for the
+    /// local device, so it resolves to "Local" directly rather than the stored machine name.
+    func deviceDisplayName(id deviceID: String) -> String { deviceSection(id: deviceID)?.displayName ?? "Local" }
     func visibleWorkspaces(projectID: String) -> [WorkspaceSummary] { sidebar.visibleWorkspaces(projectID: projectID) }
     func deviceProjects(deviceID: String) -> [ProjectSummary] { sidebar.deviceProjects(deviceID: deviceID) }
     func selectWorkspace(_ workspace: WorkspaceSummary) { sidebar.selectWorkspace(workspace) }
@@ -5280,7 +5290,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     /// The New Project title, naming the target device only when there is a choice to disambiguate.
     private func addProjectFlowTitle(deviceID: String) -> String {
-        deviceSections.count > 1 ? "New Project · \(deviceSection(id: deviceID)?.deviceName ?? localDeviceName)" : "New Project"
+        deviceSections.count > 1 ? "New Project · \(deviceDisplayName(id: deviceID))" : "New Project"
     }
 
     /// Step 2: choose the source — an existing folder or a repository to clone — and its location.
@@ -5289,7 +5299,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private func showAddProjectSourceStep(deviceID: String) {
         clearActiveAddProjectFormState()
 
-        let deviceName = deviceSection(id: deviceID)?.deviceName ?? localDeviceName
+        let deviceName = deviceDisplayName(id: deviceID)
         let folderRow = addProjectSourceRow(
             icon: "folder", title: "Existing folder", subtitle: "Use a project already on \(deviceName)", accessibilityID: "add-project-source-folder"
         )
@@ -7478,9 +7488,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         container.alphaValue = selectable ? 1 : 0.55
         container.setAccessibilityElement(true)
         container.setAccessibilityRole(.button)
-        container.setAccessibilityLabel(section.deviceName)
+        container.setAccessibilityLabel(section.displayName)
         container.setAccessibilityIdentifier("add-project-device-option")
-        container.toolTip = selectable ? "Create the project on \(section.deviceName)" : "\(section.deviceName) is offline"
+        container.toolTip = selectable ? "Create the project on \(section.displayName)" : "\(section.displayName) is offline"
 
         let iconView = NSImageView()
         iconView.image = NSImage(systemSymbolName: section.isLocal ? "desktopcomputer" : "server.rack", accessibilityDescription: nil)
@@ -7488,13 +7498,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         iconView.setContentHuggingPriority(.required, for: .horizontal)
         iconView.setContentCompressionResistancePriority(.required, for: .horizontal)
 
-        let nameField = NSTextField(labelWithString: section.deviceName)
+        let nameField = NSTextField(labelWithString: section.displayName)
         nameField.font = .systemFont(ofSize: 13, weight: .semibold)
         nameField.textColor = .labelColor
         nameField.lineBreakMode = .byTruncatingMiddle
         nameField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-        let caption = selectable ? (section.isLocal ? "This Mac" : "Remote device") : "Offline"
+        let caption = selectable ? (section.isLocal ? "This device" : "Remote device") : "Offline"
         let captionField = NSTextField(labelWithString: caption)
         captionField.font = .systemFont(ofSize: 11)
         captionField.textColor = .secondaryLabelColor
@@ -7766,8 +7776,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 sender.isEnabled = false
                 sender.title = "Creating..."
                 showOperationProgressOverlay(
-                    message: "Creating project...",
-                    detail: "Creating the project on \(deviceSection(id: refs.selectedDeviceID)?.deviceName ?? localDeviceName).", context: .global)
+                    message: "Creating project...", detail: "Creating the project on \(deviceDisplayName(id: refs.selectedDeviceID)).",
+                    context: .global)
                 Task { @MainActor [weak self, weak sender] in
                     guard let self else { return }
                     defer {
@@ -7821,7 +7831,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         // not selectable in the device step, but the device step is skipped for a lone local device, so
         // guard here too and surface the offline state instead.
         if let section = deviceSection(id: refs.selectedDeviceID), !Self.addProjectDeviceIsSelectable(loadState: section.loadState) {
-            showError(WorkspaceError.invalidArgument(message: "\(section.deviceName) is offline. Reconnect it and try again."))
+            showError(WorkspaceError.invalidArgument(message: "\(section.displayName) is offline. Reconnect it and try again."))
             return
         }
         guard let device = deviceRecord(forDeviceID: refs.selectedDeviceID) else {
@@ -8018,8 +8028,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 sender.isEnabled = false
                 sender.title = "Creating..."
                 showOperationProgressOverlay(
-                    message: "Creating workspace...",
-                    detail: "Creating the workspace on \(deviceSection(id: workspaceTargetDeviceID)?.deviceName ?? localDeviceName).",
+                    message: "Creating workspace...", detail: "Creating the workspace on \(deviceDisplayName(id: workspaceTargetDeviceID)).",
                     context: .project(refs.projectID))
                 Task { @MainActor [weak self, weak sender] in
                     guard let self else { return }
@@ -8874,6 +8883,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 return nil
             }
             if self.commandPalette.handleCommandPaletteShortcut(event: event) { return nil }
+            if self.handleNewTabSessionPickerShortcut(event: event) { return nil }
             if self.handleClosePaneShortcut(event: event) { return nil }
             if self.handleFocusedTextInputShortcut(event: event) { return nil }
             if self.isTextInputFocused() { return event }
@@ -8998,6 +9008,42 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     nonisolated static func isClosePaneShortcut(charactersIgnoringModifiers: String?, eventModifiers: NSEvent.ModifierFlags) -> Bool {
         guard charactersIgnoringModifiers?.lowercased() == "w" else { return false }
         return eventModifiers.intersection([.command, .option, .control, .shift]) == .command
+    }
+
+    enum NewTabShortcutAction: Equatable, Sendable { case presentPicker, consume, pass }
+
+    /// ⌘T gating: present only when the main window is key with a workspace selected.
+    /// While the session picker is up the chord is consumed so re-press is an explicit
+    /// no-op; in a global panel window it is consumed so it can't fall through to the
+    /// focused pane; other focused text inputs (rename editors) keep the chord.
+    nonisolated static func newTabShortcutAction(
+        sessionPickerIsActive: Bool, textInputIsFocused: Bool, keyWindowIsPanelWindow: Bool, keyWindowIsMainWindow: Bool, selectedWorkspaceID: String?
+    ) -> NewTabShortcutAction {
+        if sessionPickerIsActive { return .consume }
+        if textInputIsFocused { return .pass }
+        if keyWindowIsPanelWindow { return .consume }
+        guard keyWindowIsMainWindow, selectedWorkspaceID != nil else { return .pass }
+        return .presentPicker
+    }
+
+    /// ⌘T (configurable): opens the session-picker new-tab flow. Placed ahead of the
+    /// `isTextInputFocused()` early-return in `setupShortcutMonitor` so the chord still
+    /// reaches this gate while the command-palette search field is focused; see
+    /// `newTabShortcutAction` for the full disposition table.
+    private func handleNewTabSessionPickerShortcut(event: NSEvent) -> Bool {
+        guard let newTabShortcutSpec, matches(event: event, spec: newTabShortcutSpec) else { return false }
+        switch Self.newTabShortcutAction(
+            sessionPickerIsActive: commandPalette.sessionPickerContext != nil, textInputIsFocused: isTextInputFocused(),
+            keyWindowIsPanelWindow: panelCoordinator.panelWindowID(forWindow: NSApp.keyWindow) != nil,
+            keyWindowIsMainWindow: NSApp.keyWindow === window, selectedWorkspaceID: selectedWorkspaceID)
+        {
+        case .pass: return false
+        case .consume: return true
+        case .presentPicker:
+            guard let workspaceID = selectedWorkspaceID else { return false }
+            presentNewTabSessionPicker(scope: .workspace(deviceID: deviceID(forWorkspaceID: workspaceID), workspaceID: workspaceID))
+            return true
+        }
     }
 
     private func handleLeaderShortcutCaptureFlagsChanged(event: NSEvent) -> Bool {
@@ -9292,6 +9338,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         sidebarPreviousShortcutSpec = loadShortcutSpec(setting: .guiSidebarPreviousShortcut)
         openEditorShortcutSpec = loadShortcutSpec(setting: .guiOpenEditorShortcut)
         openTerminalShortcutSpec = loadShortcutSpec(setting: .guiOpenTerminalShortcut)
+        newTabShortcutSpec = loadShortcutSpec(setting: .guiNewTabShortcut)
         openFinderShortcutSpec = loadShortcutSpec(setting: .guiOpenFinderShortcut)
         openSettingsShortcutSpec = loadShortcutSpec(setting: .guiOpenSettingsShortcut)
         windowShortcutSpec = loadShortcutSpec(setting: .guiWindowShortcut)
@@ -9327,6 +9374,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         case .guiSidebarPreviousShortcut: return sidebarPreviousShortcutSpec
         case .guiOpenEditorShortcut: return openEditorShortcutSpec
         case .guiOpenTerminalShortcut: return openTerminalShortcutSpec
+        case .guiNewTabShortcut: return newTabShortcutSpec
         case .guiOpenFinderShortcut: return openFinderShortcutSpec
         case .guiOpenSettingsShortcut: return openSettingsShortcutSpec
         case .guiWindowShortcut: return windowShortcutSpec
@@ -9802,25 +9850,34 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         !hasExistingPane && request.shell == nil
     }
 
-    private func runTerminalSessionMutationAndOpenPane(
-        workspaceID: String, operation: @Sendable @escaping (SpacesPairedDeviceRecord) throws -> SpacesDeviceAPIResponse
-    ) async -> ExternalWindowAction? {
+    /// Runs a workspace terminal-session mutation (start a configured process / launch a
+    /// coding agent) and returns the open request for the session it produced, applying the
+    /// response to local state along the way. Placement is the caller's decision: the window
+    /// shortcut path opens/focuses the pane, while the session picker lands it at the picker's
+    /// split or new tab.
+    func runTerminalSessionMutation(workspaceID: String, operation: @Sendable @escaping (SpacesPairedDeviceRecord) throws -> SpacesDeviceAPIResponse)
+        async -> DeviceTerminalOpenRequest?
+    {
         guard let device = deviceForWorkspaceMutation(workspaceID: workspaceID) else {
             showDeviceNotLoadedError()
             return nil
         }
-        let result = await Self.deviceMutation(device: device, operation: operation)
-        switch result {
+        switch await Self.deviceMutation(device: device, operation: operation) {
         case .success(let response):
             applyDeviceMutationResponse(response, deviceID: device.id, selectedWorkspaceID: workspaceID)
-            guard let request = terminalOpenRequest(fromMutationResponse: response, workspaceID: workspaceID),
-                await openOrFocusTerminalTarget(request)
-            else { return nil }
-            return .focus(hidesApp: false)
+            return terminalOpenRequest(fromMutationResponse: response, workspaceID: workspaceID)
         case .failure(let error):
             showError(error)
             return nil
         }
+    }
+
+    private func runTerminalSessionMutationAndOpenPane(
+        workspaceID: String, operation: @Sendable @escaping (SpacesPairedDeviceRecord) throws -> SpacesDeviceAPIResponse
+    ) async -> ExternalWindowAction? {
+        guard let request = await runTerminalSessionMutation(workspaceID: workspaceID, operation: operation), await openOrFocusTerminalTarget(request)
+        else { return nil }
+        return .focus(hidesApp: false)
     }
 
     nonisolated private static func windowShortcutKind(for resolution: DeviceWindowShortcutResolution) -> String {
