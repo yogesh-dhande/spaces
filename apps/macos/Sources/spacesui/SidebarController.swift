@@ -862,7 +862,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     }
 
     private func deviceSectionName(deviceID: String) -> String {
-        host.deviceSections.first(where: { $0.deviceID == deviceID })?.deviceName ?? deviceID
+        host.deviceSections.first(where: { $0.deviceID == deviceID })?.displayName ?? deviceID
     }
 
     private func deviceSectionLoadStateLabel(deviceID: String) -> (text: String, color: NSColor)? {

@@ -13,13 +13,13 @@
     - Update `docs/dev.md` when development, build, deploy, or manual E2E workflows change.
 - Keep docs concise and non-overlapping.
 - Treat `README.md`, `docs/dev.md`, `docs/spec.md`, `docs/implementation.md`, and `docs/design.md` as current-state references, not changelogs; avoid temporal wording like "now", "no longer", "previously", "new", or "changed" when describing the intended steady state.
-- When behavior is added through the CLI, update CLI help and architecture docs in the same change.
 - User-facing docs are in `apps/web` which is published as a static website
     - Update `apps/web/app/docs/content.ts` when docs navigation or summaries need to reflect new product docs.
 
 
 
 ## Coding Guidelines
+- When planning a new feature (whether or not in plan mode), ask me lots of questions until we align on intent, design, UX, and implementation. Ask me questions to help me figure out my unknowns and better think through the feature, its intent, scope, and desired outcome. Don't present a plan until I explicitly ask you to.
 - For all coding tasks use your judgement to decide an appropriate lower power model and run that in a subagent.
 - When user instruction contradicts previous instructions or documentation, explicitly ask for clarification before proceeding.
 - Do not add fallback paths without explicit approval. We should first fully understand, implement, and harden the intended path without complicating code or behavior behind fallback paths.
@@ -39,7 +39,7 @@
 - The established gate before committing is `scripts/verify.sh` (build, lint, and tests). Either run `scripts/verify.sh` yourself and let it pass, or let the pre-commit hook run it. Do not `git commit --no-verify` unless `scripts/verify.sh` has already passed for the same change; `--no-verify` only skips the redundant re-run, it does not skip the gate. You can skip the date if making only documentation or website changes.
 
 - When running `git commit`, allow at least a 15-minute timeout so pre-commit checks can finish.
-- When presented with review findings, create a table with estimates for probably of each bug occurring (1:10, 1:1000 etc) and impact (scale of 1 to 10, 10 be worst)., effort to write a failing test (high, medium, low) with reason (architecture vs narrow/rare edge case hard to codify), and recommendation for whether it is worth addressing the review based on the probability, impact, and complexity of the fix. 
+- After committing changes, use codex cli with gpt-5.6-sol model (high effort) to run a review against base branch (e.g. main if branched off from main). When presented with review findings, create a table with estimates for probability of each bug occurring (1:10, 1:1000 etc), impact (scale of 1 to 10, 10 be worst), effort to write a failing test (high, medium, low) with reason (architecture vs narrow/rare edge case hard to codify), and recommendation for whether it is worth addressing the review based on the probability, impact, and complexity of the fix. Automatically fix any issues that are considered real and high impact blockers of the PR or anything that is a trivial correctness fix. Any issues that are of extremely low frequency edge cases and high code complexity for the necessary fix can be deferred by creating a github issue for it. Make sure there isn’t an existing issue for it. Any issues that do not need to be fixed as they are irrelevant for the product UX (if unclear, ask me questions and wait for my input) can be documented as accepted behavior/risk to avoid surfacing the issue again. Once fixed and committed, rerun the review cycle and loop until no high impact issues remain.
 - When fixing a bug, reproduce it first by writing a failing test and/or using the real system, `~/projects/spaces/apps/macos/.build/debug/spaces` cli, and/or database inspection when practical.
 - Use the e2e test scripts for hotkey-sensitive verification before resorting to ad hoc manual app launches. Those scripts may wait for desktop control instead of killing unrelated running Spaces instances.
 - When manually launching a repo-local debug build, use the derived profile helper or `scripts/dev-build-and-launch.sh` so the app, CLI, and E2E helpers stay on the same worktree-scoped profile.
@@ -68,37 +68,11 @@
 - Tables and columns that no code reads or writes anymore may be dropped in a migration; remove their schema definitions in the same change.
 - Never add any migration or reset path that can remove existing projects or workspaces.
 
-## GUI Rules
-- UI should feel modern and compact.
-- Follow `docs/design.md` when adding or updating UI.
-- Use icons for obvious actions such as add or remove.
-- Use text labels for actions that are not obvious.
-- Use icons instead of text for status where practical.
-- Show inline keyboard shortcuts for actions.
-- Respect system dark and light mode.
-- Use labeled inputs for configuration; do not require app-specific text formats.
-
 ## Web Rules
-- `apps/web` must remain a fully static prerendered Next.js site.
 - Use the shared color and typography tokens in `apps/web/app/globals.css` instead of hard-coded values.
-- Keep marketing content in `apps/web/app/page.tsx` and docs content under `apps/web/app/docs`.
-- Prefer static or server-rendered content; do not add runtime API dependencies unless explicitly requested.
 
-## Swift Rules
-- Always mark `@Observable` classes with `@MainActor`.
-- Assume strict Swift concurrency.
-- Prefer Swift-native and modern Foundation APIs.
-- Do not use C-style number formatting in SwiftUI text.
-- Prefer static member lookup where possible.
-- Do not use old-style GCD like `DispatchQueue.main.async`.
-- When capturing a child process's output through a `Pipe`, drain the pipe (`readDataToEndOfFile()` or a readability handler) BEFORE `waitUntilExit()`/`waitpid`. Waiting first deadlocks both processes as soon as the child writes more than the kernel's 64KB pipe buffer.
-- Filter user-entered text with `localizedStandardContains()`.
-- Avoid force unwrap and force try unless failure is unrecoverable.
 
 ## Project Structure Rules
-- Organize code by feature.
-- Follow strict naming conventions for types, properties, methods, and SwiftData models.
 - Keep types split into focused files instead of combining many unrelated types in one file.
 - Prefer unit tests for core logic; use UI tests only when unit tests are not possible.
 - Add comments only where they reduce real ambiguity.
-- Never commit secrets.

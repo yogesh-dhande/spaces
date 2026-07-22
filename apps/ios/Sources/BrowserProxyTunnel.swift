@@ -33,11 +33,18 @@ struct BrowserTunnelError: Error, Equatable {
 /// hands the now-raw connection back for splicing.
 struct SpacesMobileBrowserTunnelDialer: BrowserTunnelDialing {
     private let installationID: String
+    /// This device's display name, captured once by the caller and stored rather than read here on
+    /// demand: `UIDevice.current.name` is main-actor-isolated, but tunnel dialing is not.
+    private let deviceName: String
     private let connectTimeout: Duration
     private let responseTimeout: Duration
 
-    init(installationID: String, connectTimeout: Duration = .seconds(10), responseTimeout: Duration = .seconds(10)) {
+    init(
+        installationID: String, deviceName: String = "iOS Device", connectTimeout: Duration = .seconds(10),
+        responseTimeout: Duration = .seconds(10)
+    ) {
         self.installationID = installationID
+        self.deviceName = deviceName
         self.connectTimeout = connectTimeout
         self.responseTimeout = responseTimeout
     }
@@ -83,7 +90,7 @@ struct SpacesMobileBrowserTunnelDialer: BrowserTunnelDialing {
     private var clientApp: SpacesDeviceClientApp {
         SpacesDeviceClientApp(
             installationID: installationID, bundleID: Bundle.main.bundleIdentifier ?? SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "ios",
-            deviceName: ProcessInfo.processInfo.hostName, appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String)
+            deviceName: deviceName, appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String)
     }
 }
 

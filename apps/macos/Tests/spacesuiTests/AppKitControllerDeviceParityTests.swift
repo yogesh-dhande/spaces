@@ -364,6 +364,17 @@ import workspacecore
         #expect(!AppKitController.sidebarSelectionBelongsToDeviceSection(selectedWorkspaceID: nil, selectedProjectID: nil, section: section))
     }
 
+    @Test func deviceSectionDisplayNameRendersLocalDeviceAsLocalRegardlessOfStoredName() {
+        // The local device's rendered label is always "Local", no matter what machine name is
+        // stored for it; a remote device keeps showing its stored name.
+        let local = AppKitController.DeviceSection(
+            deviceID: SpacesPairedDeviceRecord.localDeviceID, deviceName: "Yogesh's MacBook Pro", isLocal: true, loadState: .loaded, device: nil)
+        #expect(local.displayName == "Local")
+
+        let remote = AppKitController.DeviceSection(deviceID: "remote", deviceName: "Build Host", isLocal: false, loadState: .loaded, device: nil)
+        #expect(remote.displayName == "Build Host")
+    }
+
     @Test func waitingAgentAlertResolvesToFocusingItsSessionNotANewLaunch() {
         // Regression: an attention alert for a waiting/done agent must focus that agent's existing
         // session, not resolve to `.runCodingAgent` (which would start a second agent). Build the

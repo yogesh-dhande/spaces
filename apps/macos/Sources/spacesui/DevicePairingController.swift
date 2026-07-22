@@ -79,6 +79,10 @@ import workspacecore
         let isLocal: Bool
         let isAvailable: Bool
         let requiresReconnect: Bool
+
+        /// The label shown for this device in the Devices settings list. The local device always
+        /// renders as "Local" regardless of its stored machine name; remote devices show their stored name.
+        var displayName: String { isLocal ? "Local" : name }
     }
 
     private struct ClientDevicePairingWindow {
@@ -258,7 +262,7 @@ import workspacecore
             }
             nameView = editor
         } else {
-            let title = NSTextField(labelWithString: device.name)
+            let title = NSTextField(labelWithString: device.displayName)
             title.font = .systemFont(ofSize: 12, weight: .medium)
             title.textColor = .labelColor
             title.lineBreakMode = .byTruncatingTail
@@ -272,7 +276,7 @@ import workspacecore
         textStack.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         let pairButton = host.sidebarRowIconButton(
-            symbol: "iphone.radiowaves.left.and.right", tooltip: "Pair iPhone or iPad with \(device.name)",
+            symbol: "iphone.radiowaves.left.and.right", tooltip: "Pair iPhone or iPad with \(device.displayName)",
             action: #selector(AppKitController.pairIOSWithConnectedDevice(_:)))
         pairButton.identifier = NSUserInterfaceItemIdentifier(device.id)
         pairButton.isEnabled = device.isAvailable
