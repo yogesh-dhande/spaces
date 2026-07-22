@@ -72,6 +72,11 @@
 
         private let controlQueue: DispatchQueue
         private let stateStreamQueue: DispatchQueue
+        /// Serial background executor for this core's durable SQLite writes, offloaded off the engine so a
+        /// competing writer's 5s SQLite busy timeout can never freeze terminal I/O or control on the single
+        /// engine executor. Runtime-state writes coalesce latest-wins; the terminated writes are FIFO-fenced.
+        /// See `TerminalCorePersistenceQueue`.
+        private let persistence: TerminalCorePersistenceQueue
         /// Orders every control-request input write (send text/bytes/paste, key) for this session and
         /// spaces submit carriage returns so they read as lone Enter keystrokes; see
         /// `TerminalControlInputSequencer`.
@@ -85,7 +90,14 @@
         private nonisolated(unsafe) var vtSession: OpaquePointer?
         private var started = false
         private var terminating = false
+        /// Live in-memory runtime state — the AUTHORITATIVE source broadcasts serve, advanced the moment a new
+        /// state is computed regardless of whether it has reached disk. Kept distinct from
+        /// `lastPersistedRuntimeState` so broadcasts always show live truth while the durable mirror converges.
         private var lastRuntimeState: TerminalSessionRuntimeState?
+        /// Durable persist marker — mirrors what was last SUCCESSFULLY written to disk. Advanced only on a
+        /// successful off-engine write, and the runtime-state change notification fires from here so
+        /// DB-reading consumers (the overview) observe a change only once it is durable.
+        private var lastPersistedRuntimeState: TerminalSessionRuntimeState?
         private var lastKnownChildPID: Int32?
         private var terminalSize: (columns: Int, rows: Int) = (80, 24)
         // The Spaces theme appearance the vt session is currently themed for. The headless daemon
@@ -119,6 +131,7 @@
             self.onSessionClosed = onSessionClosed
             controlQueue = DispatchQueue(label: "spaces.terminal.session-host.control.\(launchConfiguration.sessionID)")
             stateStreamQueue = DispatchQueue(label: "spaces.terminal.session-host.state-stream.\(launchConfiguration.sessionID)")
+            persistence = TerminalCorePersistenceQueue(label: "spaces.terminal.session-host.persistence.\(launchConfiguration.sessionID)")
             ptyDriver = HostManagedPTYTerminalSessionDriver(launchConfiguration: launchConfiguration)
         }
 
@@ -161,8 +174,23 @@
             // sub-second exit timestamp, so two separate stamps virtually always differ — build one.
             let exitedState = makeRuntimeStateSnapshot(state: .exited)
             let finalPayload = makeStatePayload(reason: TerminalRemoteSessionStateReason.terminated, runtimeStateOverride: exitedState)
-            if let finalPayload { try? TerminalSessionPersistence.writeRemoteSessionState(finalPayload, paths: paths) }
-            if let finalPayload { stateStreamServer?.broadcast(finalPayload) }
+            // The exited runtime state, detach-all, and terminated payload are all ENQUEUED (not written
+            // inline) so teardown never blocks the engine on the DB lock; FIFO ordering on the serial
+            // persistence queue lands them after every pending mirror write and in this order: exited runtime
+            // state (retry-fenced), detach-all, terminated payload. They complete asynchronously and survive
+            // this core's release (the closures capture only `paths` and value types), so the durable mirror
+            // converges even if the core is dropped right after. `enqueueRuntimeStateWrite` retries a failed
+            // EXITED write in place, holding its FIFO position so the two writes below cannot pass it.
+            lastRuntimeState = exitedState
+            enqueueRuntimeStateWrite(exitedState)
+            let detachPaths = paths
+            let detachedAt = nowISO8601()
+            persistence.enqueueWrite { try? TerminalSessionPersistence.detachActiveClients(paths: detachPaths, detachedAt: detachedAt) }
+            if let finalPayload {
+                let payloadPaths = paths
+                persistence.enqueueWrite { try? TerminalSessionPersistence.writeRemoteSessionState(finalPayload, paths: payloadPaths) }
+                stateStreamServer?.broadcast(finalPayload)
+            }
             controlServer?.stop()
             controlServer = nil
             TerminalControlServer.removeSocketFileIfPresent(at: paths.controlSocketPath)
@@ -179,7 +207,6 @@
                 spaces_ghostty_vt_session_free(vtSession)
                 self.vtSession = nil
             }
-            try? TerminalSessionPersistence.detachActiveClients(paths: paths, detachedAt: nowISO8601())
             try? outputHandle?.synchronize()
             try? outputHandle?.close()
             outputHandle = nil
@@ -195,6 +222,16 @@
             guard !terminating else { return }
             terminate()
             onSessionClosed?(self)
+        }
+
+        /// Awaitable drain used by daemon shutdown and the nil-quiesce handoff branch after `terminate()`.
+        /// `terminate()` only ENQUEUES the exited runtime-state write, detach-all, and terminated payload onto
+        /// the serial persistence queue; shutdown's `exit(0)` and the handoff's `execv` both destroy anything
+        /// still queued. SpacesdMain awaits this after terminating a core so those writes commit first —
+        /// otherwise a session's durable runtime row stays stuck at `.running` (and, across `execv`,
+        /// `recoverStaleSessions` keeps skipping it because the pid is unchanged).
+        public func drainPersistenceForShutdown() async {
+            await persistence.drainAsync()
         }
 
         // MARK: - Exec-in-place handoff
@@ -259,6 +296,11 @@
             // Flush the buffered bytes to output.log and install the direct-to-file writer
             // that keeps appending until execv.
             try ptyDriver.finishHandoffOutputBuffering(appendingTo: paths.outputPath)
+
+            // Drain every pending durable mirror write (runtime state) before returning the record: the
+            // caller `execv`s into the staged daemon, which reseeds from the DB, so the mirror must be
+            // complete first. Async so the engine is not blocked while the queue flushes.
+            await persistence.drainAsync()
 
             return DaemonHandoffSessionRecord(
                 sessionID: launchConfiguration.sessionID, masterFD: descriptor.masterFD, childPID: descriptor.childPID, columns: terminalSize.columns,
@@ -834,12 +876,35 @@
                 foregroundDisplayCommand: foregroundAgent?.displayCommand)
         }
 
+        /// Advances the in-memory authoritative state immediately (so broadcasts show live truth regardless of
+        /// when the durable write lands) and enqueues the durable runtime-state write off the engine. Coalesced
+        /// latest-wins on the persistence queue, so a burst of persists — or an exited state superseding a
+        /// still-queued running state — collapses to the newest. The durable marker advances and the
+        /// change notification fires only on a successful write (see `markRuntimeStatePersisted`), so a failed
+        /// write retries on the next persist and the overview never observes a change the DB has not committed.
         private func persistRuntimeState(_ runtimeState: TerminalSessionRuntimeState) {
-            let previousSignature = lastRuntimeState.map(runtimeStateSignature(for:))
-            let nextSignature = runtimeStateSignature(for: runtimeState)
-            try? TerminalSessionPersistence.writeRuntimeState(runtimeState, paths: paths)
             lastRuntimeState = runtimeState
-            if previousSignature != nextSignature { postRuntimeStateDidChange() }
+            enqueueRuntimeStateWrite(runtimeState)
+        }
+
+        private func enqueueRuntimeStateWrite(_ state: TerminalSessionRuntimeState) {
+            // `onPersisted` hops back to the engine to advance the durable marker (one-way rule); it is the
+            // ONLY reference to `self` in the write chain, so the write — and any exited-state retry inside the
+            // queue — survives this core's release (e.g. a session-close that drops the core after termination).
+            persistence.enqueueRuntimeStateWrite(
+                state, at: Date(), paths: paths,
+                onPersisted: { [weak self] persistedState, _ in
+                    Task { @TerminalEngineActor in self?.markRuntimeStatePersisted(persistedState) }
+                })
+        }
+
+        /// Advances the durable persist marker after a successful off-engine write and, when the persisted
+        /// signature changed, fires the runtime-state notification so DB-reading consumers (the overview)
+        /// observe the change only once it is durable while live subscribers still see live truth.
+        private func markRuntimeStatePersisted(_ state: TerminalSessionRuntimeState) {
+            let previousSignature = lastPersistedRuntimeState.map(runtimeStateSignature(for:))
+            lastPersistedRuntimeState = state
+            if previousSignature != runtimeStateSignature(for: state) { postRuntimeStateDidChange() }
         }
 
         private func postRuntimeStateDidChange() {
@@ -885,9 +950,10 @@
             let includeScreenState = TerminalRemoteSessionStatePolicy.shouldIncludeScreenState(reason: reason, ownerKind: ownerKind)
             let runtimeState: TerminalSessionRuntimeState
             if let runtimeStateOverride {
-                // Persist and embed the caller-supplied snapshot verbatim so the payload's runtime state
-                // and the row written here share one `runIdentity` (terminate() relies on this).
-                persistRuntimeState(runtimeStateOverride)
+                // Embed the caller-supplied snapshot verbatim so the payload's runtime state and the durable
+                // row share one `runIdentity`. terminate() — the only caller that passes an override — enqueues
+                // that durable exited write itself (retry-fenced, FIFO-ordered); this method only builds the
+                // payload, so it must not persist here or the exited write would run inline on the engine.
                 runtimeState = runtimeStateOverride
             } else {
                 runtimeState = lastRuntimeState ?? fallbackRuntimeState(state: started ? .running : .exited)

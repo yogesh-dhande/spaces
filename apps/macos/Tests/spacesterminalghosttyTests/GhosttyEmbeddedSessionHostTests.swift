@@ -2895,6 +2895,158 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         _ = box
     }
 
+    /// Fix 2 (FIFO fence): the exited runtime-state write retries IN PLACE and so keeps its slot on the serial
+    /// persistence queue. The detach-all/payload/durable-end items `terminate()` enqueues after it therefore
+    /// run only once it commits. The detach has no retry of its own, so it lands durably only if it waited
+    /// behind the retrying exited write until the database recovered — a faithful proxy for the fence. Before
+    /// the fix the failed exited write surrendered its FIFO slot via `asyncAfter`, so the detach ran
+    /// immediately against the broken database and was lost while the (deferred) exited retry still landed.
+    func testExitedRuntimeStateWriteHoldsFIFOFenceForLaterDetach() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "session-fence", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original", shell: "/bin/zsh",
+            command: "zsh", createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+        try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+        let client = TerminalClient(
+            id: "remote-client", kind: .remoteViewer, identity: .init(label: "iPhone", deviceName: "iPhone"), connectedAt: "2026-05-17T00:00:00Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: launchConfiguration.sessionID, client: client, mode: .viewer, paths: paths, attachedAt: "2026-05-17T00:00:00Z")
+        let runningState = TerminalSessionRuntimeState(
+            sessionID: launchConfiguration.sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: nil, state: .running,
+            updatedAt: TerminalSessionTimestamp.string(from: Date()), title: "shell", workingDirectory: "/tmp/original")
+        try TerminalSessionPersistence.writeRuntimeState(runningState, paths: paths)
+        XCTAssertFalse(try TerminalSessionPersistence.activeAttachments(paths: paths).isEmpty)
+
+        let databasePath = try SpacesProfile.current().databasePath
+        try Self.breakDatabase(at: databasePath)
+
+        let box = TerminalEngineActor.runSynchronously { () -> Box<GhosttyEmbeddedSessionHost> in
+            let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+            host.terminate()
+            return Box(host)
+        }
+        // The exited write fails against the broken database and is now retrying in place, holding the queue.
+        // Sleep long enough that the pre-fix design's immediate (broken) detach would already have run and been
+        // lost, then restore the database while the retry is still holding the fence.
+        try await Task.sleep(nanoseconds: 100_000_000)
+        try Self.restoreDatabase(at: databasePath)
+
+        await TerminalEngineActor.run { box.value.debugDrainPersistenceQueue() }
+        XCTAssertEqual(
+            try TerminalSessionPersistence.readRuntimeState(paths: paths).state, .exited,
+            "the retried exited write must commit before the drain completes")
+        XCTAssertTrue(
+            try TerminalSessionPersistence.activeAttachments(paths: paths).isEmpty,
+            "the detach enqueued after the exited write must run only after that write commits, so it lands post-recovery")
+        _ = box
+    }
+
+    /// Fix 1: `drainPersistenceForShutdown` — the awaitable drain SpacesdMain runs after terminating a core in
+    /// `shutdown()` and the nil-quiesce handoff branch — must not return until every write `terminate()`
+    /// enqueued has committed, including an exited runtime-state write a competing transaction delayed. Without
+    /// it, `exit(0)`/`execv` destroys the still-queued exited write and strands the durable row at `.running`
+    /// (and, across `execv`, the unchanged pid makes `recoverStaleSessions` skip that `.running` row forever).
+    func testDrainPersistenceForShutdownAwaitsDelayedExitedWrite() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "session-shutdown-drain", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original", shell: "/bin/zsh",
+            command: "zsh", createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+        try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+        let runningState = TerminalSessionRuntimeState(
+            sessionID: launchConfiguration.sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: nil, state: .running,
+            updatedAt: TerminalSessionTimestamp.string(from: Date()), title: "shell", workingDirectory: "/tmp/original")
+        try TerminalSessionPersistence.writeRuntimeState(runningState, paths: paths)
+        XCTAssertEqual(try TerminalSessionPersistence.readRuntimeState(paths: paths).state, .running)
+
+        let lockHolder = CompetingWriteLockHolder(databasePath: try SpacesProfile.current().databasePath)
+        lockHolder.startHolding(maxHoldSeconds: 10)
+        lockHolder.waitUntilHolding()
+
+        let box = TerminalEngineActor.runSynchronously { () -> Box<GhosttyEmbeddedSessionHost> in
+            let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+            host.terminate()
+            return Box(host)
+        }
+        // Hold the competing transaction long enough for the enqueued exited write to be blocking on it, then
+        // release so the write can commit. The drain must not return until it does.
+        try await Task.sleep(nanoseconds: 200_000_000)
+        lockHolder.release()
+
+        await box.value.core.drainPersistenceForShutdown()
+        XCTAssertEqual(
+            try TerminalSessionPersistence.readRuntimeState(paths: paths).state, .exited,
+            "drainPersistenceForShutdown must block until the competing-delayed exited write commits")
+        _ = box
+    }
+
+    /// Fix 4: a stale-client expiry whose durable detach write fails must be retried on a later timer tick, not
+    /// abandoned. The persistence queue is parked so the first tick's reads run against a healthy database and
+    /// its detach is enqueued behind the park; breaking the database, then releasing the park, makes that
+    /// detach fail. The failure hops back to the engine and un-marks the client in `expiredRemoteClientIDs`, so
+    /// the next tick — after the database is restored — re-derives it from the still-stale DB row and
+    /// re-enqueues the (idempotent) detach, which lands. Before the fix the client stayed stuck in
+    /// `expiredRemoteClientIDs` and was skipped on every later tick forever.
+    func testFailedStaleClientExpiryDetachRetriesOnLaterTick() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "session-expiry-retry", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original", shell: "/bin/zsh",
+            command: "zsh", createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+        try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+        let client = TerminalClient(
+            id: "remote-client", kind: .remoteViewer, identity: .init(label: "iPad", deviceName: "iPad"), connectedAt: "2026-05-17T00:00:00Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: launchConfiguration.sessionID, client: client, mode: .viewer, paths: paths, attachedAt: "2026-05-17T00:00:00Z")
+
+        let expiredAt = ISO8601DateFormatter().date(from: "2026-05-17T00:01:05Z")!
+        let databasePath = try SpacesProfile.current().databasePath
+        let box = TerminalEngineActor.runSynchronously { () -> Box<GhosttyEmbeddedSessionHost> in
+            Box(GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths))
+        }
+
+        // Park the persistence queue so tick 1's detach waits behind it while we break the database.
+        let gate = TerminalEngineActor.runSynchronously { box.value.debugHoldPersistenceQueue() }
+        // Tick 1: reads run against the healthy database and enqueue the detach behind the park.
+        let firstTickExpired = TerminalEngineActor.runSynchronously { box.value.expireStaleRemoteClientsIfNeeded(now: expiredAt) }
+        XCTAssertEqual(firstTickExpired, [client.id], "the first tick must expire the stale client")
+
+        try Self.breakDatabase(at: databasePath)
+        gate.signal()
+        // The detach now runs against the broken database, fails, and re-arms the expiry.
+        TerminalEngineActor.runSynchronously { box.value.debugDrainPersistenceQueue() }
+        try Self.restoreDatabase(at: databasePath)
+        XCTAssertFalse(
+            try TerminalSessionPersistence.activeAttachments(paths: paths).isEmpty,
+            "the detach must have failed against the broken database, leaving the client attached")
+
+        // Let the re-arm engine hop (enqueued during tick 1's drain) run before the second tick.
+        await TerminalEngineActor.run {}
+
+        // Tick 2: the client is still stale in the DB and no longer suppressed, so expiry re-enqueues the
+        // detach, which now commits against the restored database.
+        let secondTickExpired = TerminalEngineActor.runSynchronously { () -> [String] in
+            let expired = box.value.expireStaleRemoteClientsIfNeeded(now: expiredAt)
+            box.value.debugDrainPersistenceQueue()
+            return expired
+        }
+        XCTAssertEqual(secondTickExpired, [client.id], "a failed expiry must be re-derived and re-enqueued on the next tick")
+        XCTAssertTrue(
+            try TerminalSessionPersistence.activeAttachments(paths: paths).isEmpty,
+            "the re-enqueued detach must land the client detached")
+        _ = box
+    }
+
     /// Replaces the SQLite database (and its WAL sidecars) with a directory so every write fails to open it,
     /// preserving the real files aside so `restoreDatabase` can bring the committed data back intact.
     private static func breakDatabase(at databasePath: String) throws {

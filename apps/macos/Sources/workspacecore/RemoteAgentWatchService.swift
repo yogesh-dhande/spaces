@@ -94,6 +94,12 @@ import spacesdevicecore
     /// prove the stale-watched-set race is aborted rather than dropping the seeded child. `nil` (a no-op) in
     /// production.
     var didReadWatchedSetForTest: (@MainActor (String) async -> Void)?
+    /// Fired inside `applyRows` immediately after the off-main exited-edge deletion resumes on the main actor
+    /// and before this apply enqueues its durable baseline write, so a behavior test can deterministically land
+    /// a `seedBaseline` in that suspension window and prove the apply's write is stamped with the generation its
+    /// (pre-seed) snapshot reflects — losing the supersession gate to the seed's merged write — rather than a
+    /// stale re-read that would clobber the freshly seeded child's baseline. `nil` (a no-op) in production.
+    var didDropExitedEdgesForTest: (@MainActor (String) async -> Void)?
 
     public init(
         databasePath: String, transport: RemoteAgentWatchTransport,
@@ -112,7 +118,9 @@ import spacesdevicecore
         // reported and surfaces transitions from the downtime window. The load runs off the main actor;
         // a seed that arrives (via `seedBaseline`) while it is in flight is a fresher validation row, so
         // the merge never clobbers an entry already present — it only fills in devices/children the
-        // persisted mirror still knows about.
+        // persisted mirror still knows about. When the merge adds a mirror-missing child (a seed's child),
+        // it persists the merged union so the durable mirror matches memory; a clean startup that merely
+        // refills the loaded baseline into an empty snapshot writes nothing.
         let databasePath = databasePath
         Task { @MainActor [weak self] in
             let result = await Task.detached(priority: .utility) { () -> Result<[String: [String: SpacesDeviceAgentSessionRow]], any Error> in
@@ -122,12 +130,27 @@ import spacesdevicecore
             switch result {
             case .success(let baselines):
                 for (deviceID, baseline) in baselines {
+                    var filledAnyEntry = false
                     for (childTerminalSessionID, row) in baseline where self.snapshots[deviceID]?[childTerminalSessionID] == nil {
                         self.snapshots[deviceID, default: [:]][childTerminalSessionID] = row
+                        filledAnyEntry = true
                     }
-                    // The loaded rows are already durable, so this seeds in-memory only (no chain write); the
-                    // generation bump keeps the "every snapshots mutation bumps generation" invariant intact.
-                    self.bumpSnapshotGeneration(deviceID)
+                    // Only a device whose merge actually filled entries changed `snapshots`, so only it bumps
+                    // the generation (keeping the "every snapshots mutation bumps generation" invariant).
+                    guard filledAnyEntry else { continue }
+                    let generation = self.bumpSnapshotGeneration(deviceID)
+                    let merged = self.snapshots[deviceID] ?? [:]
+                    // A `seedBaseline` landing during the off-main load enqueued its own write of {seeded} stamped
+                    // with an earlier generation; this later-chained, newer-generation write of the full merged
+                    // union {seeded ∪ loaded} supersedes it at the gate, so the durable mirror ends up matching
+                    // the in-memory snapshot instead of stranding either the seed's or the loaded children. Skip
+                    // the write on the common clean-startup path, where the merge merely refilled the loaded
+                    // baseline into an empty snapshot and nothing diverges — an unconditional self-write would
+                    // also risk the pull → write → signal → pull loop `applyRows` guards against.
+                    guard merged != baseline else { continue }
+                    self.enqueueBaselineWrite(deviceID: deviceID, generation: generation, op: "persist_merged_baseline") { store in
+                        try store.replaceAgentRemoteWatchBaseline(deviceID: deviceID, baseline: merged)
+                    }
                 }
             case .failure(let error):
                 self.logError("spacesd remote_agent_watch_error op=load_baselines error=\(error)\n")
@@ -390,7 +413,14 @@ import spacesdevicecore
         // look superseded and skip once its turn on the chain comes up, even though nothing about the
         // snapshot changed and that queued write is still exactly the baseline that must land on disk. See
         // `snapshotGeneration`'s doc for the supersession invariant this preserves.
-        if snapshotChanged { bumpSnapshotGeneration(deviceID) }
+        //
+        // Capture the generation this snapshot reflects here, before the exited-edge suspension below, and
+        // stamp the durable write with it rather than re-reading `snapshotGeneration` after that suspension.
+        // A `seedBaseline` landing in the suspension bumps the generation and enqueues its own later-chained
+        // write of the merged baseline; keeping this apply's write stamped with the pre-seed generation lets
+        // it lose the supersession gate to that seed's write instead of clobbering the freshly seeded child's
+        // durable baseline with this pre-seed snapshot.
+        let generation = snapshotChanged ? bumpSnapshotGeneration(deviceID) : (snapshotGeneration[deviceID] ?? 0)
 
         // Delivery boundary: `AgentNotificationEngine` interleaves store reads/writes with the
         // daemon-owned, main-only `deliver` (terminal-send) closure, so the whole delivery runs on the
@@ -444,13 +474,16 @@ import spacesdevicecore
                 logError("spacesd remote_agent_watch_error op=drop_exited_edges device=\(deviceID) error=\(error)\n")
             }
         }
+        await didDropExitedEdgesForTest?(deviceID)
         // Serialize the baseline mirror per device so this apply cannot commit out of order with a concurrent
-        // seed's write (or another apply's). Stamped with this apply's generation (read fresh here, right after
-        // the conditional bump above, since nothing else touches it on the main actor in between): a seed that
-        // lands after the enqueue supersedes it and its own later-chained write wins.
+        // seed's write (or another apply's). Stamped with `generation` — the value captured above before the
+        // exited-edge suspension, the generation this apply's snapshot reflects — not a fresh re-read: a seed
+        // that lands in that suspension (or after the enqueue) bumps past `generation` and enqueues its own
+        // later-chained write, which then supersedes this one at the gate instead of this pre-seed snapshot
+        // clobbering the seed's merged baseline.
         if snapshotChanged {
             let baseline = result.snapshot
-            enqueueBaselineWrite(deviceID: deviceID, generation: snapshotGeneration[deviceID] ?? 0, op: "persist_baseline") { store in
+            enqueueBaselineWrite(deviceID: deviceID, generation: generation, op: "persist_baseline") { store in
                 try store.replaceAgentRemoteWatchBaseline(deviceID: deviceID, baseline: baseline)
             }
         }

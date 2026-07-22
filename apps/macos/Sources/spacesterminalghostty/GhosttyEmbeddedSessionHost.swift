@@ -240,30 +240,6 @@
             }
         }
 
-        /// Latest-wins coalescing gate for keyed durable writes on the persistence queue. The engine bumps a
-        /// key's generation as it enqueues each write; a queued write runs only if its generation is still the
-        /// latest for that key, so a burst of writes for the same key (lease touches for a client, successive
-        /// runtime-state persists) collapses to a single write of the newest value. Shared between the engine
-        /// (which bumps) and the persistence queue (which checks), hence lock-guarded and `@unchecked Sendable`.
-        private final class PersistenceCoalescingGate: @unchecked Sendable {
-            private let lock = NSLock()
-            private var latestGeneration: [String: UInt64] = [:]
-
-            func nextGeneration(forKey key: String) -> UInt64 {
-                lock.lock()
-                defer { lock.unlock() }
-                let next = (latestGeneration[key] ?? 0) &+ 1
-                latestGeneration[key] = next
-                return next
-            }
-
-            func isLatest(_ generation: UInt64, forKey key: String) -> Bool {
-                lock.lock()
-                defer { lock.unlock() }
-                return latestGeneration[key] == generation
-            }
-        }
-
         private enum RenderStateExportMode {
             case selfContained
             case streamDeltaAllowed
@@ -285,10 +261,7 @@
         /// stays authoritative for reads and broadcasts. Handoff drains this queue before `execv` so the staged
         /// daemon reads a complete mirror; termination enqueues its final writes last so FIFO ordering lands
         /// the terminated payload after every pending mirror write.
-        private let persistenceQueue: DispatchQueue
-        private let persistenceCoalescingGate = PersistenceCoalescingGate()
-        /// Coalescing key for the runtime-state write chain; a fresh persist supersedes any still-queued one.
-        private static let runtimeStatePersistenceKey = "runtime_state"
+        private let persistence: TerminalCorePersistenceQueue
         /// Orders every control-request input write (send text/bytes/paste, key) for this session and
         /// spaces submit carriage returns so they read as lone Enter keystrokes; see
         /// `TerminalControlInputSequencer`.
@@ -394,7 +367,7 @@
             self.onSessionClosed = onSessionClosed
             controlQueue = DispatchQueue(label: "spaces.terminal.session-host.control.\(launchConfiguration.sessionID)")
             stateStreamQueue = DispatchQueue(label: "spaces.terminal.session-host.state-stream.\(launchConfiguration.sessionID)")
-            persistenceQueue = DispatchQueue(label: "spaces.terminal.session-host.persistence.\(launchConfiguration.sessionID)")
+            persistence = TerminalCorePersistenceQueue(label: "spaces.terminal.session-host.persistence.\(launchConfiguration.sessionID)")
             sessionDriver = GhosttyEmbeddedTerminalSessionDriver(launchConfiguration: launchConfiguration)
             self.requestSurfaceRefreshAction = requestSurfaceRefreshAction ?? { [sessionDriver] in sessionDriver.requestSurfaceRefresh() }
             sessionDriver.onActionEvent = { [weak self] event in self?.applyActionEvent(event) }
@@ -578,18 +551,13 @@
         /// Enqueue a durable write with no coalescing (unique mutations: expiry detaches, ownership transfer,
         /// the terminated payload). Runs on the serial persistence queue in enqueue (FIFO) order.
         private func enqueuePersistenceWrite(_ write: @escaping @Sendable () -> Void) {
-            persistenceQueue.async(execute: write)
+            persistence.enqueueWrite(write)
         }
 
         /// Enqueue a latest-wins coalesced durable write for `key`: only the newest enqueue runs; a burst
-        /// collapses to one write of the newest value (see `PersistenceCoalescingGate`). FIFO order across keys.
+        /// collapses to one write of the newest value. FIFO order across keys.
         private func enqueueCoalescedPersistenceWrite(key: String, _ write: @escaping @Sendable () -> Void) {
-            let generation = persistenceCoalescingGate.nextGeneration(forKey: key)
-            let gate = persistenceCoalescingGate
-            persistenceQueue.async {
-                guard gate.isLatest(generation, forKey: key) else { return }
-                write()
-            }
+            persistence.enqueueCoalescedWrite(key: key, write)
         }
 
         /// Blocks the caller until every write enqueued so far has committed. Deadlock-free from the engine:
@@ -597,65 +565,40 @@
         /// never with a synchronous wait, so a blocked engine cannot cycle with the queue. Used only for the
         /// handoff/termination fences and test determinism — never on the per-keystroke path.
         private func drainPersistenceQueue() {
-            persistenceQueue.sync {}
+            persistence.drain()
         }
 
         /// Async drain for the handoff quiesce path: suspends (rather than blocking the engine) until the
         /// persistence queue is empty, so every mirror write is durable before the caller `execv`s.
         private func drainPersistenceQueueAsync() async {
-            await withCheckedContinuation { continuation in persistenceQueue.async { continuation.resume() } }
+            await persistence.drainAsync()
+        }
+
+        /// Awaitable drain used by daemon shutdown and the nil-quiesce handoff branch after `terminate()`.
+        /// `terminate()` only ENQUEUES the exited runtime-state write, detach-all, terminated payload, and the
+        /// trailing durable-end notification onto this serial queue; shutdown's `exit(0)` and the handoff's
+        /// `execv` both destroy anything still queued. SpacesdMain awaits this after terminating a core so
+        /// those writes commit first — otherwise a session's durable runtime row stays stuck at `.running`
+        /// (and, across `execv`, `recoverStaleSessions` keeps skipping it because the pid is unchanged).
+        public func drainPersistenceForShutdown() async {
+            await drainPersistenceQueueAsync()
         }
 
         /// Enqueues the durable runtime-state write off the engine. Coalesced latest-wins, so a burst of
         /// persists (or an exited state superseding a still-queued running state) collapses to the newest.
         /// On a successful write the durable marker is advanced back on the engine (finding-13 semantics:
         /// `lastPersistedRuntimeState`/timestamp advance only on success so a failed write retries next cycle;
-        /// `latestRuntimeState` stays the authoritative broadcast source regardless).
-        /// Bounded retry policy for a failed EXITED-state write. Termination cancels the runtime-state timer,
-        /// so nothing re-persists on its own — a single dropped exited write would leave the durable runtime
-        /// row stuck at `.running` while the final payload says terminated. Running-state failures need no
-        /// retry (the next timer tick re-persists).
-        private static let exitedRuntimeStateWriteMaxAttempts = 5
-        private static let exitedRuntimeStateWriteRetryDelay: DispatchTimeInterval = .milliseconds(200)
-
+        /// `latestRuntimeState` stays the authoritative broadcast source regardless). The exited-state
+        /// in-place retry that fences termination lives in `TerminalCorePersistenceQueue`.
         private func enqueueRuntimeStateWrite(_ state: TerminalSessionRuntimeState, at writeAt: Date) {
             // `onPersisted` hops back to the engine to advance the durable marker (one-way rule); it is the
-            // ONLY reference to `self` in the write chain, so the write — and any exited-state retry below —
-            // survives this core's release (e.g. a session-close that drops the core right after termination).
-            Self.performRuntimeStateWrite(
-                state, attempt: 0, at: writeAt, paths: paths, queue: persistenceQueue, gate: persistenceCoalescingGate,
-                key: Self.runtimeStatePersistenceKey, maxAttempts: Self.exitedRuntimeStateWriteMaxAttempts,
-                retryDelay: Self.exitedRuntimeStateWriteRetryDelay,
+            // ONLY reference to `self` in the write chain, so the write — and any exited-state retry — survives
+            // this core's release (e.g. a session-close that drops the core right after termination).
+            persistence.enqueueRuntimeStateWrite(
+                state, at: writeAt, paths: paths,
                 onPersisted: { [weak self] persistedState, persistedAt in
                     Task { @TerminalEngineActor in self?.markRuntimeStatePersisted(persistedState, at: persistedAt) }
                 })
-        }
-
-        /// Runs one durable runtime-state write on `queue` and, on failure of an exited state, re-enqueues a
-        /// bounded, backed-off retry on the same queue. Static and closed only over value types plus the
-        /// shared `gate`, so the retry chain never depends on the core staying alive. Each attempt takes a
-        /// fresh coalescing generation, so a newer state still supersedes a pending retry (latest-wins).
-        private static func performRuntimeStateWrite(
-            _ state: TerminalSessionRuntimeState, attempt: Int, at writeAt: Date, paths: TerminalSessionPaths, queue: DispatchQueue,
-            gate: PersistenceCoalescingGate, key: String, maxAttempts: Int, retryDelay: DispatchTimeInterval,
-            onPersisted: @escaping @Sendable (TerminalSessionRuntimeState, Date) -> Void
-        ) {
-            let generation = gate.nextGeneration(forKey: key)
-            queue.async {
-                guard gate.isLatest(generation, forKey: key) else { return }
-                do {
-                    try TerminalSessionPersistence.writeRuntimeState(state, paths: paths)
-                } catch {
-                    guard state.state == .exited, attempt + 1 < maxAttempts else { return }
-                    queue.asyncAfter(deadline: .now() + retryDelay) {
-                        performRuntimeStateWrite(
-                            state, attempt: attempt + 1, at: writeAt, paths: paths, queue: queue, gate: gate, key: key,
-                            maxAttempts: maxAttempts, retryDelay: retryDelay, onPersisted: onPersisted)
-                    }
-                    return
-                }
-                onPersisted(state, writeAt)
-            }
         }
 
         /// Advances the durable persist marker after a successful off-engine write and, when the persisted
@@ -1419,20 +1362,39 @@
             let detachedAt = TerminalSessionTimestamp.string(from: now)
             let sessionID = launchConfiguration.sessionID
             let paths = paths
-            enqueuePersistenceWrite {
-                for clientID in staleClientIDs { try? TerminalSessionPersistence.detachClient(id: clientID, paths: paths, detachedAt: detachedAt) }
-            }
             // Post-expiry owner derived from the pre-expiry snapshot (the enqueued detach has not committed yet).
             var remainingOwnerClientID = activeAttachmentsBeforeExpiry.first {
                 $0.mode == .owner && $0.detachedAt == nil && !staleClientIDSet.contains($0.clientID)
             }?.clientID
+            let ownershipTransferTarget: String?
             if detachedClientWasOwner, remainingOwnerClientID == nil, let localOwnerClientID = activeLocalWindowClientID(excluding: "") {
-                enqueuePersistenceWrite {
-                    try? TerminalSessionPersistence.transferOwnership(
-                        sessionID: sessionID, newOwnerClientID: localOwnerClientID, paths: paths, transferredAt: detachedAt)
-                }
+                ownershipTransferTarget = localOwnerClientID
                 remainingOwnerClientID = localOwnerClientID
                 advanceOwnerEpoch(reason: "stale_client_transfer")
+            } else {
+                ownershipTransferTarget = nil
+            }
+            // Enqueue the detach-all and the (optional) ownership transfer as ONE durable unit so a partial
+            // failure is handled coherently. On ANY failure, hop back to the engine and un-mark these clients
+            // in `expiredRemoteClientIDs` so the next 1s timer tick re-derives them from the still-stale DB
+            // rows and re-enqueues the whole expiry. That retry is safe because detach and transfer are
+            // idempotent UPDATE-based transactions and the owner is re-derived from fresh DB state. Without
+            // this, a swallowed failure would leave the client stuck in `expiredRemoteClientIDs` (never
+            // retried) — and a failed transfer would leave no durable owner while the in-memory `ownerEpoch`
+            // has already advanced.
+            enqueuePersistenceWrite { [weak self] in
+                do {
+                    for clientID in staleClientIDs {
+                        try TerminalSessionPersistence.detachClient(id: clientID, paths: paths, detachedAt: detachedAt)
+                    }
+                    if let ownershipTransferTarget {
+                        try TerminalSessionPersistence.transferOwnership(
+                            sessionID: sessionID, newOwnerClientID: ownershipTransferTarget, paths: paths, transferredAt: detachedAt)
+                    }
+                } catch {
+                    let failureDescription = String(describing: error)
+                    Task { @TerminalEngineActor in self?.rearmStaleClientExpiryAfterWriteFailure(clientIDs: staleClientIDs, error: failureDescription) }
+                }
             }
             if Self.shouldClearFocusAfterDetachingClient(detachedClientWasOwner: false, remainingOwnerClientID: remainingOwnerClientID) {
                 rendererHostStorage.setSurfaceFocused(false)
@@ -1441,6 +1403,14 @@
             postAttachmentStateDidChange()
             refreshRuntimeState(force: true)
             return staleClientIDs
+        }
+
+        /// Re-arms stale-client expiry after its durable detach/transfer write failed: un-marks the client IDs
+        /// so the next timer tick re-derives them from the still-stale DB rows and re-enqueues the (idempotent)
+        /// expiry. Called only from the persistence queue's engine hop on write failure.
+        private func rearmStaleClientExpiryAfterWriteFailure(clientIDs: [String], error: String) {
+            trace("stale_client_expiry_write_failed clients=\(clientIDs) error=\(error)")
+            expiredRemoteClientIDs.subtract(clientIDs)
         }
 
         @discardableResult private func appendOutput(_ data: Data, interactiveResync: Bool = false, shouldBroadcastState: Bool = true) -> Bool {
@@ -2052,6 +2022,14 @@
         /// Blocks until all enqueued durable writes have committed. Test-only fence for the off-engine
         /// persistence queue (lease touches, expiry detaches) so assertions can read the durable mirror.
         func debugDrainPersistenceQueue() { drainPersistenceQueue() }
+        /// Test-only: parks the serial persistence queue on a returned semaphore so a test can enqueue further
+        /// work (e.g. an expiry detach) and then break the database in the deterministic window before that
+        /// work runs. Signal the semaphore to release the queue.
+        func debugHoldPersistenceQueue() -> DispatchSemaphore {
+            let gate = DispatchSemaphore(value: 0)
+            enqueuePersistenceWrite { gate.wait() }
+            return gate
+        }
         func debugSetLastKnownChildPID(_ pid: Int32?) { lastKnownChildPID = pid }
         func debugSetForegroundPIDForTesting(_ pid: Int32?) { foregroundPIDOverrideForTesting = pid }
         func debugSetForegroundProcessResolverForTesting(_ resolver: @escaping (Int32) -> TerminalForegroundProcessSnapshot?) {
@@ -2199,6 +2177,7 @@
         }
         func debugPersistRuntimeState(force: Bool = true) { core.debugPersistRuntimeState(force: force) }
         func debugDrainPersistenceQueue() { core.debugDrainPersistenceQueue() }
+        func debugHoldPersistenceQueue() -> DispatchSemaphore { core.debugHoldPersistenceQueue() }
         func debugSetLastKnownChildPID(_ pid: Int32?) { core.debugSetLastKnownChildPID(pid) }
         func debugSetForegroundPIDForTesting(_ pid: Int32?) { core.debugSetForegroundPIDForTesting(pid) }
         func debugSetForegroundProcessResolverForTesting(_ resolver: @escaping (Int32) -> TerminalForegroundProcessSnapshot?) {

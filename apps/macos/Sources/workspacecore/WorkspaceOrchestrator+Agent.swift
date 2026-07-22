@@ -81,27 +81,25 @@ extension WorkspaceOrchestrator {
         // deterministic, so the later pass's upsert must never treat the earlier pass's already-inserted row
         // — carrying the SAME detected label — as a name conflict with itself and rename it "-2".
         let resolvedLabel = try uniqueAgentFocusLabel(workspaceID: workspace.id, preferredLabel: detectedAgent.label, excludingAgentWindowID: agentID)
-        // Re-read by the deterministic id right before upserting rather than trusting the caller's earlier
-        // `existingRow == nil` check: two overlapping reconciler passes (TerminalForegroundAgentReconciler
-        // and ProcessExitMonitorService) can both observe no existing row and both reach this call for the
-        // same session. If the first pass's insert — or a hook signal that landed on it in the meantime —
-        // already committed status/session-key/claimed-launcher state, a second, delayed pass upserting
-        // fresh `.idle`/`sessionKey: nil` detection defaults over it would revert that live state until a
-        // later hook repairs it. Detection only ever creates or refreshes the label/command binding; it
-        // never owns lifecycle state, so an existing row's status, session key, claimed launcher fields,
-        // and creation time are always carried forward untouched.
-        let existingByID = try store.agentWindow(id: agentID)
+        // Detection only ever creates or refreshes the label/command/runtime-target binding; it never owns
+        // lifecycle state. Two overlapping reconciler passes (TerminalForegroundAgentReconciler and
+        // ProcessExitMonitorService) can both observe no existing row and both reach this call for the same
+        // deterministic id, and a hook signal can commit newer status/session-key state between this pass's
+        // reads and its upsert. So the record carries only fresh initial lifecycle values, and preserving
+        // any already-committed status, session key, claimed launcher fields, and creation time is enforced
+        // in SQL by `upsertDetectedAgentWindow`'s ON CONFLICT clause rather than by re-reading and carrying
+        // the snapshot forward here — closing the read-modify-upsert race. On first insert (no conflict)
+        // these initial values are the ones written.
         let record = AgentWindowRecord(
             id: agentID, workspaceID: workspace.id, provider: .spaces, label: resolvedLabel, runtimeTargetID: terminalWindow?.id,
-            terminalTarget: terminalTarget, sessionKey: existingByID?.sessionKey, claimedLauncherID: existingByID?.claimedLauncherID,
-            claimedLauncherName: existingByID?.claimedLauncherName, status: existingByID?.status ?? .idle,
-            createdAt: existingByID?.createdAt ?? now, updatedAt: now)
+            terminalTarget: terminalTarget, sessionKey: nil, claimedLauncherID: nil, claimedLauncherName: nil, status: .idle,
+            createdAt: now, updatedAt: now)
         let nextAgentWindows = try store.agentWindows(workspaceID: workspace.id).filter { $0.id != agentID } + [record]
         try validateWorkspaceFocusNames(
             workspaceID: workspace.id, processes: try store.workspaceProcesses(workspaceID: workspace.id),
             browserSessions: try store.workspaceBrowserSessions(workspaceID: workspace.id), agentWindows: nextAgentWindows)
 
-        try store.upsertAgentWindow(record)
+        try store.upsertDetectedAgentWindow(record)
         _ = try updateAdHocAgentRuntimeTargetDetail(record, displayCommand: detectedAgent.displayCommand)
     }
 

@@ -1398,6 +1398,49 @@ extension OrchestratorTests {
         XCTAssertEqual(agents.first?.createdAt, inserted.createdAt)
     }
 
+    /// Pins the SQL contract that closes the detection read-modify-upsert race: the product invariant that
+    /// a detection refresh never regresses an agent's lifecycle state. `upsertDetectedAgentWindow` merges a
+    /// fresh label/binding onto a row while preserving whatever `status`, `session_key`, and `created_at`
+    /// the stored row already holds — enforced in the ON CONFLICT clause, so it holds even against a stale
+    /// caller snapshot with no injection seam between the read and the write.
+    func testUpsertDetectedAgentWindowPreservesLifecycleStateAgainstStaleRefresh() throws {
+        let store = try makeTemporaryStore()
+        let projectDir = try makeTempDirectory().path
+        let project = makeProjectRecord(dir: projectDir)
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: projectDir)
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace)
+
+        let agentID = "terminal-agent-detected-session"
+        let terminalTarget = TerminalTargetRecord(trackingID: "detected-session")
+
+        // Detection creates the row with fresh idle defaults.
+        try store.upsertDetectedAgentWindow(
+            AgentWindowRecord(
+                id: agentID, workspaceID: workspace.id, provider: .spaces, label: "claude", terminalTarget: terminalTarget, sessionKey: nil,
+                status: .idle, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z"))
+
+        // A hook advances the row to spinning with a session key through the lifecycle-owning upsert.
+        try store.upsertAgentWindow(
+            AgentWindowRecord(
+                id: agentID, workspaceID: workspace.id, provider: .spaces, label: "claude", terminalTarget: terminalTarget,
+                sessionKey: "session-key-from-hook", status: .spinning, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:01Z"))
+
+        // A delayed detection refresh carrying a stale idle/nil-session-key snapshot with a bogus creation
+        // time must not regress the live lifecycle state, but its label/updated_at binding still applies.
+        try store.upsertDetectedAgentWindow(
+            AgentWindowRecord(
+                id: agentID, workspaceID: workspace.id, provider: .spaces, label: "claude-renamed", terminalTarget: terminalTarget, sessionKey: nil,
+                status: .idle, createdAt: "2099-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:02Z"))
+
+        guard let refreshed = try store.agentWindow(id: agentID) else { return XCTFail("expected agent row") }
+        XCTAssertEqual(refreshed.status, .spinning)
+        XCTAssertEqual(refreshed.sessionKey, "session-key-from-hook")
+        XCTAssertEqual(refreshed.createdAt, "2026-01-01T00:00:00Z")
+        XCTAssertEqual(refreshed.label, "claude-renamed")
+        XCTAssertEqual(refreshed.updatedAt, "2026-01-01T00:00:02Z")
+    }
+
     func testReconcileTerminalForegroundAgentClassificationsReservesConfiguredLauncherNames() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path

@@ -377,8 +377,19 @@ enum SpacesDaemonProfileCommandRouting {
         // `terminateAllSessions` is engine-isolated (it drives `terminateSession`/Ghostty per core). Hop
         // with the ASYNC `run` — a main-actor context must never sync-wait on the engine (the one-way
         // rule). `terminate()` no longer blocks (PTY teardown is deferred), so this returns promptly after
-        // flushing each core's transcript.
-        await TerminalEngineActor.run { self.terminateAllSessions() }
+        // flushing each core's transcript. Snapshot the cores in the same hop so we retain references to the
+        // ones `terminateSession` removes from `sessionCores`.
+        let terminatedCores = await TerminalEngineActor.run { () -> [GhosttyEmbeddedSessionCore] in
+            let cores = Array(self.sessionCores.values)
+            self.terminateAllSessions()
+            return cores
+        }
+        // `terminate()` only ENQUEUES the exited runtime-state, detach-all, terminated payload, and durable-end
+        // writes onto each core's serial persistence queue; `shutdownAndExit`'s `exit(0)` would destroy any
+        // still queued. Await each core's drain so those writes commit before we exit — otherwise a session's
+        // durable runtime row stays stuck at `.running`. This is a cold path; the writes are bounded by
+        // SQLite's busy timeout plus the bounded exited-state retry, so a blocking drain is acceptable.
+        for core in terminatedCores { await core.drainPersistenceForShutdown() }
     }
 
     /// Stops everything except the per-session cores: the lifecycle timer, database-change
@@ -660,7 +671,13 @@ enum SpacesDaemonProfileCommandRouting {
                     records.append(record)
                 } else {
                     quiescedCores.removeLast()
+                    // Nil quiesce returns BEFORE its own persistence drain, so `terminateSession` here only
+                    // ENQUEUES the exited/detach/payload/durable-end writes. Drain this core before continuing
+                    // to `execv`: exec destroys anything still queued, and — because exec keeps the same pid —
+                    // a dropped exited write would leave the `.running` row that `recoverStaleSessions` skips
+                    // forever (the pid is still alive), stranding the session.
                     _ = await TerminalEngineActor.run { self.terminateSession(id: sessionID) }
+                    await core.drainPersistenceForShutdown()
                 }
             }
         } catch {
