@@ -41,14 +41,25 @@ final class SpacesDeviceAPIStreamHandle: @unchecked Sendable {
 }
 
 struct SpacesDeviceAPIClient: Sendable {
+    /// Placeholder used only when a caller (in practice, only tests) doesn't supply a real device name.
+    /// Never used in production: every production call site passes `UIDevice.current.name` explicitly.
+    private static let fallbackDeviceName = "iOS Device"
+
     let settings: SpacesMobileConnectionSettings
+    /// This device's display name, captured once by the caller and stored rather than read here on
+    /// demand: `UIDevice.current.name` is main-actor-isolated, but this type's request path is not.
+    private let deviceName: String
     /// The transport seam. Defaults to the pinned-TLS network backend; Demo Mode injects an in-memory
     /// backend. Every request round trip and session stream funnels through it, so swapping the backend
     /// reroutes the entire client without touching call sites.
     private let backend: any SpacesDeviceAPIBackend
 
-    init(settings: SpacesMobileConnectionSettings, backend: (any SpacesDeviceAPIBackend)? = nil) {
+    init(
+        settings: SpacesMobileConnectionSettings, deviceName: String = SpacesDeviceAPIClient.fallbackDeviceName,
+        backend: (any SpacesDeviceAPIBackend)? = nil
+    ) {
         self.settings = settings
+        self.deviceName = deviceName
         self.backend = backend ?? SpacesDeviceNetworkBackend(settings: settings)
     }
 
@@ -56,8 +67,9 @@ struct SpacesDeviceAPIClient: Sendable {
     /// network path (a closure never intercepted streams, matching the historical behavior). The mobile
     /// unit suite drives the client through this closure.
     init(
-        settings: SpacesMobileConnectionSettings, requestHandler: @escaping @Sendable (SpacesDeviceAPIRequest) async throws -> SpacesDeviceAPIResponse
-    ) { self.init(settings: settings, backend: SpacesDeviceClosureBackend(settings: settings, handler: requestHandler)) }
+        settings: SpacesMobileConnectionSettings, deviceName: String = SpacesDeviceAPIClient.fallbackDeviceName,
+        requestHandler: @escaping @Sendable (SpacesDeviceAPIRequest) async throws -> SpacesDeviceAPIResponse
+    ) { self.init(settings: settings, deviceName: deviceName, backend: SpacesDeviceClosureBackend(settings: settings, handler: requestHandler)) }
 
     func makeCommandChannel() -> SpacesDeviceAPICommandChannel {
         SpacesDeviceAPICommandChannel(transport: backend.makeRequestTransport(), authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity)
@@ -471,8 +483,7 @@ struct SpacesDeviceAPIClient: Sendable {
     private var clientAppIdentity: SpacesDeviceClientApp {
         SpacesDeviceClientApp(
             installationID: settings.installationID, bundleID: Bundle.main.bundleIdentifier ?? SpacesDeviceFirstPartyPolicy.allowedBundleID,
-            platform: "ios", deviceName: ProcessInfo.processInfo.hostName,
-            appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String)
+            platform: "ios", deviceName: deviceName, appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String)
     }
 
 }

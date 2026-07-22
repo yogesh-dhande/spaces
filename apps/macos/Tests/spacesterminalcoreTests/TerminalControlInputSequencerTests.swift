@@ -81,6 +81,26 @@ final class TerminalControlInputSequencerTests: XCTestCase {
             "the default submit separation regressed toward the shorter Claude/Codex-only gap that left OpenCode unsubmitted (issue #187)")
     }
 
+    /// `drain()` must suspend until every write enqueued so far — including a submit CR still held back by
+    /// its separation delay — has actually run. This is the handoff-quiesce guarantee (finding D1): before
+    /// the daemon `execv`s, a pending `terminal send --submit` must not be lost with its CR (or whole line)
+    /// unwritten. Asserting the recorded writes SYNCHRONOUSLY right after `await drain()` proves the drain
+    /// waited rather than letting the delayed CR fire later.
+    func testDrainWaitsForPendingSubmitCarriageReturnBeforeReturning() async {
+        let separation: Duration = .milliseconds(300)
+        let sequencer = TerminalControlInputSequencer(separation: separation)
+        let recorder = WriteRecorder()
+
+        sequencer.enqueueWrite { recorder.record("text") }
+        sequencer.enqueueSubmitCarriageReturn { recorder.record("cr") }
+
+        // Drain immediately, while the CR is still inside its separation delay.
+        await sequencer.drain()
+
+        // No polling: the CR must already have run because drain awaited the whole chain.
+        XCTAssertEqual(recorder.recorded.map(\.label), ["text", "cr"], "drain() returned before the delayed submit CR ran")
+    }
+
     func testPlainWritesRunBackToBackWithoutArtificialSpacing() async {
         let sequencer = TerminalControlInputSequencer(separation: .milliseconds(200))
         let recorder = WriteRecorder()

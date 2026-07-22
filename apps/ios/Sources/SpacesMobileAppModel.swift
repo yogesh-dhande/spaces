@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import UIKit
 import spacesdevicecore
 import spacesterminalcore
 
@@ -503,7 +504,11 @@ private enum SpacesMobileMutationTimeoutRecovery {
         #endif
         let loadedSettings = SpacesMobileSettingsStore.load()
         let deviceState = SpacesMobileDeviceStore.load(fallbackSettings: loadedSettings)
-        browserProxy = SpacesMobileBrowserProxy(installationID: deviceState.settings.installationID)
+        // Captured here, on the main actor, rather than read lazily off `ProcessInfo.processInfo.hostName`:
+        // that call does a blocking reverse-DNS lookup and previously ran on this init's main thread,
+        // tripping the launch watchdog on every fresh install.
+        let deviceName = UIDevice.current.name
+        browserProxy = SpacesMobileBrowserProxy(installationID: deviceState.settings.installationID, deviceName: deviceName)
         // The real settings are persisted regardless of Demo Mode; the demo device is never written to
         // disk, so a launch that lands in Demo Mode still keeps the real records and settings intact.
         SpacesMobileSettingsStore.save(deviceState.settings)
@@ -512,7 +517,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         // parked on disk (parkedRealDeviceState stays nil, so disabling reloads them from the store).
         if DemoModeStore.load(), let backend = try? DemoDeviceBackend.makeDefault() {
             let demoSettings = SpacesMobileDemoDevice.settings(installationID: deviceState.settings.installationID)
-            let bridgeClient = SpacesDeviceAPIClient(settings: demoSettings, backend: backend)
+            let bridgeClient = SpacesDeviceAPIClient(settings: demoSettings, deviceName: deviceName, backend: backend)
             settings = demoSettings
             pairedDevices = [SpacesMobileDemoDevice.record()]
             activeDeviceID = SpacesMobileDemoDevice.id
@@ -522,7 +527,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
             return
         }
 
-        let bridgeClient = SpacesDeviceAPIClient(settings: deviceState.settings)
+        let bridgeClient = SpacesDeviceAPIClient(settings: deviceState.settings, deviceName: deviceName)
         settings = deviceState.settings
         pairedDevices = deviceState.devices
         activeDeviceID = deviceState.activeDeviceID
@@ -821,7 +826,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         self.settings = deviceState.settings
         pairedDevices = deviceState.devices
         activeDeviceID = deviceState.activeDeviceID
-        bridgeClient = SpacesDeviceAPIClient(settings: deviceState.settings)
+        bridgeClient = SpacesDeviceAPIClient(settings: deviceState.settings, deviceName: UIDevice.current.name)
         commandChannel = bridgeClient.makeCommandChannel()
         overviewIdentity += 1
         SpacesMobileSettingsStore.save(deviceState.settings)
@@ -844,7 +849,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         settings = deviceState.settings
         pairedDevices = deviceState.devices
         activeDeviceID = deviceState.activeDeviceID
-        bridgeClient = SpacesDeviceAPIClient(settings: settings)
+        bridgeClient = SpacesDeviceAPIClient(settings: settings, deviceName: UIDevice.current.name)
         commandChannel = bridgeClient.makeCommandChannel()
         overviewIdentity += 1
         SpacesMobileSettingsStore.save(settings)
@@ -872,7 +877,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         settings = deviceState.settings
         pairedDevices = deviceState.devices
         activeDeviceID = deviceState.activeDeviceID
-        bridgeClient = SpacesDeviceAPIClient(settings: settings)
+        bridgeClient = SpacesDeviceAPIClient(settings: settings, deviceName: UIDevice.current.name)
         commandChannel = bridgeClient.makeCommandChannel()
         overviewIdentity += 1
         SpacesMobileSettingsStore.save(settings)
@@ -911,9 +916,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
 
     private func enableDemoMode() {
         let backend: DemoDeviceBackend
-        do {
-            backend = try DemoDeviceBackend.makeDefault()
-        } catch {
+        do { backend = try DemoDeviceBackend.makeDefault() } catch {
             // The recording could not load; leave the real connection exactly as it was.
             errorMessage = error.localizedDescription
             return
@@ -925,7 +928,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         pairedDevices = [SpacesMobileDemoDevice.record()]
         activeDeviceID = SpacesMobileDemoDevice.id
         isDemoModeEnabled = true
-        bridgeClient = SpacesDeviceAPIClient(settings: demoSettings, backend: backend)
+        bridgeClient = SpacesDeviceAPIClient(settings: demoSettings, deviceName: UIDevice.current.name, backend: backend)
         commandChannel = bridgeClient.makeCommandChannel()
         overviewIdentity += 1
         DemoModeStore.save(true)
@@ -941,7 +944,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         pairedDevices = restored.devices
         activeDeviceID = restored.activeDeviceID
         isDemoModeEnabled = false
-        bridgeClient = SpacesDeviceAPIClient(settings: restored.settings)
+        bridgeClient = SpacesDeviceAPIClient(settings: restored.settings, deviceName: UIDevice.current.name)
         commandChannel = bridgeClient.makeCommandChannel()
         overviewIdentity += 1
         DemoModeStore.save(false)
@@ -967,7 +970,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
     func handleAuthenticationFailure(message: String) {
         let previousCommandChannel = commandChannel
         settings.authToken = ""
-        bridgeClient = SpacesDeviceAPIClient(settings: settings)
+        bridgeClient = SpacesDeviceAPIClient(settings: settings, deviceName: UIDevice.current.name)
         commandChannel = bridgeClient.makeCommandChannel()
         overviewIdentity += 1
         SpacesMobileSettingsStore.save(settings)

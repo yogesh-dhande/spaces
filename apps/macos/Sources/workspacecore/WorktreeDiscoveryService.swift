@@ -1,5 +1,17 @@
 import Foundation
 
+/// The lifecycle surface `WorktreeDiscoveryService` needs from a filesystem watcher.
+/// Kept internal so tests can substitute a watcher whose `start()` blocks, verifying
+/// that a slow install never stalls the main actor. `start()` is async because the
+/// real watcher runs its (potentially slow) FSEvents/inotify setup off the caller's
+/// thread; the service awaits it so a stall suspends the actor instead of blocking it.
+protocol FileSystemWatching: Sendable {
+    func start() async throws
+    func stop()
+}
+
+extension FileSystemWatcher: FileSystemWatching {}
+
 /// Device-runtime worktree discovery, owned by the daemon.
 ///
 /// Worktree discovery acts on the device's own filesystem and database, so it
@@ -23,12 +35,26 @@ import Foundation
         /// this is the git common dir plus the `worktrees/` tree, so it changes as
         /// worktrees are added or removed; on macOS it is the single recursive root.
         let watchedDirectories: [String]
-        let watcher: FileSystemWatcher
+        let watcher: any FileSystemWatching
     }
+
+    /// Builds a watcher for a project's directories. Injected so tests can substitute
+    /// a slow-starting watcher; production always uses `liveWatcherFactory`.
+    typealias WatcherFactory =
+        @Sendable (_ paths: [String], _ latency: TimeInterval, _ onChange: @escaping @Sendable ([String]) -> Void) -> any FileSystemWatching
 
     private let databasePath: String
     private let onError: (@Sendable (any Error) -> Void)?
+    private let makeWatcher: WatcherFactory
     private var watchers: [String: Watch] = [:]
+    // Projects whose install is in flight. Installing a watcher suspends across
+    // `commonDirectory`/`watchDirectories`/`start`, so without a synchronous
+    // reservation a `databaseDidChange` storm would fire many overlapping
+    // `refreshWatchers` passes that each build a second FSEventStream for the same
+    // not-yet-installed project (a per-pass fd leak). This set is inserted into before
+    // the first suspension and cleared when the install settles, so a project installs
+    // exactly once regardless of how many passes overlap.
+    private var installingProjectIDs: Set<String> = []
     private var started = false
     // Scans are serialized: a worktree mutation emits several filesystem events in
     // quick succession, and overlapping scans would race to create the same
@@ -37,9 +63,18 @@ import Foundation
     private var scanInFlight = false
     private var scanPending = false
 
-    public init(databasePath: String, onError: (@Sendable (any Error) -> Void)? = nil) {
+    public convenience init(databasePath: String, onError: (@Sendable (any Error) -> Void)? = nil) {
+        self.init(databasePath: databasePath, onError: onError, watcherFactory: Self.liveWatcherFactory)
+    }
+
+    init(databasePath: String, onError: (@Sendable (any Error) -> Void)? = nil, watcherFactory: @escaping WatcherFactory) {
         self.databasePath = databasePath
         self.onError = onError
+        self.makeWatcher = watcherFactory
+    }
+
+    private static let liveWatcherFactory: WatcherFactory = { paths, latency, onChange in
+        FileSystemWatcher(paths: paths, latency: latency, onChange: onChange)
     }
 
     /// Runs the catch-up scan and installs the per-project watchers.
@@ -71,68 +106,101 @@ import Foundation
                 self.watchers[projectID] = nil
             }
             for (projectID, projectDir) in desired where self.watchers[projectID] == nil {
-                guard let commonDirectory = await Self.commonDirectory(projectDir: projectDir) else { continue }
-                guard self.started, self.watchers[projectID] == nil else { continue }
-                self.installWatcher(projectID: projectID, projectDir: projectDir, commonDirectory: commonDirectory)
+                await self.installWatcher(projectID: projectID, projectDir: projectDir)
                 self.scan(projectID: projectID)
             }
         }
     }
 
-    private func installWatcher(projectID: String, projectDir: String, commonDirectory: String) {
-        let watchedDirectories = Self.watchDirectories(commonDirectory: commonDirectory)
-        let watcher = FileSystemWatcher(paths: watchedDirectories, latency: 1) { [weak self] changedPaths in
+    /// Installs a watcher for one project. The git common-dir lookup, directory-list
+    /// computation, and the watcher's `start()` all run off the main actor (each can
+    /// stall — a git spawn, a slow-filesystem enumeration, FSEvents/inotify IPC under
+    /// load), so this method suspends across them rather than blocking the actor.
+    ///
+    /// Because it suspends, it reserves the project in `installingProjectIDs` before the
+    /// first `await`, so overlapping `refreshWatchers` passes install a project exactly
+    /// once instead of each racing to build (and leak) a second stream. The
+    /// `started` / `watchers[projectID] == nil` invariants are also re-checked after
+    /// every suspension as defense in depth.
+    private func installWatcher(projectID: String, projectDir: String) async {
+        guard started, watchers[projectID] == nil, installingProjectIDs.insert(projectID).inserted else { return }
+        defer { installingProjectIDs.remove(projectID) }
+        guard let commonDirectory = await Self.commonDirectory(projectDir: projectDir) else { return }
+        guard started, watchers[projectID] == nil else { return }
+        let watchedDirectories = await Self.watchDirectories(commonDirectory: commonDirectory)
+        guard started, watchers[projectID] == nil else { return }
+        let watcher = makeWatcher(watchedDirectories, 1) { [weak self] changedPaths in
             guard Self.changedPathsAffectWorktrees(changedPaths, commonDirectory: commonDirectory) else { return }
-            Task { @MainActor [weak self] in self?.handleChange(projectID: projectID) }
+            Task { @MainActor [weak self] in await self?.handleChange(projectID: projectID) }
         }
         do {
-            try watcher.start()
+            try await watcher.start()
+            guard started, watchers[projectID] == nil else {
+                watcher.stop()
+                return
+            }
+            // Accepted staleness window: these re-checks confirm the service is still
+            // running and no watcher exists for the project, but do not re-validate that
+            // `projectDir`/`commonDirectory` still exist on disk. A project moved or
+            // deleted while a slow `start()` was suspended can briefly publish a watcher
+            // for the stale path. This is deliberately tolerated: the next
+            // `databaseDidChange` refresh reconciles it (`refreshWatchers` stops any
+            // watcher whose `projectDir` no longer matches the desired set), and DB
+            // changes are frequent, so the window self-heals quickly.
             watchers[projectID] = Watch(
                 projectDir: projectDir, commonDirectory: commonDirectory, watchedDirectories: watchedDirectories, watcher: watcher)
         } catch { onError?(error) }
     }
 
-    private func handleChange(projectID: String) {
+    /// The `started` guard is the stop() safety net: a watcher callback that fires
+    /// while the watcher's async teardown is still draining must not trigger a scan or
+    /// reinstall after the service has stopped.
+    private func handleChange(projectID: String) async {
+        guard started else { return }
         scan(projectID: projectID)
-        reinstallWatcherIfWatchSetChanged(projectID: projectID)
+        await reinstallWatcherIfWatchSetChanged(projectID: projectID)
     }
 
     /// On Linux the inotify watch set includes each `worktrees/<name>/` directory,
     /// so adding or removing a worktree changes which directories must be watched;
     /// reinstall the watcher when that set drifts. On macOS the recursive FSEvents
     /// root never changes, so this is a no-op.
-    private func reinstallWatcherIfWatchSetChanged(projectID: String) {
+    private func reinstallWatcherIfWatchSetChanged(projectID: String) async {
         #if os(Linux)
             guard started, let watch = watchers[projectID] else { return }
-            let desired = Self.watchDirectories(commonDirectory: watch.commonDirectory)
-            guard desired != watch.watchedDirectories else { return }
+            let desired = await Self.watchDirectories(commonDirectory: watch.commonDirectory)
+            guard started, let watch = watchers[projectID], desired != watch.watchedDirectories else { return }
             watch.watcher.stop()
             watchers[projectID] = nil
-            installWatcher(projectID: projectID, projectDir: watch.projectDir, commonDirectory: watch.commonDirectory)
+            await installWatcher(projectID: projectID, projectDir: watch.projectDir)
         #endif
     }
 
     /// The directories to watch for a project's git common dir. FSEvents watches the
     /// single root recursively; inotify is not recursive, so the Linux build watches
     /// the common dir (for `HEAD` and `worktrees/` creation) plus the `worktrees/`
-    /// tree (for worktree add/remove and per-worktree `HEAD`).
-    private static func watchDirectories(commonDirectory: String) -> [String] {
-        #if os(macOS)
-            return [commonDirectory]
-        #else
-            var directories = [commonDirectory]
-            let worktreesDirectory = commonDirectory + "/worktrees"
-            guard isDirectory(worktreesDirectory) else { return directories }
-            directories.append(worktreesDirectory)
-            for entry in ((try? FileManager.default.contentsOfDirectory(atPath: worktreesDirectory)) ?? []).sorted() {
-                let subdirectory = worktreesDirectory + "/" + entry
-                if isDirectory(subdirectory) { directories.append(subdirectory) }
-            }
-            return directories
-        #endif
+    /// tree (for worktree add/remove and per-worktree `HEAD`). Runs off the main actor:
+    /// the Linux branch enumerates the `worktrees/` tree, which can block on a slow
+    /// filesystem, and the trivial macOS branch shares the seam for uniformity.
+    private static func watchDirectories(commonDirectory: String) async -> [String] {
+        await Task.detached(priority: .utility) {
+            #if os(macOS)
+                return [commonDirectory]
+            #else
+                var directories = [commonDirectory]
+                let worktreesDirectory = commonDirectory + "/worktrees"
+                guard isDirectory(worktreesDirectory) else { return directories }
+                directories.append(worktreesDirectory)
+                for entry in ((try? FileManager.default.contentsOfDirectory(atPath: worktreesDirectory)) ?? []).sorted() {
+                    let subdirectory = worktreesDirectory + "/" + entry
+                    if isDirectory(subdirectory) { directories.append(subdirectory) }
+                }
+                return directories
+            #endif
+        }.value
     }
 
-    private static func isDirectory(_ path: String) -> Bool {
+    private nonisolated static func isDirectory(_ path: String) -> Bool {
         var isDirectory: ObjCBool = false
         return FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) && isDirectory.boolValue
     }

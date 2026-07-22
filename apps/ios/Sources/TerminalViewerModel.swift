@@ -237,7 +237,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         self.isDemoMode = isDemoMode
         self.onAuthenticationRequired = onAuthenticationRequired
         self.onOpenTerminalDeepLink = onOpenTerminalDeepLink
-        let resolvedBridgeClient = bridgeClient ?? SpacesDeviceAPIClient(settings: settings)
+        let resolvedBridgeClient = bridgeClient ?? SpacesDeviceAPIClient(settings: settings, deviceName: UIDevice.current.name)
         self.bridgeClient = resolvedBridgeClient
         commandChannel = resolvedBridgeClient.makeCommandChannel()
         self.remoteMediaDownloader = remoteMediaDownloader

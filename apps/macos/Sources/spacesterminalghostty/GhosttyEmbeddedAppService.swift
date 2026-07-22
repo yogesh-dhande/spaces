@@ -5,13 +5,16 @@ import Foundation
     import GhosttyKit
     import spacesterminalcore
 
-    @MainActor public final class GhosttyEmbeddedAppService {
+    /// The daemon-side embedded ghostty app runtime, isolated to the terminal engine actor so terminal
+    /// I/O keeps flowing when the main actor is blocked. The app-process mirror uses its own
+    /// `GhosttyMirrorAppService` (`@MainActor`); both route their once-only `ghostty_init` and the
+    /// one-live-app-per-process invariant through `GhosttyProcessAppRuntime`.
+    @TerminalEngineActor public final class GhosttyEmbeddedAppService {
         public static let shared = GhosttyEmbeddedAppService()
 
         public private(set) var app: ghostty_app_t?
         private var config: ghostty_config_t?
-        private var initialized = false
-        private var surfaceActionHandlers: [UInt: @MainActor (GhosttyActionEvent) -> Void] = [:]
+        private var surfaceActionHandlers: [UInt: @TerminalEngineActor (GhosttyActionEvent) -> Void] = [:]
         private var liveSurfaces: [UInt: ghostty_surface_t] = [:]
 
         /// The light/dark scheme currently pushed into the app and every live surface.
@@ -21,39 +24,24 @@ import Foundation
         /// it to avoid redundant re-themes and to know whether an `applyColorScheme(_:)` actually changed
         /// anything.
         public private(set) var currentAppearance: ThemeAppearance =
-            GhosttyEmbeddedAppService.currentColorScheme() == GHOSTTY_COLOR_SCHEME_DARK ? .dark : .light
+            GhosttyProcessAppRuntime.currentColorScheme() == GHOSTTY_COLOR_SCHEME_DARK ? .dark : .light
 
         private init() {}
 
         public func startIfNeeded() throws {
             guard app == nil else { return }
-
-            let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
-            let paths: GhosttyEmbeddedPaths
-            switch availability {
-            case .available(let resolvedPaths): paths = resolvedPaths
-            case .unavailable(let reason): throw GhosttyEmbeddedAppServiceError.configuration(reason)
-            }
-
-            setenv("GHOSTTY_RESOURCES_DIR", paths.resourcesDirectoryPath, 1)
-
-            if !initialized {
-                let result = ghostty_init(UInt(CommandLine.argc), CommandLine.unsafeArgv)
-                guard result == GHOSTTY_SUCCESS else { throw GhosttyEmbeddedAppServiceError.initializationFailed(Int(result)) }
-                initialized = true
-            }
-
-            let config = try Self.makeThemeConfiguration()
+            try GhosttyProcessAppRuntime.initializeOnce(owner: .daemon)
+            let config = try GhosttyProcessAppRuntime.makeThemeConfiguration()
 
             var runtimeConfig = ghostty_runtime_config_s()
             runtimeConfig.userdata = Unmanaged.passUnretained(self).toOpaque()
             runtimeConfig.supports_selection_clipboard = true
-            runtimeConfig.wakeup_cb = { _ in Task { @MainActor in GhosttyEmbeddedAppService.shared.tick() } }
+            runtimeConfig.wakeup_cb = { _ in Task { @TerminalEngineActor in GhosttyEmbeddedAppService.shared.tick() } }
             runtimeConfig.action_cb = { _, target, action in
                 guard target.tag == GHOSTTY_TARGET_SURFACE else { return true }
                 guard let event = GhosttyActionEventParser.parse(action) else { return true }
                 let surfaceKey = UInt(bitPattern: target.target.surface)
-                Task { @MainActor in GhosttyEmbeddedAppService.shared.handleAction(event, surfaceKey: surfaceKey) }
+                Task { @TerminalEngineActor in GhosttyEmbeddedAppService.shared.handleAction(event, surfaceKey: surfaceKey) }
                 return true
             }
             runtimeConfig.read_clipboard_cb = { userdata, _, state in GhosttyClipboardBridge.readClipboard(userdata: userdata, state: state) }
@@ -64,7 +52,7 @@ import Foundation
             runtimeConfig.close_surface_cb = { userdata, _ in
                 guard let userdata else { return }
                 let surfaceUserData = Unmanaged<GhosttyEmbeddedSurfaceUserData>.fromOpaque(userdata).takeUnretainedValue()
-                Task { @MainActor in surfaceUserData.handleClose() }
+                Task { @TerminalEngineActor in surfaceUserData.handleClose() }
             }
 
             guard let app = ghostty_app_new(&runtimeConfig, config) else {
@@ -75,23 +63,9 @@ import Foundation
             // The generated config carries light: and dark: theme variants; the scheme pushed
             // here selects the variant new surfaces inherit at creation. A later OS appearance
             // change re-themes existing surfaces live via applyColorScheme(_:).
-            ghostty_app_set_color_scheme(app, Self.currentColorScheme())
+            ghostty_app_set_color_scheme(app, GhosttyProcessAppRuntime.currentColorScheme())
             self.config = config
             self.app = app
-        }
-
-        /// Generates the Spaces theme config files for the active profile and loads them into a fresh
-        /// finalized Ghostty config handle. Embedded terminals load ONLY this generated config — never
-        /// the user's `~/.config/ghostty` files — so the look is owned by the active Spaces theme.
-        private static func makeThemeConfiguration() throws -> ghostty_config_t {
-            guard let config = ghostty_config_new() else { throw GhosttyEmbeddedAppServiceError.configuration("ghostty_config_new failed") }
-            let configRoot = URL(fileURLWithPath: try SpacesProfile.current().rootDirectory, isDirectory: true).appendingPathComponent(
-                "ghostty", isDirectory: true)
-            try GhosttyThemeConfigGenerator.writeConfiguration(theme: ActiveTheme.descriptor, configRootDirectory: configRoot).withCString { path in
-                ghostty_config_load_file(config, path)
-            }
-            ghostty_config_finalize(config)
-            return config
         }
 
         /// Regenerates the Spaces theme config for the active profile and re-points the running app at
@@ -105,7 +79,7 @@ import Foundation
         /// single-profile daemon, where the profile root persists for the app service's lifetime.
         func reloadThemeConfigurationForTesting() throws {
             guard let app else { return }
-            let newConfig = try Self.makeThemeConfiguration()
+            let newConfig = try GhosttyProcessAppRuntime.makeThemeConfiguration()
             ghostty_app_update_config(app, newConfig)
             if let previousConfig = config { ghostty_config_free(previousConfig) }
             config = newConfig
@@ -117,7 +91,7 @@ import Foundation
             ghostty_app_tick(app)
         }
 
-        public func registerActionHandler(for surface: ghostty_surface_t, handler: @escaping @MainActor (GhosttyActionEvent) -> Void) {
+        public func registerActionHandler(for surface: ghostty_surface_t, handler: @escaping @TerminalEngineActor (GhosttyActionEvent) -> Void) {
             let key = surfaceKey(surface)
             surfaceActionHandlers[key] = handler
             liveSurfaces[key] = surface
@@ -156,15 +130,10 @@ import Foundation
 
         private func handleAction(_ event: GhosttyActionEvent, surfaceKey: UInt) {
             guard let handler = surfaceActionHandlers[surfaceKey] else { return }
-            Task { @MainActor in handler(event) }
+            Task { @TerminalEngineActor in handler(event) }
         }
 
         private func surfaceKey(_ surface: ghostty_surface_t) -> UInt { UInt(bitPattern: surface) }
-
-        private static func currentColorScheme() -> ghostty_color_scheme_e {
-            let bestMatch = (NSApp?.effectiveAppearance ?? NSAppearance(named: .aqua))?.bestMatch(from: [.darkAqua, .aqua])
-            return bestMatch == .darkAqua ? GHOSTTY_COLOR_SCHEME_DARK : GHOSTTY_COLOR_SCHEME_LIGHT
-        }
     }
 #endif
 
