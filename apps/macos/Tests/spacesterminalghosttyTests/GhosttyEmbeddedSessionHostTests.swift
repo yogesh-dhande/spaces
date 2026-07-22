@@ -2849,6 +2849,65 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             result.epochAfterSecond, result.epochAfterFirst, "a duplicate ownership transfer must not bump the owner epoch a second time")
     }
 
+    /// Enforcement/advertisement coherence: a stale-client expiry promotes the transfer target to owner in the
+    /// in-memory attachment cache and broadcasts that immediately, while the atomic `expireClients` write is
+    /// only enqueued (here held off by a competing write lock, standing in for the up-to-5s busy-timeout window).
+    /// Owner-gating must read the same cache, not the not-yet-committed durable mirror — otherwise the broadcast
+    /// tells the promoted local client it owns the terminal while its control requests are `.ownershipRejected`
+    /// off the stale DB owner, silently dropping keystrokes. This asserts the promoted client's epoch-carrying
+    /// send is ACCEPTED before the transfer commits, and that the expired remote owner's send is now rejected.
+    /// Pre-fix (enforcement reading the DB) the promoted send failed with `.ownershipRejected`.
+    func testPromotedLocalClientControlAcceptedBeforeExpiryTransferCommits() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "session-promoted-coherence", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original", shell: "/bin/zsh",
+            command: "zsh", createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+        let localClient = TerminalClient(
+            id: "local-window", kind: .localWindow, identity: .init(label: "Spaces window"), connectedAt: "2000-01-01T00:00:00Z")
+        let remoteClient = TerminalClient(
+            id: "stale-remote-owner", kind: .remoteViewer, identity: .init(label: "iPad", deviceName: "iPad"), connectedAt: "2000-01-01T00:00:00Z")
+        try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+        try TerminalSessionPersistence.attachClient(
+            sessionID: launchConfiguration.sessionID, client: localClient, mode: .owner, paths: paths, attachedAt: "2000-01-01T00:00:00Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: launchConfiguration.sessionID, client: remoteClient, mode: .viewer, paths: paths, attachedAt: "2000-01-01T00:00:00Z")
+        // Remote becomes the owner (local demoted to viewer); its 2000-era lease makes it a stale owner at real-now.
+        try TerminalSessionPersistence.transferOwnership(
+            sessionID: launchConfiguration.sessionID, newOwnerClientID: remoteClient.id, paths: paths, transferredAt: "2000-01-01T00:00:01Z")
+
+        let lockHolder = CompetingWriteLockHolder(databasePath: try SpacesProfile.current().databasePath)
+        lockHolder.startHolding(maxHoldSeconds: 10)
+        lockHolder.waitUntilHolding()
+        defer { lockHolder.release() }
+
+        let outcome = TerminalEngineActor.runSynchronously {
+            () -> (expired: [String], promoted: TerminalControlResponse, expiredOwner: TerminalControlResponse) in
+            let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+            let expired = host.expireStaleRemoteClientsIfNeeded(now: Date())
+            // The expiry advanced the owner epoch and promoted the local window client in the cache and broadcasts;
+            // its atomic durable transfer is still blocked on the held write lock.
+            let epoch = host.core.debugOwnerEpoch
+            XCTAssertEqual(
+                (try? TerminalSessionPersistence.activeAttachments(paths: paths))?.first(where: { $0.mode == .owner })?.clientID,
+                remoteClient.id, "the durable ownership transfer must still be pending under the held write lock")
+            let promoted = host.handleControlRequest(
+                .init(command: "send", text: "echo promoted\n", clientID: localClient.id, ownerEpoch: epoch))
+            let expiredOwner = host.handleControlRequest(
+                .init(command: "send", text: "echo stale\n", clientID: remoteClient.id, ownerEpoch: epoch))
+            return (expired, promoted, expiredOwner)
+        }
+        XCTAssertEqual(outcome.expired, [remoteClient.id], "the tick must expire the stale remote owner")
+        XCTAssertTrue(
+            outcome.promoted.ok,
+            "the promoted local client's send must be accepted from the cache the broadcast advertises, not rejected off the uncommitted DB owner")
+        XCTAssertFalse(outcome.expiredOwner.ok, "the expired remote owner is no longer the owner and its send must be rejected")
+        XCTAssertEqual(outcome.expiredOwner.errorCode, .ownershipRejected)
+    }
+
     /// Finding B4: a failed exited-state persist must retry, not leave the durable runtime row stuck at
     /// `.running` forever while the final payload says terminated. Termination cancels the runtime-state
     /// timer, so nothing else re-persists. Breaking the database makes terminate()'s exited write fail;

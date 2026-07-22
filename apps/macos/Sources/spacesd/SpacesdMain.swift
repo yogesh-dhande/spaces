@@ -888,13 +888,14 @@ enum SpacesDaemonProfileCommandRouting {
 
     /// RPC `.create` handler. The git-driven workspace prep is unbounded (it can `git clone` with a 120s
     /// timeout), so it runs off the main actor on the transport thread; only the session-core creation and
-    /// start — which mutate `sessionCores` and drive Ghostty — hop to the engine actor via
-    /// `startSessionCoreResponse`, whose on-engine create-admission re-check (`handoffInProgress` and
+    /// start — which mutate `sessionCores` and drive Ghostty — hop to the engine actor via a single
+    /// `startSessionCoreResponse` call, whose on-engine create-admission re-check (`handoffInProgress` and
     /// `shutdownInProgress`) is the real mutation-boundary guard (the off-actor check below is an early-out,
-    /// not the authority). The post-start summary is served from the live core's in-memory state via a second
-    /// engine hop (`liveCoreSummaryOrRollback`) rather than polling the durable mirror, so a create can report
-    /// the running session even while the first runtime-state write is still queued behind a contended DB
-    /// write lock.
+    /// not the authority). That one engine hop both starts the core and builds the post-start summary from
+    /// the core's in-memory state (never the durable mirror), so a create can report the running session even
+    /// while the first runtime-state write is still queued behind a contended DB write lock — and a
+    /// fast-exiting command's PTY-close job cannot interleave to strand the summary (see
+    /// `startSessionCoreResponse`).
     private nonisolated func createSessionOffMain(_ request: TerminalServiceCreateRequest) -> TerminalServiceResponse {
         if let rejection = livenessState.sessionCreateRejection() { return rejection }
         let launchConfiguration = request.launchConfiguration
@@ -903,20 +904,14 @@ enum SpacesDaemonProfileCommandRouting {
                 runtimeManifest: request.runtimeManifest, worktreeRefresh: request.worktreeRefresh,
                 workingDirectory: launchConfiguration.workingDirectory)
         } catch { return TerminalServiceResponse(ok: false, message: String(describing: error), errorCode: Self.errorCode(error)) }
-        let startResponse = TerminalEngineActor.runSynchronously { self.startSessionCoreResponse(for: launchConfiguration) }
-        guard startResponse.ok else { return startResponse }
-        guard let summary = TerminalEngineActor.runSynchronously({ self.liveCoreSummaryOrRollback(sessionID: launchConfiguration.sessionID) }) else {
-            return TerminalServiceResponse(
-                ok: false, message: "Terminal session \(launchConfiguration.sessionID) started but produced no summary.", errorCode: .internalError)
-        }
-        return TerminalServiceResponse(ok: true, message: startResponse.message, session: summary)
+        return TerminalEngineActor.runSynchronously { self.startSessionCoreResponse(for: launchConfiguration) }
     }
 
     /// Engine-isolated create used by the in-process launch callers (built-in terminal launcher /
     /// orchestrator hooks), which reach the engine via `TerminalEngineActor.runSynchronously` from their
-    /// own (never-main) calling threads. Runs the workspace prep and the core start inline; like
-    /// `startSessionCoreResponse`, it returns without a session summary, so `launchBuiltInTerminalSession`
-    /// adds it (from the live core's in-memory state, via `liveCoreSummaryOrRollback`) after this hop returns.
+    /// own (never-main) calling threads. Runs the workspace prep and the core start inline and returns
+    /// `startSessionCoreResponse`'s result, whose success response already carries the session summary from
+    /// the live core's in-memory state.
     @TerminalEngineActor private func createSession(_ request: TerminalServiceCreateRequest) -> TerminalServiceResponse {
         if let rejection = livenessState.sessionCreateRejection() { return rejection }
         let launchConfiguration = request.launchConfiguration
@@ -928,21 +923,48 @@ enum SpacesDaemonProfileCommandRouting {
         return startSessionCoreResponse(for: launchConfiguration)
     }
 
-    /// The engine-isolated tail of session create: creating the session core and starting it. Re-checks
-    /// the create-admission flags (`handoffInProgress` and `shutdownInProgress`, via
-    /// `livenessState.sessionCreateRejection()`) on the engine actor so a create that raced a handoff or a
-    /// shutdown cannot add a core after the quiesce/shutdown snapshot — this is the real mutation-boundary
-    /// guard, serialized against both the handoff quiesce loop (`performExecHandoff`) and `shutdown()`'s
-    /// terminate snapshot, which also run on the engine. Both set their flag on the main actor BEFORE their
-    /// engine snapshot, so any create reaching the engine after the snapshot observes it and is refused.
-    /// Returns without a session summary on success; every caller adds the summary itself, from the live
-    /// core's in-memory state, via `liveCoreSummaryOrRollback`.
+    /// The engine-isolated tail of session create: creating the session core, starting it, and serving the
+    /// post-start summary — all in one serial engine block. Re-checks the create-admission flags
+    /// (`handoffInProgress` and `shutdownInProgress`, via `livenessState.sessionCreateRejection()`) on the
+    /// engine actor so a create that raced a handoff or a shutdown cannot add a core after the
+    /// quiesce/shutdown snapshot — this is the real mutation-boundary guard, serialized against both the
+    /// handoff quiesce loop (`performExecHandoff`) and `shutdown()`'s terminate snapshot, which also run on
+    /// the engine. Both set their flag on the main actor BEFORE their engine snapshot, so any create reaching
+    /// the engine after the snapshot observes it and is refused.
+    ///
+    /// The success response carries the session summary in `session`, built from the just-started core's
+    /// in-memory state (`inMemorySessionSummary()`) in this same block — never from the durable mirror. Two
+    /// properties make that safe and race-free:
+    ///
+    ///   - `startIfNeeded()` advanced the core's in-memory runtime state synchronously, so
+    ///     `inMemorySessionSummary()` returns the running session immediately, independent of when the first
+    ///     runtime-state write commits to SQLite. That first write is enqueued on the per-core persistence
+    ///     queue, so under writer contention (e.g. an agent hook's `spaces agent signal` burst holding the
+    ///     write lock up to SQLite's busy timeout) it can lag; a disk-polling summary would then fail for a
+    ///     session that was live and running.
+    ///   - The summary is read here, in the same serial engine block that started the core, off the LOCAL
+    ///     `sessionCore` reference. A fast-exiting command (e.g. `true`) enqueues its PTY-close job — which
+    ///     removes the core from `sessionCores` via `onSessionClosed` — onto this same engine queue, so that
+    ///     job cannot interleave between the start and the summary within one block, and the local reference
+    ///     stays valid regardless of the `sessionCores` removal. The core keeps its terminal in-memory
+    ///     runtime state after close, so the summary reports the true exited result rather than a ghost
+    ///     failure that would leave a live, untracked agent process behind.
+    ///
+    /// A nil summary is unreachable after a successful `startIfNeeded()` (the core holds
+    /// `latestRuntimeState`/`lastRuntimeState` by then), so the defensive branch returns a plain
+    /// `internalError` without any core-terminate rollback: the summary is in-memory and the core is a live
+    /// local reference, so there is nothing meaningful a disk-fallback rollback could reconcile.
     @TerminalEngineActor private func startSessionCoreResponse(for launchConfiguration: TerminalSessionLaunchConfiguration) -> TerminalServiceResponse {
         if let rejection = livenessState.sessionCreateRejection() { return rejection }
         do {
             let sessionCore = try sessionCore(for: launchConfiguration)
             try sessionCore.startIfNeeded()
-            return TerminalServiceResponse(ok: true, message: "Started terminal session \(launchConfiguration.sessionID).")
+            guard let summary = sessionCore.inMemorySessionSummary() else {
+                return TerminalServiceResponse(
+                    ok: false, message: "Terminal session \(launchConfiguration.sessionID) started but produced no summary.",
+                    errorCode: .internalError)
+            }
+            return TerminalServiceResponse(ok: true, message: "Started terminal session \(launchConfiguration.sessionID).", session: summary)
         } catch { return TerminalServiceResponse(ok: false, message: String(describing: error), errorCode: Self.errorCode(error)) }
     }
 
@@ -1423,17 +1445,17 @@ enum SpacesDaemonProfileCommandRouting {
     /// `nonisolated`: bridges the synchronous `@Sendable` `BuiltInTerminalSessionLauncher` closure type
     /// (Device API supervisor, the process-wide orchestrator override, and the profile-command
     /// orchestrator) onto the engine actor. `createSession` runs on the engine via
-    /// `TerminalEngineActor.runSynchronously`; a second engine hop (`liveCoreSummaryOrRollback`) then serves
-    /// the post-start summary from the live core's in-memory state. This path is what the agent-spawn /
-    /// workspace-command launch (`Orchestrator.launchWorkspaceCommandSession`) flows through, so serving the
-    /// summary from memory keeps a contended first runtime-state write from reporting a ghost failure that
-    /// would leave a live, untracked agent process behind.
+    /// `TerminalEngineActor.runSynchronously` and returns a success response already carrying the post-start
+    /// summary from the live core's in-memory state. This path is what the agent-spawn / workspace-command
+    /// launch (`Orchestrator.launchWorkspaceCommandSession`) flows through, so serving the summary from
+    /// memory keeps a contended first runtime-state write — or a fast-exiting command's PTY-close job — from
+    /// reporting a ghost failure that would leave a live, untracked agent process behind.
     private nonisolated func launchBuiltInTerminalSession(_ launchConfiguration: TerminalSessionLaunchConfiguration) throws
         -> TerminalServiceSessionSummary
     {
         let response = TerminalEngineActor.runSynchronously { self.createSession(TerminalServiceCreateRequest(launchConfiguration: launchConfiguration)) }
         guard response.ok else { throw Self.requestFailedError(response.message) }
-        guard let summary = TerminalEngineActor.runSynchronously({ self.liveCoreSummaryOrRollback(sessionID: launchConfiguration.sessionID) }) else {
+        guard let summary = response.session else {
             throw Self.requestFailedError("Terminal session \(launchConfiguration.sessionID) started but produced no summary.")
         }
         return summary
@@ -1963,29 +1985,6 @@ enum SpacesDaemonProfileCommandRouting {
         let paths = try TerminalSessionPaths.forSession(id: sessionID)
         let launchConfiguration = try TerminalSessionPersistence.readLaunchConfiguration(paths: paths)
         return try summary(for: launchConfiguration, paths: paths)
-    }
-
-    /// The just-created session's summary, built from the live core's in-memory state (no DB read), with a
-    /// rollback on failure. Runs on the engine actor so it can touch `sessionCores`; every create call site
-    /// reaches it through a single `TerminalEngineActor.runSynchronously` hop after the start hop returns.
-    ///
-    /// `startIfNeeded()` advanced the core's in-memory runtime state synchronously, so
-    /// `inMemorySessionSummary()` returns the running session immediately — independent of when the first
-    /// runtime-state write commits to SQLite. That first write is enqueued on the per-core persistence
-    /// queue, so under writer contention (e.g. an agent hook's `spaces agent signal` burst holding the write
-    /// lock up to SQLite's busy timeout) it can lag past a poll deadline; the previous disk-polling summary
-    /// then threw for a session that was live and running, and the create caller returned `ok:false` while
-    /// the core kept running — a ghost session an immediate retry would duplicate (callers mint a fresh
-    /// session UUID per attempt). Serving the summary from memory removes that race entirely.
-    ///
-    /// Rollback: if the core produced no summary (should be impossible after a successful start — the core
-    /// holds `latestRuntimeState`/`lastRuntimeState` by then), the just-created core is terminated through
-    /// the normal `terminateSession` path and nil is returned, so no untracked session can outlive a failed
-    /// create response. Callers map nil to an `ok:false`/thrown failure.
-    @TerminalEngineActor private func liveCoreSummaryOrRollback(sessionID: String) -> TerminalServiceSessionSummary? {
-        if let summary = sessionCores[sessionID]?.inMemorySessionSummary() { return summary }
-        _ = terminateSession(id: sessionID)
-        return nil
     }
 
     private func summaryIfLive(for launchConfiguration: TerminalSessionLaunchConfiguration) throws -> TerminalServiceSessionSummary? {

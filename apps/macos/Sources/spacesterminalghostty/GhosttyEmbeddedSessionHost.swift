@@ -319,6 +319,16 @@
         /// In-memory cache of this session's attachment snapshot (`terminal_clients` + `terminal_attachments`
         /// rows), consulted on the per-output-chunk broadcast path in place of a disk read.
         ///
+        /// Owner-gating ENFORCEMENT reads the same cache, not the durable mirror: `isOwner`,
+        /// `activeOwnerClientID`, `hasActiveAttachments`, `activeLocalWindowClientID`, and the attach/detach
+        /// mode-change pre-checks all resolve through `currentActiveAttachments()`/`currentAttachmentSnapshot()`.
+        /// This keeps gating and broadcasts on one source of truth: a stale-client expiry promotes the transfer
+        /// target to owner in this cache and broadcasts that immediately, while its atomic `expireClients` write
+        /// is only enqueued (committing ms later, or up to the 5s busy timeout under a held write lock). Were
+        /// enforcement to read the not-yet-committed DB, it would `.ownershipRejected` the very client the
+        /// broadcast just told it owns the terminal — silently dropping its keystrokes. Serving both from the
+        /// cache makes that disagreement impossible.
+        ///
         /// SINGLE-WRITER INVARIANT: the live in-process session core is the sole writer of a live session's
         /// attachment/client rows. Every attach, detach, heartbeat-lease touch, ownership transfer, and
         /// stale-client expiry routes through this core's control handlers, and each keeps this cache current
@@ -416,7 +426,7 @@
 
         public func attachClient(_ client: TerminalClient, mode: TerminalAttachmentMode) throws {
             try startIfNeeded()
-            let activeAttachments = (try? TerminalSessionPersistence.activeAttachments(paths: paths)) ?? []
+            let activeAttachments = currentActiveAttachments()
             let currentAttachment = activeAttachments.first { $0.clientID == client.id }
             let previousOwnerClientID = activeAttachments.first { $0.mode == .owner }?.clientID
             if currentAttachment?.mode != mode {
@@ -432,6 +442,10 @@
         public func detach(clientID: String) throws {
             let detachedClientWasOwner = isOwner(clientID: clientID)
             try TerminalSessionPersistence.detachClient(id: clientID, paths: paths, detachedAt: TerminalSessionTimestamp.string(from: Date()))
+            // Invalidate synchronously after the committed detach so the ownership-successor reads below reseed
+            // from committed truth (the detached client gone) rather than the pre-detach cache. Without this the
+            // owner-successor derivation would still see the just-detached owner and skip the transfer-back.
+            invalidateAttachmentSnapshotCache()
             var remainingOwnerClientID = activeOwnerClientID()
             if detachedClientWasOwner, remainingOwnerClientID == nil, let localOwnerClientID = activeLocalWindowClientID(excluding: clientID) {
                 let transferredAt = TerminalSessionTimestamp.string(from: Date())
@@ -452,18 +466,18 @@
 
         public func isOwner(clientID: String) -> Bool {
             guard isRuntimeInteractiveForControl() else { return false }
-            return ((try? TerminalSessionPersistence.activeAttachments(paths: paths)) ?? []).contains { $0.clientID == clientID && $0.mode == .owner }
+            return currentActiveAttachments().contains { $0.clientID == clientID && $0.mode == .owner }
         }
 
         public func activeOwnerClientID() -> String? {
             guard isRuntimeInteractiveForControl() else { return nil }
-            return ((try? TerminalSessionPersistence.activeAttachments(paths: paths)) ?? []).first(where: { $0.mode == .owner })?.clientID
+            return currentActiveAttachments().first(where: { $0.mode == .owner })?.clientID
         }
 
-        private func hasActiveAttachments() -> Bool { !((try? TerminalSessionPersistence.activeAttachments(paths: paths)) ?? []).isEmpty }
+        private func hasActiveAttachments() -> Bool { !currentActiveAttachments().isEmpty }
 
         private func activeLocalWindowClientID(excluding excludedClientID: String) -> String? {
-            guard let snapshot = try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths) else { return nil }
+            guard let snapshot = currentAttachmentSnapshot() else { return nil }
             let clientsByID = Dictionary(uniqueKeysWithValues: snapshot.clients.map { ($0.id, $0) })
             return snapshot.attachments.filter { $0.detachedAt == nil && $0.clientID != excludedClientID }.compactMap {
                 attachment -> TerminalClient? in
@@ -968,7 +982,7 @@
                 let previousOwnerClientID = activeOwnerClientID()
                 try TerminalSessionPersistence.upsertClient(authoritativeClient, paths: paths)
                 invalidateAttachmentSnapshotCache()
-                let currentAttachment = try TerminalSessionPersistence.activeAttachments(paths: paths).first { $0.clientID == authoritativeClient.id }
+                let currentAttachment = currentActiveAttachments().first { $0.clientID == authoritativeClient.id }
                 if currentAttachment?.mode != mode {
                     try TerminalSessionPersistence.attachClient(
                         sessionID: launchConfiguration.sessionID, client: authoritativeClient, mode: mode, paths: paths, attachedAt: attachedAt)
@@ -1034,7 +1048,7 @@
                 return TerminalControlResponse(ok: false, message: "Missing client ID.", errorCode: .invalidArgument)
             }
             do {
-                let hasActiveAttachment = try TerminalSessionPersistence.activeAttachments(paths: paths).contains { $0.clientID == clientID }
+                let hasActiveAttachment = currentActiveAttachments().contains { $0.clientID == clientID }
                 if hasActiveAttachment { try detach(clientID: clientID) }
                 TerminalPerformance.logMetric(
                     "terminal_control_detach", target: "session=\(launchConfiguration.sessionID) client=\(clientID)",
@@ -1228,6 +1242,12 @@
                 try TerminalSessionPersistence.transferOwnership(
                     sessionID: launchConfiguration.sessionID, newOwnerClientID: clientID, paths: paths,
                     transferredAt: TerminalSessionTimestamp.string(from: Date()))
+                // Invalidate the attachment cache synchronously, right after the committed transfer, so
+                // owner-gating enforcement (which reads the cache) sees the new owner immediately rather than
+                // the pre-takeover owner until the deferred broadcast Task below runs. The notification and
+                // re-broadcast stay deferred so the takeover ack returns without waiting on the full-frame
+                // broadcast; the reseed those reads trigger meanwhile reads the committed transfer.
+                invalidateAttachmentSnapshotCache()
                 if previousOwnerClientID != clientID { advanceOwnerEpoch(reason: "takeover") }
                 Task { @TerminalEngineActor [weak self] in
                     guard let self else { return }
@@ -1713,6 +1733,14 @@
             guard let snapshot = try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths) else { return nil }
             cachedAttachmentSnapshot = snapshot
             return snapshot
+        }
+
+        /// Active (non-detached) attachments served from `currentAttachmentSnapshot()` — the in-memory cache,
+        /// reseeded from disk on a miss. Every owner-gating enforcement read (`isOwner`, `activeOwnerClientID`,
+        /// `hasActiveAttachments`, attach/detach mode-change checks) resolves through this so gating agrees with
+        /// the cache the broadcasts advertise. See `cachedAttachmentSnapshot`.
+        private func currentActiveAttachments() -> [TerminalAttachment] {
+            (currentAttachmentSnapshot()?.attachments ?? []).filter { $0.detachedAt == nil }
         }
 
         /// Drops the cached attachment snapshot so the next read reseeds from disk. Called by every in-core
