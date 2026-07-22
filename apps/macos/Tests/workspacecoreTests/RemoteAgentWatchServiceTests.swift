@@ -194,6 +194,12 @@ final class RemoteAgentWatchServiceTests: XCTestCase {
         try waitUntil(message: "baseline listing never applied") {
             service.debugSnapshot(deviceID: "device-1")?["child-1"]?.status == baselineStatus
         }
+        // The baseline mirror is persisted off the main actor, so the in-memory snapshot landing above
+        // no longer implies the row is durable. Wait for the persisted mirror before a test simulates a
+        // daemon restart by reading it back from a fresh service on the same database.
+        try waitUntil(message: "baseline was never persisted") {
+            (try? store.agentRemoteWatchBaselines())?["device-1"]?["child-1"]?.status == baselineStatus
+        }
         return (service, store)
     }
 
@@ -334,6 +340,11 @@ final class RemoteAgentWatchServiceTests: XCTestCase {
         try store.deleteAgentRemoteSubscription(subscriberTerminalSessionID: "sub-1", deviceID: "device-1", agentSessionID: "child-1")
         service.reconcile()
         try waitUntil(message: "unwatched device's stream never closed") { service.debugStreamingDeviceIDs.isEmpty }
+        // Retiring the baseline deletes the persisted mirror off the main actor; wait for it to clear so
+        // the fresh service below cannot load a stale baseline and replay a spurious exit.
+        try waitUntil(message: "retired baseline was never cleared from the persisted mirror") {
+            (try? store.agentRemoteWatchBaselines())?["device-1"] == nil
+        }
 
         // Re-subscribe after the child exited: a fresh watch has nothing to diff against, so the
         // absent row must seed silently, not replay an exit from the retired baseline.

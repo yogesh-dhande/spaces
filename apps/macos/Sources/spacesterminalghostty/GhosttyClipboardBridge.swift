@@ -2,6 +2,7 @@
     import AppKit
     import Foundation
     import GhosttyKit
+    import spacesterminalcore
 
     enum GhosttyClipboardBridge {
         static func readClipboard(userdata: UnsafeMutableRawPointer?, state: UnsafeMutableRawPointer?) -> Bool {
@@ -48,9 +49,13 @@
             userdata: UnsafeMutableRawPointer?, string: String, state: UnsafeMutableRawPointer?, confirmed: Bool
         ) {
             guard let userdata else { return }
+            // The surface userdata is the daemon's engine-actor-isolated `GhosttyEmbeddedSurfaceUserData`
+            // (mirror surfaces set none, so this only ever runs for daemon surfaces — the guard above
+            // early-returns for the null mirror userdata). Hop to the engine actor to read the surface,
+            // preserving the pre-existing "complete on a later turn" pattern.
             let surfaceUserData = Unmanaged<GhosttyEmbeddedSurfaceUserData>.fromOpaque(userdata).takeUnretainedValue()
             let stateAddress = state.map { UInt(bitPattern: $0) }
-            Task { @MainActor in
+            Task { @TerminalEngineActor in
                 guard let surface = surfaceUserData.surface() else { return }
                 let statePointer = stateAddress.flatMap(UnsafeMutableRawPointer.init(bitPattern:))
                 string.withCString { pointer in ghostty_surface_complete_clipboard_request(surface, pointer, statePointer, confirmed) }

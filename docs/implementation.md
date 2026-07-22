@@ -13,9 +13,10 @@ Related docs, each authoritative for its own layer:
 
 ## System Overview
 
-Spaces is a macOS app, an iOS app, and a CLI, all of which are thin clients of a per-device daemon. Five invariants hold everywhere:
+Spaces is a macOS app, an iOS app, and a CLI, all of which are thin clients of a per-device daemon. Six invariants hold everywhere:
 
 - SQLite is the single source of truth for persisted model data and global preferences.
+- **The daemon's terminal engine owns a dedicated serial executor.** `TerminalEngineActor` (a custom global actor backed by its own dispatch queue) hosts `ghostty_app_tick`, the embedded session cores, and the PTY data path, so a busy or blocked main actor cannot stall terminal input, output, or escape-query replies. The isolation is one-way by rule: engine code may hop synchronously to the main actor (only for AppKit-affine setup like headless view creation), but main-actor code must never synchronously wait on the engine — that asymmetry is what makes the design deadlock-free. The daemon's main actor keeps coordination only (reconcilers, database-change handling, orchestrator work), and nothing blocking belongs on either actor: subprocesses, git, SQLite opens, FSEvents/inotify registration, socket round-trips, and PTY teardown all run on background executors or transport threads, entering an actor only for its own state.
 - A **window is a client concept**. The daemon has no desktop session and stores no window identity; clients reconstruct windows from the overview payload.
 - Workspace settings are seeded from project templates at workspace creation and preserved as per-workspace overrides after that.
 - Store startup migrates older databases serially through every intermediate schema version and fails closed for versions it has no migration step for.

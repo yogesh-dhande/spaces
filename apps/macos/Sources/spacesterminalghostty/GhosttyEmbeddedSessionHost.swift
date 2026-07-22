@@ -59,22 +59,27 @@
         }
     }
 
-    @MainActor public final class GhosttyHeadlessRendererHost: TerminalGhosttyRendererHosting {
+    /// The daemon-side embedded renderer host, run on the terminal engine actor. It deliberately does
+    /// NOT conform to the app-facing `TerminalGhosttyRendererHosting` protocol (which stays `@MainActor`
+    /// for `RemoteGhosttySessionHost` and the app UI): the daemon drives it through concrete methods, so
+    /// the window-focus / `NSEvent` key-handling members that existed only to satisfy that protocol are
+    /// gone (those are the app's responsibility and cannot run on the engine actor).
+    @TerminalEngineActor public final class GhosttyHeadlessRendererHost {
         private let sessionDriver: GhosttyEmbeddedTerminalSessionDriver
-        private let clearScreenAndScrollbackAction: @MainActor () -> Bool
-        private var isOwnerClient: (@MainActor (String) -> Bool)?
-        private var inputActivityHandler: (@MainActor (Int) -> Void)?
+        private let clearScreenAndScrollbackAction: @TerminalEngineActor () -> Bool
+        private var isOwnerClient: (@TerminalEngineActor (String) -> Bool)?
+        private var inputActivityHandler: (@TerminalEngineActor (Int) -> Void)?
 
-        init(sessionDriver: GhosttyEmbeddedTerminalSessionDriver, clearScreenAndScrollbackAction: @escaping @MainActor () -> Bool) {
+        init(sessionDriver: GhosttyEmbeddedTerminalSessionDriver, clearScreenAndScrollbackAction: @escaping @TerminalEngineActor () -> Bool) {
             self.sessionDriver = sessionDriver
             self.clearScreenAndScrollbackAction = clearScreenAndScrollbackAction
         }
 
-        func setOwnerClientResolver(_ resolver: @escaping @MainActor (String) -> Bool) { isOwnerClient = resolver }
+        func setOwnerClientResolver(_ resolver: @escaping @TerminalEngineActor (String) -> Bool) { isOwnerClient = resolver }
 
         func setOutputHandler(_ handler: (@Sendable (Data) -> Void)?) { sessionDriver.setOutputHandler(handler) }
 
-        func setInputActivityHandler(_ handler: (@MainActor (Int) -> Void)?) { inputActivityHandler = handler }
+        func setInputActivityHandler(_ handler: (@TerminalEngineActor (Int) -> Void)?) { inputActivityHandler = handler }
 
         func startSessionIfNeeded() throws { try sessionDriver.startIfNeeded() }
 
@@ -120,30 +125,6 @@
 
         public func setFocused(_ focused: Bool, for clientID: String) { sessionDriver.setFocused(isOwnerClient?(clientID) == true && focused) }
 
-        public func focusWindow(_ window: NSWindow?) {
-            guard let window else { return }
-            if !window.isVisible { window.orderFront(nil) }
-            if !window.isKeyWindow { window.makeKeyAndOrderFront(nil) }
-        }
-
-        @discardableResult public func handleKeyEvent(_ event: NSEvent, for clientID: String) -> Bool {
-            guard isOwnerClient?(clientID) == true else { return false }
-            if GhosttyTerminalInputTranslator.shouldDeferToSystemShortcut(keyCode: event.keyCode, modifierFlags: event.modifierFlags) { return false }
-            if let keySpec = GhosttyTerminalInputTranslator.keySpecifier(for: event) {
-                if TerminalKeyInput.hostAction(for: keySpec) == .clearScreenAndScrollback { return clearScreenAndScrollback() }
-                guard let bytes = TerminalKeyInput.bytes(for: keySpec) else { return false }
-                sendRawBytes(Data(bytes))
-                return true
-            }
-            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-            if flags.contains(.command) { return false }
-            guard let characters = GhosttyTerminalInputTranslator.ghosttyText(for: event), !characters.isEmpty else { return false }
-            sendRawBytes(Data(characters.utf8))
-            return true
-        }
-
-        @discardableResult public func synchronizeSurfaceGeometry() -> Bool { false }
-
         public func hasRenderableSurface() -> Bool { sessionDriver.snapshot() != nil }
 
         public func snapshot() -> GhosttyTerminalSnapshot? { sessionDriver.snapshot() }
@@ -181,7 +162,7 @@
         public func debugVisibleSurfaceText() -> String? { sessionDriver.snapshotText() }
     }
 
-    @MainActor public final class GhosttyEmbeddedSessionCore {
+    @TerminalEngineActor public final class GhosttyEmbeddedSessionCore {
         private static let incomingOutputCoalescingInterval: Duration = .milliseconds(4)
         private static let interactiveInputFlushWindowNanoseconds: UInt64 = 750_000_000
         private static let interactiveInputMaximumByteCount = 128
@@ -272,8 +253,10 @@
         private let sessionDriver: GhosttyEmbeddedTerminalSessionDriver
         private lazy var rendererHostStorage = GhosttyHeadlessRendererHost(
             sessionDriver: sessionDriver, clearScreenAndScrollbackAction: { [weak self] in self?.clearScreenAndScrollback() ?? false })
-        private let requestSurfaceRefreshAction: @MainActor () -> Void
-        private var runtimeStateTimer: Timer?
+        private let requestSurfaceRefreshAction: @TerminalEngineActor () -> Void
+        /// Per-session 1s runtime-state timer. A `DispatchSourceTimer` on the engine queue replaces the
+        /// old `Timer`/`RunLoop.main` pairing — the engine actor's queue has no run loop.
+        private var runtimeStateTimer: DispatchSourceTimer?
         private var controlServer: TerminalControlServer?
         private var stateStreamServer: GhosttyRemoteSessionStateStreamServer?
         private var outputHandle: FileHandle?
@@ -298,8 +281,8 @@
         private var foregroundProcessResolver: (Int32) -> TerminalForegroundProcessSnapshot? = { TerminalForegroundProcessInspector.inspect(pid: $0) }
         private var didLogFirstOutput = false
         private let incomingOutputBuffer = IncomingOutputBuffer()
-        private let inputStateBroadcastCoalescer = MainActorNextTurnCoalescer()
-        private let screenStateChangeBroadcastCoalescer = MainActorNextTurnCoalescer()
+        private let inputStateBroadcastCoalescer = TerminalEngineNextTurnCoalescer()
+        private let screenStateChangeBroadcastCoalescer = TerminalEngineNextTurnCoalescer()
         private var pendingScreenStateChangeBroadcastRevision: UInt64?
         private lazy var inputOutputResyncScheduler = GhosttyInputOutputResyncScheduler { [weak self] in
             guard let self else { return }
@@ -308,6 +291,21 @@
             self.broadcastCurrentState(reason: "input_output")
         }
         private let interactiveOutputGate = InteractiveOutputGate()
+        /// In-memory cache of this session's attachment snapshot (`terminal_clients` + `terminal_attachments`
+        /// rows), consulted on the per-output-chunk broadcast path in place of a disk read.
+        ///
+        /// SINGLE-WRITER INVARIANT: the live in-process session core is the sole writer of a live session's
+        /// attachment/client rows. Every attach, detach, heartbeat-lease touch, ownership transfer, and
+        /// stale-client expiry routes through this core's control handlers, and each invalidates this cache
+        /// (attach/detach/transfer/expiry via `postAttachmentStateDidChange()`; heartbeats via
+        /// `touchClientLease(_:)`; client upserts via an explicit invalidate). The only writers OUTSIDE a
+        /// core — `SpacesdMain.recoverStaleSessions` and `Orchestrator.markReservedWorkspaceTerminalLaunchFailed`
+        /// — act exclusively on sessions with NO live core (crashed-prior-daemon sessions, never-started
+        /// reservations), so they can never race a live core's cache. The DB stays the durable mirror a fresh
+        /// core reseeds from on handoff/restart. Caching this removes a per-output-chunk SQLite connection
+        /// open that otherwise saturated the serial terminal-engine executor and starved input under an agent
+        /// TUI's continuous output.
+        private var cachedAttachmentSnapshot: TerminalSessionAttachmentSnapshot?
         private var ownerEpoch: UInt64 = 0
         /// Set for the brief exec-in-place quiesce window so no late timer/coalescer
         /// turn broadcasts a frame while the session is being handed to the staged
@@ -319,11 +317,12 @@
         /// appended to the transcript again.
         private var handoffTranscriptReplayOffset: UInt64?
         private var lastResizeSerialByClientID: [String: UInt64] = [:]
-        private let onSessionClosed: (@MainActor (GhosttyEmbeddedSessionCore) -> Void)?
+        private let onSessionClosed: (@TerminalEngineActor (GhosttyEmbeddedSessionCore) -> Void)?
 
         public init(
             launchConfiguration: TerminalSessionLaunchConfiguration, paths: TerminalSessionPaths,
-            requestSurfaceRefreshAction: (@MainActor () -> Void)? = nil, onSessionClosed: (@MainActor (GhosttyEmbeddedSessionCore) -> Void)? = nil
+            requestSurfaceRefreshAction: (@TerminalEngineActor () -> Void)? = nil,
+            onSessionClosed: (@TerminalEngineActor (GhosttyEmbeddedSessionCore) -> Void)? = nil
         ) {
             self.launchConfiguration = launchConfiguration
             self.paths = paths
@@ -434,13 +433,13 @@
             }.first?.id
         }
 
-        public var rendererHost: any TerminalGhosttyRendererHosting { rendererHostStorage }
+        public var rendererHost: GhosttyHeadlessRendererHost { rendererHostStorage }
         var isStarted: Bool { started }
 
         public func terminate() {
             let now = TerminalSessionTimestamp.string(from: Date())
             let childPID = observedChildPID()
-            runtimeStateTimer?.invalidate()
+            runtimeStateTimer?.cancel()
             runtimeStateTimer = nil
             inputOutputResyncScheduler.cancelForTermination()
             controlServer?.stop()
@@ -503,7 +502,7 @@
         public func quiesceForHandoff() async throws -> DaemonHandoffSessionRecord? {
             handoffTranscriptReplayOffset = nil
             suppressBroadcastsForHandoff = true
-            runtimeStateTimer?.invalidate()
+            runtimeStateTimer?.cancel()
             runtimeStateTimer = nil
             inputOutputResyncScheduler.cancelForTermination()
 
@@ -649,7 +648,9 @@
 
         private func startControlServer() throws {
             let controlServer = TerminalControlServer(socketPath: paths.controlSocketPath, queue: controlQueue) { [weak self] request in
-                Self.runOnMainActorSynchronously {
+                // The control server runs this on its own transport queue; bridge synchronously onto the
+                // terminal engine actor (never the main actor) so a blocked main actor can't stall control.
+                TerminalEngineActor.runSynchronously {
                     guard let self else {
                         return TerminalControlResponse(ok: false, message: "Terminal session is shutting down.", errorCode: .shuttingDown)
                     }
@@ -664,7 +665,7 @@
             let stateStreamServer = GhosttyRemoteSessionStateStreamServer(
                 socketPath: paths.subscriptionSocketPath, queue: stateStreamQueue,
                 initialStateProvider: { [weak self] in
-                    Self.runOnMainActorSynchronously {
+                    TerminalEngineActor.runSynchronously {
                         // Arm the forced full frame for EVERY subscriber whose unicast initial
                         // carries no render update, not just the first connection: one-shot
                         // `.state` reads share this socket, so "no existing clients" is routinely
@@ -771,6 +772,7 @@
                 let appearanceChanged = request.appearance.map { GhosttyEmbeddedAppService.shared.applyColorScheme($0) } ?? false
                 let previousOwnerClientID = activeOwnerClientID()
                 try TerminalSessionPersistence.upsertClient(authoritativeClient, paths: paths)
+                invalidateAttachmentSnapshotCache()
                 let currentAttachment = try TerminalSessionPersistence.activeAttachments(paths: paths).first { $0.clientID == authoritativeClient.id }
                 if currentAttachment?.mode != mode {
                     try TerminalSessionPersistence.attachClient(
@@ -802,7 +804,7 @@
             guard isRuntimeInteractiveForControl() else {
                 return TerminalControlResponse(ok: false, message: "Terminal session is not running.", errorCode: .sessionNotRunning)
             }
-            if let clientID = request.clientID { try? TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: nowISO8601()) }
+            touchClientLease(request.clientID)
             // Appearance is a per-client view preference on a shared session with last-writer-wins
             // semantics, so it is deliberately NOT owner-gated: viewers flip their own app appearance
             // and every client should be able to re-theme the terminal it is watching.
@@ -861,6 +863,7 @@
             }
             do {
                 try TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: nowISO8601())
+                invalidateAttachmentSnapshotCache()
                 TerminalPerformance.logMetric(
                     "terminal_control_heartbeat", target: "session=\(launchConfiguration.sessionID) client=\(clientID)",
                     elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true)
@@ -878,7 +881,7 @@
             guard isRuntimeInteractiveForControl() else {
                 return TerminalControlResponse(ok: false, message: "Terminal session is not running.", errorCode: .sessionNotRunning)
             }
-            if let clientID = request.clientID { try? TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: nowISO8601()) }
+            touchClientLease(request.clientID)
             if let rejection = ownerRequestRejection(for: request, commandName: "send", startedAt: startedAt) { return rejection }
             if request.asPaste {
                 guard var text = request.text, request.bytes == nil else {
@@ -888,7 +891,9 @@
                 guard !text.isEmpty else { return TerminalControlResponse(ok: false, message: "Missing input payload.", errorCode: .invalidArgument) }
                 markLocalOwnerCommandInputOutputResyncPending()
                 let pasteText = text
-                controlInputSequencer.enqueueWrite { [weak self] in await MainActor.run { _ = self?.rendererHostStorage.sendTextAsPaste(pasteText) } }
+                controlInputSequencer.enqueueWrite { [weak self] in
+                    await TerminalEngineActor.run { _ = self?.rendererHostStorage.sendTextAsPaste(pasteText) }
+                }
                 TerminalPerformance.logMetric(
                     "terminal_control_send", target: "session=\(launchConfiguration.sessionID)",
                     elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true, detail: "bytes=\(text.utf8.count)")
@@ -927,12 +932,12 @@
         }
 
         private func enqueueControlInputWrite(_ bytes: Data) {
-            controlInputSequencer.enqueueWrite { [weak self] in await MainActor.run { self?.rendererHostStorage.sendRawBytes(bytes) } }
+            controlInputSequencer.enqueueWrite { [weak self] in await TerminalEngineActor.run { self?.rendererHostStorage.sendRawBytes(bytes) } }
         }
 
         private func enqueueControlSubmitCarriageReturn() {
             controlInputSequencer.enqueueSubmitCarriageReturn { [weak self] in
-                await MainActor.run { self?.rendererHostStorage.sendRawBytes(Data([0x0D])) }
+                await TerminalEngineActor.run { self?.rendererHostStorage.sendRawBytes(Data([0x0D])) }
             }
         }
 
@@ -941,7 +946,7 @@
             guard isRuntimeInteractiveForControl() else {
                 return TerminalControlResponse(ok: false, message: "Terminal session is not running.", errorCode: .sessionNotRunning)
             }
-            if let clientID = request.clientID { try? TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: nowISO8601()) }
+            touchClientLease(request.clientID)
             if let rejection = ownerRequestRejection(for: request, commandName: "key", startedAt: startedAt) { return rejection }
             if let key = request.key, TerminalKeyInput.hostAction(for: key) == .clearScreenAndScrollback {
                 return controlResponseForClearScreenRequest(request, startedAt: startedAt, touchClient: false)
@@ -967,7 +972,7 @@
                 return TerminalControlResponse(ok: false, message: "Terminal session is not running.", errorCode: .sessionNotRunning)
             }
             if touchClient, let clientID = request.clientID {
-                try? TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: nowISO8601())
+                touchClientLease(clientID)
             }
             if let rejection = ownerRequestRejection(for: request, commandName: "clear", startedAt: startedAt) { return rejection }
             let cleared = rendererHostStorage.clearScreenAndScrollback()
@@ -984,7 +989,7 @@
             guard isRuntimeInteractiveForControl() else {
                 return TerminalControlResponse(ok: false, message: "Terminal session is not running.", errorCode: .sessionNotRunning)
             }
-            if let clientID = request.clientID { try? TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: nowISO8601()) }
+            touchClientLease(request.clientID)
             if let rejection = ownerRequestRejection(for: request, commandName: "scroll", startedAt: startedAt) { return rejection }
             let horizontal = CGFloat(request.scrollHorizontal ?? 0)
             let vertical = CGFloat(request.scrollVertical ?? 0)
@@ -1028,14 +1033,14 @@
                 return TerminalControlResponse(ok: false, message: "Missing client ID.", errorCode: .invalidArgument)
             }
             do {
-                try? TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: nowISO8601())
+                touchClientLease(clientID)
                 flushPendingIncomingOutputForStateExport()
                 let previousOwnerClientID = activeOwnerClientID()
                 try TerminalSessionPersistence.transferOwnership(
                     sessionID: launchConfiguration.sessionID, newOwnerClientID: clientID, paths: paths,
                     transferredAt: TerminalSessionTimestamp.string(from: Date()))
                 if previousOwnerClientID != clientID { advanceOwnerEpoch(reason: "takeover") }
-                Task { @MainActor [weak self] in
+                Task { @TerminalEngineActor [weak self] in
                     guard let self else { return }
                     self.postAttachmentStateDidChange()
                     self.refreshRuntimeState(force: true)
@@ -1057,7 +1062,7 @@
             guard isRuntimeInteractiveForControl() else {
                 return TerminalControlResponse(ok: false, message: "Terminal session is not running.", errorCode: .sessionNotRunning)
             }
-            if let clientID = request.clientID { try? TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: nowISO8601()) }
+            touchClientLease(request.clientID)
             if let rejection = ownerRequestRejection(for: request, commandName: "resize", startedAt: startedAt) { return rejection }
             if let rejection = staleResizeSerialRejection(for: request, startedAt: startedAt) { return rejection }
             guard let columns = request.columns, let rows = request.rows, columns > 0, rows > 0 else {
@@ -1091,16 +1096,19 @@
         }
 
         private func startRuntimeStateTimer() {
-            runtimeStateTimer?.invalidate()
-            runtimeStateTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-                Task { @MainActor [weak self] in
-                    guard let self else { return }
-                    guard self.started else { return }
+            runtimeStateTimer?.cancel()
+            let timer = DispatchSource.makeTimerSource(queue: TerminalEngineActor.shared.queue)
+            timer.schedule(deadline: .now() + 1.0, repeating: 1.0)
+            timer.setEventHandler { [weak self] in
+                // Fires on the engine queue (the timer's queue), so assume the engine isolation.
+                TerminalEngineActor.assumeIsolated {
+                    guard let self, self.started else { return }
                     self.expireStaleRemoteClientsIfNeeded()
                     self.refreshRuntimeState(force: false)
                 }
             }
-            if let runtimeStateTimer { RunLoop.main.add(runtimeStateTimer, forMode: .common) }
+            timer.resume()
+            runtimeStateTimer = timer
         }
 
         private func refreshRuntimeState(force: Bool) {
@@ -1255,7 +1263,10 @@
             case .setTitle(let title): currentTitle = Self.normalizedSessionMetadataValue(title)
             case .setWorkingDirectory(let path): currentWorkingDirectory = Self.normalizedSessionMetadataValue(path)
             case .openURL(_, let value):
-                _ = GhosttyTerminalLinkOpener.open(value)
+                // GhosttyTerminalLinkOpener.open uses NSWorkspace (main-only). The daemon is headless so
+                // this is effectively a no-op there, but keep it correct via an async engine→main hop
+                // rather than blocking the engine actor on the main actor.
+                Task { @MainActor in _ = GhosttyTerminalLinkOpener.open(value) }
                 return
             case .mouseOverLink, .startSearch, .endSearch, .searchTotal, .searchSelected: return
             }
@@ -1324,6 +1335,10 @@
         }
 
         private func postAttachmentStateDidChange() {
+            // Attach/detach/ownership-transfer/stale-expiry all funnel through here, so this is the single
+            // point that invalidates the attachment-snapshot cache for every attachment-row mutation except
+            // the heartbeat-lease touch (`touchClientLease`) and the client upsert (invalidated inline).
+            invalidateAttachmentSnapshotCache()
             TerminalSessionNotification.post(.spacesTerminalAttachmentStateDidChange, sessionID: launchConfiguration.sessionID)
             broadcastCurrentState(reason: "attachment_state")
         }
@@ -1415,10 +1430,32 @@
 
         private func activeOwnerClient() -> TerminalClient? {
             guard isRuntimeInteractiveForControl() else { return nil }
-            guard let snapshot = try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths),
+            guard let snapshot = currentAttachmentSnapshot(),
                 let attachment = snapshot.attachments.first(where: { $0.mode == .owner && $0.detachedAt == nil })
             else { return nil }
             return snapshot.clients.first(where: { $0.id == attachment.clientID })
+        }
+
+        /// The session's attachment snapshot, served from `cachedAttachmentSnapshot` and read from disk only
+        /// on a cache miss. See `cachedAttachmentSnapshot` for the single-writer invariant that makes serving
+        /// the cache on the hot path sound.
+        private func currentAttachmentSnapshot() -> TerminalSessionAttachmentSnapshot? {
+            if let cachedAttachmentSnapshot { return cachedAttachmentSnapshot }
+            guard let snapshot = try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths) else { return nil }
+            cachedAttachmentSnapshot = snapshot
+            return snapshot
+        }
+
+        /// Drops the cached attachment snapshot so the next read reseeds from disk. Called by every in-core
+        /// attachment-row write.
+        private func invalidateAttachmentSnapshotCache() { cachedAttachmentSnapshot = nil }
+
+        /// Refreshes a client's heartbeat lease and invalidates the attachment-snapshot cache (the lease
+        /// timestamp is part of the cached snapshot). No-op when the client id is absent.
+        private func touchClientLease(_ clientID: String?) {
+            guard let clientID else { return }
+            try? TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: nowISO8601())
+            invalidateAttachmentSnapshotCache()
         }
 
         private func isRuntimeInteractiveForControl() -> Bool {
@@ -1456,14 +1493,14 @@
             Task { [weak self] in
                 if flushSchedule == .delayed { do { try await Task.sleep(for: Self.incomingOutputCoalescingInterval) } catch { return } }
                 guard let self else { return }
-                // Drain ON the main actor so drain and file append form one critical
+                // Drain ON the terminal engine actor so drain and file append form one critical
                 // section. Every other drain (clearScreenAndScrollback's transcript
-                // mutation, the quiesce flush) runs on the main actor too, so this keeps
+                // mutation, the quiesce flush) runs on the engine actor too, so this keeps
                 // output.log byte order identical to buffer order. Draining here off the
-                // main actor would let a main-actor drain+append (e.g. a clear) write
+                // engine actor would let an engine-actor drain+append (e.g. a clear) write
                 // first, landing these earlier bytes AFTER the clear in the transcript —
                 // a handoff replay would then resurrect the cleared screen.
-                await MainActor.run {
+                await TerminalEngineActor.run {
                     let drainedOutput = self.incomingOutputBuffer.drain()
                     guard !drainedOutput.data.isEmpty else { return }
                     _ = self.appendOutput(drainedOutput.data, interactiveResync: drainedOutput.isInteractive)
@@ -1542,8 +1579,13 @@
             reason: String, outputByteCount: Int?, outputEndByteOffset: Int? = nil, exportMode: RenderStateExportMode = .selfContained,
             markNextBroadcastFull: Bool = false, markNextBroadcastFullWhenMissingRenderUpdate: Bool = false
         ) -> GhosttyRemoteSessionStatePayload? {
-            let runtimeState = (try? TerminalSessionPersistence.readRuntimeState(paths: paths)) ?? lastPersistedRuntimeState
-            let attachmentSnapshot = try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths)
+            // Serve runtime state from memory: this core is the sole writer of a live session's runtime
+            // state and keeps `lastPersistedRuntimeState` in lockstep with every disk write (see the two
+            // `writeRuntimeState` sites), so the in-memory copy is authoritative. Falling back to disk only
+            // covers the brief pre-first-persist window. This removes a per-output-chunk SQLite open that
+            // otherwise saturated the serial terminal-engine executor and starved input.
+            let runtimeState = lastPersistedRuntimeState ?? (try? TerminalSessionPersistence.readRuntimeState(paths: paths))
+            let attachmentSnapshot = currentAttachmentSnapshot()
             let ownerClient = activeOwnerClient()
             let includeScreenState = Self.remoteStateShouldIncludeScreenState(reason: reason, ownerKind: ownerClient?.kind)
             let bootstrapOutputByteCount = outputByteCount
@@ -1753,27 +1795,18 @@
                     attributes: attributes))
         }
 
-        private nonisolated static func runOnMainActorSynchronously<T: Sendable>(_ work: @escaping @MainActor () -> T) -> T {
-            if Thread.isMainThread { return MainActor.assumeIsolated { work() } }
-            let box = GhosttyMainActorSyncBox<T>()
-            DispatchQueue.main.sync { box.value = MainActor.assumeIsolated { work() } }
-            guard let value = box.value else { preconditionFailure("Ghostty session main-actor work did not return a value.") }
-            return value
-        }
     }
 
-    private final class GhosttyMainActorSyncBox<T>: @unchecked Sendable { var value: T? }
-
-    @MainActor public final class GhosttyEmbeddedSessionHost {
+    @TerminalEngineActor public final class GhosttyEmbeddedSessionHost {
         public let core: GhosttyEmbeddedSessionCore
 
         public var launchConfiguration: TerminalSessionLaunchConfiguration { core.launchConfiguration }
         public var paths: TerminalSessionPaths { core.paths }
-        public var rendererHost: any TerminalGhosttyRendererHosting { core.rendererHost }
+        public var rendererHost: GhosttyHeadlessRendererHost { core.rendererHost }
 
         init(
             launchConfiguration: TerminalSessionLaunchConfiguration, paths: TerminalSessionPaths,
-            requestSurfaceRefreshAction: (@MainActor () -> Void)? = nil
+            requestSurfaceRefreshAction: (@TerminalEngineActor () -> Void)? = nil
         ) {
             core = GhosttyEmbeddedSessionCore(
                 launchConfiguration: launchConfiguration, paths: paths, requestSurfaceRefreshAction: requestSurfaceRefreshAction)
@@ -1790,10 +1823,9 @@
                 guard core.isStarted else { return }
                 try core.rendererHost.attach(client: client, mode: mode, into: container)
                 try core.attachClient(client, mode: mode)
-                if mode == .owner, let container {
-                    core.rendererHost.requestSurfaceRefresh()
-                    core.rendererHost.focusWindow(container.window)
-                }
+                // Window focus is an app-side (main-actor) concern handled by RemoteGhosttySessionHost; the
+                // headless daemon renderer has no window to key, so an owner attach only refreshes here.
+                if mode == .owner, container != nil { core.rendererHost.requestSurfaceRefresh() }
                 TerminalPerformance.logMetric(
                     "terminal_window_attach", target: "session=\(launchConfiguration.sessionID) client=\(client.id)",
                     elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true, detail: "mode=\(mode.rawValue)")
@@ -1810,14 +1842,6 @@
         public func releaseRendererSurface() { core.rendererHost.releaseRendererSurface() }
 
         public func setFocused(_ focused: Bool, for clientID: String) { core.rendererHost.setFocused(focused, for: clientID) }
-
-        public func focusWindow(_ window: NSWindow?) { core.rendererHost.focusWindow(window) }
-
-        @discardableResult public func handleKeyEvent(_ event: NSEvent, for clientID: String) -> Bool {
-            core.rendererHost.handleKeyEvent(event, for: clientID)
-        }
-
-        @discardableResult public func synchronizeSurfaceGeometry() -> Bool { core.rendererHost.synchronizeSurfaceGeometry() }
 
         public func isOwner(clientID: String) -> Bool { core.isOwner(clientID: clientID) }
 
@@ -1898,5 +1922,4 @@
         func debugMarkStartedForTesting() { core.debugMarkStartedForTesting() }
     }
 
-    extension GhosttyEmbeddedSessionHost: TerminalGhosttySessionHosting {}
 #endif

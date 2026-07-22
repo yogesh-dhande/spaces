@@ -68,12 +68,16 @@
         }
     }
 
-    @MainActor final class GhosttyEmbeddedTerminalSessionDriver {
+    @TerminalEngineActor final class GhosttyEmbeddedTerminalSessionDriver {
         private let launchConfiguration: TerminalSessionLaunchConfiguration
 
         private var session: ghostty_session_t?
         private var hostPTY: HostManagedPTYTerminalSessionDriver?
-        private var headlessHostView: GhosttyHeadlessSessionHostView?
+        /// The headless AppKit host view. It is an `NSView` subclass (implicitly `@MainActor`) created on
+        /// the main thread via a synchronous hop and only ever handed to GhosttyKit as an opaque pointer;
+        /// nothing on the engine actor calls `NSView` methods on it afterward, so it is stored
+        /// `nonisolated(unsafe)` and merely retained.
+        private nonisolated(unsafe) var headlessHostView: GhosttyHeadlessSessionHostView?
         private var surfaceUserData: GhosttyEmbeddedSurfaceUserData?
         private let outputPipe = GhosttyHostManagedOutputPipe()
         private let handoffOutputDeliveryFence = GhosttyEmbeddedHandoffOutputDeliveryFence()
@@ -82,6 +86,11 @@
         private let handoffReplayQueue = DispatchQueue(label: "spaces.terminal.session.handoff-replay")
         private nonisolated(unsafe) var outputHandler: (@Sendable (Data) -> Void)?
         private var didHandleSurfaceClose = false
+        /// Sendable liveness mirror of `session`/`hostPTY` that the nonisolated `deinit` may read (the
+        /// GhosttyKit `session` pointer is non-Sendable, so a nonisolated deinit cannot inspect it, and
+        /// `isolated deinit` requires macOS 15.4 while this targets macOS 14). Set true once a session is
+        /// configured, cleared by `terminate()`/rollback.
+        private var hasLiveResources = false
         private var lastKnownSurfaceSize: (columns: Int, rows: Int)?
         private var lastDeliveredSessionStateRevision: UInt64 = 0
         private var sessionStateDeliveryScheduled = false
@@ -89,14 +98,26 @@
         private var debugLastScrollModsValue: Int32 = 0
         private var surfaceScaleFactor = 1.0
 
-        var onActionEvent: (@MainActor (GhosttyActionEvent) -> Void)?
-        var onSurfaceClosed: (@MainActor () -> Void)?
-        var onSurfaceCellSizeChanged: (@MainActor (Int, Int) -> Void)?
-        var onSessionStateChanged: (@MainActor (GhosttyEmbeddedSessionStateChange) -> Void)?
+        var onActionEvent: (@TerminalEngineActor (GhosttyActionEvent) -> Void)?
+        var onSurfaceClosed: (@TerminalEngineActor () -> Void)?
+        var onSurfaceCellSizeChanged: (@TerminalEngineActor (Int, Int) -> Void)?
+        var onSessionStateChanged: (@TerminalEngineActor (GhosttyEmbeddedSessionStateChange) -> Void)?
 
         init(launchConfiguration: TerminalSessionLaunchConfiguration) { self.launchConfiguration = launchConfiguration }
 
-        deinit { MainActor.assumeIsolated { if session != nil || hostPTY != nil { terminate() } } }
+        /// Auto-terminates a driver released while still live (the safety net the old
+        /// `MainActor.assumeIsolated` deinit provided). macOS 14 has no `isolated deinit` (macOS 15.4+),
+        /// and a nonisolated `deinit` may not touch the non-Sendable GhosttyKit `session` directly — but
+        /// it CAN read the Sendable liveness flag and bridge SYNCHRONOUSLY onto the terminal engine actor
+        /// to run `terminate()` there (which then touches the session in-isolation). `terminate()` performs
+        /// no engine→main hop, so this synchronous engine bridge is deadlock-free even from an arbitrary
+        /// deinit thread. This matters because a live session's C data/state callbacks capture
+        /// `Unmanaged.passUnretained(self)`; freeing the session (which `terminate()` does) before `self`
+        /// is gone is what prevents a use-after-free.
+        deinit {
+            let leakedLiveSession = hasLiveResources
+            if leakedLiveSession { TerminalEngineActor.runSynchronously { self.terminate() } }
+        }
 
         var surface: ghostty_surface_t? {
             guard let session else { return nil }
@@ -187,7 +208,8 @@
 
             let hostPTY = HostManagedPTYTerminalSessionDriver(launchConfiguration: launchConfiguration)
             let hostView = headlessSurfaceHostView()
-            let scaleFactor = Double(NSScreen.main?.backingScaleFactor ?? 2.0)
+            // NSScreen is main-only; resolve the backing scale via the legal engine→main hop.
+            let scaleFactor = Self.mainActorSync { Double(NSScreen.main?.backingScaleFactor ?? 2.0) }
             surfaceScaleFactor = scaleFactor
 
             var sessionConfig = ghostty_session_config_new()
@@ -220,6 +242,7 @@
 
             session = createdSession
             self.hostPTY = hostPTY
+            hasLiveResources = true
             outputPipe.setSession(createdSession)
             didHandleSurfaceClose = false
             ghostty_session_set_data_callback(createdSession, Self.surfaceDataCallback, Unmanaged.passUnretained(self).toOpaque())
@@ -229,7 +252,7 @@
             }
             hostPTY.setOutputHandler { [weak self, outputPipe] data in
                 outputPipe.process(data)
-                Task { @MainActor [weak self] in
+                Task { @TerminalEngineActor [weak self] in
                     GhosttyEmbeddedAppService.shared.tick()
                     self?.deliverSessionStateChange()
                 }
@@ -249,6 +272,7 @@
             ghostty_session_set_state_callback(createdSession, nil, nil)
             if let surface = surface { GhosttyEmbeddedAppService.shared.unregisterActionHandler(for: surface) }
             session = nil
+            hasLiveResources = false
             surfaceUserData = nil
             ghostty_session_free(createdSession)
         }
@@ -368,6 +392,7 @@
             currentHostPTY?.setSessionClosedHandler(nil)
             hostPTY = nil
             session = nil
+            hasLiveResources = false
             surfaceUserData = nil
             lastDeliveredSessionStateRevision = 0
             sessionStateDeliveryScheduled = false
@@ -525,10 +550,29 @@
 
         private func headlessSurfaceHostView() -> GhosttyHeadlessSessionHostView {
             if let headlessHostView { return headlessHostView }
-            let view = GhosttyHeadlessSessionHostView(frame: NSRect(x: 0, y: 0, width: 1, height: 1))
-            view.wantsLayer = true
+            // NSView construction + `wantsLayer` are main-only; build the view via the legal engine→main
+            // synchronous hop. The engine actor never sends it AppKit messages afterward — it only hands
+            // the opaque pointer to GhosttyKit — so retaining it `nonisolated(unsafe)` is sound.
+            let view = Self.mainActorSync {
+                let view = GhosttyHeadlessSessionHostView(frame: NSRect(x: 0, y: 0, width: 1, height: 1))
+                view.wantsLayer = true
+                return view
+            }
             headlessHostView = view
             return view
+        }
+
+        /// Runs `body` synchronously on the main actor from the terminal engine actor — the one legal
+        /// direction of the one-way rule (AppKit view/screen affinity). Runs inline when already on main.
+        private static func mainActorSync<T>(_ body: @escaping @MainActor () -> T) -> T {
+            let box = GhosttyDriverMainActorSyncBox<T>()
+            if Thread.isMainThread {
+                MainActor.assumeIsolated { box.value = body() }
+            } else {
+                DispatchQueue.main.sync { MainActor.assumeIsolated { box.value = body() } }
+            }
+            guard let value = box.value else { preconditionFailure("main-actor driver work did not return a value") }
+            return value
         }
 
         private func notifySurfaceCellSizeIfChanged() {
@@ -564,7 +608,7 @@
         private func scheduleSessionStateDelivery() {
             guard !sessionStateDeliveryScheduled else { return }
             sessionStateDeliveryScheduled = true
-            Task { @MainActor [weak self] in
+            Task { @TerminalEngineActor [weak self] in
                 guard let self else { return }
                 self.sessionStateDeliveryScheduled = false
                 self.deliverSessionStateChange()
@@ -596,7 +640,7 @@
         private nonisolated static let sessionStateCallback: ghostty_session_state_cb = { userdata, _ in
             guard let userdata else { return }
             let runtime = Unmanaged<GhosttyEmbeddedTerminalSessionDriver>.fromOpaque(userdata).takeUnretainedValue()
-            Task { @MainActor in runtime.scheduleSessionStateDelivery() }
+            Task { @TerminalEngineActor in runtime.scheduleSessionStateDelivery() }
         }
 
         private nonisolated static let hostManagedReceiveBufferCallback: ghostty_surface_receive_buffer_cb = { userdata, bytes, len in
@@ -619,4 +663,7 @@
             return String(decoding: bytes, as: UTF8.self)
         }
     }
+
+    /// Carries a main-actor-produced value back across `DispatchQueue.main.sync` into the engine actor.
+    private final class GhosttyDriverMainActorSyncBox<T>: @unchecked Sendable { var value: T? }
 #endif

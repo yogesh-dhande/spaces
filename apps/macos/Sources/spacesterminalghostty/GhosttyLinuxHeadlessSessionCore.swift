@@ -19,7 +19,7 @@
         }
     }
 
-    /// Bridges the PTY driver's synchronous output callback to the main-actor task that
+    /// Bridges the PTY driver's synchronous output callback to the engine-actor task that
     /// persists and renders that output. Once the PTY driver has switched to handoff
     /// buffering, no delivery can register here, so draining this fence is a stable
     /// boundary before output.log is closed.
@@ -58,7 +58,7 @@
         }
     }
 
-    @MainActor public final class GhosttyEmbeddedSessionCore {
+    @TerminalEngineActor public final class GhosttyEmbeddedSessionCore {
         private static let maxScrollbackBytes = TerminalScrollbackBudget.defaultMaxBytes
         nonisolated static let outputReplayChunkByteCount = 1024 * 1024
 
@@ -107,11 +107,12 @@
         private var localOwnerCommandInputOutputResyncPending = false
         private var scrollDeltaNormalizer = TerminalScrollDeltaNormalizer()
         private var inputOutputResyncTask: Task<Void, Never>?
-        private let onSessionClosed: (@MainActor (GhosttyEmbeddedSessionCore) -> Void)?
+        private let onSessionClosed: (@TerminalEngineActor (GhosttyEmbeddedSessionCore) -> Void)?
 
         public init(
             launchConfiguration: TerminalSessionLaunchConfiguration, paths: TerminalSessionPaths,
-            requestSurfaceRefreshAction _: (@MainActor () -> Void)? = nil, onSessionClosed: (@MainActor (GhosttyEmbeddedSessionCore) -> Void)? = nil
+            requestSurfaceRefreshAction _: (@TerminalEngineActor () -> Void)? = nil,
+            onSessionClosed: (@TerminalEngineActor (GhosttyEmbeddedSessionCore) -> Void)? = nil
         ) {
             self.launchConfiguration = launchConfiguration
             self.paths = paths
@@ -225,11 +226,11 @@
             guard let descriptor = ptyDriver.handoffDescriptorSnapshot() else { return nil }
 
             // Route further PTY bytes into an in-memory buffer so the read loop never
-            // blocks while we drain the main actor and close the durable output handle.
+            // blocks while we drain the engine actor and close the durable output handle.
             await ptyDriver.beginHandoffOutputBuffering()
 
             // The PTY callback registers this second fence before returning and only
-            // completes it after its main-actor handleOutput task has appended output.log.
+            // completes it after its engine-actor handleOutput task has appended output.log.
             // The driver's fence above makes the registration set stable; this drain proves
             // every registered persistence task completed without relying on timing.
             await outputDeliveryFence.waitUntilDrained()
@@ -298,7 +299,7 @@
         ///
         /// This core's replay is synchronous libghostty-vt (`recreateVTRenderer` writes the
         /// transcript straight into the vt session), unlike the macOS core whose replay
-        /// blocks on tick-pumped GhosttyKit IO. So there is no off-main-actor dance: the
+        /// blocks on tick-pumped GhosttyKit IO. So there is no off-engine-actor dance: the
         /// replay runs inline. The method stays `async` only for API symmetry with the
         /// macOS core so stage 5's daemon call site compiles unchanged on both platforms.
         public func resumeFromHandoff(_ record: DaemonHandoffSessionRecord) async throws {
@@ -348,7 +349,7 @@
             let outputDeliveryFence = outputDeliveryFence
             ptyDriver.setOutputHandler { [weak self, outputDeliveryFence] data in
                 outputDeliveryFence.beginDelivery()
-                Task { @MainActor [weak self, outputDeliveryFence] in
+                Task { @TerminalEngineActor [weak self, outputDeliveryFence] in
                     defer { outputDeliveryFence.finishDelivery() }
                     self?.handleOutput(data)
                 }
@@ -410,7 +411,9 @@
 
         private func startControlServer() throws {
             let server = TerminalControlServer(socketPath: paths.controlSocketPath, queue: controlQueue) { [weak self] request in
-                Self.runOnMainActorSynchronously {
+                // The control server runs this on its own transport queue; bridge synchronously onto the
+                // terminal engine actor (never the main actor) so a blocked main actor can't stall control.
+                TerminalEngineActor.runSynchronously {
                     guard let self else {
                         return TerminalControlResponse(ok: false, message: "Terminal session is shutting down.", errorCode: .shuttingDown)
                     }
@@ -425,7 +428,7 @@
             let server = GhosttyRemoteSessionStateStreamServer(
                 socketPath: paths.subscriptionSocketPath, queue: stateStreamQueue,
                 initialStateProvider: { [weak self] in
-                    Self.runOnMainActorSynchronously {
+                    TerminalEngineActor.runSynchronously {
                         self?.makeStatePayload(
                             reason: TerminalRemoteSessionStateReason.initial, exportMode: .selfContained, markNextBroadcastFull: false)
                     }
@@ -554,11 +557,13 @@
         }
 
         private func enqueueControlInputWrite(_ bytes: Data) {
-            controlInputSequencer.enqueueWrite { [weak self] in await MainActor.run { self?.ptyDriver.sendRawBytes(bytes) } }
+            controlInputSequencer.enqueueWrite { [weak self] in await TerminalEngineActor.run { self?.ptyDriver.sendRawBytes(bytes) } }
         }
 
         private func enqueueControlSubmitCarriageReturn() {
-            controlInputSequencer.enqueueSubmitCarriageReturn { [weak self] in await MainActor.run { self?.ptyDriver.sendRawBytes(Data([0x0D])) } }
+            controlInputSequencer.enqueueSubmitCarriageReturn { [weak self] in
+                await TerminalEngineActor.run { self?.ptyDriver.sendRawBytes(Data([0x0D])) }
+            }
         }
 
         private func encodePastePayload(_ text: String) -> Data? {
@@ -712,7 +717,7 @@
             guard localOwnerCommandInputOutputResyncPending else { return }
             localOwnerCommandInputOutputResyncPending = false
             inputOutputResyncTask?.cancel()
-            inputOutputResyncTask = Task { @MainActor [weak self] in
+            inputOutputResyncTask = Task { @TerminalEngineActor [weak self] in
                 do { try await Task.sleep(for: .milliseconds(20)) } catch { return }
                 guard let self else { return }
                 self.inputOutputResyncTask = nil
@@ -979,19 +984,6 @@
                 .init(
                     sessionID: launchConfiguration.sessionID, source: "linux-host", name: name, elapsedMS: elapsedMS, count: count,
                     attributes: attributes))
-        }
-
-        nonisolated private static func runOnMainActorSynchronously<T: Sendable>(_ work: @MainActor @Sendable @escaping () -> T) -> T {
-            if Thread.isMainThread { return MainActor.assumeIsolated(work) }
-            let semaphore = DispatchSemaphore(value: 0)
-            nonisolated(unsafe) var result: T?
-            Task { @MainActor in
-                result = work()
-                semaphore.signal()
-            }
-            semaphore.wait()
-            guard let result else { fatalError("MainActor synchronous task completed without a result.") }
-            return result
         }
     }
 #endif

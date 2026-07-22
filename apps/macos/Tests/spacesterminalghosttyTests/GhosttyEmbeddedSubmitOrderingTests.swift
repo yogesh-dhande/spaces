@@ -15,6 +15,13 @@ final class GhosttyEmbeddedSubmitOrderingTests: XCTestCase {
     private var originalRuntimeDirectory: String?
     private var databaseRoot: URL?
 
+    /// Carries an engine-isolated reference (created inside a `TerminalEngineActor.run` block) back out to
+    /// the nonisolated test body; the value is only ever *used* on the engine actor via a later bridge.
+    private final class Box<Value>: @unchecked Sendable {
+        let value: Value
+        init(_ value: Value) { self.value = value }
+    }
+
     override func setUpWithError() throws {
         try super.setUpWithError()
         originalDatabasePath = ProcessInfo.processInfo.environment["SPACES_DB_PATH"]
@@ -36,24 +43,32 @@ final class GhosttyEmbeddedSubmitOrderingTests: XCTestCase {
         try super.tearDownWithError()
     }
 
-    @MainActor private func waitUntil(
+    /// Nonisolated poller so its `Task.sleep` suspensions don't hold the engine's queue while the engine
+    /// runs the tick pump + sequencer writes the condition is waiting on. Each poll hops onto the engine
+    /// synchronously to tick and evaluate the (engine-isolated) condition together.
+    private func waitUntil(
         timeout: TimeInterval = 15, pollInterval: TimeInterval = 0.05, file: StaticString = #filePath, line: UInt = #line,
-        _ condition: @escaping @MainActor () -> Bool
-    ) throws {
+        _ condition: @escaping @TerminalEngineActor () -> Bool
+    ) async throws {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
-            if condition() { return }
-            RunLoop.main.run(until: Date().addingTimeInterval(pollInterval))
+            let satisfied = TerminalEngineActor.runSynchronously { () -> Bool in
+                if condition() { return true }
+                GhosttyEmbeddedAppService.shared.tick()
+                return false
+            }
+            if satisfied { return }
+            try? await Task.sleep(for: .seconds(pollInterval))
         }
         XCTFail("Timed out waiting for condition.", file: file, line: line)
         throw NSError(domain: "GhosttyEmbeddedSubmitOrderingTests", code: 1)
     }
 
-    private func occurrences(of needle: String, in haystack: String) -> Int {
+    private static func occurrences(of needle: String, in haystack: String) -> Int {
         haystack.components(separatedBy: needle).count - 1
     }
 
-    @MainActor func testRapidSubmitSendsReachChildAsSeparateSubmissions() throws {
+    func testRapidSubmitSendsReachChildAsSeparateSubmissions() async throws {
         let availability = GhosttyEmbeddedLocator.resolve(currentDirectoryPath: FileManager.default.currentDirectoryPath)
         guard case .available = availability else { throw XCTSkip("Ghostty runtime resources are unavailable for embedded renderer testing.") }
 
@@ -64,32 +79,43 @@ final class GhosttyEmbeddedSubmitOrderingTests: XCTestCase {
 
         // `cat` echoes each submitted line back, so the transcript shows exactly how the input was
         // grouped into lines by the PTY line discipline.
-        let host = GhosttyEmbeddedSessionHost(
-            launchConfiguration: TerminalSessionLaunchConfiguration(
-                sessionID: "submit-ordering-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "owner",
-                workingDirectory: FileManager.default.temporaryDirectory.path, shell: "/bin/sh", command: "echo SUBMIT_READY; cat",
-                createdAt: "2026-07-16T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
-        defer { host.terminate() }
-        try host.startIfNeeded()
+        let hostBox = try await TerminalEngineActor.run { () -> Box<GhosttyEmbeddedSessionHost> in
+            let host = GhosttyEmbeddedSessionHost(
+                launchConfiguration: TerminalSessionLaunchConfiguration(
+                    sessionID: "submit-ordering-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "owner",
+                    workingDirectory: FileManager.default.temporaryDirectory.path, shell: "/bin/sh", command: "echo SUBMIT_READY; cat",
+                    createdAt: "2026-07-16T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
+            try host.startIfNeeded()
+            return Box(host)
+        }
+        let host = hostBox.value
+        defer { TerminalEngineActor.runSynchronously { host.terminate() } }
 
-        let transcript = { (try? String(contentsOfFile: paths.outputPath, encoding: .utf8)) ?? "" }
-        try waitUntil { transcript().contains("SUBMIT_READY") }
+        // Capture only the Sendable output path in the engine-isolated `waitUntil` conditions (not the
+        // non-Sendable `transcript` closure); the nonisolated test body below still uses `transcript`.
+        let outputPath = paths.outputPath
+        let transcript = { (try? String(contentsOfFile: outputPath, encoding: .utf8)) ?? "" }
+        try await waitUntil { ((try? String(contentsOfFile: outputPath, encoding: .utf8)) ?? "").contains("SUBMIT_READY") }
 
         let firstMarker = "SUBMIT_ORDER_FIRST"
         let secondMarker = "SUBMIT_ORDER_SECOND"
-        let firstResponse = host.core.handleControlRequest(TerminalControlRequest(command: "send", text: firstMarker, appendNewline: true))
+        let firstResponse = TerminalEngineActor.runSynchronously {
+            host.core.handleControlRequest(TerminalControlRequest(command: "send", text: firstMarker, appendNewline: true))
+        }
         XCTAssertTrue(firstResponse.ok, firstResponse.message)
-        let secondResponse = host.core.handleControlRequest(TerminalControlRequest(command: "send", text: secondMarker, appendNewline: true))
+        let secondResponse = TerminalEngineActor.runSynchronously {
+            host.core.handleControlRequest(TerminalControlRequest(command: "send", text: secondMarker, appendNewline: true))
+        }
         XCTAssertTrue(secondResponse.ok, secondResponse.message)
 
         // Each marker appears once as the PTY echo of the typed line and once as `cat`'s output of the
         // submitted line, so two occurrences of the second marker means both Enters have landed.
-        try waitUntil { self.occurrences(of: secondMarker, in: transcript()) >= 2 }
+        try await waitUntil { Self.occurrences(of: secondMarker, in: (try? String(contentsOfFile: outputPath, encoding: .utf8)) ?? "") >= 2 }
 
         let output = transcript()
         XCTAssertFalse(
             output.contains(firstMarker + secondMarker),
             "the second submit's text was written before the first submit's carriage return, merging both commands into one line: \(output)")
-        XCTAssertGreaterThanOrEqual(occurrences(of: firstMarker, in: output), 2, "the first submit must be echoed and submitted on its own line")
+        XCTAssertGreaterThanOrEqual(Self.occurrences(of: firstMarker, in: output), 2, "the first submit must be echoed and submitted on its own line")
     }
 }

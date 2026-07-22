@@ -69,6 +69,34 @@ final class HostManagedPTYAdoptTests: XCTestCase {
         XCTAssertEqual(completed.wait(timeout: .now() + 5), .success, "handoff buffering did not finish")
     }
 
+    // MARK: - Non-blocking terminate()
+
+    /// Regression for the daemon main-actor offload: `terminate()` runs on the terminal engine executor,
+    /// so it must never block on `close(master)` (which hangs until the PTY reader unblocks) or `waitpid`.
+    /// With a child that keeps the PTY slave open (the read loop is blocked in `read()`), terminate()
+    /// returns immediately and the child is reaped + the fd closed shortly after via the escalation ladder
+    /// and the read loop's deferred close.
+    func testTerminateReturnsPromptlyAndReapsChildHoldingPTYSlaveOpen() throws {
+        let driver = HostManagedPTYTerminalSessionDriver(
+            launchConfiguration: makeConfiguration(sessionID: "terminate-live-child", command: "cat"),
+            terminationEscalationIntervals: fastEscalation)
+        try driver.startIfNeeded()
+        XCTAssertTrue(waitUntil { driver.childPID() != nil }, "child never came up")
+        let childPID = try XCTUnwrap(driver.childPID())
+
+        // terminate() does only bookkeeping + SIGHUP + a detached escalation, so it returns well under any
+        // grace period — the pre-fix inline blocking close(master) would hang here indefinitely.
+        let start = Date()
+        driver.terminate()
+        let elapsed = Date().timeIntervalSince(start)
+        XCTAssertLessThan(elapsed, 0.2, "terminate() blocked for \(elapsed)s instead of deferring the PTY teardown")
+
+        // The child is reaped (kill reports ESRCH, i.e. the pid is fully gone, not a lingering zombie) and
+        // the driver drops it shortly after, driven by the escalation + the read loop's fd close.
+        XCTAssertTrue(waitUntil(timeout: 10) { kill(childPID, 0) != 0 && errno == ESRCH }, "child was not reaped after terminate()")
+        XCTAssertTrue(waitUntil(timeout: 10) { driver.childPID() == nil }, "driver still reports a live child after teardown")
+    }
+
     // MARK: - Adopt round-trip
 
     func testAdoptRoundTripHandsOffLiveChild() throws {

@@ -48,9 +48,13 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
     /// transcript so their resulting output cannot arrive after the handoff boundary.
     private var handlerDeliveriesInFlight = 0
     private var handlerDeliveryWaiters: [CheckedContinuation<Void, Never>] = []
-    private var onSessionClosed: (@MainActor () -> Void)?
+    private var onSessionClosed: (@TerminalEngineActor () -> Void)?
     private var cellSize: (columns: Int, rows: Int) = (80, 24)
     private var closed = false
+    /// Set by an explicit `terminate()` (as opposed to the child exiting on its own). While true, the
+    /// read loop's natural-exit path defers child reaping to `reapWhenTerminated`, so the two never race
+    /// a double `waitpid` (and a signal to a reused pid).
+    private var terminating = false
     /// Where the read loop delivers PTY bytes. The exec-in-place handoff walks this
     /// through `.handler` → `.buffer` → `.file` so that not one byte is lost,
     /// duplicated, or reordered across the transition: reads are serialized on
@@ -96,7 +100,7 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
         lock.unlock()
     }
 
-    func setSessionClosedHandler(_ handler: (@MainActor () -> Void)?) {
+    func setSessionClosedHandler(_ handler: (@TerminalEngineActor () -> Void)?) {
         lock.lock()
         onSessionClosed = handler
         lock.unlock()
@@ -278,38 +282,51 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
         lock.unlock()
     }
 
+    /// Tears the session down WITHOUT ever blocking the calling actor.
+    ///
+    /// terminate() now runs on the terminal ENGINE executor. `close(master)` blocks in the kernel until
+    /// the PTY reader unblocks, and `waitpid` blocks until the child dies — doing either here would
+    /// freeze the very engine this migration exists to protect. (In the pre-actor architecture the same
+    /// blocking `close(master)` landed only on the main actor and was accepted as won't-fix; that
+    /// acceptance does NOT carry over now that the blocking would land on the engine executor.)
+    ///
+    /// So terminate() does only synchronous bookkeeping (mark `closed` for the observable contract —
+    /// input refused, a handoff snapshot returns nil — and `terminating`) plus the graceful SIGHUP, then
+    /// hands the rest off:
+    /// - The master fd's read-loop ownership (`masterFD`/`masterFDGeneration`) is left INTACT. The read
+    ///   loop closes the fd from `finishAfterReadLoop` the moment `read()` returns (once the child is
+    ///   gone and the slave is fully closed) — a close with no pending read, so it never blocks.
+    /// - `reapWhenTerminated` runs the HUP→TERM→KILL escalation on a detached task; its SIGKILL of the
+    ///   child process group forces the child dead — and thus the read to return — if SIGHUP is ignored,
+    ///   and it owns the `waitpid`.
+    ///
+    /// Handoff invariant: `handoffDescriptorSnapshot`/`quiesceForHandoff` never coincide with terminate()
+    /// (the daemon hands a session off OR terminates it, never both), and both gate on `closed` under
+    /// `lock`, so a snapshot can never observe a half-terminated descriptor.
     func terminate() {
-        let fd: Int32
         let pid: Int32?
-        var processGroupID: Int32?
         lock.lock()
         guard !closed else {
             lock.unlock()
             return
         }
         closed = true
-        fd = masterFD
-        masterFD = -1
-        masterFDGeneration &+= 1
+        terminating = true
         pid = childPIDValue
-        childPIDValue = nil
         lock.unlock()
 
-        if let pid {
-            let resolvedProcessGroupID = getpgid(pid)
-            processGroupID = resolvedProcessGroupID
-            let shouldSignalProcessGroup = Self.shouldSignalProcessGroup(
-                childPID: pid, processGroupID: resolvedProcessGroupID, currentProcessGroupID: getpgrp())
-            if ProcessInfo.processInfo.environment["DEBUG"] == "1" {
-                Self.writeStandardError(
-                    "spaces: pty_terminate pid=\(pid) group=\(resolvedProcessGroupID) current_group=\(getpgrp()) signal_group=\(shouldSignalProcessGroup ? 1 : 0)\n"
-                )
-            }
-            Self.signalTerminatedPTYProcess(
-                childPID: pid, processGroupID: resolvedProcessGroupID, signal: SIGHUP, signalProcessGroup: shouldSignalProcessGroup)
+        guard let pid else { return }
+        let resolvedProcessGroupID = getpgid(pid)
+        let shouldSignalProcessGroup = Self.shouldSignalProcessGroup(
+            childPID: pid, processGroupID: resolvedProcessGroupID, currentProcessGroupID: getpgrp())
+        if ProcessInfo.processInfo.environment["DEBUG"] == "1" {
+            Self.writeStandardError(
+                "spaces: pty_terminate pid=\(pid) group=\(resolvedProcessGroupID) current_group=\(getpgrp()) signal_group=\(shouldSignalProcessGroup ? 1 : 0)\n"
+            )
         }
-        if fd >= 0 { close(fd) }
-        if let pid, let processGroupID { reapWhenTerminated(childPID: pid, processGroupID: processGroupID) }
+        Self.signalTerminatedPTYProcess(
+            childPID: pid, processGroupID: resolvedProcessGroupID, signal: SIGHUP, signalProcessGroup: shouldSignalProcessGroup)
+        reapWhenTerminated(childPID: pid, processGroupID: resolvedProcessGroupID)
     }
 
     func sendRawBytes(_ data: Data) {
@@ -391,24 +408,31 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
 
     private func currentMasterFD() -> Int32 {
         lock.lock()
-        let fd = masterFD
+        // After terminate() the master fd is still open (the read loop closes it when read() returns),
+        // but the session is `closed`, so refuse further input writes rather than write to a dying PTY.
+        let fd = closed ? -1 : masterFD
         lock.unlock()
         return fd
     }
 
     private func startReadLoop(fd: Int32, childPID: Int32, fdGeneration: UInt64) {
+        // `guard let self` keeps the driver alive for the read loop's lifetime, so the deferred fd close
+        // in `finishAfterReadLoop` always runs even after `terminate()` releases the owning driver — the
+        // escalation in `reapWhenTerminated` guarantees the loop ends (SIGKILL → read returns), so this
+        // is a bounded lifetime, not a leak.
         readQueue.async { [weak self] in
+            guard let self else { return }
             var buffer = [UInt8](repeating: 0, count: 8192)
             while true {
                 let count = read(fd, &buffer, buffer.count)
                 if count > 0 {
-                    self?.dispatchOutput(Data(buffer.prefix(count)))
+                    self.dispatchOutput(Data(buffer.prefix(count)))
                     continue
                 }
                 if count < 0, errno == EINTR { continue }
                 break
             }
-            self?.finishAfterReadLoop(fd: fd, childPID: childPID, fdGeneration: fdGeneration)
+            self.finishAfterReadLoop(fd: fd, childPID: childPID, fdGeneration: fdGeneration)
         }
     }
 
@@ -455,6 +479,7 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
     private func finishAfterReadLoop(fd: Int32, childPID: Int32, fdGeneration: UInt64) {
         var shouldNotify = false
         var shouldCloseFD = false
+        var shouldReap = false
         lock.lock()
         if Self.readLoopOwnsDescriptor(currentFD: masterFD, currentGeneration: masterFDGeneration, readFD: fd, readGeneration: fdGeneration) {
             masterFD = -1
@@ -463,15 +488,20 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
             closed = true
             shouldNotify = true
             shouldCloseFD = true
+            // Reap here only on a natural child exit. When an explicit `terminate()` is unwinding,
+            // `reapWhenTerminated` owns the `waitpid` (and the escalation signals), so reaping here too
+            // would race a double reap and a signal to a possibly-reused pid.
+            shouldReap = !terminating
         }
         let closeHandler = onSessionClosed
         lock.unlock()
 
         if shouldCloseFD {
+            // The read has already returned, so the master fd has no pending reader; this close never blocks.
             close(fd)
-            reap(childPID: childPID)
+            if shouldReap { reap(childPID: childPID) }
         }
-        if shouldNotify { Task { @MainActor in closeHandler?() } }
+        if shouldNotify { Task { @TerminalEngineActor in closeHandler?() } }
     }
 
     private func reap(childPID: Int32) {
@@ -578,6 +608,15 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
         // leave terminal signals ignored. PTY children need defaults so VINTR/VSUSP
         // behave like a normal terminal without changing the daemon's handlers.
         for signalNumber in [SIGHUP, SIGINT, SIGQUIT, SIGTERM, SIGPIPE, SIGTSTP, SIGTTIN, SIGTTOU] { _ = signal(signalNumber, SIG_DFL) }
+        // A forked child also inherits the calling THREAD's signal mask, and the daemon starts sessions
+        // on the terminal engine executor — a libdispatch worker thread, which blocks terminal signals so
+        // they are delivered to the main thread instead. A PTY child that inherits SIGHUP/SIGTERM blocked
+        // cannot be gracefully terminated: the signals stay pending and its shell's traps never run, so
+        // `terminate()`'s HUP→TERM escalation is silently ineffective (only the final SIGKILL lands).
+        // Reset the mask to empty so the child starts as if spawned from a normal terminal.
+        var emptyMask = sigset_t()
+        sigemptyset(&emptyMask)
+        sigprocmask(SIG_SETMASK, &emptyMask, nil)
     }
 
     private static func writeStandardError(_ message: String) { FileHandle.standardError.write(Data(message.utf8)) }
