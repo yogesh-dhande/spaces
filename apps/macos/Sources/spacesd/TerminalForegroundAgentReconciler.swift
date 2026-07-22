@@ -54,7 +54,7 @@ import workspacecore
                 await Task.detached(priority: .utility) {
                     do {
                         let store = try SQLiteStore(path: databasePath)
-                        _ = try await WorkspaceOrchestrator(store: store).reconcileTerminalForegroundAgentClassifications()
+                        _ = try WorkspaceOrchestrator(store: store).reconcileTerminalForegroundAgentClassifications()
                     } catch { onError?(error) }
                 }.value
             } while self.pending

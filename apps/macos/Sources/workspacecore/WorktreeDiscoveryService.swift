@@ -234,7 +234,7 @@ extension FileSystemWatcher: FileSystemWatching {}
                 do {
                     let store = try SQLiteStore(path: databasePath)
                     let orchestrator = WorkspaceOrchestrator(store: store)
-                    _ = try await orchestrator.scanAndCreateWorkspacesFromWorktrees(projectID: projectID)
+                    _ = try orchestrator.scanAndCreateWorkspacesFromWorktrees(projectID: projectID)
                 } catch { onError?(error) }
             }.value
             guard let self else { return }
