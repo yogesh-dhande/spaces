@@ -74,12 +74,18 @@ extension WorkspaceOrchestrator {
         }
         let terminalTarget = TerminalTargetRecord(runtimeTargetID: terminalWindow?.id, trackingID: sessionID)
         let now = nowISO8601()
-        let resolvedLabel = try uniqueAgentFocusLabel(workspaceID: workspace.id, preferredLabel: detectedAgent.label)
+        let agentID = adHocDetectedAgentID(sessionID: sessionID)
+        // Exclude this row's own deterministic id from both the label scan and the validation snapshot.
+        // Overlapping reconcile passes (TerminalForegroundAgentReconciler and ProcessExitMonitorService, both
+        // detached) can each observe no existing row and both call this for the same session; the row id is
+        // deterministic, so the later pass's upsert must never treat the earlier pass's already-inserted row
+        // — carrying the SAME detected label — as a name conflict with itself and rename it "-2".
+        let resolvedLabel = try uniqueAgentFocusLabel(workspaceID: workspace.id, preferredLabel: detectedAgent.label, excludingAgentWindowID: agentID)
         let record = AgentWindowRecord(
-            id: adHocDetectedAgentID(sessionID: sessionID), workspaceID: workspace.id, provider: .spaces, label: resolvedLabel,
-            runtimeTargetID: terminalWindow?.id, terminalTarget: terminalTarget, sessionKey: nil, claimedLauncherID: nil, claimedLauncherName: nil,
-            status: .idle, createdAt: now, updatedAt: now)
-        let nextAgentWindows = try store.agentWindows(workspaceID: workspace.id) + [record]
+            id: agentID, workspaceID: workspace.id, provider: .spaces, label: resolvedLabel, runtimeTargetID: terminalWindow?.id,
+            terminalTarget: terminalTarget, sessionKey: nil, claimedLauncherID: nil, claimedLauncherName: nil, status: .idle, createdAt: now,
+            updatedAt: now)
+        let nextAgentWindows = try store.agentWindows(workspaceID: workspace.id).filter { $0.id != agentID } + [record]
         try validateWorkspaceFocusNames(
             workspaceID: workspace.id, processes: try store.workspaceProcesses(workspaceID: workspace.id),
             browserSessions: try store.workspaceBrowserSessions(workspaceID: workspace.id), agentWindows: nextAgentWindows)

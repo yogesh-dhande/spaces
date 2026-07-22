@@ -245,11 +245,22 @@
         }
 
         @discardableResult func handleTerminalKeyEvent(_ event: NSEvent, requireFirstResponder: Bool = true) -> Bool {
-            guard event.type == .keyDown, acceptsTerminalInput, window?.isKeyWindow == true else { return false }
+            guard event.type == .keyDown, acceptsTerminalInput, window?.isKeyWindow == true else {
+                TerminalPerformance.logLine(
+                    "spaces: input_trace point=mirror_guard keycode=\(event.keyCode) accepts=\(acceptsTerminalInput ? 1 : 0) "
+                        + "key_window=\(window?.isKeyWindow == true ? 1 : 0)\n")
+                return false
+            }
             if GhosttyTerminalInputTranslator.shouldDeferToSystemShortcut(keyCode: event.keyCode, modifierFlags: event.modifierFlags) { return false }
             if !requireFirstResponder, window?.firstResponder !== self { window?.makeFirstResponder(self) }
-            guard !requireFirstResponder || canProcessTerminalInput else { return false }
-            guard canProcessTerminalInput else { return false }
+            guard !requireFirstResponder || canProcessTerminalInput else {
+                TerminalPerformance.logLine("spaces: input_trace point=mirror_can_process keycode=\(event.keyCode) drop=1\n")
+                return false
+            }
+            guard canProcessTerminalInput else {
+                TerminalPerformance.logLine("spaces: input_trace point=mirror_can_process2 keycode=\(event.keyCode) drop=1\n")
+                return false
+            }
             if let keySpec = Self.remoteKeySpecifier(for: event) {
                 onSendKey?(keySpec)
                 return true

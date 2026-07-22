@@ -2636,6 +2636,8 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
 
             let response = host.handleControlRequest(.init(command: "heartbeat", clientID: refreshedClient.id))
             XCTAssertEqual(response, TerminalControlResponse(ok: true, message: "Refreshed terminal client lease."))
+            // The lease write is coalesced off the engine; block until it commits before reading the mirror.
+            host.debugDrainPersistenceQueue()
 
             let now = ISO8601DateFormatter().date(from: "2026-05-17T00:01:01Z")!
             XCTAssertEqual(try TerminalSessionPersistence.liveAttachments(paths: paths, now: now).map(\.clientID), [refreshedClient.id])
@@ -2672,6 +2674,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
 
             let expiredAt = ISO8601DateFormatter().date(from: "2026-05-17T00:01:05Z")!
             XCTAssertEqual(host.expireStaleRemoteClientsIfNeeded(now: expiredAt), ["remote-client"])
+            host.debugDrainPersistenceQueue()
             XCTAssertTrue(try TerminalSessionPersistence.activeAttachments(paths: paths).isEmpty)
         }
 
@@ -2704,6 +2707,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
 
             let expiredAt = ISO8601DateFormatter().date(from: "2026-05-17T00:01:05Z")!
             XCTAssertEqual(host.expireStaleRemoteClientsIfNeeded(now: expiredAt), [remoteClient.id])
+            host.debugDrainPersistenceQueue()
 
             let activeAttachments = try TerminalSessionPersistence.activeAttachments(paths: paths)
             XCTAssertEqual(activeAttachments.first(where: { $0.mode == .owner })?.clientID, localClient.id)

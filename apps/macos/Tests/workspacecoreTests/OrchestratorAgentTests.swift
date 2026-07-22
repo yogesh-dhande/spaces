@@ -1325,6 +1325,37 @@ extension OrchestratorTests {
         }
     }
 
+    /// Regression for a live rename bug: `TerminalForegroundAgentReconciler` and
+    /// `ProcessExitMonitorService` both run `reconcileTerminalForegroundAgentClassifications` detached, so
+    /// two overlapping passes can each read `existingRow == nil` for the same session and both call
+    /// `insertAdHocDetectedAgent`. The row id is deterministic, so the second call upserts the SAME row —
+    /// but must not treat the first call's own already-inserted row as a name conflict with itself and
+    /// suffix it "-2".
+    func testInsertAdHocDetectedAgentIsIdempotentAcrossOverlappingReconcilePasses() throws {
+        let store = try makeTemporaryStore()
+        let projectDir = try makeTempDirectory().path
+        let project = makeProjectRecord(dir: projectDir)
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: projectDir)
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace)
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let sessionID = "ad-hoc-overlapping-agent"
+        let detectedAgent = (label: "claude", displayCommand: "claude")
+
+        try orchestrator.insertAdHocDetectedAgent(detectedAgent: detectedAgent, workspace: workspace, sessionID: sessionID)
+        try orchestrator.insertAdHocDetectedAgent(detectedAgent: detectedAgent, workspace: workspace, sessionID: sessionID)
+
+        let agents = try store.agentWindows(workspaceID: workspace.id)
+        XCTAssertEqual(agents.count, 1)
+        XCTAssertEqual(agents.first?.label, "claude")
+
+        // A genuinely different session detecting the same label is a real collision and still suffixes.
+        let otherSessionID = "ad-hoc-overlapping-agent-other"
+        try orchestrator.insertAdHocDetectedAgent(detectedAgent: detectedAgent, workspace: workspace, sessionID: otherSessionID)
+        let labelsAfterDistinctSession = try store.agentWindows(workspaceID: workspace.id).compactMap(\.label)
+        XCTAssertEqual(Set(labelsAfterDistinctSession), Set(["claude", "claude-2"]))
+    }
+
     func testReconcileTerminalForegroundAgentClassificationsReservesConfiguredLauncherNames() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path

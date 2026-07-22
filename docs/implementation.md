@@ -731,6 +731,7 @@ Non-obvious constraints that shaped the code. Each names a trap and the conseque
 - Hot paths that need neither stdout nor stderr use lightweight process spawning.
 - Long-running GUI actions execute off the main thread and reconcile state back into the UI afterward.
 - Terminal input hot paths avoid publishing state frames that cannot contain render updates. Live streams use in-memory subscription delivery; remote-session-state persistence is reserved for final state and explicit snapshots.
+- The terminal engine never performs durable SQLite writes inline. Each session core owns a serial background persistence queue for client-lease touches, runtime-state persists, stale-client expiry detaches, and termination payloads, with latest-wins coalescing per key; the engine's in-memory state stays authoritative for reads and broadcasts while the database converges as a durable mirror. SQLite WAL reads never block on a competing writer, so reads stay inline on the engine. Handoff and termination drain the queue so a successor daemon or the overview always observes a complete mirror. This keeps a concurrent writer holding the SQLite write lock (up to the busy timeout) from ever stalling terminal input.
 
 ## External Dependencies
 
