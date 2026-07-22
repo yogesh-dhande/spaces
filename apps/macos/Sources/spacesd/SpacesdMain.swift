@@ -468,7 +468,12 @@ enum SpacesDaemonErrorClassification {
                 timeZone: {
                     NSTimeZone.resetSystemTimeZone()
                     return TimeZone.current
-                }, logError: { writeStandardError("spacesd automation_error \($0)\n") })
+                },
+                // The same handoff flag the timer callback gates on, re-checked inside the service's own
+                // queue: a tick that passed the timer gate but was scheduled late no-ops instead of polling
+                // quiesced cores mid-handoff.
+                ticksSuspended: { [livenessState] in livenessState.snapshot().handoffInProgress },
+                logError: { writeStandardError("spacesd automation_error \($0)\n") })
             automationService = service
             automationServiceBox.set(service)
             // Startup catch-up must strictly precede the first tick, but `reconcileMissedRunsOnStart` enters

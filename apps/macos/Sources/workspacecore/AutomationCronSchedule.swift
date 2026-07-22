@@ -99,8 +99,13 @@ public struct AutomationCronSchedule: Equatable, Sendable {
             daysOfMonth: daysOfMonth,
             months: months,
             daysOfWeek: daysOfWeek,
-            dayOfMonthRestricted: fields[2] != "*",
-            dayOfWeekRestricted: fields[4] != "*"
+            // Standard (Vixie) cron treats a day field that STARTS with `*` — bare `*` or a step like
+            // `*/2` — as unrestricted for the day-of-month/day-of-week interaction: the fire-on-EITHER
+            // rule applies only when both fields are written as explicit values or ranges. Marking `*/n`
+            // restricted would make `0 0 */2 * MON` fire on every second day PLUS every Monday instead of
+            // only Mondays that fall on a matching day.
+            dayOfMonthRestricted: !fields[2].hasPrefix("*"),
+            dayOfWeekRestricted: !fields[4].hasPrefix("*")
         )
     }
 

@@ -70,6 +70,35 @@ import spacesterminalcore
         XCTAssertEqual(try harness.store.automationRun(id: queued.id)?.status, .running, "the queued run executes once the current one finishes")
     }
 
+    /// A tick admitted while ticks are suspended (the daemon sets this during an exec handoff) must be a
+    /// complete no-op — firing against quiesced cores would misread preserved sessions as dead — and the
+    /// suspended occurrence fires normally on the first tick after suspension lifts.
+    func testTickIsANoOpWhileTicksAreSuspended() throws {
+        final class SuspendFlag: @unchecked Sendable {
+            private let lock = NSLock()
+            private var value = true
+            var isSuspended: Bool {
+                lock.lock()
+                defer { lock.unlock() }
+                return value
+            }
+            func lift() {
+                lock.lock()
+                value = false
+                lock.unlock()
+            }
+        }
+        let flag = SuspendFlag()
+        let harness = try Harness(self, ticksSuspended: { flag.isSuspended })
+        let automation = try harness.insertAutomation(
+            triggerKind: .cron, cronExpression: "* * * * *", nextFireTime: harness.now().addingTimeInterval(-60))
+        harness.service.tick()
+        XCTAssertTrue(try harness.store.automationRuns(automationID: automation.id).isEmpty, "a suspended tick must not fire, poll, or promote")
+        flag.lift()
+        harness.service.tick()
+        XCTAssertEqual(try harness.store.automationRuns(automationID: automation.id).count, 1, "the due occurrence fires once suspension lifts")
+    }
+
     // MARK: - Missed-run catch-up
 
     func testMissedRunOnceFiresExactlyOnce() throws {
@@ -1107,7 +1136,8 @@ import spacesterminalcore
 
     init(
         _ testCase: XCTestCase, realCommands: Bool = false, now: @escaping () -> Date = Date.init,
-        timeZone: @escaping @Sendable () -> TimeZone = { .current }, retentionLimit: Int = 100
+        timeZone: @escaping @Sendable () -> TimeZone = { .current }, retentionLimit: Int = 100,
+        ticksSuspended: @escaping @Sendable () -> Bool = { false }
     ) throws {
         store = try testCase.makeTemporaryStore()
         let host = FakeAutomationTerminalHost(realCommands: realCommands)
@@ -1120,7 +1150,7 @@ import spacesterminalcore
         self.retentionLimit = retentionLimit
         service = AutomationService(
             store: store, orchestrator: orchestrator, binaryDirectory: "/usr/bin", timeZone: timeZone, now: now, terminationGrace: 0.2,
-            retentionLimit: retentionLimit, logError: { _ in })
+            retentionLimit: retentionLimit, ticksSuspended: ticksSuspended, logError: { _ in })
     }
 
     /// Builds a fresh `AutomationService` over the same store/orchestrator, modeling a daemon restart:

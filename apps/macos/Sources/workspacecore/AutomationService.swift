@@ -55,6 +55,12 @@ public final class AutomationService: @unchecked Sendable {
     private let terminationGrace: TimeInterval
     /// Newest runs kept per automation; older terminal runs are pruned with their artifacts.
     private let retentionLimit: Int
+    /// Read at the top of every queue-confined tick, not just at the daemon's timer callback. The timer-side
+    /// handoff gate races: a tick that passed it can sit unscheduled while the handoff's `waitUntilIdle()`
+    /// drains an empty queue, then run against quiesced cores and misread preserved sessions as dead.
+    /// Re-checking INSIDE the confinement queue closes that window — any tick admitted after the handoff
+    /// flag is set no-ops. The daemon injects the same liveness flag its timer gate reads.
+    private let ticksSuspended: @Sendable () -> Bool
     private let logError: (String) -> Void
 
     /// Command processes signaled during a timeout/cancel teardown, awaiting SIGKILL escalation. Keyed by
@@ -75,7 +81,7 @@ public final class AutomationService: @unchecked Sendable {
     public init(
         store: SQLiteStore, orchestrator: WorkspaceOrchestrator, binaryDirectory: String,
         timeZone: @escaping @Sendable () -> TimeZone = { .current }, now: @escaping () -> Date = Date.init, terminationGrace: TimeInterval = 10,
-        retentionLimit: Int = 100, logError: @escaping (String) -> Void = { _ in }
+        retentionLimit: Int = 100, ticksSuspended: @escaping @Sendable () -> Bool = { false }, logError: @escaping (String) -> Void = { _ in }
     ) {
         self.store = store
         self.orchestrator = orchestrator
@@ -85,6 +91,7 @@ public final class AutomationService: @unchecked Sendable {
         self.now = now
         self.terminationGrace = terminationGrace
         self.retentionLimit = retentionLimit
+        self.ticksSuspended = ticksSuspended
         self.logError = logError
     }
 
@@ -125,6 +132,9 @@ public final class AutomationService: @unchecked Sendable {
     /// against genuinely still-running work.
     public func tick() {
         queue.sync {
+            // Checked inside the queue so a tick scheduled before a handoff began — but run after its
+            // drain — cannot poll quiesced cores (see `ticksSuspended`).
+            guard !ticksSuspended() else { return }
             recomputeCronAnchorsIfTimeZoneChanged()
             pollRunningRuns()
             fireDueCronAutomations()

@@ -142,6 +142,34 @@ final class AutomationCronScheduleTests: XCTestCase {
         XCTAssertEqual(next, date(2024, 1, 5, 0, 0))
     }
 
+    // Tests the standard cron rule that a day field STARTING with `*` — a step like `*/2`, not just a
+    // bare `*` — counts as unrestricted for the dom/dow interaction, so matching stays a plain AND:
+    // `0 0 */2 * MON` fires only on Mondays that fall on an odd day of the month, never on every odd
+    // day OR every Monday. January 2024 Mondays: the 1st, 8th, 15th, 22nd, 29th; the even ones (8th,
+    // 22nd) must be skipped.
+    func testWildcardStepDayOfMonthKeepsAndSemanticsWithDow() throws {
+        let schedule = try AutomationCronSchedule.parse("0 0 */2 * 1")
+        var cursor = date(2023, 12, 31, 0, 0)
+        for day in [1, 15, 29] {
+            let next = try XCTUnwrap(schedule.nextFireDate(after: cursor, timeZone: utc))
+            XCTAssertEqual(next, date(2024, 1, day, 0, 0), "expected Monday the \(day)th")
+            cursor = next
+        }
+    }
+
+    // The mirror case: a `*/n` step in day-of-week is likewise unrestricted, so `0 0 13 * */2`
+    // fires only when the 13th falls on a matching weekday (every-second-weekday set), never on
+    // every 13th OR every matching weekday.
+    func testWildcardStepDayOfWeekKeepsAndSemanticsWithDom() throws {
+        let schedule = try AutomationCronSchedule.parse("0 0 13 * */2")
+        // `*/2` in dow = {Sun, Tue, Thu, Sat}. January 13 2024 is a Saturday and February 13 2024 is a
+        // Tuesday — both in the set — so those fire back to back; no non-13th day may fire in between.
+        let next = schedule.nextFireDate(after: date(2024, 1, 1, 0, 0), timeZone: utc)
+        XCTAssertEqual(next, date(2024, 1, 13, 0, 0))
+        let following = schedule.nextFireDate(after: try XCTUnwrap(next), timeZone: utc)
+        XCTAssertEqual(following, date(2024, 2, 13, 0, 0))
+    }
+
     // Tests day-of-week 0 and 7 are equivalent Sunday aliases: both parse to the same schedule
     // and produce identical fire dates.
     func testSundayZeroAndSevenAreEquivalent() throws {
