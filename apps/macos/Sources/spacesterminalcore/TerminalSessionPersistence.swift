@@ -513,17 +513,22 @@ public enum TerminalSessionPersistence {
         }
     }
 
-    public static func touchClient(id clientID: String, paths: TerminalSessionPaths, touchedAt: String) throws {
+    /// Refreshes a connected client's lease and reports whether anything was touched. The `disconnected_at IS
+    /// NULL` guard makes a lease touch for a durably disconnected client a no-op (returning `false`) rather than
+    /// silently resurrecting its lease: a client that was expired/detached must not be able to keep a corpse
+    /// alive by heartbeating. Returns `true` only when a live client's lease was refreshed.
+    @discardableResult
+    public static func touchClient(id clientID: String, paths: TerminalSessionPaths, touchedAt: String) throws -> Bool {
         let root = normalizedRootDirectory(paths.rootDirectory)
-        try withDatabase(paths: paths) { database in
+        return try withDatabase(paths: paths) { database in
             try database.withImmediateTransaction {
                 let changes = try database.executeReturningChanges(
                     sql: """
                         UPDATE terminal_clients
                         SET lease_refreshed_at = ?
-                        WHERE root_directory = ? AND client_id = ?
+                        WHERE root_directory = ? AND client_id = ? AND disconnected_at IS NULL
                         """, bindings: [touchedAt, root, clientID])
-                if changes == 0 { throw TerminalSessionPersistenceError.unknownClient(clientID) }
+                return changes > 0
             }
         }
     }
@@ -746,22 +751,37 @@ public enum TerminalSessionPersistence {
     /// write (a takeover, a detach, a re-attach/heartbeat) has changed durable state:
     ///   - Each client detach requires the client's `lease_refreshed_at` to still equal the observed lease and
     ///     the client to still be connected; a client that came back is skipped (not detached), never an error.
-    ///   - The ownership transfer is applied only when the durable active owner is still one of the expired
-    ///     clients (no one else took over) AND the target still has an active attachment with a connected
-    ///     client row. A target that detached in the window is NOT resurrected with a fresh owner row — that
-    ///     ghost owner (whose client is gone) would pin the session open via `hasActiveAttachments`.
+    ///   - A client whose heartbeat generation advanced past the decision-time snapshot is also skipped: its
+    ///     durable lease touch is stuck FIFO-behind this expiry, so the committed lease row still looks stale
+    ///     even though the client just heartbeated. The generation check is taken here, INSIDE the write
+    ///     transaction (after the write lock is held), so it observes every heartbeat that landed while this
+    ///     expiry blocked on a contended lock — a check taken before entering the transaction would miss them.
+    ///   - The ownership transfer is applied only when the durable owner's OWN detach compare-and-set succeeded
+    ///     in this transaction (it really was one of the clients we expired, and it did not come back), AND the
+    ///     target still has an active attachment with a connected client row. Guarding on the actual detach —
+    ///     not merely on the pre-detach owner being in the candidate list — is load-bearing: a stale owner that
+    ///     synchronously re-attached keeps its active owner row (updated in place), so it stays the durable
+    ///     owner; its detach CAS is skipped, and the transfer must be skipped with it rather than demoting the
+    ///     re-attached owner and promoting the target. A target that detached in the window is likewise NOT
+    ///     resurrected with a fresh owner row — that ghost owner (whose client is gone) would pin the session
+    ///     open via `hasActiveAttachments`.
     /// When any compare-and-set skips, the transaction still commits what it safely can and returns
     /// `.superseded` so the caller reconciles rather than retries the stale decision. Kept separate from
     /// `detachClient`/`transferOwnership`, which still serve their own single-purpose callers.
     @discardableResult
     public static func expireClients(
         _ clients: [StaleRemoteClient], transferOwnershipTo newOwnerClientID: String?, sessionID: String, paths: TerminalSessionPaths,
-        detachedAt: String
+        detachedAt: String, heartbeatGate: TerminalClientHeartbeatGenerationGate, observedHeartbeatGenerations: [String: UInt64]
     ) throws -> ExpireClientsOutcome {
         let root = normalizedRootDirectory(paths.rootDirectory)
         return try withDatabase(paths: paths) { database in
             try database.withImmediateTransaction {
                 var worldMoved = false
+                // Client IDs whose per-client detach compare-and-set actually landed in THIS transaction. The
+                // transfer guard keys off this — not off the input candidate list — so an owner whose detach was
+                // skipped (re-attached with a fresh lease, or heartbeated after the decision) never has ownership
+                // transferred away from it.
+                var detachedClientIDs: Set<String> = []
                 // Capture the durable active owner BEFORE any detach so the transfer supersession guard can tell
                 // whether ownership is still held by one of the clients we decided to expire. Read after the
                 // detach loop it would always be nil in the normal case (the stale owner we just detached),
@@ -773,6 +793,15 @@ public enum TerminalSessionPersistence {
                         """, bindings: [root])?.first
 
                 for client in clients {
+                    // Heartbeat veto: a client that heartbeated after the expiry decision (generation advanced
+                    // past the snapshot) is left live. Its durable lease touch is queued FIFO-behind this expiry,
+                    // so the committed lease row below would still match the stale observed lease and wrongly
+                    // detach it. Taken here, inside the held transaction, so a heartbeat that arrived while this
+                    // write blocked on a contended lock is still seen.
+                    if heartbeatGate.generationAdvanced(forClientID: client.clientID, since: observedHeartbeatGenerations) {
+                        worldMoved = true
+                        continue
+                    }
                     // Compare-and-set the detach against the observed lease: a client that re-attached or
                     // refreshed its lease (different lease_refreshed_at) — or already got disconnected — since
                     // the decision matches nothing here, so it is left live. Skipping flags the decision
@@ -787,6 +816,7 @@ public enum TerminalSessionPersistence {
                         worldMoved = true
                         continue
                     }
+                    detachedClientIDs.insert(client.clientID)
                     try database.execute(
                         sql: """
                             UPDATE terminal_attachments
@@ -803,12 +833,12 @@ public enum TerminalSessionPersistence {
                         != nil
                 else { throw TerminalSessionPersistenceError.unknownClient(newOwnerClientID) }
 
-                // Transfer supersession guard: only hand ownership away from an owner that is still one of the
-                // clients we decided to expire. If a different client became the active owner between the
-                // decision and this commit (e.g. a mobile takeover that was ack'd ok), leave it untouched —
-                // stomping it would durably demote a legitimate new owner that enforcement already accepted.
-                let expiredClientIDs = Set(clients.map(\.clientID))
-                guard let preDetachOwnerClientID, expiredClientIDs.contains(preDetachOwnerClientID) else { return .superseded }
+                // Transfer supersession guard: only hand ownership away from an owner whose OWN detach landed in
+                // this transaction. If a different client became the active owner between the decision and this
+                // commit (e.g. a mobile takeover that was ack'd ok), or the stale owner synchronously re-attached
+                // so its detach CAS was skipped, leave ownership untouched — stomping it would durably demote a
+                // legitimate owner that enforcement already accepted.
+                guard let preDetachOwnerClientID, detachedClientIDs.contains(preDetachOwnerClientID) else { return .superseded }
 
                 try database.execute(
                     sql: """

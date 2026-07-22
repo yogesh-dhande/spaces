@@ -25,6 +25,50 @@ private final class PersistenceCoalescingGate: @unchecked Sendable {
     }
 }
 
+/// Per-client heartbeat generation counter shared between the terminal engine and its per-core persistence
+/// queue, so a stale-client expiry that is queued behind a client's still-uncommitted heartbeat can still veto
+/// detaching that client. The engine bumps a client's generation the moment a heartbeat (or any lease touch) is
+/// accepted in memory — before its coalesced durable lease write is even enqueued. The expiry decision captures
+/// each candidate's generation as it runs on the engine; the queued expiry transaction, once it has acquired
+/// the DB write lock, re-reads the generation and skips (never detaches) any candidate whose generation
+/// advanced. That last read happens INSIDE the write transaction on purpose: a heartbeat can land at any point
+/// while the expiry blocks on a contended write lock (its own durable touch is stuck FIFO-behind the expiry, so
+/// the committed lease row still looks stale), and only a check taken after the lock is held sees every such
+/// heartbeat. Engine-isolated state cannot be read from the queue thread, so the map is carried across the
+/// boundary by this lock-guarded `@unchecked Sendable` holder.
+public final class TerminalClientHeartbeatGenerationGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var generations: [String: UInt64] = [:]
+
+    public init() {}
+
+    /// Engine-side: advances the client's heartbeat generation. Called synchronously the instant a heartbeat or
+    /// lease touch is accepted in memory, before its coalesced durable write is enqueued.
+    public func recordHeartbeat(forClientID clientID: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        generations[clientID] = (generations[clientID] ?? 0) &+ 1
+    }
+
+    /// Engine-side: snapshot the current generations for the expiry decision's candidates, to compare inside the
+    /// queued expiry transaction.
+    public func snapshot(forClientIDs clientIDs: [String]) -> [String: UInt64] {
+        lock.lock()
+        defer { lock.unlock() }
+        var result: [String: UInt64] = [:]
+        for id in clientIDs { result[id] = generations[id] ?? 0 }
+        return result
+    }
+
+    /// Queue-side: true when the client's generation advanced past the decision-time `observed` snapshot (a
+    /// heartbeat landed after the expiry was decided), so the expiry must NOT detach it.
+    public func generationAdvanced(forClientID clientID: String, since observed: [String: UInt64]) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return (generations[clientID] ?? 0) != (observed[clientID] ?? 0)
+    }
+}
+
 /// Per-core serial background executor for a terminal session core's durable SQLite writes, shared by the
 /// macOS embedded core and the Linux headless core. Every mutation the engine used to perform synchronously
 /// on its critical path — per-request client lease touches, the runtime-state timer's persist, stale-client

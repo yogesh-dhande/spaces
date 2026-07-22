@@ -591,7 +591,10 @@
                 return TerminalControlResponse(ok: false, message: "Missing client ID.", errorCode: .invalidArgument)
             }
             do {
-                try TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: nowISO8601())
+                guard try TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: nowISO8601()) else {
+                    return TerminalControlResponse(
+                        ok: false, message: "Terminal client is no longer attached.", errorCode: .notFound)
+                }
                 return TerminalControlResponse(ok: true, message: "Refreshed terminal client lease.")
             } catch { return TerminalControlResponse(ok: false, message: String(describing: error)) }
         }
@@ -601,7 +604,7 @@
                 return TerminalControlResponse(ok: false, message: "Missing client ID.", errorCode: .invalidArgument)
             }
             do {
-                try? TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: nowISO8601())
+                _ = try? TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: nowISO8601())
                 let previousOwner = activeOwnerClientID()
                 try TerminalSessionPersistence.transferOwnership(
                     sessionID: launchConfiguration.sessionID, newOwnerClientID: clientID, paths: paths, transferredAt: nowISO8601())

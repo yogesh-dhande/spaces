@@ -2908,6 +2908,66 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         XCTAssertEqual(outcome.expiredOwner.errorCode, .ownershipRejected)
     }
 
+    /// R7-2 (heartbeat veto): a heartbeat accepted after a stale-client expiry has been decided must supersede
+    /// that expiry, not be silently detached by it. The expiry's durable detach blocks on the held write lock;
+    /// the client then heartbeats — accepted in memory (ok), but its own durable lease touch is queued FIFO
+    /// behind the expiry, so the committed lease row the expiry compares against still looks stale. The engine
+    /// bumps the client's heartbeat generation on accept; `expireClients` re-reads that generation INSIDE its
+    /// write transaction (once it finally acquires the lock, after the heartbeat) and skips detaching the client.
+    /// The client stays durably attached and the cache agrees. Pre-fix the expiry's lease CAS matched and
+    /// detached the client with `.applied`, leaving an ACK'd-but-detached zombie.
+    func testHeartbeatAfterExpiryDecisionVetoesDetachUnderWriteContention() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "session-r7-2-veto", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original", shell: "/bin/zsh",
+            command: "zsh", createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+        try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+        // A stale (2000-era lease) remote viewer so the committed DB row is a stale-expiry candidate at real-now.
+        let staleClient = TerminalClient(
+            id: "remote-heartbeat-veto", kind: .remoteViewer, identity: .init(label: "iPhone", deviceName: "iPhone"),
+            connectedAt: "2000-01-01T00:00:00Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: launchConfiguration.sessionID, client: staleClient, mode: .viewer, paths: paths, attachedAt: "2000-01-01T00:00:00Z")
+
+        let lockHolder = CompetingWriteLockHolder(databasePath: try SpacesProfile.current().databasePath)
+        lockHolder.startHolding(maxHoldSeconds: 10)
+        lockHolder.waitUntilHolding()
+
+        let hostBox = TerminalEngineActor.runSynchronously { () -> Box<GhosttyEmbeddedSessionHost> in
+            let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+            // The tick decides to expire the stale viewer and enqueues the atomic detach, which now blocks on the
+            // held write lock at BEGIN IMMEDIATE.
+            let expired = host.expireStaleRemoteClientsIfNeeded(now: Date())
+            XCTAssertEqual(expired, [staleClient.id], "the tick must decide to expire the stale viewer")
+            // The client heartbeats after the decision: accepted in memory (bumping its generation) and ok, while
+            // its durable lease touch queues FIFO behind the still-blocked expiry.
+            let heartbeat = host.handleControlRequest(.init(command: "heartbeat", clientID: staleClient.id))
+            XCTAssertTrue(heartbeat.ok, "a heartbeat for a client with a pending (veto-able) expiry must be accepted in memory")
+            return Box(host)
+        }
+
+        // Release the lock: the parked expiry now acquires the write lock and re-reads the heartbeat generation
+        // inside its transaction — seeing the post-decision bump, it skips detaching the client.
+        lockHolder.release()
+        await TerminalEngineActor.run { hostBox.value.debugDrainPersistenceQueue() }
+        // Let the `.superseded` reconcile hop (enqueued from the persistence closure) run so it invalidates the
+        // optimistically-mutated cache, which then reseeds from the still-attached durable rows.
+        await TerminalEngineActor.run {}
+
+        XCTAssertEqual(
+            try TerminalSessionPersistence.activeAttachments(paths: paths).map(\.clientID), [staleClient.id],
+            "the heartbeated client must NOT be detached by the superseded expiry — it stays durably attached")
+        let cachedClientIDs = TerminalEngineActor.runSynchronously { () -> [String] in
+            (hostBox.value.debugCurrentRemoteSessionState(reason: "test")?.attachmentSnapshot?.attachments ?? [])
+                .filter { $0.detachedAt == nil }.map(\.clientID)
+        }
+        XCTAssertEqual(cachedClientIDs, [staleClient.id], "the in-memory cache must agree the heartbeated client is still attached")
+    }
+
     /// Lost-update race: a queued stale-owner expiry must not overwrite a takeover that committed synchronously
     /// after the expiry decision. The tick decides to transfer ownership from the stale remote owner R to the
     /// local window A and optimistically promotes A in its cache, but its atomic `expireClients` write is only
@@ -3384,11 +3444,15 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         let expiringOwner = TerminalSessionPersistence.StaleRemoteClient(clientID: ownerClient.id, leaseRefreshedAt: "2026-05-17T00:00:00Z")
         let expiringViewer = TerminalSessionPersistence.StaleRemoteClient(clientID: viewerClient.id, leaseRefreshedAt: "2026-05-17T00:00:00Z")
 
+        // A fresh gate + empty snapshot: this test exercises transaction atomicity, not the heartbeat veto.
+        let heartbeatGate = TerminalClientHeartbeatGenerationGate()
+
         // An unknown transfer target throws only after both detach UPDATEs have run inside the transaction.
         XCTAssertThrowsError(
             try TerminalSessionPersistence.expireClients(
                 [expiringOwner, expiringViewer], transferOwnershipTo: "client-that-does-not-exist",
-                sessionID: launchConfiguration.sessionID, paths: paths, detachedAt: "2026-05-17T00:01:05Z"))
+                sessionID: launchConfiguration.sessionID, paths: paths, detachedAt: "2026-05-17T00:01:05Z",
+                heartbeatGate: heartbeatGate, observedHeartbeatGenerations: [:]))
         let afterFailure = try TerminalSessionPersistence.activeAttachments(paths: paths)
         XCTAssertTrue(
             afterFailure.contains { $0.clientID == ownerClient.id }, "the failed transfer must roll back the owner's detach — all-or-nothing")
@@ -3400,7 +3464,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         // A single valid call commits both detaches plus the ownership transfer atomically.
         let outcome = try TerminalSessionPersistence.expireClients(
             [expiringOwner, expiringViewer], transferOwnershipTo: localClient.id, sessionID: launchConfiguration.sessionID, paths: paths,
-            detachedAt: "2026-05-17T00:01:06Z")
+            detachedAt: "2026-05-17T00:01:06Z", heartbeatGate: heartbeatGate, observedHeartbeatGenerations: [:])
         XCTAssertEqual(outcome, .applied, "the valid call applied every detach and the transfer with no supersession")
         let afterSuccess = try TerminalSessionPersistence.activeAttachments(paths: paths)
         XCTAssertFalse(afterSuccess.contains { $0.clientID == ownerClient.id }, "the committed expiry must detach the stale owner")
@@ -3408,6 +3472,62 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         XCTAssertEqual(
             afterSuccess.first(where: { $0.mode == .owner })?.clientID, localClient.id,
             "the committed expiry must transfer ownership to the local window")
+    }
+
+    /// R7-1 (transfer guard keys off the actual detach): a stale owner R that synchronously re-attached with a
+    /// fresh lease keeps its active owner row (updated in place), so it remains the durable owner — and its
+    /// per-client detach compare-and-set is skipped because the observed lease no longer matches. The ownership
+    /// transfer must be skipped WITH it: the guard requires R's own detach to have landed in this transaction,
+    /// not merely that R was in the input candidate list. Pre-fix the guard checked only membership in the
+    /// candidate list, so it committed the transfer — demoting the re-attached owner R and promoting target A —
+    /// while returning `.superseded`, a wrong transfer that survived the race.
+    func testExpireClientsSkipsTransferWhenStaleOwnerReattachedWithFreshLease() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "session-r7-1-reattach", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original", shell: "/bin/zsh",
+            command: "zsh", createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+        try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+        let localViewer = TerminalClient(
+            id: "local-window", kind: .localWindow, identity: .init(label: "Spaces window"), connectedAt: "2000-01-01T00:00:00Z")
+        let remoteOwner = TerminalClient(
+            id: "stale-remote-owner", kind: .remoteViewer, identity: .init(label: "iPad", deviceName: "iPad"), connectedAt: "2000-01-01T00:00:00Z")
+        // Local window is a viewer; the remote attaches then takes ownership with a stale (2000-era) lease.
+        try TerminalSessionPersistence.attachClient(
+            sessionID: launchConfiguration.sessionID, client: localViewer, mode: .viewer, paths: paths, attachedAt: "2000-01-01T00:00:00Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: launchConfiguration.sessionID, client: remoteOwner, mode: .viewer, paths: paths, attachedAt: "2000-01-01T00:00:00Z")
+        try TerminalSessionPersistence.transferOwnership(
+            sessionID: launchConfiguration.sessionID, newOwnerClientID: remoteOwner.id, paths: paths, transferredAt: "2000-01-01T00:00:01Z")
+
+        // The expiry decision observed R's stale lease.
+        let observedStaleOwner = TerminalSessionPersistence.StaleRemoteClient(
+            clientID: remoteOwner.id, leaseRefreshedAt: "2000-01-01T00:00:00Z")
+
+        // R synchronously re-attaches as owner with a FRESH lease: its active owner row is updated in place, so it
+        // stays the durable owner, but its lease_refreshed_at now differs from the decision's observed lease.
+        try TerminalSessionPersistence.attachClient(
+            sessionID: launchConfiguration.sessionID, client: remoteOwner, mode: .owner, paths: paths, attachedAt: "2026-05-17T00:01:00Z")
+        XCTAssertEqual(
+            try TerminalSessionPersistence.activeAttachments(paths: paths).first(where: { $0.mode == .owner })?.clientID, remoteOwner.id,
+            "sanity: R is still the durable owner after re-attaching with a fresh lease")
+
+        let heartbeatGate = TerminalClientHeartbeatGenerationGate()
+        let outcome = try TerminalSessionPersistence.expireClients(
+            [observedStaleOwner], transferOwnershipTo: localViewer.id, sessionID: launchConfiguration.sessionID, paths: paths,
+            detachedAt: "2026-05-17T00:01:05Z", heartbeatGate: heartbeatGate, observedHeartbeatGenerations: [:])
+        XCTAssertEqual(outcome, .superseded, "the re-attached owner's detach CAS was skipped, so the decision is superseded")
+
+        let after = try TerminalSessionPersistence.activeAttachments(paths: paths)
+        XCTAssertEqual(
+            after.first(where: { $0.mode == .owner })?.clientID, remoteOwner.id,
+            "R must still be the durable owner — a skipped detach must not transfer ownership away from it")
+        XCTAssertFalse(
+            after.contains { $0.clientID == localViewer.id && $0.mode == .owner }, "the transfer target A must not have been promoted")
+        XCTAssertTrue(after.contains { $0.clientID == remoteOwner.id }, "R must remain attached")
     }
 
     /// Replaces the SQLite database (and its WAL sidecars) with a directory so every write fails to open it,

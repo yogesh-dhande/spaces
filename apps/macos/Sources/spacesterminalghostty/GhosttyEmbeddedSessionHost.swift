@@ -348,6 +348,13 @@
         /// this so a client that just heartbeated is never expired off a stale DB lease read whose durable
         /// touch has not yet committed under write contention (see that method).
         private var latestRemoteClientHeartbeat: [String: Date] = [:]
+        /// Per-client heartbeat generation, bumped synchronously on the engine each time a heartbeat/lease touch
+        /// is accepted (independent of when its coalesced durable touch commits). A queued stale-client expiry
+        /// captures each candidate's generation at decision time and, inside its write transaction, skips
+        /// detaching any candidate whose generation advanced — vetoing the detach of a client that heartbeated
+        /// while the expiry's durable write was stuck FIFO-behind that heartbeat's own touch. Lock-guarded so the
+        /// persistence-queue thread can read it from inside `expireClients` (see `TerminalClientHeartbeatGenerationGate`).
+        private let heartbeatGenerationGate = TerminalClientHeartbeatGenerationGate()
         /// Remote clients whose expiry (detach, and possibly ownership transfer) has already been enqueued
         /// but whose durable detach has not yet committed. Skipped on subsequent timer ticks so a burst of
         /// ticks cannot enqueue duplicate detach/transfer writes — or bump `ownerEpoch` repeatedly — for the
@@ -640,10 +647,15 @@
             // Record the heartbeat instant on the engine synchronously so stale-client expiry honors it even
             // before the coalesced durable touch commits (finding B1).
             latestRemoteClientHeartbeat[clientID] = touchedAtDate
+            // Advance the client's heartbeat generation so an already-queued stale-client expiry — whose durable
+            // detach sits FIFO-ahead of this touch — vetoes detaching this client when it commits (finding R7-2).
+            heartbeatGenerationGate.recordHeartbeat(forClientID: clientID)
             recordClientLeaseTouchInCache(clientID: clientID, leaseRefreshedAt: touchedAt)
             let paths = paths
             enqueueCoalescedPersistenceWrite(key: "lease:\(clientID)") {
-                try? TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: touchedAt)
+                // `disconnected_at IS NULL` inside `touchClient` makes this a no-op for an already-detached
+                // client, so a stray touch enqueued for one can never resurrect its lease; the result is unused.
+                _ = try? TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: touchedAt)
             }
         }
 
@@ -1075,6 +1087,17 @@
                     elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false)
                 return TerminalControlResponse(ok: false, message: "Missing client ID.", errorCode: .invalidArgument)
             }
+            // Honest signal for a durably disconnected client: if the client has no active attachment and no
+            // pending (veto-able) stale-client expiry that its own heartbeat could rescue, it was expired/detached
+            // and is heartbeating a corpse. Tell it so it can re-attach instead of refreshing forever (finding
+            // R7-2). A client whose expiry is still pending in `expiredRemoteClientIDs` is NOT durably gone — this
+            // heartbeat's generation bump below will veto that expiry — so it heartbeats ok.
+            if isClientDurablyDisconnected(clientID) {
+                TerminalPerformance.logMetric(
+                    "terminal_control_heartbeat", target: "session=\(launchConfiguration.sessionID) client=\(clientID)",
+                    elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false, detail: "durably_disconnected")
+                return TerminalControlResponse(ok: false, message: "Terminal client is no longer attached.", errorCode: .notFound)
+            }
             // The durable lease write is coalesced off the engine; the client's lease is recorded in memory
             // immediately, so the heartbeat acknowledges success without waiting on the DB write lock.
             enqueueClientLeaseTouch(clientID: clientID)
@@ -1436,6 +1459,12 @@
                 guard let leaseRefreshedAt = observedLeaseByClientID[clientID] else { return nil }
                 return .init(clientID: clientID, leaseRefreshedAt: leaseRefreshedAt)
             }
+            // Snapshot each candidate's heartbeat generation at decision time. The queued `expireClients` re-reads
+            // the generation inside its write transaction and skips (never detaches) any candidate that
+            // heartbeated after this decision — its durable lease touch is queued behind the expiry, so the
+            // committed lease row still looks stale (finding R7-2).
+            let heartbeatGate = heartbeatGenerationGate
+            let observedHeartbeatGenerations = heartbeatGate.snapshot(forClientIDs: staleClientIDs)
             // Enqueue the detaches and the (optional) ownership transfer as ONE atomic transaction
             // (`expireClients`) so a partial commit can never leave durable state ownerless. Two distinct
             // post-write signals hop back to the engine:
@@ -1452,7 +1481,8 @@
             enqueuePersistenceWrite { [weak self] in
                 do {
                     let outcome = try TerminalSessionPersistence.expireClients(
-                        expiringClients, transferOwnershipTo: ownershipTransferTarget, sessionID: sessionID, paths: paths, detachedAt: detachedAt)
+                        expiringClients, transferOwnershipTo: ownershipTransferTarget, sessionID: sessionID, paths: paths, detachedAt: detachedAt,
+                        heartbeatGate: heartbeatGate, observedHeartbeatGenerations: observedHeartbeatGenerations)
                     if outcome == .superseded {
                         Task { @TerminalEngineActor in self?.reconcileStaleClientExpiryAfterSupersededDecision(clientIDs: staleClientIDs) }
                     }
@@ -1849,6 +1879,15 @@
         private func touchClientLease(_ clientID: String?) {
             guard let clientID else { return }
             enqueueClientLeaseTouch(clientID: clientID)
+        }
+
+        /// Whether `clientID` is durably gone from this session: it has no active attachment in the authoritative
+        /// in-memory cache AND is not the subject of a still-pending stale-client expiry. The second clause is
+        /// load-bearing: a pending expiry optimistically marks the client detached in the cache, but the client's
+        /// own heartbeat vetoes that expiry (via the generation gate), so such a client is not durably gone.
+        private func isClientDurablyDisconnected(_ clientID: String) -> Bool {
+            if expiredRemoteClientIDs.contains(clientID) { return false }
+            return !currentActiveAttachments().contains { $0.clientID == clientID }
         }
 
         private func isRuntimeInteractiveForControl() -> Bool {
