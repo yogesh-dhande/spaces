@@ -364,6 +364,17 @@ import workspacecore
         #expect(!AppKitController.sidebarSelectionBelongsToDeviceSection(selectedWorkspaceID: nil, selectedProjectID: nil, section: section))
     }
 
+    @Test func deviceSectionDisplayNameRendersLocalDeviceAsLocalRegardlessOfStoredName() {
+        // The local device's rendered label is always "Local", no matter what machine name is
+        // stored for it; a remote device keeps showing its stored name.
+        let local = AppKitController.DeviceSection(
+            deviceID: SpacesPairedDeviceRecord.localDeviceID, deviceName: "Yogesh's MacBook Pro", isLocal: true, loadState: .loaded, device: nil)
+        #expect(local.displayName == "Local")
+
+        let remote = AppKitController.DeviceSection(deviceID: "remote", deviceName: "Build Host", isLocal: false, loadState: .loaded, device: nil)
+        #expect(remote.displayName == "Build Host")
+    }
+
     @Test func waitingAgentAlertResolvesToFocusingItsSessionNotANewLaunch() {
         // Regression: an attention alert for a waiting/done agent must focus that agent's existing
         // session, not resolve to `.runCodingAgent` (which would start a second agent). Build the
@@ -426,8 +437,7 @@ import workspacecore
     }
 
     private func automationSummary(
-        id: String = "auto-1", name: String, kind: AutomationKind, script: String = "", workspaceID: String? = nil,
-        workingDirectory: String = ""
+        id: String = "auto-1", name: String, kind: AutomationKind, script: String = "", workspaceID: String? = nil, workingDirectory: String = ""
     ) -> TerminalServiceAutomationSummary {
         TerminalServiceAutomationSummary(
             id: id, name: name, enabled: true, triggerKind: "manual", cronExpression: nil, kind: kind.rawValue, script: script,
@@ -436,9 +446,9 @@ import workspacecore
             createdAt: "2026-06-22T12:00:00Z", updatedAt: "2026-06-22T12:00:00Z")
     }
 
-    private func automationRunSummary(
-        automationID: String = "auto-1", kind: AutomationKind, status: String, terminalSessionID: String?
-    ) -> TerminalServiceAutomationRunSummary {
+    private func automationRunSummary(automationID: String = "auto-1", kind: AutomationKind, status: String, terminalSessionID: String?)
+        -> TerminalServiceAutomationRunSummary
+    {
         TerminalServiceAutomationRunSummary(
             id: "run-1", automationID: automationID, automationName: nil, kind: kind.rawValue, status: status, trigger: "manual", skipReason: nil,
             exitCode: nil, terminalSessionID: terminalSessionID, startedAt: nil, endedAt: nil, createdAt: "2026-06-22T12:00:00Z")
@@ -456,8 +466,8 @@ import workspacecore
         #expect(
             request
                 == AppKitController.DeviceTerminalOpenRequest(
-                    workspaceID: "", deviceID: "local", sessionID: "auto-session", title: "Nightly", workingDirectory: "/tmp/work",
-                    kind: .automation, shell: "/bin/zsh", command: "echo hi", initialState: .running))
+                    workspaceID: "", deviceID: "local", sessionID: "auto-session", title: "Nightly", workingDirectory: "/tmp/work", kind: .automation,
+                    shell: "/bin/zsh", command: "echo hi", initialState: .running))
     }
 
     // An agent-kind run's session is a real workspace agent session present in the overview, so its request
@@ -497,8 +507,8 @@ import workspacecore
         #expect(
             request
                 == AppKitController.DeviceTerminalOpenRequest(
-                    workspaceID: "workspace-1", deviceID: "local", sessionID: "gone-session", title: "Reviewer", workingDirectory: "",
-                    kind: .agent, shell: nil, command: nil, initialState: .exited))
+                    workspaceID: "workspace-1", deviceID: "local", sessionID: "gone-session", title: "Reviewer", workingDirectory: "", kind: .agent,
+                    shell: nil, command: nil, initialState: .exited))
     }
 
     // Dispatch keys off the RUN's kind, not the automation's current kind. A historical script-kind run whose
@@ -506,7 +516,8 @@ import workspacecore
     // automation's current script metadata — if it dispatched on the automation's kind it would take the agent
     // branch, which supplies no shell and can't cold-resolve a workspace-less session.
     @Test func automationRunTerminalRequestUsesRunKindWhenAutomationBecameAgent() {
-        let automation = automationSummary(name: "Nightly", kind: .agent, script: "echo hi", workspaceID: "workspace-1", workingDirectory: "/tmp/work")
+        let automation = automationSummary(
+            name: "Nightly", kind: .agent, script: "echo hi", workspaceID: "workspace-1", workingDirectory: "/tmp/work")
         let run = automationRunSummary(kind: .script, status: "succeeded", terminalSessionID: "auto-session")
 
         let request = AppKitController.automationRunTerminalOpenRequest(
@@ -515,8 +526,8 @@ import workspacecore
         #expect(
             request
                 == AppKitController.DeviceTerminalOpenRequest(
-                    workspaceID: "", deviceID: "local", sessionID: "auto-session", title: "Nightly", workingDirectory: "/tmp/work",
-                    kind: .automation, shell: "/bin/zsh", command: "echo hi", initialState: .exited))
+                    workspaceID: "", deviceID: "local", sessionID: "auto-session", title: "Nightly", workingDirectory: "/tmp/work", kind: .automation,
+                    shell: "/bin/zsh", command: "echo hi", initialState: .exited))
     }
 
     // The reverse: a historical agent-kind run whose automation was later edited to Script still resolves as an
@@ -533,8 +544,8 @@ import workspacecore
         #expect(
             request
                 == AppKitController.DeviceTerminalOpenRequest(
-                    workspaceID: "", deviceID: "local", sessionID: "gone-session", title: "Reviewer", workingDirectory: "",
-                    kind: .agent, shell: nil, command: nil, initialState: .exited))
+                    workspaceID: "", deviceID: "local", sessionID: "gone-session", title: "Reviewer", workingDirectory: "", kind: .agent, shell: nil,
+                    command: nil, initialState: .exited))
     }
 
     @Test func terminalOpenRequestColdResolutionIsSkippedForExistingPane() {

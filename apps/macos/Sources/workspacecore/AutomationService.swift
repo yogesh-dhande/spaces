@@ -23,8 +23,20 @@ import spacesterminalcore
 /// the same allow/skip/queue rules. Execution is poll-based: `tick()` advances the schedule, polls running
 /// runs for completion or timeout, and promotes a queued run when its automation goes idle. The daemon
 /// drives `tick()` from a periodic timer; tests drive it directly with a controllable clock, so no path
-/// depends on background tasks. Runs on the daemon main actor.
-@MainActor public final class AutomationService {
+/// depends on background tasks.
+///
+/// Confined to a private serial queue, NOT the daemon main actor: in the daemon the executor's call graph
+/// enters the terminal launcher/terminator closures, which hop the terminal engine actor via
+/// `TerminalEngineActor.runSynchronously` — and that engine work itself hops synchronously onto the main
+/// actor for NSView/Ghostty work. A main-actor caller blocking on this service would therefore deadlock
+/// behind that engine→main hop (the one-way rule). Every public entry point hops onto the serial queue,
+/// which also serializes overlapping timer fires; callers are transport/Device-API threads and the daemon
+/// timer via a detached task, never the main actor. Internal code must call the private `…Locked` helpers,
+/// never back through the queue-hopping public surface, or it would re-enter `queue.sync` and deadlock.
+public final class AutomationService: @unchecked Sendable {
+    /// Serial queue every public entry point confines its work to. Serializes concurrent transport callers
+    /// and overlapping timer-driven `tick()`s, and keeps the whole service off the main actor.
+    private let queue = DispatchQueue(label: "spaces.automation-service")
     private let store: SQLiteStore
     private let orchestrator: WorkspaceOrchestrator
     /// Prepended to the automation command's PATH so `spaces` resolves to the running daemon's sibling CLI.
@@ -83,6 +95,10 @@ import spacesterminalcore
     /// the create/update command surface reports the failure instead of returning an automation that
     /// silently never fires; scheduler-side callers wrap it and log rather than propagate.
     public func computeInitialNextFireTime(automationID: String) throws {
+        try queue.sync { try computeInitialNextFireTimeLocked(automationID: automationID) }
+    }
+
+    private func computeInitialNextFireTimeLocked(automationID: String) throws {
         guard let automation = try store.automation(id: automationID), automation.enabled, let schedule = automation.parsedCronSchedule else {
             return
         }
@@ -93,11 +109,13 @@ import spacesterminalcore
     /// completion/timeout, and promote a queued run whose automation is now idle. Idempotent per minute:
     /// a cron automation fires once when its `nextFireTime` elapses because firing recomputes it forward.
     public func tick() {
-        recomputeCronAnchorsIfTimeZoneChanged()
-        fireDueCronAutomations()
-        processPendingKills()
-        pollRunningRuns()
-        promoteQueuedRuns()
+        queue.sync {
+            recomputeCronAnchorsIfTimeZoneChanged()
+            fireDueCronAutomations()
+            processPendingKills()
+            pollRunningRuns()
+            promoteQueuedRuns()
+        }
     }
 
     /// Recomputes every enabled cron automation's next fire time from now when the device's current zone
@@ -113,7 +131,7 @@ import spacesterminalcore
             for automation in try store.enabledCronAutomations() {
                 // Scheduler-side: one automation's anchor failing must not wedge the recompute for the rest,
                 // so each is isolated and logged rather than propagated (the command surface propagates).
-                do { try computeInitialNextFireTime(automationID: automation.id) }
+                do { try computeInitialNextFireTimeLocked(automationID: automation.id) }
                 catch { logError("automation_next_fire_time_error id=\(automation.id) error=\(error)") }
             }
         } catch { logError("automation_timezone_recompute_error error=\(error)") }
@@ -124,6 +142,10 @@ import spacesterminalcore
     /// skipped row), then recompute the next fire time from now. Automations with no elapsed anchor (freshly
     /// created, or whose next time is still in the future) are left untouched.
     public func reconcileMissedRunsOnStart() {
+        queue.sync { reconcileMissedRunsOnStartLocked() }
+    }
+
+    private func reconcileMissedRunsOnStartLocked() {
         // Reconcile stale `running` run rows left by the previous daemon lifetime BEFORE firing any catch-up.
         // A run whose command finished (or died with the daemon) while the daemon was down is still `running`
         // in the store; the catch-up routes through the same concurrency gate, which would read that stale row
@@ -152,12 +174,14 @@ import spacesterminalcore
     /// as cron. Returns the resulting run row (started, queued, or a skipped record), or nil when the
     /// automation is missing.
     @discardableResult public func triggerManually(automationID: String) -> AutomationRun? {
-        do {
-            guard let automation = try store.automation(id: automationID) else { return nil }
-            return fire(automation: automation, trigger: .manual)
-        } catch {
-            logError("automation_manual_trigger_error id=\(automationID) error=\(error)")
-            return nil
+        queue.sync {
+            do {
+                guard let automation = try store.automation(id: automationID) else { return nil }
+                return fire(automation: automation, trigger: .manual)
+            } catch {
+                logError("automation_manual_trigger_error id=\(automationID) error=\(error)")
+                return nil
+            }
         }
     }
 
@@ -172,6 +196,10 @@ import spacesterminalcore
     /// time is computed from now (no backfill). Returns the persisted automation, including any computed
     /// next fire time.
     public func createAutomation(_ draft: AutomationDraft) throws -> Automation {
+        try queue.sync { try createAutomationLocked(draft) }
+    }
+
+    private func createAutomationLocked(_ draft: AutomationDraft) throws -> Automation {
         let validated = try draft.validated()
         let timestamp = now()
         let automation = Automation(
@@ -190,6 +218,10 @@ import spacesterminalcore
     /// cleared otherwise, so disabling or switching to manual removes a stale schedule anchor. Throws when
     /// the automation does not exist.
     public func updateAutomation(id: String, draft: AutomationDraft) throws -> Automation {
+        try queue.sync { try updateAutomationLocked(id: id, draft: draft) }
+    }
+
+    private func updateAutomationLocked(id: String, draft: AutomationDraft) throws -> Automation {
         let existing = try requireAutomation(id: id)
         let validated = try draft.validated()
         // The poll path dispatches on the automation's current kind, so switching Script↔Agent while a run is
@@ -209,29 +241,37 @@ import spacesterminalcore
         return try requireAutomation(id: automation.id)
     }
 
-    public func listAutomations() throws -> [Automation] { try store.automations() }
+    public func listAutomations() throws -> [Automation] { try queue.sync { try store.automations() } }
 
     /// Runs for one automation (newest first) when `automationID` is given, or across every automation
     /// otherwise. Includes live (queued/running) runs, which sort to the top by their recent creation time.
     public func listAutomationRuns(automationID: String?) throws -> [AutomationRun] {
-        if let automationID { return try store.automationRuns(automationID: automationID) }
-        return try store.allAutomationRuns()
+        try queue.sync {
+            if let automationID { return try store.automationRuns(automationID: automationID) }
+            return try store.allAutomationRuns()
+        }
     }
 
     /// Manually fires an automation through the shared concurrency gate. Throws when the automation is
     /// missing so the boundary surfaces a clear error instead of a silent no-op.
     public func triggerAutomation(id: String) throws -> AutomationRun {
-        let automation = try requireAutomation(id: id)
-        guard let run = fire(automation: automation, trigger: .manual) else {
-            throw AutomationValidationError("Failed to start a run for automation \(id).")
+        try queue.sync {
+            let automation = try requireAutomation(id: id)
+            guard let run = fire(automation: automation, trigger: .manual) else {
+                throw AutomationValidationError("Failed to start a run for automation \(id).")
+            }
+            return run
         }
-        return run
     }
 
     /// Cancels a run, returning its resulting terminal row. A terminal run is returned unchanged
     /// (idempotent). Throws when the run does not exist or its teardown/finalization fails, so the transport
     /// surfaces the failure instead of reporting success over a still-running row.
     public func cancelAutomationRun(runID: String) throws -> AutomationRun {
+        try queue.sync { try cancelAutomationRunLocked(runID: runID) }
+    }
+
+    private func cancelAutomationRunLocked(runID: String) throws -> AutomationRun {
         let run = try requireAutomationRun(id: runID)
         guard !run.status.isTerminal else { return run }
         // `cancelRunThrowing` returns the finalized `canceled` row built from what it persisted, so the result
@@ -253,6 +293,10 @@ import spacesterminalcore
     /// (which finalizes the agent row and notifies subscribers), falling back to a plain session termination
     /// for a not-yet-signalled `.agent` session with no row.
     public func endAttributedAgents(runID: String) throws -> AutomationRun {
+        try queue.sync { try endAttributedAgentsLocked(runID: runID) }
+    }
+
+    private func endAttributedAgentsLocked(runID: String) throws -> AutomationRun {
         let run = try requireAutomationRun(id: runID)
         guard run.status.isTerminal else {
             throw AutomationValidationError("Cannot end agents for automation run \(runID): it is still \(run.status.rawValue). Cancel it instead.")
@@ -273,8 +317,10 @@ import spacesterminalcore
     /// Deletes an automation (cancelling any running run and cleaning up its artifacts and attributed
     /// sessions). Throws when the automation does not exist.
     public func deleteAutomationCommand(id: String) throws {
-        _ = try requireAutomation(id: id)
-        try deleteAutomation(id: id)
+        try queue.sync {
+            _ = try requireAutomation(id: id)
+            try deleteAutomationLocked(id: id)
+        }
     }
 
     private func requireAutomation(id: String) throws -> Automation {
@@ -292,7 +338,7 @@ import spacesterminalcore
     /// every other case has no schedule, so the anchor is explicitly cleared to drop any stale value.
     private func applyNextFireTime(automationID: String, enabled: Bool, triggerKind: AutomationTriggerKind) throws {
         if enabled, triggerKind == .cron {
-            try computeInitialNextFireTime(automationID: automationID)
+            try computeInitialNextFireTimeLocked(automationID: automationID)
         } else {
             try store.setAutomationNextFireTime(id: automationID, nextFireTime: nil)
         }
@@ -651,6 +697,10 @@ import spacesterminalcore
     /// best-effort cancels every running run before tearing the automation down) — where one run's teardown
     /// failure must not abort the surrounding sweep. Command-surface cancels go through `cancelAutomationRun`.
     public func cancelRun(runID: String) {
+        queue.sync { cancelRunLocked(runID: runID) }
+    }
+
+    private func cancelRunLocked(runID: String) {
         do { try cancelRunThrowing(runID: runID) }
         catch { logError("automation_cancel_error run=\(runID) error=\(error)") }
     }
@@ -811,7 +861,11 @@ import spacesterminalcore
     /// running run's cancel stays best-effort (the log-only `cancelRun`) so one stuck teardown does not abort
     /// the surrounding deletion.
     public func deleteAutomation(id: String) throws {
-        for run in try store.activeAutomationRuns(automationID: id) where run.status == .running { cancelRun(runID: run.id) }
+        try queue.sync { try deleteAutomationLocked(id: id) }
+    }
+
+    private func deleteAutomationLocked(id: String) throws {
+        for run in try store.activeAutomationRuns(automationID: id) where run.status == .running { cancelRunLocked(runID: run.id) }
         for run in try store.automationRuns(automationID: id) { try deleteRunArtifactsAndSessions(runID: run.id) }
         try store.deleteAutomation(id: id)
     }

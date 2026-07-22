@@ -35,6 +35,10 @@ public final class WorkspaceOrchestrator {
     /// profile command uses; workspacecore has no session I/O of its own, so with none installed the write
     /// throws (non-daemon callers never spawn agent automations).
     public typealias BuiltInTerminalSessionInputWriter = @Sendable (String, TerminalProfileInput, _ appendNewline: Bool) throws -> Void
+    /// Reports whether the owning daemon is mid exec-in-place handoff. Installed process-wide so every
+    /// transient daemon orchestrator (discovery scans, reconcilers, Device API handlers) consults the
+    /// same handoff flag the profile orchestrator does, not just the one built by `makeProfileOrchestrator`.
+    public typealias DaemonHandoffInProgressPredicate = @Sendable () -> Bool
 
     public static let terminalTrackingIDEnvVar = "SPACES_TERMINAL_TRACKING_ID"
     /// Set by the CLI's `agent spawn` on the automation orchestrator's own terminal to identify the
@@ -50,6 +54,7 @@ public final class WorkspaceOrchestrator {
     private static let notificationDelivererOverrideStore = LockedBox<NotificationDeliverer?>(nil)
     static let agentNotificationLineSubmitterOverrideStore = LockedBox<AgentNotificationLineSubmitter?>(nil)
     static let builtInTerminalSessionInputWriterOverrideStore = LockedBox<BuiltInTerminalSessionInputWriter?>(nil)
+    private static let daemonHandoffInProgressOverrideStore = LockedBox<DaemonHandoffInProgressPredicate?>(nil)
 
     public struct WorkspaceStopOutcome: Sendable {
         public let skippedStopScriptBecauseWorkspaceDirectoryMissing: Bool
@@ -138,6 +143,14 @@ public final class WorkspaceOrchestrator {
         builtInTerminalSessionInputWriterOverrideStore.set(writer)
     }
 
+    /// Installs a process-wide handoff predicate consumed by every orchestrator built without an explicit
+    /// one. The daemon sets this so its transient orchestrators (the worktree-discovery scan, the runtime
+    /// reconcilers, the Device API handlers) veto `stopWorkspaceUnlocked`'s destructive row deletes during
+    /// an exec-in-place handoff, matching the profile orchestrator. See `daemonHandoffInProgress`'s doc.
+    public static func setProcessWideDaemonHandoffInProgress(_ predicate: DaemonHandoffInProgressPredicate?) {
+        daemonHandoffInProgressOverrideStore.set(predicate)
+    }
+
     /// Builds the notification engine the device-runtime reconcilers use to tell subscribers a coding
     /// agent exited when reconciliation — not a hook — detected the exit. Delivery routes through the
     /// process-wide submitter the daemon installs; with none installed (non-daemon callers, tests that
@@ -151,8 +164,7 @@ public final class WorkspaceOrchestrator {
             deliver: { sessionID, line in
                 guard let submitter else { throw WorkspaceError.invalidArgument(message: "No agent notification submitter is configured.") }
                 try submitter(sessionID, line)
-            },
-            resolveAgentKind: { [self] agent in agent.terminalTrackingID.flatMap { agentRuntimeKind(terminalSessionID: $0) } },
+            }, resolveAgentKind: { [self] agent in agent.terminalTrackingID.flatMap { agentRuntimeKind(terminalSessionID: $0) } },
             logError: { Self.writeStandardError($0) })
     }
 
@@ -237,6 +249,17 @@ public final class WorkspaceOrchestrator {
     let builtInTerminalWindowCloser: BuiltInTerminalWindowCloser
     let builtInTerminalSessionTerminator: BuiltInTerminalSessionTerminator
     let builtInTerminalSessionLauncher: BuiltInTerminalSessionLauncher
+    /// Reports whether the owning daemon is mid exec-in-place handoff. During a handoff the daemon's
+    /// terminal terminator no-ops (live sessions are quiesced and carried across the exec, not killed),
+    /// so a destructive workspace operation that deleted its process/window/agent rows would leave the
+    /// replacement daemon adopting a still-live terminal whose records were removed. `stopWorkspaceUnlocked`
+    /// consults this at its row-mutation boundary and throws `WorkspaceError.daemonHandoffInProgress` so the
+    /// terminal-side effect and the database mutation stay consistent — neither is applied when a handoff
+    /// intervenes. When no explicit predicate is passed, resolves to the process-wide override the daemon
+    /// installs (so its transient orchestrators — discovery scans, reconcilers, Device API handlers — share
+    /// the profile orchestrator's handoff gate) and otherwise defaults to `{ false }` for every non-daemon
+    /// orchestrator (GUI, CLI, tests), which never hands off.
+    let daemonHandoffInProgress: @Sendable () -> Bool
     private let projectsRootDirectoryURL: URL?
     private let workspacesRootDirectoryURL: URL?
     private let workspaceLifecycleGate = PerKeyGate()
@@ -247,11 +270,13 @@ public final class WorkspaceOrchestrator {
         notificationDeliverer: ((String, String, String?) -> Void)? = nil, builtInTerminalWindowOpener: BuiltInTerminalWindowOpener? = nil,
         builtInTerminalWindowFocuser: BuiltInTerminalWindowFocuser? = nil, builtInTerminalWindowCloser: BuiltInTerminalWindowCloser? = nil,
         builtInTerminalSessionTerminator: BuiltInTerminalSessionTerminator? = nil,
-        builtInTerminalSessionLauncher: BuiltInTerminalSessionLauncher? = nil, currentDate: @escaping () -> Date = Date.init
+        builtInTerminalSessionLauncher: BuiltInTerminalSessionLauncher? = nil, daemonHandoffInProgress: (@Sendable () -> Bool)? = nil,
+        currentDate: @escaping () -> Date = Date.init
     ) {
         self.store = store
         projectsRootDirectoryURL = projectsRootDirectory
         self.git = git
+        self.daemonHandoffInProgress = daemonHandoffInProgress ?? Self.daemonHandoffInProgressOverrideStore.get() ?? { false }
         self.workspacesRootDirectoryURL = workspacesRootDirectory
         self.notificationDeliverer = notificationDeliverer ?? Self.notificationDelivererOverrideStore.get() ?? Self.deliverUserNotification
         #if canImport(Darwin)
@@ -884,6 +909,11 @@ public final class WorkspaceOrchestrator {
     }
 
     private func stopWorkspaceUnlocked(workspaceID: String, waitForTerminalExit: Bool = true) throws -> WorkspaceStopOutcome {
+        // Refuse a stop that races a daemon handoff before touching anything: the daemon's terminator
+        // no-ops during handoff (sessions are quiesced and carried across the exec), so proceeding would
+        // delete the workspace's rows while its terminals stay live. Rejecting here keeps both the
+        // terminals and their records intact for the replacement daemon to resume.
+        guard !daemonHandoffInProgress() else { throw WorkspaceError.daemonHandoffInProgress }
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         let windows = try indexedWorkspaceWindows(workspaceID: workspace.id)
         let assignedPorts = try store.workspacePortsAssigned(workspaceID: workspace.id)
@@ -938,6 +968,13 @@ public final class WorkspaceOrchestrator {
                 closedBuiltInTerminalSessionIDs.insert(sessionID)
             }
         }
+        // Re-check at the row-mutation boundary: a handoff that began after the entry guard (while the
+        // terminate loop above was running) would have silently no-op'd the not-yet-terminated sessions.
+        // Aborting before the deletes below prevents the dangerous divergence where rows are erased while
+        // their terminals survive into the replacement daemon. Sessions already terminated before the
+        // handoff started keep their (now-stale) rows, which normal stale-session recovery reconciles; no
+        // live terminal is ever orphaned from its records.
+        guard !daemonHandoffInProgress() else { throw WorkspaceError.daemonHandoffInProgress }
         if waitForTerminalExit { waitForBuiltInTerminalSessionsToExit(closedBuiltInTerminalSessionIDs) }
         try store.deleteRunningProcesses(workspaceID: workspace.id)
         try store.deleteWindows(workspaceID: workspace.id)
@@ -1221,9 +1258,9 @@ public final class WorkspaceOrchestrator {
     /// first signal, so a coding agent (e.g. Codex) that emits `working` before `init` still registers.
     /// The default title is the matched coding agent's display name (or the command's executable
     /// basename when no supported agent matches — spawn's hook gate has already ensured one does).
-    @discardableResult public func createWorkspaceAgentSession(
-        workspaceID: String, command: String, title: String?, automationRunID: String? = nil
-    ) throws -> TerminalServiceSessionSummary {
+    @discardableResult public func createWorkspaceAgentSession(workspaceID: String, command: String, title: String?, automationRunID: String? = nil)
+        throws -> TerminalServiceSessionSummary
+    {
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         guard !workspace.isArchived else { throw WorkspaceError.invalidArgument(message: "Workspace is archived.") }
         let trimmedCommand = command.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1257,8 +1294,8 @@ public final class WorkspaceOrchestrator {
         let launchCommand = commandPrefixedWithShellEnvironment(rawCommand, env: env)
         let launchConfiguration = TerminalSessionLaunchConfiguration(
             sessionID: sessionID, backend: .ghosttyEmbedded, lifetimePolicy: .persistent, title: sessionTitle, workingDirectory: workspace.dir,
-            shell: shellPath, command: launchCommand, createdAt: nowISO8601(), workspaceID: workspace.id, kind: kind,
-            automationRunID: automationRunID)
+            shell: shellPath, command: launchCommand, createdAt: nowISO8601(), workspaceID: workspace.id, kind: kind, automationRunID: automationRunID
+        )
 
         let session = try builtInTerminalSessionLauncher(launchConfiguration)
         let windowRecordID = UUID().uuidString

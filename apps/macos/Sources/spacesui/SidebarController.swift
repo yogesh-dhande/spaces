@@ -873,7 +873,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     }
 
     private func deviceSectionName(deviceID: String) -> String {
-        host.deviceSections.first(where: { $0.deviceID == deviceID })?.deviceName ?? deviceID
+        host.deviceSections.first(where: { $0.deviceID == deviceID })?.displayName ?? deviceID
     }
 
     private func deviceSectionLoadStateLabel(deviceID: String) -> (text: String, color: NSColor)? {
@@ -1952,8 +1952,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         container.addSubview(header)
         container.addSubview(children)
         NSLayoutConstraint.activate([
-            header.topAnchor.constraint(equalTo: container.topAnchor),
-            header.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            header.topAnchor.constraint(equalTo: container.topAnchor), header.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             header.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             children.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 2),
             children.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 20),
@@ -1983,8 +1982,8 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         }
         automationsDisclosureButton?.isHidden = runningRuns.isEmpty
         automationsDisclosureButton?.image = NSImage(
-            systemSymbolName: automationsExpanded ? "chevron.down" : "chevron.right", accessibilityDescription: automationsExpanded ? "Collapse" : "Expand")?
-            .withSymbolConfiguration(.init(pointSize: 9, weight: .semibold))
+            systemSymbolName: automationsExpanded ? "chevron.down" : "chevron.right",
+            accessibilityDescription: automationsExpanded ? "Collapse" : "Expand")?.withSymbolConfiguration(.init(pointSize: 9, weight: .semibold))
 
         updateAutomationsRowAppearance()
 
@@ -2020,9 +2019,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         stack.edgeInsets = NSEdgeInsets(top: 3, left: 6, bottom: 3, right: 6)
         stack.translatesAutoresizingMaskIntoConstraints = false
         stack.toolTip = "Open live terminal"
-        attachRowClickAction(to: stack) { [weak self] in
-            self?.host.openAutomationRunTerminal(deviceID: row.deviceID, run: row.run)
-        }
+        attachRowClickAction(to: stack) { [weak self] in self?.host.openAutomationRunTerminal(deviceID: row.deviceID, run: row.run) }
         return stack
     }
 

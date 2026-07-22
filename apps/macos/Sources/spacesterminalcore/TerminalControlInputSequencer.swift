@@ -50,6 +50,13 @@ public final class TerminalControlInputSequencer: @unchecked Sendable {
         }
     }
 
+    /// Suspends until every write enqueued so far has run — including a pending submit CR held back by
+    /// its `separation` delay — so a handoff `execv` cannot destroy the sequencer with an unwritten CR (or
+    /// the whole submitted line) still queued. Callers first stop accepting new input (the control server
+    /// is stopped before quiesce drains), so the chain this awaits is bounded by the outstanding writes
+    /// plus at most one `separation` interval.
+    public func drain() async { await queue.drain() }
+
     private func takeEarliestNextWrite() -> ContinuousClock.Instant? {
         lock.lock()
         defer { lock.unlock() }

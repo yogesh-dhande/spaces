@@ -1313,6 +1313,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             case .missingProject, .missingWorkspace, .missingTrackedWindow: return .notFound
             case .invalidArgument, .invalidWorkspace, .projectAlreadyExists, .workspaceAlreadyExists: return .invalidArgument
             case .gitCommandFailed, .dependencyMissing, .configError, .databaseMigrationFailed: return .internalError
+            case .daemonHandoffInProgress: return .shuttingDown
             }
         }
         // The daemon's host is missing the Spaces CLI every hook command needs; the request was well
@@ -2470,8 +2471,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 if let resolved { namesByAutomationID[run.automationID] = resolved }
                 name = resolved
             }
-            return TerminalServiceAutomationRunSummary(
-                run, automationName: name, attributedAgents: attributedAgentsByRunID[run.id] ?? [])
+            return TerminalServiceAutomationRunSummary(run, automationName: name, attributedAgents: attributedAgentsByRunID[run.id] ?? [])
         }
     }
 

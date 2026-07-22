@@ -120,7 +120,7 @@
                 pendingFirstResponderRestoreTask?.cancel()
                 pendingSearchQueryTask?.cancel()
                 pendingSurfacePresentationTask?.cancel()
-                if let surface = mirrorSurface() { GhosttyEmbeddedAppService.shared.unregisterActionHandler(for: surface) }
+                if let surface = mirrorSurface() { GhosttyMirrorAppService.shared.unregisterActionHandler(for: surface) }
                 if let mirror { ghostty_mirror_free(mirror) }
             }
         }
@@ -245,11 +245,22 @@
         }
 
         @discardableResult func handleTerminalKeyEvent(_ event: NSEvent, requireFirstResponder: Bool = true) -> Bool {
-            guard event.type == .keyDown, acceptsTerminalInput, window?.isKeyWindow == true else { return false }
+            guard event.type == .keyDown, acceptsTerminalInput, window?.isKeyWindow == true else {
+                TerminalPerformance.logLine(
+                    "spaces: input_trace point=mirror_guard keycode=\(event.keyCode) accepts=\(acceptsTerminalInput ? 1 : 0) "
+                        + "key_window=\(window?.isKeyWindow == true ? 1 : 0)\n")
+                return false
+            }
             if GhosttyTerminalInputTranslator.shouldDeferToSystemShortcut(keyCode: event.keyCode, modifierFlags: event.modifierFlags) { return false }
             if !requireFirstResponder, window?.firstResponder !== self { window?.makeFirstResponder(self) }
-            guard !requireFirstResponder || canProcessTerminalInput else { return false }
-            guard canProcessTerminalInput else { return false }
+            guard !requireFirstResponder || canProcessTerminalInput else {
+                TerminalPerformance.logLine("spaces: input_trace point=mirror_can_process keycode=\(event.keyCode) drop=1\n")
+                return false
+            }
+            guard canProcessTerminalInput else {
+                TerminalPerformance.logLine("spaces: input_trace point=mirror_can_process2 keycode=\(event.keyCode) drop=1\n")
+                return false
+            }
             if let keySpec = Self.remoteKeySpecifier(for: event) {
                 onSendKey?(keySpec)
                 return true
@@ -383,7 +394,7 @@
             resetSearchOverlay(restoreFocus: false)
             pendingSurfacePresentationTask?.cancel()
             pendingSurfacePresentationTask = nil
-            if let surface = mirrorSurface() { GhosttyEmbeddedAppService.shared.unregisterActionHandler(for: surface) }
+            if let surface = mirrorSurface() { GhosttyMirrorAppService.shared.unregisterActionHandler(for: surface) }
             if let mirror {
                 ghostty_mirror_free(mirror)
                 self.mirror = nil
@@ -532,10 +543,8 @@
         private func ensureMirrorIfNeeded() {
             guard mirror == nil, window != nil else { return }
             do {
-                try GhosttyEmbeddedAppService.shared.startIfNeeded()
-                guard let app = GhosttyEmbeddedAppService.shared.app else {
-                    throw GhosttyEmbeddedAppServiceError.configuration("ghostty app missing")
-                }
+                try GhosttyMirrorAppService.shared.startIfNeeded()
+                guard let app = GhosttyMirrorAppService.shared.app else { throw GhosttyEmbeddedAppServiceError.configuration("ghostty app missing") }
                 var host = makeSurfaceHost()
                 var config = ghostty_session_config_new()
                 config.surface.platform_tag = host.platform_tag
@@ -551,7 +560,7 @@
                 updateSurfaceGeometry()
                 updateSurfaceFocus()
                 if let surface = mirrorSurface() {
-                    GhosttyEmbeddedAppService.shared.registerActionHandler(for: surface) { [weak self] event in self?.applyActionEvent(event) }
+                    GhosttyMirrorAppService.shared.registerActionHandler(for: surface) { [weak self] event in self?.applyActionEvent(event) }
                 }
             } catch { fputs("spaces: ghostty mirror creation failed for session \(launchConfiguration.sessionID): \(error)\n", stderr) }
         }
@@ -679,9 +688,9 @@
                 return
             }
             lastAppliedRenderFrameIdentity = identity
-            GhosttyEmbeddedAppService.shared.tick()
+            GhosttyMirrorAppService.shared.tick()
             presentSurfaceNow()
-            GhosttyEmbeddedAppService.shared.tick()
+            GhosttyMirrorAppService.shared.tick()
             surfaceHostView.needsDisplay = true
             surfaceHostView.displayIfNeeded()
             window?.displayIfNeeded()
@@ -697,7 +706,7 @@
                 guard let surface = self.mirrorSurface() else { return }
                 ghostty_surface_refresh(surface)
                 ghostty_surface_draw(surface)
-                GhosttyEmbeddedAppService.shared.tick()
+                GhosttyMirrorAppService.shared.tick()
                 self.surfaceHostView.needsDisplay = true
                 self.surfaceHostView.displayIfNeeded()
                 self.window?.displayIfNeeded()

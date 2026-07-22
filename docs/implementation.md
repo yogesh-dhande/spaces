@@ -13,9 +13,10 @@ Related docs, each authoritative for its own layer:
 
 ## System Overview
 
-Spaces is a macOS app, an iOS app, and a CLI, all of which are thin clients of a per-device daemon. Five invariants hold everywhere:
+Spaces is a macOS app, an iOS app, and a CLI, all of which are thin clients of a per-device daemon. Six invariants hold everywhere:
 
 - SQLite is the single source of truth for persisted model data and global preferences.
+- **The daemon's terminal engine owns a dedicated serial executor.** `TerminalEngineActor` (a custom global actor backed by its own dispatch queue) hosts `ghostty_app_tick`, the embedded session cores, and the PTY data path, so a busy or blocked main actor cannot stall terminal input, output, or escape-query replies. The isolation is one-way by rule: engine code may hop synchronously to the main actor (only for AppKit-affine setup like headless view creation), but main-actor code must never synchronously wait on the engine — that asymmetry is what makes the design deadlock-free. The daemon's main actor keeps coordination only (reconcilers, database-change handling, orchestrator work), and nothing blocking belongs on either actor: subprocesses, git, SQLite opens, FSEvents/inotify registration, socket round-trips, and PTY teardown all run on background executors or transport threads, entering an actor only for its own state.
 - A **window is a client concept**. The daemon has no desktop session and stores no window identity; clients reconstruct windows from the overview payload.
 - Workspace settings are seeded from project templates at workspace creation and preserved as per-workspace overrides after that.
 - Store startup migrates older databases serially through every intermediate schema version and fails closed for versions it has no migration step for.
@@ -762,6 +763,7 @@ Non-obvious constraints that shaped the code. Each names a trap and the conseque
 - Hot paths that need neither stdout nor stderr use lightweight process spawning.
 - Long-running GUI actions execute off the main thread and reconcile state back into the UI afterward.
 - Terminal input hot paths avoid publishing state frames that cannot contain render updates. Live streams use in-memory subscription delivery; remote-session-state persistence is reserved for final state and explicit snapshots.
+- The terminal engine avoids durable SQLite writes inline. Each session core owns a serial background persistence queue (the shared `TerminalCorePersistenceQueue` in `spacesterminalcore`, used by both the macOS embedded core and the Linux headless core) with latest-wins coalescing per key; the engine's in-memory state stays authoritative for reads and broadcasts while the database converges as a durable mirror. The macOS core queues client-lease touches, runtime-state persists, stale-client expiry detaches, and termination payloads; the Linux core queues runtime-state persists and termination writes, while its client-attachment control writes remain inline on the engine because owner gating still reads durable attachment rows directly. SQLite WAL reads never block on a competing writer, so reads stay inline on the engine. Handoff, termination, and daemon shutdown drain the queue — the exited-state write retries in place inside its queue slot so later-enqueued items and drains always observe it — so a successor daemon, the overview, and the post-exit database always see a complete mirror. This keeps a concurrent writer holding the SQLite write lock (up to the busy timeout) from stalling terminal input.
 
 ## External Dependencies
 

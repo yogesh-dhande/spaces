@@ -543,8 +543,14 @@
         }
 
         private func sendRemoteInput(_ text: String, asPaste: Bool) {
-            guard isInteractiveRuntimeStateForControl() else { return }
-            guard let client = attachedClient else { return }
+            guard isInteractiveRuntimeStateForControl() else {
+                TerminalPerformance.logLine("spaces: input_trace point=send_input_not_interactive session=\(launchConfiguration.sessionID)\n")
+                return
+            }
+            guard let client = attachedClient else {
+                TerminalPerformance.logLine("spaces: input_trace point=send_input_no_client session=\(launchConfiguration.sessionID)\n")
+                return
+            }
             scrollCoalescer.flush()
             let socketPath = paths.controlSocketPath
             let clientID = client.id
@@ -563,12 +569,18 @@
         }
 
         private func sendRemoteKey(_ key: String) {
-            guard isInteractiveRuntimeStateForControl() else { return }
+            guard isInteractiveRuntimeStateForControl() else {
+                TerminalPerformance.logLine("spaces: input_trace point=send_key_not_interactive session=\(launchConfiguration.sessionID)\n")
+                return
+            }
             if TerminalKeyInput.hostAction(for: key) == .clearScreenAndScrollback {
                 sendRemoteClearScreenAndScrollback()
                 return
             }
-            guard let client = attachedClient else { return }
+            guard let client = attachedClient else {
+                TerminalPerformance.logLine("spaces: input_trace point=send_key_no_client session=\(launchConfiguration.sessionID)\n")
+                return
+            }
             scrollCoalescer.flush()
             let socketPath = paths.controlSocketPath
             let clientID = client.id

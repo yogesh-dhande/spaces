@@ -1,10 +1,13 @@
 import Foundation
 import XCTest
 
+@testable import spacesterminalcore
 @testable import spacesterminalghostty
 
-final class GhosttyInputOutputResyncSchedulerTests: XCTestCase {
-    @MainActor private func waitForCondition(_ description: String, timeout: TimeInterval = 5, condition: @escaping @MainActor () -> Bool) async {
+@TerminalEngineActor final class GhosttyInputOutputResyncSchedulerTests: XCTestCase {
+    @TerminalEngineActor private func waitForCondition(
+        _ description: String, timeout: TimeInterval = 5, condition: @escaping @TerminalEngineActor () -> Bool
+    ) async {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             if condition() { return }
@@ -13,7 +16,7 @@ final class GhosttyInputOutputResyncSchedulerTests: XCTestCase {
         XCTFail("Timed out waiting for \(description)")
     }
 
-    @MainActor func testInteractiveOutputWithPendingCommandSchedulesResync() async {
+    @TerminalEngineActor func testInteractiveOutputWithPendingCommandSchedulesResync() async {
         var resyncCount = 0
         let scheduler = GhosttyInputOutputResyncScheduler { resyncCount += 1 }
 
@@ -26,7 +29,7 @@ final class GhosttyInputOutputResyncSchedulerTests: XCTestCase {
         XCTAssertFalse(scheduler.hasScheduledResync)
     }
 
-    @MainActor func testInteractiveOutputWithInFlightWorkItemReschedules() async {
+    @TerminalEngineActor func testInteractiveOutputWithInFlightWorkItemReschedules() async {
         var resyncCount = 0
         let scheduler = GhosttyInputOutputResyncScheduler { resyncCount += 1 }
 
@@ -43,7 +46,7 @@ final class GhosttyInputOutputResyncSchedulerTests: XCTestCase {
         XCTAssertEqual(resyncCount, 1)
     }
 
-    @MainActor func testPlainInteractiveOutputCancelsWithoutScheduling() async {
+    @TerminalEngineActor func testPlainInteractiveOutputCancelsWithoutScheduling() async {
         var resyncCount = 0
         let scheduler = GhosttyInputOutputResyncScheduler { resyncCount += 1 }
 
@@ -54,7 +57,7 @@ final class GhosttyInputOutputResyncSchedulerTests: XCTestCase {
         XCTAssertEqual(resyncCount, 0)
     }
 
-    @MainActor func testBulkOutputWithPendingInputSchedulesResync() async {
+    @TerminalEngineActor func testBulkOutputWithPendingInputSchedulesResync() async {
         var resyncCount = 0
         let scheduler = GhosttyInputOutputResyncScheduler { resyncCount += 1 }
 
@@ -67,7 +70,7 @@ final class GhosttyInputOutputResyncSchedulerTests: XCTestCase {
         XCTAssertFalse(scheduler.hasScheduledResync)
     }
 
-    @MainActor func testBulkOutputWithNothingPendingIsNoOp() async {
+    @TerminalEngineActor func testBulkOutputWithNothingPendingIsNoOp() async {
         var resyncCount = 0
         let scheduler = GhosttyInputOutputResyncScheduler { resyncCount += 1 }
 
@@ -78,7 +81,7 @@ final class GhosttyInputOutputResyncSchedulerTests: XCTestCase {
         XCTAssertEqual(resyncCount, 0)
     }
 
-    @MainActor func testCancelForTerminationCancelsWorkItemButKeepsInputPending() async {
+    @TerminalEngineActor func testCancelForTerminationCancelsWorkItemButKeepsInputPending() async {
         var resyncCount = 0
         let scheduler = GhosttyInputOutputResyncScheduler { resyncCount += 1 }
 

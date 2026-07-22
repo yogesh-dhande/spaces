@@ -11,9 +11,7 @@ import spacesdevicecore
 /// device runs at most one `listAgentSessions` pull at a time so a stale response can never overwrite
 /// newer state.
 final class RemoteAgentWatchServiceTests: XCTestCase {
-    private final class FakeStreamHandle: RemoteAgentOverviewStreamHandle {
-        func stop() {}
-    }
+    private final class FakeStreamHandle: RemoteAgentOverviewStreamHandle { func stop() {} }
 
     /// Scriptable transport: records every connection's callbacks so tests can fire overview signals
     /// and disconnects, serves a settable listing, and can gate listing pulls to observe concurrency.
@@ -179,20 +177,22 @@ final class RemoteAgentWatchServiceTests: XCTestCase {
 
     /// Store with one watch edge, service wired to the fake transport, connected with an applied
     /// baseline listing of `child-1` in `baselineStatus`.
-    @MainActor private func makeWatchedService(
-        transport: FakeTransport, recorder: DeliveryRecorder, baselineStatus: String
-    ) throws -> (service: RemoteAgentWatchService, store: SQLiteStore) {
+    @MainActor private func makeWatchedService(transport: FakeTransport, recorder: DeliveryRecorder, baselineStatus: String) throws -> (
+        service: RemoteAgentWatchService, store: SQLiteStore
+    ) {
         let (store, path) = try makeStoreAndPath()
-        try store.insertAgentRemoteSubscription(
-            subscriberTerminalSessionID: "sub-1", deviceID: "device-1", agentSessionID: "child-1", createdAt: "t")
+        try store.insertAgentRemoteSubscription(subscriberTerminalSessionID: "sub-1", deviceID: "device-1", agentSessionID: "child-1", createdAt: "t")
         transport.setListing([makeRow(status: baselineStatus)])
         let service = RemoteAgentWatchService(
-            databasePath: path, transport: transport.transport, deliver: { sessionID, line in recorder.record(sessionID, line) },
-            logError: { _ in })
+            databasePath: path, transport: transport.transport, deliver: { sessionID, line in recorder.record(sessionID, line) }, logError: { _ in })
         service.start()
         try waitUntil(message: "stream never connected") { service.debugStreamingDeviceIDs == ["device-1"] }
-        try waitUntil(message: "baseline listing never applied") {
-            service.debugSnapshot(deviceID: "device-1")?["child-1"]?.status == baselineStatus
+        try waitUntil(message: "baseline listing never applied") { service.debugSnapshot(deviceID: "device-1")?["child-1"]?.status == baselineStatus }
+        // The baseline mirror is persisted off the main actor, so the in-memory snapshot landing above
+        // no longer implies the row is durable. Wait for the persisted mirror before a test simulates a
+        // daemon restart by reading it back from a fresh service on the same database.
+        try waitUntil(message: "baseline was never persisted") {
+            (try? store.agentRemoteWatchBaselines())?["device-1"]?["child-1"]?.status == baselineStatus
         }
         return (service, store)
     }
@@ -334,6 +334,11 @@ final class RemoteAgentWatchServiceTests: XCTestCase {
         try store.deleteAgentRemoteSubscription(subscriberTerminalSessionID: "sub-1", deviceID: "device-1", agentSessionID: "child-1")
         service.reconcile()
         try waitUntil(message: "unwatched device's stream never closed") { service.debugStreamingDeviceIDs.isEmpty }
+        // Retiring the baseline deletes the persisted mirror off the main actor; wait for it to clear so
+        // the fresh service below cannot load a stale baseline and replay a spurious exit.
+        try waitUntil(message: "retired baseline was never cleared from the persisted mirror") {
+            (try? store.agentRemoteWatchBaselines())?["device-1"] == nil
+        }
 
         // Re-subscribe after the child exited: a fresh watch has nothing to diff against, so the
         // absent row must seed silently, not replay an exit from the retired baseline.
@@ -448,8 +453,7 @@ final class RemoteAgentWatchServiceTests: XCTestCase {
         // Give a wrongly-scheduled retry ample time to (incorrectly) fire another listing pull.
         let settleDeadline = Date().addingTimeInterval(0.3)
         while Date() < settleDeadline { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
-        XCTAssertEqual(
-            transport.listCalls, listCallsBeforeSignal + 1, "a device dropped for being unpaired must not get a follow-up listing pull")
+        XCTAssertEqual(transport.listCalls, listCallsBeforeSignal + 1, "a device dropped for being unpaired must not get a follow-up listing pull")
     }
 
     /// Store with one watch edge and a service connected with its first `listAgentSessions` pull gated,
@@ -459,13 +463,11 @@ final class RemoteAgentWatchServiceTests: XCTestCase {
         transport: FakeTransport, recorder: DeliveryRecorder, firstListing: [SpacesDeviceAgentSessionRow], gate: DispatchSemaphore
     ) throws -> (service: RemoteAgentWatchService, store: SQLiteStore) {
         let (store, path) = try makeStoreAndPath()
-        try store.insertAgentRemoteSubscription(
-            subscriberTerminalSessionID: "sub-1", deviceID: "device-1", agentSessionID: "child-1", createdAt: "t")
+        try store.insertAgentRemoteSubscription(subscriberTerminalSessionID: "sub-1", deviceID: "device-1", agentSessionID: "child-1", createdAt: "t")
         transport.setListGate(gate)
         transport.setListing(firstListing)
         let service = RemoteAgentWatchService(
-            databasePath: path, transport: transport.transport, deliver: { sessionID, line in recorder.record(sessionID, line) },
-            logError: { _ in })
+            databasePath: path, transport: transport.transport, deliver: { sessionID, line in recorder.record(sessionID, line) }, logError: { _ in })
         service.start()
         try waitUntil(message: "stream never connected") { service.debugStreamingDeviceIDs == ["device-1"] }
         try waitUntil(message: "first listing pull never started") { transport.listCalls == 1 }
@@ -490,8 +492,7 @@ final class RemoteAgentWatchServiceTests: XCTestCase {
         }
 
         // The child was spinning when validation fetched it; seed that before the gated listing applies.
-        service.seedBaseline(
-            deviceID: "device-1", childTerminalSessionID: "child-1", row: makeRow(status: AgentWindowStatus.spinning.rawValue))
+        service.seedBaseline(deviceID: "device-1", childTerminalSessionID: "child-1", row: makeRow(status: AgentWindowStatus.spinning.rawValue))
         XCTAssertEqual(service.debugSnapshot(deviceID: "device-1")?["child-1"]?.status, AgentWindowStatus.spinning.rawValue)
 
         gate.signal()
@@ -508,16 +509,14 @@ final class RemoteAgentWatchServiceTests: XCTestCase {
         let recorder = DeliveryRecorder()
         let gate = DispatchSemaphore(value: 0)
         // The child exited during the connect gap: the first listing has no row for it.
-        let (service, store) = try makeServiceWithGatedFirstListing(
-            transport: transport, recorder: recorder, firstListing: [], gate: gate)
+        let (service, store) = try makeServiceWithGatedFirstListing(transport: transport, recorder: recorder, firstListing: [], gate: gate)
         defer {
             transport.setListGate(nil)
             for _ in 0..<8 { gate.signal() }
             service.stop()
         }
 
-        service.seedBaseline(
-            deviceID: "device-1", childTerminalSessionID: "child-1", row: makeRow(status: AgentWindowStatus.spinning.rawValue))
+        service.seedBaseline(deviceID: "device-1", childTerminalSessionID: "child-1", row: makeRow(status: AgentWindowStatus.spinning.rawValue))
 
         gate.signal()
         try waitUntil(message: "exit from the connect gap was never delivered") {
@@ -540,8 +539,7 @@ final class RemoteAgentWatchServiceTests: XCTestCase {
         defer { service.stop() }
 
         // A second subscribe validation happens to fetch an older `waiting` row; the seed must be ignored.
-        service.seedBaseline(
-            deviceID: "device-1", childTerminalSessionID: "child-1", row: makeRow(status: AgentWindowStatus.waiting.rawValue))
+        service.seedBaseline(deviceID: "device-1", childTerminalSessionID: "child-1", row: makeRow(status: AgentWindowStatus.waiting.rawValue))
         XCTAssertEqual(
             service.debugSnapshot(deviceID: "device-1")?["child-1"]?.status, AgentWindowStatus.spinning.rawValue,
             "an existing baseline entry must not be clobbered by a seed")
@@ -553,5 +551,281 @@ final class RemoteAgentWatchServiceTests: XCTestCase {
             recorder.delivered.contains { $0.sessionID == "sub-1" && $0.line.contains("is blocked") }
         }
         XCTAssertEqual(recorder.delivered.count, 1)
+    }
+
+    /// A `seedBaseline` for a newly subscribed child that lands while `applyRows` is suspended on its
+    /// off-main watched-set read must not be dropped. `applyRows` reads the watched set before the seed
+    /// (so it omits the new child) and then filters the next snapshot to that stale set; blindly writing
+    /// it would drop the seeded child from the in-memory baseline, and the child's transition — carried in
+    /// the very listing being applied — would then be lost as a silent re-seed. The fix re-checks the
+    /// per-device snapshot generation after the suspension and, on a mismatch, aborts and coalesces a fresh
+    /// listing that re-reads both the rows and the watched set against the updated snapshot, so the child
+    /// survives and its `blocked` transition is delivered exactly once.
+    @MainActor func testSeedLandingMidApplyRowsSurvivesAndDeliversTransition() throws {
+        let transport = FakeTransport()
+        let recorder = DeliveryRecorder()
+        let (service, store) = try makeWatchedService(transport: transport, recorder: recorder, baselineStatus: AgentWindowStatus.spinning.rawValue)
+        defer {
+            service.didReadWatchedSetForTest = nil
+            service.stop()
+        }
+
+        // The listing being applied already shows `child-2` blocked (it went blocked in the connect gap).
+        // `child-1` stays spinning, so it never transitions and the only expected delivery is `child-2`'s.
+        transport.setListing([
+            makeRow(status: AgentWindowStatus.spinning.rawValue, terminalSessionID: "child-1"),
+            makeRow(status: AgentWindowStatus.waiting.rawValue, terminalSessionID: "child-2"),
+        ])
+
+        // The moment `applyRows` resumes from its watched-set read (which therefore already omits `child-2`),
+        // subscribe and seed `child-2` — reproducing a seed landing squarely in that suspension window. Fires
+        // once, so the coalesced re-pull's own `applyRows` proceeds against the now-stable snapshot.
+        final class Once { var fired = false }
+        let once = Once()
+        service.didReadWatchedSetForTest = { [weak service] deviceID in
+            guard !once.fired, let service else { return }
+            once.fired = true
+            try? store.insertAgentRemoteSubscription(
+                subscriberTerminalSessionID: "sub-2", deviceID: deviceID, agentSessionID: "child-2", createdAt: "t")
+            service.seedBaseline(
+                deviceID: deviceID, childTerminalSessionID: "child-2",
+                row: self.makeRow(status: AgentWindowStatus.spinning.rawValue, terminalSessionID: "child-2"))
+        }
+
+        transport.fireSignal(connection: 0)
+
+        try waitUntil(message: "seeded child dropped by the stale-watched-set replace; its blocked transition was lost") {
+            recorder.delivered.contains { $0.sessionID == "sub-2" && $0.line.contains("is blocked") }
+        }
+        // The seeded child must survive in the in-memory baseline (the bug drops it entirely).
+        try waitUntil(message: "seeded child never landed in the retained snapshot") {
+            service.debugSnapshot(deviceID: "device-1")?["child-2"]?.status == AgentWindowStatus.waiting.rawValue
+        }
+        XCTAssertEqual(recorder.delivered.count, 1, "child-2's blocked transition must be delivered exactly once")
+    }
+
+    /// Two rapid seeds — {child-1} already durable, then {child-1, child-2}, then {child-1, child-2, child-3}
+    /// — must leave the durable mirror at the latest union. Firing each seed's persist as an independent
+    /// detached write gives no ordering, so a later, larger snapshot could commit before an earlier one and
+    /// strand a child in the mirror; after a daemon restart that child's baseline would be missing and its
+    /// next transition swallowed. Serializing the per-device baseline writes makes the mirror converge to the
+    /// last in-memory snapshot regardless of task-completion order.
+    @MainActor func testRapidSeedsConvergeDurableMirrorToLatestUnion() throws {
+        let transport = FakeTransport()
+        let recorder = DeliveryRecorder()
+        let (service, store) = try makeWatchedService(transport: transport, recorder: recorder, baselineStatus: AgentWindowStatus.spinning.rawValue)
+        defer { service.stop() }
+
+        // Two seeds back-to-back on the main actor, each a superset of the last.
+        service.seedBaseline(
+            deviceID: "device-1", childTerminalSessionID: "child-2",
+            row: makeRow(status: AgentWindowStatus.spinning.rawValue, terminalSessionID: "child-2"))
+        service.seedBaseline(
+            deviceID: "device-1", childTerminalSessionID: "child-3",
+            row: makeRow(status: AgentWindowStatus.spinning.rawValue, terminalSessionID: "child-3"))
+
+        func mirroredChildren() -> Set<String> { Set(((try? store.agentRemoteWatchBaselines())?["device-1"] ?? [:]).keys) }
+        try waitUntil(message: "durable mirror never converged to the latest union of all three children") {
+            mirroredChildren() == ["child-1", "child-2", "child-3"]
+        }
+        // Convergence must be to the *settled* state, not a transient the union briefly passes through before an
+        // out-of-order write clobbers it back: assert the mirror stays at the union rather than regressing. An
+        // earlier, smaller snapshot committing after the latest one (the bug) would drop a child here.
+        let stabilityDeadline = Date().addingTimeInterval(0.3)
+        while Date() < stabilityDeadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+            XCTAssertEqual(
+                mirroredChildren(), ["child-1", "child-2", "child-3"],
+                "durable mirror regressed after converging — per-device baseline writes committed out of order")
+        }
+    }
+
+    /// A2 regression: `applyRows` bumps the per-device generation on every apply, even one whose listing
+    /// is byte-for-byte unchanged from the retained snapshot. If a seed's durable write is still queued
+    /// behind an earlier, slower write on that same device's baseline chain when the unchanged listing
+    /// lands, the spurious bump makes the seed's write look superseded before it ever runs: the seeded
+    /// child stays correctly in the in-memory snapshot (nothing there was wrong), but its baseline is
+    /// never persisted. Nothing else happens to rewrite the whole per-device mirror afterwards, so a
+    /// daemon restart before that loses the seed's baseline entirely and its first real transition is
+    /// swallowed as an initial observation instead of being delivered.
+    @MainActor func testUnchangedListingDoesNotSkipAQueuedSeedWrite() throws {
+        let transport = FakeTransport()
+        let recorder = DeliveryRecorder()
+        let (service, store) = try makeWatchedService(transport: transport, recorder: recorder, baselineStatus: AgentWindowStatus.spinning.rawValue)
+        defer { service.stop() }
+        let databasePath = try XCTUnwrap(currentDatabasePath)
+
+        try store.insertAgentRemoteSubscription(subscriberTerminalSessionID: "sub-x", deviceID: "device-1", agentSessionID: "child-x", createdAt: "t")
+        try store.insertAgentRemoteSubscription(subscriberTerminalSessionID: "sub-b", deviceID: "device-1", agentSessionID: "child-b", createdAt: "t")
+
+        // Hold an external write lock on the database on a second connection, so the next baseline write
+        // this test triggers blocks mid-flight trying to commit — the "slow prior write" already in
+        // flight on device-1's chain that the finding describes.
+        let lockAcquired = DispatchSemaphore(value: 0)
+        let releaseLock = DispatchSemaphore(value: 0)
+        let lockThreadFinished = DispatchSemaphore(value: 0)
+        let lockThread = Thread {
+            defer { lockThreadFinished.signal() }
+            guard let lockingStore = try? SQLiteStore(path: databasePath) else { return }
+            try? lockingStore.withTransaction {
+                lockAcquired.signal()
+                releaseLock.wait()
+            }
+        }
+        lockThread.start()
+        lockAcquired.wait()
+
+        // Seed child-x: its durable write (P) is chained behind the setup baseline's already-completed
+        // write, so it starts almost immediately once the run loop is pumped and then blocks trying to
+        // commit against the held external lock.
+        service.seedBaseline(
+            deviceID: "device-1", childTerminalSessionID: "child-x",
+            row: makeRow(status: AgentWindowStatus.spinning.rawValue, terminalSessionID: "child-x"))
+        // Pump the run loop just long enough for P to actually start and block in its `Task.detached`
+        // write (not merely be scheduled) before child-b is seeded. Without this, both seeds' generation
+        // bumps happen back-to-back on this same synchronous call stack before either write's chain-turn
+        // arrives, and child-b's write would already be stamped with the post-bump generation instead of
+        // genuinely queuing behind a still-in-flight P.
+        let priorWriteStartDeadline = Date().addingTimeInterval(0.1)
+        while Date() < priorWriteStartDeadline { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+        // Seed child-b: P is still blocked on the external lock, so child-b's write chains behind it and
+        // suspends at `await previous?.value` instead of running its generation check yet.
+        service.seedBaseline(
+            deviceID: "device-1", childTerminalSessionID: "child-b",
+            row: makeRow(status: AgentWindowStatus.spinning.rawValue, terminalSessionID: "child-b"))
+
+        // An unrelated listing pull lands on the same device while both writes are still queued. Every
+        // watched child (child-1, child-x, child-b) reports back exactly what is already in the in-memory
+        // snapshot, so nothing transitions — yet applyRows still bumps the generation for this apply.
+        transport.setListing([
+            makeRow(status: AgentWindowStatus.spinning.rawValue, terminalSessionID: "child-1"),
+            makeRow(status: AgentWindowStatus.spinning.rawValue, terminalSessionID: "child-x"),
+            makeRow(status: AgentWindowStatus.spinning.rawValue, terminalSessionID: "child-b"),
+        ])
+        transport.fireSignal(connection: 0)
+        // Give the unchanged listing's applyRows ample time to fully complete while P is still blocked on
+        // the external lock.
+        let settleDeadline = Date().addingTimeInterval(0.3)
+        while Date() < settleDeadline { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+        XCTAssertTrue(recorder.delivered.isEmpty, "an unchanged listing must not deliver any transition")
+
+        // Release the external lock: P's write lands, unblocking child-b's chained write.
+        releaseLock.signal()
+        try waitUntil(message: "the prior seed's baseline write (child-x) never landed") {
+            (try? store.agentRemoteWatchBaselines())?["device-1"]?["child-x"] != nil
+        }
+        // Give the now-unblocked chained child-b write ample time to run (or, pre-fix, to see itself as
+        // superseded and skip).
+        let chainSettleDeadline = Date().addingTimeInterval(0.3)
+        while Date() < chainSettleDeadline { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+        lockThreadFinished.wait()
+
+        XCTAssertNotNil(service.debugSnapshot(deviceID: "device-1")?["child-b"], "the seeded child must remain in the in-memory snapshot")
+        XCTAssertNotNil(
+            (try? store.agentRemoteWatchBaselines())?["device-1"]?["child-b"],
+            "an unchanged listing must not suppress a seed's still-queued durable baseline write")
+    }
+
+    /// Startup baseline load must persist its in-memory merge, not just apply it. The persisted mirror holds
+    /// device-1 → {child-1}; a `seedBaseline(child-2)` lands (as the subscribe path fires it) while `start()`'s
+    /// off-main baseline load is still in flight, so the load merges the persisted {child-1} into the seed's
+    /// {child-2} for an in-memory {child-1, child-2}. If the merge is not persisted, the durable mirror is
+    /// stranded — the seed's {child-2} write is superseded by the load's generation bump, so the mirror stays
+    /// at {child-1} — and a later daemon restart loses child-2's baseline and swallows its first transition.
+    /// The load's own later-chained, newer-generation write must carry the union to disk.
+    @MainActor func testStartupBaselineLoadPersistsSeedMergedUnion() throws {
+        let transport = FakeTransport()
+        let recorder = DeliveryRecorder()
+        let (store, path) = try makeStoreAndPath()
+        // Keep device-1 in the desired set so reconcile does not retire the loaded baseline.
+        try store.insertAgentRemoteSubscription(subscriberTerminalSessionID: "sub-1", deviceID: "device-1", agentSessionID: "child-1", createdAt: "t")
+        // The previous daemon run persisted device-1 → {child-1}.
+        try store.replaceAgentRemoteWatchBaseline(
+            deviceID: "device-1", baseline: ["child-1": makeRow(status: AgentWindowStatus.spinning.rawValue, terminalSessionID: "child-1")])
+
+        // Gate the post-load reconcile's first listing so its `applyRows` never runs and cannot rewrite the
+        // mirror out from under this test's durable assertion.
+        let gate = DispatchSemaphore(value: 0)
+        transport.setListGate(gate)
+        transport.setListing([])
+        let service = RemoteAgentWatchService(
+            databasePath: path, transport: transport.transport, deliver: { sessionID, line in recorder.record(sessionID, line) }, logError: { _ in })
+        defer {
+            transport.setListGate(nil)
+            for _ in 0..<8 { gate.signal() }
+            service.stop()
+        }
+        service.start()
+        // In the same main-actor turn — before the detached load can round-trip — seed child-2, reproducing the
+        // subscribe path firing a seed while start()'s baseline load is still in flight.
+        service.seedBaseline(
+            deviceID: "device-1", childTerminalSessionID: "child-2",
+            row: makeRow(status: AgentWindowStatus.spinning.rawValue, terminalSessionID: "child-2"))
+
+        // The load merges the persisted {child-1} into the seed's {child-2}.
+        try waitUntil(message: "startup load never merged the persisted baseline with the seed") {
+            service.debugSnapshot(deviceID: "device-1").map { Set($0.keys) } == ["child-1", "child-2"]
+        }
+        // The merged union must reach the durable mirror, not just memory.
+        func mirroredChildren() -> Set<String> { Set(((try? store.agentRemoteWatchBaselines())?["device-1"] ?? [:]).keys) }
+        try waitUntil(message: "durable mirror never converged to the seed-merged union {child-1, child-2}") {
+            mirroredChildren() == ["child-1", "child-2"]
+        }
+        // And it must stay there — not regress once a later, stale-generation write on the chain runs.
+        let stabilityDeadline = Date().addingTimeInterval(0.3)
+        while Date() < stabilityDeadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+            XCTAssertEqual(mirroredChildren(), ["child-1", "child-2"], "durable mirror regressed after converging to the seed-merged union")
+        }
+    }
+
+    /// A `seedBaseline` for a newly subscribed child that lands while `applyRows` is suspended on its off-main
+    /// exited-edge deletion — after `applyRows` captured the generation its (pre-seed) snapshot reflects — must
+    /// not have its durable baseline clobbered by that apply. The apply carries an exit for `child-1`, so it
+    /// suspends dropping that edge; the seed adds `child-2` and enqueues its own later-chained write of
+    /// {child-2}. The apply's baseline write must stay stamped with the pre-seed generation so it loses the
+    /// supersession gate to the seed's write, leaving `child-2` durable. Stamping a fresh re-read (the bug)
+    /// makes both writes carry the seed's generation, so the apply's pre-seed snapshot clobbers `child-2`.
+    @MainActor func testSeedLandingMidExitedEdgeDropKeepsChildDurable() throws {
+        let transport = FakeTransport()
+        let recorder = DeliveryRecorder()
+        let (service, store) = try makeWatchedService(transport: transport, recorder: recorder, baselineStatus: AgentWindowStatus.spinning.rawValue)
+        defer {
+            service.didDropExitedEdgesForTest = nil
+            service.stop()
+        }
+
+        // The moment `applyRows` finishes dropping `child-1`'s exited edge and before it enqueues its baseline
+        // write, subscribe and seed `child-2` — reproducing a seed landing squarely in that suspension window.
+        // Fires once so nothing re-seeds on any coalesced re-pull.
+        final class Once { var fired = false }
+        let once = Once()
+        service.didDropExitedEdgesForTest = { [weak service] deviceID in
+            guard !once.fired, let service else { return }
+            once.fired = true
+            try? store.insertAgentRemoteSubscription(
+                subscriberTerminalSessionID: "sub-2", deviceID: deviceID, agentSessionID: "child-2", createdAt: "t")
+            service.seedBaseline(
+                deviceID: deviceID, childTerminalSessionID: "child-2",
+                row: self.makeRow(status: AgentWindowStatus.spinning.rawValue, terminalSessionID: "child-2"))
+        }
+
+        // The listing omits child-1: it exited, driving the applyRows exited-edge drop the seam hooks.
+        transport.setListing([])
+        transport.fireSignal(connection: 0)
+
+        // The seeded child must reach the durable mirror. Pre-fix the apply's write (its pre-seed {} snapshot)
+        // carries the seed's re-read generation and clobbers child-2 back out of the mirror.
+        try waitUntil(message: "seeded child's durable baseline was clobbered by the exiting apply's write") {
+            (try? store.agentRemoteWatchBaselines())?["device-1"]?["child-2"] != nil
+        }
+        // And it must stay durable — not regress once the apply's chained write runs.
+        let stabilityDeadline = Date().addingTimeInterval(0.3)
+        while Date() < stabilityDeadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+            XCTAssertNotNil(
+                (try? store.agentRemoteWatchBaselines())?["device-1"]?["child-2"],
+                "seeded child's durable baseline regressed after the exiting apply's chained write ran")
+        }
     }
 }
