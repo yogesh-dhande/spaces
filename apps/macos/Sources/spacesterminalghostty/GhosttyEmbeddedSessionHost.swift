@@ -442,11 +442,13 @@
         public func detach(clientID: String) throws {
             let detachedClientWasOwner = isOwner(clientID: clientID)
             try TerminalSessionPersistence.detachClient(id: clientID, paths: paths, detachedAt: TerminalSessionTimestamp.string(from: Date()))
-            // Invalidate synchronously after the committed detach so the ownership-successor reads below reseed
-            // from committed truth (the detached client gone) rather than the pre-detach cache. Without this the
-            // owner-successor derivation would still see the just-detached owner and skip the transfer-back.
-            invalidateAttachmentSnapshotCache()
-            var remainingOwnerClientID = activeOwnerClientID()
+            // Derive the ownership successor from the current in-memory snapshot (enforcement's source), treating
+            // the just-detached client as gone — NOT by reseeding from the durable mirror. During a pending
+            // queued stale-client expiry the mirror is still pre-expiry, so a reseed here would see the
+            // already-cache-expired stale owner as still owning and wrongly skip the transfer-back, clobbering
+            // the tick's optimistic cache. `activeLocalWindowClientID(excluding:)` reads the same cache.
+            let remainingActiveAttachments = currentActiveAttachments().filter { $0.clientID != clientID }
+            var remainingOwnerClientID = remainingActiveAttachments.first(where: { $0.mode == .owner })?.clientID
             if detachedClientWasOwner, remainingOwnerClientID == nil, let localOwnerClientID = activeLocalWindowClientID(excluding: clientID) {
                 let transferredAt = TerminalSessionTimestamp.string(from: Date())
                 try TerminalSessionPersistence.transferOwnership(
@@ -454,6 +456,9 @@
                 remainingOwnerClientID = localOwnerClientID
                 advanceOwnerEpoch(reason: "detach_transfer")
             }
+            // Invalidate synchronously AFTER the committed detach (and optional transfer) so same-call-stack
+            // reads below and the broadcast in `postAttachmentStateDidChange` reseed from committed truth.
+            invalidateAttachmentSnapshotCache()
             if Self.shouldClearFocusAfterDetachingClient(
                 detachedClientWasOwner: detachedClientWasOwner, remainingOwnerClientID: remainingOwnerClientID)
             {
@@ -1378,12 +1383,17 @@
             // Keep only fresh heartbeats: an entry older than the cutoff can no longer protect a client and
             // would otherwise accumulate for the daemon's lifetime.
             latestRemoteClientHeartbeat = latestRemoteClientHeartbeat.filter { $0.value >= cutoff }
-            guard let databaseStaleClientIDs = try? TerminalSessionPersistence.staleRemoteClientIDs(paths: paths, now: now),
-                !databaseStaleClientIDs.isEmpty
+            guard let databaseStaleClients = try? TerminalSessionPersistence.staleRemoteClients(paths: paths, now: now),
+                !databaseStaleClients.isEmpty
             else {
                 expiredRemoteClientIDs.removeAll(keepingCapacity: true)
                 return []
             }
+            let databaseStaleClientIDs = databaseStaleClients.map(\.clientID)
+            // The `lease_refreshed_at` each stale row currently carries, keyed by client id. Carried into the
+            // queued `expireClients` transaction so its per-client detach is a compare-and-set: a client whose
+            // lease moved between this decision and the commit is skipped rather than re-disconnected.
+            let observedLeaseByClientID = Dictionary(databaseStaleClients.map { ($0.clientID, $0.leaseRefreshedAt) }, uniquingKeysWith: { first, _ in first })
             // A client that reconnected (fresh DB lease) or whose durable detach has committed drops out of
             // the DB candidate set; forget it so a later genuine lapse can be expired again.
             expiredRemoteClientIDs.formIntersection(databaseStaleClientIDs)
@@ -1419,19 +1429,33 @@
             } else {
                 ownershipTransferTarget = nil
             }
+            // Carry each stale client's observed lease into the queued transaction so its detach is a
+            // compare-and-set. `observedLeaseByClientID` always contains every id in `staleClientIDs` (both
+            // derive from the same DB read), so the compactMap never drops a client.
+            let expiringClients: [TerminalSessionPersistence.StaleRemoteClient] = staleClientIDs.compactMap { clientID in
+                guard let leaseRefreshedAt = observedLeaseByClientID[clientID] else { return nil }
+                return .init(clientID: clientID, leaseRefreshedAt: leaseRefreshedAt)
+            }
             // Enqueue the detaches and the (optional) ownership transfer as ONE atomic transaction
-            // (`expireClients`) so a partial commit can never leave durable state ownerless. On ANY failure,
-            // hop back to the engine and un-mark these clients in `expiredRemoteClientIDs` so the next 1s timer
-            // tick re-derives them from the still-stale DB rows and re-enqueues the whole expiry. That retry is
-            // sound because the failed transaction rolled back untouched, so the next tick re-derives the
-            // identical decision. Without the un-mark, a swallowed failure would leave the client stuck in
-            // `expiredRemoteClientIDs` (never retried) — and a failed transfer would leave no durable owner
-            // while the in-memory `ownerEpoch` has already advanced.
+            // (`expireClients`) so a partial commit can never leave durable state ownerless. Two distinct
+            // post-write signals hop back to the engine:
+            //   - THROWN error: a genuine write failure that rolled the transaction back untouched. Un-mark the
+            //     clients so the next 1s tick re-derives the IDENTICAL decision from the still-stale rows and
+            //     retries the whole expiry (`rearmStaleClientExpiryAfterWriteFailure`).
+            //   - `.superseded`: the transaction COMMITTED whatever was still valid, but a synchronous
+            //     engine-side write (takeover, detach, re-attach) moved durable state out from under the
+            //     decision, so some/all of it was skipped. Retrying the SAME decision would be wrong — instead
+            //     reconcile: un-mark and reseed the optimistic cache from committed truth
+            //     (`reconcileStaleClientExpiryAfterSupersededDecision`), letting the next tick derive a FRESH
+            //     decision. Keeping these paths separate is load-bearing: routing supersession through the
+            //     failure retry would re-apply a stale decision and could stomp a legitimate new owner.
             enqueuePersistenceWrite { [weak self] in
                 do {
-                    try TerminalSessionPersistence.expireClients(
-                        clientIDs: staleClientIDs, transferOwnershipTo: ownershipTransferTarget, sessionID: sessionID, paths: paths,
-                        detachedAt: detachedAt)
+                    let outcome = try TerminalSessionPersistence.expireClients(
+                        expiringClients, transferOwnershipTo: ownershipTransferTarget, sessionID: sessionID, paths: paths, detachedAt: detachedAt)
+                    if outcome == .superseded {
+                        Task { @TerminalEngineActor in self?.reconcileStaleClientExpiryAfterSupersededDecision(clientIDs: staleClientIDs) }
+                    }
                 } catch {
                     let failureDescription = String(describing: error)
                     Task { @TerminalEngineActor in self?.rearmStaleClientExpiryAfterWriteFailure(clientIDs: staleClientIDs, error: failureDescription) }
@@ -1462,6 +1486,20 @@
         /// retry. Called only from the persistence queue's engine hop on write failure.
         private func rearmStaleClientExpiryAfterWriteFailure(clientIDs: [String], error: String) {
             trace("stale_client_expiry_write_failed clients=\(clientIDs) error=\(error)")
+            expiredRemoteClientIDs.subtract(clientIDs)
+            invalidateAttachmentSnapshotCache()
+        }
+
+        /// Reconciles the optimistic expiry cache after `expireClients` reported `.superseded`: the durable world
+        /// moved out from under the decision (a client refreshed its lease, a different client took ownership via
+        /// takeover, or the transfer target detached in the race window). Distinct from the write-FAILURE path
+        /// (`rearmStaleClientExpiryAfterWriteFailure`): the transaction did NOT fail and did NOT roll back — it
+        /// committed whatever remained valid. Retrying the SAME decision would re-apply stale intent (and could
+        /// stomp a legitimate new owner), so instead un-mark these clients — letting the next tick derive a FRESH
+        /// decision from current durable rows — and reseed the optimistically-mutated cache from committed truth.
+        /// Called only from the persistence queue's engine hop on the `.superseded` signal.
+        private func reconcileStaleClientExpiryAfterSupersededDecision(clientIDs: [String]) {
+            trace("stale_client_expiry_superseded clients=\(clientIDs)")
             expiredRemoteClientIDs.subtract(clientIDs)
             invalidateAttachmentSnapshotCache()
         }

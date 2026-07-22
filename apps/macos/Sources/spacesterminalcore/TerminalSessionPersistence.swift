@@ -631,10 +631,23 @@ public enum TerminalSessionPersistence {
         try readAttachmentSnapshot(paths: paths).liveAttachments(now: now, remoteClientLeaseInterval: remoteClientLeaseInterval)
     }
 
-    public static func staleRemoteClientIDs(
+    /// A lease-lapsed remote client together with the exact `lease_refreshed_at` the expiry decision observed.
+    /// The observed lease is carried into `expireClients` so the durable detach is a compare-and-set: a client
+    /// whose lease moved (it re-attached or heartbeated) between the decision and the queued commit is skipped
+    /// rather than re-disconnected.
+    public struct StaleRemoteClient: Sendable, Equatable {
+        public let clientID: String
+        public let leaseRefreshedAt: String
+        public init(clientID: String, leaseRefreshedAt: String) {
+            self.clientID = clientID
+            self.leaseRefreshedAt = leaseRefreshedAt
+        }
+    }
+
+    public static func staleRemoteClients(
         paths: TerminalSessionPaths, now: Date = Date(),
         remoteClientLeaseInterval: TimeInterval = TerminalSessionPersistence.remoteClientLeaseInterval
-    ) throws -> [String] {
+    ) throws -> [StaleRemoteClient] {
         let root = normalizedRootDirectory(paths.rootDirectory)
         return try withDatabase(paths: paths) { database in
             let rows = try database.queryRows(
@@ -650,10 +663,19 @@ public enum TerminalSessionPersistence {
                     """, bindings: [root, TerminalClientKind.localWindow.rawValue])
             let cutoff = now.addingTimeInterval(-remoteClientLeaseInterval)
             return rows.compactMap { row in
-                guard let lastSeenAt = parseISO8601(row[1]), lastSeenAt >= cutoff else { return row[0] }
+                guard let lastSeenAt = parseISO8601(row[1]), lastSeenAt >= cutoff else {
+                    return StaleRemoteClient(clientID: row[0], leaseRefreshedAt: row[1])
+                }
                 return nil
             }
         }
+    }
+
+    public static func staleRemoteClientIDs(
+        paths: TerminalSessionPaths, now: Date = Date(),
+        remoteClientLeaseInterval: TimeInterval = TerminalSessionPersistence.remoteClientLeaseInterval
+    ) throws -> [String] {
+        try staleRemoteClients(paths: paths, now: now, remoteClientLeaseInterval: remoteClientLeaseInterval).map(\.clientID)
     }
 
     public static func transferOwnership(sessionID: String, newOwnerClientID: String, paths: TerminalSessionPaths, transferredAt: String) throws {
@@ -702,36 +724,77 @@ public enum TerminalSessionPersistence {
         }
     }
 
+    /// Result of an `expireClients` transaction. `.superseded` is NOT a failure: the transaction committed
+    /// whatever remained valid, but the durable world moved out from under the original decision (a client
+    /// refreshed its lease, a different client took ownership, or the transfer target detached in the race
+    /// window), so the caller must reseed its optimistic cache and re-derive a fresh decision on the next tick
+    /// rather than retry this exact — now stale — decision.
+    public enum ExpireClientsOutcome: Sendable, Equatable {
+        case applied
+        case superseded
+    }
+
     /// Atomically expires a set of stale clients — disconnecting each client and detaching its still-active
     /// attachments — and, optionally, transfers ownership to `newOwnerClientID`, all inside ONE transaction.
-    /// The detach and transfer statement bodies mirror `detachClient`/`transferOwnership`; consolidating them
-    /// here makes the stale-client expiry an all-or-nothing durable unit. A partial commit (some detaches
-    /// landed, a later statement failed) could otherwise leave durable state ownerless — the detached owner
-    /// no longer appears in `staleRemoteClientIDs` or `activeAttachments`, so no later tick could re-derive the
-    /// transfer. With a single transaction any failure rolls back untouched, so the engine's un-mark retry
-    /// re-derives the identical decision from the still-stale rows on the next tick. Kept separate from
+    /// Consolidating them here makes the stale-client expiry an all-or-nothing durable unit: a partial commit
+    /// (some detaches landed, a later statement failed) could otherwise leave durable state ownerless — the
+    /// detached owner no longer appears in `staleRemoteClients` or `activeAttachments`, so no later tick could
+    /// re-derive the transfer. With a single transaction any genuine failure rolls back untouched.
+    ///
+    /// Every mutation is a compare-and-set against the state the expiry decision observed, because the decision
+    /// is made on the engine but the write is queued and can land after a synchronous engine-side attachment
+    /// write (a takeover, a detach, a re-attach/heartbeat) has changed durable state:
+    ///   - Each client detach requires the client's `lease_refreshed_at` to still equal the observed lease and
+    ///     the client to still be connected; a client that came back is skipped (not detached), never an error.
+    ///   - The ownership transfer is applied only when the durable active owner is still one of the expired
+    ///     clients (no one else took over) AND the target still has an active attachment with a connected
+    ///     client row. A target that detached in the window is NOT resurrected with a fresh owner row — that
+    ///     ghost owner (whose client is gone) would pin the session open via `hasActiveAttachments`.
+    /// When any compare-and-set skips, the transaction still commits what it safely can and returns
+    /// `.superseded` so the caller reconciles rather than retries the stale decision. Kept separate from
     /// `detachClient`/`transferOwnership`, which still serve their own single-purpose callers.
+    @discardableResult
     public static func expireClients(
-        clientIDs: [String], transferOwnershipTo newOwnerClientID: String?, sessionID: String, paths: TerminalSessionPaths, detachedAt: String
-    ) throws {
+        _ clients: [StaleRemoteClient], transferOwnershipTo newOwnerClientID: String?, sessionID: String, paths: TerminalSessionPaths,
+        detachedAt: String
+    ) throws -> ExpireClientsOutcome {
         let root = normalizedRootDirectory(paths.rootDirectory)
-        try withDatabase(paths: paths) { database in
+        return try withDatabase(paths: paths) { database in
             try database.withImmediateTransaction {
-                for clientID in clientIDs {
-                    try database.execute(
+                var worldMoved = false
+                // Capture the durable active owner BEFORE any detach so the transfer supersession guard can tell
+                // whether ownership is still held by one of the clients we decided to expire. Read after the
+                // detach loop it would always be nil in the normal case (the stale owner we just detached),
+                // defeating the guard.
+                let preDetachOwnerClientID = try database.queryRow(
+                    sql: """
+                        SELECT client_id FROM terminal_attachments
+                        WHERE root_directory = ? AND mode = 'owner' AND detached_at IS NULL
+                        """, bindings: [root])?.first
+
+                for client in clients {
+                    // Compare-and-set the detach against the observed lease: a client that re-attached or
+                    // refreshed its lease (different lease_refreshed_at) — or already got disconnected — since
+                    // the decision matches nothing here, so it is left live. Skipping flags the decision
+                    // superseded so the caller reseeds; it is not an error.
+                    let clientChanges = try database.executeReturningChanges(
                         sql: """
                             UPDATE terminal_clients
                             SET disconnected_at = ?
-                            WHERE root_directory = ? AND client_id = ?
-                            """, bindings: [detachedAt, root, clientID])
+                            WHERE root_directory = ? AND client_id = ? AND disconnected_at IS NULL AND lease_refreshed_at = ?
+                            """, bindings: [detachedAt, root, client.clientID, client.leaseRefreshedAt])
+                    guard clientChanges > 0 else {
+                        worldMoved = true
+                        continue
+                    }
                     try database.execute(
                         sql: """
                             UPDATE terminal_attachments
                             SET detached_at = ?
                             WHERE root_directory = ? AND client_id = ? AND detached_at IS NULL
-                            """, bindings: [detachedAt, root, clientID])
+                            """, bindings: [detachedAt, root, client.clientID])
                 }
-                guard let newOwnerClientID else { return }
+                guard let newOwnerClientID else { return worldMoved ? .superseded : .applied }
                 let canonicalSessionID = try existingSessionID(rootDirectory: root, database: database)
                 guard canonicalSessionID == sessionID else { throw TerminalSessionPersistenceError.unknownSession(sessionID) }
                 guard
@@ -739,6 +802,13 @@ public enum TerminalSessionPersistence {
                         sql: "SELECT client_id FROM terminal_clients WHERE root_directory = ? AND client_id = ?", bindings: [root, newOwnerClientID])
                         != nil
                 else { throw TerminalSessionPersistenceError.unknownClient(newOwnerClientID) }
+
+                // Transfer supersession guard: only hand ownership away from an owner that is still one of the
+                // clients we decided to expire. If a different client became the active owner between the
+                // decision and this commit (e.g. a mobile takeover that was ack'd ok), leave it untouched —
+                // stomping it would durably demote a legitimate new owner that enforcement already accepted.
+                let expiredClientIDs = Set(clients.map(\.clientID))
+                guard let preDetachOwnerClientID, expiredClientIDs.contains(preDetachOwnerClientID) else { return .superseded }
 
                 try database.execute(
                     sql: """
@@ -750,26 +820,23 @@ public enum TerminalSessionPersistence {
                           AND client_id <> ?
                         """, bindings: [root, newOwnerClientID])
 
-                if let existing = try database.queryRow(
+                // Promote the target only if it still has an active attachment whose client row is connected.
+                // Never INSERT a fresh owner row: a target that detached in the race window must not be
+                // resurrected as a ghost durable owner (its client row is gone) that pins the session open.
+                let promoted = try database.executeReturningChanges(
                     sql: """
-                        SELECT id
-                        FROM terminal_attachments
+                        UPDATE terminal_attachments
+                        SET session_id = ?, mode = 'owner'
                         WHERE root_directory = ? AND client_id = ? AND detached_at IS NULL
-                        """, bindings: [root, newOwnerClientID])
-                {
-                    try database.execute(
-                        sql: """
-                            UPDATE terminal_attachments
-                            SET session_id = ?, mode = 'owner'
-                            WHERE id = ?
-                            """, bindings: [sessionID, existing[0]])
-                } else {
-                    try database.execute(
-                        sql: """
-                            INSERT INTO terminal_attachments(id, root_directory, session_id, client_id, mode, attached_at, detached_at)
-                            VALUES (?, ?, ?, ?, 'owner', ?, NULL)
-                            """, bindings: [UUID().uuidString, root, sessionID, newOwnerClientID, detachedAt])
-                }
+                          AND EXISTS (
+                            SELECT 1 FROM terminal_clients c
+                            WHERE c.root_directory = terminal_attachments.root_directory
+                              AND c.client_id = terminal_attachments.client_id
+                              AND c.disconnected_at IS NULL
+                          )
+                        """, bindings: [sessionID, root, newOwnerClientID])
+                guard promoted > 0 else { return .superseded }
+                return worldMoved ? .superseded : .applied
             }
         }
     }

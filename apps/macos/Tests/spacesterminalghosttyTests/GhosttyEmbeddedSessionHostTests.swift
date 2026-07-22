@@ -2908,6 +2908,125 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         XCTAssertEqual(outcome.expiredOwner.errorCode, .ownershipRejected)
     }
 
+    /// Lost-update race: a queued stale-owner expiry must not overwrite a takeover that committed synchronously
+    /// after the expiry decision. The tick decides to transfer ownership from the stale remote owner R to the
+    /// local window A and optimistically promotes A in its cache, but its atomic `expireClients` write is only
+    /// enqueued (parked here on the held persistence queue). Before it commits, remote viewer B takes over — a
+    /// synchronous transfer that is ack'd ok, making B the durable owner. When the queued expiry finally runs it
+    /// must SKIP the transfer (B is not one of the expired clients) and leave B the durable owner, only detaching
+    /// the genuinely stale R. Pre-fix `expireClients` demoted every active owner but the target and promoted A
+    /// unconditionally, durably stomping B's ack'd takeover — a permanent inversion that survived handoff.
+    func testQueuedStaleOwnerExpiryDoesNotOverwriteSynchronousTakeover() async throws {
+        try await TerminalEngineActor.run {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+
+            let paths = TerminalSessionPaths(rootDirectory: root.path)
+            try paths.ensureDirectories()
+            let launchConfiguration = TerminalSessionLaunchConfiguration(
+                sessionID: "session-takeover-race", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original", shell: "/bin/zsh",
+                command: "zsh", createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+            let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+            try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+            let localClient = TerminalClient(
+                id: "local-window", kind: .localWindow, identity: .init(label: "Spaces window"), connectedAt: "2000-01-01T00:00:00Z")
+            let staleRemoteOwner = TerminalClient(
+                id: "stale-remote-owner", kind: .remoteViewer, identity: .init(label: "iPad", deviceName: "iPad"), connectedAt: "2000-01-01T00:00:00Z")
+            // B attaches with a fresh lease so it is never itself a stale-expiry candidate.
+            let takeoverClient = TerminalClient(
+                id: "takeover-remote", kind: .remoteViewer, identity: .init(label: "iPhone", deviceName: "iPhone"),
+                connectedAt: TerminalSessionTimestamp.string(from: Date()))
+            try TerminalSessionPersistence.attachClient(
+                sessionID: launchConfiguration.sessionID, client: localClient, mode: .owner, paths: paths, attachedAt: "2000-01-01T00:00:00Z")
+            try TerminalSessionPersistence.attachClient(
+                sessionID: launchConfiguration.sessionID, client: staleRemoteOwner, mode: .viewer, paths: paths, attachedAt: "2000-01-01T00:00:00Z")
+            try TerminalSessionPersistence.attachClient(
+                sessionID: launchConfiguration.sessionID, client: takeoverClient, mode: .viewer, paths: paths,
+                attachedAt: TerminalSessionTimestamp.string(from: Date()))
+            // The stale remote becomes the owner (2000-era lease makes it stale at real-now).
+            try TerminalSessionPersistence.transferOwnership(
+                sessionID: launchConfiguration.sessionID, newOwnerClientID: staleRemoteOwner.id, paths: paths, transferredAt: "2000-01-01T00:00:01Z")
+
+            // Park the persistence queue so the tick's atomic expiry is enqueued but cannot commit yet.
+            let gate = host.debugHoldPersistenceQueue()
+            let expired = host.expireStaleRemoteClientsIfNeeded(now: Date())
+            XCTAssertEqual(expired, [staleRemoteOwner.id], "the tick must decide to expire the stale remote owner (transferring to the local window)")
+
+            // B takes over synchronously (not via the parked queue); its transfer commits and is ack'd ok.
+            let takeover = host.handleControlRequest(.init(command: "takeover", clientID: takeoverClient.id))
+            XCTAssertTrue(takeover.ok, "the takeover must be accepted before the queued expiry commits")
+            XCTAssertEqual(
+                (try TerminalSessionPersistence.activeAttachments(paths: paths)).first(where: { $0.mode == .owner })?.clientID, takeoverClient.id,
+                "B's takeover is durably the owner before the expiry runs")
+
+            // Release the queue: the parked expiry now commits against a world where B owns the session.
+            gate.signal()
+            host.debugDrainPersistenceQueue()
+
+            let activeAttachments = try TerminalSessionPersistence.activeAttachments(paths: paths)
+            XCTAssertEqual(
+                activeAttachments.first(where: { $0.mode == .owner })?.clientID, takeoverClient.id,
+                "the queued expiry must not overwrite B's ack'd takeover — B stays the durable owner")
+            XCTAssertFalse(
+                activeAttachments.contains { $0.clientID == staleRemoteOwner.id }, "the genuinely stale remote owner is still detached by the expiry")
+            XCTAssertEqual(host.activeOwnerClientID(), takeoverClient.id, "the cache agrees B is the owner (no regression off the reseeded durable state)")
+            XCTAssertTrue(host.isOwner(clientID: takeoverClient.id), "B is accepted as owner by enforcement")
+            XCTAssertFalse(host.isOwner(clientID: localClient.id), "the local window A must not have been promoted by the superseded transfer")
+        }
+    }
+
+    /// Lost-update race (resurrection): a queued stale-owner expiry that transfers ownership to a local window
+    /// target A must not resurrect A as a durable owner if A detached in the window between the decision and the
+    /// commit. The tick decides to transfer R → A and enqueues its atomic `expireClients` (parked here); A then
+    /// detaches synchronously. When the expiry commits, the target has no active attachment, so the transfer is
+    /// skipped and no owner row is created. Pre-fix `expireClients` INSERTed a brand-new active owner row for A —
+    /// a ghost owner whose client row is disconnected — which pins the session open via `hasActiveAttachments`
+    /// and blocks auto-close. After the fix no active durable attachment remains, so the session can auto-close.
+    func testQueuedStaleOwnerExpiryDoesNotResurrectDetachedTransferTarget() async throws {
+        try await TerminalEngineActor.run {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+
+            let paths = TerminalSessionPaths(rootDirectory: root.path)
+            try paths.ensureDirectories()
+            let launchConfiguration = TerminalSessionLaunchConfiguration(
+                sessionID: "session-resurrect-race", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original", shell: "/bin/zsh",
+                command: "zsh", createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+            let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+            try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+            let localClient = TerminalClient(
+                id: "local-window", kind: .localWindow, identity: .init(label: "Spaces window"), connectedAt: "2000-01-01T00:00:00Z")
+            let staleRemoteOwner = TerminalClient(
+                id: "stale-remote-owner", kind: .remoteViewer, identity: .init(label: "iPad", deviceName: "iPad"), connectedAt: "2000-01-01T00:00:00Z")
+            try TerminalSessionPersistence.attachClient(
+                sessionID: launchConfiguration.sessionID, client: localClient, mode: .owner, paths: paths, attachedAt: "2000-01-01T00:00:00Z")
+            try TerminalSessionPersistence.attachClient(
+                sessionID: launchConfiguration.sessionID, client: staleRemoteOwner, mode: .viewer, paths: paths, attachedAt: "2000-01-01T00:00:00Z")
+            try TerminalSessionPersistence.transferOwnership(
+                sessionID: launchConfiguration.sessionID, newOwnerClientID: staleRemoteOwner.id, paths: paths, transferredAt: "2000-01-01T00:00:01Z")
+
+            // Park the queue so the tick's atomic expiry (transfer target = the local window A) is enqueued but
+            // cannot commit yet.
+            let gate = host.debugHoldPersistenceQueue()
+            let expired = host.expireStaleRemoteClientsIfNeeded(now: Date())
+            XCTAssertEqual(expired, [staleRemoteOwner.id], "the tick must decide to expire the stale remote owner (transferring to the local window)")
+
+            // The transfer target A detaches synchronously before the parked expiry commits.
+            try host.detach(clientID: localClient.id)
+
+            // Release the queue: the parked expiry now commits against a world where the target has detached.
+            gate.signal()
+            host.debugDrainPersistenceQueue()
+
+            let activeAttachments = try TerminalSessionPersistence.activeAttachments(paths: paths)
+            XCTAssertTrue(
+                activeAttachments.isEmpty,
+                "the detached transfer target must not be resurrected as a ghost owner — no active durable attachment remains, so the session can auto-close")
+        }
+    }
+
     /// Finding B4: a failed exited-state persist must retry, not leave the durable runtime row stuck at
     /// `.running` forever while the final payload says terminated. Termination cancels the runtime-state
     /// timer, so nothing else re-persists. Breaking the database makes terminate()'s exited write fail;
@@ -3259,10 +3378,16 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         try TerminalSessionPersistence.attachClient(
             sessionID: launchConfiguration.sessionID, client: ownerClient, mode: .owner, paths: paths, attachedAt: "2026-05-17T00:00:00Z")
 
+        // The observed leases equal each client's attach time (attachClient seeds lease_refreshed_at from it),
+        // so the per-client compare-and-set detaches match; this test exercises transaction atomicity, not the
+        // supersession skips.
+        let expiringOwner = TerminalSessionPersistence.StaleRemoteClient(clientID: ownerClient.id, leaseRefreshedAt: "2026-05-17T00:00:00Z")
+        let expiringViewer = TerminalSessionPersistence.StaleRemoteClient(clientID: viewerClient.id, leaseRefreshedAt: "2026-05-17T00:00:00Z")
+
         // An unknown transfer target throws only after both detach UPDATEs have run inside the transaction.
         XCTAssertThrowsError(
             try TerminalSessionPersistence.expireClients(
-                clientIDs: [ownerClient.id, viewerClient.id], transferOwnershipTo: "client-that-does-not-exist",
+                [expiringOwner, expiringViewer], transferOwnershipTo: "client-that-does-not-exist",
                 sessionID: launchConfiguration.sessionID, paths: paths, detachedAt: "2026-05-17T00:01:05Z"))
         let afterFailure = try TerminalSessionPersistence.activeAttachments(paths: paths)
         XCTAssertTrue(
@@ -3273,9 +3398,10 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             afterFailure.first(where: { $0.mode == .owner })?.clientID, ownerClient.id, "the owner must be unchanged after the rolled-back expiry")
 
         // A single valid call commits both detaches plus the ownership transfer atomically.
-        try TerminalSessionPersistence.expireClients(
-            clientIDs: [ownerClient.id, viewerClient.id], transferOwnershipTo: localClient.id, sessionID: launchConfiguration.sessionID, paths: paths,
+        let outcome = try TerminalSessionPersistence.expireClients(
+            [expiringOwner, expiringViewer], transferOwnershipTo: localClient.id, sessionID: launchConfiguration.sessionID, paths: paths,
             detachedAt: "2026-05-17T00:01:06Z")
+        XCTAssertEqual(outcome, .applied, "the valid call applied every detach and the transfer with no supersession")
         let afterSuccess = try TerminalSessionPersistence.activeAttachments(paths: paths)
         XCTAssertFalse(afterSuccess.contains { $0.clientID == ownerClient.id }, "the committed expiry must detach the stale owner")
         XCTAssertFalse(afterSuccess.contains { $0.clientID == viewerClient.id }, "the committed expiry must detach the stale viewer")
