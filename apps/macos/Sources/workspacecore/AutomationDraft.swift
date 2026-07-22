@@ -1,4 +1,5 @@
 import Foundation
+import spacesterminalcore
 
 /// Raised when an automation's editable fields fail validation at the create/update boundary. Carries a
 /// human-readable explanation so the boundary that rejected the draft (a profile command or a Device API
@@ -60,7 +61,9 @@ public struct AutomationDraft: Sendable, Equatable {
     ///   directory its script runs in).
     /// - an `agent`-kind draft requires a non-empty `agentCommand`, `agentPrompt`, and `workspaceID` instead;
     ///   it has no `workingDirectory` of its own — the coding agent's location comes from `workspaceID` — so
-    ///   none is required (the editor has no cwd field for this kind; see commit 11).
+    ///   none is required (the editor has no cwd field for this kind; see commit 11). The `agentCommand` must
+    ///   launch a supported coding agent (`AgentSpawnCommandGate`), so an unspawnable command is rejected at
+    ///   save time rather than failing every run at launch.
     /// - a positive `timeoutSeconds` when present (a non-positive budget would time a run out instantly).
     /// - a cron automation must carry a cron expression that `AutomationCronSchedule.parse` accepts.
     /// - a manual automation must not carry a cron expression (it has no schedule).
@@ -96,6 +99,15 @@ public struct AutomationDraft: Sendable, Equatable {
         case .agent:
             guard let agentCommand, !agentCommand.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 throw AutomationValidationError("An agent automation requires an agent command.")
+            }
+            // Reject a command that does not launch a supported coding agent at save time, so a typo
+            // (e.g. `bash`) is caught here rather than failing every run at launch. This is the same gate
+            // the executor applies before spawning; surfacing it as an `AutomationValidationError` keeps a
+            // rejection uniform with the other authoring errors the create/update boundary relays.
+            do {
+                _ = try AgentSpawnCommandGate.resolveSpawnableAgent(command: agentCommand)
+            } catch {
+                throw AutomationValidationError(error.localizedDescription)
             }
             guard let agentPrompt, !agentPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 throw AutomationValidationError("An agent automation requires a prompt.")

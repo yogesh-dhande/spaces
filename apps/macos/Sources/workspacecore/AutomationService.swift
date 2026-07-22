@@ -208,8 +208,13 @@ public final class AutomationService: @unchecked Sendable {
             agentPrompt: validated.agentPrompt, workspaceID: validated.workspaceID, workingDirectory: validated.workingDirectory,
             timeoutSeconds: validated.timeoutSeconds, concurrencyPolicy: validated.concurrencyPolicy, missedRunPolicy: validated.missedRunPolicy,
             nextFireTime: nil, createdAt: timestamp, updatedAt: timestamp)
-        try store.upsertAutomation(automation)
-        try applyNextFireTime(automationID: automation.id, enabled: validated.enabled, triggerKind: validated.triggerKind)
+        // The row and its cron anchor must land atomically: a failure between the two writes would otherwise
+        // persist an enabled cron automation with a NULL anchor (one that never fires) while surfacing an
+        // error the caller would retry into a duplicate.
+        try store.withTransaction {
+            try store.upsertAutomation(automation)
+            try applyNextFireTime(automationID: automation.id, enabled: validated.enabled, triggerKind: validated.triggerKind)
+        }
         return try requireAutomation(id: automation.id)
     }
 
@@ -236,8 +241,13 @@ public final class AutomationService: @unchecked Sendable {
             agentPrompt: validated.agentPrompt, workspaceID: validated.workspaceID, workingDirectory: validated.workingDirectory,
             timeoutSeconds: validated.timeoutSeconds, concurrencyPolicy: validated.concurrencyPolicy, missedRunPolicy: validated.missedRunPolicy,
             nextFireTime: nil, createdAt: existing.createdAt, updatedAt: now())
-        try store.upsertAutomation(automation)
-        try applyNextFireTime(automationID: automation.id, enabled: validated.enabled, triggerKind: validated.triggerKind)
+        // The row and its recomputed cron anchor must land atomically: a failure between the two writes would
+        // otherwise leave an enabled cron automation with a NULL anchor (one that never fires) while surfacing
+        // an error to the caller.
+        try store.withTransaction {
+            try store.upsertAutomation(automation)
+            try applyNextFireTime(automationID: automation.id, enabled: validated.enabled, triggerKind: validated.triggerKind)
+        }
         return try requireAutomation(id: automation.id)
     }
 
@@ -583,9 +593,17 @@ public final class AutomationService: @unchecked Sendable {
             if let timeoutSeconds = automation.timeoutSeconds, let startedAt = run.startedAt,
                 now().timeIntervalSince(startedAt) >= TimeInterval(timeoutSeconds), sessionLive
             {
-                try teardownAgentRunSession(run)
-                try finishRun(run, status: .timedOut, exitCode: nil)
-                return
+                // An observed completion wins over the timeout: the timeout exists to reap hung agents, not
+                // to reclassify finished work. A done agent's session deliberately stays live, so an agent
+                // whose row already recorded `.done` before its deadline — but whose next tick lands after it
+                // — is finished as `.succeeded` by the awaiting-phase handler below rather than killed and
+                // recorded `.timedOut`.
+                let agentDone = try store.agentWindowByTerminalSession(terminalSessionID: sessionID)?.status == .done
+                if !agentDone {
+                    try teardownAgentRunSession(run)
+                    try finishRun(run, status: .timedOut, exitCode: nil)
+                    return
+                }
             }
 
             if run.promptDeliveredAt == nil {

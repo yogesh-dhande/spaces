@@ -530,6 +530,53 @@ import spacesterminalcore
         XCTAssertEqual(try harness.store.automationRun(id: run.id)?.status, .succeeded)
     }
 
+    /// An observed completion wins over the timeout: an agent that recorded `.done` before its deadline —
+    /// whose next poll lands after it — is finished `.succeeded` by the awaiting-phase handler, not killed
+    /// and recorded `.timedOut`. The done agent's session is deliberately left live and is not torn down.
+    func testAgentRunDoneBeatsTimeout() throws {
+        let clock = MutableClock(start: Date())
+        let harness = try Harness(self, now: clock.now)
+        let (_, workspace) = try harness.makeProjectAndWorkspace()
+        let automation = try harness.insertAgentAutomation(workspaceID: workspace.id, timeoutSeconds: 5)
+        let run = try XCTUnwrap(harness.service.triggerManually(automationID: automation.id))
+        let sessionID = try XCTUnwrap(harness.store.automationRun(id: run.id)?.terminalSessionID)
+
+        // Reach the awaiting phase: detect, deliver the prompt, then record the agent's done signal.
+        harness.host.markSessionForegroundDetected(sessionID: sessionID)
+        harness.service.tick()  // delivers prompt
+        _ = try harness.registerAgentRow(workspaceID: workspace.id, sessionID: sessionID, status: .done)
+
+        // The next tick lands after the timeout budget, but the agent already recorded done: completion wins.
+        clock.advance(by: 10)  // past the 5s budget
+        harness.service.tick()
+
+        let finished = try XCTUnwrap(harness.store.automationRun(id: run.id))
+        XCTAssertEqual(finished.status, .succeeded, "an observed done wins over a timeout that lands after it")
+        XCTAssertNil(finished.exitCode)
+        XCTAssertTrue(harness.orchestrator.automationSessionIsLive(sessionID: sessionID), "the done agent's session is not torn down by the timeout")
+    }
+
+    /// Genuine-hang path: an agent still live at its deadline with no `done` row is reaped — recorded
+    /// `.timedOut` and its session torn down. This is the case the timeout exists for.
+    func testAgentRunTimesOutAndTearsDownHungAgent() throws {
+        let clock = MutableClock(start: Date())
+        let harness = try Harness(self, now: clock.now)
+        let (_, workspace) = try harness.makeProjectAndWorkspace()
+        let automation = try harness.insertAgentAutomation(workspaceID: workspace.id, timeoutSeconds: 5)
+        let run = try XCTUnwrap(harness.service.triggerManually(automationID: automation.id))
+        let sessionID = try XCTUnwrap(harness.store.automationRun(id: run.id)?.terminalSessionID)
+
+        // Reach the awaiting phase with a live session and no done signal — a genuinely hung agent.
+        harness.host.markSessionForegroundDetected(sessionID: sessionID)
+        harness.service.tick()  // delivers prompt
+
+        clock.advance(by: 10)  // past the 5s budget, still no done row
+        harness.service.tick()
+
+        XCTAssertEqual(try harness.store.automationRun(id: run.id)?.status, .timedOut, "a hung agent with no done row is timed out")
+        XCTAssertFalse(harness.orchestrator.automationSessionIsLive(sessionID: sessionID), "the hung agent's session is torn down")
+    }
+
     // MARK: - End attributed agents
 
     /// End-agents over a terminal run reaps its still-live attributed agent session through the agent-kill

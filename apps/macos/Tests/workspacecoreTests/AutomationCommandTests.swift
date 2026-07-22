@@ -56,6 +56,25 @@ import spacesterminalcore
             try service.createAutomation(draft(kind: .agent, agentCommand: "claude", agentPrompt: "do the thing", workspaceID: nil)))
     }
 
+    func testCreateAgentKindRejectsUnsupportedAgentCommand() throws {
+        let (service, _) = try makeService()
+        // A command that does not launch a supported coding agent (claude, codex, opencode) is rejected at
+        // save time — the same gate the executor applies before spawning — so a typo like `bash` never
+        // persists an automation whose every run would fail at launch.
+        XCTAssertThrowsError(
+            try service.createAutomation(draft(kind: .agent, agentCommand: "bash", agentPrompt: "do the thing", workspaceID: "ws-1"))
+        ) { error in
+            XCTAssertTrue(error is AutomationValidationError, "an unspawnable agent command is a validation error")
+        }
+    }
+
+    func testCreateAgentKindAcceptsSupportedAgentCommand() throws {
+        let (service, _) = try makeService()
+        let automation = try service.createAutomation(
+            draft(kind: .agent, script: "", agentCommand: "claude", agentPrompt: "do the thing", workspaceID: "ws-1", workingDirectory: ""))
+        XCTAssertEqual(automation.agentCommand, "claude", "a supported coding agent command validates")
+    }
+
     func testCreateAgentKindAcceptsAllRequiredFields() throws {
         let (service, _) = try makeService()
         // Agent-kind drafts have no working directory of their own (the editor has no cwd field for this
