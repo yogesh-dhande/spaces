@@ -29,6 +29,10 @@ public final class WorkspaceOrchestrator {
     /// and cannot reach the daemon's terminal-send path directly, so the daemon installs a process-wide
     /// override that routes to the same send chokepoint its request-path notification engine uses.
     public typealias AgentNotificationLineSubmitter = @Sendable (String, String) throws -> Void
+    /// Reports whether the owning daemon is mid exec-in-place handoff. Installed process-wide so every
+    /// transient daemon orchestrator (discovery scans, reconcilers, Device API handlers) consults the
+    /// same handoff flag the profile orchestrator does, not just the one built by `makeProfileOrchestrator`.
+    public typealias DaemonHandoffInProgressPredicate = @Sendable () -> Bool
 
     public static let terminalTrackingIDEnvVar = "SPACES_TERMINAL_TRACKING_ID"
     #if canImport(UserNotifications)
@@ -38,6 +42,7 @@ public final class WorkspaceOrchestrator {
     private static let builtInTerminalSessionTerminatorOverrideStore = LockedBox<BuiltInTerminalSessionTerminator?>(nil)
     private static let notificationDelivererOverrideStore = LockedBox<NotificationDeliverer?>(nil)
     static let agentNotificationLineSubmitterOverrideStore = LockedBox<AgentNotificationLineSubmitter?>(nil)
+    private static let daemonHandoffInProgressOverrideStore = LockedBox<DaemonHandoffInProgressPredicate?>(nil)
 
     public struct WorkspaceStopOutcome: Sendable {
         public let skippedStopScriptBecauseWorkspaceDirectoryMissing: Bool
@@ -117,6 +122,14 @@ public final class WorkspaceOrchestrator {
     /// identically to the hook-signaled exit path.
     public static func setProcessWideAgentNotificationLineSubmitter(_ submitter: AgentNotificationLineSubmitter?) {
         agentNotificationLineSubmitterOverrideStore.set(submitter)
+    }
+
+    /// Installs a process-wide handoff predicate consumed by every orchestrator built without an explicit
+    /// one. The daemon sets this so its transient orchestrators (the worktree-discovery scan, the runtime
+    /// reconcilers, the Device API handlers) veto `stopWorkspaceUnlocked`'s destructive row deletes during
+    /// an exec-in-place handoff, matching the profile orchestrator. See `daemonHandoffInProgress`'s doc.
+    public static func setProcessWideDaemonHandoffInProgress(_ predicate: DaemonHandoffInProgressPredicate?) {
+        daemonHandoffInProgressOverrideStore.set(predicate)
     }
 
     /// Builds the notification engine the device-runtime reconcilers use to tell subscribers a coding
@@ -224,8 +237,10 @@ public final class WorkspaceOrchestrator {
     /// replacement daemon adopting a still-live terminal whose records were removed. `stopWorkspaceUnlocked`
     /// consults this at its row-mutation boundary and throws `WorkspaceError.daemonHandoffInProgress` so the
     /// terminal-side effect and the database mutation stay consistent — neither is applied when a handoff
-    /// intervenes. Defaults to `{ false }` for every non-daemon orchestrator (GUI, CLI, tests, device-runtime
-    /// reconcilers), which never hand off.
+    /// intervenes. When no explicit predicate is passed, resolves to the process-wide override the daemon
+    /// installs (so its transient orchestrators — discovery scans, reconcilers, Device API handlers — share
+    /// the profile orchestrator's handoff gate) and otherwise defaults to `{ false }` for every non-daemon
+    /// orchestrator (GUI, CLI, tests), which never hands off.
     let daemonHandoffInProgress: @Sendable () -> Bool
     private let projectsRootDirectoryURL: URL?
     private let workspacesRootDirectoryURL: URL?
@@ -243,7 +258,7 @@ public final class WorkspaceOrchestrator {
         self.store = store
         projectsRootDirectoryURL = projectsRootDirectory
         self.git = git
-        self.daemonHandoffInProgress = daemonHandoffInProgress ?? { false }
+        self.daemonHandoffInProgress = daemonHandoffInProgress ?? Self.daemonHandoffInProgressOverrideStore.get() ?? { false }
         self.workspacesRootDirectoryURL = workspacesRootDirectory
         self.notificationDeliverer = notificationDeliverer ?? Self.notificationDelivererOverrideStore.get() ?? Self.deliverUserNotification
         #if canImport(Darwin)

@@ -557,6 +557,75 @@ extension OrchestratorTests {
         XCTAssertEqual(archivedWorkspace?.isArchived, true)
     }
 
+    // A daemon-side orchestrator built without an explicit handoff predicate — exactly how
+    // `WorktreeDiscoveryService.scan` constructs one — must honor the process-wide
+    // `daemonHandoffInProgress` override and refuse the removed-worktree archive during an exec-in-place
+    // handoff. This guards the bug where every non-profile daemon orchestrator (discovery scans,
+    // reconcilers, Device API handlers) got the `{ false }` default, letting the scan delete a still-live
+    // session's workspace rows mid-handoff. The negative half asserts the pre-existing archive behavior is
+    // untouched once the override is cleared.
+    func testScanHonorsProcessWideDaemonHandoffOverrideAndRefusesArchive() throws {
+        let repo = try makeTempGitRepo(name: "handoff-scan-repo")
+        let root = repo.deletingLastPathComponent()
+
+        let store = try makeTemporaryStore()
+        // Fixture is built with the override unset, so setup calls behave normally.
+        let setupOrchestrator = WorkspaceOrchestrator(store: store)
+        let project = try setupOrchestrator.addProject(dir: repo.path)
+
+        let client = GitClient()
+        let removedWorktree = root.appendingPathComponent("feature-removed", isDirectory: true)
+        try client.createWorktree(path: repo.path, worktreePath: removedWorktree.path, branch: "feature-removed")
+        let workspace = try setupOrchestrator.createWorkspaceFromWorktree(worktreePath: removedWorktree.path)
+        try client.removeWorktree(path: repo.path, worktreePath: removedWorktree.path)
+
+        // Rows `stopWorkspaceUnlocked` would delete if it archived the now-invalid workspace.
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: "handoff-process", workspaceID: workspace.id, templateName: "web", command: "npm run dev",
+                terminalApp: TerminalHost.spaces.appName, terminalTrackingID: "handoff-session", pid: nil, status: .running, logPath: nil,
+                lastOutputAt: nil, startedAt: "2026-07-01T00:00:00Z", exitedAt: nil))
+        try store.upsert(
+            window: WindowRecord(
+                id: "handoff-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "Shell",
+                terminalTrackingID: "handoff-session", role: .terminal, orderIndex: 100, lastSeenAt: "2026-07-01T00:00:00Z"))
+
+        // Positive: install the process-wide override BEFORE constructing the scan orchestrator — the daemon
+        // installs the hook at startup and builds a fresh orchestrator per scan (WorktreeDiscoveryService.scan),
+        // and the init resolves the predicate at construction. A scan orchestrator built without an explicit
+        // predicate must therefore pick up the override and abort at `stopWorkspaceUnlocked`'s entry guard:
+        // nothing archived, no rows deleted, no session terminated, `daemonHandoffInProgress` surfaced. The
+        // terminator is injected only to keep the negative archive path off the real TerminalService; it does
+        // not affect which handoff predicate the init resolves.
+        WorkspaceOrchestrator.setProcessWideDaemonHandoffInProgress { true }
+        defer { WorkspaceOrchestrator.setProcessWideDaemonHandoffInProgress(nil) }
+        let terminated = TerminalTerminateCapture()
+        let handoffScanOrchestrator = WorkspaceOrchestrator(
+            store: store, builtInTerminalSessionTerminator: { terminated.sessionIDs.append($0) })
+
+        XCTAssertThrowsError(try handoffScanOrchestrator.scanAndCreateWorkspacesFromWorktrees(projectID: project.id)) { error in
+            guard case WorkspaceError.daemonHandoffInProgress = error else {
+                return XCTFail("Expected daemonHandoffInProgress, got \(error)")
+            }
+        }
+        XCTAssertEqual(try store.workspace(id: workspace.id)?.isArchived, false)
+        XCTAssertEqual(try store.runningProcesses(workspaceID: workspace.id).count, 1)
+        XCTAssertEqual(try store.windows(workspaceID: workspace.id).count, 1)
+        XCTAssertTrue(terminated.sessionIDs.isEmpty)
+
+        // Negative: clear the override, then build a fresh scan orchestrator (again mirroring the per-scan
+        // construction) so it resolves the `{ false }` default. The same scan now archives the workspace and
+        // deletes its rows — the behavior this fix must leave intact when no handoff is active.
+        WorkspaceOrchestrator.setProcessWideDaemonHandoffInProgress(nil)
+        let normalScanOrchestrator = WorkspaceOrchestrator(
+            store: store, builtInTerminalSessionTerminator: { terminated.sessionIDs.append($0) })
+        let created = try normalScanOrchestrator.scanAndCreateWorkspacesFromWorktrees(projectID: project.id)
+        XCTAssertTrue(created.isEmpty)
+        XCTAssertEqual(try store.workspace(id: workspace.id)?.isArchived, true)
+        XCTAssertTrue(try store.runningProcesses(workspaceID: workspace.id).isEmpty)
+        XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
+    }
+
     // Tests scan and create workspaces from worktrees refreshes stored branch names by arranging representative inputs and asserting the expected result.
     func testScanAndCreateWorkspacesFromWorktreesRefreshesBranchNamesFromDisk() throws {
         let repo = try makeTempGitRepo(name: "test-repo")

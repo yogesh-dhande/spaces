@@ -391,6 +391,14 @@ enum SpacesDaemonProfileCommandRouting {
     /// services) through the daemon's in-process terminal launcher and a client-side
     /// notification deliverer. A bundle-less daemon cannot post OS notifications, so
     /// `notify` on-exit events are forwarded to the client to deliver.
+    ///
+    /// Also installs the process-wide handoff predicate. The handoff gate must be process-wide, not
+    /// confined to `makeProfileOrchestrator`: every transient daemon orchestrator — the worktree-discovery
+    /// scan (which archives workspaces and deletes their process/window/agent rows), the runtime reconcilers,
+    /// and the Device API request handlers — is built without an explicit predicate and would otherwise get
+    /// the `{ false }` default, letting its destructive `stopWorkspaceUnlocked` row deletes proceed during an
+    /// exec-in-place handoff while the terminator no-ops. That would leave the successor daemon adopting a
+    /// still-live terminal whose workspace tracking was deleted.
     private func installProcessWideOrchestratorHooks() {
         // The device-runtime reconcilers (worktree discovery, foreground-agent reconciliation) that
         // consume these overrides run on their own detached tasks/queues, never main, so hopping onto the
@@ -410,6 +418,10 @@ enum SpacesDaemonProfileCommandRouting {
             guard let self else { throw Self.requestFailedError("spacesd is shutting down.") }
             try self.submitAgentNotificationLine(sessionID: sessionID, line: line)
         }
+        // Same off-actor, lock-guarded flag `makeProfileOrchestrator` reads: safe to poll from any
+        // orchestrator's transport-thread/detached-task call graph. This is what makes the transient
+        // daemon orchestrators refuse workspace stops during a handoff.
+        WorkspaceOrchestrator.setProcessWideDaemonHandoffInProgress { [weak self] in self?.handoffInProgress ?? false }
         #if os(macOS)
             WorkspaceOrchestrator.setProcessWideNotificationDeliverer { title, body, subtitle in
                 var userInfo = [IPCNotification.titleUserInfoKey: title, IPCNotification.detailUserInfoKey: body]
