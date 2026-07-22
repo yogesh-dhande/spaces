@@ -133,17 +133,20 @@ public enum TerminalSessionStaleRecovery {
 
     /// Writes the finalized runtime state and detaches active clients as one repair, retrying in place
     /// up to `repairWriteMaxAttempts` with a `repairWriteRetryDelay` back-off between attempts (mirroring
-    /// the persistence queue's exited-write pattern). Returns `true` once both writes commit, `false` if
-    /// every attempt fails. The runtime-state write is attempted first, so on failure neither write has
-    /// altered durable state and the row stays in its prior live state.
+    /// the persistence queue's exited-write pattern). Returns `true` once the repair commits, `false` if
+    /// every attempt fails. The runtime-state write and the client detach are performed inside a single
+    /// `finalizeSessionRepair` transaction, so the repair is all-or-nothing: on failure neither half has
+    /// altered durable state and the row stays in its prior live state. This atomicity is what lets a
+    /// failed repair heal at the next daemon restart via the dead-pid branch — a partial commit (row
+    /// finalized but clients left attached) would strand ghost attachments the terminal-row-skipping
+    /// sweep could never revisit.
     private static func commitRepair(
         _ finalizedState: TerminalSessionRuntimeState, detachedAt: String, paths: TerminalSessionPaths
     ) -> Bool {
         var attempt = 0
         while true {
             do {
-                try TerminalSessionPersistence.writeRuntimeState(finalizedState, paths: paths)
-                try TerminalSessionPersistence.detachActiveClients(paths: paths, detachedAt: detachedAt)
+                try TerminalSessionPersistence.finalizeSessionRepair(finalizedState, detachedAt: detachedAt, paths: paths)
                 return true
             } catch {
                 attempt += 1

@@ -622,6 +622,82 @@ public enum TerminalSessionPersistence {
         }
     }
 
+    /// Finalizes a stale session's repair as ONE all-or-nothing durable unit: the terminal runtime-state
+    /// write AND the detach of every still-active client/attachment commit inside a single
+    /// `BEGIN IMMEDIATE` transaction. Consolidating them here — the way `expireClients` consolidates
+    /// detach+transfer — is load-bearing for the stale-recovery sweep: written as two separate
+    /// transactions (`writeRuntimeState` then `detachActiveClients`), a repair whose first write commits
+    /// but whose second write then fails through all retries would leave the row terminal with its
+    /// attachments still active. The next restart's sweep skips terminal rows, so those ghost
+    /// attachments on a dead session would never be cleaned. As one transaction any failure rolls back
+    /// untouched, leaving the row in its prior live state so the next restart genuinely heals it via the
+    /// dead-pid branch. Kept separate from `writeRuntimeState`/`detachActiveClients`, which still serve
+    /// their own single-purpose callers.
+    public static func finalizeSessionRepair(
+        _ runtimeState: TerminalSessionRuntimeState, detachedAt: String, paths: TerminalSessionPaths
+    ) throws {
+        try paths.ensureDirectories()
+        let root = normalizedRootDirectory(paths.rootDirectory)
+        let foregroundArgvJSON = try encodeForegroundArgv(runtimeState.foregroundArgv)
+        try withDatabase(paths: paths) { database in
+            try database.withImmediateTransaction {
+                try database.execute(
+                    sql: "DELETE FROM terminal_runtime_states WHERE root_directory = ? AND session_id <> ?",
+                    bindings: [root, runtimeState.sessionID])
+                try database.execute(
+                    sql: """
+                        INSERT INTO terminal_runtime_states(
+                          session_id, root_directory, backend, service_pid, child_pid, title, working_directory, columns, rows, state, updated_at, exited_at,
+                          foreground_pid, foreground_executable_path, foreground_executable_name, foreground_argv_json,
+                          foreground_detected_agent_kind, foreground_display_label, foreground_display_command
+                        )
+                        VALUES (?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, ?, NULLIF(?, ''), ?, NULLIF(?, ''), NULLIF(?, ''),
+                                NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''))
+                        ON CONFLICT(session_id) DO UPDATE SET
+                          root_directory = excluded.root_directory,
+                          backend = excluded.backend,
+                          service_pid = excluded.service_pid,
+                          child_pid = excluded.child_pid,
+                          title = excluded.title,
+                          working_directory = excluded.working_directory,
+                          columns = excluded.columns,
+                          rows = excluded.rows,
+                          state = excluded.state,
+                          updated_at = excluded.updated_at,
+                          exited_at = excluded.exited_at,
+                          foreground_pid = excluded.foreground_pid,
+                          foreground_executable_path = excluded.foreground_executable_path,
+                          foreground_executable_name = excluded.foreground_executable_name,
+                          foreground_argv_json = excluded.foreground_argv_json,
+                          foreground_detected_agent_kind = excluded.foreground_detected_agent_kind,
+                          foreground_display_label = excluded.foreground_display_label,
+                          foreground_display_command = excluded.foreground_display_command
+                        """,
+                    bindings: [
+                        runtimeState.sessionID, root, runtimeState.backend.rawValue, runtimeState.servicePID,
+                        runtimeState.childPID.map { Int($0) } as Any? ?? NSNull(), runtimeState.title ?? "", runtimeState.workingDirectory ?? "",
+                        runtimeState.columns as Any? ?? NSNull(), runtimeState.rows as Any? ?? NSNull(), runtimeState.state.rawValue,
+                        runtimeState.updatedAt, runtimeState.exitedAt ?? "", runtimeState.foregroundPID.map { Int($0) } as Any? ?? NSNull(),
+                        runtimeState.foregroundExecutablePath ?? "", runtimeState.foregroundExecutableName ?? "", foregroundArgvJSON ?? "",
+                        runtimeState.foregroundDetectedAgentKind?.rawValue ?? "", runtimeState.foregroundDisplayLabel ?? "",
+                        runtimeState.foregroundDisplayCommand ?? "",
+                    ])
+                try database.execute(
+                    sql: """
+                        UPDATE terminal_clients
+                        SET disconnected_at = ?
+                        WHERE root_directory = ? AND disconnected_at IS NULL
+                        """, bindings: [detachedAt, root])
+                try database.execute(
+                    sql: """
+                        UPDATE terminal_attachments
+                        SET detached_at = ?
+                        WHERE root_directory = ? AND detached_at IS NULL
+                        """, bindings: [detachedAt, root])
+            }
+        }
+    }
+
     public static func activeAttachments(paths: TerminalSessionPaths) throws -> [TerminalAttachment] {
         try readAttachmentSnapshot(paths: paths).attachments.filter { $0.detachedAt == nil }
     }

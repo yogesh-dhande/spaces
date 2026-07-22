@@ -149,6 +149,13 @@ final class TerminalSessionStaleRecoveryTests: XCTestCase {
     /// appended the session to the finalized list, so a caller believed a row was `.exited` while it
     /// stayed `.running` under this live pid until the next daemon restart.
     ///
+    /// The repair's runtime-state write and client detach run inside ONE `finalizeSessionRepair`
+    /// transaction, so partial commit (row finalized while its clients stay attached — which the
+    /// terminal-row-skipping restart sweep could never revisit, permanently stranding ghost
+    /// attachments) is structurally impossible rather than merely rare: there is no seam that can fail
+    /// only the second half. The assertions below verify both halves rolled back together — the row is
+    /// still `.running` AND its attachments are still active — proving neither committed alone.
+    ///
     /// Failure injection makes ONLY the write fail while reads still succeed: the profile database is
     /// chmod'd read-only (`0o444`). Every connection opens read/write, but SQLite is lazy — `SELECT`
     /// (and the already-current `PRAGMA journal_mode=WAL` / migration check) needs no write, so
