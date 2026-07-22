@@ -494,17 +494,25 @@ public final class AutomationService: @unchecked Sendable {
     /// launch failure records the run `failed`.
     private func launchScriptRun(automation: Automation, runID: String, startedAt: Date) throws {
         let sessionID = UUID().uuidString
+        // Set once the session is live; distinguishes a post-launch persist failure from a launch failure.
+        var launchedSessionID: String?
         do {
             try AutomationPaths.ensureRunDirectory(runID: runID)
             let command = try wrappedCommand(automation: automation, runID: runID)
             _ = try orchestrator.launchAutomationSession(
                 runID: runID, sessionID: sessionID, title: automation.name, workingDirectory: automation.workingDirectory, command: command,
                 environment: [WorkspaceOrchestrator.automationRunIDEnvVar: runID])
+            launchedSessionID = sessionID
             try store.updateAutomationRun(
                 id: runID, status: .running, skipReason: nil, exitCode: nil, terminalSessionID: sessionID, startedAt: startedAt, endedAt: nil,
                 promptDeliveredAt: nil)
         } catch {
             logError("automation_launch_error run=\(runID) error=\(error)")
+            // Invariant: a run may never finalize while a session it launched is still live and unrecorded.
+            // A persist failure leaves the launched session running with no run-row session id — an orphan that
+            // runs alongside the automation's next fire (script concurrency gates on run rows only). Tear it down
+            // best-effort: termination must not mask the original error, so the run still lands `.failed`.
+            if let launchedSessionID { orchestrator.automationTerminateSession(sessionID: launchedSessionID) }
             try recordLaunchFailure(automationID: automation.id, runID: runID, startedAt: startedAt)
         }
     }
@@ -515,6 +523,8 @@ public final class AutomationService: @unchecked Sendable {
     /// blocks. A missing workspace, an unsupported command, or a spawn error records the run `failed`
     /// through the same launch-failure path a script-launch error takes.
     private func launchAgentRun(automation: Automation, runID: String, startedAt: Date) throws {
+        // Set once the session is spawned; distinguishes a post-launch persist failure from a spawn failure.
+        var launchedSessionID: String?
         do {
             guard let workspaceID = automation.workspaceID, let command = automation.agentCommand else {
                 throw AutomationValidationError("Agent automation is missing its workspace or command.")
@@ -525,11 +535,20 @@ public final class AutomationService: @unchecked Sendable {
             try AutomationPaths.ensureRunDirectory(runID: runID)
             let session = try orchestrator.createWorkspaceAgentSession(
                 workspaceID: workspaceID, command: command, title: automation.name, automationRunID: runID)
+            launchedSessionID = session.id
             try store.updateAutomationRun(
                 id: runID, status: .running, skipReason: nil, exitCode: nil, terminalSessionID: session.id, startedAt: startedAt, endedAt: nil,
                 promptDeliveredAt: nil)
         } catch {
             logError("automation_agent_launch_error run=\(runID) error=\(error)")
+            // Invariant: a run may never finalize while a session it launched is still live and unrecorded.
+            // A persist failure leaves the spawned session running but unrecorded; its automationRunID stamp on the
+            // session table keeps `automationHasLiveAttributedSession` true, permanently blocking future agent fires.
+            // Mirror `teardownAgentRunSession`'s fallback without the transcript capture (nothing ran yet): the kill
+            // is best-effort so the run still lands `.failed`.
+            if let launchedSessionID, (try? orchestrator.killAgentSession(terminalSessionID: launchedSessionID)) != true {
+                orchestrator.automationTerminateSession(sessionID: launchedSessionID)
+            }
             try recordLaunchFailure(automationID: automation.id, runID: runID, startedAt: startedAt)
         }
     }

@@ -151,6 +151,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     enum SidebarArrowSelectionTarget: Equatable, Sendable {
         case alerts
+        case automations
         case workspace(String)
     }
 
@@ -9468,17 +9469,22 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     nonisolated static func sidebarArrowSelectionTarget(
         visibleWorkspaceIDsByProject: [(projectID: String, workspaceIDs: [String])], hiddenWorkspaceIDs: [String], selectedProjectID: String?,
-        selectedWorkspaceID: String?, showingAlerts: Bool, direction: Int
+        selectedWorkspaceID: String?, showingAlerts: Bool, showingAutomations: Bool, direction: Int
     ) -> SidebarArrowSelectionTarget? {
         guard direction == -1 || direction == 1 else { return nil }
         let visibleWorkspaceIDs = visibleWorkspaceIDsByProject.flatMap(\.workspaceIDs) + hiddenWorkspaceIDs
+        // Top-level row order is Alerts ↔ Automations ↔ first workspace; the Automations row is always present.
         if showingAlerts {
-            guard direction > 0, let firstWorkspaceID = visibleWorkspaceIDs.first else { return nil }
+            return direction > 0 ? .automations : nil
+        }
+        if showingAutomations {
+            guard direction > 0 else { return .alerts }
+            guard let firstWorkspaceID = visibleWorkspaceIDs.first else { return nil }
             return .workspace(firstWorkspaceID)
         }
         if let selectedWorkspaceID, let currentIndex = visibleWorkspaceIDs.firstIndex(of: selectedWorkspaceID) {
             let targetIndex = currentIndex + direction
-            if targetIndex < 0 { return .alerts }
+            if targetIndex < 0 { return .automations }
             guard targetIndex < visibleWorkspaceIDs.count else { return nil }
             return .workspace(visibleWorkspaceIDs[targetIndex])
         }
@@ -9488,7 +9494,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         if direction < 0 {
             let priorProjects = visibleWorkspaceIDsByProject[..<projectIndex].reversed()
             for project in priorProjects { if let workspaceID = project.workspaceIDs.last { return .workspace(workspaceID) } }
-            return .alerts
+            return .automations
         }
         for project in visibleWorkspaceIDsByProject[(projectIndex + 1)...] {
             if let workspaceID = project.workspaceIDs.first { return .workspace(workspaceID) }
@@ -10546,6 +10552,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 return
             }
             showAlertsDetail()
+        // `activationSelectionTarget` resolves activation to a focused workspace or Alerts only; Automations
+        // is a keyboard-navigation target, never an activation target. Kept exhaustive without a dead path.
+        case .automations:
+            showAutomationsDetail()
         case .workspace(let targetWorkspaceID):
             guard let (_, workspace) = findWorkspace(id: targetWorkspaceID) else { return }
             if selectedWorkspaceID == targetWorkspaceID, !showingAlerts, !showingSettings {

@@ -718,10 +718,11 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
                     let visibleWorkspaceIDs = project.isCollapsed ? [] : visibleWorkspaces(projectID: project.id).map(\.id)
                     return (project.id, visibleWorkspaceIDs)
                 }, hiddenWorkspaceIDs: [], selectedProjectID: host.selectedProjectID, selectedWorkspaceID: host.selectedWorkspaceID,
-                showingAlerts: host.showingAlerts, direction: direction)
+                showingAlerts: host.showingAlerts, showingAutomations: host.showingAutomations, direction: direction)
         else { return false }
         switch target {
         case .alerts: host.showAlertsDetail()
+        case .automations: host.showAutomationsDetail()
         case .workspace(let workspaceID):
             guard let (_, workspace) = findWorkspace(id: workspaceID) else { return false }
             selectWorkspace(workspace)
