@@ -798,6 +798,13 @@ public enum TerminalSessionPersistence {
                     // so the committed lease row below would still match the stale observed lease and wrongly
                     // detach it. Taken here, inside the held transaction, so a heartbeat that arrived while this
                     // write blocked on a contended lock is still seen.
+                    //
+                    // Accepted residual: a heartbeat acknowledged in the instant between this check and COMMIT
+                    // is detached anyway. That window is microseconds against a 20s heartbeat cadence, and no
+                    // check placement can remove it — closing it would require the engine's heartbeat accept to
+                    // block on this transaction, the exact engine-blocks-on-SQLite coupling the persistence
+                    // queue removes. The client's next heartbeat gets a notFound rejection and recovers by
+                    // re-attaching (client-side reaction tracked in issue #223).
                     if heartbeatGate.generationAdvanced(forClientID: client.clientID, since: observedHeartbeatGenerations) {
                         worldMoved = true
                         continue
