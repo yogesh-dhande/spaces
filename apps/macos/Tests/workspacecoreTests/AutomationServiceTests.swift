@@ -228,6 +228,38 @@ import spacesterminalcore
         XCTAssertTrue(harness.host.delivered.contains { $0.sessionID == "watcher" && $0.line.contains("exited") }, "the watcher is told the child exited")
     }
 
+    /// A spawned agent session that ended before its agent row was registered still leaves its spawn-time
+    /// workspace tracking (a tracked terminal window and the workspace marked running). The sweep must
+    /// release that state through the row-less cleanup seam, not just delete the session row and files.
+    func testSweepReleasesWorkspaceTrackingForRowlessEndedAgentSession() throws {
+        let harness = try Harness(self)
+        let (_, workspace) = try harness.makeProjectAndWorkspace()
+        let automation = try harness.insertAutomation(concurrency: .allow)
+
+        // A completed prior run whose spawned agent session ended before any agent row was created: it has
+        // its ended session files plus the spawn-time tracked window and running workspace, but no agent row.
+        let priorRun = try harness.insertRun(automationID: automation.id, status: .succeeded)
+        let endedSessionID = UUID().uuidString
+        try harness.writeAttributedSessionFiles(workspaceID: workspace.id, runID: priorRun.id, sessionID: endedSessionID, kind: .agent, live: false)
+        try harness.seedSpawnedAgentWorkspaceTracking(workspace: workspace, sessionID: endedSessionID)
+        XCTAssertTrue(try XCTUnwrap(harness.store.workspace(id: workspace.id)).isRunning, "the workspace starts running from the spawn")
+        XCTAssertTrue(
+            try harness.store.windows(workspaceID: workspace.id).contains { $0.terminalTrackingID == endedSessionID },
+            "the spawn-time tracked window exists before the sweep")
+
+        // Starting a new run of the same automation triggers the prior-run sweep.
+        _ = harness.service.triggerManually(automationID: automation.id)
+
+        XCTAssertFalse(
+            try harness.store.terminalSessionIDs(automationRunID: priorRun.id).contains(endedSessionID), "the ended session is removed from the product")
+        XCTAssertFalse(
+            try harness.store.windows(workspaceID: workspace.id).contains { $0.terminalTrackingID == endedSessionID },
+            "the row-less session's tracked window is released")
+        XCTAssertFalse(
+            try XCTUnwrap(harness.store.workspace(id: workspace.id)).isRunning,
+            "the workspace is not left running once its only tracked session ends")
+    }
+
     // MARK: - Retention
 
     func testRetentionPrunesToNewestHundredAndDeletesArtifacts() throws {
@@ -1028,9 +1060,9 @@ import spacesterminalcore
 
     /// Deleting a terminal session removes its companion rows keyed by the session id, not just the
     /// `terminal_sessions` row, so retention pruning and the ended-agent sweep leave no orphaned persistence
-    /// behind. Runtime state is seeded and asserted here; the other companion tables (`terminal_clients`,
-    /// `terminal_attachments`, `terminal_remote_session_states`) are keyed by session id with no FK cascade
-    /// and are deleted in the same transaction (covered by schema reading, not seeded here).
+    /// behind. Runtime state and a signal-event row are seeded and asserted here; the other companion tables
+    /// (`terminal_clients`, `terminal_attachments`, `terminal_remote_session_states`) are keyed by session id
+    /// with no FK cascade and are deleted in the same transaction (covered by schema reading, not seeded here).
     func testDeleteTerminalSessionRemovesCompanionRuntimeState() throws {
         let harness = try Harness(self)
         let automation = try harness.insertAutomation(concurrency: .allow)
@@ -1038,10 +1070,19 @@ import spacesterminalcore
         let sessionID = UUID().uuidString
         try harness.writeAttributedSessionFiles(workspaceID: nil, runID: run.id, sessionID: sessionID, kind: .automation, live: false)
 
-        // Both the session row and its runtime state are present before deletion.
-        XCTAssertTrue(try harness.store.terminalSessionIDs(automationRunID: run.id).contains(sessionID))
+        // A pending agent-signal row keyed by the session id — the signal history a signaling agent leaves in
+        // the profile store (not a per-session database), so it is not swept away by removing session files.
         let paths = try TerminalSessionPaths.forSession(id: sessionID)
+        try TerminalSessionPersistence.appendPendingAgentSignal(
+            TerminalServiceAgentSignalEvent(
+                id: UUID().uuidString, sessionID: sessionID, workspaceID: nil, workspacePath: nil, type: "done",
+                createdAt: "2026-06-06T00:00:02Z"),
+            paths: paths)
+
+        // The session row, its runtime state, and its signal-event row are all present before deletion.
+        XCTAssertTrue(try harness.store.terminalSessionIDs(automationRunID: run.id).contains(sessionID))
         XCTAssertNoThrow(try TerminalSessionPersistence.readRuntimeState(paths: paths), "the runtime row exists before deletion")
+        XCTAssertEqual(try harness.signalEventCount(sessionID: sessionID), 1, "the signal-event row exists before deletion")
 
         try harness.store.deleteTerminalSession(sessionID: sessionID)
 
@@ -1049,6 +1090,7 @@ import spacesterminalcore
             try harness.store.terminalSessionIDs(automationRunID: run.id).contains(sessionID), "the terminal_sessions row is removed")
         XCTAssertThrowsError(
             try TerminalSessionPersistence.readRuntimeState(paths: paths), "the companion runtime_states row is removed in the same delete")
+        XCTAssertEqual(try harness.signalEventCount(sessionID: sessionID), 0, "the companion signal-event rows are removed in the same delete")
     }
 }
 
@@ -1185,6 +1227,27 @@ import spacesterminalcore
         try writeAttributedSessionFiles(workspaceID: workspaceID, runID: runID, sessionID: sessionID, kind: .agent, live: live)
         return try orchestrator.registerAgentWindow(
             workspaceID: workspaceID, provider: .spaces, label: "Codex CLI", terminalTrackingID: sessionID, status: status)
+    }
+
+    /// Seeds the workspace-side state a spawned agent session persists at launch time (`createWorkspaceAgentSession`):
+    /// a tracked terminal window keyed by the session id and the workspace marked running. Modeling this
+    /// without an agent row reproduces a session that ended before the foreground reconciler registered its
+    /// row. Returns the tracked window's id.
+    @discardableResult func seedSpawnedAgentWorkspaceTracking(workspace: WorkspaceRecord, sessionID: String, title: String = "agent") throws -> String {
+        let windowRecordID = UUID().uuidString
+        try store.upsert(
+            window: WindowRecord(
+                id: windowRecordID, workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: title, detail: nil, targetURL: nil,
+                terminalTrackingID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "2026-06-06T00:00:00Z"))
+        try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "2026-06-06T00:00:00Z")
+        return windowRecordID
+    }
+
+    /// Counts the `terminal_agent_signal_events` rows keyed to a session id in the profile store, used to
+    /// assert the companion signal history is pruned with the session.
+    func signalEventCount(sessionID: String) throws -> Int {
+        try store.queryRows(sql: "SELECT COUNT(*) FROM terminal_agent_signal_events WHERE session_id = ?", bindings: [sessionID])
+            .first?.first.flatMap(Int.init) ?? 0
     }
 
     /// Drives `tick()` until a run reaches a terminal status, waiting for the fake host's background waiter

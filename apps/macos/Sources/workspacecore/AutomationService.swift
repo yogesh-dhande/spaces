@@ -884,9 +884,23 @@ public final class AutomationService: @unchecked Sendable {
 
     /// Finalizes the coding-agent orchestration row bound to an attributed terminal session through the
     /// single termination chokepoint (`finalizeAgentRow`), so its subscribers are told it exited before its
-    /// row is removed. A session with no agent row (e.g. a plain automation command) is left untouched.
+    /// row is removed.
+    ///
+    /// Invariant: an ended attributed session must leave no workspace tracking behind, row or no row. A
+    /// spawned agent session persists workspace-side state (a tracked terminal window plus the workspace
+    /// marked running) at spawn time, before the foreground reconciler registers its agent row. A session
+    /// that ends inside that window has no `AgentWindowRecord`, so `finalizeAgentRow` cannot reach it; left
+    /// alone, its tracked window and running flag would leak past the sweep (which removes only the
+    /// terminal-session row and files). For that row-less case route through
+    /// `terminateSpawnedAgentTerminalSession` — the existing `.agent` cleanup seam shared with `agent kill`
+    /// that drops the tracked window and clears the workspace's running flag when no runtime indicators
+    /// remain. Its terminate call is a harmless no-op here: the sweep only reaches ended sessions, and
+    /// teardown has already terminated the live one.
     private func finalizeAttributedAgentRow(sessionID: String) throws {
-        guard let agent = try store.agentWindowByTerminalSession(terminalSessionID: sessionID) else { return }
+        guard let agent = try store.agentWindowByTerminalSession(terminalSessionID: sessionID) else {
+            _ = try orchestrator.terminateSpawnedAgentTerminalSession(sessionID: sessionID)
+            return
+        }
         try orchestrator.finalizeAgentRow(agent, reason: .destroyed(terminateTerminalSession: false))
     }
 

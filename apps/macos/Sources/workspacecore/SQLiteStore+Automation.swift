@@ -273,9 +273,11 @@ extension SQLiteStore {
 
     /// Deletes a terminal session and every companion row keyed by its session id — used to remove an ended
     /// automation-attributed session from the product once its artifacts have been captured. The session row
-    /// and its runtime state, client, attachment, and remote-session-state rows are removed in one
-    /// transaction so a deleted session leaves no orphaned persistence behind (none of these tables declares a
-    /// foreign-key cascade onto `terminal_sessions`, so each must be deleted explicitly).
+    /// and its runtime state, client, attachment, remote-session-state, and agent-signal-event rows are
+    /// removed in one transaction so a deleted session leaves no orphaned persistence behind (none of these
+    /// tables declares a foreign-key cascade onto `terminal_sessions`, so each must be deleted explicitly).
+    /// `terminal_agent_signal_events` lives in the profile store (not a per-session database), so deleting the
+    /// session directory alone would leave a signaling agent's signal history behind forever.
     public func deleteTerminalSession(sessionID: String) throws {
         try withImmediateTransaction {
             try execute(sql: "DELETE FROM terminal_sessions WHERE session_id = ?", bindings: [sessionID])
@@ -283,6 +285,7 @@ extension SQLiteStore {
             try execute(sql: "DELETE FROM terminal_clients WHERE session_id = ?", bindings: [sessionID])
             try execute(sql: "DELETE FROM terminal_attachments WHERE session_id = ?", bindings: [sessionID])
             try execute(sql: "DELETE FROM terminal_remote_session_states WHERE session_id = ?", bindings: [sessionID])
+            try execute(sql: "DELETE FROM terminal_agent_signal_events WHERE session_id = ?", bindings: [sessionID])
         }
     }
 }

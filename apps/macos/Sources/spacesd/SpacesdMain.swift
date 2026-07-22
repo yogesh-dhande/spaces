@@ -164,6 +164,31 @@ enum SpacesDaemonProfileCommandRouting {
     }
 }
 
+/// Maps a thrown error to its machine-readable `SpacesDeviceErrorCode` for the profile (terminal-service)
+/// transport. Factored out of the daemon controller so it is unit-testable and stays byte-for-byte aligned
+/// with the Device API server's `SpacesDeviceAPIServer.errorCode(for:)`: both wire surfaces must classify
+/// the same failure identically, so a client sees one code for one cause regardless of transport.
+enum SpacesDaemonErrorClassification {
+    static func errorCode(_ error: any Error) -> SpacesDeviceErrorCode {
+        if let workspaceError = error as? WorkspaceError {
+            switch workspaceError {
+            case .missingProject, .missingWorkspace, .missingTrackedWindow: return .notFound
+            case .invalidArgument, .invalidWorkspace, .projectAlreadyExists, .workspaceAlreadyExists: return .invalidArgument
+            case .gitCommandFailed, .dependencyMissing, .configError, .databaseMigrationFailed: return .internalError
+            case .daemonHandoffInProgress: return .shuttingDown
+            }
+        }
+        if case SpacesRuntimeError.invalidArgument = error { return .invalidArgument }
+        // Automation boundary rejections (bad cron, empty field, unknown enum, missing automation/run) are
+        // well-formed-request client errors, so they surface as invalidArgument with their descriptive
+        // message rather than a generic internal error.
+        if error is AutomationValidationError { return .invalidArgument }
+        if error is AutomationCronScheduleError { return .invalidArgument }
+        if error is DecodingError { return .invalidArgument }
+        return .internalError
+    }
+}
+
 @MainActor private final class SpacesDaemonController {
     private static let ownerGatedTerminalCommands: Set<String> = ["send", "key", "clearScreen", "resize", "scroll"]
     private static let terminalLinkTransferAuthorizationTTL: TimeInterval = 10 * 60
@@ -2550,21 +2575,11 @@ enum SpacesDaemonProfileCommandRouting {
         return String(describing: error)
     }
 
-    /// Machine-readable failure category for a thrown error at the terminal-service flatten points,
-    /// mirroring the `WorkspaceError` mapping used by the Device API server so both wire surfaces
-    /// classify the same failures identically.
+    /// Machine-readable failure category for a thrown error at the terminal-service flatten points.
+    /// Delegates to `SpacesDaemonErrorClassification`, which owns the mapping so it stays testable and
+    /// aligned with the Device API server's classification.
     private nonisolated static func errorCode(_ error: any Error) -> SpacesDeviceErrorCode {
-        if let workspaceError = error as? WorkspaceError {
-            switch workspaceError {
-            case .missingProject, .missingWorkspace, .missingTrackedWindow: return .notFound
-            case .invalidArgument, .invalidWorkspace, .projectAlreadyExists, .workspaceAlreadyExists: return .invalidArgument
-            case .gitCommandFailed, .dependencyMissing, .configError, .databaseMigrationFailed: return .internalError
-            case .daemonHandoffInProgress: return .shuttingDown
-            }
-        }
-        if case SpacesRuntimeError.invalidArgument = error { return .invalidArgument }
-        if error is DecodingError { return .invalidArgument }
-        return .internalError
+        SpacesDaemonErrorClassification.errorCode(error)
     }
 
     /// Flattens a thrown error into a failure response, pairing the localized message with its
