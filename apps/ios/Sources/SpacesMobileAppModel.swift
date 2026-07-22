@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import UIKit
 import spacesdevicecore
 import spacesterminalcore
 
@@ -488,13 +489,17 @@ private enum SpacesMobileMutationTimeoutRecovery {
         #endif
         let loadedSettings = SpacesMobileSettingsStore.load()
         let deviceState = SpacesMobileDeviceStore.load(fallbackSettings: loadedSettings)
-        let bridgeClient = SpacesDeviceAPIClient(settings: deviceState.settings)
+        // Captured here, on the main actor, rather than read lazily off `ProcessInfo.processInfo.hostName`:
+        // that call does a blocking reverse-DNS lookup and previously ran on this init's main thread,
+        // tripping the launch watchdog on every fresh install.
+        let deviceName = UIDevice.current.name
+        let bridgeClient = SpacesDeviceAPIClient(settings: deviceState.settings, deviceName: deviceName)
         settings = deviceState.settings
         pairedDevices = deviceState.devices
         activeDeviceID = deviceState.activeDeviceID
         self.bridgeClient = bridgeClient
         commandChannel = bridgeClient.makeCommandChannel()
-        browserProxy = SpacesMobileBrowserProxy(installationID: deviceState.settings.installationID)
+        browserProxy = SpacesMobileBrowserProxy(installationID: deviceState.settings.installationID, deviceName: deviceName)
         SpacesMobileSettingsStore.save(deviceState.settings)
     }
 
@@ -783,7 +788,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         self.settings = deviceState.settings
         pairedDevices = deviceState.devices
         activeDeviceID = deviceState.activeDeviceID
-        bridgeClient = SpacesDeviceAPIClient(settings: deviceState.settings)
+        bridgeClient = SpacesDeviceAPIClient(settings: deviceState.settings, deviceName: UIDevice.current.name)
         commandChannel = bridgeClient.makeCommandChannel()
         overviewIdentity += 1
         SpacesMobileSettingsStore.save(deviceState.settings)
@@ -802,7 +807,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         settings = deviceState.settings
         pairedDevices = deviceState.devices
         activeDeviceID = deviceState.activeDeviceID
-        bridgeClient = SpacesDeviceAPIClient(settings: settings)
+        bridgeClient = SpacesDeviceAPIClient(settings: settings, deviceName: UIDevice.current.name)
         commandChannel = bridgeClient.makeCommandChannel()
         overviewIdentity += 1
         SpacesMobileSettingsStore.save(settings)
@@ -821,7 +826,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         settings = deviceState.settings
         pairedDevices = deviceState.devices
         activeDeviceID = deviceState.activeDeviceID
-        bridgeClient = SpacesDeviceAPIClient(settings: settings)
+        bridgeClient = SpacesDeviceAPIClient(settings: settings, deviceName: UIDevice.current.name)
         commandChannel = bridgeClient.makeCommandChannel()
         overviewIdentity += 1
         SpacesMobileSettingsStore.save(settings)
@@ -848,7 +853,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
     func handleAuthenticationFailure(message: String) {
         let previousCommandChannel = commandChannel
         settings.authToken = ""
-        bridgeClient = SpacesDeviceAPIClient(settings: settings)
+        bridgeClient = SpacesDeviceAPIClient(settings: settings, deviceName: UIDevice.current.name)
         commandChannel = bridgeClient.makeCommandChannel()
         overviewIdentity += 1
         SpacesMobileSettingsStore.save(settings)

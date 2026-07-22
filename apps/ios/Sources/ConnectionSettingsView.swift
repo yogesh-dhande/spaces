@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import spacesdevicecore
 import spacesterminalcore
 
@@ -180,7 +181,7 @@ struct ConnectionSettingsView: View {
             pairedSettings.host = pairingLink.host
             pairedSettings.port = pairingLink.port
             pairedSettings.certificateFingerprint = pairingLink.certificateFingerprint
-            let bridgeClient = SpacesDeviceAPIClient(settings: pairedSettings)
+            let bridgeClient = SpacesDeviceAPIClient(settings: pairedSettings, deviceName: UIDevice.current.name)
             let commandChannel = bridgeClient.makeCommandChannel()
             let issuedAuthToken: String
             do { issuedAuthToken = try await bridgeClient.pair(pairingLink: pairingLink, commandChannel: commandChannel) } catch {
