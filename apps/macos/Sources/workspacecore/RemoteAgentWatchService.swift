@@ -61,10 +61,33 @@ import spacesdevicecore
     /// reads the freshest state and converges.
     private var reconcileInFlight = false
     private var reconcilePending = false
+    /// Monotonic per-device version, bumped on every main-actor mutation of `snapshots[deviceID]` (seed,
+    /// applyRows apply, retirement). Two consumers:
+    ///  - `applyRows` captures it before its off-main watched-set read and re-checks after: a `seedBaseline`
+    ///    (or a retirement) that lands during that suspension makes the just-read watched set — and thus the
+    ///    watched-filtered snapshot `applyRows` would blindly write — stale, which would silently drop the
+    ///    freshly seeded child. On a mismatch `applyRows` aborts without touching the snapshot and coalesces
+    ///    a fresh listing that re-reads rows and the watched set against the updated snapshot.
+    ///  - every durable baseline write is stamped with the generation it reflects; a write is skipped when a
+    ///    newer mutation has already superseded it (that newer mutation enqueued its own later-chained write),
+    ///    so a burst collapses to a single write of the latest snapshot and the mirror converges to it.
+    private var snapshotGeneration: [String: Int] = [:]
+    /// Per-device tail of the serial durable-baseline write chain. `Task.detached` gives no ordering, so two
+    /// rapid seeds {A} then {A,B} could otherwise commit in reverse and strand B in the persisted mirror.
+    /// Chaining every baseline write (seed, applyRows persist, retirement delete) behind the previous one for
+    /// the same device makes them commit in main-actor enqueue order — which, because main-actor mutations are
+    /// serialized, is latest-wins order. Cleared on `stop()`; in-flight writes still drain to completion so the
+    /// mirror reflects the last in-memory snapshot across a daemon restart.
+    private var baselineWriteChain: [String: Task<Void, Never>] = [:]
     private var isStopped = false
     /// Delay before a failed connect, a dropped stream, or a failed listing pull retries through
     /// `reconcile()`. Internal so behavior tests can shorten it instead of waiting out real seconds.
     var reconnectDelay: Duration = .seconds(5)
+    /// Fired inside `applyRows` immediately after its off-main watched-set read resumes on the main actor,
+    /// so a behavior test can deterministically land a `seedBaseline` in exactly that suspension window and
+    /// prove the stale-watched-set race is aborted rather than dropping the seeded child. `nil` (a no-op) in
+    /// production.
+    var didReadWatchedSetForTest: (@MainActor (String) async -> Void)?
 
     public init(
         databasePath: String, transport: RemoteAgentWatchTransport,
@@ -96,6 +119,9 @@ import spacesdevicecore
                     for (childTerminalSessionID, row) in baseline where self.snapshots[deviceID]?[childTerminalSessionID] == nil {
                         self.snapshots[deviceID, default: [:]][childTerminalSessionID] = row
                     }
+                    // The loaded rows are already durable, so this seeds in-memory only (no chain write); the
+                    // generation bump keeps the "every snapshots mutation bumps generation" invariant intact.
+                    self.bumpSnapshotGeneration(deviceID)
                 }
             case .failure(let error):
                 self.logError("spacesd remote_agent_watch_error op=load_baselines error=\(error)\n")
@@ -112,6 +138,11 @@ import spacesdevicecore
         snapshots.removeAll()
         listingInFlight.removeAll()
         listingQueued.removeAll()
+        // Drop the chain handles but let their unstructured tasks run to completion: any baseline write still
+        // in flight (e.g. a just-committed seed) must reach disk so a restarted daemon sees it. `snapshots`
+        // is cleared but `snapshotGeneration` is deliberately retained so a draining write's supersession gate
+        // still evaluates correctly.
+        baselineWriteChain.removeAll()
     }
 
     /// Seeds the watch baseline for a freshly subscribed cross-device child with the row the daemon's
@@ -142,15 +173,12 @@ import spacesdevicecore
         guard !isStopped else { return }
         guard snapshots[deviceID]?[childTerminalSessionID] == nil else { return }
         snapshots[deviceID, default: [:]][childTerminalSessionID] = row
+        let generation = bumpSnapshotGeneration(deviceID)
         let baseline = snapshots[deviceID] ?? [:]
-        let databasePath = databasePath
-        Task { @MainActor [weak self] in
-            let result = await Task.detached(priority: .utility) { () -> Result<Void, any Error> in
-                Result { try SQLiteStore(path: databasePath).replaceAgentRemoteWatchBaseline(deviceID: deviceID, baseline: baseline) }
-            }.value
-            if case .failure(let error) = result {
-                self?.logError("spacesd remote_agent_watch_error op=seed_baseline device=\(deviceID) error=\(error)\n")
-            }
+        // Two rapid seeds must not commit out of order, so the durable write is serialized per device rather
+        // than fired as an independent detached task.
+        enqueueBaselineWrite(deviceID: deviceID, generation: generation, op: "seed_baseline") { store in
+            try store.replaceAgentRemoteWatchBaseline(deviceID: deviceID, baseline: baseline)
         }
     }
 
@@ -197,16 +225,20 @@ import spacesdevicecore
             client.stop()
         }
         // Baselines outlive streams (they survive disconnects and daemon restarts), so retire them by
-        // desired-set membership rather than alongside stream teardown.
-        var retiredBaselines: [String] = []
-        for deviceID in snapshots.keys where !desired.contains(deviceID) {
+        // desired-set membership rather than alongside stream teardown. Collect the retired device ids before
+        // mutating `snapshots` to avoid mutating the dictionary mid-iteration. The persisted-mirror delete goes
+        // through the same per-device chain as the replace writes, so a retirement can never race and resurrect
+        // a still-in-flight seed's baseline.
+        for deviceID in snapshots.keys.filter({ !desired.contains($0) }) {
             snapshots[deviceID] = nil
-            retiredBaselines.append(deviceID)
+            let generation = bumpSnapshotGeneration(deviceID)
+            enqueueBaselineWrite(deviceID: deviceID, generation: generation, op: "delete_baseline") { store in
+                try store.deleteAgentRemoteWatchBaseline(deviceID: deviceID)
+            }
         }
         listingQueued = listingQueued.filter(desired.contains)
         for deviceID in desired where streams[deviceID] == nil && !connecting.contains(deviceID) { openStream(deviceID: deviceID) }
         for deviceID in desired where streams[deviceID] != nil { requestListing(deviceID: deviceID) }
-        await deletePersistedBaselines(retiredBaselines)
     }
 
     private func openStream(deviceID: String) {
@@ -318,10 +350,22 @@ import spacesdevicecore
 
     private func applyRows(deviceID: String, rows: [SpacesDeviceAgentSessionRow]) async {
         let databasePath = databasePath
+        let generationAtEntry = snapshotGeneration[deviceID] ?? 0
         let watchedResult = await Task.detached(priority: .utility) { () -> Result<Set<String>, any Error> in
             Result { Set(try SQLiteStore(path: databasePath).agentRemoteSubscriptions(deviceID: deviceID).map(\.agentSessionID)) }
         }.value
+        await didReadWatchedSetForTest?(deviceID)
         guard !isStopped, streams[deviceID] != nil else { return }
+        // A snapshot mutation landed on the main actor while the watched-set read was suspended off it — a
+        // `seedBaseline` for a newly subscribed child, or a retirement. The watched set just read is therefore
+        // stale: it may omit the seeded child, and the diff below filters the next snapshot to that watched
+        // set, so blindly writing it would drop the child from the in-memory baseline and lose its next
+        // transition (it would re-seed silently). Abort without touching the snapshot and coalesce a fresh
+        // listing, which re-reads both the rows and the watched set against the now-updated snapshot.
+        guard (snapshotGeneration[deviceID] ?? 0) == generationAtEntry else {
+            listingQueued.insert(deviceID)
+            return
+        }
         let watched: Set<String>
         switch watchedResult {
         case .success(let ids): watched = ids
@@ -332,6 +376,7 @@ import spacesdevicecore
         let previous = snapshots[deviceID] ?? [:]
         let result = RemoteAgentSnapshotDiff.diff(previous: previous, newRows: rows, watchedTerminalSessionIDs: watched)
         snapshots[deviceID] = result.snapshot
+        let generation = bumpSnapshotGeneration(deviceID)
 
         // Delivery boundary: `AgentNotificationEngine` interleaves store reads/writes with the
         // daemon-owned, main-only `deliver` (terminal-send) closure, so the whole delivery runs on the
@@ -364,24 +409,36 @@ import spacesdevicecore
             }
         }
 
-        // Drop completed watch edges and mirror the baseline off the main actor, after the transitions
-        // were delivered or queued (both durable), so a crash in between re-emits rather than silently
-        // drops. Only a real change writes the baseline: the write signals databaseDidChange, which drives
-        // reconcile back through here — an unconditional mirror would loop pull → write → signal → pull.
+        // Drop completed watch edges and mirror the baseline, after the transitions were delivered or queued
+        // (both durable), so a crash in between re-emits rather than silently drops. Only a real change writes
+        // the baseline: the write signals databaseDidChange, which drives reconcile back through here — an
+        // unconditional mirror would loop pull → write → signal → pull.
         let snapshotChanged = previous != result.snapshot
         guard snapshotChanged || !exitedTerminalSessionIDs.isEmpty else { return }
-        let baseline = result.snapshot
-        let persistResult = await Task.detached(priority: .utility) { () -> Result<Void, any Error> in
-            Result {
-                let store = try SQLiteStore(path: databasePath)
-                for terminalSessionID in exitedTerminalSessionIDs {
-                    try? store.deleteAgentRemoteSubscriptions(deviceID: deviceID, agentSessionID: terminalSessionID)
+        // The exited children's subscription edges are an independent table from the baseline mirror, so they
+        // are torn down in their own off-main task rather than on the baseline chain.
+        if !exitedTerminalSessionIDs.isEmpty {
+            let exited = exitedTerminalSessionIDs
+            let dropResult = await Task.detached(priority: .utility) { () -> Result<Void, any Error> in
+                Result {
+                    let store = try SQLiteStore(path: databasePath)
+                    for terminalSessionID in exited {
+                        try? store.deleteAgentRemoteSubscriptions(deviceID: deviceID, agentSessionID: terminalSessionID)
+                    }
                 }
-                if snapshotChanged { try store.replaceAgentRemoteWatchBaseline(deviceID: deviceID, baseline: baseline) }
+            }.value
+            if case .failure(let error) = dropResult {
+                logError("spacesd remote_agent_watch_error op=drop_exited_edges device=\(deviceID) error=\(error)\n")
             }
-        }.value
-        if case .failure(let error) = persistResult {
-            logError("spacesd remote_agent_watch_error op=persist_baseline device=\(deviceID) error=\(error)\n")
+        }
+        // Serialize the baseline mirror per device so this apply cannot commit out of order with a concurrent
+        // seed's write (or another apply's). Stamped with this apply's generation: a seed that lands after the
+        // enqueue supersedes it and its own later-chained write wins.
+        if snapshotChanged {
+            let baseline = result.snapshot
+            enqueueBaselineWrite(deviceID: deviceID, generation: generation, op: "persist_baseline") { store in
+                try store.replaceAgentRemoteWatchBaseline(deviceID: deviceID, baseline: baseline)
+            }
         }
     }
 
@@ -407,8 +464,10 @@ import spacesdevicecore
         }
     }
 
-    /// Drops every watch edge for `deviceID` and retires its baseline (in memory and persisted). All the
-    /// store work runs in one detached task; the in-memory snapshot is cleared on the main actor after.
+    /// Drops every watch edge for `deviceID` and retires its baseline (in memory and persisted). The
+    /// subscription-edge deletes are awaited in one detached task because callers hold `connecting` across this
+    /// call to keep a concurrent reconcile from reopening a stream while the edges still exist; the baseline
+    /// mirror delete goes on the per-device chain so it cannot race and resurrect a concurrent seed's write.
     private func dropAllEdges(deviceID: String) async {
         let databasePath = databasePath
         let result = await Task.detached(priority: .utility) { () -> Result<Void, any Error> in
@@ -418,27 +477,47 @@ import spacesdevicecore
                     try store.deleteAgentRemoteSubscription(
                         subscriberTerminalSessionID: edge.subscriberTerminalSessionID, deviceID: deviceID, agentSessionID: edge.agentSessionID)
                 }
-                try store.deleteAgentRemoteWatchBaseline(deviceID: deviceID)
             }
         }.value
         if case .failure(let error) = result {
             logError("spacesd remote_agent_watch_error op=drop_edges device=\(deviceID) error=\(error)\n")
         }
         snapshots[deviceID] = nil
+        let generation = bumpSnapshotGeneration(deviceID)
+        enqueueBaselineWrite(deviceID: deviceID, generation: generation, op: "drop_edges_baseline") { store in
+            try store.deleteAgentRemoteWatchBaseline(deviceID: deviceID)
+        }
     }
 
-    private func deletePersistedBaselines(_ deviceIDs: [String]) async {
-        guard !deviceIDs.isEmpty else { return }
+    /// Appends a durable baseline mutation for `deviceID` to its serial write chain (see `baselineWriteChain`).
+    /// The write only runs if `generation` is still the device's latest snapshot generation — a newer mutation
+    /// has its own later-chained write, so a superseded one is skipped and a burst collapses to a single write
+    /// of the final snapshot. `write` runs off the main actor (the daemon keeps SQLite off its main terminal
+    /// engine); only the chaining and the supersession gate touch main-actor state. The write is allowed to run
+    /// even after `stop()` so an in-flight seed still reaches disk for the next daemon run.
+    private func enqueueBaselineWrite(
+        deviceID: String, generation: Int, op: String, _ write: @escaping @Sendable (SQLiteStore) throws -> Void
+    ) {
+        let previous = baselineWriteChain[deviceID]
         let databasePath = databasePath
-        let result = await Task.detached(priority: .utility) { () -> Result<Void, any Error> in
-            Result {
-                let store = try SQLiteStore(path: databasePath)
-                for deviceID in deviceIDs { try store.deleteAgentRemoteWatchBaseline(deviceID: deviceID) }
+        let logError = logError
+        baselineWriteChain[deviceID] = Task { @MainActor [weak self] in
+            _ = await previous?.value
+            if let self, self.snapshotGeneration[deviceID] != generation { return }
+            let result = await Task.detached(priority: .utility) { () -> Result<Void, any Error> in
+                Result { try write(SQLiteStore(path: databasePath)) }
+            }.value
+            if case .failure(let error) = result {
+                logError("spacesd remote_agent_watch_error op=\(op) device=\(deviceID) error=\(error)\n")
             }
-        }.value
-        if case .failure(let error) = result {
-            logError("spacesd remote_agent_watch_error op=delete_baseline error=\(error)\n")
         }
+    }
+
+    @discardableResult
+    private func bumpSnapshotGeneration(_ deviceID: String) -> Int {
+        let next = (snapshotGeneration[deviceID] ?? 0) + 1
+        snapshotGeneration[deviceID] = next
+        return next
     }
 
     private func deviceIsStillWatched(_ deviceID: String) async -> Bool {

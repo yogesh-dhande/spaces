@@ -55,6 +55,12 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
     /// read loop's natural-exit path defers child reaping to `reapWhenTerminated`, so the two never race
     /// a double `waitpid` (and a signal to a reused pid).
     private var terminating = false
+    /// Set once the PTY read loop has exited — its `read()` returned (EOF, i.e. every descendant holding
+    /// the slave has died) and `finishAfterReadLoop` has closed the master fd. The termination escalation
+    /// keys its stages on THIS, not on the leader being reaped: a backgrounded descendant that outlives the
+    /// leader keeps the slave open, so escalation must continue signaling the process group until the reader
+    /// actually exits, otherwise the fd and this driver leak forever. Only touched under `lock`.
+    private var readLoopFinished = false
     /// Where the read loop delivers PTY bytes. The exec-in-place handoff walks this
     /// through `.handler` → `.buffer` → `.file` so that not one byte is lost,
     /// duplicated, or reordered across the transition: reads are serialized on
@@ -501,6 +507,11 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
             close(fd)
             if shouldReap { reap(childPID: childPID) }
         }
+        // Publish read-loop exit AFTER the fd close so the termination escalation only stops once the fd is
+        // actually gone (see `readLoopFinished`). The escalation polls this to know the slave was released.
+        lock.lock()
+        readLoopFinished = true
+        lock.unlock()
         if shouldNotify { Task { @TerminalEngineActor in closeHandler?() } }
     }
 
@@ -513,36 +524,52 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
         let shouldSignalProcessGroup = Self.shouldSignalProcessGroup(
             childPID: childPID, processGroupID: processGroupID, currentProcessGroupID: getpgrp())
         let intervals = terminationEscalationIntervals
-        Task.detached(priority: .utility) {
-            if Self.waitForTerminatedChild(childPID, timeout: intervals.hupGrace) { return }
+        Task.detached(priority: .utility) { [weak self] in
+            guard let self else { return }
+            // SIGHUP was already sent by terminate(). Escalate to SIGTERM then SIGKILL, but key each stage on
+            // the READ LOOP exiting — not merely on the leader being reaped. Reaping the leader is necessary
+            // (else it zombies) but not sufficient: a backgrounded descendant that survives the leader (e.g.
+            // a `nohup` job) keeps the PTY slave open, so `read()` stays blocked, and the master fd and this
+            // driver leak while the closed handler never fires. Each stage signals the child's PROCESS GROUP
+            // so such descendants die too; the wait helper reaps the leader opportunistically.
+            if self.escalationWaitForReadLoopExit(reapingLeader: childPID, timeout: intervals.hupGrace) { return }
             Self.signalTerminatedPTYProcess(
                 childPID: childPID, processGroupID: processGroupID, signal: SIGTERM, signalProcessGroup: shouldSignalProcessGroup)
-            if Self.waitForTerminatedChild(childPID, timeout: intervals.termGrace) { return }
+            if self.escalationWaitForReadLoopExit(reapingLeader: childPID, timeout: intervals.termGrace) { return }
             Self.signalTerminatedPTYProcess(
                 childPID: childPID, processGroupID: processGroupID, signal: SIGKILL, signalProcessGroup: shouldSignalProcessGroup)
-            _ = Self.waitForTerminatedChild(childPID, timeout: intervals.killGrace)
+            _ = self.escalationWaitForReadLoopExit(reapingLeader: childPID, timeout: intervals.killGrace)
+            // A group SIGKILL releases the slave from every process still in the child's group, which unblocks
+            // read(). We deliberately do NOT force-close the master as a further bound: the read loop owns the
+            // fd's close (guarded by `masterFDGeneration`), and closing it from here would race that read/close
+            // and risk operating on a reused fd number. The one unrecoverable case — a descendant that fully
+            // detached into its own session (setsid) AND re-opened the controlling tty — is beyond a group
+            // signal's reach; leaving read() blocked there is safer than an fd-reuse crash and is accepted.
+        }
+    }
+
+    /// Polls until the PTY read loop has exited (`read()` returned and `finishAfterReadLoop` closed the
+    /// master fd, setting `readLoopFinished`), reaping the leader `childPID` along the way so it never
+    /// zombies. Returns true once the read loop has finished within `timeout`. Only `reapWhenTerminated`
+    /// reaps during termination (the read loop defers to it while `terminating`), so this `waitpid` cannot
+    /// double-reap.
+    private func escalationWaitForReadLoopExit(reapingLeader childPID: Int32, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while true {
+            var status: Int32 = 0
+            while waitpid(childPID, &status, WNOHANG) == -1, errno == EINTR {}
+            lock.lock()
+            let finished = readLoopFinished
+            lock.unlock()
+            if finished { return true }
+            if Date() >= deadline { return false }
+            usleep(50_000)
         }
     }
 
     private static func signalTerminatedPTYProcess(childPID: Int32, processGroupID: Int32, signal: Int32, signalProcessGroup: Bool) {
         if signalProcessGroup { kill(-processGroupID, signal) }
         kill(childPID, signal)
-    }
-
-    private static func waitForTerminatedChild(_ childPID: Int32, timeout: TimeInterval) -> Bool {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            var status: Int32 = 0
-            let result = waitpid(childPID, &status, WNOHANG)
-            if result == childPID { return true }
-            if result == -1 {
-                if errno == EINTR { continue }
-                if errno == ECHILD { return true }
-                return false
-            }
-            usleep(50_000)
-        }
-        return false
     }
 
     static func readLoopOwnsDescriptor(currentFD: Int32, currentGeneration: UInt64, readFD: Int32, readGeneration: UInt64) -> Bool {

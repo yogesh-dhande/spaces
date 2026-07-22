@@ -1647,6 +1647,11 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         XCTAssertEqual(runtimeState.state, .exited)
         XCTAssertEqual(finalPayload.reason, TerminalRemoteSessionStateReason.terminated)
         XCTAssertTrue(finalPayload.renderText?.contains("final-frame") == true)
+        // Finding 12 regression: terminate() detaches every client and must invalidate the cached
+        // attachment snapshot, so the final persisted payload cannot advertise a still-active attachment
+        // (owner) after all clients detached. Without the invalidation this served the stale pre-detach cache.
+        let activeAttachments = finalPayload.attachmentSnapshot?.attachments.filter { $0.detachedAt == nil } ?? []
+        XCTAssertTrue(activeAttachments.isEmpty, "terminated payload advertised active attachments after detach: \(activeAttachments)")
     }
 
     func testHeadlessDriverKeepsHostManagedSessionRunningWithoutWindowSurface() async throws {
@@ -2127,6 +2132,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             return Box(host)
         }
         let host = hostBox.value
+        defer { TerminalEngineActor.runSynchronously { host.terminate() } }
         try await waitUntil { host.rendererHost.hasRenderableSurface() }
 
         try await waitUntil {

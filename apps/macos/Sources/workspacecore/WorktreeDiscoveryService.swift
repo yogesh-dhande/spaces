@@ -140,6 +140,14 @@ extension FileSystemWatcher: FileSystemWatching {}
                 watcher.stop()
                 return
             }
+            // Accepted staleness window: these re-checks confirm the service is still
+            // running and no watcher exists for the project, but do not re-validate that
+            // `projectDir`/`commonDirectory` still exist on disk. A project moved or
+            // deleted while a slow `start()` was suspended can briefly publish a watcher
+            // for the stale path. This is deliberately tolerated: the next
+            // `databaseDidChange` refresh reconciles it (`refreshWatchers` stops any
+            // watcher whose `projectDir` no longer matches the desired set), and DB
+            // changes are frequent, so the window self-heals quickly.
             watchers[projectID] = Watch(
                 projectDir: projectDir, commonDirectory: commonDirectory, watchedDirectories: watchedDirectories, watcher: watcher)
         } catch { onError?(error) }

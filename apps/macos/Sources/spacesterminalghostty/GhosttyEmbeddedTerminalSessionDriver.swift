@@ -105,18 +105,29 @@
 
         init(launchConfiguration: TerminalSessionLaunchConfiguration) { self.launchConfiguration = launchConfiguration }
 
-        /// Auto-terminates a driver released while still live (the safety net the old
-        /// `MainActor.assumeIsolated` deinit provided). macOS 14 has no `isolated deinit` (macOS 15.4+),
-        /// and a nonisolated `deinit` may not touch the non-Sendable GhosttyKit `session` directly — but
-        /// it CAN read the Sendable liveness flag and bridge SYNCHRONOUSLY onto the terminal engine actor
-        /// to run `terminate()` there (which then touches the session in-isolation). `terminate()` performs
-        /// no engine→main hop, so this synchronous engine bridge is deadlock-free even from an arbitrary
-        /// deinit thread. This matters because a live session's C data/state callbacks capture
-        /// `Unmanaged.passUnretained(self)`; freeing the session (which `terminate()` does) before `self`
-        /// is gone is what prevents a use-after-free.
+        /// A live session's C data/state callbacks capture `Unmanaged.passUnretained(self)`, so the
+        /// GhosttyKit session MUST be freed (which `terminate()` does) before `self` is deallocated or those
+        /// callbacks dangle. Rather than bridge onto the engine actor from `deinit` to auto-terminate — which
+        /// would abort the daemon whenever the final reference happens to drop on the main thread (the engine
+        /// bridge preconditions `!Thread.isMainThread`), turning the safety net into a crash — this asserts
+        /// the invariant instead: every owning path (session-core teardown, `startIfNeeded` rollback, handoff
+        /// resume failure, tests) must call `terminate()` before releasing the driver.
         deinit {
-            let leakedLiveSession = hasLiveResources
-            if leakedLiveSession { TerminalEngineActor.runSynchronously { self.terminate() } }
+            // Read the isolated liveness flag into a local first: a nonisolated deinit may bind it directly
+            // but cannot reference it inside `precondition`'s nonisolated autoclosure.
+            let leakedLiveResources = hasLiveResources
+            precondition(
+                !leakedLiveResources,
+                "GhosttyEmbeddedTerminalSessionDriver was released while still live; every owning path must call terminate() first")
+            // The headless AppKit host view must never make its final release on the engine queue (AppKit
+            // deallocation off-main is undefined). Normal teardown hands it to the main actor via
+            // `releaseHeadlessHostViewOnMainActor()`; this covers a driver dropped after a rollback (which
+            // leaves the view retained) so the residual release still lands on main.
+            if let view = headlessHostView {
+                headlessHostView = nil
+                let releaseBox = GhosttyHeadlessHostViewReleaseBox(view)
+                Task { @MainActor in releaseBox.release() }
+            }
         }
 
         var surface: ghostty_surface_t? {
@@ -399,7 +410,18 @@
             currentHostPTY?.terminate()
             if let currentSession { ghostty_session_free(currentSession) }
             lastKnownSurfaceSize = nil
+            releaseHeadlessHostViewOnMainActor()
+        }
+
+        /// Releases the headless AppKit host view on the main actor and clears the ivar. NSView/CALayer
+        /// deallocation off the main thread is undefined (Main Thread Checker violations, intermittent
+        /// crashes), and this driver runs on the terminal engine executor, so the view's final release must
+        /// be handed to main rather than dropped on the engine queue.
+        private func releaseHeadlessHostViewOnMainActor() {
+            guard let view = headlessHostView else { return }
             headlessHostView = nil
+            let releaseBox = GhosttyHeadlessHostViewReleaseBox(view)
+            Task { @MainActor in releaseBox.release() }
         }
 
         func requestSurfaceRefresh() {
@@ -666,4 +688,13 @@
 
     /// Carries a main-actor-produced value back across `DispatchQueue.main.sync` into the engine actor.
     private final class GhosttyDriverMainActorSyncBox<T>: @unchecked Sendable { var value: T? }
+
+    /// Smuggles the non-Sendable headless host view to the main actor so its final release runs there.
+    /// The view is only ever retained (never messaged) off-main, and the sole main-actor action is
+    /// dropping the last reference, so `@unchecked Sendable` is sound.
+    private final class GhosttyHeadlessHostViewReleaseBox: @unchecked Sendable {
+        private var view: GhosttyHeadlessSessionHostView?
+        init(_ view: GhosttyHeadlessSessionHostView) { self.view = view }
+        @MainActor func release() { view = nil }
+    }
 #endif

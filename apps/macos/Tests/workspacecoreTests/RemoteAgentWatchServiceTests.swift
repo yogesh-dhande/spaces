@@ -565,4 +565,91 @@ final class RemoteAgentWatchServiceTests: XCTestCase {
         }
         XCTAssertEqual(recorder.delivered.count, 1)
     }
+
+    /// A `seedBaseline` for a newly subscribed child that lands while `applyRows` is suspended on its
+    /// off-main watched-set read must not be dropped. `applyRows` reads the watched set before the seed
+    /// (so it omits the new child) and then filters the next snapshot to that stale set; blindly writing
+    /// it would drop the seeded child from the in-memory baseline, and the child's transition — carried in
+    /// the very listing being applied — would then be lost as a silent re-seed. The fix re-checks the
+    /// per-device snapshot generation after the suspension and, on a mismatch, aborts and coalesces a fresh
+    /// listing that re-reads both the rows and the watched set against the updated snapshot, so the child
+    /// survives and its `blocked` transition is delivered exactly once.
+    @MainActor func testSeedLandingMidApplyRowsSurvivesAndDeliversTransition() throws {
+        let transport = FakeTransport()
+        let recorder = DeliveryRecorder()
+        let (service, store) = try makeWatchedService(transport: transport, recorder: recorder, baselineStatus: AgentWindowStatus.spinning.rawValue)
+        defer {
+            service.didReadWatchedSetForTest = nil
+            service.stop()
+        }
+
+        // The listing being applied already shows `child-2` blocked (it went blocked in the connect gap).
+        // `child-1` stays spinning, so it never transitions and the only expected delivery is `child-2`'s.
+        transport.setListing([
+            makeRow(status: AgentWindowStatus.spinning.rawValue, terminalSessionID: "child-1"),
+            makeRow(status: AgentWindowStatus.waiting.rawValue, terminalSessionID: "child-2"),
+        ])
+
+        // The moment `applyRows` resumes from its watched-set read (which therefore already omits `child-2`),
+        // subscribe and seed `child-2` — reproducing a seed landing squarely in that suspension window. Fires
+        // once, so the coalesced re-pull's own `applyRows` proceeds against the now-stable snapshot.
+        final class Once { var fired = false }
+        let once = Once()
+        service.didReadWatchedSetForTest = { [weak service] deviceID in
+            guard !once.fired, let service else { return }
+            once.fired = true
+            try? store.insertAgentRemoteSubscription(
+                subscriberTerminalSessionID: "sub-2", deviceID: deviceID, agentSessionID: "child-2", createdAt: "t")
+            service.seedBaseline(
+                deviceID: deviceID, childTerminalSessionID: "child-2",
+                row: self.makeRow(status: AgentWindowStatus.spinning.rawValue, terminalSessionID: "child-2"))
+        }
+
+        transport.fireSignal(connection: 0)
+
+        try waitUntil(message: "seeded child dropped by the stale-watched-set replace; its blocked transition was lost") {
+            recorder.delivered.contains { $0.sessionID == "sub-2" && $0.line.contains("is blocked") }
+        }
+        // The seeded child must survive in the in-memory baseline (the bug drops it entirely).
+        try waitUntil(message: "seeded child never landed in the retained snapshot") {
+            service.debugSnapshot(deviceID: "device-1")?["child-2"]?.status == AgentWindowStatus.waiting.rawValue
+        }
+        XCTAssertEqual(recorder.delivered.count, 1, "child-2's blocked transition must be delivered exactly once")
+    }
+
+    /// Two rapid seeds — {child-1} already durable, then {child-1, child-2}, then {child-1, child-2, child-3}
+    /// — must leave the durable mirror at the latest union. Firing each seed's persist as an independent
+    /// detached write gives no ordering, so a later, larger snapshot could commit before an earlier one and
+    /// strand a child in the mirror; after a daemon restart that child's baseline would be missing and its
+    /// next transition swallowed. Serializing the per-device baseline writes makes the mirror converge to the
+    /// last in-memory snapshot regardless of task-completion order.
+    @MainActor func testRapidSeedsConvergeDurableMirrorToLatestUnion() throws {
+        let transport = FakeTransport()
+        let recorder = DeliveryRecorder()
+        let (service, store) = try makeWatchedService(transport: transport, recorder: recorder, baselineStatus: AgentWindowStatus.spinning.rawValue)
+        defer { service.stop() }
+
+        // Two seeds back-to-back on the main actor, each a superset of the last.
+        service.seedBaseline(
+            deviceID: "device-1", childTerminalSessionID: "child-2",
+            row: makeRow(status: AgentWindowStatus.spinning.rawValue, terminalSessionID: "child-2"))
+        service.seedBaseline(
+            deviceID: "device-1", childTerminalSessionID: "child-3",
+            row: makeRow(status: AgentWindowStatus.spinning.rawValue, terminalSessionID: "child-3"))
+
+        func mirroredChildren() -> Set<String> { Set(((try? store.agentRemoteWatchBaselines())?["device-1"] ?? [:]).keys) }
+        try waitUntil(message: "durable mirror never converged to the latest union of all three children") {
+            mirroredChildren() == ["child-1", "child-2", "child-3"]
+        }
+        // Convergence must be to the *settled* state, not a transient the union briefly passes through before an
+        // out-of-order write clobbers it back: assert the mirror stays at the union rather than regressing. An
+        // earlier, smaller snapshot committing after the latest one (the bug) would drop a child here.
+        let stabilityDeadline = Date().addingTimeInterval(0.3)
+        while Date() < stabilityDeadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+            XCTAssertEqual(
+                mirroredChildren(), ["child-1", "child-2", "child-3"],
+                "durable mirror regressed after converging — per-device baseline writes committed out of order")
+        }
+    }
 }

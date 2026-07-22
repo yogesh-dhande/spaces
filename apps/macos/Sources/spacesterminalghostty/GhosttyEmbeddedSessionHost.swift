@@ -274,6 +274,15 @@
         private var lastRenderUpdateBaseline: GhosttyRenderUpdateBaseline?
         private var renderUpdateRevision: UInt64 = 0
         private var forceNextBroadcastFullRenderUpdate = false
+        /// Live in-memory runtime state — the AUTHORITATIVE source broadcasts serve, advanced the moment a
+        /// new state is computed regardless of whether it reaches disk. Kept distinct from
+        /// `lastPersistedRuntimeState` so the invariant holds under a failed persist: broadcasts always show
+        /// live truth here, while the durable mirror converges via retry (see `refreshRuntimeState`).
+        private var latestRuntimeState: TerminalSessionRuntimeState?
+        /// Durable persist marker — mirrors what was last SUCCESSFULLY written to disk. Advanced only on a
+        /// successful write so `shouldPersistRuntimeState` retries after a failure rather than being
+        /// suppressed by a stale success marker/timestamp. Not the broadcast source (that is
+        /// `latestRuntimeState`); this exists to drive persistence/retry decisions.
         private var lastPersistedRuntimeState: TerminalSessionRuntimeState?
         private var lastRuntimeStateWriteAt: Date?
         private var sessionStartedAt: Date?
@@ -460,6 +469,10 @@
                 columns: lastKnownSurfaceSize?.columns, rows: lastKnownSurfaceSize?.rows)
             persistExitedRuntimeState(exitedState)
             try? TerminalSessionPersistence.detachActiveClients(paths: paths, detachedAt: now)
+            // Detaching mutates the durable attachment mirror; without invalidating the cache the final
+            // remote-state payload below (built via currentAttachmentSnapshot) would advertise an active
+            // owner after every client detached.
+            invalidateAttachmentSnapshotCache()
             let finalPayload = currentRemoteSessionState(reason: TerminalRemoteSessionStateReason.terminated, outputByteCount: nil)
             if let finalPayload {
                 try? TerminalSessionPersistence.writeRemoteSessionState(finalPayload, paths: paths)
@@ -479,8 +492,11 @@
         }
 
         private func persistExitedRuntimeState(_ state: TerminalSessionRuntimeState) {
-            try? TerminalSessionPersistence.writeRuntimeState(state, paths: paths)
-            lastPersistedRuntimeState = state
+            latestRuntimeState = state
+            do {
+                try TerminalSessionPersistence.writeRuntimeState(state, paths: paths)
+                lastPersistedRuntimeState = state
+            } catch {}
         }
 
         private func handleSessionClosed() {
@@ -1138,18 +1154,28 @@
                 foregroundExecutableName: foregroundProcess?.executableName, foregroundArgv: foregroundProcess?.argv,
                 foregroundDetectedAgentKind: foregroundAgent?.detectedAgentKind, foregroundDisplayLabel: foregroundAgent?.displayLabel,
                 foregroundDisplayCommand: foregroundAgent?.displayCommand)
+            // Advance the in-memory authoritative state first so broadcasts show live truth even when the
+            // persist below is throttled away or fails.
+            latestRuntimeState = state
             let shouldPersist = force || shouldPersistRuntimeState(state, now: now)
             guard shouldPersist else { return }
             let previousSignature = lastPersistedRuntimeState.map(runtimeStateSignature(for:))
             let nextSignature = runtimeStateSignature(for: state)
-            try? TerminalSessionPersistence.writeRuntimeState(state, paths: paths)
+            do {
+                try TerminalSessionPersistence.writeRuntimeState(state, paths: paths)
+            } catch {
+                // Persist failed: leave the durable marker + throttle timestamp unadvanced so the next
+                // refresh retries the write. Broadcasts already serve `latestRuntimeState`, so no live
+                // update is lost while the durable mirror catches up.
+                return
+            }
             lastPersistedRuntimeState = state
             lastRuntimeStateWriteAt = now
             if previousSignature != nextSignature { postRuntimeStateDidChange() }
         }
 
         private func currentRuntimeStateIsExited() -> Bool {
-            if lastPersistedRuntimeState?.state == .exited { return true }
+            if latestRuntimeState?.state == .exited { return true }
             return (try? TerminalSessionPersistence.readRuntimeState(paths: paths))?.state == .exited
         }
 
@@ -1460,7 +1486,7 @@
 
         private func isRuntimeInteractiveForControl() -> Bool {
             if started { return true }
-            let runtimeState = (try? TerminalSessionPersistence.readRuntimeState(paths: paths)) ?? lastPersistedRuntimeState
+            let runtimeState = (try? TerminalSessionPersistence.readRuntimeState(paths: paths)) ?? latestRuntimeState
             guard let runtimeState else { return true }
             return runtimeState.state.isInteractive
         }
@@ -1580,11 +1606,11 @@
             markNextBroadcastFull: Bool = false, markNextBroadcastFullWhenMissingRenderUpdate: Bool = false
         ) -> GhosttyRemoteSessionStatePayload? {
             // Serve runtime state from memory: this core is the sole writer of a live session's runtime
-            // state and keeps `lastPersistedRuntimeState` in lockstep with every disk write (see the two
-            // `writeRuntimeState` sites), so the in-memory copy is authoritative. Falling back to disk only
-            // covers the brief pre-first-persist window. This removes a per-output-chunk SQLite open that
-            // otherwise saturated the serial terminal-engine executor and starved input.
-            let runtimeState = lastPersistedRuntimeState ?? (try? TerminalSessionPersistence.readRuntimeState(paths: paths))
+            // state and advances `latestRuntimeState` the moment it computes a new one, so the in-memory copy
+            // is authoritative (live truth) whether or not the durable write has landed yet. Falling back to
+            // disk only covers the brief pre-first-compute window. This removes a per-output-chunk SQLite open
+            // that otherwise saturated the serial terminal-engine executor and starved input.
+            let runtimeState = latestRuntimeState ?? (try? TerminalSessionPersistence.readRuntimeState(paths: paths))
             let attachmentSnapshot = currentAttachmentSnapshot()
             let ownerClient = activeOwnerClient()
             let includeScreenState = Self.remoteStateShouldIncludeScreenState(reason: reason, ownerKind: ownerClient?.kind)

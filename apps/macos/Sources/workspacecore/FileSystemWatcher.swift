@@ -25,6 +25,18 @@
     /// always dispatched with `async` (never `sync`), so tearing a stream down from
     /// within its own callback cannot deadlock, and the setup/teardown never runs on
     /// the caller's thread (e.g. the daemon main actor that pumps terminal I/O).
+    ///
+    /// Ownership contract: the FSEvents `info` pointer holds a *retained* reference to
+    /// a small `FSEventCallbackContext` box (carrying only `onChange`), never to the
+    /// watcher itself. This makes both failure modes structurally impossible:
+    /// - No use-after-free: a callback already enqueued on `queue` when the watcher is
+    ///   dropped still dereferences the box, which the live stream keeps retained until
+    ///   `FSEventStreamInvalidate` runs the release thunk. It never touches `self`.
+    /// - No leak: because the stream does not retain the watcher, dropping the last
+    ///   external reference deallocates the watcher, whose `deinit` tears the stream
+    ///   down (releasing the box). There is no stream↔watcher retain cycle, so the
+    ///   `deinit` safety net remains reachable and callers need not call `stop()` to
+    ///   avoid a leak (though `WorktreeDiscoveryService` does, on every removal path).
     public final class FileSystemWatcher: @unchecked Sendable {
         public enum WatchError: Error {
             case noPaths
@@ -70,8 +82,6 @@
         private func startOnQueue() throws {
             guard stream == nil else { return }
             guard !paths.isEmpty else { throw WatchError.noPaths }
-            var context = FSEventStreamContext(
-                version: 0, info: Unmanaged.passUnretained(self).toOpaque(), retain: nil, release: nil, copyDescription: nil)
             // File-level events keep the callback path list precise enough for callers
             // to filter (e.g. only git worktree metadata), while NoDefer delivers the
             // first event in an idle period immediately and coalesces the rest.
@@ -80,14 +90,34 @@
                     | kFSEventStreamCreateFlagWatchRoot)
             let callback: FSEventStreamCallback = { _, info, count, eventPaths, _, _ in
                 guard let info, count > 0 else { return }
-                let watcher = Unmanaged<FileSystemWatcher>.fromOpaque(info).takeUnretainedValue()
+                let callbackContext = Unmanaged<FSEventCallbackContext>.fromOpaque(info).takeUnretainedValue()
                 let changed = (unsafeBitCast(eventPaths, to: NSArray.self) as? [String]) ?? []
-                watcher.onChange(changed)
+                callbackContext.onChange(changed)
             }
-            guard
-                let created = FSEventStreamCreate(
+            // The context retains this box (never `self`) via the thunks below, so a
+            // callback can never observe a freed object; see the type's ownership
+            // contract. `withExtendedLifetime` keeps the box alive across
+            // `FSEventStreamCreate` — the opaque `info` pointer is invisible to ARC, so
+            // without it the box could be freed before Create takes its retain.
+            let callbackContext = FSEventCallbackContext(onChange: onChange)
+            let created: FSEventStreamRef? = withExtendedLifetime(callbackContext) {
+                var context = FSEventStreamContext(
+                    version: 0,
+                    info: Unmanaged.passUnretained(callbackContext).toOpaque(),
+                    retain: { info in
+                        guard let info else { return nil }
+                        _ = Unmanaged<FSEventCallbackContext>.fromOpaque(info).retain()
+                        return info
+                    },
+                    release: { info in
+                        guard let info else { return }
+                        Unmanaged<FSEventCallbackContext>.fromOpaque(info).release()
+                    },
+                    copyDescription: nil)
+                return FSEventStreamCreate(
                     kCFAllocatorDefault, callback, &context, paths as CFArray, FSEventStreamEventId(kFSEventStreamEventIdSinceNow), latency, flags)
-            else { throw WatchError.streamUnavailable }
+            }
+            guard let created else { throw WatchError.streamUnavailable }
             FSEventStreamSetDispatchQueue(created, queue)
             guard FSEventStreamStart(created) else {
                 FSEventStreamInvalidate(created)
@@ -118,10 +148,14 @@
 
         deinit {
             // At deinit no other reference to `self` can exist, so reading `stream`
-            // directly is race-free. If the owner dropped the watcher without calling
-            // stop(), tear the stream down on `queue` (never the calling thread, which
-            // may be the main actor). The pointer is boxed because FSEventStreamRef is
-            // not Sendable; `self` is not captured, so this cannot resurrect the object.
+            // directly is race-free. This safety net is reachable precisely because the
+            // stream retains the callback box rather than `self` (see the ownership
+            // contract): the owner may drop the watcher without calling stop(), and this
+            // tears the stream down on `queue` (never the calling thread, which may be
+            // the main actor). Invalidating releases the box, so an in-flight callback
+            // enqueued ahead of this teardown still sees a live box. The pointer is boxed
+            // because FSEventStreamRef is not Sendable; `self` is not captured, so this
+            // cannot resurrect the object.
             guard let stream else { return }
             let box = UncheckedSendableBox(stream)
             queue.async {
@@ -137,6 +171,17 @@
     private struct UncheckedSendableBox: @unchecked Sendable {
         let value: FSEventStreamRef
         init(_ value: FSEventStreamRef) { self.value = value }
+    }
+
+    /// Carries only the change handler across the FSEvents C callback boundary. The
+    /// stream's context retains an instance (via the retain/release thunks in
+    /// `startOnQueue`), so a callback always dereferences a live object even after the
+    /// owning `FileSystemWatcher` deallocates. It deliberately does NOT reference the
+    /// watcher, so the watcher can deinit independently and tear its stream down; the
+    /// stream's `FSEventStreamInvalidate` then releases this box.
+    private final class FSEventCallbackContext {
+        let onChange: @Sendable ([String]) -> Void
+        init(onChange: @escaping @Sendable ([String]) -> Void) { self.onChange = onChange }
     }
 
 #elseif os(Linux)

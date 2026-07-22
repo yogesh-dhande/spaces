@@ -349,9 +349,10 @@ final class GhosttyEmbeddedSessionHandoffTests: XCTestCase {
         guard let record = try await sourceCore.quiesceForHandoff() else { return XCTFail("quiesce produced no handoff record") }
         XCTAssertEqual(record.ownerEpoch, TerminalEngineActor.runSynchronously { sourceCore.debugOwnerEpoch }, "the record must carry the live owner epoch")
         let recordedEpoch = record.ownerEpoch
-        // Do NOT terminate the source core here: terminate() detaches active clients, and
-        // this test relies on the owner attachment persisting across the handoff (quiesce
-        // itself never detaches). The quiesced source core is cleaned up when it deinits.
+        // Do NOT terminate the source core inline here: terminate() detaches active clients, and this test
+        // relies on the owner attachment persisting across the handoff (quiesce itself never detaches). The
+        // quiesced source core is torn down by the deferred terminate() at scope exit, after the epoch
+        // assertions have run against its still-attached owner.
         defer { TerminalEngineActor.runSynchronously { sourceCore.terminate() } }
 
         let pty = try Self.makeAdoptablePTY()

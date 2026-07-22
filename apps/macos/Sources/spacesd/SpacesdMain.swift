@@ -78,6 +78,30 @@ final class DaemonLivenessState: @unchecked Sendable {
     }
 }
 
+/// The routing contract that keeps the daemon deadlock-free: which profile commands MUST run off the
+/// main actor. A command must be peeled off main when its orchestrator call graph can reach the built-in
+/// terminal launcher or terminator closures, both of which enter the terminal engine actor via
+/// `TerminalEngineActor.runSynchronously` — a synchronous engine hop that traps from the main actor (the
+/// one-way rule). `dispatch(_:)` peels exactly these onto the transport thread; every other profile
+/// command runs its bulk on the main actor. Kept as a pure, `internal` classifier (not buried in
+/// `dispatch`) so the routing contract is unit-testable without standing up a daemon, and so
+/// `profileCommandOffMain` can assert against the single source of truth.
+enum SpacesDaemonProfileCommandRouting {
+    static func requiresOffMainExecution(_ command: TerminalServiceProfileCommand) -> Bool {
+        switch command {
+        // Launcher-reaching: session create/send and workspace start/restart (`upWorkspace` launches
+        // and tears down workspace terminals). Terminator-reaching: agent kill's stop chokepoint, and an
+        // agent-signal `exit` whose `finalizeAgentRow`/`handleAgentExit` terminates the backing terminal.
+        case .terminalSend, .terminalCommand, .agentSpawn, .workspaceStart, .workspaceRestart, .agentKill, .agentSignal:
+            true
+        // Engine-free: pure store/disk reads and metadata writes with no launcher/terminator reach.
+        case .terminalList, .terminalTail, .projectList, .workspaceList, .workspaceCreate, .agentList, .agentAnnotate, .agentSubscribe,
+            .agentUnsubscribe, .agentConsumePendingEvents:
+            false
+        }
+    }
+}
+
 @MainActor private final class SpacesDaemonController {
     private static let ownerGatedTerminalCommands: Set<String> = ["send", "key", "clearScreen", "resize", "scroll"]
     private static let terminalLinkTransferAuthorizationTTL: TimeInterval = 10 * 60
@@ -176,20 +200,19 @@ final class DaemonLivenessState: @unchecked Sendable {
             return try self.launchBuiltInTerminalSession(launchConfiguration)
         },
         // Routes the remote `killAgentSession` Device API command through the same notify-then-stop flow
-        // as the local `.agentKill` (`killProfileAgentSession`): `killAgentSession` routes through the stop
-        // chokepoint that tells the child's subscribers it exited before deleting its row. Hops onto the
-        // main actor so the finalization runs exactly where the local `.agentKill` path runs it; the
-        // subscriber notification the chokepoint enqueues does not block here — `submitAgentNotificationLine`
-        // defers the terminal-send off the main actor (the engine send must never be awaited from main —
-        // see `TerminalEngineActor`'s one-way rule).
+        // as the local `.agentKill` (`agentKillOffMain`): `killAgentSession` routes through the stop
+        // chokepoint that tells the child's subscribers it exited before deleting its row, which
+        // terminates the backing terminal through the orchestrator's terminator closure
+        // (`TerminalEngineActor.runSynchronously`). This closure runs on the Device API server's own
+        // connection-handling queue (never main), so it drives the whole flow directly off the main actor:
+        // the engine hop is deadlock-safe here (main stays free) and the subscriber notification the
+        // chokepoint enqueues takes `submitAgentNotificationLine`'s direct off-main send path. Hopping onto
+        // the main actor instead would trip `runSynchronously`'s `!isMainThread` precondition and abort the
+        // daemon (see `TerminalEngineActor`'s one-way rule).
         agentSessionKiller: { [weak self] sessionID in
-            try Self.runOnMainActorSynchronously {
-                Result {
-                    guard let self else { throw Self.requestFailedError("spacesd is shutting down.") }
-                    let orchestrator = try self.makeProfileOrchestrator()
-                    return try orchestrator.killAgentSession(terminalSessionID: sessionID)
-                }
-            }.get()
+            guard let self else { throw Self.requestFailedError("spacesd is shutting down.") }
+            let orchestrator = try self.makeProfileOrchestrator()
+            return try orchestrator.killAgentSession(terminalSessionID: sessionID)
         }, onRestartRequested: { [weak self] in Task { @MainActor in self?.requestDaemonRestart() } })
     /// `nonisolated` so the off-main request handlers can drive git subprocesses from the transport
     /// thread. `RemoteWorkspaceGitClient` is `Sendable` (immutable, subprocess-per-call), so sharing the
@@ -433,13 +456,21 @@ final class DaemonLivenessState: @unchecked Sendable {
         // main-blocked context would deadlock (see the one-way rule).
         case .profileCommand(.terminalCommand(let payload)): return terminalCommandOffMain(payload)
         case .profileCommand(.agentSpawn(let payload)): return agentSpawnOffMain(payload)
-        // Every other profile command (agent signal/kill, workspace start/restart, listings, …) is peeled
-        // off main too: several of them can finalize an agent row, whose subscriber notification must
-        // suspend rather than block when reached from the main actor (see `TerminalEngineActor`'s one-way
-        // rule). Unlike the three cases above these keep running the *bulk* of their work on the main
-        // actor (through `handleProfileCommand`/`runProfileCommand`, unchanged main-actor methods) — only
-        // the calling thread here (never main) blocks on `profileCommandOffMain`'s bridge while that
-        // async chain runs, which is safe precisely because it is not main.
+        // Workspace start/restart and agent kill/signal are peeled off main for the SAME reason as the
+        // three cases above: their orchestrator call graph reaches the built-in terminal launcher (start/
+        // restart) or terminator (agent kill's stop chokepoint, and an agent-signal `exit` whose
+        // `handleAgentExit` tears down an already-dead backing terminal), and both closures enter the
+        // terminal engine actor via `TerminalEngineActor.runSynchronously` — which traps when called from
+        // the main actor (the one-way rule). `SpacesDaemonProfileCommandRouting.requiresOffMainExecution`
+        // is the single source of truth for this classification; `profileCommandOffMain` asserts against it.
+        case .profileCommand(.workspaceStart(let workspaceID)): return workspaceStartOffMain(workspaceID: workspaceID, restartIfRunning: false)
+        case .profileCommand(.workspaceRestart(let workspaceID)): return workspaceStartOffMain(workspaceID: workspaceID, restartIfRunning: true)
+        case .profileCommand(.agentKill(let payload)): return agentKillOffMain(payload)
+        case .profileCommand(.agentSignal(let payload)): return agentSignalOffMain(payload)
+        // Every remaining profile command (listings, workspace/agent metadata, subscriptions) touches no
+        // engine state, so it keeps running the *bulk* of its work on the main actor (through
+        // `handleProfileCommand`/`runProfileCommand`, unchanged main-actor methods) — only the calling
+        // thread here (never main) blocks on `profileCommandOffMain`'s bridge while that runs.
         case .profileCommand(let command): return profileCommandOffMain(command)
         default: return Self.runOnMainActorSynchronously { self.handle(request) }
         }
@@ -449,6 +480,12 @@ final class DaemonLivenessState: @unchecked Sendable {
     /// not already peeled out above. See the `dispatch(_:)` case comment for why this exists instead of
     /// calling `handleProfileCommand` inline through `handle`.
     private nonisolated func profileCommandOffMain(_ command: TerminalServiceProfileCommand) -> TerminalServiceResponse {
+        // Only engine-free profile commands may run their bulk on the main actor. An engine-touching
+        // command reaching here means `dispatch(_:)` failed to peel it off main, which would trap inside
+        // `TerminalEngineActor.runSynchronously`; fail loudly at the seam instead.
+        precondition(
+            !SpacesDaemonProfileCommandRouting.requiresOffMainExecution(command),
+            "engine-touching profile command reached the main-actor bridge; peel it off main in dispatch(_:)")
         guard !livenessState.snapshot().handoffInProgress else { return Self.handoffInProgressResponse() }
         return Self.runOnMainActorSynchronously { [weak self] in
             guard let self else { return TerminalServiceResponse(ok: false, message: "spacesd is shutting down.", errorCode: .shuttingDown) }
@@ -590,6 +627,16 @@ final class DaemonLivenessState: @unchecked Sendable {
         stopSharedServices()
         writeStandardError("spacesd handoff_intake_stopped\n")
 
+        // Flush agent-notification lines already enqueued from main-actor callers (RemoteAgentWatchService
+        // delivery) before quiescing, so an accepted-but-not-yet-sent line reaches its still-live core
+        // instead of being lost across exec. Drain by awaiting a trailing block on the serial delivery
+        // queue: because the queue is serial, that block runs only after every prior enqueued send. It is
+        // AWAITED (not `.sync`-blocked): the main actor stays free, so a drained send's live-core engine hop
+        // — and any engine→main hop underneath it — can complete instead of deadlocking against a blocked
+        // main thread. Intake is already stopped, so nothing new enqueues after this.
+        await withCheckedContinuation { continuation in agentNotificationDeliveryQueue.async { continuation.resume() } }
+        writeStandardError("spacesd handoff_delivery_drained\n")
+
         // Quiesce each live core. A nil return means the child already exited — finalize that session
         // through the normal dead-session teardown before exec so it lands `.exited`, not resumed.
         var records: [DaemonHandoffSessionRecord] = []
@@ -692,6 +739,15 @@ final class DaemonLivenessState: @unchecked Sendable {
     /// `CommandLine`/`execv`), and `performExecHandoff` calls it from inside the engine-isolated
     /// `withValidatedHandoffOutputsForExec`'s `operation` closure.
     private nonisolated func execStagedBinary(path: String) {
+        // POSIX exec preserves the calling THREAD's signal mask, and this runs on the terminal engine
+        // executor — a libdispatch worker, which blocks the terminal signals (SIGTERM/SIGHUP/SIGINT) so
+        // they are delivered to the main thread instead. Without resetting the mask here the replacement
+        // daemon would start with those signals blocked and ignore graceful shutdown (they would stay
+        // pending, never handled). Reset to an empty mask immediately before `execv`, exactly as the PTY
+        // child path does before its own exec (HostManagedPTYTerminalSessionDriver.resetSignalDispositionsForExec).
+        var emptyMask = sigset_t()
+        sigemptyset(&emptyMask)
+        sigprocmask(SIG_SETMASK, &emptyMask, nil)
         var argv: [UnsafeMutablePointer<CChar>?] = CommandLine.arguments.map { strdup($0) }
         argv.append(nil)
         path.withCString { pathPointer in _ = execv(pathPointer, &argv) }
@@ -1029,19 +1085,14 @@ final class DaemonLivenessState: @unchecked Sendable {
             let workspace = try orchestrator.createWorkspaceOnDevice(
                 projectID: project.id, branch: payload.branch, baseBranch: payload.baseBranch, allowExistingBranchReuse: payload.existingBranch)
             return TerminalServiceProfileCommandResponse(message: "Created workspace.", workspace: profileWorkspaceRecord(workspace))
-        case .workspaceStart(let workspaceID):
-            let orchestrator = try makeProfileOrchestrator()
-            try orchestrator.upWorkspace(workspaceID: workspaceID, restartIfRunning: false, background: true)
-            let workspace = try requiredProfileWorkspace(id: workspaceID, orchestrator: orchestrator)
-            return TerminalServiceProfileCommandResponse(message: "Workspace is running.", workspace: profileWorkspaceRecord(workspace))
-        case .workspaceRestart(let workspaceID):
-            let orchestrator = try makeProfileOrchestrator()
-            try orchestrator.upWorkspace(workspaceID: workspaceID, restartIfRunning: true, background: true)
-            let workspace = try requiredProfileWorkspace(id: workspaceID, orchestrator: orchestrator)
-            return TerminalServiceProfileCommandResponse(message: "Workspace restarted.", workspace: profileWorkspaceRecord(workspace))
-        case .agentSignal(let payload):
-            let orchestrator = try makeProfileOrchestrator()
-            return try recordProfileAgentSignal(payload, orchestrator: orchestrator)
+        // Workspace start/restart and agent kill/signal are peeled off main by `dispatch(_:)` into their
+        // dedicated synchronous off-main handlers (`workspaceStartOffMain`, `agentKillOffMain`,
+        // `agentSignalOffMain`) because their call graph reaches the launcher/terminator, whose engine hop
+        // would trap on the main-actor `runProfileCommand` switch (see `SpacesDaemonProfileCommandRouting`).
+        // Kept in the switch for exhaustiveness and to fail loudly if that peeling ever regresses.
+        case .workspaceStart: preconditionFailure("`.workspaceStart` is peeled off main by dispatch(_:); it must not reach runProfileCommand")
+        case .workspaceRestart: preconditionFailure("`.workspaceRestart` is peeled off main by dispatch(_:); it must not reach runProfileCommand")
+        case .agentSignal: preconditionFailure("`.agentSignal` is peeled off main by dispatch(_:); it must not reach runProfileCommand")
         case .agentList(let payload):
             let orchestrator = try makeProfileOrchestrator()
             let rows = try orchestrator.agentSessionRows(
@@ -1051,9 +1102,7 @@ final class DaemonLivenessState: @unchecked Sendable {
             let orchestrator = try makeProfileOrchestrator()
             return try annotateProfileAgentSession(payload, orchestrator: orchestrator)
         case .agentSpawn: preconditionFailure("`.agentSpawn` is peeled off main by dispatch(_:); it must not reach runProfileCommand")
-        case .agentKill(let payload):
-            let orchestrator = try makeProfileOrchestrator()
-            return try killProfileAgentSession(payload.sessionID, orchestrator: orchestrator)
+        case .agentKill: preconditionFailure("`.agentKill` is peeled off main by dispatch(_:); it must not reach runProfileCommand")
         case .agentSubscribe(let payload):
             let orchestrator = try makeProfileOrchestrator()
             return try subscribeProfileAgentSession(payload, orchestrator: orchestrator)
@@ -1136,6 +1185,51 @@ final class DaemonLivenessState: @unchecked Sendable {
         do {
             let orchestrator = try makeProfileOrchestrator()
             let profile = try spawnProfileAgentSession(payload, orchestrator: orchestrator)
+            return TerminalServiceResponse(ok: true, message: profile.message, sessions: profile.terminalSessions, profile: profile)
+        } catch { return Self.failureResponse(error) }
+    }
+
+    /// RPC `.profileCommand(.workspaceStart/.workspaceRestart)` handler. `upWorkspace` launches (and, on
+    /// restart, first tears down) workspace terminals through the orchestrator's launcher/terminator
+    /// closures, which hop the engine actor via `TerminalEngineActor.runSynchronously`; that traps if
+    /// driven from the main actor (the one-way rule), so this runs on the transport thread where the
+    /// synchronous engine hop is safe. Mirrors the `handleProfileCommand` success/failure envelope.
+    private nonisolated func workspaceStartOffMain(workspaceID: String, restartIfRunning: Bool) -> TerminalServiceResponse {
+        guard !livenessState.snapshot().handoffInProgress else { return Self.handoffInProgressResponse() }
+        do {
+            let orchestrator = try makeProfileOrchestrator()
+            try orchestrator.upWorkspace(workspaceID: workspaceID, restartIfRunning: restartIfRunning, background: true)
+            let workspace = try requiredProfileWorkspace(id: workspaceID, orchestrator: orchestrator)
+            let profile = TerminalServiceProfileCommandResponse(
+                message: restartIfRunning ? "Workspace restarted." : "Workspace is running.", workspace: profileWorkspaceRecord(workspace))
+            return TerminalServiceResponse(ok: true, message: profile.message, sessions: profile.terminalSessions, profile: profile)
+        } catch { return Self.failureResponse(error) }
+    }
+
+    /// RPC `.profileCommand(.agentKill)` handler. `killAgentSession` finalizes the agent row through the
+    /// stop chokepoint, which terminates the backing terminal via the orchestrator's terminator closure
+    /// (`TerminalEngineActor.runSynchronously`) — a forbidden synchronous engine wait from the main actor
+    /// — so it runs on the transport thread. The subscriber "exited" notice the chokepoint enqueues sends
+    /// through `submitAgentNotificationLine`, which on this off-main thread takes its direct send path.
+    private nonisolated func agentKillOffMain(_ payload: TerminalServiceAgentKillPayload) -> TerminalServiceResponse {
+        guard !livenessState.snapshot().handoffInProgress else { return Self.handoffInProgressResponse() }
+        do {
+            let orchestrator = try makeProfileOrchestrator()
+            let profile = try killProfileAgentSession(payload.sessionID, orchestrator: orchestrator)
+            return TerminalServiceResponse(ok: true, message: profile.message, sessions: profile.terminalSessions, profile: profile)
+        } catch { return Self.failureResponse(error) }
+    }
+
+    /// RPC `.profileCommand(.agentSignal)` handler. An `exit` signal can finalize the agent row, whose
+    /// `handleAgentExit` terminates an already-dead backing terminal through the orchestrator's terminator
+    /// closure (`TerminalEngineActor.runSynchronously`) — forbidden from the main actor — so it runs on the
+    /// transport thread. Every subscriber notification it produces goes direct (off-main) through
+    /// `submitAgentNotificationLine`. Mirrors the `handleProfileCommand` success/failure envelope.
+    private nonisolated func agentSignalOffMain(_ payload: TerminalServiceProfileAgentSignalPayload) -> TerminalServiceResponse {
+        guard !livenessState.snapshot().handoffInProgress else { return Self.handoffInProgressResponse() }
+        do {
+            let orchestrator = try makeProfileOrchestrator()
+            let profile = try recordProfileAgentSignal(payload, orchestrator: orchestrator)
             return TerminalServiceResponse(ok: true, message: profile.message, sessions: profile.terminalSessions, profile: profile)
         } catch { return Self.failureResponse(error) }
     }
@@ -1252,7 +1346,7 @@ final class DaemonLivenessState: @unchecked Sendable {
             id: value.id, name: value.name, dir: value.dir, isGitRepo: value.isGitRepo, defaultBranch: value.defaultBranch)
     }
 
-    private func profileWorkspaceRecord(_ value: WorkspaceRecord) -> TerminalServiceProfileWorkspaceRecord {
+    private nonisolated func profileWorkspaceRecord(_ value: WorkspaceRecord) -> TerminalServiceProfileWorkspaceRecord {
         TerminalServiceProfileWorkspaceRecord(
             id: value.id, projectID: value.projectID, dir: value.dir, dirname: value.dirname, branch: value.branch, baseBranch: value.baseBranch,
             isDefault: value.isDefault, isArchived: value.isArchived, isHidden: value.isHidden, isRunning: value.isRunning,
@@ -1310,7 +1404,11 @@ final class DaemonLivenessState: @unchecked Sendable {
         }
     }
 
-    private func recordProfileAgentSignal(_ payload: TerminalServiceProfileAgentSignalPayload, orchestrator: WorkspaceOrchestrator) throws
+    /// `nonisolated`: driven off main by `agentSignalOffMain` on the transport thread, since an `exit`
+    /// signal can reach the terminator (agent-row finalization → `handleAgentExit`), whose engine hop
+    /// must not run from the main actor. Its notification sends therefore take `submitAgentNotificationLine`'s
+    /// direct off-main path rather than the deferred main-actor path.
+    private nonisolated func recordProfileAgentSignal(_ payload: TerminalServiceProfileAgentSignalPayload, orchestrator: WorkspaceOrchestrator) throws
         -> TerminalServiceProfileCommandResponse
     {
         let workspaceID = payload.workspaceID
@@ -1394,7 +1492,7 @@ final class DaemonLivenessState: @unchecked Sendable {
     /// `sendProfileTerminalInput` plumbing a `terminal send` uses, via `submitAgentNotificationLine` so
     /// the line submits reliably. A send failure throws, which the engine reads as the subscriber having
     /// vanished (dead session) and tears the watch edge down.
-    private func makeAgentNotificationEngine(orchestrator: WorkspaceOrchestrator) -> AgentNotificationEngine {
+    private nonisolated func makeAgentNotificationEngine(orchestrator: WorkspaceOrchestrator) -> AgentNotificationEngine {
         AgentNotificationEngine(
             store: orchestrator.store,
             deliver: { [weak self] sessionID, line in
@@ -1435,6 +1533,14 @@ final class DaemonLivenessState: @unchecked Sendable {
     /// on the main path is logged rather than propagated back to `AgentNotificationEngine.deliverOrQueue`,
     /// so that path's synchronous dead-subscriber teardown (`subscriberDidExit`) is skipped for the failed
     /// send; the subscriber's edges are still torn down through its own later exit finalization.
+    ///
+    /// Accepted risk (deliberate, not a bug): for a main-originated send the enqueue itself is the ack —
+    /// `AgentNotificationEngine.deliverOrQueue` treats the deferred submit as delivered and does not learn
+    /// of a later send failure. The only consequence of that skipped signal is the dead-subscriber cleanup
+    /// above, which self-heals when the vanished subscriber runs its own exit finalization
+    /// (`subscriberDidExit`). The one remaining loss window — lines enqueued but not yet flushed when the
+    /// daemon exec-hands-off — is bounded by `performExecHandoff`'s pre-quiesce drain of this queue, so an
+    /// already-enqueued send flushes through a live core before the image is replaced.
     private nonisolated func submitAgentNotificationLine(sessionID: String, line: String) throws {
         if Thread.isMainThread {
             agentNotificationDeliveryQueue.async { [weak self] in
@@ -1496,7 +1602,7 @@ final class DaemonLivenessState: @unchecked Sendable {
     /// the flow (`killAgentSession`): a hook-signaled child stops through the coding-agent stop path
     /// with its subscribers told it exited first, and a not-yet-signaled session is terminated only
     /// when it was launched as a coding agent. A session that is neither is a loud error.
-    private func killProfileAgentSession(_ sessionID: String, orchestrator: WorkspaceOrchestrator) throws
+    private nonisolated func killProfileAgentSession(_ sessionID: String, orchestrator: WorkspaceOrchestrator) throws
         -> TerminalServiceProfileCommandResponse
     {
         guard try orchestrator.killAgentSession(terminalSessionID: sessionID)
@@ -1679,7 +1785,20 @@ final class DaemonLivenessState: @unchecked Sendable {
         guard !payload.sessionID.isEmpty else {
             return TerminalServiceResponse(ok: false, message: "Missing session ID.", errorCode: .invalidArgument)
         }
-        return TerminalEngineActor.runSynchronously { self.terminateSession(id: payload.sessionID) }
+        return TerminalEngineActor.runSynchronously {
+            // Re-check the handoff barrier on the engine actor, the same mutation-boundary guard
+            // `startSessionCoreResponse` applies to create. `performExecHandoff` sets `handoffInProgress`
+            // on the main actor BEFORE its engine-actor snapshot of `sessionCores`, and this hop is
+            // serialized against that snapshot/quiesce loop on the one engine queue: any terminate that
+            // reaches the engine after the snapshot therefore sees the flag set and is rejected, so a
+            // request accepted just before handoff can never remove/terminate a core the quiesce loop has
+            // already snapshotted (which would leave `quiesceForHandoff` building a record around a closed
+            // resource). A terminate that wins the race and runs before the snapshot is harmless — the
+            // snapshot then simply excludes the core it removed. The internal handoff/shutdown/resume paths
+            // call `terminateSession` directly, bypassing this RPC-only barrier.
+            guard !self.handoffInProgress else { return Self.handoffInProgressResponse() }
+            return self.terminateSession(id: payload.sessionID)
+        }
     }
 
     @TerminalEngineActor private func terminateSession(id sessionID: String) -> TerminalServiceResponse {
@@ -2117,10 +2236,24 @@ private final class MainActorSyncBox<T>: @unchecked Sendable { var value: T? }
         init(controller: SpacesDaemonController) { self.controller = controller }
 
         func applicationWillTerminate(_ notification: Notification) {
-            // OS-driven termination (e.g. logout). `shutdown()` is async now; kick it best-effort — the
-            // daemon's own shutdown paths use `shutdownAndExit`, and `terminate()` no longer blocks, so the
-            // per-core transcript flush completes quickly.
-            Task { @MainActor in await controller.shutdown() }
+            // OS-driven termination (e.g. logout). `shutdown()` is async now, and AppKit does not await it,
+            // so without waiting here the process could exit before the per-core transcript flush and
+            // attachment finalization complete. Drive it to completion, but never block this thread (the
+            // main actor's executor) on the semaphore while the `Task { @MainActor }` shutdown runs — its
+            // main-actor continuations would deadlock against the blocked executor. Instead pump the main
+            // run loop (legal inside applicationWillTerminate), which services the main-actor executor, so
+            // the shutdown task's continuations run and it signals. `shutdown()` awaits the engine actor
+            // only asynchronously (no engine→main sync wait), so this is not the forbidden main→engine
+            // bridge. Bound the pump so a stuck cleanup cannot hang logout.
+            let shutdownComplete = DispatchSemaphore(value: 0)
+            Task { @MainActor in
+                await controller.shutdown()
+                shutdownComplete.signal()
+            }
+            let deadline = Date(timeIntervalSinceNow: 5)
+            while shutdownComplete.wait(timeout: .now()) == .timedOut, Date() < deadline {
+                _ = RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.02))
+            }
         }
     }
 #endif
@@ -2182,14 +2315,21 @@ private final class MainActorSyncBox<T>: @unchecked Sendable { var value: T? }
                 }
                 withExtendedLifetime(signalSources) { RunLoop.main.run() }
                 // The run loop has returned (process teardown); drive the async shutdown to completion
-                // before returning. This semaphore wait is not the forbidden main→engine sync bridge:
-                // `shutdown()`'s engine hop performs no engine→main callback, so it cannot deadlock here.
+                // before returning. This thread IS the main actor's executor, so it must NOT block on the
+                // semaphore while a `Task { @MainActor }` shutdown runs — the task's main-actor
+                // continuations would target this blocked executor and never resume (a permanent hang).
+                // Instead keep pumping the run loop, which services the main-actor executor exactly as it
+                // does for `controller.start()` above, until the async shutdown signals completion. The
+                // shutdown only awaits the engine actor asynchronously (no engine→main sync wait), so this
+                // is not the forbidden main→engine bridge.
                 let shutdownComplete = DispatchSemaphore(value: 0)
                 Task { @MainActor in
                     await controller.shutdown()
                     shutdownComplete.signal()
                 }
-                shutdownComplete.wait()
+                while shutdownComplete.wait(timeout: .now()) == .timedOut {
+                    _ = RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.02))
+                }
             } catch {
                 writeStandardError("spacesd: \(error)\n")
                 exit(1)
