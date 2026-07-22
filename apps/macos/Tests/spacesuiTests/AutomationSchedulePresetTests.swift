@@ -10,11 +10,25 @@ struct AutomationSchedulePresetTests {
     // MARK: - Preset ↔ cron-string round-trips
 
     @Test func everyNMinutesRoundTrips() {
-        for n in [2, 5, 15, 30, 59] {
+        // Only uniform divisors of 60 are preset choices, so those are the values that round-trip.
+        for n in AutomationSchedulePreset.everyNMinutesChoices {
             let preset = AutomationSchedulePreset.everyNMinutes(minutes: n)
             #expect(preset.cronExpression == "*/\(n) * * * *")
             #expect(AutomationSchedulePreset.from(cronExpression: preset.cronExpression) == preset)
         }
+    }
+
+    @Test func everyNMinutesChoicesAreDivisorsOfSixtyUpTo30() {
+        // A `*/N` cron only keeps a uniform gap when N divides 60; the preset offers exactly those steps
+        // (2 through 30) so it can never open on a lying non-uniform cadence. 1 is excluded like
+        // every-minute (`*`) always was.
+        #expect(AutomationSchedulePreset.everyNMinutesChoices == [2, 3, 4, 5, 6, 10, 12, 15, 20, 30])
+    }
+
+    @Test func everyMinuteStepIsAdvanced() {
+        // `*/1` is the same schedule as every-minute (`*`), which is deliberately not a preset; both open
+        // in Advanced so the round-trip stays deterministic.
+        #expect(AutomationSchedulePreset.from(cronExpression: "*/1 * * * *") == .advanced(expression: "*/1 * * * *"))
     }
 
     @Test func hourlyAtMinuteRoundTrips() {
@@ -73,10 +87,17 @@ struct AutomationSchedulePresetTests {
         #expect(AutomationSchedulePreset.from(cronExpression: "  not a cron  ") == .advanced(expression: "not a cron"))
     }
 
-    @Test func everyOneMinuteStepIsAdvanced() {
-        // `*/1` is technically valid but the every-N-minutes preset only accepts N in 2...59, so `*/1` opens
-        // in Advanced rather than round-tripping to a misleading "every 1 minutes" builder state.
-        #expect(AutomationSchedulePreset.from(cronExpression: "*/1 * * * *") == .advanced(expression: "*/1 * * * *"))
+    @Test func nonDivisorStepMinutesIsAdvanced() {
+        // `*/40` is valid cron but does NOT space evenly (fires at :00 and :40 each hour), so it is not an
+        // every-N-minutes preset — it opens in Advanced verbatim rather than as a lying preset. `*/59` (fires
+        // at :59 then :00) is the same case.
+        #expect(AutomationSchedulePreset.from(cronExpression: "*/40 * * * *") == .advanced(expression: "*/40 * * * *"))
+        #expect(AutomationSchedulePreset.from(cronExpression: "*/59 * * * *") == .advanced(expression: "*/59 * * * *"))
+    }
+
+    @Test func divisorStepMinutesRoundTripsToPreset() {
+        // A divisor step opens honestly as the preset.
+        #expect(AutomationSchedulePreset.from(cronExpression: "*/15 * * * *") == .everyNMinutes(minutes: 15))
     }
 
     // MARK: - Next-3-runs preview

@@ -54,7 +54,7 @@ import workspacecore
     private var triggerSegmented: NSSegmentedControl?
     private var cronModeSegmented: NSSegmentedControl?
     private var presetKindPopUp: NSPopUpButton?
-    private var everyNField: NSTextField?
+    private var everyNPopUp: NSPopUpButton?
     private var hourlyMinuteField: NSTextField?
     private var dailyHourField: NSTextField?
     private var dailyMinuteField: NSTextField?
@@ -335,10 +335,11 @@ import workspacecore
         cronSectionRows.append(kindRow)
         builderRows.append(kindRow)
 
-        // Preset parameter rows.
-        let everyNField = makeIntegerField(range: 2...59, value: 15)
-        self.everyNField = everyNField
-        let everyNRow = host.settingsLabeledField(name: "Every N minutes", hint: "2–59.", control: everyNField)
+        // Preset parameter rows. Every-N-minutes offers only uniform divisors of 60 (a free numeric field
+        // would let the user pick a step like 40 that cron does not space evenly), so it is a popup.
+        let everyNPopUp = makeEveryNPopUp(selected: 15)
+        self.everyNPopUp = everyNPopUp
+        let everyNRow = host.settingsLabeledField(name: "Every N minutes", hint: "Uniform intervals (divisors of 60).", control: everyNPopUp)
         addRow(everyNRow, to: stack)
         self.everyNRow = everyNRow
         cronSectionRows.append(everyNRow)
@@ -398,7 +399,9 @@ import workspacecore
         switch preset {
         case .everyNMinutes(let minutes):
             presetKindPopUp?.selectItem(at: indexOfKind(.everyNMinutes))
-            everyNField?.integerValue = minutes
+            // `from(cronExpression:)` only ever derives an everyNMinutes preset for an N in the choices, so a
+            // stored value always matches an item; leave the default selected if it somehow does not.
+            if let index = AutomationSchedulePreset.everyNMinutesChoices.firstIndex(of: minutes) { everyNPopUp?.selectItem(at: index) }
         case .hourlyAtMinute(let minute):
             presetKindPopUp?.selectItem(at: indexOfKind(.hourlyAtMinute))
             hourlyMinuteField?.integerValue = minute
@@ -420,6 +423,20 @@ import workspacecore
 
     private func indexOfKind(_ kind: AutomationSchedulePreset.Kind) -> Int {
         AutomationSchedulePreset.Kind.allCases.firstIndex(of: kind) ?? 0
+    }
+
+    /// Builds the every-N-minutes popup from the preset's canonical divisor choices, each item carrying its
+    /// integer value as its represented object so the read path recovers it directly.
+    private func makeEveryNPopUp(selected: Int) -> NSPopUpButton {
+        let popUp = NSPopUpButton()
+        for choice in AutomationSchedulePreset.everyNMinutesChoices {
+            popUp.addItem(withTitle: "\(choice)")
+            popUp.itemArray.last?.representedObject = choice
+        }
+        popUp.selectItem(at: AutomationSchedulePreset.everyNMinutesChoices.firstIndex(of: selected) ?? 0)
+        popUp.target = self
+        popUp.action = #selector(scheduleValueChanged)
+        return popUp
     }
 
     private func makeIntegerField(range: ClosedRange<Int>, value: Int) -> NSTextField {
@@ -586,7 +603,8 @@ import workspacecore
         let mode = CronMode(rawValue: cronModeSegmented?.selectedSegment ?? 0) ?? .builder
         if mode == .advanced { return .advanced(expression: advancedCronField?.stringValue ?? "") }
         switch selectedKind() {
-        case .everyNMinutes: return .everyNMinutes(minutes: everyNField?.integerValue ?? 0)
+        case .everyNMinutes:
+            return .everyNMinutes(minutes: (everyNPopUp?.selectedItem?.representedObject as? Int) ?? AutomationSchedulePreset.everyNMinutesChoices[0])
         case .hourlyAtMinute: return .hourlyAtMinute(minute: hourlyMinuteField?.integerValue ?? 0)
         case .dailyAtTime: return .dailyAtTime(hour: dailyHourField?.integerValue ?? 0, minute: dailyMinuteField?.integerValue ?? 0)
         case .weeklyOnDaysAtTime:

@@ -964,6 +964,92 @@ import spacesterminalcore
         XCTAssertEqual(next.status, .running, "the failed stale row no longer blocks skip concurrency")
         harness.service.cancelRun(runID: next.id)
     }
+
+    // MARK: - Cancel/timeout with no persisted childPID
+
+    /// A cancel that lands in the write-behind no-PID window — the session is genuinely live but its runtime
+    /// row carries no `childPID` yet — must still terminate the session, not just finalize the run. The
+    /// preferred process-group signal cannot run without a pid, so teardown falls back to terminating the whole
+    /// session through the daemon, so a run finalized `canceled` can never leave its own session running.
+    func testCancelTerminatesOwnSessionWhenNoChildPIDPersisted() throws {
+        let harness = try Harness(self)
+        let automation = try harness.insertAutomation(concurrency: .allow)
+        let sessionID = UUID().uuidString
+        let run = AutomationRun(
+            id: UUID().uuidString, automationID: automation.id, kind: .script, status: .running, skipReason: nil, trigger: .manual, exitCode: nil,
+            terminalSessionID: sessionID, startedAt: harness.now(), endedAt: nil, createdAt: harness.now())
+        try harness.store.insertAutomationRun(run)
+        // A live session whose runtime row has no childPID (write-behind: the pid has not landed yet).
+        try harness.writeAttributedSessionFiles(workspaceID: nil, runID: run.id, sessionID: sessionID, kind: .automation, live: true)
+        XCTAssertTrue(harness.orchestrator.automationSessionIsLive(sessionID: sessionID))
+
+        harness.service.cancelRun(runID: run.id)
+
+        XCTAssertEqual(try harness.store.automationRun(id: run.id)?.status, .canceled)
+        XCTAssertFalse(
+            harness.orchestrator.automationSessionIsLive(sessionID: sessionID),
+            "with no persisted childPID the whole session is terminated so the canceled run leaves nothing running")
+    }
+
+    // MARK: - Completions polled before due cron fires
+
+    /// A run whose command exits between ticks must be finalized before the due cron fire judges overlap:
+    /// `tick()` polls running runs before firing due crons, so a `skip`-policy occurrence coming due the same
+    /// tick sees the just-finished run as idle and starts a real run rather than consuming the anchor on a
+    /// skipped occurrence recorded against work that is no longer running.
+    func testTickPollsCompletionBeforeDueCronFireSoSkipDoesNotSkipFinishedRun() throws {
+        let clock = MutableClock(start: Date(timeIntervalSince1970: 1_700_000_000))
+        let harness = try Harness(self, now: clock.now)
+        let automation = try harness.insertAutomation(
+            triggerKind: .cron, cronExpression: "* * * * *", concurrency: .skip, nextFireTime: clock.now().addingTimeInterval(60))
+
+        // A run is already running from a prior (manual) fire.
+        let run = try XCTUnwrap(harness.service.triggerManually(automationID: automation.id))
+        XCTAssertEqual(run.status, .running)
+        let sessionID = try XCTUnwrap(harness.store.automationRun(id: run.id)?.terminalSessionID)
+
+        // Its command exits just before the next cron occurrence is due — no tick has observed it yet.
+        harness.host.markSessionEnded(sessionID: sessionID)
+
+        // The occurrence is now due; a single tick polls the completion first, so the due fire sees an idle
+        // automation and starts a real run rather than skipping against the just-finished run.
+        clock.advance(by: 60)
+        harness.service.tick()
+
+        XCTAssertTrue(try XCTUnwrap(harness.store.automationRun(id: run.id)).status.isTerminal, "the finished run is finalized this tick")
+        let cronRuns = try harness.store.automationRuns(automationID: automation.id).filter { $0.trigger == .cron }
+        XCTAssertEqual(cronRuns.count, 1, "the due occurrence fires exactly one run")
+        XCTAssertEqual(cronRuns.first?.status, .running, "the due fire starts a real run, not a skipped occurrence")
+        XCTAssertFalse(cronRuns.contains { $0.status == .skipped }, "no skipped occurrence is recorded against the finished run")
+        harness.service.cancelRun(runID: try XCTUnwrap(cronRuns.first).id)
+    }
+
+    // MARK: - Terminal-session companion cleanup
+
+    /// Deleting a terminal session removes its companion rows keyed by the session id, not just the
+    /// `terminal_sessions` row, so retention pruning and the ended-agent sweep leave no orphaned persistence
+    /// behind. Runtime state is seeded and asserted here; the other companion tables (`terminal_clients`,
+    /// `terminal_attachments`, `terminal_remote_session_states`) are keyed by session id with no FK cascade
+    /// and are deleted in the same transaction (covered by schema reading, not seeded here).
+    func testDeleteTerminalSessionRemovesCompanionRuntimeState() throws {
+        let harness = try Harness(self)
+        let automation = try harness.insertAutomation(concurrency: .allow)
+        let run = try harness.insertRun(automationID: automation.id, status: .succeeded)
+        let sessionID = UUID().uuidString
+        try harness.writeAttributedSessionFiles(workspaceID: nil, runID: run.id, sessionID: sessionID, kind: .automation, live: false)
+
+        // Both the session row and its runtime state are present before deletion.
+        XCTAssertTrue(try harness.store.terminalSessionIDs(automationRunID: run.id).contains(sessionID))
+        let paths = try TerminalSessionPaths.forSession(id: sessionID)
+        XCTAssertNoThrow(try TerminalSessionPersistence.readRuntimeState(paths: paths), "the runtime row exists before deletion")
+
+        try harness.store.deleteTerminalSession(sessionID: sessionID)
+
+        XCTAssertFalse(
+            try harness.store.terminalSessionIDs(automationRunID: run.id).contains(sessionID), "the terminal_sessions row is removed")
+        XCTAssertThrowsError(
+            try TerminalSessionPersistence.readRuntimeState(paths: paths), "the companion runtime_states row is removed in the same delete")
+    }
 }
 
 // MARK: - Test harness

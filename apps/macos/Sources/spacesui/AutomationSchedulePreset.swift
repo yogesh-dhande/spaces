@@ -12,8 +12,12 @@ import workspacecore
 /// `.advanced` carrying that string verbatim. Kept a pure value type (no AppKit) so the round-trips,
 /// serialization, and next-run previews are directly unit-testable.
 enum AutomationSchedulePreset: Equatable, Sendable {
-    /// Fires every `minutes` minutes (`*/N * * * *`); `N` in 2...59. Every-minute (`*`) is not a preset and
-    /// derives to `.advanced` so the round-trip stays deterministic.
+    /// Fires every `minutes` minutes (`*/N * * * *`), where `N` is a uniform divisor of 60. `*/N` cron only
+    /// keeps a uniform gap when `N` divides 60: otherwise cron restarts the step sequence at minute 0 each
+    /// hour, so e.g. `*/40` fires at :00 and :40 (a 40/20 gap) and `*/59` fires at :59 then :00. Restricting
+    /// the preset to `everyNMinutesChoices` keeps its promise; a non-dividing cadence like `*/40` remains
+    /// expressible through `.advanced`. Every-minute (`*`) is not a preset and derives to `.advanced` so the
+    /// round-trip stays deterministic.
     case everyNMinutes(minutes: Int)
     /// Fires once an hour at minute `minute` (`M * * * *`); `minute` in 0...59.
     case hourlyAtMinute(minute: Int)
@@ -23,6 +27,11 @@ enum AutomationSchedulePreset: Equatable, Sendable {
     case weeklyOnDaysAtTime(days: Set<Int>, hour: Int, minute: Int)
     /// Any expression that does not match a builder preset; the raw 5-field string is edited directly.
     case advanced(expression: String)
+
+    /// The `N` values the every-N-minutes preset offers, in ascending order: the divisors of 60 from 2 to
+    /// 30. Only these produce a uniform `*/N` gap; any other cadence uses `.advanced`. 1 is excluded like
+    /// every-minute (`*`) always was — `*/1` is the same every-minute schedule and derives to `.advanced`.
+    static let everyNMinutesChoices = [2, 3, 4, 5, 6, 10, 12, 15, 20, 30]
 
     /// The friendly cases offered as the builder's picker options, in display order. `advanced` is not a
     /// picker option (it is a separate mode), so it is excluded here.
@@ -75,8 +84,10 @@ enum AutomationSchedulePreset: Equatable, Sendable {
         // Every recognized preset leaves day-of-month and month unrestricted.
         guard domField == "*", monthField == "*" else { return .advanced(expression: expression) }
 
-        // Every N minutes: `*/N * * * *` with the rest unrestricted.
-        if hourField == "*", dowField == "*", let step = stepValue(minuteField), (2...59).contains(step) {
+        // Every N minutes: `*/N * * * *` with the rest unrestricted, but only for a uniform divisor of 60.
+        // A non-dividing step (e.g. `*/40`) is NOT mapped to the preset — that would open it as a preset whose
+        // "every N minutes" promise the cron string does not keep — so it falls through to `.advanced`.
+        if hourField == "*", dowField == "*", let step = stepValue(minuteField), everyNMinutesChoices.contains(step) {
             return .everyNMinutes(minutes: step)
         }
         // The remaining presets pin a single minute (0...59).

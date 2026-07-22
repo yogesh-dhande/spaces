@@ -114,15 +114,21 @@ public final class AutomationService: @unchecked Sendable {
         try store.setAutomationNextFireTime(id: automationID, nextFireTime: schedule.nextFireDate(after: now(), timeZone: timeZone()))
     }
 
-    /// One scheduler + executor step: fire due cron automations, advance escalations, poll running runs for
-    /// completion/timeout, and promote a queued run whose automation is now idle. Idempotent per minute:
+    /// One scheduler + executor step: poll running runs for completion/timeout, fire due cron automations,
+    /// advance escalations, and promote a queued run whose automation is now idle. Idempotent per minute:
     /// a cron automation fires once when its `nextFireTime` elapses because firing recomputes it forward.
+    ///
+    /// Invariant: `pollRunningRuns` runs BEFORE `fireDueCronAutomations`, so a run whose command exited
+    /// between ticks is finalized before the concurrency gate judges overlap this tick. Otherwise a due fire
+    /// under the `skip` policy would read the just-exited run as still `.running`, consume the cron anchor,
+    /// and record a skipped occurrence against work that is no longer running — so `skip` only ever skips
+    /// against genuinely still-running work.
     public func tick() {
         queue.sync {
             recomputeCronAnchorsIfTimeZoneChanged()
+            pollRunningRuns()
             fireDueCronAutomations()
             processPendingKills()
-            pollRunningRuns()
             promoteQueuedRuns()
         }
     }
@@ -829,14 +835,22 @@ public final class AutomationService: @unchecked Sendable {
 
         guard terminate, let ownSessionID else { return }
         if let runtimeState = try? terminalRuntimeState(sessionID: ownSessionID), let childPID = runtimeState.childPID, childPID > 0 {
-            // The group id is read ONCE, before SIGTERM: a leader that dies on the signal would make a
-            // second getpgid fail, storing no group and dropping the escalation while a SIGTERM-ignoring
+            // Preferred path: signal the command's own process group so the transcript keeps flowing until the
+            // command exits (the session host stays up and drains output), with SIGKILL escalation tracked in
+            // `pendingKills`. The group id is read ONCE, before SIGTERM: a leader that dies on the signal would
+            // make a second getpgid fail, storing no group and dropping the escalation while a SIGTERM-ignoring
             // descendant survives. The signal and the pending kill must see the same group.
             let processGroupID = signalableProcessGroupID(childPID: childPID)
             signalProcessGroup(childPID: childPID, processGroupID: processGroupID, signal: SIGTERM)
             pendingKills[run.id] = PendingKill(
                 childPID: childPID, processGroupID: processGroupID,
                 sigkillDeadline: now().addingTimeInterval(terminationGrace))
+        } else {
+            // Fallback for the no-PID window: under write-behind persistence the runtime row (or its childPID)
+            // can be absent while the session is genuinely live — a cancel, or a short timeout expiring while
+            // the session is still starting. Terminating the whole session through the daemon's machinery kills
+            // its process tree, so a run finalized canceled/timedOut can never leave its own session running.
+            orchestrator.automationTerminateSession(sessionID: ownSessionID)
         }
     }
 
