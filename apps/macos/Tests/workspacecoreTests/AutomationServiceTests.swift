@@ -899,6 +899,71 @@ import spacesterminalcore
         XCTAssertEqual(sessionID, try harness.store.automationRun(id: run.id)?.terminalSessionID)
         harness.service.cancelRun(runID: run.id)
     }
+
+    // MARK: - Launch-persistence grace
+
+    /// A script run whose session has no runtime row yet but a fresh launch configuration is within the
+    /// launch-persistence grace window (write-behind persistence, post-#224, has not landed the runtime row):
+    /// the tick reads the absent runtime row as indeterminate (session still coming up), not as completion, so
+    /// the run stays `.running` rather than being falsely finalized as failed.
+    func testScriptRunWithPendingLaunchAndNoRuntimeStateStaysRunning() throws {
+        let harness = try Harness(self)
+        let automation = try harness.insertAutomation(concurrency: .allow)
+        let sessionID = UUID().uuidString
+        let run = AutomationRun(
+            id: UUID().uuidString, automationID: automation.id, kind: .script, status: .running, skipReason: nil, trigger: .manual, exitCode: nil,
+            terminalSessionID: sessionID, startedAt: harness.now(), endedAt: nil, createdAt: harness.now())
+        try harness.store.insertAutomationRun(run)
+        try harness.writeLaunchConfigurationOnly(workspaceID: nil, runID: run.id, sessionID: sessionID, kind: .automation, createdAt: Date())
+
+        harness.service.tick()
+        XCTAssertEqual(
+            try harness.store.automationRun(id: run.id)?.status, .running,
+            "an absent runtime row within the launch grace window is indeterminate, not completion")
+    }
+
+    /// A script run whose session has no runtime row and only a stale launch configuration (outside the grace
+    /// window) is a vanished session, so the tick finalizes the run rather than waiting for a row that will
+    /// never land. No recorded exit code finalizes it as failed.
+    func testScriptRunWithNoRuntimeStateAndStaleLaunchFinalizes() throws {
+        let harness = try Harness(self)
+        let automation = try harness.insertAutomation(concurrency: .allow)
+        let sessionID = UUID().uuidString
+        let run = AutomationRun(
+            id: UUID().uuidString, automationID: automation.id, kind: .script, status: .running, skipReason: nil, trigger: .manual, exitCode: nil,
+            terminalSessionID: sessionID, startedAt: harness.now(), endedAt: nil, createdAt: harness.now())
+        try harness.store.insertAutomationRun(run)
+        try harness.writeLaunchConfigurationOnly(
+            workspaceID: nil, runID: run.id, sessionID: sessionID, kind: .automation, createdAt: Date().addingTimeInterval(-120))
+
+        harness.service.tick()
+        let finished = try XCTUnwrap(harness.store.automationRun(id: run.id))
+        XCTAssertEqual(finished.status, .failed, "a vanished session outside the grace window finalizes (no exit code → failed)")
+    }
+
+    // MARK: - Stale nil-session running row
+
+    /// A `.running` run row with no session id is a stale crash leftover: the daemon died between inserting
+    /// the row and persisting its launched session id. Queue confinement means a tick can never legitimately
+    /// observe that mid-`startRun` window, so the tick fails the row — which would otherwise stay `.running`
+    /// forever and block skip/queue concurrency — and the automation is unblocked for its next trigger.
+    func testRunningRunWithoutSessionIsFailedAndUnblocksConcurrency() throws {
+        let harness = try Harness(self)
+        let automation = try harness.insertAutomation(concurrency: .skip)
+        let orphan = AutomationRun(
+            id: UUID().uuidString, automationID: automation.id, kind: .script, status: .running, skipReason: nil, trigger: .manual, exitCode: nil,
+            terminalSessionID: nil, startedAt: harness.now(), endedAt: nil, createdAt: harness.now())
+        try harness.store.insertAutomationRun(orphan)
+
+        harness.service.tick()
+        XCTAssertEqual(
+            try harness.store.automationRun(id: orphan.id)?.status, .failed, "a nil-session running row is failed as a stale crash leftover")
+
+        // With the stale row failed, a skip-policy trigger starts a real run instead of being blocked.
+        let next = try XCTUnwrap(harness.service.triggerManually(automationID: automation.id))
+        XCTAssertEqual(next.status, .running, "the failed stale row no longer blocks skip concurrency")
+        harness.service.cancelRun(runID: next.id)
+    }
 }
 
 // MARK: - Test harness
@@ -1009,6 +1074,20 @@ import spacesterminalcore
                 sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: live ? getpid() : 1, childPID: nil, state: live ? .running : .exited,
                 updatedAt: "2026-06-06T00:00:01Z", exitedAt: live ? nil : "2026-06-06T00:00:01Z", title: title, workingDirectory: "/tmp"), paths: paths)
         if live { FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data()) }
+    }
+
+    /// Writes ONLY a launch configuration for a session — no runtime state and no control socket — modeling
+    /// the write-behind window just after a launch where the runtime row has not landed yet. `createdAt`
+    /// drives whether `builtInSessionLaunchIsPending` reads the launch as still coming up (recent) or stale
+    /// (old).
+    func writeLaunchConfigurationOnly(workspaceID: String?, runID: String, sessionID: String, kind: TerminalSessionKind, createdAt: Date) throws {
+        let paths = try TerminalSessionPaths.forSession(id: sessionID)
+        try paths.ensureDirectories()
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            TerminalSessionLaunchConfiguration(
+                sessionID: sessionID, backend: .ghosttyEmbedded, title: "cmd", workingDirectory: "/tmp", shell: "/bin/zsh", command: nil,
+                createdAt: TerminalSessionTimestamp.string(from: createdAt), workspaceID: workspaceID, kind: kind, automationRunID: runID),
+            paths: paths)
     }
 
     /// Writes an attributed coding-agent terminal session (workspace-scoped, stamped with the run id) plus

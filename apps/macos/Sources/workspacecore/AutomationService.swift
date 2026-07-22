@@ -88,6 +88,15 @@ public final class AutomationService: @unchecked Sendable {
         self.logError = logError
     }
 
+    /// Drains any in-flight operation: awaits a no-op block appended to the confinement queue. Because that
+    /// queue is serial, the continuation resumes only after every previously started operation has completed.
+    /// Used by the daemon to drain a possibly in-flight `tick()` before quiescing cores for an exec handoff.
+    /// Async, and must never be called as a sync block from the main actor: the service's executor hops the
+    /// terminal engine actor (and thus main), so a main-actor sync wait would deadlock (the one-way rule).
+    public func waitUntilIdle() async {
+        await withCheckedContinuation { continuation in queue.async { continuation.resume() } }
+    }
+
     // MARK: - Scheduling entry points
 
     /// Establishes a newly created or re-enabled cron automation's next fire time from now, with no
@@ -126,15 +135,27 @@ public final class AutomationService: @unchecked Sendable {
     private func recomputeCronAnchorsIfTimeZoneChanged() {
         let zone = timeZone()
         guard zone.identifier != anchorTimeZoneIdentifier else { return }
-        anchorTimeZoneIdentifier = zone.identifier
+        // The cached identifier is committed only after the whole recompute succeeds — the outer fetch and
+        // every per-automation anchor write. On any failure it is left unchanged so the next tick retries the
+        // whole (idempotent) recompute; caching the new zone before any anchor moved would strand stale-zone
+        // anchors until some later zone change.
+        var recomputeFailed = false
         do {
             for automation in try store.enabledCronAutomations() {
                 // Scheduler-side: one automation's anchor failing must not wedge the recompute for the rest,
                 // so each is isolated and logged rather than propagated (the command surface propagates).
                 do { try computeInitialNextFireTimeLocked(automationID: automation.id) }
-                catch { logError("automation_next_fire_time_error id=\(automation.id) error=\(error)") }
+                catch {
+                    recomputeFailed = true
+                    logError("automation_next_fire_time_error id=\(automation.id) error=\(error)")
+                }
             }
-        } catch { logError("automation_timezone_recompute_error error=\(error)") }
+        } catch {
+            recomputeFailed = true
+            logError("automation_timezone_recompute_error error=\(error)")
+        }
+        guard !recomputeFailed else { return }
+        anchorTimeZoneIdentifier = zone.identifier
     }
 
     /// Daemon-start reconciliation: for each enabled cron automation whose persisted `nextFireTime` already
@@ -361,8 +382,16 @@ public final class AutomationService: @unchecked Sendable {
                 guard let schedule = automation.parsedCronSchedule, let nextFireTime = automation.nextFireTime, nextFireTime <= currentTime else {
                     continue
                 }
-                _ = fire(automation: automation, trigger: .cron)
+                // At-most-once firing: the persisted anchor is the durable claim on this occurrence, advanced
+                // BEFORE the launch. `fire` swallows its own errors and the two writes are independent, so if the
+                // launch ran first an anchor-write failure (or a crash between the two) would leave a due anchor
+                // that re-fires the same occurrence on every tick — under the `allow` policy, a fresh duplicate
+                // launch every second. Advancing the anchor first means a failure or crash can only ever LOSE one
+                // occurrence, never duplicate a launch (a duplicate agent/script launch is the worse failure).
+                // Which automations fire this tick is still decided by each row's in-memory `nextFireTime` in the
+                // guard above (the loop iterates a pre-fetched list), so the reorder does not change the selection.
                 try store.setAutomationNextFireTime(id: automation.id, nextFireTime: schedule.nextFireDate(after: currentTime, timeZone: timeZone()))
+                _ = fire(automation: automation, trigger: .cron)
             }
         } catch { logError("automation_fire_due_error error=\(error)") }
     }
@@ -549,6 +578,17 @@ public final class AutomationService: @unchecked Sendable {
     }
 
     private func pollRunningRun(_ run: AutomationRun, automation: Automation) {
+        // A `.running` row with no session id is always a stale crash leftover: queue confinement means a tick
+        // can never observe the mid-`startRun` window where the row is briefly `.running` with a nil session id
+        // (`startRun` inserts the row and records its launched session id within one queued operation, never
+        // interleaved with a tick). So an observed nil-session `.running` row is a daemon that died between
+        // inserting the row and persisting its session id; it would otherwise stay `.running` forever and block
+        // skip/queue concurrency. Fail it (nil exit code) so the automation is unblocked.
+        guard run.terminalSessionID != nil else {
+            do { try finishRun(run, status: .failed, exitCode: nil) }
+            catch { logError("automation_poll_run_error run=\(run.id) error=\(error)") }
+            return
+        }
         switch automation.kind {
         case .script: pollRunningScriptRun(run, automation: automation)
         case .agent: pollRunningAgentRun(run, automation: automation)
@@ -568,6 +608,13 @@ public final class AutomationService: @unchecked Sendable {
                 try finishRun(run, status: .timedOut, exitCode: nil)
                 return
             }
+
+            // Launch-persistence grace: just after a successful launch the runtime row can be absent/stale under
+            // write-behind persistence (post-#224), so a nil runtime state within the launch-pending window is
+            // indeterminate — the session is still coming up — not completion. Finalizing here would falsely fail
+            // a just-launched run, so wait for the next tick. Only a nil state OUTSIDE the pending window is a
+            // vanished session (bounded by the 60s pending window) that finalizes below.
+            if runtimeState == nil, orchestrator.automationSessionLaunchIsPending(sessionID: sessionID) { return }
 
             // Completion: the command session ended, so read the recorded exit code and finalize.
             if runtimeState == nil || runtimeState?.state.isInteractive == false {
@@ -620,6 +667,11 @@ public final class AutomationService: @unchecked Sendable {
     /// `spaces agent spawn`, which reports a detection timeout without killing the session).
     private func pollAgentDetectionPhase(_ run: AutomationRun, automation: Automation, sessionID: String, sessionLive: Bool) throws {
         guard sessionLive else {
+            // Launch-persistence grace: just after a spawn the runtime row can be absent/stale under write-behind
+            // persistence (post-#224), so `sessionLive` (which reads that row) reads false even though the session
+            // is still coming up. Treat a not-yet-landed launch as still detecting — the next tick re-checks —
+            // rather than failing the run. The detection deadline below remains the overall bound.
+            if orchestrator.automationSessionLaunchIsPending(sessionID: sessionID) { return }
             try finishRun(run, status: .failed, exitCode: nil)
             return
         }

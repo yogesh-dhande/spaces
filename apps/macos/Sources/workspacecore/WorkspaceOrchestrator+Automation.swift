@@ -31,6 +31,13 @@ extension WorkspaceOrchestrator {
     /// state, service PID alive). Exposed for the automation executor's attributed-session sweep.
     func automationSessionIsLive(sessionID: String) -> Bool { builtInSessionIsStillLive(sessionID: sessionID) }
 
+    /// Whether a built-in terminal session's launch is still pending — its runtime row is absent or stale
+    /// (write-behind persistence, post-#224, has not landed it yet) while a recent launch configuration says
+    /// it is coming up. Exposed for the automation executor's poll paths, which must read an absent runtime
+    /// row within this grace window as indeterminate (session still launching) rather than as a completed or
+    /// dead session that should finalize the run.
+    func automationSessionLaunchIsPending(sessionID: String) -> Bool { builtInSessionLaunchIsPending(sessionID: sessionID) }
+
     /// Terminates a built-in terminal session through the daemon's existing termination machinery.
     func automationTerminateSession(sessionID: String) { builtInTerminalSessionTerminator(sessionID) }
 

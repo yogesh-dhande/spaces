@@ -455,7 +455,14 @@ enum SpacesDaemonProfileCommandRouting {
                 service.reconcileMissedRunsOnStart()
                 await MainActor.run { [weak self] in
                     guard let self, self.automationService === service else { return }
-                    let timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in Task.detached(priority: .utility) { service.tick() }
+                    // Capture the off-actor liveness box so the timer can gate on it without hopping the main
+                    // actor: a tick observing quiesced cores mid-handoff would misread preserved sessions as
+                    // dead and falsely finalize their runs, so skip ticking while a handoff is in progress.
+                    // `performExecHandoff` drains any tick already in flight before quiescing.
+                    let livenessState = self.livenessState
+                    let timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
+                        guard !livenessState.snapshot().handoffInProgress else { return }
+                        Task.detached(priority: .utility) { service.tick() }
                     }
                     RunLoop.main.add(timer, forMode: .common)
                     self.automationTimer = timer
@@ -819,6 +826,10 @@ enum SpacesDaemonProfileCommandRouting {
         }
         writeStandardError("spacesd handoff_preflight_ok\n")
 
+        // Capture the automation service before `stopSharedServices()` nils its box, so its in-flight tick can
+        // be drained below. `resumeInPlaceAfterFailedHandoff` restarts shared services and rebuilds a fresh
+        // automation service, so nothing needs re-arming here on a failed handoff.
+        let automationServiceToDrain = automationServiceBox.get()
         stopSharedServices()
         writeStandardError("spacesd handoff_intake_stopped\n")
 
@@ -831,6 +842,14 @@ enum SpacesDaemonProfileCommandRouting {
         // main thread. Intake is already stopped, so nothing new enqueues after this.
         await withCheckedContinuation { continuation in agentNotificationDeliveryQueue.async { continuation.resume() } }
         writeStandardError("spacesd handoff_delivery_drained\n")
+
+        // Drain a possibly in-flight automation tick before quiescing cores. `handoffInProgress` is already set,
+        // so the timer gate stops new ticks; this awaits the one that may already be running so it cannot land
+        // mid-quiesce and misread preserved sessions as dead. AWAITED (not `.sync`-blocked) for the same
+        // one-way-rule reason as the delivery drain above: the tick's executor hops the terminal engine actor
+        // (and thus main), so a blocked main thread would deadlock it.
+        if let automationServiceToDrain { await automationServiceToDrain.waitUntilIdle() }
+        writeStandardError("spacesd handoff_automation_drained\n")
 
         // Quiesce each live core. A nil return means the child already exited — finalize that session
         // through the normal dead-session teardown before exec so it lands `.exited`, not resumed.
