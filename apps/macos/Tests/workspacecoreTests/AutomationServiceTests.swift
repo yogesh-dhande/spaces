@@ -1121,6 +1121,45 @@ import spacesterminalcore
             try TerminalSessionPersistence.readRuntimeState(paths: paths), "the companion runtime_states row is removed in the same delete")
         XCTAssertEqual(try harness.signalEventCount(sessionID: sessionID), 0, "the companion signal-event rows are removed in the same delete")
     }
+
+    /// An automation session can itself be an agent-watch SUBSCRIBER (its script ran `spaces agent … --subscribe`).
+    /// Deleting the session drops its subscriber-keyed edges in `agent_subscriptions`,
+    /// `agent_pending_notifications`, and `agent_remote_subscriptions` in the same transaction, so a
+    /// retention/sweep delete (which bypasses the orchestrator's `subscriberDidExit` path) leaves no dangling
+    /// remote watch stream or notification aimed at the gone session. Rows where the session is the WATCHED
+    /// agent are owned by the agent-row lifecycle and must survive.
+    func testDeleteTerminalSessionRemovesSubscriberWatchEdges() throws {
+        let harness = try Harness(self)
+        let (_, workspace) = try harness.makeProjectAndWorkspace()
+        let automation = try harness.insertAutomation(concurrency: .allow)
+        let run = try harness.insertRun(automationID: automation.id, status: .succeeded)
+        let sessionID = UUID().uuidString
+        try harness.writeAttributedSessionFiles(workspaceID: nil, runID: run.id, sessionID: sessionID, kind: .automation, live: false)
+
+        // The deleted session watches a live child agent (local edge), holds a coalesced notification for it,
+        // and watches a remote agent on a paired device.
+        let child = try harness.registerAgentRow(workspaceID: workspace.id, sessionID: "child-session", status: .waiting)
+        try harness.store.insertAgentSubscription(subscriberTerminalSessionID: sessionID, agentSessionID: child.id, createdAt: "t")
+        try harness.store.upsertPendingAgentNotification(
+            subscriberTerminalSessionID: sessionID, agentSessionID: child.id, transition: "blocked", message: "child is blocked", createdAt: "t")
+        try harness.store.insertAgentRemoteSubscription(
+            subscriberTerminalSessionID: sessionID, deviceID: "dev-1", agentSessionID: "remote-term", createdAt: "t")
+
+        XCTAssertFalse(try harness.store.agentSubscriptions(subscriberTerminalSessionID: sessionID).isEmpty, "the local watch edge exists before deletion")
+        XCTAssertFalse(
+            try harness.store.pendingAgentNotifications(subscriberTerminalSessionID: sessionID).isEmpty, "the pending notification exists before deletion")
+        XCTAssertFalse(
+            try harness.store.agentRemoteSubscriptions(subscriberTerminalSessionID: sessionID).isEmpty, "the remote watch edge exists before deletion")
+
+        try harness.store.deleteTerminalSession(sessionID: sessionID)
+
+        XCTAssertTrue(try harness.store.agentSubscriptions(subscriberTerminalSessionID: sessionID).isEmpty, "the subscriber's local watch edge is removed")
+        XCTAssertTrue(
+            try harness.store.pendingAgentNotifications(subscriberTerminalSessionID: sessionID).isEmpty, "the subscriber's pending notification is removed")
+        XCTAssertTrue(
+            try harness.store.agentRemoteSubscriptions(subscriberTerminalSessionID: sessionID).isEmpty, "the subscriber's remote watch edge is removed")
+        XCTAssertNotNil(try harness.store.agentWindow(id: child.id), "the watched child agent row is untouched by the subscriber-side delete")
+    }
 }
 
 // MARK: - Test harness

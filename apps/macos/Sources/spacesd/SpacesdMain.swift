@@ -474,17 +474,26 @@ enum SpacesDaemonErrorClassification {
                 // quiesced cores mid-handoff.
                 ticksSuspended: { [livenessState] in livenessState.snapshot().handoffInProgress },
                 logError: { writeStandardError("spacesd automation_error \($0)\n") })
+            // Set the main-actor identity immediately (the lifecycle/identity guard below depends on it) but
+            // publish the off-main box only after reconciliation. Transports (Device API listeners already
+            // opened by `startSharedServices`) may reach the service through the box, so exposing it before
+            // startup catch-up would let an early update/disable request recompute or clear an overdue cron
+            // automation's anchor before the missed-run policy is applied, silently losing the catch-up. An
+            // early request instead gets the same "Automations are unavailable" rejection as a failed service
+            // start — honest and transient.
             automationService = service
-            automationServiceBox.set(service)
             // Startup catch-up must strictly precede the first tick, but `reconcileMissedRunsOnStart` enters
             // the service's serial queue whose executor hops the engine actor (and thus main): running it on
-            // main would deadlock (the one-way rule). Run it on a detached task, then create the timer only
-            // after it returns. The timer callback likewise fires `tick()` off main via a detached task; the
-            // service's serial queue serializes any overlapping fires.
+            // main would deadlock (the one-way rule). Run it on a detached task, then publish the box and
+            // create the timer only after it returns. The timer callback likewise fires `tick()` off main via
+            // a detached task; the service's serial queue serializes any overlapping fires.
             Task.detached(priority: .utility) { [weak self] in
                 service.reconcileMissedRunsOnStart()
                 await MainActor.run { [weak self] in
                     guard let self, self.automationService === service else { return }
+                    // Publish the off-main box inside the identity guard so a shutdown during reconciliation
+                    // (which nils `automationService`) can never resurrect the gate.
+                    self.automationServiceBox.set(service)
                     // Capture the off-actor liveness box so the timer can gate on it without hopping the main
                     // actor: a tick observing quiesced cores mid-handoff would misread preserved sessions as
                     // dead and falsely finalize their runs, so skip ticking while a handoff is in progress.

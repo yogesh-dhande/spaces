@@ -278,6 +278,15 @@ extension SQLiteStore {
     /// tables declares a foreign-key cascade onto `terminal_sessions`, so each must be deleted explicitly).
     /// `terminal_agent_signal_events` lives in the profile store (not a per-session database), so deleting the
     /// session directory alone would leave a signaling agent's signal history behind forever.
+    ///
+    /// The session may itself be an agent-watch SUBSCRIBER (its script ran `spaces agent … --subscribe`).
+    /// Retention/sweep deletion reaches this transaction directly and never routes the orchestrator's
+    /// `subscriberDidExit` path, so its subscriber-keyed edges in `agent_subscriptions`,
+    /// `agent_pending_notifications`, and `agent_remote_subscriptions` are dropped here — otherwise remote
+    /// watch streams stay alive and notifications target a nonexistent session. Only the subscriber SIDE is
+    /// cleared: rows where this session is the WATCHED agent (child) are owned by the agent-row lifecycle
+    /// (`finalizeAgentRow`, behind the `agent_subscriptions` RESTRICT foreign key) and must not be touched
+    /// here.
     public func deleteTerminalSession(sessionID: String) throws {
         try withImmediateTransaction {
             try execute(sql: "DELETE FROM terminal_sessions WHERE session_id = ?", bindings: [sessionID])
@@ -286,6 +295,9 @@ extension SQLiteStore {
             try execute(sql: "DELETE FROM terminal_attachments WHERE session_id = ?", bindings: [sessionID])
             try execute(sql: "DELETE FROM terminal_remote_session_states WHERE session_id = ?", bindings: [sessionID])
             try execute(sql: "DELETE FROM terminal_agent_signal_events WHERE session_id = ?", bindings: [sessionID])
+            try deleteAgentSubscriptions(subscriberTerminalSessionID: sessionID)
+            try deletePendingAgentNotifications(subscriberTerminalSessionID: sessionID)
+            try deleteAgentRemoteSubscriptions(subscriberTerminalSessionID: sessionID)
         }
     }
 }

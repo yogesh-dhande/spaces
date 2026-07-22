@@ -716,10 +716,13 @@ import workspacecore
         let forceRemoteRefresh = host.isRemoteAutomationDevice(deviceID: deviceID)
         // Set the flag synchronously before spawning the Task, so a second click or Return press arriving
         // before the first request completes is rejected at the guard above. Disabling the button gives
-        // immediate visual feedback and is a second line of defense against a rebuild (device/kind change)
-        // recreating the button mid-save with an unrelated NSButton instance.
+        // immediate visual feedback. The device popup is frozen too: changing the device rebuilds the form
+        // via `present`, which resets `isSaving` and mints a fresh enabled Save button — a second save would
+        // then fire a duplicate create. A request already being written must not have its target device
+        // mutated, so the only rebuild trigger stays disabled until the request settles.
         isSaving = true
         saveButton?.isEnabled = false
+        devicePopUp?.isEnabled = false
         Task { @MainActor [weak self] in
             let error = await Task.detached(priority: .userInitiated) { () -> Error? in
                 do {
@@ -736,6 +739,7 @@ import workspacecore
             if let error {
                 self.isSaving = false
                 self.saveButton?.isEnabled = true
+                self.devicePopUp?.isEnabled = true
                 showError(error.localizedDescription)
                 return
             }
