@@ -211,6 +211,10 @@ enum SpacesDaemonProfileCommandRouting {
         // daemon (see `TerminalEngineActor`'s one-way rule).
         agentSessionKiller: { [weak self] sessionID in
             guard let self else { throw Self.requestFailedError("spacesd is shutting down.") }
+            // Admit against handoff before the kill runs its stop chokepoint (which deletes the agent row and
+            // terminates its backing terminal): the other off-main handlers gate at entry the same way, and
+            // without this the Device API `killAgentSession` path had no handoff check at all.
+            guard !self.handoffInProgress else { throw WorkspaceError.daemonHandoffInProgress }
             let orchestrator = try self.makeProfileOrchestrator()
             return try orchestrator.killAgentSession(terminalSessionID: sessionID)
         }, onRestartRequested: { [weak self] in Task { @MainActor in self?.requestDaemonRestart() } })
@@ -789,8 +793,21 @@ enum SpacesDaemonProfileCommandRouting {
                 try await core.resumeFromHandoff(record)
             } catch {
                 writeStandardError("spacesd handoff_resume_session_failed session=\(record.sessionID) error=\(error)\n")
-                await TerminalEngineActor.run { self.sessionCores.removeValue(forKey: record.sessionID) }
-                close(record.masterFD)
+                // `sessionCore(for:)` already inserted the core into `sessionCores`, and the local `core`
+                // binding is out of scope here, so the dictionary holds the last reference. When the failure
+                // landed AFTER `resumeFromHandoff` adopted the PTY (e.g. the control- or state-stream server
+                // throws), the driver's `hasLiveResources` is true; simply removing that last reference would
+                // release the driver and trip its deinit precondition, aborting the whole staged daemon
+                // before cleanup. Route teardown through `terminateSession`, which keeps its own local
+                // reference while it calls the driver's `terminate()` and drops it only afterwards — so the
+                // live resources are always freed before the final release.
+                //
+                // The inherited master fd is intentionally NOT closed here. Once adopted, the driver's read
+                // loop owns that fd and closes it when its read returns (see HostManagedPTYTerminalSessionDriver);
+                // closing it from this context would race that close and double-close a descriptor the kernel
+                // may have reused. A resume that fails BEFORE adoption (a rare pre-adopt error such as a disk
+                // failure) leaks that one descriptor, which is preferable to the reuse hazard and there is no
+                // cross-platform signal here to distinguish the two cases without reaching into the engine core.
                 _ = await TerminalEngineActor.run { self.terminateSession(id: record.sessionID) }
             }
         case .finalizeExited:
@@ -1313,7 +1330,12 @@ enum SpacesDaemonProfileCommandRouting {
             builtInTerminalSessionLauncher: { [weak self] launchConfiguration in
                 guard let self else { throw Self.requestFailedError("spacesd is shutting down.") }
                 return try self.launchBuiltInTerminalSession(launchConfiguration)
-            })
+            },
+            // Lets `stopWorkspaceUnlocked` veto its destructive row deletes at the mutation boundary when a
+            // handoff races the stop. Reads the off-actor, lock-guarded flag, so it is safe to poll from the
+            // orchestrator's transport-thread call graph. See `daemonHandoffInProgress`'s doc on the terminator
+            // no-op divergence this closes.
+            daemonHandoffInProgress: { [weak self] in self?.handoffInProgress ?? false })
         _ = try orchestrator.syncConfig()
         return orchestrator
     }
@@ -1805,6 +1827,10 @@ enum SpacesDaemonProfileCommandRouting {
         do {
             if let sessionCore = sessionCores.removeValue(forKey: sessionID) {
                 sessionCore.terminate()
+                // The exited-state write is asynchronous on the core's persistence queue, so this
+                // best-effort summary can still read `.running` for a moment after terminate(). `ok` and the
+                // message are the authoritative stop acknowledgment; consumers of durable state converge via
+                // the runtime-state notification the queue posts after the exited write commits.
                 return TerminalServiceResponse(
                     ok: true, message: "Stopped terminal session \(sessionID).", session: try? sessionSummary(for: sessionID))
             }
@@ -2165,6 +2191,7 @@ enum SpacesDaemonProfileCommandRouting {
             case .missingProject, .missingWorkspace, .missingTrackedWindow: return .notFound
             case .invalidArgument, .invalidWorkspace, .projectAlreadyExists, .workspaceAlreadyExists: return .invalidArgument
             case .gitCommandFailed, .dependencyMissing, .configError, .databaseMigrationFailed: return .internalError
+            case .daemonHandoffInProgress: return .shuttingDown
             }
         }
         if case SpacesRuntimeError.invalidArgument = error { return .invalidArgument }

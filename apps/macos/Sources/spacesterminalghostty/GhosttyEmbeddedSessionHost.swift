@@ -112,6 +112,10 @@
 
         func terminateSession() { sessionDriver.terminate() }
 
+        /// Flush accepted-but-unwritten input toward the PTY master before an exec handoff; see
+        /// `GhosttyEmbeddedTerminalSessionDriver.drainPendingInputWrites`.
+        func drainPendingInputWrites() async { await sessionDriver.drainPendingInputWrites() }
+
         func setSurfaceFocused(_ focused: Bool) { sessionDriver.setFocused(focused) }
 
         public func attach(client: TerminalClient, mode: TerminalAttachmentMode, into container: NSView?) throws {
@@ -355,6 +359,18 @@
         /// open that otherwise saturated the serial terminal-engine executor and starved input under an agent
         /// TUI's continuous output.
         private var cachedAttachmentSnapshot: TerminalSessionAttachmentSnapshot?
+        /// Last heartbeat instant per remote client, recorded synchronously on the engine the moment a
+        /// heartbeat lands — independent of when its coalesced durable lease write commits and of the
+        /// attachment-snapshot cache's invalidation lifecycle. `expireStaleRemoteClientsIfNeeded` consults
+        /// this so a client that just heartbeated is never expired off a stale DB lease read whose durable
+        /// touch has not yet committed under write contention (see that method).
+        private var latestRemoteClientHeartbeat: [String: Date] = [:]
+        /// Remote clients whose expiry (detach, and possibly ownership transfer) has already been enqueued
+        /// but whose durable detach has not yet committed. Skipped on subsequent timer ticks so a burst of
+        /// ticks cannot enqueue duplicate detach/transfer writes — or bump `ownerEpoch` repeatedly — for the
+        /// same not-yet-committed expiry decision. Pruned to the current DB stale-candidate set each tick, so
+        /// a client that reconnects (fresh lease) or whose detach has committed becomes expirable again.
+        private var expiredRemoteClientIDs: Set<String> = []
         private var ownerEpoch: UInt64 = 0
         /// Set for the brief exec-in-place quiesce window so no late timer/coalescer
         /// turn broadcasts a frame while the session is being handed to the staged
@@ -526,14 +542,23 @@
                 enqueuePersistenceWrite { try? TerminalSessionPersistence.writeRemoteSessionState(finalPayload, paths: payloadPaths) }
                 broadcastRemoteStatePayload(finalPayload, startedAt: Date(), ownerClient: nil, outputByteCount: nil)
             }
-            // Termination fence: block until the exited state, detach-all, and terminated payload have all
-            // committed, so callers (and the overview) observe the durable end state and the final persist
-            // lands after every pending mirror write. This is a one-time teardown, never the per-keystroke
-            // path, so the bounded wait here does not reintroduce the interactive freeze this queue removes.
-            drainPersistenceQueue()
-            TerminalSessionNotification.post(.spacesTerminalRuntimeStateDidChange, sessionID: launchConfiguration.sessionID)
-            TerminalSessionNotification.post(.spacesTerminalAttachmentStateDidChange, sessionID: launchConfiguration.sessionID)
-            TerminalOverviewSignal.post()
+            // Termination fence: the exited-state, detach-all, and terminated-payload writes are enqueued
+            // above; FIFO on the serial persistence queue lands them in order and after every pending mirror
+            // write. The durable-end notifications must fire only once those have committed (so a DB-reading
+            // consumer like the overview observes the end state), but blocking the engine on that commit
+            // could stall the single engine executor — and thus every live session — for seconds under DB
+            // write contention (SQLite's 5s busy timeout). So instead of a blocking drain we enqueue one
+            // trailing closure that, by FIFO, runs after the three writes commit and hops back to the engine
+            // to post the notifications (persistence closures return to the engine only via async Task). It
+            // captures only the session id (a value type), so it survives this core's release.
+            let terminatedSessionID = launchConfiguration.sessionID
+            enqueuePersistenceWrite {
+                Task { @TerminalEngineActor in
+                    TerminalSessionNotification.post(.spacesTerminalRuntimeStateDidChange, sessionID: terminatedSessionID)
+                    TerminalSessionNotification.post(.spacesTerminalAttachmentStateDidChange, sessionID: terminatedSessionID)
+                    TerminalOverviewSignal.post()
+                }
+            }
             rendererHostStorage.terminateSession()
             try? outputHandle?.synchronize()
             try? outputHandle?.close()
@@ -586,14 +611,50 @@
         /// On a successful write the durable marker is advanced back on the engine (finding-13 semantics:
         /// `lastPersistedRuntimeState`/timestamp advance only on success so a failed write retries next cycle;
         /// `latestRuntimeState` stays the authoritative broadcast source regardless).
+        /// Bounded retry policy for a failed EXITED-state write. Termination cancels the runtime-state timer,
+        /// so nothing re-persists on its own — a single dropped exited write would leave the durable runtime
+        /// row stuck at `.running` while the final payload says terminated. Running-state failures need no
+        /// retry (the next timer tick re-persists).
+        private static let exitedRuntimeStateWriteMaxAttempts = 5
+        private static let exitedRuntimeStateWriteRetryDelay: DispatchTimeInterval = .milliseconds(200)
+
         private func enqueueRuntimeStateWrite(_ state: TerminalSessionRuntimeState, at writeAt: Date) {
-            let paths = paths
-            let gate = persistenceCoalescingGate
-            let generation = gate.nextGeneration(forKey: Self.runtimeStatePersistenceKey)
-            persistenceQueue.async { [weak self] in
-                guard gate.isLatest(generation, forKey: Self.runtimeStatePersistenceKey) else { return }
-                do { try TerminalSessionPersistence.writeRuntimeState(state, paths: paths) } catch { return }
-                Task { @TerminalEngineActor in self?.markRuntimeStatePersisted(state, at: writeAt) }
+            // `onPersisted` hops back to the engine to advance the durable marker (one-way rule); it is the
+            // ONLY reference to `self` in the write chain, so the write — and any exited-state retry below —
+            // survives this core's release (e.g. a session-close that drops the core right after termination).
+            Self.performRuntimeStateWrite(
+                state, attempt: 0, at: writeAt, paths: paths, queue: persistenceQueue, gate: persistenceCoalescingGate,
+                key: Self.runtimeStatePersistenceKey, maxAttempts: Self.exitedRuntimeStateWriteMaxAttempts,
+                retryDelay: Self.exitedRuntimeStateWriteRetryDelay,
+                onPersisted: { [weak self] persistedState, persistedAt in
+                    Task { @TerminalEngineActor in self?.markRuntimeStatePersisted(persistedState, at: persistedAt) }
+                })
+        }
+
+        /// Runs one durable runtime-state write on `queue` and, on failure of an exited state, re-enqueues a
+        /// bounded, backed-off retry on the same queue. Static and closed only over value types plus the
+        /// shared `gate`, so the retry chain never depends on the core staying alive. Each attempt takes a
+        /// fresh coalescing generation, so a newer state still supersedes a pending retry (latest-wins).
+        private static func performRuntimeStateWrite(
+            _ state: TerminalSessionRuntimeState, attempt: Int, at writeAt: Date, paths: TerminalSessionPaths, queue: DispatchQueue,
+            gate: PersistenceCoalescingGate, key: String, maxAttempts: Int, retryDelay: DispatchTimeInterval,
+            onPersisted: @escaping @Sendable (TerminalSessionRuntimeState, Date) -> Void
+        ) {
+            let generation = gate.nextGeneration(forKey: key)
+            queue.async {
+                guard gate.isLatest(generation, forKey: key) else { return }
+                do {
+                    try TerminalSessionPersistence.writeRuntimeState(state, paths: paths)
+                } catch {
+                    guard state.state == .exited, attempt + 1 < maxAttempts else { return }
+                    queue.asyncAfter(deadline: .now() + retryDelay) {
+                        performRuntimeStateWrite(
+                            state, attempt: attempt + 1, at: writeAt, paths: paths, queue: queue, gate: gate, key: key,
+                            maxAttempts: maxAttempts, retryDelay: retryDelay, onPersisted: onPersisted)
+                    }
+                    return
+                }
+                onPersisted(state, writeAt)
             }
         }
 
@@ -612,7 +673,11 @@
         /// reflect it without a disk hit, then enqueues a coalesced durable write. Lease expiry runs on a
         /// multi-second scale, so durable staleness of a coalesced touch between writes is harmless.
         private func enqueueClientLeaseTouch(clientID: String) {
-            let touchedAt = nowISO8601()
+            let touchedAtDate = Date()
+            let touchedAt = TerminalSessionTimestamp.string(from: touchedAtDate)
+            // Record the heartbeat instant on the engine synchronously so stale-client expiry honors it even
+            // before the coalesced durable touch commits (finding B1).
+            latestRemoteClientHeartbeat[clientID] = touchedAtDate
             recordClientLeaseTouchInCache(clientID: clientID, leaseRefreshedAt: touchedAt)
             let paths = paths
             enqueueCoalescedPersistenceWrite(key: "lease:\(clientID)") {
@@ -660,6 +725,15 @@
             stateStreamServer?.stop()
             stateStreamServer = nil
             GhosttyRemoteSessionStateStreamServer.removeSocketFileIfPresent(at: paths.subscriptionSocketPath)
+
+            // Drain accepted-but-unwritten control input before handing off. A `terminal send --submit`
+            // splits into the text write and a carriage return the sequencer holds back by its separation
+            // delay; the host PTY write queue is likewise asynchronous. The control server is stopped above,
+            // so no new sends can enqueue — await the sequencer chain and then the PTY write queue so the
+            // `execv` that inherits this same master fd cannot destroy either with the CR (or the whole line)
+            // unwritten. The child's echo of the drained input flows through the normal output path below.
+            await controlInputSequencer.drain()
+            await rendererHostStorage.drainPendingInputWrites()
 
             // Nothing live to hand off (child dead/closed): caller terminates normally.
             guard let descriptor = sessionDriver.handoffDescriptorSnapshot() else { return nil }
@@ -1302,14 +1376,41 @@
         }
 
         /// Expires lease-lapsed remote clients. The liveness READS stay inline on the engine (WAL reads never
-        /// block on a competing writer); only the WRITES move off it. The post-expiry owner state is derived
-        /// in memory from the pre-expiry attachments — never by re-reading the DB, which would still show the
-        /// not-yet-committed detach — and the durable detach + ownership-transfer writes are enqueued (in
-        /// order) onto the persistence queue so a burst of expiries can never block the engine on the DB lock.
+        /// block on a competing writer); only the WRITES move off it. The DB read reflects committed leases
+        /// only, so the candidate set it returns is filtered against the in-memory heartbeat map (a client
+        /// that heartbeated since its DB row was read is spared, even if its coalesced durable touch has not
+        /// yet committed under write contention) and against the already-enqueued expiry set (so repeated
+        /// ticks never enqueue duplicate detach/transfer writes for the same not-yet-committed decision). The
+        /// post-expiry owner state is derived in memory from the pre-expiry attachments — never by re-reading
+        /// the DB, which would still show the not-yet-committed detach — and the durable detach +
+        /// ownership-transfer writes are enqueued (in order) onto the persistence queue so a burst of
+        /// expiries can never block the engine on the DB lock.
         @discardableResult func expireStaleRemoteClientsIfNeeded(now: Date = Date()) -> [String] {
-            guard let staleClientIDs = try? TerminalSessionPersistence.staleRemoteClientIDs(paths: paths, now: now), !staleClientIDs.isEmpty else {
+            let cutoff = now.addingTimeInterval(-TerminalSessionPersistence.remoteClientLeaseInterval)
+            // Keep only fresh heartbeats: an entry older than the cutoff can no longer protect a client and
+            // would otherwise accumulate for the daemon's lifetime.
+            latestRemoteClientHeartbeat = latestRemoteClientHeartbeat.filter { $0.value >= cutoff }
+            guard let databaseStaleClientIDs = try? TerminalSessionPersistence.staleRemoteClientIDs(paths: paths, now: now),
+                !databaseStaleClientIDs.isEmpty
+            else {
+                expiredRemoteClientIDs.removeAll(keepingCapacity: true)
                 return []
             }
+            // A client that reconnected (fresh DB lease) or whose durable detach has committed drops out of
+            // the DB candidate set; forget it so a later genuine lapse can be expired again.
+            expiredRemoteClientIDs.formIntersection(databaseStaleClientIDs)
+            // The DB read reflects committed leases only. Honor the in-memory heartbeat map (updated
+            // synchronously on the engine) so a client whose durable lease touch has not yet committed under
+            // write contention is not expired off its stale DB row, and skip clients whose expiry was already
+            // enqueued on a prior tick so repeated ticks never enqueue duplicate detach/transfer writes.
+            let staleClientIDs = databaseStaleClientIDs.filter { clientID in
+                if expiredRemoteClientIDs.contains(clientID) { return false }
+                if let heartbeat = latestRemoteClientHeartbeat[clientID], heartbeat >= cutoff { return false }
+                return true
+            }
+            guard !staleClientIDs.isEmpty else { return [] }
+            expiredRemoteClientIDs.formUnion(staleClientIDs)
+            for clientID in staleClientIDs { latestRemoteClientHeartbeat[clientID] = nil }
             let activeAttachmentsBeforeExpiry = (try? TerminalSessionPersistence.activeAttachments(paths: paths)) ?? []
             let staleClientIDSet = Set(staleClientIDs)
             let detachedClientWasOwner = activeAttachmentsBeforeExpiry.contains {

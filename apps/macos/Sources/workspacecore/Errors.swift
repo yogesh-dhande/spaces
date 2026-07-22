@@ -35,6 +35,10 @@ public enum WorkspaceError: LocalizedError {
     case configError(message: String)
     case databaseMigrationFailed(message: String)
     case missingTrackedWindow(MissingTrackedWindowContext)
+    /// A destructive workspace operation was refused because the daemon is handing off to an updated
+    /// binary. Thrown at the row-mutation boundary so the terminal-side effect (which no-ops during
+    /// handoff) and the database mutation stay consistent: neither is applied when handoff intervenes.
+    case daemonHandoffInProgress
 
     public var errorDescription: String? {
         switch self {
@@ -48,6 +52,7 @@ public enum WorkspaceError: LocalizedError {
         case .dependencyMissing(let message): return "Missing dependency: \(message)"
         case .configError(let message): return "Configuration error: \(message)"
         case .databaseMigrationFailed(let message): return message
+        case .daemonHandoffInProgress: return "spacesd is handing off to an updated daemon."
         case .missingTrackedWindow(let context):
             switch context.kind {
             case .browserSession: return "Window missing: Browser session '\(context.title)' is no longer available."

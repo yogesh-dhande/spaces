@@ -61,8 +61,10 @@ import spacesdevicecore
     /// reads the freshest state and converges.
     private var reconcileInFlight = false
     private var reconcilePending = false
-    /// Monotonic per-device version, bumped on every main-actor mutation of `snapshots[deviceID]` (seed,
-    /// applyRows apply, retirement). Two consumers:
+    /// Monotonic per-device version, bumped on every main-actor mutation that actually changes
+    /// `snapshots[deviceID]`'s content (seed, applyRows apply, retirement) — never on a content-identical
+    /// replace, e.g. an applyRows apply whose listing reports back exactly the retained snapshot. Two
+    /// consumers:
     ///  - `applyRows` captures it before its off-main watched-set read and re-checks after: a `seedBaseline`
     ///    (or a retirement) that lands during that suspension makes the just-read watched set — and thus the
     ///    watched-filtered snapshot `applyRows` would blindly write — stale, which would silently drop the
@@ -70,7 +72,11 @@ import spacesdevicecore
     ///    a fresh listing that re-reads rows and the watched set against the updated snapshot.
     ///  - every durable baseline write is stamped with the generation it reflects; a write is skipped when a
     ///    newer mutation has already superseded it (that newer mutation enqueued its own later-chained write),
-    ///    so a burst collapses to a single write of the latest snapshot and the mirror converges to it.
+    ///    so a burst collapses to a single write of the latest snapshot and the mirror converges to it. Not
+    ///    bumping on an unchanged apply is load-bearing here: bumping unconditionally would make an older
+    ///    write still queued behind a slower one on the same device's chain — e.g. a `seedBaseline` — look
+    ///    superseded and skip once its turn comes up, even though nothing about the snapshot actually
+    ///    changed and that queued write is still the correct baseline to persist.
     private var snapshotGeneration: [String: Int] = [:]
     /// Per-device tail of the serial durable-baseline write chain. `Task.detached` gives no ordering, so two
     /// rapid seeds {A} then {A,B} could otherwise commit in reverse and strand B in the persisted mirror.
@@ -375,8 +381,16 @@ import spacesdevicecore
         }
         let previous = snapshots[deviceID] ?? [:]
         let result = RemoteAgentSnapshotDiff.diff(previous: previous, newRows: rows, watchedTerminalSessionIDs: watched)
+        let snapshotChanged = previous != result.snapshot
         snapshots[deviceID] = result.snapshot
-        let generation = bumpSnapshotGeneration(deviceID)
+        // An unchanged listing (every watched child reports back exactly what is already retained) is not
+        // a real mutation of `snapshots[deviceID]`, so it must not bump the generation. Bumping here
+        // unconditionally would make an older write still queued on the per-device baseline chain — e.g. a
+        // `seedBaseline` stamped with the pre-bump generation, chained behind a slower earlier write —
+        // look superseded and skip once its turn on the chain comes up, even though nothing about the
+        // snapshot changed and that queued write is still exactly the baseline that must land on disk. See
+        // `snapshotGeneration`'s doc for the supersession invariant this preserves.
+        if snapshotChanged { bumpSnapshotGeneration(deviceID) }
 
         // Delivery boundary: `AgentNotificationEngine` interleaves store reads/writes with the
         // daemon-owned, main-only `deliver` (terminal-send) closure, so the whole delivery runs on the
@@ -413,7 +427,6 @@ import spacesdevicecore
         // (both durable), so a crash in between re-emits rather than silently drops. Only a real change writes
         // the baseline: the write signals databaseDidChange, which drives reconcile back through here — an
         // unconditional mirror would loop pull → write → signal → pull.
-        let snapshotChanged = previous != result.snapshot
         guard snapshotChanged || !exitedTerminalSessionIDs.isEmpty else { return }
         // The exited children's subscription edges are an independent table from the baseline mirror, so they
         // are torn down in their own off-main task rather than on the baseline chain.
@@ -432,11 +445,12 @@ import spacesdevicecore
             }
         }
         // Serialize the baseline mirror per device so this apply cannot commit out of order with a concurrent
-        // seed's write (or another apply's). Stamped with this apply's generation: a seed that lands after the
-        // enqueue supersedes it and its own later-chained write wins.
+        // seed's write (or another apply's). Stamped with this apply's generation (read fresh here, right after
+        // the conditional bump above, since nothing else touches it on the main actor in between): a seed that
+        // lands after the enqueue supersedes it and its own later-chained write wins.
         if snapshotChanged {
             let baseline = result.snapshot
-            enqueueBaselineWrite(deviceID: deviceID, generation: generation, op: "persist_baseline") { store in
+            enqueueBaselineWrite(deviceID: deviceID, generation: snapshotGeneration[deviceID] ?? 0, op: "persist_baseline") { store in
                 try store.replaceAgentRemoteWatchBaseline(deviceID: deviceID, baseline: baseline)
             }
         }

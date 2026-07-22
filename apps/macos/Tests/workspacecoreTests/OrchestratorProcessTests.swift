@@ -1171,6 +1171,43 @@ extension OrchestratorTests {
         XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, false)
     }
 
+    func testStopWorkspaceIsVetoedByDaemonHandoffAndPreservesRows() throws {
+        let store = try makeTemporaryStore()
+        let terminateCapture = TerminalTerminateCapture()
+        // During a daemon handoff the terminator no-ops, so stopping must not delete the workspace's rows;
+        // otherwise the replacement daemon adopts a still-live terminal whose records were erased.
+        let orchestrator = WorkspaceOrchestrator(
+            store: store, builtInTerminalSessionTerminator: { sessionID in terminateCapture.sessionIDs.append(sessionID) },
+            daemonHandoffInProgress: { true })
+        let root = try makeTempDirectory()
+        let projectDir = root.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        let project = try orchestrator.addProject(dir: projectDir.path)
+        let workspace = try orchestrator.createWorkspace(projectID: project.id)
+        _ = project
+
+        let sessionID = "spaces-session-handoff-veto"
+        try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: "running-process-handoff", workspaceID: workspace.id, templateName: "api", command: "npm run api",
+                terminalApp: TerminalHost.spaces.appName, terminalTrackingID: sessionID, pid: nil, status: .running, logPath: nil, lastOutputAt: nil,
+                startedAt: "now", exitedAt: nil))
+        try store.upsert(
+            window: WindowRecord(
+                id: "tracked-window-handoff", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "api", detail: "npm run api",
+                targetURL: nil, terminalTrackingID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
+
+        XCTAssertThrowsError(try orchestrator.stopWorkspace(workspaceID: workspace.id)) { error in
+            guard case WorkspaceError.daemonHandoffInProgress = error else { return XCTFail("expected daemonHandoffInProgress, got \(error)") }
+        }
+
+        XCTAssertTrue(terminateCapture.sessionIDs.isEmpty, "no terminal should be terminated while a handoff is vetoing the stop")
+        XCTAssertFalse(try store.runningProcesses(workspaceID: workspace.id).isEmpty, "running process rows must survive the vetoed stop")
+        XCTAssertFalse(try store.windows(workspaceID: workspace.id).isEmpty, "window rows must survive the vetoed stop")
+        XCTAssertEqual(try store.workspace(id: workspace.id)?.isRunning, true, "workspace must remain running after a vetoed stop")
+    }
+
     func testStopWorkspaceTerminatesAdHocBuiltInTerminalSession() throws {
         let store = try makeTemporaryStore()
         let terminateCapture = TerminalTerminateCapture()

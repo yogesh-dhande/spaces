@@ -218,6 +218,15 @@ public final class WorkspaceOrchestrator {
     let builtInTerminalWindowCloser: BuiltInTerminalWindowCloser
     let builtInTerminalSessionTerminator: BuiltInTerminalSessionTerminator
     let builtInTerminalSessionLauncher: BuiltInTerminalSessionLauncher
+    /// Reports whether the owning daemon is mid exec-in-place handoff. During a handoff the daemon's
+    /// terminal terminator no-ops (live sessions are quiesced and carried across the exec, not killed),
+    /// so a destructive workspace operation that deleted its process/window/agent rows would leave the
+    /// replacement daemon adopting a still-live terminal whose records were removed. `stopWorkspaceUnlocked`
+    /// consults this at its row-mutation boundary and throws `WorkspaceError.daemonHandoffInProgress` so the
+    /// terminal-side effect and the database mutation stay consistent — neither is applied when a handoff
+    /// intervenes. Defaults to `{ false }` for every non-daemon orchestrator (GUI, CLI, tests, device-runtime
+    /// reconcilers), which never hand off.
+    let daemonHandoffInProgress: @Sendable () -> Bool
     private let projectsRootDirectoryURL: URL?
     private let workspacesRootDirectoryURL: URL?
     private let workspaceLifecycleGate = PerKeyGate()
@@ -228,11 +237,13 @@ public final class WorkspaceOrchestrator {
         notificationDeliverer: ((String, String, String?) -> Void)? = nil, builtInTerminalWindowOpener: BuiltInTerminalWindowOpener? = nil,
         builtInTerminalWindowFocuser: BuiltInTerminalWindowFocuser? = nil, builtInTerminalWindowCloser: BuiltInTerminalWindowCloser? = nil,
         builtInTerminalSessionTerminator: BuiltInTerminalSessionTerminator? = nil,
-        builtInTerminalSessionLauncher: BuiltInTerminalSessionLauncher? = nil, currentDate: @escaping () -> Date = Date.init
+        builtInTerminalSessionLauncher: BuiltInTerminalSessionLauncher? = nil, daemonHandoffInProgress: (@Sendable () -> Bool)? = nil,
+        currentDate: @escaping () -> Date = Date.init
     ) {
         self.store = store
         projectsRootDirectoryURL = projectsRootDirectory
         self.git = git
+        self.daemonHandoffInProgress = daemonHandoffInProgress ?? { false }
         self.workspacesRootDirectoryURL = workspacesRootDirectory
         self.notificationDeliverer = notificationDeliverer ?? Self.notificationDelivererOverrideStore.get() ?? Self.deliverUserNotification
         #if canImport(Darwin)
@@ -865,6 +876,11 @@ public final class WorkspaceOrchestrator {
     }
 
     private func stopWorkspaceUnlocked(workspaceID: String, waitForTerminalExit: Bool = true) throws -> WorkspaceStopOutcome {
+        // Refuse a stop that races a daemon handoff before touching anything: the daemon's terminator
+        // no-ops during handoff (sessions are quiesced and carried across the exec), so proceeding would
+        // delete the workspace's rows while its terminals stay live. Rejecting here keeps both the
+        // terminals and their records intact for the replacement daemon to resume.
+        guard !daemonHandoffInProgress() else { throw WorkspaceError.daemonHandoffInProgress }
         let (project, workspace) = try resolveWorkspace(id: workspaceID)
         let windows = try indexedWorkspaceWindows(workspaceID: workspace.id)
         let assignedPorts = try store.workspacePortsAssigned(workspaceID: workspace.id)
@@ -919,6 +935,13 @@ public final class WorkspaceOrchestrator {
                 closedBuiltInTerminalSessionIDs.insert(sessionID)
             }
         }
+        // Re-check at the row-mutation boundary: a handoff that began after the entry guard (while the
+        // terminate loop above was running) would have silently no-op'd the not-yet-terminated sessions.
+        // Aborting before the deletes below prevents the dangerous divergence where rows are erased while
+        // their terminals survive into the replacement daemon. Sessions already terminated before the
+        // handoff started keep their (now-stale) rows, which normal stale-session recovery reconciles; no
+        // live terminal is ever orphaned from its records.
+        guard !daemonHandoffInProgress() else { throw WorkspaceError.daemonHandoffInProgress }
         if waitForTerminalExit { waitForBuiltInTerminalSessionsToExit(closedBuiltInTerminalSessionIDs) }
         try store.deleteRunningProcesses(workspaceID: workspace.id)
         try store.deleteWindows(workspaceID: workspace.id)

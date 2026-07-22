@@ -2,6 +2,7 @@ import AppKit
 import Carbon
 import Foundation
 import GhosttyKit
+import SQLite3
 import XCTest
 import spacesterminalcore
 
@@ -1497,6 +1498,9 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
 
             host.terminate()
+            // terminate() enqueues the exited-state write off the engine and no longer blocks on its commit
+            // (finding B3); block on the persistence queue before reading the durable mirror.
+            host.debugDrainPersistenceQueue()
 
             let runtimeState = try TerminalSessionPersistence.readRuntimeState(paths: paths)
             XCTAssertEqual(runtimeState.state, .exited)
@@ -1605,6 +1609,9 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
 
             host.debugHandleSessionClosed()
+            // terminate() enqueues the exited-state write off the engine and no longer blocks on its commit
+            // (finding B3); block on the persistence queue before reading the durable mirror.
+            host.debugDrainPersistenceQueue()
 
             let runtimeState = try TerminalSessionPersistence.readRuntimeState(paths: paths)
             XCTAssertEqual(runtimeState.state, .exited)
@@ -2721,6 +2728,191 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             GhosttyEmbeddedSessionHost.shouldClearFocusAfterDetachingClient(detachedClientWasOwner: false, remainingOwnerClientID: "owner-client"))
         XCTAssertTrue(GhosttyEmbeddedSessionHost.shouldClearFocusAfterDetachingClient(detachedClientWasOwner: true, remainingOwnerClientID: nil))
         XCTAssertTrue(GhosttyEmbeddedSessionHost.shouldClearFocusAfterDetachingClient(detachedClientWasOwner: false, remainingOwnerClientID: nil))
+    }
+
+    /// Holds the shared database's write lock (`BEGIN IMMEDIATE`) from a background thread until released,
+    /// standing in for an agent hook's `spaces agent signal` write burst. Raw SQLite3 so it contends the
+    /// exact WAL write lock the terminal engine's coalesced durable writes take; `ROLLBACK` leaves the
+    /// database untouched. WAL reads (stale-client liveness checks, attachment reads) stay unblocked.
+    private final class CompetingWriteLockHolder: @unchecked Sendable {
+        private let databasePath: String
+        private let acquired = DispatchSemaphore(value: 0)
+        private let releaseNow = DispatchSemaphore(value: 0)
+
+        init(databasePath: String) { self.databasePath = databasePath }
+
+        func startHolding(maxHoldSeconds: TimeInterval) {
+            Thread.detachNewThread { [databasePath, acquired, releaseNow] in
+                var handle: OpaquePointer?
+                guard sqlite3_open(databasePath, &handle) == SQLITE_OK, let handle else {
+                    acquired.signal()
+                    return
+                }
+                defer { sqlite3_close(handle) }
+                sqlite3_busy_timeout(handle, 5000)
+                guard sqlite3_exec(handle, "BEGIN IMMEDIATE", nil, nil, nil) == SQLITE_OK else {
+                    acquired.signal()
+                    return
+                }
+                acquired.signal()
+                _ = releaseNow.wait(timeout: .now() + maxHoldSeconds)
+                _ = sqlite3_exec(handle, "ROLLBACK", nil, nil, nil)
+            }
+        }
+
+        func waitUntilHolding() { acquired.wait() }
+        func release() { releaseNow.signal() }
+    }
+
+    /// Finding B1: a client that just heartbeated must not be expired off a stale DB lease read while its
+    /// coalesced durable lease touch is still blocked on the write lock. The heartbeat records the client's
+    /// fresh lease in memory synchronously on the engine; expiry consults that in-memory heartbeat, not only
+    /// the committed DB row. Before the fix the timer's expiry read the pre-touch DB lease and detached the
+    /// freshly heartbeated owner.
+    func testFreshHeartbeatSparesClientFromExpiryWhileDurableTouchIsBlocked() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "session-b1-heartbeat", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original", shell: "/bin/zsh",
+            command: "zsh", createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+        // Attach with a very old lease so the committed DB row is stale at real-now.
+        let staleClient = TerminalClient(
+            id: "remote-heartbeat", kind: .remoteViewer, identity: .init(label: "iPhone", deviceName: "iPhone"),
+            connectedAt: "2000-01-01T00:00:00Z")
+        try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+        try TerminalSessionPersistence.attachClient(
+            sessionID: launchConfiguration.sessionID, client: staleClient, mode: .viewer, paths: paths, attachedAt: "2000-01-01T00:00:00Z")
+
+        let lockHolder = CompetingWriteLockHolder(databasePath: try SpacesProfile.current().databasePath)
+        lockHolder.startHolding(maxHoldSeconds: 10)
+        lockHolder.waitUntilHolding()
+        defer { lockHolder.release() }
+
+        let expired = TerminalEngineActor.runSynchronously { () -> [String] in
+            let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+            // Heartbeat records the fresh lease in memory; its coalesced durable touch now blocks on the lock.
+            _ = host.handleControlRequest(.init(command: "heartbeat", clientID: staleClient.id))
+            // Sanity: the committed DB lease is still stale (the touch has not landed).
+            XCTAssertEqual(try? TerminalSessionPersistence.staleRemoteClientIDs(paths: paths, now: Date()), [staleClient.id])
+            return host.expireStaleRemoteClientsIfNeeded(now: Date())
+        }
+        XCTAssertEqual(
+            expired, [], "a client that just heartbeated must not be expired while its durable lease touch is blocked on the DB write lock")
+    }
+
+    /// Finding B1: once an expiry has been enqueued for a stale remote owner, later timer ticks must not
+    /// re-enqueue the detach/ownership-transfer (or bump the owner epoch again) while that first decision's
+    /// durable detach is still pending. The held write lock keeps the detach uncommitted across both ticks,
+    /// so without the dedup guard the DB still shows the remote as the stale owner and the second tick
+    /// duplicates the transfer.
+    func testRepeatedExpiryTicksDoNotDuplicateOwnershipTransferBeforeDetachCommits() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "session-b1-dedup", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original", shell: "/bin/zsh",
+            command: "zsh", createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+        let localClient = TerminalClient(
+            id: "local-window", kind: .localWindow, identity: .init(label: "Spaces window"), connectedAt: "2000-01-01T00:00:00Z")
+        let remoteClient = TerminalClient(
+            id: "stale-remote-owner", kind: .remoteViewer, identity: .init(label: "iPad", deviceName: "iPad"), connectedAt: "2000-01-01T00:00:00Z")
+        try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+        try TerminalSessionPersistence.attachClient(
+            sessionID: launchConfiguration.sessionID, client: localClient, mode: .owner, paths: paths, attachedAt: "2000-01-01T00:00:00Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: launchConfiguration.sessionID, client: remoteClient, mode: .viewer, paths: paths, attachedAt: "2000-01-01T00:00:00Z")
+        try TerminalSessionPersistence.transferOwnership(
+            sessionID: launchConfiguration.sessionID, newOwnerClientID: remoteClient.id, paths: paths, transferredAt: "2000-01-01T00:00:01Z")
+
+        let lockHolder = CompetingWriteLockHolder(databasePath: try SpacesProfile.current().databasePath)
+        lockHolder.startHolding(maxHoldSeconds: 10)
+        lockHolder.waitUntilHolding()
+        defer { lockHolder.release() }
+
+        let result = TerminalEngineActor.runSynchronously { () -> (first: [String], epochAfterFirst: UInt64, second: [String], epochAfterSecond: UInt64) in
+            let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+            let now = Date()
+            let first = host.expireStaleRemoteClientsIfNeeded(now: now)
+            let epochAfterFirst = host.core.debugOwnerEpoch
+            let second = host.expireStaleRemoteClientsIfNeeded(now: now)
+            let epochAfterSecond = host.core.debugOwnerEpoch
+            return (first, epochAfterFirst, second, epochAfterSecond)
+        }
+        XCTAssertEqual(result.first, [remoteClient.id], "the first tick must expire the stale remote owner")
+        XCTAssertEqual(result.second, [], "the second tick must not re-expire a client whose detach/transfer is still pending")
+        XCTAssertEqual(
+            result.epochAfterSecond, result.epochAfterFirst, "a duplicate ownership transfer must not bump the owner epoch a second time")
+    }
+
+    /// Finding B4: a failed exited-state persist must retry, not leave the durable runtime row stuck at
+    /// `.running` forever while the final payload says terminated. Termination cancels the runtime-state
+    /// timer, so nothing else re-persists. Breaking the database makes terminate()'s exited write fail;
+    /// restoring it lets the bounded retry land the exited state.
+    func testFailedExitedRuntimeStateWriteRetriesUntilItLands() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "session-b4-retry", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original", shell: "/bin/zsh",
+            command: "zsh", createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+        try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+        let runningState = TerminalSessionRuntimeState(
+            sessionID: launchConfiguration.sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: nil, state: .running,
+            updatedAt: TerminalSessionTimestamp.string(from: Date()), title: "shell", workingDirectory: "/tmp/original")
+        try TerminalSessionPersistence.writeRuntimeState(runningState, paths: paths)
+        XCTAssertEqual(try TerminalSessionPersistence.readRuntimeState(paths: paths).state, .running)
+
+        let databasePath = try SpacesProfile.current().databasePath
+        try Self.breakDatabase(at: databasePath)
+
+        // terminate() enqueues the exited-state write; it fails against the broken database and schedules a
+        // bounded retry. Keep the host alive so the retry (which no longer depends on the core) still has a
+        // live core to update its markers, matching the common non-dropped path.
+        let box = TerminalEngineActor.runSynchronously { () -> Box<GhosttyEmbeddedSessionHost> in
+            let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+            host.terminate()
+            return Box(host)
+        }
+        try Self.restoreDatabase(at: databasePath)
+
+        let deadline = Date().addingTimeInterval(3)
+        var landed = false
+        while Date() < deadline {
+            if (try? TerminalSessionPersistence.readRuntimeState(paths: paths))?.state == .exited {
+                landed = true
+                break
+            }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        XCTAssertTrue(landed, "a failed exited-state write must retry and eventually mark the durable runtime row exited")
+        _ = box
+    }
+
+    /// Replaces the SQLite database (and its WAL sidecars) with a directory so every write fails to open it,
+    /// preserving the real files aside so `restoreDatabase` can bring the committed data back intact.
+    private static func breakDatabase(at databasePath: String) throws {
+        let fileManager = FileManager.default
+        for suffix in ["", "-wal", "-shm"] {
+            let path = databasePath + suffix
+            if fileManager.fileExists(atPath: path) { try fileManager.moveItem(atPath: path, toPath: path + ".b4bak") }
+        }
+        try fileManager.createDirectory(atPath: databasePath, withIntermediateDirectories: false)
+    }
+
+    private static func restoreDatabase(at databasePath: String) throws {
+        let fileManager = FileManager.default
+        try? fileManager.removeItem(atPath: databasePath)
+        for suffix in ["", "-wal", "-shm"] {
+            let backup = databasePath + suffix + ".b4bak"
+            if fileManager.fileExists(atPath: backup) { try fileManager.moveItem(atPath: backup, toPath: databasePath + suffix) }
+        }
     }
 
     private static func renderBaseline(from payload: GhosttyRemoteSessionStatePayload, baseline: GhosttyRenderUpdateBaseline?) throws

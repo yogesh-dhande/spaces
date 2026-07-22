@@ -222,6 +222,14 @@
             stateStreamServer = nil
             GhosttyRemoteSessionStateStreamServer.removeSocketFileIfPresent(at: paths.subscriptionSocketPath)
 
+            // Drain accepted-but-unwritten control input before handing off. A `terminal send --submit`
+            // splits into the text write and a carriage return the sequencer holds back by its separation
+            // delay; the PTY write queue is likewise asynchronous. The control server is stopped above, so no
+            // new sends can enqueue — await the sequencer chain and then the PTY write queue so the `execv`
+            // that inherits this same master fd cannot destroy either with the CR (or the whole line) unwritten.
+            await controlInputSequencer.drain()
+            await ptyDriver.drainPendingWrites()
+
             // Nothing live to hand off (child dead/closed): caller terminates normally.
             guard let descriptor = ptyDriver.handoffDescriptorSnapshot() else { return nil }
 

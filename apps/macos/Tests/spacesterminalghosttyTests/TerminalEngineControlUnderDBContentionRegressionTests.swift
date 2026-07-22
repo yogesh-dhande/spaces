@@ -154,4 +154,74 @@ final class TerminalEngineControlUnderDBContentionRegressionTests: XCTestCase {
         releaseLock()
         TerminalEngineActor.runSynchronously { box.core.terminate() }
     }
+
+    /// Finding B3 companion: terminating one core must not stall another live core's control requests. Both
+    /// cores share the single terminal-engine executor. Before the fix, `terminate()` ended with a blocking
+    /// `persistenceQueue.sync {}` drain; under a held write lock that drain blocked the engine thread up to
+    /// SQLite's 5s busy timeout, freezing every other session. With the fence made non-blocking, terminating
+    /// one core under a held write lock leaves another core's control round-trip fast.
+    func testTerminatingOneCoreUnderHeldWriteLockDoesNotStallAnotherCoresControl() async throws {
+        @TerminalEngineActor func makeCoreBox(tag: String) throws -> CoreBox {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            let paths = TerminalSessionPaths(rootDirectory: root.path)
+            try paths.ensureDirectories()
+            let launch = TerminalSessionLaunchConfiguration(
+                sessionID: "engine-b3-\(tag)-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "shell",
+                workingDirectory: FileManager.default.temporaryDirectory.path, shell: "/bin/sh", command: "cat", createdAt: "2026-07-21T00:00:00Z",
+                workspaceID: "workspace-1", kind: .shell)
+            let core = GhosttyEmbeddedSessionCore(launchConfiguration: launch, paths: paths)
+            try core.startIfNeeded()
+            let owner = TerminalClient(
+                id: "owner-client", kind: .localWindow, identity: .init(label: "Spaces window"), connectedAt: "2026-07-21T00:00:00Z")
+            try core.attachClient(owner, mode: .owner)
+            return CoreBox(core: core, paths: paths, root: root)
+        }
+
+        let terminatingBox = try await TerminalEngineActor.run { try makeCoreBox(tag: "terminating") }
+        let liveBox = try await TerminalEngineActor.run { try makeCoreBox(tag: "live") }
+        defer {
+            try? FileManager.default.removeItem(at: terminatingBox.root)
+            try? FileManager.default.removeItem(at: liveBox.root)
+        }
+
+        // Flush startup/attach backlog so the queues are empty before we contend the lock.
+        TerminalEngineActor.runSynchronously {
+            terminatingBox.core.debugDrainPersistenceQueue()
+            liveBox.core.debugDrainPersistenceQueue()
+        }
+
+        let lockHolder = CompetingWriteLockHolder(databasePath: try SpacesProfile.current().databasePath)
+        lockHolder.startHolding(maxHoldSeconds: 10)
+        lockHolder.waitUntilHolding()
+        var released = false
+        let releaseLock = { if !released { released = true; lockHolder.release() } }
+        defer { releaseLock() }
+
+        // Terminate one core on a background thread so it is in flight on the shared engine while the lock is
+        // held. Before the fix its blocking drain holds the engine thread; with the fix it returns at once.
+        let terminated = DispatchSemaphore(value: 0)
+        Thread.detachNewThread {
+            TerminalEngineActor.runSynchronously { terminatingBox.core.terminate() }
+            terminated.signal()
+        }
+        // Let the terminate reach the engine before measuring the other core.
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        // Drive a control send to the OTHER core through the shared engine bridge and time the round-trip.
+        let startedAt = Date()
+        let ok = TerminalEngineActor.runSynchronously { () -> Bool in
+            liveBox.core.handleControlRequest(.init(command: "send", text: "b3-marker\n", clientID: "owner-client", appendNewline: false)).ok
+        }
+        let roundTrip = Date().timeIntervalSince(startedAt)
+        XCTAssertTrue(ok, "the live core's owner send should be accepted while the other core terminates under the held lock")
+        XCTAssertLessThan(
+            roundTrip, 0.5,
+            "terminating one core under a held write lock stalled another core's control for \(roundTrip)s — the termination fence blocked the engine")
+        XCTAssertEqual(
+            terminated.wait(timeout: .now() + 1), .success, "terminate() did not return promptly — its durable fence blocked the engine on the write lock")
+
+        releaseLock()
+        TerminalEngineActor.runSynchronously { liveBox.core.terminate() }
+    }
 }

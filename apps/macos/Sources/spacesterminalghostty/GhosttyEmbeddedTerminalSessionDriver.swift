@@ -341,6 +341,15 @@
         /// there is nothing to hand off. Forwarded from the host PTY driver.
         func handoffDescriptorSnapshot() -> (masterFD: Int32, childPID: Int32)? { hostPTY?.handoffDescriptorSnapshot() }
 
+        /// Flush accepted-but-unwritten input toward the PTY master for handoff quiesce: pump Ghostty so any
+        /// input still inside its pipeline reaches the host PTY write callback, then drain that write queue.
+        /// Paired with the control-input sequencer drain so a submit's trailing CR cannot be lost across the
+        /// `execv` that inherits this same master fd.
+        func drainPendingInputWrites() async {
+            GhosttyEmbeddedAppService.shared.tick()
+            await hostPTY?.drainPendingWrites()
+        }
+
         /// Swap PTY output delivery to an in-memory buffer so the read loop keeps
         /// draining while the daemon quiesces and closes its durable output handle.
         func beginHandoffOutputBuffering() async {

@@ -81,10 +81,21 @@ extension WorkspaceOrchestrator {
         // deterministic, so the later pass's upsert must never treat the earlier pass's already-inserted row
         // — carrying the SAME detected label — as a name conflict with itself and rename it "-2".
         let resolvedLabel = try uniqueAgentFocusLabel(workspaceID: workspace.id, preferredLabel: detectedAgent.label, excludingAgentWindowID: agentID)
+        // Re-read by the deterministic id right before upserting rather than trusting the caller's earlier
+        // `existingRow == nil` check: two overlapping reconciler passes (TerminalForegroundAgentReconciler
+        // and ProcessExitMonitorService) can both observe no existing row and both reach this call for the
+        // same session. If the first pass's insert — or a hook signal that landed on it in the meantime —
+        // already committed status/session-key/claimed-launcher state, a second, delayed pass upserting
+        // fresh `.idle`/`sessionKey: nil` detection defaults over it would revert that live state until a
+        // later hook repairs it. Detection only ever creates or refreshes the label/command binding; it
+        // never owns lifecycle state, so an existing row's status, session key, claimed launcher fields,
+        // and creation time are always carried forward untouched.
+        let existingByID = try store.agentWindow(id: agentID)
         let record = AgentWindowRecord(
             id: agentID, workspaceID: workspace.id, provider: .spaces, label: resolvedLabel, runtimeTargetID: terminalWindow?.id,
-            terminalTarget: terminalTarget, sessionKey: nil, claimedLauncherID: nil, claimedLauncherName: nil, status: .idle, createdAt: now,
-            updatedAt: now)
+            terminalTarget: terminalTarget, sessionKey: existingByID?.sessionKey, claimedLauncherID: existingByID?.claimedLauncherID,
+            claimedLauncherName: existingByID?.claimedLauncherName, status: existingByID?.status ?? .idle,
+            createdAt: existingByID?.createdAt ?? now, updatedAt: now)
         let nextAgentWindows = try store.agentWindows(workspaceID: workspace.id).filter { $0.id != agentID } + [record]
         try validateWorkspaceFocusNames(
             workspaceID: workspace.id, processes: try store.workspaceProcesses(workspaceID: workspace.id),
@@ -842,6 +853,13 @@ extension WorkspaceOrchestrator {
         let alreadyFinalized = try agentRowIsFinalized(record)
         switch reason {
         case .destroyed(let terminateTerminalSession):
+            // Destroys delete the row and (usually) terminate the backing terminal. During a daemon
+            // handoff the terminal side becomes a silent no-op (`terminateBuiltInTerminalSession` defers to
+            // the successor daemon), so proceeding would delete rows for a terminal that survives the
+            // handoff. Veto at the chokepoint so every destroy path — workspace stop, agent kill, stale-slot
+            // eviction — either does both or neither. `.exited` stays admitted: it records an observed exit
+            // and performs no terminal-side work that a handoff could split.
+            guard !daemonHandoffInProgress() else { throw WorkspaceError.daemonHandoffInProgress }
             if !alreadyFinalized { try engine.childDidTransition(agent: record, transition: .exited) }
             if terminateTerminalSession, let sessionID = record.terminalTrackingID, !sessionID.isEmpty { terminateBuiltInTerminalSession(sessionID) }
             try store.deleteAgentSubscriptions(agentSessionID: record.id)

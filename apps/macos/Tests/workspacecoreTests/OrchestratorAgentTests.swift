@@ -1356,6 +1356,48 @@ extension OrchestratorTests {
         XCTAssertEqual(Set(labelsAfterDistinctSession), Set(["claude", "claude-2"]))
     }
 
+    /// Regression: the SAME overlapping-reconcile-pass race as
+    /// `testInsertAdHocDetectedAgentIsIdempotentAcrossOverlappingReconcilePasses`, but with a hook landing
+    /// in the window between the two passes' `insertAdHocDetectedAgent` calls. Pass A inserts the
+    /// detection row; a hook then advances it to `.spinning` with a session key; the delayed pass B (which
+    /// also read `existingRow == nil` before A's insert) must merge into that live state rather than
+    /// re-upserting its stale `.idle`/`sessionKey: nil` detection defaults over it.
+    func testInsertAdHocDetectedAgentPreservesHookStateFromDelayedOverlappingPass() throws {
+        let store = try makeTemporaryStore()
+        let projectDir = try makeTempDirectory().path
+        let project = makeProjectRecord(dir: projectDir)
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: projectDir)
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace)
+        let orchestrator = WorkspaceOrchestrator(store: store)
+        let sessionID = "ad-hoc-stale-detection-agent"
+        let detectedAgent = (label: "claude", displayCommand: "claude")
+
+        // Pass A's insert.
+        try orchestrator.insertAdHocDetectedAgent(detectedAgent: detectedAgent, workspace: workspace, sessionID: sessionID)
+        let agentID = orchestrator.adHocDetectedAgentID(sessionID: sessionID)
+        guard let inserted = try store.agentWindow(id: agentID) else { return XCTFail("expected inserted detection row") }
+
+        // A hook fires between the two passes, moving the row to spinning with a session key — real
+        // lifecycle state pass B must not clobber.
+        try store.upsertAgentWindow(
+            AgentWindowRecord(
+                id: inserted.id, workspaceID: inserted.workspaceID, provider: inserted.provider, label: inserted.label,
+                runtimeTargetID: inserted.runtimeTargetID, terminalTarget: inserted.terminalTarget, sessionKey: "session-key-from-hook",
+                claimedLauncherID: inserted.claimedLauncherID, claimedLauncherName: inserted.claimedLauncherName, status: .spinning,
+                note: inserted.note, createdAt: inserted.createdAt, updatedAt: "2026-01-01T00:00:01Z"))
+
+        // Pass B: the delayed second reconcile pass re-runs the same detection.
+        try orchestrator.insertAdHocDetectedAgent(detectedAgent: detectedAgent, workspace: workspace, sessionID: sessionID)
+
+        let agents = try store.agentWindows(workspaceID: workspace.id)
+        XCTAssertEqual(agents.count, 1)
+        XCTAssertEqual(agents.first?.label, "claude")
+        XCTAssertEqual(agents.first?.status, .spinning)
+        XCTAssertEqual(agents.first?.sessionKey, "session-key-from-hook")
+        XCTAssertEqual(agents.first?.createdAt, inserted.createdAt)
+    }
+
     func testReconcileTerminalForegroundAgentClassificationsReservesConfiguredLauncherNames() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path

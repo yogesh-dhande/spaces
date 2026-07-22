@@ -234,6 +234,43 @@ final class GhosttyEmbeddedSessionHandoffTests: XCTestCase {
         XCTAssertEqual(Self.occurrences(of: secondMarker, in: transcript), 1, "post-handoff output must land in output.log exactly once")
     }
 
+    /// Pins the teardown ordering the daemon's resume-failure path (`resumeHandoffSession`) relies on: a
+    /// core that has adopted the inherited PTY holds live driver resources, so it must be terminated (which
+    /// frees those resources) while a reference is still held — releasing the last reference without an
+    /// explicit `terminate()` first trips the driver's deinit precondition and aborts the staged daemon.
+    /// This exercises exactly that shape (adopt a live PTY, then terminate, then release) and asserts the
+    /// teardown completes without aborting.
+    func testAdoptedCoreTerminatesBeforeReleaseWithoutTrippingDriverPrecondition() async throws {
+        try Self.requireGhosttyAvailable()
+        let paths = try Self.makeTemporaryPaths()
+        defer { try? FileManager.default.removeItem(atPath: paths.rootDirectory) }
+
+        let configuration = Self.makeConfiguration(
+            sessionID: "handoff-adopt-teardown-\(UUID().uuidString)", command: "stty -echo; cat")
+        let sourceCoreBox = try await TerminalEngineActor.run { () -> Box<GhosttyEmbeddedSessionCore> in
+            let sourceCore = GhosttyEmbeddedSessionCore(launchConfiguration: configuration, paths: paths)
+            try sourceCore.startIfNeeded()
+            return Box(sourceCore)
+        }
+        let sourceCore = sourceCoreBox.value
+        guard let record = try await sourceCore.quiesceForHandoff() else { return XCTFail("quiesce produced no handoff record for a live session") }
+        TerminalEngineActor.runSynchronously { sourceCore.terminate() }
+
+        let pty = try Self.makeAdoptablePTY()
+        let resumedCoreBox = try await TerminalEngineActor.run { () -> Box<GhosttyEmbeddedSessionCore> in
+            Box(GhosttyEmbeddedSessionCore(launchConfiguration: configuration, paths: paths))
+        }
+        let resumedCore = resumedCoreBox.value
+        try await resumedCore.resumeFromHandoff(Self.handoffRecord(from: record, adopting: pty))
+
+        // Terminate while still referenced (mirrors routing the resume-failure teardown through
+        // `terminateSession` instead of dropping the dictionary's last reference first), then let the
+        // reference drop at scope exit. Reaching the end of the test proves the driver's live resources
+        // were freed before release, so its deinit precondition did not abort the process.
+        Self.tearDown(pty)
+        TerminalEngineActor.runSynchronously { resumedCore.terminate() }
+    }
+
     func testResumeDoesNotRestoreClearedScreenOrScrollback() async throws {
         try Self.requireGhosttyAvailable()
         let paths = try Self.makeTemporaryPaths()
@@ -506,6 +543,55 @@ final class GhosttyEmbeddedSessionHandoffTests: XCTestCase {
         XCTAssertEqual(Self.occurrences(of: marker, in: transcript), 1)
         XCTAssertEqual(Self.occurrences(of: duringHandoffMarker, in: transcript), 1)
         XCTAssertEqual(Self.occurrences(of: afterMarker, in: transcript), 1)
+    }
+
+    // MARK: - 6. Input drain before handoff (finding D1)
+
+    /// A `terminal send --submit` splits into the text write and a carriage return the sequencer holds
+    /// back by its separation delay. If a handoff `execv` fires right after the send, it would destroy the
+    /// sequencer with the CR (or the whole line) unwritten. `quiesceForHandoff` must drain the pending
+    /// sequencer work — and the host PTY write queue — before returning the record.
+    ///
+    /// The child runs `stty -echo; cat`, so it re-emits a line only once its terminating newline arrives:
+    /// "PAYLOAD" reaches `output.log` only if the submit's CR was actually written. Quiesce must also have
+    /// taken at least the pending CR's separation delay (proving it waited for the drain rather than
+    /// returning while the CR was still queued) — before the fix it returned immediately.
+    func testQuiesceDrainsPendingSubmitCarriageReturnBeforeHandoff() async throws {
+        try Self.requireGhosttyAvailable()
+        let paths = try Self.makeTemporaryPaths()
+        defer { try? FileManager.default.removeItem(atPath: paths.rootDirectory) }
+
+        let configuration = Self.makeConfiguration(
+            sessionID: "handoff-input-drain-\(UUID().uuidString)", command: "printf SUBMIT_READY; stty -echo; cat")
+        let sourceCoreBox = try await TerminalEngineActor.run { () -> Box<GhosttyEmbeddedSessionCore> in
+            let sourceCore = GhosttyEmbeddedSessionCore(launchConfiguration: configuration, paths: paths)
+            try sourceCore.startIfNeeded()
+            return Box(sourceCore)
+        }
+        let sourceCore = sourceCoreBox.value
+        defer { TerminalEngineActor.runSynchronously { sourceCore.terminate() } }
+        try await waitAsync { (try? String(contentsOfFile: paths.outputPath))?.contains("SUBMIT_READY") == true }
+
+        // Submit a line, then quiesce immediately while the trailing CR is still held in the sequencer.
+        let submitMarker = "DRAIN_PAYLOAD"
+        TerminalEngineActor.runSynchronously {
+            _ = sourceCore.handleControlRequest(TerminalControlRequest(command: "send", text: submitMarker, appendNewline: true))
+        }
+        let quiesceStartedAt = ContinuousClock.now
+        guard let record = try await sourceCore.quiesceForHandoff() else { return XCTFail("quiesce produced no handoff record for a live session") }
+        let quiesceDuration = quiesceStartedAt.duration(to: .now)
+        _ = record
+
+        // Quiesce must have waited for the pending CR (its separation delay), not returned while it was queued.
+        XCTAssertGreaterThanOrEqual(
+            quiesceDuration, .milliseconds(300),
+            "quiesce returned before draining the pending submit carriage return (\(quiesceDuration))")
+
+        // `cat` re-emits the line only after the CR lands, so its presence proves the CR was written before
+        // the handoff record was returned. The direct-to-file writer installed by quiesce keeps appending.
+        try await waitAsync {
+            (try? String(contentsOfFile: paths.outputPath))?.contains(submitMarker) == true
+        }
     }
 }
 

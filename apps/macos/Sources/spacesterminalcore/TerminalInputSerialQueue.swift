@@ -45,6 +45,19 @@ public final class TerminalInputSerialQueue: @unchecked Sendable {
         for task in tasks { task.cancel() }
     }
 
+    /// Suspends until the task chain enqueued so far has finished. Because each task awaits its
+    /// predecessor, awaiting the current tail awaits the whole outstanding chain. Tasks enqueued after
+    /// this call began are not awaited. Used by handoff quiesce to flush pending input before `execv`.
+    public func drain() async {
+        await currentTail()?.value
+    }
+
+    private func currentTail() -> Task<Void, Never>? {
+        lock.lock()
+        defer { lock.unlock() }
+        return pendingTask
+    }
+
     private func isCurrentGeneration(_ taskGeneration: UInt64) -> Bool {
         lock.lock()
         defer { lock.unlock() }
