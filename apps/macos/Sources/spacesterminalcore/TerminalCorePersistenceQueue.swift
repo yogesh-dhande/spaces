@@ -40,12 +40,13 @@ public final class TerminalCorePersistenceQueue: Sendable {
     /// Coalescing key for the runtime-state write chain; a fresh persist supersedes any still-queued one.
     /// Namespaced so it never collides with per-client lease-touch keys (`lease:<clientID>`).
     public static let runtimeStateCoalescingKey = "runtime_state"
-    /// Bounded retry policy for a failed EXITED-state write. Termination cancels the per-session runtime-state
-    /// refresh, so nothing re-persists on its own — a single dropped exited write would leave the durable
-    /// runtime row stuck at `.running` while the final payload says terminated. Running-state failures need no
-    /// retry (the next refresh re-persists).
-    public static let exitedRuntimeStateWriteMaxAttempts = 5
-    public static let exitedRuntimeStateWriteRetryDelay: TimeInterval = 0.2
+    /// Bounded retry policy for a failed runtime-state write, applied to every state (not just `.exited`). The
+    /// Linux headless core has no periodic runtime-state refresh — its persists are purely event-driven
+    /// (startup, per output chunk, attach/detach/takeover/resize/handoff, terminate) — so a dropped write of
+    /// any state leaves stale durable metadata until the next event. A superseded write abandons its retry
+    /// (latest-wins), so a running-state retry can never overwrite a newer state.
+    public static let runtimeStateWriteMaxAttempts = 5
+    public static let runtimeStateWriteRetryDelay: TimeInterval = 0.2
 
     private let queue: DispatchQueue
     private let coalescingGate = PersistenceCoalescingGate()
@@ -86,28 +87,28 @@ public final class TerminalCorePersistenceQueue: Sendable {
         await withCheckedContinuation { continuation in queue.async { continuation.resume() } }
     }
 
-    /// Runs one durable runtime-state write on the serial queue. On failure of an EXITED state it retries IN
-    /// PLACE inside the single queued work item — looping up to `exitedRuntimeStateWriteMaxAttempts` with a
-    /// `Thread.sleep` back-off between attempts — rather than re-enqueuing. Blocking the per-core persistence
-    /// queue here IS the termination fence: it holds this write's FIFO position so the detach-all, terminated
-    /// payload, and trailing durable-end notification enqueued after it in a core's `terminate()` cannot run —
-    /// and `execv` cannot destroy the pending retry by jumping ahead of it — until the exited state commits.
-    /// It only ever blocks this core's serial persistence queue, never the engine executor, so it cannot stall
-    /// live sessions. Closed only over value types plus the shared gate, so the retry never depends on the
-    /// core staying alive. The coalescing generation is taken up front and re-checked each attempt, so a newer
-    /// state enqueued behind this one still supersedes it (latest-wins). Running-state failures do not retry:
-    /// the runtime-state refresh re-persists them on its next tick, whereas termination cancels that refresh,
-    /// so only the exited write must be driven home here. `onPersisted` hops back to the engine to advance the
-    /// durable marker (one-way rule); it is the ONLY reference to the core in the write chain, so the write —
-    /// and any exited-state retry — survives the core's release (e.g. a session-close that drops the core
-    /// right after termination).
+    /// Runs one durable runtime-state write on the serial queue. On failure it retries IN PLACE inside the
+    /// single queued work item — looping up to `runtimeStateWriteMaxAttempts` with a `Thread.sleep` back-off
+    /// between attempts — rather than re-enqueuing. Every state retries, not just `.exited`: the Linux headless
+    /// core has no periodic refresh, so a dropped write of any state (running included) would otherwise leave
+    /// stale durable metadata until the next event. Blocking the per-core persistence queue here IS the
+    /// termination fence: it holds this write's FIFO position so the detach-all, terminated payload, and
+    /// trailing durable-end notification enqueued after it in a core's `terminate()` cannot run — and `execv`
+    /// cannot destroy the pending retry by jumping ahead of it — until the exited state commits. It only ever
+    /// blocks this core's serial persistence queue, never the engine executor, so it cannot stall live
+    /// sessions. Closed only over value types plus the shared gate, so the retry never depends on the core
+    /// staying alive. The coalescing generation is taken up front and re-checked each attempt, so a newer state
+    /// enqueued behind this one still supersedes it (latest-wins) and a superseded write abandons its retry.
+    /// `onPersisted` hops back to the engine to advance the durable marker (one-way rule); it is the ONLY
+    /// reference to the core in the write chain, so the write — and any retry — survives the core's release
+    /// (e.g. a session-close that drops the core right after termination).
     public func enqueueRuntimeStateWrite(
         _ state: TerminalSessionRuntimeState, at writeAt: Date, paths: TerminalSessionPaths,
         onPersisted: @escaping @Sendable (TerminalSessionRuntimeState, Date) -> Void
     ) {
         let key = Self.runtimeStateCoalescingKey
-        let maxAttempts = Self.exitedRuntimeStateWriteMaxAttempts
-        let retryDelay = Self.exitedRuntimeStateWriteRetryDelay
+        let maxAttempts = Self.runtimeStateWriteMaxAttempts
+        let retryDelay = Self.runtimeStateWriteRetryDelay
         let gate = coalescingGate
         let generation = gate.nextGeneration(forKey: key)
         queue.async {
@@ -118,7 +119,7 @@ public final class TerminalCorePersistenceQueue: Sendable {
                     try TerminalSessionPersistence.writeRuntimeState(state, paths: paths)
                 } catch {
                     attempt += 1
-                    guard state.state == .exited, attempt < maxAttempts else { return }
+                    guard attempt < maxAttempts else { return }
                     Thread.sleep(forTimeInterval: retryDelay)
                     continue
                 }

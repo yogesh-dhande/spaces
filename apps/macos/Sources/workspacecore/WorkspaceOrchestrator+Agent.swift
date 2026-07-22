@@ -86,7 +86,7 @@ extension WorkspaceOrchestrator {
         // ProcessExitMonitorService) can both observe no existing row and both reach this call for the same
         // deterministic id, and a hook signal can commit newer status/session-key state between this pass's
         // reads and its upsert. So the record carries only fresh initial lifecycle values, and preserving
-        // any already-committed status, session key, claimed launcher fields, and creation time is enforced
+        // any already-committed status, session key, claimed launcher fields, and lifecycle timestamps is enforced
         // in SQL by `upsertDetectedAgentWindow`'s ON CONFLICT clause rather than by re-reading and carrying
         // the snapshot forward here — closing the read-modify-upsert race. On first insert (no conflict)
         // these initial values are the ones written.

@@ -1427,7 +1427,9 @@ extension OrchestratorTests {
                 sessionKey: "session-key-from-hook", status: .spinning, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:01Z"))
 
         // A delayed detection refresh carrying a stale idle/nil-session-key snapshot with a bogus creation
-        // time must not regress the live lifecycle state, but its label/updated_at binding still applies.
+        // time must not regress the live lifecycle state; its label binding still applies, but updated_at
+        // (the lifecycle-state-entered timestamp) must stay with the stored status rather than jump to
+        // this refresh's value.
         try store.upsertDetectedAgentWindow(
             AgentWindowRecord(
                 id: agentID, workspaceID: workspace.id, provider: .spaces, label: "claude-renamed", terminalTarget: terminalTarget, sessionKey: nil,
@@ -1438,7 +1440,7 @@ extension OrchestratorTests {
         XCTAssertEqual(refreshed.sessionKey, "session-key-from-hook")
         XCTAssertEqual(refreshed.createdAt, "2026-01-01T00:00:00Z")
         XCTAssertEqual(refreshed.label, "claude-renamed")
-        XCTAssertEqual(refreshed.updatedAt, "2026-01-01T00:00:02Z")
+        XCTAssertEqual(refreshed.updatedAt, "2026-01-01T00:00:01Z")
     }
 
     func testReconcileTerminalForegroundAgentClassificationsReservesConfiguredLauncherNames() throws {

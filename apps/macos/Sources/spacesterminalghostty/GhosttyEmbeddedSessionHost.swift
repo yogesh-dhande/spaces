@@ -816,6 +816,31 @@
             lastObservedProcessWorkingDirectory ?? currentWorkingDirectory ?? launchConfiguration.workingDirectory
         }
 
+        /// The session summary built entirely from this core's in-memory launch configuration and
+        /// `latestRuntimeState` — with no DB read. Serves the create path's post-start summary so a create
+        /// reports the running session the moment `startIfNeeded()` returns (which advances
+        /// `latestRuntimeState` synchronously via `refreshRuntimeState(force:)`), independent of when the
+        /// first runtime-state write commits to SQLite. That first write is enqueued on the per-core
+        /// persistence queue, so under writer contention it can lag the busy timeout; polling the durable
+        /// mirror for it could time out and report `ok:false` for a live session. Returns nil only before any
+        /// runtime state has been computed (never started), which the create path treats as a failed start
+        /// and rolls back.
+        ///
+        /// Mirrors the fields of `SpacesdMain.summary(for:paths:)`. The two fields that helper reads from
+        /// disk are trivially known at session birth: no client has attached yet, so the attachment snapshot
+        /// is empty (`cachedAttachmentSnapshot` is nil at birth), and no final render exists, so
+        /// `hasFinalRender` is false.
+        public func inMemorySessionSummary() -> TerminalServiceSessionSummary? {
+            guard let runtimeState = latestRuntimeState else { return nil }
+            return TerminalServiceSessionSummary(
+                id: launchConfiguration.sessionID, title: runtimeState.title ?? launchConfiguration.title,
+                workingDirectory: runtimeState.workingDirectory ?? launchConfiguration.workingDirectory, backend: launchConfiguration.backend,
+                lifetimePolicy: launchConfiguration.lifetimePolicy, state: runtimeState.state, servicePID: runtimeState.servicePID,
+                childPID: runtimeState.childPID, controlSocketPath: paths.controlSocketPath, outputPath: paths.outputPath,
+                launchConfiguration: launchConfiguration, runtimeState: runtimeState,
+                attachmentSnapshot: cachedAttachmentSnapshot ?? TerminalSessionAttachmentSnapshot(), hasFinalRender: false)
+        }
+
         private func startControlServer() throws {
             let controlServer = TerminalControlServer(socketPath: paths.controlSocketPath, queue: controlQueue) { [weak self] request in
                 // The control server runs this on its own transport queue; bridge synchronously onto the
@@ -1374,43 +1399,51 @@
             } else {
                 ownershipTransferTarget = nil
             }
-            // Enqueue the detach-all and the (optional) ownership transfer as ONE durable unit so a partial
-            // failure is handled coherently. On ANY failure, hop back to the engine and un-mark these clients
-            // in `expiredRemoteClientIDs` so the next 1s timer tick re-derives them from the still-stale DB
-            // rows and re-enqueues the whole expiry. That retry is safe because detach and transfer are
-            // idempotent UPDATE-based transactions and the owner is re-derived from fresh DB state. Without
-            // this, a swallowed failure would leave the client stuck in `expiredRemoteClientIDs` (never
-            // retried) — and a failed transfer would leave no durable owner while the in-memory `ownerEpoch`
-            // has already advanced.
+            // Enqueue the detaches and the (optional) ownership transfer as ONE atomic transaction
+            // (`expireClients`) so a partial commit can never leave durable state ownerless. On ANY failure,
+            // hop back to the engine and un-mark these clients in `expiredRemoteClientIDs` so the next 1s timer
+            // tick re-derives them from the still-stale DB rows and re-enqueues the whole expiry. That retry is
+            // sound because the failed transaction rolled back untouched, so the next tick re-derives the
+            // identical decision. Without the un-mark, a swallowed failure would leave the client stuck in
+            // `expiredRemoteClientIDs` (never retried) — and a failed transfer would leave no durable owner
+            // while the in-memory `ownerEpoch` has already advanced.
             enqueuePersistenceWrite { [weak self] in
                 do {
-                    for clientID in staleClientIDs {
-                        try TerminalSessionPersistence.detachClient(id: clientID, paths: paths, detachedAt: detachedAt)
-                    }
-                    if let ownershipTransferTarget {
-                        try TerminalSessionPersistence.transferOwnership(
-                            sessionID: sessionID, newOwnerClientID: ownershipTransferTarget, paths: paths, transferredAt: detachedAt)
-                    }
+                    try TerminalSessionPersistence.expireClients(
+                        clientIDs: staleClientIDs, transferOwnershipTo: ownershipTransferTarget, sessionID: sessionID, paths: paths,
+                        detachedAt: detachedAt)
                 } catch {
                     let failureDescription = String(describing: error)
                     Task { @TerminalEngineActor in self?.rearmStaleClientExpiryAfterWriteFailure(clientIDs: staleClientIDs, error: failureDescription) }
                 }
             }
+            // Mirror the atomic write into the in-memory cache BEFORE broadcasting, so the payload advertises
+            // the post-expiry attachment state (expired clients gone, transfer target the owner) without
+            // reading the not-yet-committed durable mirror. `postAttachmentStateDidChange(invalidateCache:)` is
+            // called with `invalidateCache: false` so it does not wipe this fresh cache and reseed the stale
+            // pre-commit rows. On write failure `rearmStaleClientExpiryAfterWriteFailure` invalidates the cache
+            // so it reseeds from the (rolled-back, still pre-expiry) durable state — keeping cache and DB
+            // coherent for the retry.
+            markClientsExpiredInCache(clientIDs: staleClientIDs, newOwnerClientID: ownershipTransferTarget, detachedAt: detachedAt)
             if Self.shouldClearFocusAfterDetachingClient(detachedClientWasOwner: false, remainingOwnerClientID: remainingOwnerClientID) {
                 rendererHostStorage.setSurfaceFocused(false)
             }
             if remainingOwnerClientID == nil, rendererHostStorage.hasRenderableSurface() { rendererHostStorage.releaseRendererSurface() }
-            postAttachmentStateDidChange()
+            postAttachmentStateDidChange(invalidateCache: false)
             refreshRuntimeState(force: true)
             return staleClientIDs
         }
 
-        /// Re-arms stale-client expiry after its durable detach/transfer write failed: un-marks the client IDs
-        /// so the next timer tick re-derives them from the still-stale DB rows and re-enqueues the (idempotent)
-        /// expiry. Called only from the persistence queue's engine hop on write failure.
+        /// Re-arms stale-client expiry after its atomic detach/transfer transaction failed: un-marks the client
+        /// IDs so the next timer tick re-derives them from the still-stale DB rows and re-enqueues the expiry.
+        /// Also invalidates the attachment-snapshot cache, which `expireStaleRemoteClientsIfNeeded` optimistically
+        /// mutated to reflect the expiry as if it had committed: the transaction rolled back untouched, so
+        /// reseeding from the true (pre-expiry) durable state restores coherence between cache and DB for the
+        /// retry. Called only from the persistence queue's engine hop on write failure.
         private func rearmStaleClientExpiryAfterWriteFailure(clientIDs: [String], error: String) {
             trace("stale_client_expiry_write_failed clients=\(clientIDs) error=\(error)")
             expiredRemoteClientIDs.subtract(clientIDs)
+            invalidateAttachmentSnapshotCache()
         }
 
         @discardableResult private func appendOutput(_ data: Data, interactiveResync: Bool = false, shouldBroadcastState: Bool = true) -> Bool {
@@ -1567,11 +1600,14 @@
             return lastKnownSurfaceSize
         }
 
-        private func postAttachmentStateDidChange() {
-            // Attach/detach/ownership-transfer/stale-expiry all funnel through here, so this is the single
-            // point that invalidates the attachment-snapshot cache for every attachment-row mutation except
-            // the heartbeat-lease touch (`touchClientLease`) and the client upsert (invalidated inline).
-            invalidateAttachmentSnapshotCache()
+        /// Notifies and re-broadcasts after an attachment-row mutation. `invalidateCache` defaults to true so
+        /// this is the single point that drops the attachment-snapshot cache for every attachment-row mutation
+        /// except the heartbeat-lease touch (`touchClientLease`) and the client upsert (invalidated inline).
+        /// The stale-client expiry path passes `false`: it has already mutated the cache in memory to mirror its
+        /// enqueued atomic write (`markClientsExpiredInCache`), and invalidating here would wipe that and reseed
+        /// the not-yet-committed pre-expiry rows from disk — re-advertising the dead client as owner.
+        private func postAttachmentStateDidChange(invalidateCache: Bool = true) {
+            if invalidateCache { invalidateAttachmentSnapshotCache() }
             TerminalSessionNotification.post(.spacesTerminalAttachmentStateDidChange, sessionID: launchConfiguration.sessionID)
             broadcastCurrentState(reason: "attachment_state")
         }
@@ -1696,6 +1732,49 @@
                     attachedAt: attachment.attachedAt, detachedAt: detachedAt)
             }
             cachedAttachmentSnapshot = TerminalSessionAttachmentSnapshot(clients: snapshot.clients, attachments: detachedAttachments)
+        }
+
+        /// Mirrors the atomic `expireClients` write in the in-memory cache so the broadcast that follows a
+        /// stale-client expiry advertises the post-expiry attachment state WITHOUT reading the durable mirror
+        /// (whose matching transaction is only enqueued, not yet committed). Marks each stale client
+        /// disconnected and its still-active attachments detached, then — when a transfer target is given —
+        /// applies the ownership transfer exactly as the SQL does: demote every other active owner to viewer and
+        /// promote the target's active attachment to owner (inserting one if the target has none). Populates the
+        /// cache from disk first so a never-invalidated cache still captures the pre-expiry attachments.
+        private func markClientsExpiredInCache(clientIDs: [String], newOwnerClientID: String?, detachedAt: String) {
+            guard let snapshot = currentAttachmentSnapshot() else { return }
+            let staleClientIDs = Set(clientIDs)
+            let clients = snapshot.clients.map { client -> TerminalClient in
+                guard staleClientIDs.contains(client.id), client.disconnectedAt == nil else { return client }
+                return TerminalClient(
+                    id: client.id, kind: client.kind, identity: client.identity, connectedAt: client.connectedAt, disconnectedAt: detachedAt,
+                    leaseRefreshedAt: client.leaseRefreshedAt)
+            }
+            var attachments = snapshot.attachments.map { attachment -> TerminalAttachment in
+                guard attachment.detachedAt == nil, staleClientIDs.contains(attachment.clientID) else { return attachment }
+                return TerminalAttachment(
+                    id: attachment.id, sessionID: attachment.sessionID, clientID: attachment.clientID, mode: attachment.mode,
+                    attachedAt: attachment.attachedAt, detachedAt: detachedAt)
+            }
+            if let newOwnerClientID {
+                attachments = attachments.map { attachment -> TerminalAttachment in
+                    guard attachment.detachedAt == nil, attachment.mode == .owner, attachment.clientID != newOwnerClientID else { return attachment }
+                    return TerminalAttachment(
+                        id: attachment.id, sessionID: attachment.sessionID, clientID: attachment.clientID, mode: .viewer,
+                        attachedAt: attachment.attachedAt, detachedAt: nil)
+                }
+                if let index = attachments.firstIndex(where: { $0.detachedAt == nil && $0.clientID == newOwnerClientID }) {
+                    let existing = attachments[index]
+                    attachments[index] = TerminalAttachment(
+                        id: existing.id, sessionID: launchConfiguration.sessionID, clientID: existing.clientID, mode: .owner,
+                        attachedAt: existing.attachedAt, detachedAt: nil)
+                } else {
+                    attachments.append(
+                        TerminalAttachment(
+                            sessionID: launchConfiguration.sessionID, clientID: newOwnerClientID, mode: .owner, attachedAt: detachedAt))
+                }
+            }
+            cachedAttachmentSnapshot = TerminalSessionAttachmentSnapshot(clients: clients, attachments: attachments)
         }
 
         /// Refreshes a client's heartbeat lease off the engine (see `enqueueClientLeaseTouch`). No-op when the
@@ -2152,6 +2231,8 @@
         public var effectiveTitle: String { core.effectiveTitle }
 
         public var effectiveWorkingDirectory: String { core.effectiveWorkingDirectory }
+
+        public func inMemorySessionSummary() -> TerminalServiceSessionSummary? { core.inMemorySessionSummary() }
 
         func handleControlRequest(_ request: TerminalControlRequest) -> TerminalControlResponse { core.handleControlRequest(request) }
         func applyActionEvent(_ event: GhosttyActionEvent) { core.applyActionEvent(event) }

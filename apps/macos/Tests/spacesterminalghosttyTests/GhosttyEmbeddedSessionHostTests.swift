@@ -3047,6 +3047,184 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         _ = box
     }
 
+    /// The create path serves the post-start session summary from the live core's in-memory state, so a
+    /// create can report the running session the moment `startIfNeeded()` returns — independent of when the
+    /// first runtime-state write commits to SQLite through the per-core persistence queue. With that queue
+    /// parked (the first runtime-state write never reaches disk), `inMemorySessionSummary()` still reports the
+    /// running session with its id and launch fields. The negative check proves DB-independence: the durable
+    /// runtime state is absent while the queue is parked, so the pre-fix disk poll (`readRuntimeState`) would
+    /// have found nothing and, after its deadline, thrown — making a create report a ghost `ok:false` for a
+    /// session that was live and running.
+    func testInMemorySessionSummaryReportsRunningStateWithoutDBCommit() async throws {
+        try await TerminalEngineActor.run {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let paths = TerminalSessionPaths(rootDirectory: root.path)
+            try paths.ensureDirectories()
+            let launchConfiguration = TerminalSessionLaunchConfiguration(
+                sessionID: "session-in-memory-summary-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp",
+                shell: "/bin/zsh", command: nil, createdAt: "2026-06-02T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+            let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
+            defer { host.terminate() }
+
+            // Park the persistence queue BEFORE start so the first runtime-state write — enqueued by
+            // startIfNeeded's refreshRuntimeState(force:) — never commits to disk while we read the summary.
+            let gate = host.debugHoldPersistenceQueue()
+            defer { gate.signal() }
+
+            try host.startIfNeeded()
+            let summary = try XCTUnwrap(host.inMemorySessionSummary(), "a started core must produce an in-memory summary")
+
+            XCTAssertEqual(summary.id, launchConfiguration.sessionID)
+            XCTAssertEqual(summary.state, .running, "the in-memory summary must report the live running state")
+            XCTAssertEqual(summary.title, "shell")
+            // `workingDirectory` mirrors the live process cwd resolved during start (effectiveWorkingDirectory),
+            // which legitimately differs from the launch directory once the shell process reports its own cwd;
+            // assert only that it is populated.
+            XCTAssertFalse(summary.workingDirectory.isEmpty)
+            XCTAssertEqual(summary.backend, launchConfiguration.backend)
+            XCTAssertEqual(summary.lifetimePolicy, launchConfiguration.lifetimePolicy)
+            XCTAssertEqual(summary.controlSocketPath, paths.controlSocketPath)
+            XCTAssertEqual(summary.outputPath, paths.outputPath)
+            XCTAssertEqual(summary.launchConfiguration?.sessionID, launchConfiguration.sessionID)
+            XCTAssertEqual(summary.runtimeState?.state, .running, "the summary must embed the in-memory runtime state")
+
+            // Negative check: with the persistence queue parked, no runtime state has committed to disk, so
+            // the pre-fix disk poll would have found nothing and timed out — proving the summary above is
+            // served from memory, not the durable mirror.
+            XCTAssertNil(
+                try? TerminalSessionPersistence.readRuntimeState(paths: paths),
+                "the durable runtime state must be absent while the queue is parked, proving the summary is DB-independent")
+        }
+    }
+
+    /// R4-5: the broadcast that follows a stale-client expiry must advertise the post-expiry attachment state
+    /// from the in-memory cache, not reseed the not-yet-committed pre-expiry rows from disk. The persistence
+    /// queue is parked so the expiry's atomic detach/transfer stays uncommitted; the payload built right after
+    /// the tick must already exclude the expired remote owner and show the local window as the owner. Before the
+    /// fix `postAttachmentStateDidChange` invalidated the cache and the broadcast reseeded the dead owner from
+    /// disk, so every payload advertised the expired client as the attached owner until the next attach/detach.
+    func testStaleClientExpiryBroadcastReflectsPostExpiryOwnerBeforeDetachCommits() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "session-expiry-broadcast", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original", shell: "/bin/zsh",
+            command: "zsh", createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+        try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+        let localClient = TerminalClient(
+            id: "local-window", kind: .localWindow, identity: .init(label: "Spaces window"), connectedAt: "2026-05-17T00:00:00Z")
+        let remoteClient = TerminalClient(
+            id: "stale-remote-owner", kind: .remoteViewer, identity: .init(label: "iPad", deviceName: "iPad"), connectedAt: "2026-05-17T00:00:00Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: launchConfiguration.sessionID, client: localClient, mode: .viewer, paths: paths, attachedAt: "2026-05-17T00:00:00Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: launchConfiguration.sessionID, client: remoteClient, mode: .viewer, paths: paths, attachedAt: "2026-05-17T00:00:00Z")
+        try TerminalSessionPersistence.transferOwnership(
+            sessionID: launchConfiguration.sessionID, newOwnerClientID: remoteClient.id, paths: paths, transferredAt: "2026-05-17T00:00:01Z")
+
+        let expiredAt = ISO8601DateFormatter().date(from: "2026-05-17T00:01:05Z")!
+        let box = TerminalEngineActor.runSynchronously { () -> Box<GhosttyEmbeddedSessionHost> in
+            Box(GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths))
+        }
+        // Park the persistence queue so the expiry's atomic detach/transfer never commits during the assertion.
+        let gate = TerminalEngineActor.runSynchronously { box.value.debugHoldPersistenceQueue() }
+
+        let (expired, payload) = TerminalEngineActor.runSynchronously { () -> ([String], GhosttyRemoteSessionStatePayload?) in
+            let expired = box.value.expireStaleRemoteClientsIfNeeded(now: expiredAt)
+            // WITHOUT draining: the atomic write is parked, still uncommitted. The payload must read the fresh
+            // in-memory cache, not reseed the pre-expiry rows from disk.
+            return (expired, box.value.debugCurrentRemoteSessionState(reason: "test"))
+        }
+        XCTAssertEqual(expired, [remoteClient.id], "the tick must expire the stale remote owner")
+        // Sanity: the durable mirror is untouched (write parked), so the assertions below read pure in-memory state.
+        XCTAssertEqual(
+            try TerminalSessionPersistence.activeAttachments(paths: paths).first(where: { $0.mode == .owner })?.clientID, remoteClient.id,
+            "the parked write must leave the durable owner unchanged so the payload's owner comes from the cache alone")
+        let snapshot = try XCTUnwrap(payload?.attachmentSnapshot)
+        XCTAssertEqual(
+            snapshot.attachments.first(where: { $0.mode == .owner && $0.detachedAt == nil })?.clientID, localClient.id,
+            "the payload built before the detach commits must show the transferred local owner, not the expired remote")
+        XCTAssertFalse(
+            snapshot.attachments.contains { $0.clientID == remoteClient.id && $0.detachedAt == nil },
+            "the payload must not advertise the expired remote client as still attached")
+
+        gate.signal()
+        let drainedSnapshot = TerminalEngineActor.runSynchronously { () -> TerminalSessionAttachmentSnapshot? in
+            box.value.debugDrainPersistenceQueue()
+            return box.value.debugCurrentRemoteSessionState(reason: "test")?.attachmentSnapshot
+        }
+        let committed = try XCTUnwrap(drainedSnapshot)
+        XCTAssertEqual(
+            committed.attachments.first(where: { $0.mode == .owner && $0.detachedAt == nil })?.clientID, localClient.id,
+            "after the write commits the payload must still show the transferred local owner")
+        XCTAssertFalse(
+            committed.attachments.contains { $0.clientID == remoteClient.id && $0.detachedAt == nil },
+            "after the write commits the expired remote client must remain detached in the payload")
+        // The durable mirror now matches the payload the engine advertised all along.
+        XCTAssertEqual(
+            try TerminalSessionPersistence.activeAttachments(paths: paths).first(where: { $0.mode == .owner })?.clientID, localClient.id)
+        _ = box
+    }
+
+    /// R4-3: `expireClients` performs every detach and the ownership transfer inside ONE transaction, so a
+    /// statement that fails after the detaches have run rolls the whole thing back — durable state is never
+    /// left with the owner detached and no transfer applied. An unknown transfer target throws only after both
+    /// detaches execute; the transaction must roll back so both clients remain attached and the owner unchanged.
+    /// A subsequent valid call then commits every detach plus the transfer atomically. Before consolidating the
+    /// detach and transfer into one transaction, a committed detach could survive a later failure, leaving
+    /// durable state ownerless with no path to re-derive the transfer.
+    func testExpireClientsRollsBackAllDetachesWhenOwnershipTransferFails() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "session-expire-atomic", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original", shell: "/bin/zsh",
+            command: "zsh", createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+        try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+        let localClient = TerminalClient(
+            id: "local-window", kind: .localWindow, identity: .init(label: "Spaces window"), connectedAt: "2026-05-17T00:00:00Z")
+        let ownerClient = TerminalClient(
+            id: "stale-remote-owner", kind: .remoteViewer, identity: .init(label: "iPad", deviceName: "iPad"), connectedAt: "2026-05-17T00:00:00Z")
+        let viewerClient = TerminalClient(
+            id: "stale-remote-viewer", kind: .remoteViewer, identity: .init(label: "iPhone", deviceName: "iPhone"), connectedAt: "2026-05-17T00:00:00Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: launchConfiguration.sessionID, client: localClient, mode: .viewer, paths: paths, attachedAt: "2026-05-17T00:00:00Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: launchConfiguration.sessionID, client: viewerClient, mode: .viewer, paths: paths, attachedAt: "2026-05-17T00:00:00Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: launchConfiguration.sessionID, client: ownerClient, mode: .owner, paths: paths, attachedAt: "2026-05-17T00:00:00Z")
+
+        // An unknown transfer target throws only after both detach UPDATEs have run inside the transaction.
+        XCTAssertThrowsError(
+            try TerminalSessionPersistence.expireClients(
+                clientIDs: [ownerClient.id, viewerClient.id], transferOwnershipTo: "client-that-does-not-exist",
+                sessionID: launchConfiguration.sessionID, paths: paths, detachedAt: "2026-05-17T00:01:05Z"))
+        let afterFailure = try TerminalSessionPersistence.activeAttachments(paths: paths)
+        XCTAssertTrue(
+            afterFailure.contains { $0.clientID == ownerClient.id }, "the failed transfer must roll back the owner's detach — all-or-nothing")
+        XCTAssertTrue(
+            afterFailure.contains { $0.clientID == viewerClient.id }, "the failed transfer must roll back the viewer's detach — all-or-nothing")
+        XCTAssertEqual(
+            afterFailure.first(where: { $0.mode == .owner })?.clientID, ownerClient.id, "the owner must be unchanged after the rolled-back expiry")
+
+        // A single valid call commits both detaches plus the ownership transfer atomically.
+        try TerminalSessionPersistence.expireClients(
+            clientIDs: [ownerClient.id, viewerClient.id], transferOwnershipTo: localClient.id, sessionID: launchConfiguration.sessionID, paths: paths,
+            detachedAt: "2026-05-17T00:01:06Z")
+        let afterSuccess = try TerminalSessionPersistence.activeAttachments(paths: paths)
+        XCTAssertFalse(afterSuccess.contains { $0.clientID == ownerClient.id }, "the committed expiry must detach the stale owner")
+        XCTAssertFalse(afterSuccess.contains { $0.clientID == viewerClient.id }, "the committed expiry must detach the stale viewer")
+        XCTAssertEqual(
+            afterSuccess.first(where: { $0.mode == .owner })?.clientID, localClient.id,
+            "the committed expiry must transfer ownership to the local window")
+    }
+
     /// Replaces the SQLite database (and its WAL sidecars) with a directory so every write fails to open it,
     /// preserving the real files aside so `restoreDatabase` can bring the committed data back intact.
     private static func breakDatabase(at databasePath: String) throws {

@@ -44,9 +44,11 @@ extension SQLiteStore {
     /// status/session-key. An overwriting upsert would revert that live state to the caller's stale
     /// snapshot; this guarantee is therefore enforced in SQL, not in the caller: on conflict the
     /// lifecycle columns keep the STORED row's values — `status`, `session_key`, `claimed_launcher_name`
-    /// (coalesced), and `created_at` — regardless of what the caller's record carried, closing the
-    /// read-modify-upsert race entirely. On first insert (no conflict) the record's own values are used,
-    /// so a detection record must still carry sensible initial lifecycle values.
+    /// (coalesced), `created_at`, and `updated_at` — regardless of what the caller's record carried,
+    /// closing the read-modify-upsert race entirely. `updated_at` tracks when the row's lifecycle state
+    /// was entered (see `setAgentSessionNote`), so it must move in lockstep with `status`, not with a
+    /// detection refresh that leaves status untouched. On first insert (no conflict) the record's own
+    /// values are used, so a detection record must still carry sensible initial lifecycle values.
     public func upsertDetectedAgentWindow(_ record: AgentWindowRecord) throws {
         try upsertAgentWindow(record, conflictClause: Self.detectionPreservingConflictClause)
     }
@@ -79,7 +81,7 @@ extension SQLiteStore {
           claimed_launcher_name = COALESCE(excluded.claimed_launcher_name, agent_sessions.claimed_launcher_name),
           note = COALESCE(excluded.note, agent_sessions.note),
           created_at = agent_sessions.created_at,
-          updated_at = excluded.updated_at
+          updated_at = agent_sessions.updated_at
         """
 
     private func upsertAgentWindow(_ record: AgentWindowRecord, conflictClause: String) throws {

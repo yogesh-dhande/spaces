@@ -191,6 +191,27 @@
                 persistence.enqueueWrite { try? TerminalSessionPersistence.writeRemoteSessionState(finalPayload, paths: payloadPaths) }
                 stateStreamServer?.broadcast(finalPayload)
             }
+            // Termination fence: the exited-state, detach-all, and terminated-payload writes are enqueued
+            // above; FIFO on the serial persistence queue lands them in order and after every pending mirror
+            // write. The durable-end notifications must fire only once those have committed (so a DB-reading
+            // consumer like the overview observes the end state), but blocking the engine on that commit could
+            // stall the single engine executor — and thus every live session — for seconds under DB write
+            // contention (SQLite's 5s busy timeout). So instead of a blocking drain we enqueue one trailing
+            // closure that, by FIFO, runs after the three writes commit and hops back to the engine to post the
+            // notifications (persistence closures return to the engine only via async Task). This is the ONLY
+            // path to the durable-end notifications on a natural child exit: `handleSessionClosed()` →
+            // `terminate()` → `onSessionClosed` drops the core's last strong reference on the engine executor
+            // before the `enqueueRuntimeStateWrite` weak-self hop can run, so that hop finds `self` nil and
+            // fires nothing. This closure captures only the session id (a value type), so it survives the
+            // core's release. A benign duplicate notification when the core stays alive is acceptable.
+            let terminatedSessionID = launchConfiguration.sessionID
+            persistence.enqueueWrite {
+                Task { @TerminalEngineActor in
+                    TerminalSessionNotification.post(.spacesTerminalRuntimeStateDidChange, sessionID: terminatedSessionID)
+                    TerminalSessionNotification.post(.spacesTerminalAttachmentStateDidChange, sessionID: terminatedSessionID)
+                    TerminalOverviewSignal.post()
+                }
+            }
             controlServer?.stop()
             controlServer = nil
             TerminalControlServer.removeSocketFileIfPresent(at: paths.controlSocketPath)
@@ -216,6 +237,26 @@
 
         public func currentRemoteStatePayload(reason: String = TerminalRemoteSessionStateReason.stateChange) -> GhosttyRemoteSessionStatePayload? {
             makeStatePayload(reason: reason, exportMode: .selfContained)
+        }
+
+        /// The session summary built entirely from this core's in-memory launch configuration and
+        /// `lastRuntimeState` — with no DB read. Serves the create path's post-start summary so a create
+        /// reports the running session the moment `startIfNeeded()` returns (which advances `lastRuntimeState`
+        /// synchronously via `writeRuntimeState(state: .running)`), independent of when the first
+        /// runtime-state write commits to SQLite through the per-core persistence queue. Platform parity with
+        /// the macOS `GhosttyEmbeddedSessionCore.inMemorySessionSummary()`; `SpacesdMain.createSessionOffMain`
+        /// compiles for Linux too and calls this. Returns nil only before any runtime state has been computed
+        /// (never started). At session birth no client has attached and no final render exists, so the
+        /// attachment snapshot is empty and `hasFinalRender` is false.
+        public func inMemorySessionSummary() -> TerminalServiceSessionSummary? {
+            guard let runtimeState = lastRuntimeState else { return nil }
+            return TerminalServiceSessionSummary(
+                id: launchConfiguration.sessionID, title: runtimeState.title ?? launchConfiguration.title,
+                workingDirectory: runtimeState.workingDirectory ?? launchConfiguration.workingDirectory, backend: launchConfiguration.backend,
+                lifetimePolicy: launchConfiguration.lifetimePolicy, state: runtimeState.state, servicePID: runtimeState.servicePID,
+                childPID: runtimeState.childPID, controlSocketPath: paths.controlSocketPath, outputPath: paths.outputPath,
+                launchConfiguration: launchConfiguration, runtimeState: runtimeState,
+                attachmentSnapshot: TerminalSessionAttachmentSnapshot(), hasFinalRender: false)
         }
 
         private func handleSessionClosed() {

@@ -702,6 +702,78 @@ public enum TerminalSessionPersistence {
         }
     }
 
+    /// Atomically expires a set of stale clients — disconnecting each client and detaching its still-active
+    /// attachments — and, optionally, transfers ownership to `newOwnerClientID`, all inside ONE transaction.
+    /// The detach and transfer statement bodies mirror `detachClient`/`transferOwnership`; consolidating them
+    /// here makes the stale-client expiry an all-or-nothing durable unit. A partial commit (some detaches
+    /// landed, a later statement failed) could otherwise leave durable state ownerless — the detached owner
+    /// no longer appears in `staleRemoteClientIDs` or `activeAttachments`, so no later tick could re-derive the
+    /// transfer. With a single transaction any failure rolls back untouched, so the engine's un-mark retry
+    /// re-derives the identical decision from the still-stale rows on the next tick. Kept separate from
+    /// `detachClient`/`transferOwnership`, which still serve their own single-purpose callers.
+    public static func expireClients(
+        clientIDs: [String], transferOwnershipTo newOwnerClientID: String?, sessionID: String, paths: TerminalSessionPaths, detachedAt: String
+    ) throws {
+        let root = normalizedRootDirectory(paths.rootDirectory)
+        try withDatabase(paths: paths) { database in
+            try database.withImmediateTransaction {
+                for clientID in clientIDs {
+                    try database.execute(
+                        sql: """
+                            UPDATE terminal_clients
+                            SET disconnected_at = ?
+                            WHERE root_directory = ? AND client_id = ?
+                            """, bindings: [detachedAt, root, clientID])
+                    try database.execute(
+                        sql: """
+                            UPDATE terminal_attachments
+                            SET detached_at = ?
+                            WHERE root_directory = ? AND client_id = ? AND detached_at IS NULL
+                            """, bindings: [detachedAt, root, clientID])
+                }
+                guard let newOwnerClientID else { return }
+                let canonicalSessionID = try existingSessionID(rootDirectory: root, database: database)
+                guard canonicalSessionID == sessionID else { throw TerminalSessionPersistenceError.unknownSession(sessionID) }
+                guard
+                    try database.queryRow(
+                        sql: "SELECT client_id FROM terminal_clients WHERE root_directory = ? AND client_id = ?", bindings: [root, newOwnerClientID])
+                        != nil
+                else { throw TerminalSessionPersistenceError.unknownClient(newOwnerClientID) }
+
+                try database.execute(
+                    sql: """
+                        UPDATE terminal_attachments
+                        SET mode = 'viewer'
+                        WHERE root_directory = ?
+                          AND mode = 'owner'
+                          AND detached_at IS NULL
+                          AND client_id <> ?
+                        """, bindings: [root, newOwnerClientID])
+
+                if let existing = try database.queryRow(
+                    sql: """
+                        SELECT id
+                        FROM terminal_attachments
+                        WHERE root_directory = ? AND client_id = ? AND detached_at IS NULL
+                        """, bindings: [root, newOwnerClientID])
+                {
+                    try database.execute(
+                        sql: """
+                            UPDATE terminal_attachments
+                            SET session_id = ?, mode = 'owner'
+                            WHERE id = ?
+                            """, bindings: [sessionID, existing[0]])
+                } else {
+                    try database.execute(
+                        sql: """
+                            INSERT INTO terminal_attachments(id, root_directory, session_id, client_id, mode, attached_at, detached_at)
+                            VALUES (?, ?, ?, ?, 'owner', ?, NULL)
+                            """, bindings: [UUID().uuidString, root, sessionID, newOwnerClientID, detachedAt])
+                }
+            }
+        }
+    }
+
     public static func listKnownSessions(fileManager _: FileManager = .default) throws -> [TerminalSessionLaunchConfiguration] {
         try withProfileDatabase { database in
             try database.queryRows(
