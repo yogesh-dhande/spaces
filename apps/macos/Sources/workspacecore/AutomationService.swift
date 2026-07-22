@@ -634,26 +634,45 @@ public final class AutomationService: @unchecked Sendable {
         do {
             guard let sessionID = run.terminalSessionID else { return }
             let runtimeState = try? terminalRuntimeState(sessionID: sessionID)
+            let isInteractive = runtimeState?.state.isInteractive == true
+            // Launch-persistence grace: just after a successful launch the runtime row can be absent/stale under
+            // write-behind persistence (post-#224), so a nil runtime state within the launch-pending window is
+            // the session still coming up, not completion.
+            let launchPending = runtimeState == nil && orchestrator.automationSessionLaunchIsPending(sessionID: sessionID)
+            // A completed script beats the timeout: the exit-code sentinel is authored by the wrapped command at
+            // its own exit and written synchronously, while the exited runtime row is write-behind and can still
+            // read interactive when the timeout tick lands. A present sentinel is therefore completion evidence
+            // that outranks a stale interactive (or not-yet-landed) runtime row — it must never be killed and
+            // recorded `.timedOut` after finishing within budget. Read once here so both the timeout guard below
+            // (which it suppresses) and the completion branch (which it satisfies) see the same evidence.
+            let exitCode = readExitCode(runID: run.id)
 
-            // Timeout: elapsed budget exceeded while the command session is still live.
-            if let timeoutSeconds = automation.timeoutSeconds, let startedAt = run.startedAt,
-                now().timeIntervalSince(startedAt) >= TimeInterval(timeoutSeconds), let runtimeState, runtimeState.state.isInteractive
+            // Timeout: the budget elapsed while the session is still live (interactive) OR still within the
+            // launch-persistence grace (nil runtime + launch pending). Covering the pending case keeps a short
+            // timeout from silently stretching toward the 60s pending window: a launch whose runtime row never
+            // lands is torn down and recorded `.timedOut` on time rather than surviving to a later `.failed`
+            // completion that skipped teardown. Suppressed by a present sentinel (completion won the race).
+            if exitCode == nil, let timeoutSeconds = automation.timeoutSeconds, let startedAt = run.startedAt,
+                now().timeIntervalSince(startedAt) >= TimeInterval(timeoutSeconds), isInteractive || launchPending
             {
                 try teardownRunSessions(run, terminate: true)
                 try finishRun(run, status: .timedOut, exitCode: nil)
                 return
             }
 
-            // Launch-persistence grace: just after a successful launch the runtime row can be absent/stale under
-            // write-behind persistence (post-#224), so a nil runtime state within the launch-pending window is
-            // indeterminate — the session is still coming up — not completion. Finalizing here would falsely fail
-            // a just-launched run, so wait for the next tick. Only a nil state OUTSIDE the pending window is a
-            // vanished session (bounded by the 60s pending window) that finalizes below.
-            if runtimeState == nil, orchestrator.automationSessionLaunchIsPending(sessionID: sessionID) { return }
+            // Still launch-pending with no completion evidence: indeterminate, so wait for the next tick rather
+            // than falsely failing a just-launched run. Only a nil state OUTSIDE the pending window is a vanished
+            // session (bounded by the 60s pending window) that finalizes below.
+            if exitCode == nil, launchPending { return }
 
-            // Completion: the command session ended, so read the recorded exit code and finalize.
-            if runtimeState == nil || runtimeState?.state.isInteractive == false {
-                let exitCode = readExitCode(runID: run.id)
+            // Completion: a present sentinel, an ended (non-interactive) session, or a vanished runtime row.
+            if exitCode != nil || runtimeState == nil || !isInteractive {
+                // A nil runtime row past the grace with no sentinel is a session that vanished before its runtime
+                // row landed — and the row may never land while the process is still live. Tear the session down
+                // before finalizing so a live-but-unrecorded process is not orphaned (a run may never finalize
+                // while a session it launched is still live). A sentinel or an exited runtime row means the
+                // command already ended, so those paths need no teardown.
+                if exitCode == nil, runtimeState == nil { try teardownRunSessions(run, terminate: true) }
                 try finishRun(run, status: exitCode == 0 ? .succeeded : .failed, exitCode: exitCode)
             }
         } catch { logError("automation_poll_run_error run=\(run.id) error=\(error)") }
@@ -956,17 +975,20 @@ public final class AutomationService: @unchecked Sendable {
 
     private func deleteRunArtifactsAndSessions(runID: String) throws {
         let sessionIDs = try store.terminalSessionIDs(automationRunID: runID)
-        // A live session must be terminated (and its agent row finalized) before its persistence is removed,
-        // so deleting a run's records can never orphan a running process: a succeeded agent-kind run
-        // deliberately leaves its agent session live, and dropping its rows/directories without ending it
-        // would leave that process running but unreachable through the product. No transcript is captured
-        // here — the run's entire artifacts directory is deleted in this same call, so a capture would be
-        // written and immediately removed.
-        for sessionID in sessionIDs where orchestrator.automationSessionIsLive(sessionID: sessionID) {
-            orchestrator.automationTerminateSession(sessionID: sessionID)
-            try finalizeAttributedAgentRow(sessionID: sessionID)
-        }
         for sessionID in sessionIDs {
+            // A live session must be terminated before its persistence is removed, so deleting a run's records
+            // can never orphan a running process: a succeeded agent-kind run deliberately leaves its agent
+            // session live, and dropping its rows/directories without ending it would leave that process running
+            // but unreachable through the product.
+            if orchestrator.automationSessionIsLive(sessionID: sessionID) { orchestrator.automationTerminateSession(sessionID: sessionID) }
+            // Finalize the attributed agent row for BOTH the just-terminated live session and an already-ended
+            // one: an agent session that ended before the foreground reconciler registered its row still holds
+            // spawn-time workspace tracking (a tracked terminal window plus the workspace-running flag), which
+            // `finalizeAttributedAgentRow`'s row-less fallback releases. Deleting the session rows/files without
+            // it would leak that tracking permanently — no later sweep can reach the gone rows. No transcript is
+            // captured here — the run's entire artifacts directory is deleted in this same call, so a capture
+            // would be written and immediately removed.
+            try finalizeAttributedAgentRow(sessionID: sessionID)
             try store.deleteTerminalSession(sessionID: sessionID)
             if let paths = try? TerminalSessionPaths.forSession(id: sessionID) {
                 try? FileManager.default.removeItem(atPath: paths.rootDirectory)

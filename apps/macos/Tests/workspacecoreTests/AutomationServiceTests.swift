@@ -805,6 +805,60 @@ import spacesterminalcore
         try harness.assertProcessDies(pid: childPID, drivingTicks: harness.service.tick)
     }
 
+    /// A script that finishes right at its deadline wins over the timeout: its exit-code sentinel is written
+    /// synchronously at command exit while the exited runtime row is write-behind and can still read
+    /// interactive when the timeout tick lands. The present sentinel is completion evidence that outranks the
+    /// stale interactive row, so the run is finalized from the sentinel (succeeded, exit 0) rather than killed
+    /// and recorded `.timedOut` despite completing within budget.
+    func testScriptCompletionSentinelBeatsTimeout() throws {
+        let clock = MutableClock(start: Date())
+        let harness = try Harness(self, now: clock.now)
+        let automation = try harness.insertAutomation(concurrency: .allow, timeoutSeconds: 5)
+        let sessionID = UUID().uuidString
+        let run = AutomationRun(
+            id: UUID().uuidString, automationID: automation.id, kind: .script, status: .running, skipReason: nil, trigger: .manual, exitCode: nil,
+            terminalSessionID: sessionID, startedAt: clock.now(), endedAt: nil, createdAt: clock.now())
+        try harness.store.insertAutomationRun(run)
+        // The session's runtime row still reads interactive (write-behind: the exited state has not landed) ...
+        try harness.writeAttributedSessionFiles(workspaceID: nil, runID: run.id, sessionID: sessionID, kind: .automation, live: true)
+        // ... but the wrapped command already recorded its exit code at exit.
+        try harness.writeExitCodeSentinel(runID: run.id, exitCode: 0)
+        XCTAssertTrue(harness.orchestrator.automationSessionIsLive(sessionID: sessionID))
+
+        clock.advance(by: 10)  // past the 5s budget
+        harness.service.tick()
+
+        let finished = try XCTUnwrap(harness.store.automationRun(id: run.id))
+        XCTAssertEqual(finished.status, .succeeded, "a present exit-code sentinel beats a timeout that lands after completion")
+        XCTAssertEqual(finished.exitCode, 0)
+        XCTAssertFalse(harness.host.terminated.contains(sessionID), "a completed script is not torn down by the timeout")
+    }
+
+    /// A short-timeout script whose session has no runtime row yet but a fresh launch configuration
+    /// (launch-pending under write-behind persistence) still times out on budget: the timeout branch covers
+    /// the pending case, so the session is torn down and the run recorded `.timedOut` on time — rather than
+    /// the short timeout silently stretching toward the 60s pending window and later finalizing `.failed`
+    /// with no teardown, orphaning a possibly live process.
+    func testScriptTimesOutDuringLaunchPendingGrace() throws {
+        let clock = MutableClock(start: Date())
+        let harness = try Harness(self, now: clock.now)
+        let automation = try harness.insertAutomation(concurrency: .allow, timeoutSeconds: 5)
+        let sessionID = UUID().uuidString
+        let run = AutomationRun(
+            id: UUID().uuidString, automationID: automation.id, kind: .script, status: .running, skipReason: nil, trigger: .manual, exitCode: nil,
+            terminalSessionID: sessionID, startedAt: clock.now(), endedAt: nil, createdAt: clock.now())
+        try harness.store.insertAutomationRun(run)
+        // No runtime row, only a fresh launch config → launch-pending. The pending check reads the real wall
+        // clock, so the config is written at `Date()` while the MutableClock advances only the timeout budget.
+        try harness.writeLaunchConfigurationOnly(workspaceID: nil, runID: run.id, sessionID: sessionID, kind: .automation, createdAt: Date())
+
+        clock.advance(by: 10)  // past the 5s budget while still launch-pending
+        harness.service.tick()
+
+        XCTAssertEqual(try harness.store.automationRun(id: run.id)?.status, .timedOut, "a launch-pending session past its budget is timed out, not stretched")
+        XCTAssertTrue(harness.host.terminated.contains(sessionID), "the launch-pending session is terminated via the no-PID fallback")
+    }
+
     func testCancelKillsCommandAndRecordsCanceled() throws {
         let harness = try Harness(self, realCommands: true)
         let automation = try harness.insertAutomation(script: "sleep 30", concurrency: .allow)
@@ -894,6 +948,37 @@ import spacesterminalcore
         XCTAssertTrue(
             harness.host.delivered.contains { $0.sessionID == "watcher" && $0.line.contains("exited") }, "the subscriber is told the agent exited")
         XCTAssertNil(try harness.store.automation(id: automation.id), "the automation is deleted")
+    }
+
+    /// Deleting an automation must finalize an ENDED attributed agent session too — including one that died
+    /// before its agent row was registered — releasing its spawn-time workspace tracking (a tracked terminal
+    /// window and the workspace-running flag). Without the row-less finalize the delete would drop the session
+    /// rows/files and leak that tracking permanently, since no later sweep can reach the gone rows.
+    func testDeleteReleasesWorkspaceTrackingForRowlessEndedAgentSession() throws {
+        let harness = try Harness(self)
+        let (_, workspace) = try harness.makeProjectAndWorkspace()
+        let automation = try harness.insertAgentAutomation(workspaceID: workspace.id)
+
+        // A terminal run whose spawned agent session ended before any agent row was created: ended session
+        // files plus the spawn-time tracked window and running workspace, but no agent row.
+        let run = try harness.insertRun(automationID: automation.id, status: .succeeded)
+        let endedSessionID = UUID().uuidString
+        try harness.writeAttributedSessionFiles(workspaceID: workspace.id, runID: run.id, sessionID: endedSessionID, kind: .agent, live: false)
+        try harness.seedSpawnedAgentWorkspaceTracking(workspace: workspace, sessionID: endedSessionID)
+        XCTAssertTrue(try XCTUnwrap(harness.store.workspace(id: workspace.id)).isRunning, "the workspace starts running from the spawn")
+        XCTAssertTrue(
+            try harness.store.windows(workspaceID: workspace.id).contains { $0.terminalTrackingID == endedSessionID },
+            "the spawn-time tracked window exists before deletion")
+
+        try harness.service.deleteAutomation(id: automation.id)
+
+        XCTAssertNil(try harness.store.automation(id: automation.id), "the automation is deleted")
+        XCTAssertFalse(
+            try harness.store.windows(workspaceID: workspace.id).contains { $0.terminalTrackingID == endedSessionID },
+            "the row-less ended session's tracked window is released")
+        XCTAssertFalse(
+            try XCTUnwrap(harness.store.workspace(id: workspace.id)).isRunning,
+            "the workspace is not left running once its only tracked session ends")
     }
 
     // MARK: - Kind-change guard
@@ -1312,6 +1397,13 @@ import spacesterminalcore
         return windowRecordID
     }
 
+    /// Writes the exit-code sentinel a wrapped command records at its own exit (`AutomationPaths.exitCodePath`),
+    /// modeling a script that finished and recorded its status while its exited runtime row is still write-behind.
+    func writeExitCodeSentinel(runID: String, exitCode: Int) throws {
+        try AutomationPaths.ensureRunDirectory(runID: runID)
+        try String(exitCode).write(to: try AutomationPaths.exitCodePath(runID: runID), atomically: true, encoding: .utf8)
+    }
+
     /// Counts the `terminal_agent_signal_events` rows keyed to a session id in the profile store, used to
     /// assert the companion signal history is pruned with the session.
     func signalEventCount(sessionID: String) throws -> Int {
@@ -1419,6 +1511,14 @@ private final class FakeAutomationTerminalHost: @unchecked Sendable {
         return writtenInputStore
     }
     private var writtenInputStore: [(sessionID: String, input: TerminalProfileInput, appendNewline: Bool)] = []
+    /// Session ids the executor asked to terminate through the process-wide terminator seam, in order — the
+    /// seam a timeout/cancel no-PID teardown uses to end a whole session.
+    var terminated: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return terminatedStore
+    }
+    private var terminatedStore: [String] = []
     private var trackedPIDs: [Int32] = []
 
     init(realCommands: Bool) { self.realCommands = realCommands }
@@ -1505,6 +1605,9 @@ private final class FakeAutomationTerminalHost: @unchecked Sendable {
     }
 
     private func terminate(sessionID: String) {
+        lock.lock()
+        terminatedStore.append(sessionID)
+        lock.unlock()
         guard let paths = try? TerminalSessionPaths.forSession(id: sessionID) else { return }
         writeRuntimeState(sessionID: sessionID, paths: paths, state: .exited, childPID: nil)
         try? FileManager.default.removeItem(atPath: paths.controlSocketPath)
