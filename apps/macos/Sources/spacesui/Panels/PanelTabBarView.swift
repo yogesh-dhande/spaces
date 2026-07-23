@@ -45,7 +45,7 @@ import systembridge
 
         tabsStack.orientation = .horizontal
         tabsStack.alignment = .centerY
-        tabsStack.spacing = 2
+        tabsStack.spacing = 0
         tabsStack.translatesAutoresizingMaskIntoConstraints = false
 
         let clipView = NSClipView()
@@ -68,7 +68,8 @@ import systembridge
         row.orientation = .horizontal
         row.alignment = .centerY
         row.spacing = 8
-        row.edgeInsets = NSEdgeInsets(top: 3, left: 8, bottom: 3, right: 10)
+        // No left inset: the first tab's chip sits flush to the panel's leading edge.
+        row.edgeInsets = NSEdgeInsets(top: 3, left: 0, bottom: 3, right: 10)
         row.translatesAutoresizingMaskIntoConstraints = false
         addSubview(row)
         NSLayoutConstraint.activate([
@@ -175,7 +176,7 @@ import systembridge
             tabsStack.addArrangedSubview(
                 PanelTabItemView(
                     tabID: tabID, title: titlesByTabID[tabID] ?? "Terminal", isSelected: tabID == selectedTabID, isRenaming: tabID == renamingTabID,
-                    showsTrailingSeparator: tabID != tabIDs.last, onSelect: { [weak self] id in self?.onSelectTab?(id) },
+                    onSelect: { [weak self] id in self?.onSelectTab?(id) },
                     onClose: { [weak self] id in self?.onCloseTab?(id) }, onRenameRequest: { [weak self] id in self?.beginRename(tabID: id) },
                     onRenameCommit: { [weak self] id, text in self?.endRename(tabID: id, committedTitle: text) },
                     onRenameCancel: { [weak self] _ in self?.endRename(tabID: nil, committedTitle: nil) }))
@@ -220,9 +221,9 @@ import systembridge
     @objc private func splitDownClicked() { onSplitFocusedPane?(.down) }
 }
 
-/// A single flat tab: title plus a close glyph; the selected tab reads from full-color
-/// text and a filled lighter background chip. In rename mode the title is an inline
-/// editor: Return or focus loss commits, Esc cancels.
+/// A single flat tab: title plus a trailing close glyph; the selected tab reads from full-color
+/// text and a full-height neutral chip. In rename mode the title is an inline editor: Return or
+/// focus loss commits, Esc cancels.
 @MainActor private final class PanelTabItemView: NSView, NSTextFieldDelegate {
     private let tabID: String
     private let onSelect: (String) -> Void
@@ -242,7 +243,7 @@ import systembridge
     private var widthConstraint: NSLayoutConstraint?
 
     init(
-        tabID: String, title: String, isSelected: Bool, isRenaming: Bool, showsTrailingSeparator: Bool, onSelect: @escaping (String) -> Void,
+        tabID: String, title: String, isSelected: Bool, isRenaming: Bool, onSelect: @escaping (String) -> Void,
         onClose: @escaping (String) -> Void, onRenameRequest: @escaping (String) -> Void, onRenameCommit: @escaping (String, String) -> Void,
         onRenameCancel: @escaping (String) -> Void
     ) {
@@ -314,42 +315,25 @@ import systembridge
         stack.edgeInsets = NSEdgeInsets(top: 3, left: 8, bottom: 5, right: 5)
         stack.translatesAutoresizingMaskIntoConstraints = false
 
-        // The selected tab reads from a filled lighter chip rather than a bottom accent underline: the
-        // underline sat on the tab's bottom edge and clashed with the focused-pane accent bar on the pane's
-        // top edge directly below it. The chip sits behind the title/close stack.
+        // The selected tab reads from a full-height neutral chip that fills the tab cell (no bottom accent
+        // underline, which clashed with the focused-pane bar on the pane's top edge directly below). The chip
+        // sits behind the title/close stack; tabs are flush (no separators) so it reads like a segmented control.
         let selectionChip = NSView()
         selectionChip.translatesAutoresizingMaskIntoConstraints = false
         selectionChip.wantsLayer = true
-        selectionChip.layer?.cornerRadius = 5
+        selectionChip.layer?.cornerRadius = 4
         bindAppearanceReactiveLayer(selectionChip) { view in
-            view.layer?.backgroundColor = isSelected ? Theme.rowSelected.cgColor : NSColor.clear.cgColor
+            view.layer?.backgroundColor = isSelected ? Theme.chipBg.cgColor : NSColor.clear.cgColor
         }
         addSubview(selectionChip)
         addSubview(stack)
 
-        var constraints = [
+        NSLayoutConstraint.activate([
             stack.topAnchor.constraint(equalTo: topAnchor), stack.leadingAnchor.constraint(equalTo: leadingAnchor),
             stack.trailingAnchor.constraint(equalTo: trailingAnchor), stack.bottomAnchor.constraint(equalTo: bottomAnchor),
-            selectionChip.topAnchor.constraint(equalTo: topAnchor, constant: 3),
-            selectionChip.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -3),
-            selectionChip.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
-            selectionChip.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
-        ]
-
-        if showsTrailingSeparator {
-            let separator = NSView()
-            separator.translatesAutoresizingMaskIntoConstraints = false
-            separator.wantsLayer = true
-            separator.setAccessibilityIdentifier("tab-separator-\(tabID)")
-            bindAppearanceReactiveLayer(separator) { view in view.layer?.backgroundColor = Theme.border.withAlphaComponent(0.55).cgColor }
-            addSubview(separator)
-            constraints.append(contentsOf: [
-                separator.trailingAnchor.constraint(equalTo: trailingAnchor), separator.centerYAnchor.constraint(equalTo: centerYAnchor),
-                separator.widthAnchor.constraint(equalToConstant: 1), separator.heightAnchor.constraint(equalToConstant: 14),
-            ])
-        }
-
-        NSLayoutConstraint.activate(constraints)
+            selectionChip.topAnchor.constraint(equalTo: topAnchor), selectionChip.bottomAnchor.constraint(equalTo: bottomAnchor),
+            selectionChip.leadingAnchor.constraint(equalTo: leadingAnchor), selectionChip.trailingAnchor.constraint(equalTo: trailingAnchor),
+        ])
 
         // Start at the default width; the strip narrows this as tabs accumulate.
         let width = widthAnchor.constraint(equalToConstant: 160)
