@@ -44,7 +44,11 @@ import Foundation
 
             if FileManager.default.fileExists(atPath: socketPath) {
                 if runReload(configPath: configPath, socketPath: socketPath, timeout: 2) { return false }
-                if adminSocketHasOwner(socketPath, timeout: timeout) { throw CaddyServiceError.reloadFailed(configPath) }
+                // The owner probe decides whether it is safe to unlink the socket; a wrong "no
+                // owner" answer destroys a live Caddy's admin socket. It therefore gets its own
+                // generous bound (like the reload above) instead of the caller's startup budget,
+                // which tests legitimately set near zero.
+                if adminSocketHasOwner(socketPath, timeout: 10) { throw CaddyServiceError.reloadFailed(configPath) }
                 try? FileManager.default.removeItem(atPath: socketPath)
             }
 
