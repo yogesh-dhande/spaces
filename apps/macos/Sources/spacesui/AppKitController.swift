@@ -223,6 +223,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private var toggleShortcutSpec: HotkeySpec?
     private var commandPaletteShortcutSpec: HotkeySpec?
     private var shortcutMonitor: Any?
+    private var mouseFocusMonitor: Any?
     private var addWorkspaceShortcutSpec: HotkeySpec?
     private var reloadShortcutSpec: HotkeySpec?
     private var openEditorShortcutSpec: HotkeySpec?
@@ -563,6 +564,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         sidebar.cancelSidebarReloadTask()
         teardownGlobalHotkey()
         if let shortcutMonitor { NSEvent.removeMonitor(shortcutMonitor) }
+        if let mouseFocusMonitor { NSEvent.removeMonitor(mouseFocusMonitor) }
         DistributedNotificationCenter.default().removeObserver(self)
         if let appDidBecomeActiveObserver {
             NotificationCenter.default.removeObserver(appDidBecomeActiveObserver)
@@ -8861,6 +8863,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     private func setupShortcutMonitor() {
+        // A click inside a terminal surface is consumed by that surface, so `PaneView` never sees the
+        // mouseDown and the focused-pane indicator would otherwise update only once the user starts typing
+        // (the keyDown path below). Sync the focused pane after each left click settles the first responder.
+        mouseFocusMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown]) { [weak self] event in
+            DispatchQueue.main.async { [weak self] in
+                guard let self, let content = self.panelCoordinator.contentOwning(responder: NSApp.keyWindow?.firstResponder) else { return }
+                self.panelCoordinator.noteContentFocused(content)
+            }
+            return event
+        }
         shortcutMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { [weak self] event in
             guard let self else { return event }
             if event.type == .flagsChanged { return self.handleLeaderShortcutCaptureFlagsChanged(event: event) ? nil : event }

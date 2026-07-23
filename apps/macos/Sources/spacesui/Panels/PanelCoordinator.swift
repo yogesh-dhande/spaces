@@ -157,8 +157,8 @@ import spacesterminalcore
     func focusedSessionID() -> String? { contentOwning(responder: NSApp.keyWindow?.firstResponder)?.sessionID }
 
     /// Syncs the layout's focused pane to the content that actually has keyboard focus
-    /// (clicks inside terminal content bypass the pane chrome's mouse handling, so the
-    /// shortcut monitor calls this as typing reveals where focus really is).
+    /// (clicks inside terminal content bypass the pane chrome's mouse handling, so the app's
+    /// mouse-down and key-down monitors call this to sync focus after a click or a keystroke).
     func noteContentFocused(_ content: any TerminalPaneContentHosting) {
         guard let placement = placement(forSessionID: content.sessionID) else { return }
         guard layout(for: placement.scope).focusedPaneID != placement.paneID else { return }
