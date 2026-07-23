@@ -743,18 +743,18 @@ final class RemoteAgentWatchServiceTests: XCTestCase {
         try store.replaceAgentRemoteWatchBaseline(
             deviceID: "device-1", baseline: ["child-1": makeRow(status: AgentWindowStatus.spinning.rawValue, terminalSessionID: "child-1")])
 
-        // Gate the post-load reconcile's first listing so its `applyRows` never runs and cannot rewrite the
-        // mirror out from under this test's durable assertion.
-        let gate = DispatchSemaphore(value: 0)
-        transport.setListGate(gate)
+        // Fail the post-load reconcile's listing pulls so `applyRows` never runs and cannot rewrite the
+        // mirror out from under this test's durable assertion: a failed pull leaves the baseline
+        // untouched and schedules its retry beyond this test's lifetime. Deliberately NOT a semaphore
+        // gate on the listing: that blocks the cooperative-pool thread running the transport closure,
+        // and under machine-wide CPU saturation the pool does not grow past a blocked thread — the
+        // startup load below then never gets scheduled and the merge wait deadlocks to its ceiling
+        // (the #196 CI signature of this test).
+        transport.failNextListings(Int.max)
         transport.setListing([])
         let service = RemoteAgentWatchService(
             databasePath: path, transport: transport.transport, deliver: { sessionID, line in recorder.record(sessionID, line) }, logError: { _ in })
-        defer {
-            transport.setListGate(nil)
-            for _ in 0..<8 { gate.signal() }
-            service.stop()
-        }
+        defer { service.stop() }
         service.start()
         // In the same main-actor turn — before the detached load can round-trip — seed child-2, reproducing the
         // subscribe path firing a seed while start()'s baseline load is still in flight.
