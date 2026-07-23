@@ -123,7 +123,10 @@ import spacesdevicecore
         // refills the loaded baseline into an empty snapshot writes nothing.
         let databasePath = databasePath
         Task { @MainActor [weak self] in
-            let result = await Task.detached(priority: .utility) { () -> Result<[String: [String: SpacesDeviceAgentSessionRow]], any Error> in
+            // .userInitiated, matching the connect/listing pulls: this load gates delivering the
+            // downtime window's transitions after a daemon restart, and .utility work can be
+            // starved for tens of seconds on a saturated machine, delaying that readiness.
+            let result = await Task.detached(priority: .userInitiated) { () -> Result<[String: [String: SpacesDeviceAgentSessionRow]], any Error> in
                 Result { try SQLiteStore(path: databasePath).agentRemoteWatchBaselines() }
             }.value
             guard let self, !self.isStopped else { return }
