@@ -10,11 +10,13 @@ public struct SpacesRemoteDevicePairingRequest: Sendable {
     public let clientBundleID: String
     public let clientDeviceName: String
     public let clientAppVersion: String?
+    /// Optional user-chosen display name for the paired device. When nil, the daemon-reported name is used.
+    public let customName: String?
     public let profile: SpacesProfile?
 
     public init(
         sshHost: String, sshUser: String? = nil, sshPort: Int? = nil, clientInstallationID: String, clientBundleID: String, clientDeviceName: String,
-        clientAppVersion: String?, profile: SpacesProfile? = nil
+        clientAppVersion: String?, customName: String? = nil, profile: SpacesProfile? = nil
     ) {
         self.sshHost = sshHost
         self.sshUser = sshUser
@@ -23,6 +25,7 @@ public struct SpacesRemoteDevicePairingRequest: Sendable {
         self.clientBundleID = clientBundleID
         self.clientDeviceName = clientDeviceName
         self.clientAppVersion = clientAppVersion
+        self.customName = customName
         self.profile = profile
     }
 }
@@ -159,15 +162,17 @@ public enum SpacesDevicePairingClient {
         guard response.ok else { throw SpacesRemoteDevicePairingError.pairingRejected(response.message) }
         guard let authToken = normalized(response.issuedAuthToken) else { throw SpacesRemoteDevicePairingError.missingAuthToken }
 
+        // Prefer the user's name when they typed one at connect time, else the daemon-reported name.
+        let displayName = normalized(request.customName) ?? metadata.name
         let now = ISO8601DateFormatter().string(from: Date())
         let database = try SpacesClientDatabase.defaultDatabase()
         try database.upsert(
             device: SpacesPairedDeviceRecord(
-                id: deviceID, name: metadata.name, platform: "remote", host: deviceAPIHost, port: metadata.port,
+                id: deviceID, name: displayName, platform: "remote", host: deviceAPIHost, port: metadata.port,
                 certificateFingerprint: metadata.certificateFingerprint, sshHost: sshHost, sshUser: sshUser, sshPort: request.sshPort, createdAt: now,
                 updatedAt: now, lastSelectedAt: now))
         try SpacesDeviceCredentialStore.saveToken(authToken, deviceID: deviceID, profile: request.profile)
-        return SpacesRemoteDevicePairingResult(deviceID: deviceID, name: metadata.name, host: deviceAPIHost, port: metadata.port)
+        return SpacesRemoteDevicePairingResult(deviceID: deviceID, name: displayName, host: deviceAPIHost, port: metadata.port)
     }
 
     /// Runs the Linux installer one-liner on the remote host over SSH, pinned to this client's app
