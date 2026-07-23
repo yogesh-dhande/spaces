@@ -65,8 +65,10 @@ final class TerminalEngineInputUnderOutputLoadRegressionTests: XCTestCase {
         defer { subscriber.stop() }
 
         // Wait until output is genuinely flooding (the transcript is growing) so the send lands mid-stream,
-        // and give the subscriber connection a moment to register with the stream server.
-        let floodDeadline = Date().addingTimeInterval(5.0)
+        // and give the subscriber connection a moment to register with the stream server. The ceiling is
+        // generous because it only gates flood START (subprocess spawn under CI load, #196); the regression
+        // signal lives in the echo budget below, which stays tight.
+        let floodDeadline = Date().addingTimeInterval(30.0)
         var floodedByteCount = 0
         while Date() < floodDeadline {
             floodedByteCount = (FileManager.default.contents(atPath: box.outputPath)?.count) ?? 0

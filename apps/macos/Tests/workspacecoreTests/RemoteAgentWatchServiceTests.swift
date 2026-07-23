@@ -163,7 +163,7 @@ final class RemoteAgentWatchServiceTests: XCTestCase {
     }
 
     @MainActor private func waitUntil(
-        timeout: TimeInterval = 10, pollInterval: TimeInterval = 0.02, file: StaticString = #filePath, line: UInt = #line, message: String = "",
+        timeout: TimeInterval = 30, pollInterval: TimeInterval = 0.02, file: StaticString = #filePath, line: UInt = #line, message: String = "",
         _ condition: @escaping @MainActor () -> Bool
     ) throws {
         let deadline = Date().addingTimeInterval(timeout)

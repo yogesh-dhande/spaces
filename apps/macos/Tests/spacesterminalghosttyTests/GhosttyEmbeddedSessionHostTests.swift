@@ -1595,6 +1595,10 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             defer { host.terminate() }
 
             try host.startIfNeeded()
+            // startIfNeeded enqueues the running-state write off the engine; block on the
+            // persistence queue before reading the durable mirror (same pattern as the
+            // session-close test below), or this read races the async commit under load.
+            host.debugDrainPersistenceQueue()
 
             let runtimeState = try TerminalSessionPersistence.readRuntimeState(paths: paths)
             XCTAssertEqual(runtimeState.state, .running)
@@ -2227,8 +2231,11 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             tty.setraw(fd)
             os.write(sys.stdout.fileno(), b"\\x1b[?1000h\\x1b[?1006hREADY\\r\\n")
             data = os.read(fd, 128)
-            with open(sys.argv[1], "wb") as output:
+            # Write to a sibling temp file and rename onto the final path so the test's
+            # wait-for-existence never observes a created-but-not-yet-written file.
+            with open(sys.argv[1] + ".tmp", "wb") as output:
                 output.write(data)
+            os.replace(sys.argv[1] + ".tmp", sys.argv[1])
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, previous)
         """.write(to: scriptURL, atomically: true, encoding: .utf8)
@@ -2298,8 +2305,11 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             first = read_scroll_burst(fd)
             os.write(sys.stdout.fileno(), b"FIRST\\r\\n")
             second = read_scroll_burst(fd)
-            with open(sys.argv[1], "wb") as output:
+            # Write to a sibling temp file and rename onto the final path so the test's
+            # wait-for-existence never observes a created-but-not-yet-written file.
+            with open(sys.argv[1] + ".tmp", "wb") as output:
                 output.write(first + b"\\n" + second)
+            os.replace(sys.argv[1] + ".tmp", sys.argv[1])
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, previous)
         """.write(to: scriptURL, atomically: true, encoding: .utf8)
@@ -2336,7 +2346,10 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         try await waitUntil { FileManager.default.fileExists(atPath: outputURL.path) }
 
         let reports = String(decoding: try Data(contentsOf: outputURL), as: UTF8.self).split(separator: "\n")
+        // XCTAssertEqual is non-fatal; without the count guard an unexpected report shape would
+        // fall through to out-of-range subscripts below and crash the whole test bundle (#196).
         XCTAssertEqual(reports.count, 2)
+        guard reports.count == 2 else { return }
         let expression = try NSRegularExpression(pattern: #"\u001B\[<([0-9]+);[0-9]+;[0-9]+M"#)
         let buttonCodes = try reports.map { report in
             let input = String(report)
