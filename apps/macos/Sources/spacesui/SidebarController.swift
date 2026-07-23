@@ -969,9 +969,10 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         rowBackground.translatesAutoresizingMaskIntoConstraints = false
         rowBackground.wantsLayer = true
         rowBackground.layer?.cornerRadius = UIRadius.regular
-        rowBackground.layer?.borderWidth = isSelected && !usesGroupedWorkspaceSelection ? 1 : 0
+        // Muted selection (design V2+V4) drops the full border everywhere; a selected standalone project row
+        // reads from the neutral fill alone (the grouped case is drawn by the outline view's selection region).
+        rowBackground.layer?.borderWidth = 0
         bindAppearanceReactiveLayer(rowBackground) { [weak self] view in
-            view.layer?.borderColor = self?.sidebarCardBorderColor(isSelected: true).cgColor
             view.layer?.backgroundColor =
                 isSelected && !usesGroupedWorkspaceSelection ? self?.sidebarSelectedCardBackgroundColor().cgColor : NSColor.clear.cgColor
         }
@@ -1554,7 +1555,12 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         return sidebarThemeColor(light: (240, 238, 230), dark: (24, 36, 39), alpha: alpha)
     }
 
-    func sidebarSelectedCardBackgroundColor() -> NSColor { sidebarThemeColor(light: (226, 224, 216), dark: (24, 35, 39), alpha: 0.85) }
+    /// Muted neutral fill for the selected workspace region (design V2+V4): a faint ink/white overlay
+    /// rather than a teal-tinted card, so the leading teal rail is the only accent.
+    func sidebarSelectedCardBackgroundColor() -> NSColor { sidebarThemeColor(light: (0, 0, 0), dark: (255, 255, 255), alpha: 0.06) }
+
+    /// Teal rail drawn on the leading edge of the selected workspace region — the selection's sole accent.
+    func sidebarSelectionRailColor() -> NSColor { sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184), alpha: 0.55) }
 
     func sidebarCardBorderColor(isSelected: Bool) -> NSColor {
         if isSelected { return sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184), alpha: 0.28) }
@@ -1705,7 +1711,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         return nil
     }
 
-    private func selectedWorkspaceHighlight(in outlineView: NSOutlineView) -> (frame: NSRect, fill: NSColor, border: NSColor)? {
+    private func selectedWorkspaceHighlight(in outlineView: NSOutlineView) -> (frame: NSRect, fill: NSColor, rail: NSColor)? {
         guard let selectedWorkspaceID = host.selectedWorkspaceID else { return nil }
 
         var firstRow: Int?
@@ -1736,7 +1742,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         guard verticalFrame.height > 0 else { return nil }
         let highlightFrame = NSRect(
             x: leadingInset, y: verticalFrame.minY, width: max(0, outlineView.bounds.width - leadingInset), height: verticalFrame.height)
-        return (highlightFrame, sidebarSelectedCardBackgroundColor(), sidebarCardBorderColor(isSelected: true))
+        return (highlightFrame, sidebarSelectedCardBackgroundColor(), sidebarSelectionRailColor())
     }
 
     func toggleProjectExpanded(projectID: String) {
