@@ -86,6 +86,10 @@ PY
 }
 
 echo "Building SwiftPM tests with coverage..."
+# scripts/verify.sh pre-builds with this exact flag set before calling this script, so this is
+# normally an incremental no-op; it stays here (rather than being skipped) because it is the
+# correctness guarantee for anyone invoking coverage.sh directly, and costs nothing when the
+# flags already match the last build.
 "$root/scripts/swiftpm.sh" build --build-tests --enable-code-coverage
 
 echo "Running SwiftPM coverage tests..."
