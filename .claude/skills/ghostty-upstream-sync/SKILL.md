@@ -20,7 +20,7 @@ The fork lives at `apps/macos/vendor/ghostty` (origin = `yogesh-dhande/ghostty`,
    - Preserve fork features: host-managed termio backend, `ghostty_session_*` embedded APIs, screen-change/render-scroll tracking, `macos-use-login-shell` (fork-only option — upstream has no trace of it, do not conclude it was removed), `drainMailboxTo`.
    - Drop fork patches that upstream now carries. Verify with `git log upstream/main -- <path>` or the GitHub compare API before dropping; when a fork dependency pin (e.g. libxev) differs, confirm the fork's pinned commit is an ancestor of upstream's new pin.
    - When upstream moves an API (signature, module, ownership), port the fork-side code to the new API rather than keeping the old call shape.
-3. If Zig APIs changed, port fork code accordingly. See the `ghostty-upstream-merge-zig016` memory for the std.Io-era recipe if it exists; otherwise let compile errors drive the port.
+3. If Zig APIs changed, port fork code accordingly; let compile errors drive the port. Notably, since Zig 0.16 the stdlib uses the `std.Io` concurrency model: `std.Thread.Mutex/Condition/sleep` no longer exist — use `std.Io.Mutex` (`.init`, `lockUncancelable(io)`, `unlock(io)`), `std.Io.Condition` (`waitUncancelable(io, &mutex)`, `signal(io)`, `broadcast(io)`), `std.Io.sleep(io, .fromMilliseconds(n), .awake)`, and pass `global.io()` to mailbox/queue ops (`std.testing.io` in tests).
 
 ## 3. Test the fork
 
