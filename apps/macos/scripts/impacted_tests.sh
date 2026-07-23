@@ -13,25 +13,38 @@ set -eu
 #   it with `git status --porcelain --untracked-files=all` (the `=all` mode
 #   matters: the default `normal` mode collapses a brand-new untracked
 #   directory into one line instead of listing the files inside it, which
-#   would hide a new test file from the target mapper below). Renamed-but-
-#   uncommitted files are read from the porcelain `old -> new` form and both
-#   sides are counted as changed; a rename already committed on the branch
-#   only shows its new path (`git diff --name-only` doesn't report the old
-#   side of a rename), which is an accepted minor gap, not a fallback path.
-#   If origin/main can't be resolved, this script fails loudly — it does not
-#   guess another base ref.
+#   would hide a new test file from the target mapper below). Both git
+#   commands run with `-z`: without it, a path containing a space or
+#   non-ASCII byte comes back double-quoted with octal escapes (core.quotepath),
+#   which silently breaks the plain-text "apps/macos/" prefix match below and
+#   drops the file from selection. `-z` NUL-delimits records instead and
+#   never quotes. POSIX shell variables can't hold embedded NUL bytes, so a
+#   small Python helper (not sh/awk) reads the raw `-z` output, splits on
+#   NUL, and reconstructs paths — including porcelain's rename record shape,
+#   where a `R`/`C` status line is immediately followed by a second, prefix-
+#   less NUL record holding the original path; both the new and original
+#   paths are counted as changed. A rename already committed on the branch
+#   only surfaces its new path (`git diff --name-only` doesn't report the
+#   old side of a rename), which is an accepted minor gap, not a fallback
+#   path. If origin/main can't be resolved, this script fails loudly — it
+#   does not guess another base ref.
 #
 # TARGET MAPPING AND REVERSE CLOSURE
 #   `xcrun swift package describe --type json`, run directly (not through
 #   scripts/swiftpm.sh), gives the declared `path` and `target_dependencies`
 #   for every target. It's read-only: verified by hand (2026-07-22) that a
 #   plain invocation completes in under a second and touches no file under
-#   .build/, so it doesn't need scripts/swiftpm.sh's exec lock. Each changed
-#   path under Sources/ or Tests/ is mapped to the target whose declared
-#   `path` prefixes it (not a hardcoded "Sources/<name>" guess, so it stays
-#   correct if a target ever declares a custom `path:`). A test target is
-#   impacted if it was changed directly, or if the transitive closure of its
-#   `target_dependencies` intersects the set of changed non-test targets.
+#   .build/, so it doesn't need scripts/swiftpm.sh's exec lock. It still
+#   gets scripts/swiftpm.sh's cache isolation treatment (CLANG_MODULE_CACHE_PATH
+#   plus --cache-path/--config-path/--security-path under this package's
+#   .build/), because compiling Package.swift to answer `describe` otherwise
+#   falls back to default (often read-only, e.g. in a sandboxed CI checkout)
+#   user-level cache directories. Each changed path under Sources/ or Tests/
+#   is mapped to the target whose declared `path` prefixes it (not a
+#   hardcoded "Sources/<name>" guess, so it stays correct if a target ever
+#   declares a custom `path:`). A test target is impacted if it was changed
+#   directly, or if the transitive closure of its `target_dependencies`
+#   intersects the set of changed non-test targets.
 #
 # CONSERVATIVE ESCAPE HATCH
 #   A changed path under apps/macos/ that is not under Sources/ or Tests/
@@ -85,11 +98,54 @@ work_dir="$(mktemp -d "${TMPDIR:-/tmp}/spaces-impacted-tests.XXXXXX")"
 trap 'rm -rf "$work_dir"' EXIT INT TERM HUP
 
 changed_paths_file="$work_dir/changed-paths.txt"
-{
-    git -C "$repo_root" diff --name-only --merge-base origin/main
-    git -C "$repo_root" status --porcelain --untracked-files=all | cut -c4- |
-        awk '{ n = index($0, " -> "); if (n > 0) { print substr($0, 1, n - 1); print substr($0, n + 4) } else { print } }'
-} | sort -u >"$changed_paths_file"
+
+collect_script="$work_dir/collect_changed_paths.py"
+cat >"$collect_script" <<'PY'
+# Reads `-z` (NUL-delimited, unquoted) output from `git diff` and `git
+# status` directly as bytes, since sh/awk can't hold embedded NUL bytes in a
+# variable and plain (non-`-z`) git output C-quotes paths with spaces or
+# non-ASCII bytes, which would silently break the shell script's plain-text
+# prefix matching. Writes one deduped, sorted path per line (repo-root
+# relative) to the output file for the rest of the pipeline to consume.
+import subprocess
+import sys
+from pathlib import Path
+
+repo_root = Path(sys.argv[1])
+output_file = Path(sys.argv[2])
+
+
+def run_z(args):
+    result = subprocess.run(args, cwd=repo_root, capture_output=True, check=True)
+    return [r for r in result.stdout.split(b"\0") if r]
+
+
+paths = set()
+
+for record in run_z(["git", "diff", "--name-only", "-z", "--merge-base", "origin/main"]):
+    paths.add(record)
+
+# `git status --porcelain -z` prefixes each primary record with a 2-character
+# status code and a space (e.g. b"R  new/path"). For a rename or copy (status
+# code containing 'R' or 'C'), that record is immediately followed by a
+# second, prefix-less NUL record holding the original path. Both the new and
+# original paths are treated as changed.
+expect_orig = False
+for record in run_z(["git", "status", "--porcelain", "-z", "--untracked-files=all"]):
+    if expect_orig:
+        paths.add(record)
+        expect_orig = False
+        continue
+    code, path = record[:2], record[3:]
+    paths.add(path)
+    if b"R" in code or b"C" in code:
+        expect_orig = True
+
+decoded = sorted(p.decode("utf-8", "surrogateescape") for p in paths)
+output_file.write_text("".join(f"{p}\n" for p in decoded))
+PY
+
+python3 "$collect_script" "$repo_root" "$changed_paths_file"
 
 if [ ! -s "$changed_paths_file" ]; then
     echo "impacted_tests.sh: no changed paths vs origin/main; nothing to test."
@@ -109,6 +165,7 @@ cat >"$select_script" <<'PY'
 #   NONE              - nothing impacted, run nothing
 #   TARGETS\n<name>*  - run exactly these test targets
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -159,12 +216,43 @@ if not mapped_relative_paths:
 
 # Read-only: verified by hand that this completes in well under a second and
 # writes nothing under .build/, so it doesn't need scripts/swiftpm.sh's lock.
+# It does need scripts/swiftpm.sh's cache isolation, though: compiling
+# Package.swift to answer `describe` otherwise resolves clang module and
+# SwiftPM cache/config/security paths to default user-level locations, which
+# can be missing or read-only in a sandboxed/CI checkout. `--cache-path` /
+# `--config-path` / `--security-path` are top-level `swift package` options
+# and (unlike for `swift build`/`swift test`) must precede the `describe`
+# subcommand to be recognized.
+cache_dir = root / ".build" / "spm-cache"
+config_dir = root / ".build" / "spm-config"
+security_dir = root / ".build" / "spm-security"
+clang_module_cache_dir = root / ".build" / "clang-module-cache"
+for cache_path in (cache_dir, config_dir, security_dir, clang_module_cache_dir):
+    cache_path.mkdir(parents=True, exist_ok=True)
+
+describe_env = dict(os.environ)
+describe_env["CLANG_MODULE_CACHE_PATH"] = str(clang_module_cache_dir)
+
 describe = subprocess.run(
-    ["xcrun", "swift", "package", "describe", "--type", "json"],
+    [
+        "xcrun",
+        "swift",
+        "package",
+        "--cache-path",
+        str(cache_dir),
+        "--config-path",
+        str(config_dir),
+        "--security-path",
+        str(security_dir),
+        "describe",
+        "--type",
+        "json",
+    ],
     cwd=root,
     capture_output=True,
     text=True,
     check=True,
+    env=describe_env,
 )
 graph = json.loads(describe.stdout)
 targets = {t["name"]: t for t in graph["targets"]}
