@@ -445,6 +445,13 @@ private enum SpacesMobileMutationTimeoutRecovery {
     var compatibility: SpacesWireCompatibility?
     var isLoading = false
     var isMutating = false
+    /// True while a requested daemon update has been sent and this app is polling the device for the
+    /// update to land (see `requestDaemonUpdate()`). Kept separate from `isMutating`: that flag gates
+    /// one-shot mutations and is released as soon as their single RPC returns, but the update poll runs
+    /// for up to `daemonUpdatePollAttempts * daemonUpdatePollInterval`, and holding `isMutating` for
+    /// that whole window would freeze every other mutating control in the app. Only the Update Daemon
+    /// button reads this flag.
+    var isApplyingDaemonUpdate = false
     var isShowingConnectionSettings = false
     var isShowingWorkspaceCreateSheet = false
     var connectionNotice: String?
@@ -497,6 +504,12 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// In-memory holding spot for a screenshot staged for paste into a terminal session, shared across
     /// the app so the staging flow and the terminal viewer can both reach the same pending image.
     let stagedScreenshots = StagedScreenshotStore()
+    /// Interval between daemon-status polls in `requestDaemonUpdate()`. Injectable so tests can shrink
+    /// it instead of sleeping through the production wait.
+    @ObservationIgnored private let daemonUpdatePollInterval: Duration
+    /// Attempts `requestDaemonUpdate()` polls before giving up (paired with `daemonUpdatePollInterval`,
+    /// production default ~30s total). Injectable for the same reason.
+    @ObservationIgnored private let daemonUpdatePollAttempts: Int
 
     init() {
         #if DEBUG
@@ -509,6 +522,8 @@ private enum SpacesMobileMutationTimeoutRecovery {
         // tripping the launch watchdog on every fresh install.
         let deviceName = UIDevice.current.name
         browserProxy = SpacesMobileBrowserProxy(installationID: deviceState.settings.installationID, deviceName: deviceName)
+        daemonUpdatePollInterval = .seconds(3)
+        daemonUpdatePollAttempts = 10
         // The real settings are persisted regardless of Demo Mode; the demo device is never written to
         // disk, so a launch that lands in Demo Mode still keeps the real records and settings intact.
         SpacesMobileSettingsStore.save(deviceState.settings)
@@ -536,7 +551,10 @@ private enum SpacesMobileMutationTimeoutRecovery {
         commandChannel = bridgeClient.makeCommandChannel()
     }
 
-    init(settings: SpacesMobileConnectionSettings, bridgeClient: SpacesDeviceAPIClient, browserProxy: SpacesMobileBrowserProxy? = nil) {
+    init(
+        settings: SpacesMobileConnectionSettings, bridgeClient: SpacesDeviceAPIClient, browserProxy: SpacesMobileBrowserProxy? = nil,
+        daemonUpdatePollInterval: Duration = .seconds(3), daemonUpdatePollAttempts: Int = 10
+    ) {
         self.settings = settings
         pairedDevices = []
         activeDeviceID = nil
@@ -544,6 +562,8 @@ private enum SpacesMobileMutationTimeoutRecovery {
         self.bridgeClient = bridgeClient
         commandChannel = bridgeClient.makeCommandChannel()
         self.browserProxy = browserProxy ?? SpacesMobileBrowserProxy(installationID: settings.installationID)
+        self.daemonUpdatePollInterval = daemonUpdatePollInterval
+        self.daemonUpdatePollAttempts = daemonUpdatePollAttempts
     }
 
     /// The workspaces this client lists: neither archived nor hidden, matching the Mac sidebar's
@@ -634,18 +654,29 @@ private enum SpacesMobileMutationTimeoutRecovery {
     }
 
     /// The active device cannot be used until its daemon is restarted/updated or this app updates.
+    /// Stays keyed on wire compatibility rather than `daemonUpdateRemedy`: `.applyStagedUpdate` covers
+    /// both a blocking (`daemonTooOld`) and a non-blocking (`compatible`) case, so only compatibility —
+    /// not the remedy alone — can tell them apart.
     var isActiveDeviceBlocked: Bool {
         guard let compatibility else { return false }
         return !compatibility.isCompatible
     }
 
+    /// The action a client should offer about the active device's daemon, computed once via the shared
+    /// `DaemonUpdateRemedy` rule so this app never re-derives the decision from raw compatibility or
+    /// version fields itself. `nil` until the first successful handshake, mirroring `daemonStatus`.
+    var daemonUpdateRemedy: DaemonUpdateRemedy? {
+        guard let daemonStatus else { return nil }
+        return DaemonUpdateRemedy.remedy(for: daemonStatus)
+    }
+
     /// Compatible, but a newer Spaces is installed on the active device than the build its daemon is
-    /// running — a non-blocking hint that the update applies on the daemon's next restart. The daemon
-    /// reports this about its own device; this app's own version says nothing about what is installed
-    /// over there, so it is deliberately not part of the comparison.
+    /// running — the non-blocking shape of `.applyStagedUpdate` (see `isActiveDeviceBlocked`'s doc). A
+    /// restart applies the update; the daemon reports this about its own device, so no version
+    /// comparison happens on this client.
     var daemonUpdatePending: Bool {
-        guard compatibility == .compatible else { return false }
-        return daemonStatus?.isUpdatePending ?? false
+        guard case .applyStagedUpdate = daemonUpdateRemedy else { return false }
+        return !isActiveDeviceBlocked
     }
 
     var connectionSummary: String {
@@ -779,15 +810,52 @@ private enum SpacesMobileMutationTimeoutRecovery {
 
     /// Requests the active device's daemon exec-in-place handoff: it quiesces sessions, applies any
     /// staged update, and re-execs at the same pid, so running terminals, agents, and processes survive.
-    /// After the daemon comes back up, the next refresh re-runs the handshake.
-    func requestDaemonRestart() async {
-        guard !isMutating else { return }
-        isMutating = true
-        defer { isMutating = false }
-        do {
-            try await bridgeClient.requestDaemonRestart(commandChannel: commandChannel)
-            connectionNotice = "Restarting the daemon…"
-        } catch is CancellationError { return } catch { errorMessage = error.localizedDescription }
+    /// Polls the device's frozen-core status afterward until it reports the update applied, so the
+    /// compatibility banner clears itself instead of sitting on "Updating…" forever if nothing else
+    /// looks back. The daemon is expected to be briefly unreachable mid-handoff, so fetch failures
+    /// during the poll are swallowed rather than surfaced as a connection error — they just mean "not
+    /// back yet."
+    ///
+    /// Every step is guarded against `overviewIdentity`, captured once up front: a device switch or
+    /// removal mid-poll must not publish the old device's status onto whatever is now active.
+    func requestDaemonUpdate() async {
+        guard !isMutating, !isApplyingDaemonUpdate else { return }
+        let identity = overviewIdentity
+        isApplyingDaemonUpdate = true
+        defer { isApplyingDaemonUpdate = false }
+
+        do { try await bridgeClient.requestDaemonRestart(commandChannel: commandChannel) } catch is CancellationError { return } catch {
+            guard identity == overviewIdentity else { return }
+            errorMessage = error.localizedDescription
+            return
+        }
+        guard identity == overviewIdentity else { return }
+        connectionNotice = "Updating the daemon…"
+
+        for _ in 0..<daemonUpdatePollAttempts {
+            // Cancellation exits the poll rather than being swallowed like a fetch failure: a cancelled
+            // sleep would otherwise let every remaining attempt run back-to-back with no wait, spinning
+            // the whole budget in one turn of the loop.
+            do { try await Task.sleep(for: daemonUpdatePollInterval) } catch { return }
+            guard identity == overviewIdentity else { return }
+            guard let status = try? await bridgeClient.fetchDaemonStatus(commandChannel: commandChannel) else { continue }
+            guard identity == overviewIdentity else { return }
+            if case .applyStagedUpdate = DaemonUpdateRemedy.remedy(for: status) { continue }
+            // The device no longer reports a staged update: publish the fresh status, then let a full
+            // refresh repopulate the overview before clearing the notice.
+            applyCompatibility(status)
+            await refresh()
+            guard identity == overviewIdentity else { return }
+            connectionNotice = nil
+            return
+        }
+
+        // Timed out. Do not invent a failure message: a slow restart and a refused handoff both simply
+        // land back on the banner, and a final refresh lets whatever is actually true render (including
+        // a real connection error at that point).
+        guard identity == overviewIdentity else { return }
+        connectionNotice = nil
+        await refresh()
     }
 
     private func applyCompatibility(_ status: TerminalServiceDaemonStatus) {

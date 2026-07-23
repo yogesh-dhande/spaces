@@ -28,6 +28,17 @@
         }
     }
 
+    /// Counts calls across the fake bridge's `@Sendable` request closure, so a test can make the Nth
+    /// `daemonStatus` poll behave differently from the ones before it (e.g. "unreachable twice, then
+    /// reachable").
+    private actor SpacesMobilePollCounter {
+        private var count = 0
+        func increment() -> Int {
+            count += 1
+            return count
+        }
+    }
+
     @MainActor final class SpacesMobileAppModelTests: XCTestCase {
         func testWorkspaceGroupsFilterByTypeStateAndSearch() {
             let model = makeModel()
@@ -698,6 +709,176 @@
             XCTAssertNil(model.overview)
         }
 
+        // MARK: - Daemon update
+
+        /// Requesting the update fires the RPC, then polls until the device reports the staged update
+        /// applied, at which point the fresh status is published, a full refresh runs, and the notice
+        /// clears — leaving the device usable again.
+        func testRequestDaemonUpdatePollsUntilAppliedThenClearsNotice() async {
+            let recorder = SpacesMobileRequestRecorder()
+            let counter = SpacesMobilePollCounter()
+            let settings = SpacesMobileConnectionSettings()
+            let pendingStatus = daemonStatus(protocolVersion: SpacesWireProtocol.version, installedVersion: "2.0.0")
+            let appliedStatus = daemonStatus(protocolVersion: SpacesWireProtocol.version, version: "2.0.0")
+            let overview = makeOverview(daemonStatus: appliedStatus)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                switch request.commandName {
+                case "requestDaemonRestart": return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                case "daemonStatus":
+                    let attempt = await counter.increment()
+                    let status = attempt < 3 ? pendingStatus : appliedStatus
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .daemonStatus(status))
+                case "overview": return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview))
+                default: return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                }
+            }
+            let model = SpacesMobileAppModel(
+                settings: settings, bridgeClient: client, daemonUpdatePollInterval: .milliseconds(1), daemonUpdatePollAttempts: 5)
+
+            await model.requestDaemonUpdate()
+
+            XCTAssertNil(model.connectionNotice)
+            XCTAssertNil(model.errorMessage)
+            XCTAssertFalse(model.isApplyingDaemonUpdate)
+            XCTAssertFalse(model.isActiveDeviceBlocked)
+            XCTAssertFalse(model.daemonUpdatePending, "the applied status no longer reports a staged update")
+            XCTAssertEqual(model.overview, overview)
+            let daemonStatusAttempts = await recorder.snapshot().filter { $0.commandName == "daemonStatus" }.count
+            XCTAssertEqual(daemonStatusAttempts, 3, "should stop polling as soon as the applied status is observed")
+        }
+
+        /// The daemon is expected to be briefly unreachable mid-handoff (it quiesces sessions and
+        /// re-execs); a poll attempt that fails to reach it must not surface as a connection error, and
+        /// polling must continue once it becomes reachable again.
+        func testRequestDaemonUpdateSwallowsUnreachableAttemptsThenResolves() async {
+            let recorder = SpacesMobileRequestRecorder()
+            let counter = SpacesMobilePollCounter()
+            let settings = SpacesMobileConnectionSettings()
+            let appliedStatus = daemonStatus(protocolVersion: SpacesWireProtocol.version, version: "2.0.0")
+            let overview = makeOverview(daemonStatus: appliedStatus)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                switch request.commandName {
+                case "requestDaemonRestart": return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                case "daemonStatus":
+                    let attempt = await counter.increment()
+                    if attempt < 3 { throw SpacesDeviceAPIClientError.requestTimedOut }
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .daemonStatus(appliedStatus))
+                case "overview": return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview))
+                default: return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                }
+            }
+            let model = SpacesMobileAppModel(
+                settings: settings, bridgeClient: client, daemonUpdatePollInterval: .milliseconds(1), daemonUpdatePollAttempts: 5)
+
+            await model.requestDaemonUpdate()
+
+            XCTAssertNil(model.connectionNotice)
+            XCTAssertNil(model.errorMessage, "fetch failures mid-poll must not surface as a connection error")
+            XCTAssertEqual(model.overview, overview)
+        }
+
+        /// A device that never reports the update applied within the attempt budget clears the notice
+        /// and lets a final refresh render whatever is actually true, instead of inventing a failure.
+        func testRequestDaemonUpdateClearsNoticeWithoutErrorWhenBudgetRunsOut() async {
+            let recorder = SpacesMobileRequestRecorder()
+            let settings = SpacesMobileConnectionSettings()
+            let pendingStatus = daemonStatus(protocolVersion: SpacesWireProtocol.version, installedVersion: "2.0.0")
+            let overview = makeOverview(daemonStatus: pendingStatus)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                switch request.commandName {
+                case "requestDaemonRestart": return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                case "daemonStatus": return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .daemonStatus(pendingStatus))
+                case "overview": return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview))
+                default: return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                }
+            }
+            let model = SpacesMobileAppModel(
+                settings: settings, bridgeClient: client, daemonUpdatePollInterval: .milliseconds(1), daemonUpdatePollAttempts: 3)
+
+            await model.requestDaemonUpdate()
+
+            XCTAssertNil(model.connectionNotice, "a timed-out poll must not invent a failure message")
+            XCTAssertNil(model.errorMessage)
+            XCTAssertFalse(model.isApplyingDaemonUpdate)
+            // Still pending: the final refresh renders what is actually true rather than a stuck notice.
+            XCTAssertTrue(model.daemonUpdatePending)
+            let daemonStatusAttempts = await recorder.snapshot().filter { $0.commandName == "daemonStatus" }.count
+            XCTAssertEqual(daemonStatusAttempts, 3)
+        }
+
+        /// Switching the active device mid-poll (modeled here the same way other identity-change tests
+        /// do, via `handleAuthenticationFailure`) must not let a stale poll result publish onto the new
+        /// device, nor clobber the notice the switch itself raised.
+        func testRequestDaemonUpdateDeviceSwitchMidPollDoesNotPublishOntoNewDevice() async {
+            let recorder = SpacesMobileRequestRecorder()
+            let gate = SpacesMobileAsyncGate()
+            let settings = SpacesMobileConnectionSettings()
+            let appliedStatus = daemonStatus(protocolVersion: SpacesWireProtocol.version, version: "2.0.0")
+            let overview = makeOverview(daemonStatus: appliedStatus)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                switch request.commandName {
+                case "requestDaemonRestart": return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                case "daemonStatus":
+                    await gate.wait()
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .daemonStatus(appliedStatus))
+                case "overview": return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview))
+                default: return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                }
+            }
+            let model = SpacesMobileAppModel(
+                settings: settings, bridgeClient: client, daemonUpdatePollInterval: .milliseconds(1), daemonUpdatePollAttempts: 5)
+
+            let updateTask = Task { await model.requestDaemonUpdate() }
+            // Wait until the first poll attempt is gated on the device's daemonStatus fetch.
+            while !(await recorder.snapshot()).contains(where: { $0.commandName == "daemonStatus" }) { await Task.yield() }
+            model.handleAuthenticationFailure(message: "Switched devices.")
+            await gate.open()
+            await updateTask.value
+
+            XCTAssertEqual(model.connectionNotice, "Switched devices.", "the device switch's own notice must survive the stale poll resolving")
+            XCTAssertNil(model.daemonStatus, "a stale poll result must not publish onto the new identity")
+            XCTAssertNil(model.overview)
+        }
+
+        /// The banner renders straight off `DaemonUpdateRemedy` plus the status it came from: the action
+        /// button only ever appears for `.applyStagedUpdate`, and that one remedy still reads differently
+        /// depending on whether the daemon is also wire-incompatible (`isBlocking`).
+        func testCompatibilityBannerViewRendersExpectedTitleAndSeverityPerRemedy() {
+            let pendingStatus = daemonStatus(protocolVersion: SpacesWireProtocol.version, installedVersion: "2.0.0")
+            let blockingStagedStatus = daemonStatus(protocolVersion: SpacesWireProtocol.version - 1, installedVersion: "2.0.0")
+            let installOnDeviceStatus = daemonStatus(protocolVersion: SpacesWireProtocol.version - 1)
+            let updateClientStatus = daemonStatus(protocolVersion: SpacesWireProtocol.version + 1)
+
+            let pendingBanner = CompatibilityBannerView(
+                remedy: .applyStagedUpdate(installedVersion: "2.0.0"), status: pendingStatus, isMutating: false, onUpdate: {})
+            XCTAssertFalse(pendingBanner.isBlocking)
+            XCTAssertEqual(pendingBanner.title, "Daemon update pending")
+
+            let blockingBanner = CompatibilityBannerView(
+                remedy: .applyStagedUpdate(installedVersion: "2.0.0"), status: blockingStagedStatus, isMutating: false, onUpdate: {})
+            XCTAssertTrue(blockingBanner.isBlocking)
+            XCTAssertEqual(blockingBanner.title, "This device needs a daemon update")
+
+            let installBanner = CompatibilityBannerView(
+                remedy: .installUpdateOnDevice, status: installOnDeviceStatus, isMutating: false, onUpdate: {})
+            XCTAssertTrue(installBanner.isBlocking)
+            XCTAssertEqual(installBanner.title, "Install the update on this device")
+            XCTAssertFalse(DaemonUpdateRemedy.installUpdateOnDevice.offersDaemonUpdateAction)
+
+            let updateClientBanner = CompatibilityBannerView(remedy: .updateClient, status: updateClientStatus, isMutating: false, onUpdate: {})
+            XCTAssertTrue(updateClientBanner.isBlocking)
+            XCTAssertEqual(updateClientBanner.title, "Update Spaces to use this device")
+            XCTAssertFalse(DaemonUpdateRemedy.updateClient.offersDaemonUpdateAction)
+
+            XCTAssertTrue(
+                DaemonUpdateRemedy.applyStagedUpdate(installedVersion: "2.0.0").offersDaemonUpdateAction,
+                "the only remedy that offers the Update Daemon action")
+        }
+
         // MARK: - Renaming runtime rows
 
         func testRenameAdHocTerminalRowRenamesItsSession() async throws {
@@ -907,9 +1088,10 @@
             return SpacesDeviceOverviewPayload(projects: [project], workspaces: [feature, docs], sessions: sessions, daemonStatus: daemonStatus)
         }
 
-        private func daemonStatus(protocolVersion: Int) -> TerminalServiceDaemonStatus {
+        private func daemonStatus(protocolVersion: Int, version: String = "1.0.0", installedVersion: String? = nil) -> TerminalServiceDaemonStatus {
             TerminalServiceDaemonStatus(
-                version: "1.0.0", installedVersion: nil, certificateFingerprint: nil, activeSessionCount: 0, protocolVersion: protocolVersion)
+                version: version, installedVersion: installedVersion, certificateFingerprint: nil, activeSessionCount: 0,
+                protocolVersion: protocolVersion)
         }
 
         private func makeSession(
