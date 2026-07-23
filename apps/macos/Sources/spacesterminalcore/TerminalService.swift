@@ -268,7 +268,7 @@ import Foundation
                 if response.ok, waitForServiceExit(socketPath: socketPath, candidatePIDs: candidatePIDs, timeout: timeout) { return }
             }
 
-            if candidatePIDs.isEmpty { candidatePIDs.formUnion(serviceProcessIDsOwningSocket(socketPath, timeout: timeout)) }
+            if candidatePIDs.isEmpty { candidatePIDs.formUnion(serviceProcessIDsOwningSocket(socketPath, timeout: timeout) ?? []) }
             terminateServiceProcesses(candidatePIDs, timeout: timeout)
         }
 
@@ -296,14 +296,17 @@ import Foundation
             return false
         }
 
-        static func serviceProcessIDsOwningSocket(_ socketPath: String, timeout: TimeInterval) -> Set<pid_t> {
+        /// Returns nil when the sweep never produced an answer (lsof hit the deadline or failed to
+        /// launch): an indeterminate probe, not proof the socket is unowned. Callers that destroy
+        /// state on "no owner" must treat nil as "owner unknown". A clean nonzero exit keeps the
+        /// long-standing empty-set mapping.
+        static func serviceProcessIDsOwningSocket(_ socketPath: String, timeout: TimeInterval) -> Set<pid_t>? {
             let candidates = ["/usr/sbin/lsof", "/usr/bin/lsof"]
             guard let executablePath = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else { return [] }
             guard
-                let result = capturedStandardOutput(
-                    executableURL: URL(fileURLWithPath: executablePath), arguments: ["-nP", "-U"], timeout: timeout),
-                result.terminationStatus == 0
-            else { return [] }
+                let result = capturedStandardOutput(executableURL: URL(fileURLWithPath: executablePath), arguments: ["-nP", "-U"], timeout: timeout)
+            else { return nil }
+            guard result.terminationStatus == 0 else { return [] }
             return parseSocketOwnerProcessIDs(String(decoding: result.output, as: UTF8.self), socketPath: socketPath)
         }
 

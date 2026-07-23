@@ -131,7 +131,9 @@ import Foundation
         }
 
         private static func terminateProcessesOwningSocket(_ socketPath: String, timeout: TimeInterval) {
-            let pids = serviceProcessIDsOwningSocket(socketPath, timeout: timeout).filter { $0 > 0 && $0 != getpid() }
+            // An indeterminate sweep (nil) leaves nothing to kill; this stage is best-effort and
+            // stop() removes the socket file regardless.
+            let pids = (serviceProcessIDsOwningSocket(socketPath, timeout: timeout) ?? []).filter { $0 > 0 && $0 != getpid() }
             guard !pids.isEmpty else { return }
             for pid in pids { kill(pid, SIGTERM) }
             let deadline = Date().addingTimeInterval(timeout)
@@ -142,12 +144,15 @@ import Foundation
             for pid in pids where isProcessAlive(pid: Int(pid)) { kill(pid, SIGKILL) }
         }
 
-        private static func serviceProcessIDsOwningSocket(_ socketPath: String, timeout: TimeInterval) -> Set<pid_t> {
+        private static func serviceProcessIDsOwningSocket(_ socketPath: String, timeout: TimeInterval) -> Set<pid_t>? {
             TerminalService.serviceProcessIDsOwningSocket(socketPath, timeout: timeout)
         }
 
         private static func adminSocketHasOwner(_ socketPath: String, timeout: TimeInterval) -> Bool {
-            !serviceProcessIDsOwningSocket(socketPath, timeout: timeout).isEmpty
+            // An indeterminate sweep must read as "owner present": ensureRunning unlinks the socket
+            // on a "no owner" answer, and a wrong unlink orphans a live Caddy's admin socket.
+            guard let owners = serviceProcessIDsOwningSocket(socketPath, timeout: timeout) else { return true }
+            return !owners.isEmpty
         }
 
         /// True when a live Caddy owns the profile's admin socket. Unlike checking for the generated
