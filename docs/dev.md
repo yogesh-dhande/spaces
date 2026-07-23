@@ -340,7 +340,7 @@ The Spaces terminal `tail` path also depends on the local `libghostty-vt` artifa
 apps/macos/scripts/setup_ghostty.sh
 ```
 
-The setup script installs Zig `0.15.2` under `apps/macos/.local/ghosttyvt/toolchain/` when a source build is requested. The fork keeps `main` mirrored from upstream, so the reviewable fork delta lives in the `spaces -> main` pull request.
+The setup script installs Zig `0.15.2` under `apps/macos/.local/ghosttyvt/toolchain/` when a source build is requested. Ghostty pins source dependencies by content hash, and setup leaves Zig package caches unmodified so cold and warm caches build the same source. The fork keeps `main` mirrored from upstream, so the reviewable fork delta lives in the `spaces -> main` pull request.
 For a browser view of fork drift against upstream, open [ghostty-org/ghostty compare view](https://github.com/ghostty-org/ghostty/compare/main...yogesh-dhande:ghostty:spaces).
 The GitHub Actions PR and release workflows run this setup before the macOS build and coverage pass so clean runners have the matching `GhosttyKit`, `libghostty-vt` headers, and dylib available.
 
