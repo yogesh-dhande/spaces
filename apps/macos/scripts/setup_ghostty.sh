@@ -624,6 +624,9 @@ build_from_source() {
     echo "==> Building Ghostty artifacts from $GHOSTTY_SOURCE_ROOT ($GHOSTTY_SHA, optimize=$GHOSTTY_BUILD_OPTIMIZE)"
     (
         cd "$GHOSTTY_SOURCE_ROOT"
+        # Ghostty's vendored translate_c build helper shells out to a bare
+        # `zig env`, so the pinned toolchain must be first on PATH.
+        export PATH="$(dirname "$zig_bin"):$PATH"
         "$zig_bin" build -Doptimize="$GHOSTTY_BUILD_OPTIMIZE" -Demit-xcframework=true -Demit-macos-app=false -Di18n=false -Dversion-string="$app_version"
         "$zig_bin" build -Doptimize="$GHOSTTY_BUILD_OPTIMIZE" -Demit-lib-vt=true -Dversion-string="$app_version"
     )

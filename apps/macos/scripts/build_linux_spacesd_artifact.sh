@@ -219,6 +219,9 @@ build_ghostty_vt() {
     echo "==> Building Linux libghostty-vt from $GHOSTTY_SOURCE_ROOT"
     (
         cd "$GHOSTTY_SOURCE_ROOT"
+        # Ghostty's vendored translate_c build helper shells out to a bare
+        # `zig env`, so the pinned toolchain must be first on PATH.
+        export PATH="$(dirname "$zig_bin"):$PATH"
         "$zig_bin" build -Doptimize="$GHOSTTY_BUILD_OPTIMIZE" -Demit-lib-vt=true -Dversion-string="$app_version"
     )
 }
