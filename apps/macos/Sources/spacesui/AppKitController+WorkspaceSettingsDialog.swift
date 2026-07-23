@@ -108,6 +108,21 @@ extension AppKitController {
             constrainFormFieldToFillWidth(section, in: stack)
         }
 
+        // Edits already commit live (see the type comment), so this is a "Done" close affordance, not a
+        // save: it just dismisses the window. Labeled Done — not Save — so it doesn't imply the edits
+        // were unsaved until now. Matches the project dialog closing on its Save.
+        let doneButton = actionButton(
+            title: "Done", symbol: nil, tooltip: "Close workspace settings (⌘S)", action: #selector(closeWorkspaceSettingsWindow), primary: true)
+        doneButton.setAccessibilityIdentifier("workspace-settings-done")
+        doneButton.keyEquivalent = "\r"
+        let doneRow = NSStackView()
+        doneRow.orientation = .horizontal
+        doneRow.spacing = 8
+        doneRow.addArrangedSubview(NSView())
+        doneRow.addArrangedSubview(doneButton)
+        stack.addArrangedSubview(doneRow)
+        constrainFormFieldToFillWidth(doneRow, in: stack)
+
         workspaceSettingsWorkspaceID = workspace.id
         let title = project.isGitRepo ? "\(project.name) / \(workspace.displayName)" : workspace.displayName
         let header = buildFormWindowHeader(symbol: "gearshape", title: title, closeAction: #selector(closeWorkspaceSettingsWindow))

@@ -7570,6 +7570,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             try persistProjectFields(refs)
             projectHasUnsavedChanges = false
             reloadData()
+            // Saving is the terminal action for this dialog, so close it; the header X / Escape remain
+            // for dismissing without saving. performClose routes through windowWillClose cleanup.
+            projectSettingsWindow?.performClose(nil)
         } catch { showError(error) }
     }
 
