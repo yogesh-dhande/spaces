@@ -94,6 +94,25 @@ jobs:
         timeout-minutes: 45
         run: scripts/verify.sh
 
+      # A recurring CI-only SIGTRAP kills a test worker mid-run (so far always within
+      # TerminalSessionPaneViewControllerTests) and has never reproduced locally; the macOS crash
+      # report is the only artifact that can name the crashed frame.
+      - name: Collect crash reports
+        if: failure()
+        run: |
+          mkdir -p crash-reports
+          cp ~/Library/Logs/DiagnosticReports/*.ips crash-reports/ 2>/dev/null || true
+          cp ~/Library/Logs/DiagnosticReports/*.crash crash-reports/ 2>/dev/null || true
+          ls -la crash-reports/
+
+      - name: Upload crash reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verify-crash-reports
+          path: crash-reports/
+          if-no-files-found: ignore
+
       - name: Build static website
         working-directory: apps/web
         run: npm run build
