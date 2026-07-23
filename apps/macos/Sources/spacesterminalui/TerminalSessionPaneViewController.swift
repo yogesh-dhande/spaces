@@ -175,6 +175,11 @@ private final class NotificationObserverBag: @unchecked Sendable {
     // properties off-main drops none of them to zero, and views added later are covered without
     // touching this.
     private nonisolated(unsafe) var mainThreadReleaseBag: [AnyObject] = []
+    // The view root above does not cover the session host: a viewer pane never attaches the host's
+    // Ghostty terminal view, and releasing the surface strips `terminalContainer`'s subviews, so the
+    // host and its C-backed view can outlive the hierarchy. Replaced rather than appended in step
+    // with `activeGhosttySessionHost` — appending would pin every past host's mirror alive.
+    private nonisolated(unsafe) var activeGhosttySessionHostForMainThreadRelease: AnyObject?
 
     /// Title the host should display for this pane (window title today, tab title
     /// later). Updated on every refresh together with `representedWorkingDirectoryURL`,
@@ -263,7 +268,7 @@ private final class NotificationObserverBag: @unchecked Sendable {
     }
 
     deinit {
-        MainThreadRelease.release(mainThreadReleaseBag)
+        MainThreadRelease.release(mainThreadReleaseBag + [activeGhosttySessionHostForMainThreadRelease].compactMap { $0 })
     }
 
     public func requestOwnershipIfNeeded() {
@@ -793,6 +798,7 @@ private final class NotificationObserverBag: @unchecked Sendable {
         ghosttyRendererHost?.releaseRendererSurface()
         terminalContainer.subviews.forEach { $0.removeFromSuperview() }
         activeGhosttySessionHost = host
+        activeGhosttySessionHostForMainThreadRelease = hostObject
         let resolvedHostComponents = Self.resolveGhosttyHostComponents(host)
         ghosttyRendererHost = resolvedHostComponents.rendererHost
         ghosttySessionInfoProvider = resolvedHostComponents.sessionInfoProvider
