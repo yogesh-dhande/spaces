@@ -421,7 +421,6 @@
 
         private func applyRemoteState(_ incomingPayload: GhosttyRemoteSessionStatePayload, postNotifications: Bool = true) {
             let decodeStartedAt = Date()
-            let incomingPayloadBytes = (try? GhosttyRemoteSessionStateCodec.encodeLine(incomingPayload).count) ?? 0
             let reduction = stateReducer.reduce(
                 incomingPayload: incomingPayload, previousPayload: latestState,
                 shouldUseFrame: { frame, payload in
@@ -463,7 +462,7 @@
             let emittedAt = GhosttyRemoteSessionStateTimestamp.date(from: payload.emittedAt) ?? Date()
             var renderUpdateAttributes = GhosttyRenderFrameMetrics.attributes(
                 reason: payload.reason, frame: decodedFrame, frameByteCount: incomingPayload.renderUpdate?.count,
-                payloadByteCount: incomingPayloadBytes, decodeMS: decodeMS, outputByteCount: payload.outputByteCount,
+                decodeMS: decodeMS, outputByteCount: payload.outputByteCount,
                 screenStateRevision: payload.screenStateRevision, dropped: incomingPayload.renderUpdate == nil ? nil : dropReason != nil,
                 dropReason: dropReason, renderMode: "ghostty-mirror", frameKind: decodedUpdate?.frameKindMetricValue,
                 baseRevision: decodedUpdate?.baseRevision, targetRevision: decodedUpdate?.targetRevision ?? payload.screenStateRevision,
@@ -483,7 +482,7 @@
                 "terminal_remote_state_receive", target: "session=\(payload.sessionID)", elapsedMS: TerminalPerformance.elapsedMS(since: emittedAt),
                 success: true,
                 detail:
-                    "reason=\(payload.reason) render_update=\(incomingPayload.renderUpdate == nil ? 0 : 1) bytes=\(payload.outputByteCount ?? 0) payload_bytes=\(incomingPayloadBytes) render_update_bytes=\(incomingPayload.renderUpdate?.count ?? 0)"
+                    "reason=\(payload.reason) render_update=\(incomingPayload.renderUpdate == nil ? 0 : 1) bytes=\(payload.outputByteCount ?? 0) render_update_bytes=\(incomingPayload.renderUpdate?.count ?? 0)"
             )
             TerminalPerformance.logMetric(
                 "terminal_render_frame_payload_receive", target: "session=\(payload.sessionID)",
