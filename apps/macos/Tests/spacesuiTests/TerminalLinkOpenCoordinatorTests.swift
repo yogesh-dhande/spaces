@@ -376,15 +376,17 @@ import spacesterminalui
 
         // The duplicate click cancels the first fetch (bumping `generation` and calling
         // `Task.cancel()`) and starts a second for the same link; the second's chunk read finds the
-        // gate's one-shot queue already drained by the first, so it never blocks and can finish on
-        // its own. The gate is only released *after* that click — releasing it earlier would let the
-        // first fetch race to finish while it is still the current generation, which would let it
-        // legitimately succeed instead of exercising the cancelled-late-finisher path this test
-        // targets. Once cancelled, releasing it before or after the second fetch actually completes
-        // makes no difference to correctness (the regression under test is that a cancelled fetch's
-        // late finish must not clobber the cache, not any particular interleaving), so signaling
-        // immediately here and draining both at once is exact and race-free.
+        // gate's one-shot queue already drained by the first, so it never blocks and completes on
+        // its own. The first fetch stays parked on the gate until the second's open — and therefore
+        // its cache write — has been observed: the late finisher this test targets must finish
+        // *after* the current fetch populated the cache, or a stale completion that clobbered the
+        // cache before checking its generation would be silently repaired by the second's write.
+        // (An ordering poll, not a drain: draining here would also await the parked first fetch.)
         coordinator.openLink("data.txt")
+        await waitUntil { recorder.opens.count == 1 }
+
+        // Only now let the cancelled first fetch finish, and drain it to completion so the
+        // assertions are exact: its late finish must not have removed the cache or opened anything.
         gate.signal()
         await coordinator.drainActiveWorkForTesting()
 
@@ -441,13 +443,17 @@ import spacesterminalui
         await waitUntil { sender.chunkCount(forLinkID: firstLinkID) >= 1 }
 
         // The second click cancels the first (bumping `generation` before this call returns) and
-        // starts its own fetch. Only after that is the first's gate released — releasing it earlier
-        // would let the first fetch race to finish while still current, which would let it
-        // legitimately succeed instead of exercising the "superseded fetch must never open anything"
-        // path this test targets. `drainActiveWorkForTesting()` then awaits both to completion, so
-        // the assertions below are exact rather than a 300ms guess at whether the released first
-        // fetch has finished discarding its own (would-be) result.
+        // starts its own fetch. The first's gate stays closed until the second's open has been
+        // observed, which is what proves supersession is non-blocking: the replacement fetch
+        // completes while the superseded sender is still stuck in its chunk read, so an
+        // implementation that serialized the new fetch behind the old I/O would fail this wait
+        // loudly instead of being rescued by the release below. (An ordering poll, not a drain:
+        // draining here would also await the parked first fetch.)
         coordinator.openLink("second.txt")
+        await waitUntil { recorder.opens.count == 1 }
+
+        // Only now release the superseded fetch and drain it to completion, so the assertions are
+        // exact: the cancelled fetch must have discarded its result without opening anything.
         gate.signal()
         await coordinator.drainActiveWorkForTesting()
 
