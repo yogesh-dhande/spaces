@@ -7,12 +7,10 @@ final class SidebarOutlineView: NSOutlineView {
     var onRowMouseDown: ((Int) -> Bool)?
     /// Context menu provider for the right-clicked row; nil falls back to the view's menu.
     var onRowMenu: ((Int) -> NSMenu?)?
-    /// Draws one selected workspace region behind the workspace row and its visible targets.
-    var selectedWorkspaceHighlight: (() -> (frame: NSRect, fill: NSColor, rail: NSColor)?)?
+    /// Draws the selected workspace region's leading accent rail, spanning the workspace row and its
+    /// visible targets. The selection reads from the squared teal left rail alone — no fill, no border.
+    var selectedWorkspaceHighlight: (() -> (frame: NSRect, rail: NSColor)?)?
 
-    /// Corner radius of the selection region's trailing (right) corners. The leading edge stays square
-    /// so the accent rail reads as a flush bar.
-    private static let selectionRadius: CGFloat = 5
     /// Width of the leading accent rail.
     private static let selectionRailWidth: CGFloat = 2
 
@@ -20,31 +18,11 @@ final class SidebarOutlineView: NSOutlineView {
         super.drawBackground(inClipRect: clipRect)
         guard let highlight = selectedWorkspaceHighlight?(), highlight.frame.intersects(clipRect) else { return }
 
-        // Muted selection (design V2+V4): a neutral fill with a squared leading edge and rounded trailing
-        // corners, and a teal rail on the leading edge as the sole accent — no full border.
+        // Selection is a squared teal rail on the leading edge only — no fill, no border.
         let frame = highlight.frame
-        let fillPath = Self.leadingSquaredTrailingRoundedPath(frame, radius: Self.selectionRadius)
-        highlight.fill.setFill()
-        fillPath.fill()
-
         let railRect = NSRect(x: frame.minX, y: frame.minY, width: Self.selectionRailWidth, height: frame.height)
         highlight.rail.setFill()
         NSBezierPath(rect: railRect).fill()
-    }
-
-    /// A rect path with square leading (left) corners and rounded trailing (right) corners. Rounding both
-    /// right corners symmetrically means the outline view's flipped coordinate space doesn't matter.
-    private static func leadingSquaredTrailingRoundedPath(_ rect: NSRect, radius: CGFloat) -> NSBezierPath {
-        let r = min(radius, min(rect.width, rect.height) / 2)
-        let path = NSBezierPath()
-        path.move(to: NSPoint(x: rect.minX, y: rect.minY))
-        path.line(to: NSPoint(x: rect.maxX - r, y: rect.minY))
-        path.appendArc(withCenter: NSPoint(x: rect.maxX - r, y: rect.minY + r), radius: r, startAngle: 270, endAngle: 360)
-        path.line(to: NSPoint(x: rect.maxX, y: rect.maxY - r))
-        path.appendArc(withCenter: NSPoint(x: rect.maxX - r, y: rect.maxY - r), radius: r, startAngle: 0, endAngle: 90)
-        path.line(to: NSPoint(x: rect.minX, y: rect.maxY))
-        path.close()
-        return path
     }
 
     override func mouseDown(with event: NSEvent) {
