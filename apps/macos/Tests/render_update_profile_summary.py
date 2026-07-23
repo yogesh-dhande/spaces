@@ -216,8 +216,11 @@ def summarize(args: argparse.Namespace, events: list[dict[str, Any]], latency_su
     full_frame_count = sum(1 for record in frame_events if (attr(record, "frame_kind") or "full") == "full")
     delta_frame_count = sum(1 for record in frame_events if attr(record, "frame_kind") == "delta")
     resync_frame_count = sum(1 for record in frame_events if attr(record, "frame_kind") == "resync_required")
-    local_publish_payload_bytes = sum_event_bytes(publish_events)
-    local_receive_payload_bytes = sum_event_bytes(receive_events)
+    # Publish/receive events carry the render update's binary wire size (render_update_bytes),
+    # not the JSON state line's transport size — the hosts don't re-encode payloads just to
+    # measure them. True transport bytes come from the network/relay lanes when present.
+    local_publish_render_update_bytes = sum_event_bytes(publish_events)
+    local_receive_render_update_bytes = sum_event_bytes(receive_events)
     stream_relay_read_bytes = sum_event_bytes(relay_events)
     network_send_bytes = sum_event_bytes(network_events)
     materialized_frame_bytes = first_nonzero(
@@ -275,8 +278,8 @@ def summarize(args: argparse.Namespace, events: list[dict[str, Any]], latency_su
             "peak_1s_bytes_per_second": peak_bytes_per_second(payload_events, 1),
             "peak_10s_bytes_per_second": peak_bytes_per_second(payload_events, 10),
             "network_send_bytes": network_send_bytes,
-            "local_publish_payload_bytes": local_publish_payload_bytes,
-            "local_receive_payload_bytes": local_receive_payload_bytes,
+            "local_publish_render_update_bytes": local_publish_render_update_bytes,
+            "local_receive_render_update_bytes": local_receive_render_update_bytes,
             "stream_relay_read_bytes": stream_relay_read_bytes,
             "materialized_frame_bytes": materialized_frame_bytes,
             "materialized_render_update_bytes": materialized_render_update_bytes,
@@ -355,8 +358,8 @@ def print_table(summary: dict[str, Any], output_path: Path) -> None:
         ("peak 1s B/s", metrics["peak_1s_bytes_per_second"]),
         ("peak 10s B/s", metrics["peak_10s_bytes_per_second"]),
         ("network send bytes", metrics["network_send_bytes"]),
-        ("local publish payload bytes", metrics["local_publish_payload_bytes"]),
-        ("local receive payload bytes", metrics["local_receive_payload_bytes"]),
+        ("local publish update bytes", metrics["local_publish_render_update_bytes"]),
+        ("local receive update bytes", metrics["local_receive_render_update_bytes"]),
         ("materialized frame bytes", metrics["materialized_frame_bytes"]),
         ("materialized update bytes", metrics["materialized_render_update_bytes"]),
         ("payload bytes by kind", metrics["payload_bytes_by_frame_kind"]),
