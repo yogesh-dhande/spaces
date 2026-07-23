@@ -197,15 +197,13 @@ final class GhosttyRemoteSessionStateTests: XCTestCase {
         let snapshot = snapshot(text: "frame")
         let frame = GhosttyRenderFrame(sessionRevision: 12, ownerEpoch: 34, snapshot: snapshot)
         let attributes = GhosttyRenderFrameMetrics.attributes(
-            reason: "output", frame: frame, frameByteCount: 256, frameEncodeMS: 3, payloadByteCount: 384, payloadEncodeMS: 4, decodeMS: 5,
+            reason: "output", frame: frame, frameByteCount: 256, frameEncodeMS: 3, decodeMS: 5,
             outputByteCount: 6, screenStateRevision: 7, dropped: false, renderMode: "ghostty-mirror")
 
         XCTAssertEqual(attributes["reason"], "output")
         XCTAssertEqual(attributes["render_frame"], "1")
         XCTAssertEqual(attributes["frame_bytes"], "256")
         XCTAssertEqual(attributes["frame_encode_ms"], "3")
-        XCTAssertEqual(attributes["payload_bytes"], "384")
-        XCTAssertEqual(attributes["payload_encode_ms"], "4")
         XCTAssertEqual(attributes["decode_ms"], "5")
         XCTAssertEqual(attributes["output_bytes"], "6")
         XCTAssertEqual(attributes["screen_revision"], "7")
