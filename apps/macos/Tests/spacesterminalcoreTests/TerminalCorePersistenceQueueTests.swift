@@ -26,11 +26,16 @@ final class TerminalCorePersistenceQueueTests: XCTestCase {
         databaseRoot = root
         setenv("SPACES_DB_PATH", root.appendingPathComponent("spaces.db").path, 1)
         setenv("SPACES_RUNTIME_DIR", root.appendingPathComponent("runtime", isDirectory: true).path, 1)
+        // Without this, SpacesProfile.current() below can return a profile a sibling test cached before
+        // this suite pointed SPACES_DB_PATH at its own throwaway root, and breakDatabase would then
+        // destroy that stale (possibly real, shared) database instead of this suite's own.
+        SpacesProfile.resetCacheForTesting()
     }
 
     override func tearDownWithError() throws {
         if let originalDatabasePath { setenv("SPACES_DB_PATH", originalDatabasePath, 1) } else { unsetenv("SPACES_DB_PATH") }
         if let originalRuntimeDirectory { setenv("SPACES_RUNTIME_DIR", originalRuntimeDirectory, 1) } else { unsetenv("SPACES_RUNTIME_DIR") }
+        SpacesProfile.resetCacheForTesting()
         if let databaseRoot { try? FileManager.default.removeItem(at: databaseRoot) }
         databaseRoot = nil
         originalDatabasePath = nil
@@ -153,7 +158,7 @@ final class TerminalCorePersistenceQueueTests: XCTestCase {
         XCTAssertEqual(try TerminalSessionPersistence.readRuntimeState(paths: paths).title, "before")
 
         let databasePath = try SpacesProfile.current().databasePath
-        try Self.breakDatabase(at: databasePath)
+        try Self.breakDatabase(at: databasePath, allowedRoot: XCTUnwrap(databaseRoot))
 
         let queue = TerminalCorePersistenceQueue(label: "test.persistence.running-retry")
         let recorder = PersistedTitleRecorder()
@@ -189,7 +194,7 @@ final class TerminalCorePersistenceQueueTests: XCTestCase {
         try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
 
         let databasePath = try SpacesProfile.current().databasePath
-        try Self.breakDatabase(at: databasePath)
+        try Self.breakDatabase(at: databasePath, allowedRoot: XCTUnwrap(databaseRoot))
 
         let queue = TerminalCorePersistenceQueue(label: "test.persistence.supersede-retry")
         let recorder = PersistedTitleRecorder()
@@ -215,7 +220,16 @@ final class TerminalCorePersistenceQueueTests: XCTestCase {
 
     /// Replaces the SQLite database (and its WAL sidecars) with a directory so every write fails to open it,
     /// preserving the real files aside so `restoreDatabase` can bring the committed data back intact.
-    private static func breakDatabase(at databasePath: String) throws {
+    ///
+    /// `databasePath` comes from `SpacesProfile.current()`, which is process-wide cached state; a stale
+    /// entry left by a sibling test (or a future test in this suite that forgets to reset the cache)
+    /// could point this at a real, shared database. Refuse to touch anything outside this suite's own
+    /// throwaway profile root instead of silently destroying it.
+    private static func breakDatabase(at databasePath: String, allowedRoot: URL) throws {
+        guard databasePath.hasPrefix(allowedRoot.path + "/") else {
+            XCTFail("refusing to break database at \(databasePath): outside this test's isolated root \(allowedRoot.path)")
+            return
+        }
         let fileManager = FileManager.default
         for suffix in ["", "-wal", "-shm"] {
             let path = databasePath + suffix

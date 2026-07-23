@@ -4,6 +4,13 @@ import XCTest
 @testable import systembridge
 
 final class ShellTests: XCTestCase {
+    // A probe timeout under parallel load caches a failure process-wide for several seconds; without
+    // a reset here, that cached failure can leak into this suite's own login-shell resolution tests.
+    override func setUp() {
+        super.setUp()
+        Shell.resetLoginShellPathCacheForTesting()
+    }
+
     // Tests run returns exit status by arranging representative inputs and asserting the expected result.
     func testRunReturnsExitStatus() throws {
         let status = try Shell.run(["sh", "-lc", "exit 7"])

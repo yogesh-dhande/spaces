@@ -1,11 +1,20 @@
 import CryptoKit
 import XCTest
 import spacesterminalcore
-import systembridge
 
+@testable import systembridge
 @testable import workspacecore
 
 extension OrchestratorTests {
+
+    // testWorkspaceSetupUsesShellCommandEnvironmentPath below runs the real login-shell PATH probe
+    // against a mock shell; a cached failure from an unrelated probe earlier in the process would make
+    // it fall back to the inherited PATH and miss the mocked command directory. No other extension of
+    // OrchestratorTests defines setUp(), so this is the sole override for the class.
+    override func setUp() {
+        super.setUp()
+        Shell.resetLoginShellPathCacheForTesting()
+    }
 
     func testUpdateProjectConfigRejectsBlankPortNameAtSaveTime() throws {
         let root = try makeTempDirectory()

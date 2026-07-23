@@ -80,16 +80,27 @@ func initializeGitRepository(at directory: URL, initialBranch: String = "main") 
     }
 }
 
+/// Absolute path to the system `git`, resolved once instead of relying on `/usr/bin/env git` to search
+/// `PATH` at spawn time. XCTest `--parallel` runs multiple test classes in the same worker process, so a
+/// sibling test's `setenv("PATH", <tempdir>)` window (e.g. `withMockCommands`,
+/// `testWorkspaceSetupUsesShellCommandEnvironmentPath`) can otherwise overlap a fixture's `env git`
+/// lookup and make it fail to find git at all.
+private let gitExecutablePath = "/usr/bin/git"
+
 /// Run `git` in `cwd`, returning stdout and throwing on a non-zero exit. Commit hooks can export
 /// GIT_DIR/GIT_WORK_TREE for the repository being committed; tests use throwaway repositories, so those
 /// inherited values are stripped to keep each git invocation scoped to the fixture under test.
 @discardableResult func runGit(_ arguments: [String], cwd: String) throws -> String {
     _ = installHermeticGitEnvironment
     let process = Process()
-    process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-    process.arguments = ["git"] + arguments
+    process.executableURL = URL(fileURLWithPath: gitExecutablePath)
+    process.arguments = arguments
     process.currentDirectoryURL = URL(fileURLWithPath: cwd)
     var environment = ProcessInfo.processInfo.environment
+    // Force a fixed PATH rather than trusting the inherited one: a sibling test elsewhere in this
+    // worker process may be mid-`setenv("PATH", <tempdir>)` when this spawns. Git itself is launched by
+    // absolute path above, so this PATH only matters for subprocesses git itself may launch.
+    environment["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
     environment.removeValue(forKey: "GIT_DIR")
     environment.removeValue(forKey: "GIT_WORK_TREE")
     environment.removeValue(forKey: "GIT_INDEX_FILE")
