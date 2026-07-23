@@ -268,7 +268,7 @@ import Foundation
                 if response.ok, waitForServiceExit(socketPath: socketPath, candidatePIDs: candidatePIDs, timeout: timeout) { return }
             }
 
-            if candidatePIDs.isEmpty { candidatePIDs.formUnion(serviceProcessIDsOwningSocket(socketPath)) }
+            if candidatePIDs.isEmpty { candidatePIDs.formUnion(serviceProcessIDsOwningSocket(socketPath, timeout: timeout)) }
             terminateServiceProcesses(candidatePIDs, timeout: timeout)
         }
 
@@ -296,10 +296,12 @@ import Foundation
             return false
         }
 
-        static func serviceProcessIDsOwningSocket(_ socketPath: String) -> Set<pid_t> {
+        static func serviceProcessIDsOwningSocket(_ socketPath: String, timeout: TimeInterval) -> Set<pid_t> {
             let candidates = ["/usr/sbin/lsof", "/usr/bin/lsof"]
             guard let executablePath = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else { return [] }
-            guard let result = capturedStandardOutput(executableURL: URL(fileURLWithPath: executablePath), arguments: ["-nP", "-U"]),
+            guard
+                let result = capturedStandardOutput(
+                    executableURL: URL(fileURLWithPath: executablePath), arguments: ["-nP", "-U"], timeout: timeout),
                 result.terminationStatus == 0
             else { return [] }
             return parseSocketOwnerProcessIDs(String(decoding: result.output, as: UTF8.self), socketPath: socketPath)
@@ -308,8 +310,11 @@ import Foundation
         /// Runs a short-lived process and captures its stdout. The pipe must be drained BEFORE
         /// waiting for exit: a child that writes more than the kernel's pipe buffer (64KB) blocks
         /// until someone reads, so waiting first deadlocks both processes. `lsof -nP -U` output
-        /// routinely exceeds that buffer on a busy desktop.
-        static func capturedStandardOutput(executableURL: URL, arguments: [String]) -> (terminationStatus: Int32, output: Data)? {
+        /// routinely exceeds that buffer on a busy desktop. A watchdog SIGKILLs the child if it
+        /// outlives `timeout`, so callers with a bounded shutdown budget never block indefinitely.
+        static func capturedStandardOutput(executableURL: URL, arguments: [String], timeout: TimeInterval) -> (
+            terminationStatus: Int32, output: Data
+        )? {
             let process = Process()
             process.executableURL = executableURL
             process.arguments = arguments
@@ -317,8 +322,26 @@ import Foundation
             process.standardOutput = output
             process.standardError = FileHandle.nullDevice
             do { try process.run() } catch { return nil }
+
+            let timedOutLock = NSLock()
+            var timedOut = false
+            let watchdog = DispatchWorkItem {
+                guard process.isRunning else { return }
+                timedOutLock.lock()
+                timedOut = true
+                timedOutLock.unlock()
+                kill(process.processIdentifier, SIGKILL)
+            }
+            DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: watchdog)
+
             let data = output.fileHandleForReading.readDataToEndOfFile()
             process.waitUntilExit()
+            watchdog.cancel()
+
+            timedOutLock.lock()
+            let didTimeOut = timedOut
+            timedOutLock.unlock()
+            if didTimeOut { return nil }
             return (process.terminationStatus, data)
         }
 

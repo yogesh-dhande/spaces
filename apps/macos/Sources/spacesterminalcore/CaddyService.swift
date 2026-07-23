@@ -44,7 +44,7 @@ import Foundation
 
             if FileManager.default.fileExists(atPath: socketPath) {
                 if runReload(configPath: configPath, socketPath: socketPath, timeout: 2) { return false }
-                if adminSocketHasOwner(socketPath) { throw CaddyServiceError.reloadFailed(configPath) }
+                if adminSocketHasOwner(socketPath, timeout: timeout) { throw CaddyServiceError.reloadFailed(configPath) }
                 try? FileManager.default.removeItem(atPath: socketPath)
             }
 
@@ -127,7 +127,7 @@ import Foundation
         }
 
         private static func terminateProcessesOwningSocket(_ socketPath: String, timeout: TimeInterval) {
-            let pids = serviceProcessIDsOwningSocket(socketPath).filter { $0 > 0 && $0 != getpid() }
+            let pids = serviceProcessIDsOwningSocket(socketPath, timeout: timeout).filter { $0 > 0 && $0 != getpid() }
             guard !pids.isEmpty else { return }
             for pid in pids { kill(pid, SIGTERM) }
             let deadline = Date().addingTimeInterval(timeout)
@@ -138,11 +138,13 @@ import Foundation
             for pid in pids where isProcessAlive(pid: Int(pid)) { kill(pid, SIGKILL) }
         }
 
-        private static func serviceProcessIDsOwningSocket(_ socketPath: String) -> Set<pid_t> {
-            TerminalService.serviceProcessIDsOwningSocket(socketPath)
+        private static func serviceProcessIDsOwningSocket(_ socketPath: String, timeout: TimeInterval) -> Set<pid_t> {
+            TerminalService.serviceProcessIDsOwningSocket(socketPath, timeout: timeout)
         }
 
-        private static func adminSocketHasOwner(_ socketPath: String) -> Bool { !serviceProcessIDsOwningSocket(socketPath).isEmpty }
+        private static func adminSocketHasOwner(_ socketPath: String, timeout: TimeInterval) -> Bool {
+            !serviceProcessIDsOwningSocket(socketPath, timeout: timeout).isEmpty
+        }
 
         /// True when a live Caddy owns the profile's admin socket. Unlike checking for the generated
         /// config file or the socket file on disk (both of which survive a crash or `stop()`), this
