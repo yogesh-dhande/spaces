@@ -113,6 +113,17 @@ jobs:
           path: crash-reports/
           if-no-files-found: ignore
 
+      # The backgrounded iOS unit-test lane logs to this file instead of the terminal (see
+      # verify.sh) so a hang there produces no console output at all; upload it on failure so a
+      # silence-watchdog kill or a step timeout still leaves something to diagnose from.
+      - name: Upload iOS verify lane log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-verify-log
+          path: apps/macos/.build/ios-verify.log
+          if-no-files-found: ignore
+
       - name: Build static website
         working-directory: apps/web
         run: npm run build

@@ -13,6 +13,14 @@ source "$root/scripts/silence-watchdog.sh"
 # Override with SPACES_VERIFY_STALL_SECONDS (0 disables, e.g. when attaching a debugger).
 verify_stall_seconds="${SPACES_VERIFY_STALL_SECONDS:-600}"
 
+# The iOS build-for-testing phase gets a larger budget than the test phase, but the budget is on
+# SILENCE, not duration: a cold xcodebuild is slow yet still prints compile lines throughout, so a
+# healthy build never approaches this. It must also stay well under the CI job's own step ceiling,
+# or it can never fire first -- a budget larger than the remaining job time just lets the step time
+# out with no diagnosis, which is the failure this guards against.
+# Override with SPACES_VERIFY_IOS_BUILD_STALL_SECONDS (0 disables).
+ios_build_stall_seconds="${SPACES_VERIFY_IOS_BUILD_STALL_SECONDS:-900}"
+
 ios_simulator_arch() {
   local host_arch
   host_arch="$(uname -m)"
@@ -68,6 +76,12 @@ raise SystemExit("No available iPhone simulator found for iOS tests.")
   )"
   simulator_id="$simulator_selection"
 
+  # Not wrapped in run_with_silence_watchdog: that helper backgrounds its command in a subshell,
+  # and spaces_ios_simulator_boot_if_needed's own ownership bookkeeping (it appends the udid it
+  # booted to SPACES_OWNED_IOS_SIMULATOR_UDIDS, read later by run_ios_lane's EXIT trap) is a plain
+  # bash variable mutation that would not propagate back out of that subshell -- the same
+  # propagation hazard documented above run_ios_lane. Losing it would leak a booted simulator on
+  # every run, which is worse than an unwrapped hang here.
   spaces_ios_simulator_boot_if_needed "$simulator_id"
   destination="platform=iOS Simulator,id=$simulator_id,arch=$simulator_arch"
 }
@@ -89,7 +103,7 @@ run_ios_tests() {
 
   unset $(git rev-parse --local-env-vars)
   printf 'Building iOS unit tests for %s...\n' "$destination"
-  xcodebuild "${xcodebuild_args[@]}" build-for-testing
+  run_with_silence_watchdog "$ios_build_stall_seconds" xcodebuild "${xcodebuild_args[@]}" build-for-testing
   printf 'Running iOS unit tests on %s...\n' "$destination"
   run_with_silence_watchdog "$verify_stall_seconds" xcodebuild "${xcodebuild_args[@]}" test-without-building
 }
