@@ -1,4 +1,5 @@
 import Foundation
+import workspacecore
 
 // Install a hermetic git environment for the whole test process. Other helpers (notably `withMockCommands`)
 // temporarily repoint `HOME`/`PATH`/`SHELL` at throwaway directories; without this, a real `git` invocation
@@ -124,3 +125,30 @@ private let gitExecutablePath = "/usr/bin/git"
 
 /// Convenience wrapper that mirrors `runGit` for call sites that read the captured stdout.
 @discardableResult func runGitAndCapture(_ arguments: [String], cwd: String) throws -> String { try runGit(arguments, cwd: cwd) }
+
+/// `WorkspaceOrchestrator` with a generous git metadata budget: on a saturated CI runner even local git
+/// forks can exceed the 2s product default (`GitClient.init(metadataCommandTimeout:)`), and these tests
+/// assert orchestrator behavior, not git latency. A genuinely hung git still fails, just slower.
+///
+/// Mirrors every parameter of `WorkspaceOrchestrator.init` except `git`, in the same order, so existing
+/// `makeTestOrchestrator(...)` call sites convert to `makeTestOrchestrator(...)` by renaming the call
+/// alone. Tests that need to control git behavior themselves (an explicit failure-injecting `GitClient`,
+/// or an assertion about timeout behavior) should keep constructing `WorkspaceOrchestrator` directly.
+func makeTestOrchestrator(
+    store: SQLiteStore, projectsRootDirectory: URL? = nil, workspacesRootDirectory: URL? = nil,
+    notificationDeliverer: ((String, String, String?) -> Void)? = nil,
+    builtInTerminalWindowOpener: WorkspaceOrchestrator.BuiltInTerminalWindowOpener? = nil,
+    builtInTerminalWindowFocuser: WorkspaceOrchestrator.BuiltInTerminalWindowFocuser? = nil,
+    builtInTerminalWindowCloser: WorkspaceOrchestrator.BuiltInTerminalWindowCloser? = nil,
+    builtInTerminalSessionTerminator: WorkspaceOrchestrator.BuiltInTerminalSessionTerminator? = nil,
+    builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher? = nil,
+    daemonHandoffInProgress: (@Sendable () -> Bool)? = nil, currentDate: @escaping () -> Date = Date.init
+) -> WorkspaceOrchestrator {
+    WorkspaceOrchestrator(
+        store: store, projectsRootDirectory: projectsRootDirectory, workspacesRootDirectory: workspacesRootDirectory,
+        git: GitClient(metadataCommandTimeout: 30), notificationDeliverer: notificationDeliverer,
+        builtInTerminalWindowOpener: builtInTerminalWindowOpener, builtInTerminalWindowFocuser: builtInTerminalWindowFocuser,
+        builtInTerminalWindowCloser: builtInTerminalWindowCloser, builtInTerminalSessionTerminator: builtInTerminalSessionTerminator,
+        builtInTerminalSessionLauncher: builtInTerminalSessionLauncher, daemonHandoffInProgress: daemonHandoffInProgress,
+        currentDate: currentDate)
+}

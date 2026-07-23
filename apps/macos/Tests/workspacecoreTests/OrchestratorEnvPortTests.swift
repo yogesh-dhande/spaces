@@ -19,7 +19,7 @@ extension OrchestratorTests {
     func testUpdateProjectConfigRejectsBlankPortNameAtSaveTime() throws {
         let root = try makeTempDirectory()
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let project = try orchestrator.addProject(dir: root.path)
 
         XCTAssertThrowsError(
@@ -30,7 +30,7 @@ extension OrchestratorTests {
     func testUpdateWorkspaceSettingsAcceptsSyntheticPortFallbackVariableAtSaveTime() throws {
         let root = try makeTempDirectory()
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let project = try orchestrator.addProject(dir: root.path)
         let workspace = try XCTUnwrap(try store.workspaces(projectID: project.id).first)
 
@@ -46,7 +46,7 @@ extension OrchestratorTests {
     func testUpdateWorkspaceSettingsRejectsBlankPortNameAtSaveTime() throws {
         let root = try makeTempDirectory()
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let project = try orchestrator.addProject(dir: root.path)
         let workspace = try XCTUnwrap(try store.workspaces(projectID: project.id).first)
 
@@ -58,7 +58,7 @@ extension OrchestratorTests {
     func testUpdateWorkspaceSettingsRejectsDuplicateServiceNames() throws {
         let root = try makeTempDirectory()
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let project = try orchestrator.addProject(dir: root.path)
         let workspace = try XCTUnwrap(try store.workspaces(projectID: project.id).first)
 
@@ -74,7 +74,7 @@ extension OrchestratorTests {
         let reposRoot = root.appendingPathComponent("repos", isDirectory: true)
         let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store, projectsRootDirectory: reposRoot, workspacesRootDirectory: workspacesRoot)
+        let orchestrator = makeTestOrchestrator(store: store, projectsRootDirectory: reposRoot, workspacesRootDirectory: workspacesRoot)
         let managedDirname = managedProjectStorageDirname(
             namespace: "git", source: "12345678-1234-1234-1234-123456789ABC", preferredName: "sample-repo")
 
@@ -149,7 +149,7 @@ extension OrchestratorTests {
         }
 
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let project = try orchestrator.addProject(dir: projectDir.path)
         try orchestrator.updateProjectConfig(projectID: project.id) { config in config.setupScript = "setupcmd" }
         let workspace = try orchestrator.createWorkspace(projectID: project.id, runSetupScript: false)
@@ -186,7 +186,7 @@ extension OrchestratorTests {
         try spacesYAMLFixture(stopScript: "echo preview-stop").write(
             to: projectDir.appendingPathComponent("spaces.yaml"), atomically: true, encoding: .utf8)
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
 
         let preview = try orchestrator.previewProject(dir: projectDir.path)
 
@@ -206,7 +206,7 @@ extension OrchestratorTests {
         let reposRoot = root.appendingPathComponent("repos", isDirectory: true)
         let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store, projectsRootDirectory: reposRoot, workspacesRootDirectory: workspacesRoot)
+        let orchestrator = makeTestOrchestrator(store: store, projectsRootDirectory: reposRoot, workspacesRootDirectory: workspacesRoot)
         var didCommit = false
 
         let prepared = try orchestrator.prepareGitProject(gitURL: fixture.path)
@@ -238,7 +238,7 @@ extension OrchestratorTests {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let project = try orchestrator.addProject(dir: projectDir.path)
         let defaultWorkspace = try XCTUnwrap(try store.workspaces(projectID: project.id).first(where: \.isDefault))
         try orchestrator.updateProjectConfig(projectID: project.id) { config in
@@ -267,7 +267,7 @@ extension OrchestratorTests {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let project = try orchestrator.addProject(dir: projectDir.path) { config in
             config.stopScript = "echo saved-stop"
             config.ports = [ServiceDefinition(id: "saved-port", name: "saved")]
@@ -288,7 +288,7 @@ extension OrchestratorTests {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let api = ServiceDefinition(id: "port-api", name: "api")
         let project = try orchestrator.addProject(dir: projectDir.path) { config in config.ports = [api] }
         let workspace = try XCTUnwrap(try store.workspaces(projectID: project.id).first(where: \.isDefault))
@@ -315,7 +315,7 @@ extension OrchestratorTests {
         let root = try makeTempDirectory()
         let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+        let orchestrator = makeTestOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
         let project = try orchestrator.addProject(dir: repo.path)
         let activeWorkspace = try orchestrator.createWorkspace(projectID: project.id, branch: "active")
         let archivedWorkspace = try orchestrator.createWorkspace(projectID: project.id, branch: "archived")
@@ -340,7 +340,7 @@ extension OrchestratorTests {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let project = try orchestrator.addProject(dir: projectDir.path) { config in
             config.stopScript = "echo old-stop"
             config.ports = [ServiceDefinition(id: "old-port", name: "oldport")]
@@ -401,7 +401,7 @@ extension OrchestratorTests {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let project = try orchestrator.addProject(dir: projectDir.path)
         let configURL = try orchestrator.spacesYAMLConfigURL(projectID: project.id)
         try "old: value\n".write(to: configURL, atomically: true, encoding: .utf8)
@@ -424,7 +424,7 @@ extension OrchestratorTests {
     // Tests build workspace env sets spaces workspace dir by arranging representative inputs and asserting the expected result.
     func testBuildWorkspaceEnvSetsSpacesWorkspaceDir() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let project = makeProjectRecord(dir: "/tmp/project")
         let workspace = makeWorkspaceRecord(projectID: project.id, dir: "/tmp/project/ws")
         let env = orchestrator.buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: [])
@@ -434,7 +434,7 @@ extension OrchestratorTests {
     // Tests build workspace env sets spaces project dir by arranging representative inputs and asserting the expected result.
     func testBuildWorkspaceEnvSetsSpacesProjectDir() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let project = makeProjectRecord(dir: "/tmp/project")
         let workspace = makeWorkspaceRecord(projectID: project.id, dir: "/tmp/project/ws")
         let env = orchestrator.buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: [])
@@ -444,7 +444,7 @@ extension OrchestratorTests {
     // Tests build workspace env does not contain scoped key by arranging representative inputs and asserting the expected result.
     func testBuildWorkspaceEnvDoesNotContainScopedKey() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let project = makeProjectRecord(dir: "/tmp/project")
         let workspace = makeWorkspaceRecord(projectID: project.id, dir: "/tmp/project/ws")
         let env = orchestrator.buildWorkspaceEnv(project: project, workspace: workspace, namedPorts: [])
@@ -455,7 +455,7 @@ extension OrchestratorTests {
     // Tests build workspace env includes service ports by arranging representative inputs and asserting the expected result.
     func testBuildWorkspaceEnvIncludesServicePorts() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let project = makeProjectRecord(dir: "/tmp/project")
         let workspace = makeWorkspaceRecord(projectID: project.id, dir: "/tmp/project/ws")
         let ports: [(port: Int, name: String)] = [(port: 3000, name: "frontend"), (port: 8080, name: "api")]
@@ -468,7 +468,7 @@ extension OrchestratorTests {
 
     func testBuildWorkspaceEnvDoesNotIncludePath() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let project = makeProjectRecord(dir: "/tmp/project")
         let workspace = makeWorkspaceRecord(projectID: project.id, dir: "/tmp/project/ws")
 
@@ -479,7 +479,7 @@ extension OrchestratorTests {
 
     func testBuildWorkspaceEnvEmitsServicePortAndWorkspaceIdentityVars() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let project = makeProjectRecord(dir: "/tmp/project")
         let workspace = makeWorkspaceRecord(projectID: project.id, dir: "/tmp/project/ws")
         let ports: [(port: Int, name: String)] = [(port: 3000, name: " "), (port: 8080, name: "admin-ui")]
@@ -500,7 +500,7 @@ extension OrchestratorTests {
 
     func testBuildWorkspaceEnvKeepsBrowserFacingServiceURLForRuntimeManifest() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let project = makeProjectRecord(dir: "/local/project")
         let workspace = makeWorkspaceRecord(id: "workspace-remote", projectID: project.id, dir: "/local/project/ws", branch: "feature/web")
         let slug = SpacesProfile.workspaceHostSlug(
@@ -535,7 +535,7 @@ extension OrchestratorTests {
         config.routerPort = seededPort
         try store.setAppConfig(config)
 
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let project = makeProjectRecord(dir: "/local/project")
         let workspace = makeWorkspaceRecord(id: "workspace-seeded", projectID: project.id, dir: "/local/project/ws", branch: "feature/web")
         let slug = SpacesProfile.workspaceHostSlug(
@@ -550,14 +550,14 @@ extension OrchestratorTests {
 
     // Tests applyEnvVars substitutes a single named variable.
     func testApplyEnvVarsSubstitutesSingleVar() {
-        let orchestrator = WorkspaceOrchestrator(store: try! makeTemporaryStore())
+        let orchestrator = makeTestOrchestrator(store: try! makeTemporaryStore())
         let result = orchestrator.applyEnvVars("PORT=$SPACES_FRONTEND_PORT npm run dev", env: ["SPACES_FRONTEND_PORT": "20002"])
         XCTAssertEqual(result, "PORT=20002 npm run dev")
     }
 
     // Tests applyEnvVars substitutes multiple variables in one command.
     func testApplyEnvVarsSubstitutesMultipleVars() {
-        let orchestrator = WorkspaceOrchestrator(store: try! makeTemporaryStore())
+        let orchestrator = makeTestOrchestrator(store: try! makeTemporaryStore())
         let result = orchestrator.applyEnvVars(
             "PORT=$SPACES_FRONTEND_PORT BACKEND=$SPACES_BACKEND_PORT node server.js",
             env: ["SPACES_FRONTEND_PORT": "3000", "SPACES_BACKEND_PORT": "4000"])
@@ -566,14 +566,14 @@ extension OrchestratorTests {
 
     // Tests applyEnvVars leaves unknown variables unchanged.
     func testApplyEnvVarsLeavesUnknownVarsUnchanged() {
-        let orchestrator = WorkspaceOrchestrator(store: try! makeTemporaryStore())
+        let orchestrator = makeTestOrchestrator(store: try! makeTemporaryStore())
         let result = orchestrator.applyEnvVars("PORT=$UNKNOWN npm start", env: ["SPACES_FRONTEND_PORT": "3000"])
         XCTAssertEqual(result, "PORT=$UNKNOWN npm start")
     }
 
     // Tests applyEnvVars returns command unchanged when env is empty.
     func testApplyEnvVarsEmptyEnvReturnsCommandUnchanged() {
-        let orchestrator = WorkspaceOrchestrator(store: try! makeTemporaryStore())
+        let orchestrator = makeTestOrchestrator(store: try! makeTemporaryStore())
         let result = orchestrator.applyEnvVars("PORT=$SPACES_FRONTEND_PORT npm run dev", env: [:])
         XCTAssertEqual(result, "PORT=$SPACES_FRONTEND_PORT npm run dev")
     }
@@ -582,7 +582,7 @@ extension OrchestratorTests {
     // does not substitute the bare service name.
     func testResolveEnvVarsReplacesServicePortVar() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
 
         let project = makeProjectRecord(dir: "/projects/myapp")
         try store.upsert(project: project)
@@ -597,7 +597,7 @@ extension OrchestratorTests {
     // Tests resolveEnvVars resolves multiple service ports.
     func testResolveEnvVarsResolvesMultipleServicePorts() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
 
         let project = makeProjectRecord(dir: "/projects/myapp")
         try store.upsert(project: project)
@@ -613,7 +613,7 @@ extension OrchestratorTests {
     // Tests resolveEnvVars leaves command unchanged when no ports are allocated.
     func testResolveEnvVarsNoPorts() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
 
         let project = makeProjectRecord(dir: "/projects/myapp")
         try store.upsert(project: project)
@@ -627,7 +627,7 @@ extension OrchestratorTests {
     // Tests resolveEnvVars injects SPACES_WORKSPACE_DIR into command.
     func testResolveEnvVarsInjectsWorkspaceDir() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
 
         let project = makeProjectRecord(dir: "/projects/myapp")
         try store.upsert(project: project)
@@ -643,7 +643,7 @@ extension OrchestratorTests {
     // Tests updatePortRange persists to the app config by arranging representative inputs and asserting the expected result.
     func testUpdatePortRangePersists() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
 
         let updated = try orchestrator.updatePortRange(PortRange(start: 25000, end: 35000))
         XCTAssertEqual(updated.portRange.start, 25000)
@@ -656,7 +656,7 @@ extension OrchestratorTests {
     // Tests workspacePortsNamed returns named ports by arranging representative inputs and asserting the expected result.
     func testWorkspacePortsNamedReturnsNamedPorts() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let project = makeProjectRecord(dir: "/projects/myapp")
         try store.upsert(project: project)
         let workspace = makeWorkspaceRecord(projectID: project.id, dir: "/projects/myapp")
@@ -680,7 +680,7 @@ extension OrchestratorTests {
         try FileManager.default.createDirectory(at: actualReposRoot, withIntermediateDirectories: true)
         try FileManager.default.createSymbolicLink(at: reposRoot, withDestinationURL: actualReposRoot)
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store, projectsRootDirectory: reposRoot, workspacesRootDirectory: workspacesRoot)
+        let orchestrator = makeTestOrchestrator(store: store, projectsRootDirectory: reposRoot, workspacesRootDirectory: workspacesRoot)
         let managedDirname = managedProjectStorageDirname(namespace: "git", source: fixture.path, preferredName: "symlinked-root-repo")
         let entryProjectDir = reposRoot.appendingPathComponent(managedDirname, isDirectory: true)
         let normalizedProjectDir = actualReposRoot.appendingPathComponent(managedDirname, isDirectory: true).path
@@ -697,7 +697,7 @@ extension OrchestratorTests {
     // Tests resolvedWorkspaceBrowserSessions expands port env vars to their allocated values.
     func testResolvedWorkspaceBrowserSessionsExpandsPortEnvVars() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let project = makeProjectRecord(dir: "/projects/app")
         try store.upsert(project: project)
         let workspace = makeWorkspaceRecord(projectID: project.id, dir: "/projects/app")
