@@ -90,6 +90,11 @@ import spacesdevicecore
     /// deterministically instead of a test polling `debugSnapshot` under a wall-clock ceiling; production
     /// never reads this field. `nil` before `start()` is called.
     private var startupBaselineLoadTask: Task<Void, Never>?
+    /// Handle to just the off-main READ half of `start()`'s baseline load (before the merge). Every durable
+    /// baseline write awaits this first (see `enqueueBaselineWrite`): the read loads the persisted mirror, and
+    /// a write that reaches disk before it runs is a whole-device replace over children the read hasn't merged
+    /// in yet, silently destroying them. `nil` before `start()` is called, in which case the gate is a no-op.
+    private var startupBaselineReadTask: Task<Result<[String: [String: SpacesDeviceAgentSessionRow]], any Error>, Never>?
     private var isStopped = false
     /// Delay before a failed connect, a dropped stream, or a failed listing pull retries through
     /// `reconcile()`. Internal so behavior tests can shorten it instead of waiting out real seconds.
@@ -127,13 +132,17 @@ import spacesdevicecore
         // it persists the merged union so the durable mirror matches memory; a clean startup that merely
         // refills the loaded baseline into an empty snapshot writes nothing.
         let databasePath = databasePath
+        // .userInitiated, matching the connect/listing pulls: this load gates delivering the
+        // downtime window's transitions after a daemon restart, and .utility work can be
+        // starved for tens of seconds on a saturated machine, delaying that readiness. Stored
+        // separately from `startupBaselineLoadTask` so `enqueueBaselineWrite` can await just the
+        // read — awaiting the whole load task would deadlock the write it itself enqueues below.
+        let readTask = Task.detached(priority: .userInitiated) { () -> Result<[String: [String: SpacesDeviceAgentSessionRow]], any Error> in
+            Result { try SQLiteStore(path: databasePath).agentRemoteWatchBaselines() }
+        }
+        startupBaselineReadTask = readTask
         startupBaselineLoadTask = Task { @MainActor [weak self] in
-            // .userInitiated, matching the connect/listing pulls: this load gates delivering the
-            // downtime window's transitions after a daemon restart, and .utility work can be
-            // starved for tens of seconds on a saturated machine, delaying that readiness.
-            let result = await Task.detached(priority: .userInitiated) { () -> Result<[String: [String: SpacesDeviceAgentSessionRow]], any Error> in
-                Result { try SQLiteStore(path: databasePath).agentRemoteWatchBaselines() }
-            }.value
+            let result = await readTask.value
             guard let self, !self.isStopped else { return }
             switch result {
             case .success(let baselines):
@@ -543,11 +552,19 @@ import spacesdevicecore
     /// of the final snapshot. `write` runs off the main actor (the daemon keeps SQLite off its main terminal
     /// engine); only the chaining and the supersession gate touch main-actor state. The write is allowed to run
     /// even after `stop()` so an in-flight seed still reaches disk for the next daemon run.
+    ///
+    /// Every write also awaits `start()`'s baseline read first (`startupBaselineReadTask`), before the chain
+    /// wait and the supersession check: that read loads the persisted mirror, and a write — e.g. a seed's
+    /// whole-device replace — reaching disk before it runs would clobber the not-yet-merged children the
+    /// mirror still holds, losing them from disk with nothing left to notice. `nil` (no `start()`, or the
+    /// read already finished) proceeds immediately.
     private func enqueueBaselineWrite(deviceID: String, generation: Int, op: String, _ write: @escaping @Sendable (SQLiteStore) throws -> Void) {
         let previous = baselineWriteChain[deviceID]
+        let readTask = startupBaselineReadTask
         let databasePath = databasePath
         let logError = logError
         baselineWriteChain[deviceID] = Task { @MainActor [weak self] in
+            _ = await readTask?.value
             _ = await previous?.value
             if let self, self.snapshotGeneration[deviceID] != generation { return }
             let result = await Task.detached(priority: .utility) { () -> Result<Void, any Error> in
