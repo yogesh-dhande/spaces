@@ -127,6 +127,8 @@ import Testing
 
     /// Waits until `created` has held steady for a short settle window (or the timeout),
     /// then returns the final snapshot. Used to let a burst of refresh passes drain.
+    /// The settle window only starts once the first watcher has been created — until then
+    /// a still-zero counter is indistinguishable from "not started yet" on a slow runner.
     private static func waitUntilCreatedStable(_ counter: WatcherCounter, timeout: Duration) async -> (created: Int, live: Int) {
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: timeout)
@@ -135,7 +137,10 @@ import Testing
         while clock.now < deadline {
             try? await Task.sleep(for: .milliseconds(100))
             let current = counter.snapshot
-            if current.created == lastCreated {
+            if current.created == 0 {
+                // Nothing has been created yet; don't let the stability window start.
+                stableSince = clock.now
+            } else if current.created == lastCreated {
                 if clock.now >= stableSince.advanced(by: .milliseconds(500)) { return current }
             } else {
                 lastCreated = current.created

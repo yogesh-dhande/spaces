@@ -501,7 +501,7 @@ final class ShellTests: XCTestCase {
         let shellScript = """
             #!/bin/sh
             if [ "$1" = "-l" ] && [ "$2" = "-c" ]; then
-              /bin/sh -c "sleep 10 >&1 & sleep 10 >&2 & sleep 10"
+              /bin/sh -c "sleep 30 >&1 & sleep 30 >&2 & sleep 30"
               exit 0
             fi
             exec /bin/sh "$@"
@@ -514,7 +514,10 @@ final class ShellTests: XCTestCase {
         let startedAt = Date()
         let output = try Shell.runAndCapture(["mockcmd"], environment: environment)
         XCTAssertEqual(output, "fallback-with-open-pipes")
-        XCTAssertLessThan(Date().timeIntervalSince(startedAt), 8.0)
+        // The ceiling must stay well below the writers' hold time (a regression to
+        // waiting-for-writer takes >=30s) while leaving headroom above the tiny drain
+        // budget for CPU-load scheduling jitter.
+        XCTAssertLessThan(Date().timeIntervalSince(startedAt), 20.0)
     }
 
     func testRunAndCaptureUsesSingleDrainBudgetAfterShellExit() throws {
@@ -530,7 +533,7 @@ final class ShellTests: XCTestCase {
         let shellScript = """
             #!/bin/sh
             if [ "$1" = "-l" ] && [ "$2" = "-c" ]; then
-              /bin/sh -c "sleep 15 >&2" &
+              /bin/sh -c "sleep 30 >&2" &
               exit 0
             fi
             exec /bin/sh "$@"
@@ -543,7 +546,10 @@ final class ShellTests: XCTestCase {
         let startedAt = Date()
         let output = try Shell.runAndCapture(["mockcmd"], environment: environment)
         XCTAssertEqual(output, "single-drain-budget")
-        XCTAssertLessThan(Date().timeIntervalSince(startedAt), 10.0)
+        // The ceiling must stay well below the writer's hold time (a regression to
+        // waiting-for-writer takes >=30s) while leaving headroom above the ~2s drain
+        // budget for CPU-load scheduling jitter.
+        XCTAssertLessThan(Date().timeIntervalSince(startedAt), 20.0)
     }
 
     func testRunAndCaptureRefreshesCachedLoginShellPathWhenZdotdirChanges() throws {

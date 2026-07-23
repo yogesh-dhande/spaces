@@ -285,7 +285,11 @@ extension OrchestratorTests {
             pid = os.fork()
             if pid == 0:
                 os._exit(0)
-            path.write_text(str(pid))
+            # Write to a sibling temp file and rename onto the final path so readers
+            # polling for file existence never observe a truncated/empty file.
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(str(pid))
+            os.replace(tmp, path)
             time.sleep(30)
             """,
         ]
@@ -1685,8 +1689,12 @@ extension OrchestratorTests {
             child_pid = os.fork()
             if child_pid == 0:
                 os._exit(0)
-            with open(pid_file, "w", encoding="utf-8") as fh:
+            # Write to a sibling temp file and rename onto the final path so readers
+            # polling for file existence never observe a truncated/empty file.
+            tmp_file = pid_file + ".tmp"
+            with open(tmp_file, "w", encoding="utf-8") as fh:
                 fh.write(str(child_pid))
+            os.replace(tmp_file, pid_file)
             time.sleep(30)
             """, zombiePIDPath.path,
         ]
