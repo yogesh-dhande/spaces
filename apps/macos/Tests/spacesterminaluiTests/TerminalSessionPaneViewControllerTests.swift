@@ -3060,6 +3060,18 @@ final class TerminalPaneBannerTests: XCTestCase {
         return (TerminalPaneBanner(hostView: host), host)
     }
 
+    /// A banner's last reference can be dropped by a background task (any async caller that
+    /// captured its owning pane controller), so deinit must not assert main-actor isolation.
+    /// `MainActor.assumeIsolated` in deinit trapped exactly here — a CI-only SIGTRAP, because the
+    /// off-main last release needs a slow-scheduled background holder to lose the race. The box
+    /// makes that ordering deterministic: the detached task provably performs the final release.
+    @MainActor func testLastReleaseOffMainDoesNotTrap() async {
+        final class Box: @unchecked Sendable { var banner: TerminalPaneBanner? }
+        let box = Box()
+        box.banner = TerminalPaneBanner(hostView: NSView())
+        await Task.detached { box.banner = nil }.value
+    }
+
     @MainActor func testPersistentNoticeShowsUntilCleared() {
         let (banner, _) = makeBanner()
         XCTAssertFalse(banner.debugIsVisible)

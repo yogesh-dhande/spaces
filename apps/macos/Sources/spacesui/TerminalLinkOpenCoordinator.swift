@@ -59,7 +59,7 @@
         /// if a newer click has since superseded it, so a stale resolve/download never opens a file or
         /// updates the banner after the user moved on.
         private var generation: UInt64 = 0
-        private var activeTask: Task<Void, Never>?
+        private nonisolated(unsafe) var activeTask: Task<Void, Never>?
 
         /// Every task this coordinator has spawned and not yet finished, keyed by a token minted
         /// before the task exists (so the task never has to reference its own `Task` handle from
@@ -95,7 +95,11 @@
             self.openSpacesTerminalLink = openSpacesTerminalLink
         }
 
-        deinit { MainActor.assumeIsolated { activeTask?.cancel() } }
+        // No isolation assumption: the last release can land off-main when an async caller holds
+        // the final reference, and `MainActor.assumeIsolated` in deinit traps there (the
+        // TerminalPaneBanner CI SIGTRAP pattern). `Task.cancel()` is thread-safe and deinit has
+        // exclusive access to self, so `activeTask` is declared `nonisolated(unsafe)`.
+        deinit { activeTask?.cancel() }
 
         // MARK: - Routing
 
