@@ -8866,7 +8866,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         // A click inside a terminal surface is consumed by that surface, so `PaneView` never sees the
         // mouseDown and the focused-pane indicator would otherwise update only once the user starts typing
         // (the keyDown path below). Sync the focused pane after each left click settles the first responder.
-        mouseFocusMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown]) { [weak self] event in
+        //
+        // This fires on mouseUP, not mouseDOWN: a focus change rebuilds the pane tree (PaneTreeView.render
+        // re-parents every surface view), and doing that between the surface's mouseDown and mouseUp yanks
+        // the surface out of the hierarchy so AppKit never delivers the mouseUp. The terminal would then miss
+        // its mouse-release and stay stuck in a selection drag on every hover. Waiting for mouseUp lets the
+        // surface complete its press→release pair before the rebuild; the async hop defers the rebuild past
+        // this event's own delivery so the release still lands.
+        mouseFocusMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseUp]) { [weak self] event in
             DispatchQueue.main.async { [weak self] in
                 guard let self, let content = self.panelCoordinator.contentOwning(responder: NSApp.keyWindow?.firstResponder) else { return }
                 self.panelCoordinator.noteContentFocused(content)
