@@ -7,6 +7,31 @@ import workspacecore
 @testable import spacesdeviceapi
 
 final class SpacesDeviceOverviewBuilderTests: XCTestCase {
+    func testWorkspacesSortDefaultFirstThenByNameSoEveryClientMatches() {
+        // The overview payload is the single ordering source every client renders. macOS pins each
+        // project's default workspace to the top; iOS uses the payload order verbatim. Making the
+        // builder sort default-first (then name) keeps the two clients from diverging.
+        let alpha = ProjectRecord(id: "project-alpha", name: "Alpha", dir: "/alpha", isGitRepo: true, defaultBranch: "main")
+        let beta = ProjectRecord(id: "project-beta", name: "Beta", dir: "/beta", isGitRepo: true, defaultBranch: "main")
+        func workspace(id: String, project: ProjectRecord, branch: String, isDefault: Bool) -> SpacesDeviceOverviewBuilder.WorkspaceDescriptor {
+            .init(
+                project: project,
+                workspace: WorkspaceRecord(
+                    id: id, projectID: project.id, dir: "/\(project.name)/\(branch)", dirname: nil, branch: branch, isDefault: isDefault,
+                    isArchived: false, isRunning: false, lastLaunchedAt: nil))
+        }
+        // Default branch name ("zzz-main") deliberately sorts last alphabetically to prove default-first wins.
+        let alphaFeature = workspace(id: "alpha-feature", project: alpha, branch: "aaa-feature", isDefault: false)
+        let alphaDefault = workspace(id: "alpha-default", project: alpha, branch: "zzz-main", isDefault: true)
+        let betaDefault = workspace(id: "beta-default", project: beta, branch: "main", isDefault: true)
+
+        let overview = SpacesDeviceOverviewBuilder.build(
+            workspaces: [alphaFeature, betaDefault, alphaDefault], sessions: [])
+
+        // Project order by name (Alpha before Beta); within Alpha the default sorts ahead of the earlier-named feature.
+        XCTAssertEqual(overview.workspaces.map(\.id), ["alpha-default", "alpha-feature", "beta-default"])
+    }
+
     func testMetadataWorkspaceMatchAssignsSessionToStampedWorkspace() {
         let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
         let rootWorkspace = WorkspaceRecord(
