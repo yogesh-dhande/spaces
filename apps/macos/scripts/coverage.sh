@@ -96,7 +96,10 @@ echo "Running SwiftPM coverage tests..."
 set -- test --skip-build --enable-code-coverage --disable-sandbox
 if [ "${SPACES_TEST_PARALLEL:-1}" = "1" ]; then
     workers="${SPACES_TEST_WORKERS:-}"
-    max_auto_workers="${SPACES_TEST_MAX_AUTO_WORKERS:-8}"
+    # Auto worker count is uncapped by default: measured on a 14-core machine, capping at 8
+    # cost 37% of the test run's wall time (56.5s vs 35.4s). SPACES_TEST_MAX_AUTO_WORKERS
+    # remains available to impose a ceiling.
+    max_auto_workers="${SPACES_TEST_MAX_AUTO_WORKERS:-0}"
     if [ -z "$workers" ]; then
         detected_workers="$(sysctl -n hw.logicalcpu 2>/dev/null || echo "")"
         case "$detected_workers" in

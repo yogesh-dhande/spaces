@@ -43,7 +43,9 @@ jobs:
 
   verify:
     needs: publish-ghostty-artifacts
-    if: ${{ always() && github.event_name != 'push' && (needs['publish-ghostty-artifacts'].result == 'success' || needs['publish-ghostty-artifacts'].result == 'skipped') }}
+    # Runs on pull requests AND pushes to main: a post-merge verify failure is the only signal
+    # that main itself broke (e.g. a semantic conflict between two individually-green PRs).
+    if: ${{ always() && (needs['publish-ghostty-artifacts'].result == 'success' || needs['publish-ghostty-artifacts'].result == 'skipped') }}
     runs-on: macos-15
     concurrency:
       group: pr-checks-verify-${{ github.event.pull_request.number || github.ref }}
@@ -93,7 +95,9 @@ jobs:
 
   linux-spacesd-artifact:
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
+    # The x86_64 leg also runs the Linux unit-test lane after the artifact build; its SwiftPM
+    # test build starts cold on a fresh runner, so the ceiling covers both phases.
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -117,6 +121,22 @@ jobs:
             -w /workspace \
             swift:6.2-noble \
             bash -lc 'apt-get update && apt-get install -y curl git xz-utils python3 pkg-config libsqlite3-dev libssl-dev openssl coreutils && apps/macos/scripts/build_linux_spacesd_artifact.sh --arch ${{ matrix.arch }}'
+
+      # The artifact build above stages the Linux libghostty-vt into .local/ghosttyvt/lib-linux,
+      # which is exactly what the unit lane needs; one architecture's run suffices for unit
+      # coverage. The named volumes start empty on a fresh runner — the lane builds its own
+      # test products into them.
+      - name: Run Linux unit-test lane
+        if: ${{ matrix.arch == 'x86_64' }}
+        run: |
+          docker run --rm --init --platform ${{ matrix.docker-platform }} \
+            -v "$PWD":/workspace \
+            -v spaces-linux-src:/root/src \
+            -v spaces-linux-zig:/root/spaces-zig-cache \
+            -v spaces-linux-test-build:/root/spaces-test-build \
+            -e ZIG_LOCAL_CACHE_DIR=/root/spaces-zig-cache/local -e ZIG_GLOBAL_CACHE_DIR=/root/spaces-zig-cache/global \
+            swift:6.2-noble \
+            bash /workspace/apps/macos/scripts/run_linux_tests.sh
 
       - name: Upload Linux spacesd artifact
         uses: actions/upload-artifact@v4
