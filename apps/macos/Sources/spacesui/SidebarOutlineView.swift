@@ -7,22 +7,22 @@ final class SidebarOutlineView: NSOutlineView {
     var onRowMouseDown: ((Int) -> Bool)?
     /// Context menu provider for the right-clicked row; nil falls back to the view's menu.
     var onRowMenu: ((Int) -> NSMenu?)?
-    /// Draws one selected workspace region behind the workspace row and its visible targets.
-    var selectedWorkspaceHighlight: (() -> (frame: NSRect, fill: NSColor, border: NSColor)?)?
+    /// Draws the selected workspace region's leading accent rail, spanning the workspace row and its
+    /// visible targets. The selection reads from the squared teal left rail alone — no fill, no border.
+    var selectedWorkspaceHighlight: (() -> (frame: NSRect, rail: NSColor)?)?
+
+    /// Width of the leading accent rail.
+    private static let selectionRailWidth: CGFloat = 2
 
     override func drawBackground(inClipRect clipRect: NSRect) {
         super.drawBackground(inClipRect: clipRect)
         guard let highlight = selectedWorkspaceHighlight?(), highlight.frame.intersects(clipRect) else { return }
 
-        let fillPath = NSBezierPath(roundedRect: highlight.frame, xRadius: UIRadius.regular, yRadius: UIRadius.regular)
-        highlight.fill.setFill()
-        fillPath.fill()
-
-        let strokeFrame = highlight.frame.insetBy(dx: 0.5, dy: 0.5)
-        let strokePath = NSBezierPath(roundedRect: strokeFrame, xRadius: UIRadius.regular, yRadius: UIRadius.regular)
-        strokePath.lineWidth = 1
-        highlight.border.setStroke()
-        strokePath.stroke()
+        // Selection is a squared teal rail on the leading edge only — no fill, no border.
+        let frame = highlight.frame
+        let railRect = NSRect(x: frame.minX, y: frame.minY, width: Self.selectionRailWidth, height: frame.height)
+        highlight.rail.setFill()
+        NSBezierPath(rect: railRect).fill()
     }
 
     override func mouseDown(with event: NSEvent) {

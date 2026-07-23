@@ -680,6 +680,10 @@ private final class NotificationObserverBag: @unchecked Sendable {
     /// `Theme.primaryButtonFill` / `Theme.primaryButtonText` and are appearance-independent.
     static func applyBrandPrimaryStyle(to button: NSButton, title: String) {
         button.isBordered = false
+        // A borderless NSButton has no bezel for AppKit's default focus ring to hug, so the ring
+        // draws around the title cell instead — a rectangle mismatched with the rounded teal fill.
+        // Suppress it; the teal layer is the button's own affordance.
+        button.focusRingType = .none
         button.wantsLayer = true
         // Same fill/ink in both appearances (see the theme's primary-button tokens).
         button.layer?.backgroundColor = NSColor(themeColor: ActiveTheme.descriptor.dark.primaryButtonFill).cgColor

@@ -54,7 +54,7 @@ public struct GhosttyRemoteSessionStatePayload: Codable, Sendable, Equatable {
 extension GhosttyRemoteSessionStatePayload {
     public var decodedRenderUpdate: GhosttyRenderUpdate? {
         guard let renderUpdate else { return nil }
-        return try? GhosttyRenderUpdateBinaryCodec.decode(renderUpdate)
+        return GhosttyRenderUpdateDecodeCache.decodedUpdate(for: renderUpdate)
     }
 
     public var renderSnapshot: GhosttyTerminalSnapshot? { decodedRenderUpdate?.fullFrame?.snapshot }

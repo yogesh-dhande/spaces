@@ -95,6 +95,7 @@ import workspacecore
     }
 
     private weak var remoteDeviceSSHHostField: NSTextField?
+    private weak var remoteDeviceNameField: NSTextField?
     private weak var remoteDeviceSSHUserField: NSTextField?
     private weak var remoteDeviceSSHPortField: NSTextField?
     /// The collapsible row holding the optional username/port fields. Hidden until the user
@@ -350,6 +351,14 @@ import workspacecore
         sshHostField.setContentHuggingPriority(.defaultLow, for: .horizontal)
         remoteDeviceSSHHostField = sshHostField
         rows.append(sshHostField)
+
+        // Optional display name for the paired device; when left blank the daemon-reported name is used.
+        let nameField = NSTextField()
+        nameField.placeholderString = "Name (optional)"
+        nameField.setAccessibilityIdentifier("remote-device-name")
+        nameField.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        remoteDeviceNameField = nameField
+        rows.append(nameField)
 
         // Username and port are optional (they default to the SSH login and port 22), so they live
         // behind a collapsed "Advanced" disclosure to keep the common case a single host field.
@@ -616,6 +625,7 @@ import workspacecore
         remoteDeviceLinuxInstallCommand = nil
         remoteDeviceInstallBlock?.isHidden = true
         let sshHostText = remoteDeviceSSHHostField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let nameText = remoteDeviceNameField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let sshUserText = remoteDeviceSSHUserField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let sshPortText = remoteDeviceSSHPortField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let bundleID = Bundle.main.bundleIdentifier ?? "dev.usespaces.spaces"
@@ -632,7 +642,7 @@ import workspacecore
                         SpacesRemoteDevicePairingRequest(
                             sshHost: sshHostText, sshUser: Self.normalizedPanelField(sshUserText), sshPort: sshPort,
                             clientInstallationID: clientInstallationID, clientBundleID: bundleID, clientDeviceName: deviceName,
-                            clientAppVersion: appVersion, profile: profile))
+                            clientAppVersion: appVersion, customName: Self.normalizedPanelField(nameText), profile: profile))
                 }.value
                 self?.setRemoteDevicePairingStatus("Connected \(result.name).", isError: false)
                 self?.refreshVisibleDeviceSettingsAfterClientDeviceChange()
@@ -665,6 +675,7 @@ import workspacecore
     func installSpacesOnRemoteDevice() {
         guard !isInstallingRemoteSpaces else { return }
         let sshHostText = remoteDeviceSSHHostField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let nameText = remoteDeviceNameField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let sshUserText = remoteDeviceSSHUserField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let sshPortText = remoteDeviceSSHPortField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let bundleID = Bundle.main.bundleIdentifier ?? "dev.usespaces.spaces"
@@ -686,7 +697,7 @@ import workspacecore
                         SpacesRemoteDevicePairingRequest(
                             sshHost: sshHostText, sshUser: Self.normalizedPanelField(sshUserText), sshPort: sshPort,
                             clientInstallationID: clientInstallationID, clientBundleID: bundleID, clientDeviceName: deviceName,
-                            clientAppVersion: appVersion, profile: profile))
+                            clientAppVersion: appVersion, customName: Self.normalizedPanelField(nameText), profile: profile))
                 }.value
                 guard let self else { return }
                 self.isInstallingRemoteSpaces = false

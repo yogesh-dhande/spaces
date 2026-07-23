@@ -1991,36 +1991,35 @@
         private func broadcastRemoteStatePayload(
             _ payload: GhosttyRemoteSessionStatePayload, startedAt: Date, ownerClient: TerminalClient?, outputByteCount: Int?
         ) {
-            let payloadEncodeStartedAt = Date()
-            let encodedPayload = try? GhosttyRemoteSessionStateCodec.encodeLine(payload)
-            let payloadEncodeMS = TerminalPerformance.elapsedMS(since: payloadEncodeStartedAt)
             stateStreamServer?.broadcast(payload)
-            let payloadBytes = encodedPayload?.count ?? 0
+            trace(
+                "broadcast_state_end reason=\(payload.reason) render_update=\(payload.renderUpdate == nil ? 0 : 1) runtime=\(traceSize(columns: payload.runtimeState?.columns, rows: payload.runtimeState?.rows)) owner_epoch=\(ownerEpoch)"
+            )
+            // Metric emission only; the wire encode happens inside broadcast() on the stream
+            // server's queue. Skip the assembly when no perf log is recording.
+            guard SpacesDeviceTerminalPerformanceLogger.isEnabled() || TerminalPerformance.isEnabled else { return }
             let decodedUpdate = payload.decodedRenderUpdate
             let renderUpdateAttributes = GhosttyRenderFrameMetrics.attributes(
-                reason: payload.reason, frame: decodedUpdate?.fullFrame, payloadByteCount: payloadBytes, payloadEncodeMS: payloadEncodeMS,
+                reason: payload.reason, frame: decodedUpdate?.fullFrame,
                 outputByteCount: outputByteCount, screenStateRevision: payload.screenStateRevision, frameKind: decodedUpdate?.frameKindMetricValue,
                 baseRevision: decodedUpdate?.baseRevision, targetRevision: decodedUpdate?.targetRevision ?? payload.screenStateRevision,
                 operationCount: decodedUpdate?.operationCount, changedCellCount: decodedUpdate?.changedCellCount,
                 scrollOperationCount: decodedUpdate?.scrollOperationCount, fullFrameFallbackReason: decodedUpdate?.fallbackReason)
             logMobileTakeoverPerformance(
-                name: "remote_state_publish", count: payloadBytes,
+                name: "remote_state_publish", count: payload.renderUpdate?.count,
                 attributes: [
                     "reason": payload.reason, "owner_kind": ownerClient?.kind.rawValue ?? "nil", "output_bytes": String(outputByteCount ?? 0),
-                    "payload_bytes": String(payloadBytes), "render_update": payload.renderUpdate == nil ? "0" : "1",
+                    "render_update": payload.renderUpdate == nil ? "0" : "1",
                     "render_update_bytes": String(payload.renderUpdate?.count ?? 0),
                 ])
             logMobileTakeoverPerformance(
-                name: "render_frame_payload_publish", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), count: payloadBytes,
+                name: "render_frame_payload_publish", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), count: payload.renderUpdate?.count,
                 attributes: renderUpdateAttributes)
-            trace(
-                "broadcast_state_end reason=\(payload.reason) render_update=\(payload.renderUpdate == nil ? 0 : 1) runtime=\(traceSize(columns: payload.runtimeState?.columns, rows: payload.runtimeState?.rows)) owner_epoch=\(ownerEpoch)"
-            )
             TerminalPerformance.logMetric(
                 "terminal_remote_state_publish", target: "session=\(launchConfiguration.sessionID)",
                 elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true,
                 detail:
-                    "reason=\(payload.reason) render_update=\(payload.renderUpdate == nil ? 0 : 1) bytes=\(outputByteCount ?? 0) payload_bytes=\(payloadBytes) render_update_bytes=\(payload.renderUpdate?.count ?? 0)"
+                    "reason=\(payload.reason) render_update=\(payload.renderUpdate == nil ? 0 : 1) bytes=\(outputByteCount ?? 0) render_update_bytes=\(payload.renderUpdate?.count ?? 0)"
             )
             TerminalPerformance.logMetric(
                 "terminal_render_frame_payload_publish", target: "session=\(launchConfiguration.sessionID)",

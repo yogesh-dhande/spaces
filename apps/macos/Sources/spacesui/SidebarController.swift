@@ -117,6 +117,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     // Alerts sidebar row
     private var alertsRowView: NSView?
     private var alertsRowStack: NSStackView?
+    private var alertsRowRail: NSView?
     private var alertsRowBadge: NSTextField?
     /// Top-bar warning icon shown while another Spaces instance owns desktop control.
     private(set) weak var desktopControlStatusIcon: NSImageView?
@@ -969,9 +970,10 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         rowBackground.translatesAutoresizingMaskIntoConstraints = false
         rowBackground.wantsLayer = true
         rowBackground.layer?.cornerRadius = UIRadius.regular
-        rowBackground.layer?.borderWidth = isSelected && !usesGroupedWorkspaceSelection ? 1 : 0
+        // Muted selection (design V2+V4) drops the full border everywhere; a selected standalone project row
+        // reads from the neutral fill alone (the grouped case is drawn by the outline view's selection region).
+        rowBackground.layer?.borderWidth = 0
         bindAppearanceReactiveLayer(rowBackground) { [weak self] view in
-            view.layer?.borderColor = self?.sidebarCardBorderColor(isSelected: true).cgColor
             view.layer?.backgroundColor =
                 isSelected && !usesGroupedWorkspaceSelection ? self?.sidebarSelectedCardBackgroundColor().cgColor : NSColor.clear.cgColor
         }
@@ -1554,7 +1556,13 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         return sidebarThemeColor(light: (240, 238, 230), dark: (24, 36, 39), alpha: alpha)
     }
 
-    func sidebarSelectedCardBackgroundColor() -> NSColor { sidebarThemeColor(light: (226, 224, 216), dark: (24, 35, 39), alpha: 0.85) }
+    /// Muted neutral fill for the selected workspace region (design V2+V4): a faint ink/white overlay
+    /// rather than a teal-tinted card, so the leading teal rail is the only accent.
+    func sidebarSelectedCardBackgroundColor() -> NSColor { sidebarThemeColor(light: (0, 0, 0), dark: (255, 255, 255), alpha: 0.06) }
+
+    /// Teal rail drawn on the leading edge of a selected sidebar row/region — the selection's sole accent.
+    /// Matches the focused-pane accent bar so the sidebar and terminal chrome share one accent.
+    func sidebarSelectionRailColor() -> NSColor { sidebarThemeColor(light: (15, 122, 118), dark: (89, 219, 205), alpha: 0.9) }
 
     func sidebarCardBorderColor(isSelected: Bool) -> NSColor {
         if isSelected { return sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184), alpha: 0.28) }
@@ -1705,7 +1713,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         return nil
     }
 
-    private func selectedWorkspaceHighlight(in outlineView: NSOutlineView) -> (frame: NSRect, fill: NSColor, border: NSColor)? {
+    private func selectedWorkspaceHighlight(in outlineView: NSOutlineView) -> (frame: NSRect, rail: NSColor)? {
         guard let selectedWorkspaceID = host.selectedWorkspaceID else { return nil }
 
         var firstRow: Int?
@@ -1736,7 +1744,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         guard verticalFrame.height > 0 else { return nil }
         let highlightFrame = NSRect(
             x: leadingInset, y: verticalFrame.minY, width: max(0, outlineView.bounds.width - leadingInset), height: verticalFrame.height)
-        return (highlightFrame, sidebarSelectedCardBackgroundColor(), sidebarCardBorderColor(isSelected: true))
+        return (highlightFrame, sidebarSelectionRailColor())
     }
 
     func toggleProjectExpanded(projectID: String) {
@@ -2003,9 +2011,21 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         alertsRowStack = stack
 
         row.addSubview(stack)
+        // Selection rail: a squared teal bar shown while the Alerts view is active. It sits on the row's own
+        // leading edge (just left of the bell), not the window edge — a single short row's rail is lost in the
+        // top-left corner, so it is inset here rather than aligned to the outline's window-edge workspace rail.
+        let rail = NSView()
+        rail.translatesAutoresizingMaskIntoConstraints = false
+        rail.wantsLayer = true
+        rail.isHidden = true
+        row.addSubview(rail)
+        alertsRowRail = rail
+
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: row.leadingAnchor), stack.trailingAnchor.constraint(equalTo: row.trailingAnchor),
             stack.topAnchor.constraint(equalTo: row.topAnchor), stack.bottomAnchor.constraint(equalTo: row.bottomAnchor),
+            rail.leadingAnchor.constraint(equalTo: row.leadingAnchor), rail.widthAnchor.constraint(equalToConstant: 2),
+            rail.topAnchor.constraint(equalTo: row.topAnchor), rail.bottomAnchor.constraint(equalTo: row.bottomAnchor),
         ])
 
         let click = NSClickGestureRecognizer(target: host, action: #selector(AppKitController.alertsRowClicked))
@@ -2017,10 +2037,12 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     func updateAlertsRowAppearance() {
         guard let stack = alertsRowStack else { return }
         let isShowingAlerts = host.showingAlerts
-        stack.layer?.borderWidth = isShowingAlerts ? 1 : 0
-        bindAppearanceReactiveLayer(stack) { [weak self] view in
-            view.layer?.backgroundColor = isShowingAlerts ? self?.sidebarSelectedCardBackgroundColor().cgColor : NSColor.clear.cgColor
-            view.layer?.borderColor = self?.sidebarCardBorderColor(isSelected: true).cgColor
+        // Selection reads from the leading teal rail alone (matching the workspace selection) — no fill/border.
+        stack.layer?.borderWidth = 0
+        stack.layer?.backgroundColor = NSColor.clear.cgColor
+        alertsRowRail?.isHidden = !isShowingAlerts
+        if let rail = alertsRowRail {
+            bindAppearanceReactiveLayer(rail) { [weak self] view in view.layer?.backgroundColor = self?.sidebarSelectionRailColor().cgColor }
         }
     }
 }

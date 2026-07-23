@@ -223,6 +223,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private var toggleShortcutSpec: HotkeySpec?
     private var commandPaletteShortcutSpec: HotkeySpec?
     private var shortcutMonitor: Any?
+    private var mouseFocusMonitor: Any?
     private var addWorkspaceShortcutSpec: HotkeySpec?
     private var reloadShortcutSpec: HotkeySpec?
     private var openEditorShortcutSpec: HotkeySpec?
@@ -563,6 +564,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         sidebar.cancelSidebarReloadTask()
         teardownGlobalHotkey()
         if let shortcutMonitor { NSEvent.removeMonitor(shortcutMonitor) }
+        if let mouseFocusMonitor { NSEvent.removeMonitor(mouseFocusMonitor) }
         DistributedNotificationCenter.default().removeObserver(self)
         if let appDidBecomeActiveObserver {
             NotificationCenter.default.removeObserver(appDidBecomeActiveObserver)
@@ -7570,6 +7572,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             try persistProjectFields(refs)
             projectHasUnsavedChanges = false
             reloadData()
+            // Saving is the terminal action for this dialog, so close it; the header X / Escape remain
+            // for dismissing without saving. performClose routes through windowWillClose cleanup.
+            projectSettingsWindow?.performClose(nil)
         } catch { showError(error) }
     }
 
@@ -8858,6 +8863,23 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     private func setupShortcutMonitor() {
+        // A click inside a terminal surface is consumed by that surface, so `PaneView` never sees the
+        // mouseDown and the focused-pane indicator would otherwise update only once the user starts typing
+        // (the keyDown path below). Sync the focused pane after each left click settles the first responder.
+        //
+        // This fires on mouseUP, not mouseDOWN: a focus change rebuilds the pane tree (PaneTreeView.render
+        // re-parents every surface view), and doing that between the surface's mouseDown and mouseUp yanks
+        // the surface out of the hierarchy so AppKit never delivers the mouseUp. The terminal would then miss
+        // its mouse-release and stay stuck in a selection drag on every hover. Waiting for mouseUp lets the
+        // surface complete its press→release pair before the rebuild; the async hop defers the rebuild past
+        // this event's own delivery so the release still lands.
+        mouseFocusMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseUp]) { [weak self] event in
+            DispatchQueue.main.async { [weak self] in
+                guard let self, let content = self.panelCoordinator.contentOwning(responder: NSApp.keyWindow?.firstResponder) else { return }
+                self.panelCoordinator.noteContentFocused(content)
+            }
+            return event
+        }
         shortcutMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { [weak self] event in
             guard let self else { return event }
             if event.type == .flagsChanged { return self.handleLeaderShortcutCaptureFlagsChanged(event: event) ? nil : event }

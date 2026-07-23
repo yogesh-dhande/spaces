@@ -302,7 +302,7 @@ For render-update profiling, run the latency scenario with a fixed sample count,
 apps/macos/Tests/e2e.sh mobile --scenario ios-input-latency --network-profile local --samples 12 --keep-root
 ```
 
-Summarize each preserved `mobile-terminal-performance.jsonl` or `terminal-performance.jsonl` with the latency summary JSON from the same work root. Render-update summaries report total selected payload bytes plus split fields for network send bytes, local publish/receive payload bytes, materialized render-update bytes, frame-kind byte totals, fallback reasons, and drop reasons:
+Summarize each preserved `mobile-terminal-performance.jsonl` or `terminal-performance.jsonl` with the latency summary JSON from the same work root. Render-update summaries report total selected payload bytes plus split fields for network send bytes, local publish/receive render-update bytes, materialized render-update bytes, frame-kind byte totals, fallback reasons, and drop reasons:
 
 ```bash
 apps/macos/Tests/render_update_profile_summary.py \
