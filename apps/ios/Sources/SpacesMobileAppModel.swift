@@ -866,6 +866,11 @@ private enum SpacesMobileMutationTimeoutRecovery {
         // a real connection error at that point).
         guard identity == overviewIdentity else { return }
         connectionNotice = nil
+        // Release the in-flight flag before reconciling rather than letting the `defer` do it after: the
+        // update attempt is over at the deadline, but this refresh is an ordinary overview fetch that
+        // against a still-unreachable device costs its own request timeouts. Holding the flag across it
+        // would keep the Update Daemon button disabled well past the budget the poll just enforced.
+        isApplyingDaemonUpdate = false
         await refresh()
     }
 

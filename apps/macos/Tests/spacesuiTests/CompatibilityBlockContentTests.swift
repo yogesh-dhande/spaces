@@ -4,9 +4,11 @@ import spacesterminalcore
 
 @testable import spacesui
 
-/// Coverage for the pure decisions behind `CompatibilityBlockView`: the nil-status conservative
-/// verdict->remedy fallback, the "no block needed" case, the Check-for-Updates eligibility gate, and the
-/// remedy->copy/button table. None of these touch AppKit, so they run without instantiating any view.
+/// Coverage for the pure decisions behind `CompatibilityBlockView` and `AppKitController`'s
+/// compatibility-block reconciliation: the nil-status conservative verdict->remedy fallback, the "no
+/// block needed" case, the Check-for-Updates eligibility gate, the clear/rerender/leave-alone decision for
+/// a visible block whose device's verdict/status just changed, and the remedy->copy/button table. None of
+/// these touch AppKit, so they run without instantiating any view.
 @Suite struct CompatibilityBlockContentTests {
     // MARK: - blockRemedy
 
@@ -44,6 +46,46 @@ import spacesterminalcore
         #expect(!AppKitController.shouldOfferCheckForUpdatesAction(isLocalDevice: true, updaterAvailable: false))
         #expect(!AppKitController.shouldOfferCheckForUpdatesAction(isLocalDevice: false, updaterAvailable: true))
         #expect(!AppKitController.shouldOfferCheckForUpdatesAction(isLocalDevice: false, updaterAvailable: false))
+    }
+
+    // MARK: - reconcileCompatibilityBlockAction
+
+    @Test func staleInstallGuidanceRerendersOnceADeviceReportsAStagedUpdateWhileStillIncompatible() {
+        // The motivating case: the block told the user to "open Spaces on that Mac and install the
+        // update"; they did, and the daemon is still on the old build (still incompatible) but now
+        // reports the update it just staged. The block must switch to offering "Update Daemon" rather
+        // than repeating stale install-it-yourself guidance the user already acted on.
+        let staged = makeStatus(version: "0.1.0", installedVersion: "0.2.0", protocolVersion: SpacesWireProtocol.version - 1)
+        let action = AppKitController.reconcileCompatibilityBlockAction(
+            isVisibleBlockDevice: true, renderedRemedy: .installUpdateOnDevice(daemonVersion: "0.1.0"), verdict: .daemonTooOld, status: staged)
+        #expect(action == .rerender(.applyStagedUpdate(daemonVersion: "0.1.0", installedVersion: "0.2.0")))
+    }
+
+    @Test func stagedUpdateBlockClearsOnceTheDeviceReportsCompatible() {
+        let compatible = makeStatus(version: "0.2.0", installedVersion: nil, protocolVersion: SpacesWireProtocol.version)
+        let action = AppKitController.reconcileCompatibilityBlockAction(
+            isVisibleBlockDevice: true, renderedRemedy: .applyStagedUpdate(daemonVersion: "0.1.0", installedVersion: "0.2.0"), verdict: .compatible,
+            status: compatible)
+        #expect(action == .clear)
+    }
+
+    @Test func unchangedRemedyIsLeftAlone() {
+        // Rebuilding the card on every sidebar tick would be wasteful and would fight anything transient
+        // in the pane (e.g. focus), so an identical remedy must not trigger a re-render.
+        let nothingStaged = makeStatus(version: "0.1.0", installedVersion: nil, protocolVersion: SpacesWireProtocol.version - 1)
+        let action = AppKitController.reconcileCompatibilityBlockAction(
+            isVisibleBlockDevice: true, renderedRemedy: .installUpdateOnDevice(daemonVersion: "0.1.0"), verdict: .daemonTooOld, status: nothingStaged)
+        #expect(action == .leaveAlone)
+    }
+
+    @Test func aDeviceThatDoesNotOwnTheVisibleBlockIsLeftAlone() {
+        // A background refresh for some other device's section must never touch a block that belongs to
+        // a different device, even when that other device's own facts would otherwise call for a
+        // re-render.
+        let staged = makeStatus(version: "0.1.0", installedVersion: "0.2.0", protocolVersion: SpacesWireProtocol.version - 1)
+        let action = AppKitController.reconcileCompatibilityBlockAction(
+            isVisibleBlockDevice: false, renderedRemedy: .installUpdateOnDevice(daemonVersion: "0.1.0"), verdict: .daemonTooOld, status: staged)
+        #expect(action == .leaveAlone)
     }
 
     // MARK: - Remedy -> copy/button table
