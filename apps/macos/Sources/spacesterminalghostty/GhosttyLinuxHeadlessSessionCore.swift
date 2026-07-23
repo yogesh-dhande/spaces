@@ -994,25 +994,21 @@
             guard let payload = makeStatePayload(reason: reason, exportMode: .streamDeltaAllowed) else { return }
             stateStreamServer?.broadcast(payload)
             guard performanceLoggingEnabled, let startedAt else { return }
-            let payloadEncodeStartedAt = Date()
-            let encodedPayload = try? GhosttyRemoteSessionStateCodec.encodeLine(payload)
-            let payloadEncodeMS = TerminalPerformance.elapsedMS(since: payloadEncodeStartedAt)
-            let payloadBytes = encodedPayload?.count ?? 0
             let decodedUpdate = payload.decodedRenderUpdate
             let attributes = GhosttyRenderFrameMetrics.attributes(
-                reason: payload.reason, frame: decodedUpdate?.fullFrame, payloadByteCount: payloadBytes, payloadEncodeMS: payloadEncodeMS,
+                reason: payload.reason, frame: decodedUpdate?.fullFrame,
                 outputByteCount: outputByteCount, screenStateRevision: payload.screenStateRevision, frameKind: decodedUpdate?.frameKindMetricValue,
                 baseRevision: decodedUpdate?.baseRevision, targetRevision: decodedUpdate?.targetRevision ?? payload.screenStateRevision,
                 operationCount: decodedUpdate?.operationCount, changedCellCount: decodedUpdate?.changedCellCount,
                 scrollOperationCount: decodedUpdate?.scrollOperationCount, fullFrameFallbackReason: decodedUpdate?.fallbackReason)
             logMobileTakeoverPerformance(
-                name: "remote_state_publish", count: payloadBytes,
+                name: "remote_state_publish", count: payload.renderUpdate?.count,
                 attributes: [
-                    "reason": payload.reason, "owner_kind": activeOwnerClient()?.kind.rawValue ?? "nil", "payload_bytes": String(payloadBytes),
+                    "reason": payload.reason, "owner_kind": activeOwnerClient()?.kind.rawValue ?? "nil",
                     "render_update": payload.renderUpdate == nil ? "0" : "1", "render_update_bytes": String(payload.renderUpdate?.count ?? 0),
                 ])
             logMobileTakeoverPerformance(
-                name: "render_frame_payload_publish", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), count: payloadBytes,
+                name: "render_frame_payload_publish", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), count: payload.renderUpdate?.count,
                 attributes: attributes)
         }
 
