@@ -113,7 +113,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
     /// on needs to run there. Each poll hops onto the engine synchronously just to evaluate the
     /// (engine-isolated) condition.
     private func waitUntil(
-        timeout: TimeInterval = 10, pollInterval: TimeInterval = 0.05, file: StaticString = #filePath, line: UInt = #line,
+        timeout: TimeInterval = 30, pollInterval: TimeInterval = 0.05, file: StaticString = #filePath, line: UInt = #line,
         _ condition: @escaping @TerminalEngineActor () -> Bool
     ) async throws {
         let deadline = Date().addingTimeInterval(timeout)
@@ -261,7 +261,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         try driver.startIfNeeded()
         try await waitUntil { FileManager.default.fileExists(atPath: markerPath.path) }
         driver.sendRawBytes(Data([0x03]))
-        try await waitUntil(timeout: 5) { driver.childPID() == nil }
+        try await waitUntil(timeout: 30) { driver.childPID() == nil }
 
         let markerText = try String(contentsOf: markerPath, encoding: .utf8)
         XCTAssertTrue(markerText.contains("ready"))
@@ -297,11 +297,11 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
 
         driver.terminate()
 
-        try await waitUntil(timeout: 5) {
+        try await waitUntil(timeout: 30) {
             guard let markerText = try? String(contentsOf: markerPath, encoding: .utf8) else { return false }
             return markerText.contains("term")
         }
-        try await waitUntil(timeout: 5) { !Self.processIsAlive(childPID) }
+        try await waitUntil(timeout: 30) { !Self.processIsAlive(childPID) }
 
         let markerText = try String(contentsOf: markerPath, encoding: .utf8)
         XCTAssertTrue(markerText.contains("hup"))

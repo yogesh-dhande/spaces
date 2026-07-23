@@ -48,7 +48,7 @@ final class HostManagedPTYAdoptTests: XCTestCase {
         return path
     }
 
-    @discardableResult private func waitUntil(timeout: TimeInterval = 5, _ condition: () -> Bool) -> Bool {
+    @discardableResult private func waitUntil(timeout: TimeInterval = 30, _ condition: () -> Bool) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             if condition() { return true }

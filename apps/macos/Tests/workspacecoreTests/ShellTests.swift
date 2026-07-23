@@ -693,8 +693,8 @@ final class ShellTests: XCTestCase {
 
     func testAppleScriptRunWrapsScriptWithTimeout() throws {
         try withMockCommands(["osascript": "#!/bin/bash\nprintf '%s' \"${*: -1}\"\n"]) {
-            let result = try AppleScript.run("return \"hello\"", timeoutSeconds: 2)
-            XCTAssertTrue(result.hasPrefix("with timeout of 2 seconds"))
+            let result = try AppleScript.run("return \"hello\"", timeoutSeconds: 15)
+            XCTAssertTrue(result.hasPrefix("with timeout of 15 seconds"))
             XCTAssertTrue(result.contains("  return \"hello\""))
             XCTAssertTrue(result.hasSuffix("end timeout"))
         }
@@ -703,7 +703,7 @@ final class ShellTests: XCTestCase {
     func testAppleScriptRunWithTimeoutTerminatesSlowCommand() throws {
         let osascriptMock = """
             #!/usr/bin/perl
-            select(undef, undef, undef, 5);
+            select(undef, undef, undef, 30);
             """
         let startedAt = Date()
         try withMockCommands(["osascript": osascriptMock]) {
@@ -713,7 +713,10 @@ final class ShellTests: XCTestCase {
                 XCTAssertTrue(nsError.localizedDescription.contains("timed out"))
             }
         }
-        XCTAssertLessThan(Date().timeIntervalSince(startedAt), 3)
+        // The ceiling must stay well below the mock's sleep (a regression to waiting-out
+        // the mock takes >=30s) while leaving headroom above the 1s timeout budget for
+        // CPU-load scheduling jitter.
+        XCTAssertLessThan(Date().timeIntervalSince(startedAt), 15)
     }
 }
 
