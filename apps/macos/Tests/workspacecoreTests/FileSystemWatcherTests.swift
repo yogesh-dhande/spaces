@@ -1,6 +1,7 @@
 // FileSystemWatcher is macOS-only (FSEvents); keep its tests off non-macOS builds.
 #if os(macOS)
 
+    import CoreServices
     import Foundation
     import XCTest
 
@@ -8,36 +9,63 @@
 
     final class FileSystemWatcherTests: XCTestCase {
         /// Once per process: confirms fseventsd on this host actually delivers events within a
-        /// generous window, independent of anything under test. #196 found the FSEvents-dependent
-        /// tests below can miss even a very wide per-test ceiling when the machine-wide fseventsd
-        /// daemon itself is degraded — widening those ceilings alone can't tell "product
-        /// regression" apart from "this host's fseventsd is unhealthy". Computed once and reused
-        /// so every FSEvents test pays for the diagnosis, not a repeated 30s probe.
+        /// generous window. #196 found the FSEvents-dependent tests below can miss even a very
+        /// wide per-test ceiling when the machine-wide fseventsd daemon itself is degraded —
+        /// widening those ceilings alone can't tell "product regression" apart from "this host's
+        /// fseventsd is unhealthy". The probe deliberately uses the raw FSEventStream C API, not
+        /// FileSystemWatcher: if the watcher itself regresses, its tests must fail as product
+        /// failures instead of being misdiagnosed here as host degradation. Computed once and
+        /// reused so every FSEvents test pays for the diagnosis, not a repeated 30s probe.
         private static let fsEventsLivenessFailure: String? = {
-            // Boxes the error thrown inside the Task below; DispatchSemaphore.wait() below the
-            // Task establishes the happens-before edge that makes reading it back race-free.
-            final class ErrorBox: @unchecked Sendable { var error: Error? }
+            final class ProbeBox {
+                let delivered = DispatchSemaphore(value: 0)
+            }
             do {
                 let directory = try makeTempDirectory()
-                let delivered = DispatchSemaphore(value: 0)
-                let watcher = FileSystemWatcher(paths: [directory.path], latency: 0.1) { paths in
-                    if paths.contains(where: { $0.contains("liveness-probe.txt") }) { delivered.signal() }
-                }
+                let box = ProbeBox()
+                return withExtendedLifetime(box) {
+                    var context = FSEventStreamContext(
+                        version: 0, info: Unmanaged.passUnretained(box).toOpaque(), retain: nil, release: nil,
+                        copyDescription: nil)
+                    // Any delivery for the probe directory proves fseventsd is alive; no need to
+                    // inspect paths or flags.
+                    let callback: FSEventStreamCallback = { _, info, _, _, _, _ in
+                        guard let info else { return }
+                        Unmanaged<ProbeBox>.fromOpaque(info).takeUnretainedValue().delivered.signal()
+                    }
+                    guard
+                        let stream = FSEventStreamCreate(
+                            kCFAllocatorDefault, callback, &context, [directory.path] as CFArray,
+                            FSEventStreamEventId(kFSEventStreamEventIdSinceNow), 0.1,
+                            FSEventStreamCreateFlags(kFSEventStreamCreateFlagNone))
+                    else { return "FSEventStreamCreate failed" }
 
-                let started = DispatchSemaphore(value: 0)
-                let startFailure = ErrorBox()
-                Task {
-                    do { try await watcher.start() } catch { startFailure.error = error }
-                    started.signal()
-                }
-                started.wait()
-                if let error = startFailure.error { return "failed to start watcher: \(error)" }
+                    let queue = DispatchQueue(label: "test.fsevents-liveness-probe")
+                    FSEventStreamSetDispatchQueue(stream, queue)
+                    guard FSEventStreamStart(stream) else {
+                        FSEventStreamInvalidate(stream)
+                        FSEventStreamRelease(stream)
+                        return "FSEventStreamStart failed"
+                    }
 
-                try "probe".write(to: directory.appendingPathComponent("liveness-probe.txt"), atomically: true, encoding: .utf8)
-                let result = delivered.wait(timeout: .now() + 30)
-                watcher.stop()
-                guard result == .success else { return "no FSEvents callback delivered within 30s" }
-                return nil
+                    do {
+                        try "probe".write(
+                            to: directory.appendingPathComponent("liveness-probe.txt"), atomically: true, encoding: .utf8)
+                    } catch {
+                        FSEventStreamStop(stream)
+                        FSEventStreamInvalidate(stream)
+                        FSEventStreamRelease(stream)
+                        return "probe setup failed: \(error)"
+                    }
+                    let result = box.delivered.wait(timeout: .now() + 30)
+                    FSEventStreamStop(stream)
+                    FSEventStreamInvalidate(stream)
+                    FSEventStreamRelease(stream)
+                    // Drain any in-flight callback so `box` cannot be touched after this scope.
+                    queue.sync {}
+                    guard result == .success else { return "no FSEvents callback delivered within 30s" }
+                    return nil
+                }
             } catch {
                 return "probe setup failed: \(error)"
             }
