@@ -94,10 +94,10 @@ import Testing
         #expect(!close.isEnabled)
     }
 
-    /// Tab separators are drawn between neighboring tabs, not after the final tab.
-    @Test func tabSeparatorsRenderBetweenTabs() {
+    /// Tabs render flush with no separators; the selected tab reads from its full-height chip instead.
+    @Test func tabsRenderWithoutSeparators() {
         let (bar, _) = makeBarInWindow()
-        #expect(view(withAccessibilityIdentifier: "tab-separator-t1", in: bar) != nil)
+        #expect(view(withAccessibilityIdentifier: "tab-separator-t1", in: bar) == nil)
         #expect(view(withAccessibilityIdentifier: "tab-separator-t2", in: bar) == nil)
     }
 

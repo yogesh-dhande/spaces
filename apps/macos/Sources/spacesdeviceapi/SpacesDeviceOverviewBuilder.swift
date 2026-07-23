@@ -65,6 +65,10 @@ struct SpacesDeviceOverviewBuilder {
 
         let workspaceSummaries = workspaces.sorted { lhs, rhs in
             if lhs.project.name != rhs.project.name { return lhs.project.name.localizedStandardCompare(rhs.project.name) == .orderedAscending }
+            // Pin each project's default workspace to the top so every client (macOS sidebar, iOS) renders the
+            // same order. macOS re-applies this same tiebreaker in its sidebar; making it canonical here keeps the
+            // clients from diverging and lets iOS inherit the order verbatim.
+            if lhs.workspace.isDefault != rhs.workspace.isDefault { return lhs.workspace.isDefault }
             return lhs.workspace.displayName.localizedStandardCompare(rhs.workspace.displayName) == .orderedAscending
         }.map { descriptor in
             let runtimeRows = runtimeRows(for: descriptor, availableSessionIDs: availableSessionIDs, sessionsByID: sessionEntriesByID)
