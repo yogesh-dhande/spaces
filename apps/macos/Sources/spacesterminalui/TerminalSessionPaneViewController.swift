@@ -130,6 +130,9 @@ private final class NotificationObserverBag: @unchecked Sendable {
     let defersInitialOwnerClientAttach: Bool
     let copySelectionAction: (@MainActor () -> Bool)?
     let pasteClipboardAction: (@MainActor () -> Bool)?
+    /// Unit tests inject a uniquely-named pasteboard here so copy/paste tests never touch the user's
+    /// real clipboard. Nil in the app, where copy/paste keep using `NSPasteboard.general`.
+    public var pasteboardOverrideForTesting: NSPasteboard?
     private let ownerWindowFocusAction: (@MainActor (NSWindow?) -> Void)?
     private let ownerSurfaceFocusAction: (@MainActor (Bool) -> Void)?
     let onWindowFocus: (@MainActor (String) -> Void)?

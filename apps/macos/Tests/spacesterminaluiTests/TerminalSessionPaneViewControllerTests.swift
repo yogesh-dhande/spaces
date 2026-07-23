@@ -1551,6 +1551,9 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         let controller = makeGhosttyController(
             sessionID: "session-viewer-final-output", paths: paths, preferredAttachmentMode: .viewer, host: fakeHost, attachClientAction: { _, _ in },
             detachClientAction: { _ in })
+        let pasteboard = NSPasteboard(name: NSPasteboard.Name("pane-copy-\(UUID().uuidString)"))
+        defer { pasteboard.releaseGlobally() }
+        controller.pasteboardOverrideForTesting = pasteboard
 
         XCTAssertTrue(controller.debugShowsTerminalSurface)
         XCTAssertFalse(controller.debugShowsTextRenderer)
@@ -1560,10 +1563,10 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         XCTAssertTrue(normalizedRenderedOutput(controller.debugStateDump().renderedOutput).contains("command failed"))
         XCTAssertFalse(normalizedRenderedOutput(controller.debugStateDump().renderedOutput).contains("output log tail should not render"))
         XCTAssertEqual(normalizedRenderedOutput(controller.debugRenderedOutput), "command failed")
-        NSPasteboard.general.clearContents()
+        pasteboard.clearContents()
         controller.selectAll(nil)
         controller.copy(nil)
-        XCTAssertEqual(NSPasteboard.general.string(forType: .string), "command failed")
+        XCTAssertEqual(pasteboard.string(forType: .string), "command failed")
         XCTAssertEqual(controller.debugRendererSummary, "Renderer: final Ghostty render")
     }
 
@@ -2453,12 +2456,15 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
                 createdAt: "2026-05-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             .init(sessionID: "session-fallback", servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-05-09T00:00:01Z"), paths: paths)
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString("paste-from-test", forType: .string)
 
         let controller = TerminalSessionPaneViewController(
             sessionID: "session-fallback", paths: paths, stateProvider: PersistenceBackedTerminalSessionStateProvider(paths: paths),
             attachClientAction: persistenceBackedAttachAction(paths), detachClientAction: persistenceBackedDetachAction(paths))
+        let pasteboard = NSPasteboard(name: NSPasteboard.Name("owner-status-paste-\(UUID().uuidString)"))
+        defer { pasteboard.releaseGlobally() }
+        controller.pasteboardOverrideForTesting = pasteboard
+        pasteboard.clearContents()
+        pasteboard.setString("paste-from-test", forType: .string)
 
         controller.paste(nil)
 

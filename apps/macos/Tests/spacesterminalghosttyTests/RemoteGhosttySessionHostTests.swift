@@ -163,14 +163,11 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         var sentText: [(String, Bool)] = []
         mirrorView.onSendText = { text, asPaste in sentText.append((text, asPaste)) }
         mirrorView.acceptsTerminalInput = true
-        let pasteboard = NSPasteboard.general
-        let previousText = pasteboard.string(forType: .string)
+        let pasteboard = NSPasteboard(name: NSPasteboard.Name("remote-mirror-paste-\(UUID().uuidString)"))
+        defer { pasteboard.releaseGlobally() }
+        mirrorView.pasteboardOverrideForTesting = pasteboard
         pasteboard.clearContents()
         pasteboard.setString("line one\nline two", forType: .string)
-        defer {
-            pasteboard.clearContents()
-            if let previousText { pasteboard.setString(previousText, forType: .string) }
-        }
 
         XCTAssertTrue(mirrorView.pasteClipboardContents())
 

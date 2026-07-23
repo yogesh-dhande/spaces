@@ -59,9 +59,19 @@ extension TerminalSessionPaneViewController {
                     .copySelectionToPasteboard() ?? false
                 if copied { return }
             }
-            outputView.copy(sender)
-        case .ghosttyTakeoverStatus, .unavailable, .textView: outputView.copy(sender)
+            copyOutputViewSelection(sender)
+        case .ghosttyTakeoverStatus, .unavailable, .textView: copyOutputViewSelection(sender)
         }
+    }
+
+    private func copyOutputViewSelection(_ sender: Any?) {
+        guard let pasteboard = pasteboardOverrideForTesting else {
+            outputView.copy(sender)
+            return
+        }
+        pasteboard.clearContents()
+        let selectedText = outputView.textStorage?.attributedSubstring(from: outputView.selectedRange()).string ?? ""
+        pasteboard.writeObjects([selectedText as NSString])
     }
 
     @objc public func paste(_ sender: Any?) {
@@ -97,7 +107,7 @@ extension TerminalSessionPaneViewController {
                 NSSound.beep()
                 return
             }
-            guard let text = NSPasteboard.general.string(forType: .string), !text.isEmpty else {
+            guard let text = (pasteboardOverrideForTesting ?? .general).string(forType: .string), !text.isEmpty else {
                 NSSound.beep()
                 return
             }
