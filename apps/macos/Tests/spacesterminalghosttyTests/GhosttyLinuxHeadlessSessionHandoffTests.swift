@@ -629,6 +629,9 @@
             try await waitAsync { (try? String(contentsOfFile: paths.outputPath))?.contains(marker) == true }
 
             TerminalEngineActor.runSynchronously { core.terminate() }
+            // terminate() enqueues its exited-state write off the engine; block on the persistence
+            // queue before reading the durable mirror or this read races the async commit.
+            await core.drainPersistenceForShutdown()
 
             let persistedRuntimeState = try TerminalSessionPersistence.readRuntimeState(paths: paths)
             let finalPayload = try TerminalSessionPersistence.readRemoteSessionState(paths: paths)
