@@ -2011,9 +2011,9 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         alertsRowStack = stack
 
         row.addSubview(stack)
-        // Selection rail matching the workspace selection: a squared teal bar on the sidebar's leading edge.
-        // The row is inset 8pt from the sidebar edge, but the outline's workspace rail sits at the sidebar
-        // edge (x=0), so the rail is offset -8 to align with it. Shown only while the Alerts view is active.
+        // Selection rail: a squared teal bar shown while the Alerts view is active. It sits on the row's own
+        // leading edge (just left of the bell), not the window edge — a single short row's rail is lost in the
+        // top-left corner, so it is inset here rather than aligned to the outline's window-edge workspace rail.
         let rail = NSView()
         rail.translatesAutoresizingMaskIntoConstraints = false
         rail.wantsLayer = true
@@ -2024,7 +2024,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: row.leadingAnchor), stack.trailingAnchor.constraint(equalTo: row.trailingAnchor),
             stack.topAnchor.constraint(equalTo: row.topAnchor), stack.bottomAnchor.constraint(equalTo: row.bottomAnchor),
-            rail.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: -8), rail.widthAnchor.constraint(equalToConstant: 2),
+            rail.leadingAnchor.constraint(equalTo: row.leadingAnchor), rail.widthAnchor.constraint(equalToConstant: 2),
             rail.topAnchor.constraint(equalTo: row.topAnchor), rail.bottomAnchor.constraint(equalTo: row.bottomAnchor),
         ])
 
