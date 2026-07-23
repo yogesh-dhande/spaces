@@ -747,10 +747,15 @@
                     try FileManager.default.createDirectory(at: cacheRoot, withIntermediateDirectories: true)
                     if url.lastPathComponent == "slow.png" {
                         await probe.markSlowStarted()
-                        // Ordering against the fresher request below is already deterministic via the probe's
-                        // start/cancel continuations, not this duration — it only needs to still be suspended
-                        // (rather than having completed naturally) when the fresher request cancels this task.
-                        do { try await Task.sleep(for: .milliseconds(500)) } catch {
+                        // The slow download must still be suspended when the fresher request cancels it, so
+                        // only cancellation should end this sleep; the ceiling exists solely so a cancellation
+                        // regression fails in bounded time. If the sleep completes naturally, fail loudly AND
+                        // still mark the cancel so waitForSlowCancel() below unblocks instead of hanging.
+                        do {
+                            try await Task.sleep(for: .seconds(30))
+                            XCTFail("slow download completed naturally; the fresher request never cancelled it")
+                            await probe.markSlowCancelled()
+                        } catch {
                             await probe.markSlowCancelled()
                             throw error
                         }
@@ -2060,7 +2065,10 @@
             let releaseFree = DispatchSemaphore(value: 0)
             defer { releaseFree.signal() }
             GhosttyRemoteTerminalHostView.sessionFreeHandlerForTesting = { _ in
-                releaseFree.wait()
+                // Bounded wait: if prepareForDismantle() ever regresses to running this handler
+                // synchronously, the test thread would otherwise block on its own gate forever;
+                // the timeout turns that regression into a failed elapsed-time assertion instead.
+                _ = releaseFree.wait(timeout: .now() + 30)
                 freeCompleted.fulfill()
             }
             defer { GhosttyRemoteTerminalHostView.sessionFreeHandlerForTesting = originalSessionFreeHandler }
