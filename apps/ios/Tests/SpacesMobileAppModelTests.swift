@@ -214,7 +214,7 @@
         func testBrowserProxyStopReturnsProxyToIdle() async throws {
             let settings = SpacesMobileConnectionSettings()
             let client = SpacesDeviceAPIClient(settings: settings) { _ in SpacesDeviceAPIResponse(ok: true, message: "ok") }
-            let proxyPort = UInt16.random(in: 49_152...65_500)
+            let proxyPort = try freeLocalTCPPort()
             let proxy = SpacesMobileBrowserProxy(port: proxyPort, installationID: settings.installationID)
             let model = SpacesMobileAppModel(settings: settings, bridgeClient: client, browserProxy: proxy)
 
@@ -606,7 +606,7 @@
             XCTAssertEqual(request?.commandName, "openWorkspaceTerminal")
         }
 
-        func testMutationOverviewUpdatesBrowserProxyRoutes() async {
+        func testMutationOverviewUpdatesBrowserProxyRoutes() async throws {
             let refreshedOverview = makeOverview(
                 featureAssignedPorts: [SpacesDeviceAssignedPort(name: "web", port: 3_000, url: "http://web.feature.localhost:3000")],
                 featureConfig: SpacesDeviceWorkspaceConfig(resolvedBrowserSessions: [
@@ -623,7 +623,7 @@
                     ok: true, message: "Created workspace.",
                     result: .mutation(SpacesDeviceMutationResult(overview: refreshedOverview, workspaceID: "workspace-feature")))
             }
-            let proxy = SpacesMobileBrowserProxy(port: UInt16.random(in: 49_152...65_500), installationID: settings.installationID)
+            let proxy = SpacesMobileBrowserProxy(port: try freeLocalTCPPort(), installationID: settings.installationID)
             let model = SpacesMobileAppModel(settings: settings, bridgeClient: client, browserProxy: proxy)
             model.activeDeviceID = "device-1"
             model.pairedDevices = [
