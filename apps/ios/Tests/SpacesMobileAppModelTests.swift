@@ -734,7 +734,7 @@
                 }
             }
             let model = SpacesMobileAppModel(
-                settings: settings, bridgeClient: client, daemonUpdatePollInterval: .milliseconds(1), daemonUpdatePollAttempts: 5)
+                settings: settings, bridgeClient: client, daemonUpdatePollInterval: .milliseconds(1), daemonUpdateTimeout: .milliseconds(200))
 
             await model.requestDaemonUpdate()
 
@@ -770,7 +770,7 @@
                 }
             }
             let model = SpacesMobileAppModel(
-                settings: settings, bridgeClient: client, daemonUpdatePollInterval: .milliseconds(1), daemonUpdatePollAttempts: 5)
+                settings: settings, bridgeClient: client, daemonUpdatePollInterval: .milliseconds(1), daemonUpdateTimeout: .milliseconds(200))
 
             await model.requestDaemonUpdate()
 
@@ -786,19 +786,26 @@
             let settings = SpacesMobileConnectionSettings()
             let pendingStatus = daemonStatus(protocolVersion: SpacesWireProtocol.version, installedVersion: "2.0.0")
             let overview = makeOverview(daemonStatus: pendingStatus)
+            // Each status probe is slow, standing in for the request timeout a genuinely unreachable
+            // device burns. This is what separates a wall-clock budget from an attempt count: polling a
+            // fixed number of times would cost attempts × probe duration, many times the stated budget.
+            let probeDuration = Duration.milliseconds(100)
             let client = SpacesDeviceAPIClient(settings: settings) { request in
                 await recorder.append(request)
                 switch request.commandName {
                 case "requestDaemonRestart": return SpacesDeviceAPIResponse(ok: true, message: "ok")
-                case "daemonStatus": return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .daemonStatus(pendingStatus))
+                case "daemonStatus":
+                    try? await Task.sleep(for: probeDuration)
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .daemonStatus(pendingStatus))
                 case "overview": return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview))
                 default: return SpacesDeviceAPIResponse(ok: true, message: "ok")
                 }
             }
+            let budget = Duration.milliseconds(200)
             let model = SpacesMobileAppModel(
-                settings: settings, bridgeClient: client, daemonUpdatePollInterval: .milliseconds(1), daemonUpdatePollAttempts: 3)
+                settings: settings, bridgeClient: client, daemonUpdatePollInterval: .milliseconds(1), daemonUpdateTimeout: budget)
 
-            await model.requestDaemonUpdate()
+            let elapsed = await ContinuousClock().measure { await model.requestDaemonUpdate() }
 
             XCTAssertNil(model.connectionNotice, "a timed-out poll must not invent a failure message")
             XCTAssertNil(model.errorMessage)
@@ -806,7 +813,11 @@
             // Still pending: the final refresh renders what is actually true rather than a stuck notice.
             XCTAssertTrue(model.daemonUpdatePending)
             let daemonStatusAttempts = await recorder.snapshot().filter { $0.commandName == "daemonStatus" }.count
-            XCTAssertEqual(daemonStatusAttempts, 3)
+            XCTAssertGreaterThanOrEqual(daemonStatusAttempts, 1, "the poll must probe at least once before giving up")
+            // The budget bounds the poll, plus at most one probe already in flight when it expires. The
+            // generous slack keeps this from flaking on a loaded machine while still failing an
+            // implementation that polls a fixed number of times (which would run several times longer).
+            XCTAssertLessThan(elapsed, budget + probeDuration + .milliseconds(600), "the poll must stop on its time budget")
         }
 
         /// Switching the active device mid-poll (modeled here the same way other identity-change tests
@@ -830,7 +841,7 @@
                 }
             }
             let model = SpacesMobileAppModel(
-                settings: settings, bridgeClient: client, daemonUpdatePollInterval: .milliseconds(1), daemonUpdatePollAttempts: 5)
+                settings: settings, bridgeClient: client, daemonUpdatePollInterval: .milliseconds(1), daemonUpdateTimeout: .milliseconds(200))
 
             let updateTask = Task { await model.requestDaemonUpdate() }
             // Wait until the first poll attempt is gated on the device's daemonStatus fetch.

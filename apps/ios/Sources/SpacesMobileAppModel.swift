@@ -448,9 +448,8 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// True while a requested daemon update has been sent and this app is polling the device for the
     /// update to land (see `requestDaemonUpdate()`). Kept separate from `isMutating`: that flag gates
     /// one-shot mutations and is released as soon as their single RPC returns, but the update poll runs
-    /// for up to `daemonUpdatePollAttempts * daemonUpdatePollInterval`, and holding `isMutating` for
-    /// that whole window would freeze every other mutating control in the app. Only the Update Daemon
-    /// button reads this flag.
+    /// for up to `daemonUpdateTimeout`, and holding `isMutating` for that whole window would freeze
+    /// every other mutating control in the app. Only the Update Daemon button reads this flag.
     var isApplyingDaemonUpdate = false
     var isShowingConnectionSettings = false
     var isShowingWorkspaceCreateSheet = false
@@ -507,9 +506,12 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// Interval between daemon-status polls in `requestDaemonUpdate()`. Injectable so tests can shrink
     /// it instead of sleeping through the production wait.
     @ObservationIgnored private let daemonUpdatePollInterval: Duration
-    /// Attempts `requestDaemonUpdate()` polls before giving up (paired with `daemonUpdatePollInterval`,
-    /// production default ~30s total). Injectable for the same reason.
-    @ObservationIgnored private let daemonUpdatePollAttempts: Int
+    /// Wall-clock budget `requestDaemonUpdate()` polls for before giving up (production default 30s).
+    /// Expressed as time rather than an attempt count because each attempt's own request timeout
+    /// (`fetchDaemonStatus`'s 8s) means the two are not proportional — a fixed attempt count against an
+    /// unreachable device would cost attempts × (interval + request timeout), several times the stated
+    /// budget. Injectable so tests can shrink it instead of sleeping through the production wait.
+    @ObservationIgnored private let daemonUpdateTimeout: Duration
 
     init() {
         #if DEBUG
@@ -523,7 +525,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         let deviceName = UIDevice.current.name
         browserProxy = SpacesMobileBrowserProxy(installationID: deviceState.settings.installationID, deviceName: deviceName)
         daemonUpdatePollInterval = .seconds(3)
-        daemonUpdatePollAttempts = 10
+        daemonUpdateTimeout = .seconds(30)
         // The real settings are persisted regardless of Demo Mode; the demo device is never written to
         // disk, so a launch that lands in Demo Mode still keeps the real records and settings intact.
         SpacesMobileSettingsStore.save(deviceState.settings)
@@ -553,7 +555,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
 
     init(
         settings: SpacesMobileConnectionSettings, bridgeClient: SpacesDeviceAPIClient, browserProxy: SpacesMobileBrowserProxy? = nil,
-        daemonUpdatePollInterval: Duration = .seconds(3), daemonUpdatePollAttempts: Int = 10
+        daemonUpdatePollInterval: Duration = .seconds(3), daemonUpdateTimeout: Duration = .seconds(30)
     ) {
         self.settings = settings
         pairedDevices = []
@@ -563,7 +565,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         commandChannel = bridgeClient.makeCommandChannel()
         self.browserProxy = browserProxy ?? SpacesMobileBrowserProxy(installationID: settings.installationID)
         self.daemonUpdatePollInterval = daemonUpdatePollInterval
-        self.daemonUpdatePollAttempts = daemonUpdatePollAttempts
+        self.daemonUpdateTimeout = daemonUpdateTimeout
     }
 
     /// The workspaces this client lists: neither archived nor hidden, matching the Mac sidebar's
@@ -816,6 +818,13 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// during the poll are swallowed rather than surfaced as a connection error — they just mean "not
     /// back yet."
     ///
+    /// The poll is bounded by `daemonUpdateTimeout`, checked against a `ContinuousClock` deadline before
+    /// each attempt rather than a fixed attempt count — see `daemonUpdateTimeout`'s doc comment. That
+    /// bound is not exact: one probe already in flight when the deadline passes still runs to
+    /// completion (or its own request timeout), because the loop has no way to abandon a request it is
+    /// already awaiting, so the wall-clock cost of a fully unreachable device can exceed the stated
+    /// budget by up to one request's timeout.
+    ///
     /// Every step is guarded against `overviewIdentity`, captured once up front: a device switch or
     /// removal mid-poll must not publish the old device's status onto whatever is now active.
     func requestDaemonUpdate() async {
@@ -832,7 +841,9 @@ private enum SpacesMobileMutationTimeoutRecovery {
         guard identity == overviewIdentity else { return }
         connectionNotice = "Updating the daemon…"
 
-        for _ in 0..<daemonUpdatePollAttempts {
+        let clock = ContinuousClock()
+        let deadline = clock.now + daemonUpdateTimeout
+        while clock.now < deadline {
             // Cancellation exits the poll rather than being swallowed like a fetch failure: a cancelled
             // sleep would otherwise let every remaining attempt run back-to-back with no wait, spinning
             // the whole budget in one turn of the loop.
