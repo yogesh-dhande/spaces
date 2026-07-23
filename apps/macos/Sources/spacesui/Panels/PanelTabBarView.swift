@@ -221,8 +221,8 @@ import systembridge
 }
 
 /// A single flat tab: title plus a close glyph; the selected tab reads from full-color
-/// text and an accent underline instead of a filled chip. In rename mode the title is
-/// an inline editor: Return or focus loss commits, Esc cancels.
+/// text and a filled lighter background chip. In rename mode the title is an inline
+/// editor: Return or focus loss commits, Esc cancels.
 @MainActor private final class PanelTabItemView: NSView, NSTextFieldDelegate {
     private let tabID: String
     private let onSelect: (String) -> Void
@@ -313,20 +313,27 @@ import systembridge
         stack.spacing = 4
         stack.edgeInsets = NSEdgeInsets(top: 3, left: 8, bottom: 5, right: 5)
         stack.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(stack)
 
-        let underline = NSView()
-        underline.translatesAutoresizingMaskIntoConstraints = false
-        underline.wantsLayer = true
-        bindAppearanceReactiveLayer(underline) { view in view.layer?.backgroundColor = isSelected ? Theme.accent.cgColor : NSColor.clear.cgColor }
-        addSubview(underline)
+        // The selected tab reads from a filled lighter chip rather than a bottom accent underline: the
+        // underline sat on the tab's bottom edge and clashed with the focused-pane accent bar on the pane's
+        // top edge directly below it. The chip sits behind the title/close stack.
+        let selectionChip = NSView()
+        selectionChip.translatesAutoresizingMaskIntoConstraints = false
+        selectionChip.wantsLayer = true
+        selectionChip.layer?.cornerRadius = 5
+        bindAppearanceReactiveLayer(selectionChip) { view in
+            view.layer?.backgroundColor = isSelected ? Theme.rowSelected.cgColor : NSColor.clear.cgColor
+        }
+        addSubview(selectionChip)
+        addSubview(stack)
 
         var constraints = [
             stack.topAnchor.constraint(equalTo: topAnchor), stack.leadingAnchor.constraint(equalTo: leadingAnchor),
             stack.trailingAnchor.constraint(equalTo: trailingAnchor), stack.bottomAnchor.constraint(equalTo: bottomAnchor),
-            underline.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
-            underline.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6), underline.bottomAnchor.constraint(equalTo: bottomAnchor),
-            underline.heightAnchor.constraint(equalToConstant: 2),
+            selectionChip.topAnchor.constraint(equalTo: topAnchor, constant: 3),
+            selectionChip.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -3),
+            selectionChip.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
+            selectionChip.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
         ]
 
         if showsTrailingSeparator {
