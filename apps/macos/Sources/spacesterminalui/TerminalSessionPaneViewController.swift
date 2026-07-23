@@ -169,6 +169,12 @@ private final class NotificationObserverBag: @unchecked Sendable {
     /// Set by the host while it defers the pane's initial owner presentation; the
     /// layout collapses to a full-bleed blank surface until presentation completes.
     var isDeferringInitialOwnerPresentation = false
+    // An extra retain on the pane's view-hierarchy root, dropped on the main queue by deinit so an
+    // off-main last release of the pane cannot deallocate AppKit objects on a background thread.
+    // The root suffices — every UI member below is one of its descendants, so releasing the stored
+    // properties off-main drops none of them to zero, and views added later are covered without
+    // touching this.
+    private nonisolated(unsafe) var mainThreadReleaseBag: [AnyObject] = []
 
     /// Title the host should display for this pane (window title today, tab title
     /// later). Updated on every refresh together with `representedWorkingDirectoryURL`,
@@ -253,6 +259,11 @@ private final class NotificationObserverBag: @unchecked Sendable {
         startObservingApplicationActivation()
         buildUI()
         if performInitialRefresh { refreshNow() }
+        mainThreadReleaseBag = [view]
+    }
+
+    deinit {
+        MainThreadRelease.release(mainThreadReleaseBag)
     }
 
     public func requestOwnershipIfNeeded() {

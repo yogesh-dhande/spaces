@@ -3048,6 +3048,27 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         XCTAssertFalse(controller.handleKeyEvent(try keyEvent(keyCode: kVK_ANSI_A, characters: "a", modifiers: [])))
         XCTAssertTrue(controller.debugBannerVisible)
     }
+
+    /// The pane's last reference can be dropped by a background task (e.g. a finished detached
+    /// takeover task holding the final reference), so its deinit must not deallocate its AppKit
+    /// members off the main thread. The box makes the off-main last release deterministic; draining
+    /// the main queue afterward proves the shipped `mainThreadReleaseBag` release actually runs.
+    @MainActor func testControllerLastReleaseOffMainDoesNotTrap() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        final class Box: @unchecked Sendable { var controller: TerminalSessionPaneViewController? }
+        let box = Box()
+        box.controller = TerminalSessionPaneViewController(
+            sessionID: "session-1", paths: .init(rootDirectory: root.path),
+            stateProvider: PersistenceBackedTerminalSessionStateProvider(paths: .init(rootDirectory: root.path)),
+            attachClientAction: persistenceBackedAttachAction(.init(rootDirectory: root.path)),
+            detachClientAction: persistenceBackedDetachAction(.init(rootDirectory: root.path)))
+
+        await Task.detached { box.controller = nil }.value
+        await Task { @MainActor in }.value
+    }
 }
 
 /// Exercises `TerminalPaneBanner`'s two state layers. The pane's persistent notice and the link
