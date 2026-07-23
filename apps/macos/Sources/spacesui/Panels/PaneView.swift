@@ -35,7 +35,7 @@ import AppKit
             contentContainer.topAnchor.constraint(equalTo: topAnchor), contentContainer.leadingAnchor.constraint(equalTo: leadingAnchor),
             contentContainer.trailingAnchor.constraint(equalTo: trailingAnchor), contentContainer.bottomAnchor.constraint(equalTo: bottomAnchor),
             focusIndicator.topAnchor.constraint(equalTo: topAnchor), focusIndicator.leadingAnchor.constraint(equalTo: leadingAnchor),
-            focusIndicator.trailingAnchor.constraint(equalTo: trailingAnchor), focusIndicator.heightAnchor.constraint(equalToConstant: 2),
+            focusIndicator.trailingAnchor.constraint(equalTo: trailingAnchor), focusIndicator.heightAnchor.constraint(equalToConstant: 1),
         ])
     }
 
