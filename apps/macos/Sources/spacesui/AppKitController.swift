@@ -4621,6 +4621,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// Renders the full-pane compatibility block for an incompatible device, with the restart-impact
     /// report and a restart action. Switching to a compatible device in the sidebar leaves it.
     func showCompatibilityBlock(deviceID: String, verdict: SpacesWireCompatibility) {
+        let status = deviceDaemonStatus(forDeviceID: deviceID)
+        guard let remedy = CompatibilityBlockView.blockRemedy(verdict: verdict, status: status) else {
+            // A device with no remedy needs no block — leave the detail pane exactly as it is rather
+            // than clearing it out for a card that would have nothing to say.
+            return
+        }
+
         clearActiveAddFormStateAndCloseWindows()
         stopWorkspaceSetupDetailRefreshTimer()
         presentDetailPane(.compatibilityBlock(deviceID: deviceID))
@@ -4642,10 +4649,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         clearWorkspaceDetailFooter()
         for view in detailContainer.subviews { view.removeFromSuperview() }
 
-        let status = deviceDaemonStatus(forDeviceID: deviceID)
+        let isLocalDevice = deviceID == SpacesPairedDeviceRecord.localDeviceID
+        let offersCheckForUpdates = Self.shouldOfferCheckForUpdatesAction(isLocalDevice: isLocalDevice, updaterAvailable: updaterController != nil)
         let card = CompatibilityBlockView(
-            verdict: verdict, deviceName: deviceSection(id: deviceID)?.deviceName ?? deviceID, status: status,
-            onRestart: verdict == .clientTooOld ? nil : { [weak self] in self?.requestDaemonRestart(deviceID: deviceID) })
+            remedy: remedy, deviceName: deviceSection(id: deviceID)?.deviceName ?? deviceID, isLocalDevice: isLocalDevice,
+            isLinuxDaemon: status?.isLinuxDaemon == true,
+            onRestart: remedy.offersDaemonUpdateAction ? { [weak self] in self?.requestDaemonRestart(deviceID: deviceID) } : nil,
+            onCheckForUpdates: offersCheckForUpdates ? { [weak self] in self?.updaterController?.checkForUpdates(nil) } : nil)
         card.translatesAutoresizingMaskIntoConstraints = false
         detailContainer.addSubview(card)
         NSLayoutConstraint.activate([
@@ -4697,6 +4707,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// already been requested.
     nonisolated static func shouldFireSilentDaemonHandoff(updatePending: Bool, compatibilityIsCompatible: Bool, alreadyRequestedKey: Bool) -> Bool {
         updatePending && compatibilityIsCompatible && !alreadyRequestedKey
+    }
+
+    /// Pure eligibility for the compatibility block's "Check for Updates…" action, factored out so it's
+    /// testable without AppKit or a Sparkle instance. It is offered only for this Mac's own daemon — a
+    /// remote device's Spaces install can't be checked/updated from here — and only when Sparkle has an
+    /// updater to drive (a dev build launched outside an app bundle has none; see `updaterController`).
+    nonisolated static func shouldOfferCheckForUpdatesAction(isLocalDevice: Bool, updaterAvailable: Bool) -> Bool {
+        isLocalDevice && updaterAvailable
     }
 
     /// Silently requests a daemon exec-in-place handoff when a compatible daemon reports a staged
