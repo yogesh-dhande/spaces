@@ -85,6 +85,11 @@ import spacesdevicecore
     /// serialized, is latest-wins order. Cleared on `stop()`; in-flight writes still drain to completion so the
     /// mirror reflects the last in-memory snapshot across a daemon restart.
     private var baselineWriteChain: [String: Task<Void, Never>] = [:]
+    /// Handle to `start()`'s off-main baseline-load task (load persisted mirror → merge with any seed
+    /// already landed → persist the union). Retained only so `drainStartupLoadForTesting()` can await it
+    /// deterministically instead of a test polling `debugSnapshot` under a wall-clock ceiling; production
+    /// never reads this field. `nil` before `start()` is called.
+    private var startupBaselineLoadTask: Task<Void, Never>?
     private var isStopped = false
     /// Delay before a failed connect, a dropped stream, or a failed listing pull retries through
     /// `reconcile()`. Internal so behavior tests can shorten it instead of waiting out real seconds.
@@ -122,7 +127,7 @@ import spacesdevicecore
         // it persists the merged union so the durable mirror matches memory; a clean startup that merely
         // refills the loaded baseline into an empty snapshot writes nothing.
         let databasePath = databasePath
-        Task { @MainActor [weak self] in
+        startupBaselineLoadTask = Task { @MainActor [weak self] in
             // .userInitiated, matching the connect/listing pulls: this load gates delivering the
             // downtime window's transitions after a daemon restart, and .utility work can be
             // starved for tens of seconds on a saturated machine, delaying that readiness.
@@ -574,4 +579,19 @@ import spacesdevicecore
     /// The retained baseline for `deviceID`. Internal so behavior tests can await baseline
     /// application deterministically instead of sleeping.
     func debugSnapshot(deviceID: String) -> [String: SpacesDeviceAgentSessionRow]? { snapshots[deviceID] }
+
+    /// Awaits `start()`'s baseline-load task to completion, then awaits every per-device durable-write
+    /// chain tail (see `baselineWriteChain`) so a seed-merged union the load persisted has actually
+    /// landed on disk, not just in memory. The load enqueues its baseline write(s) synchronously before
+    /// returning (no `await` between the merge loop and the task's completion), so by the time
+    /// `startupBaselineLoadTask` resolves, `baselineWriteChain` already holds the load's chain tail for
+    /// every device it touched — and each chain tail's own `await previous?.value` already accounts for
+    /// anything it was chained behind (e.g. a seed's write that raced the load), so awaiting the tails
+    /// here needs no extra bookkeeping. The seam a test drains after `start()` + a racing `seedBaseline`
+    /// instead of polling `debugSnapshot`/the persisted mirror under a wall-clock ceiling. `nil` (a
+    /// no-op) if `start()` was never called.
+    func drainStartupLoadForTesting() async {
+        await startupBaselineLoadTask?.value
+        for task in baselineWriteChain.values { await task.value }
+    }
 }

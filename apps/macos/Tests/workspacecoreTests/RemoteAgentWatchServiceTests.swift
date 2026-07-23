@@ -733,7 +733,7 @@ final class RemoteAgentWatchServiceTests: XCTestCase {
     /// stranded — the seed's {child-2} write is superseded by the load's generation bump, so the mirror stays
     /// at {child-1} — and a later daemon restart loses child-2's baseline and swallows its first transition.
     /// The load's own later-chained, newer-generation write must carry the union to disk.
-    @MainActor func testStartupBaselineLoadPersistsSeedMergedUnion() throws {
+    @MainActor func testStartupBaselineLoadPersistsSeedMergedUnion() async throws {
         let transport = FakeTransport()
         let recorder = DeliveryRecorder()
         let (store, path) = try makeStoreAndPath()
@@ -762,19 +762,25 @@ final class RemoteAgentWatchServiceTests: XCTestCase {
             deviceID: "device-1", childTerminalSessionID: "child-2",
             row: makeRow(status: AgentWindowStatus.spinning.rawValue, terminalSessionID: "child-2"))
 
+        // Await the startup load (merge + its durable persist) to completion instead of polling under a
+        // wall-clock ceiling: on a saturated machine the load's detached task can be starved well past
+        // any reasonable poll timeout.
+        await service.drainStartupLoadForTesting()
+
         // The load merges the persisted {child-1} into the seed's {child-2}.
-        try waitUntil(message: "startup load never merged the persisted baseline with the seed") {
-            service.debugSnapshot(deviceID: "device-1").map { Set($0.keys) } == ["child-1", "child-2"]
-        }
+        XCTAssertEqual(
+            service.debugSnapshot(deviceID: "device-1").map { Set($0.keys) }, ["child-1", "child-2"],
+            "startup load never merged the persisted baseline with the seed")
         // The merged union must reach the durable mirror, not just memory.
         func mirroredChildren() -> Set<String> { Set(((try? store.agentRemoteWatchBaselines())?["device-1"] ?? [:]).keys) }
-        try waitUntil(message: "durable mirror never converged to the seed-merged union {child-1, child-2}") {
-            mirroredChildren() == ["child-1", "child-2"]
-        }
+        XCTAssertEqual(
+            mirroredChildren(), ["child-1", "child-2"], "durable mirror never converged to the seed-merged union {child-1, child-2}")
         // And it must stay there — not regress once a later, stale-generation write on the chain runs.
+        // `Task.sleep` (not `RunLoop.main.run`, which is unavailable from an async context) still yields
+        // the main actor between checks so any such queued write gets its turn to run.
         let stabilityDeadline = Date().addingTimeInterval(0.3)
         while Date() < stabilityDeadline {
-            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+            try await Task.sleep(for: .milliseconds(20))
             XCTAssertEqual(mirroredChildren(), ["child-1", "child-2"], "durable mirror regressed after converging to the seed-merged union")
         }
     }
