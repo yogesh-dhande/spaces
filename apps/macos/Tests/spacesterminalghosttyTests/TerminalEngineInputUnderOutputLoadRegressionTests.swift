@@ -65,9 +65,11 @@ final class TerminalEngineInputUnderOutputLoadRegressionTests: XCTestCase {
         defer { subscriber.stop() }
 
         // Wait until output is genuinely flooding (the transcript is growing) so the send lands mid-stream,
-        // and give the subscriber connection a moment to register with the stream server. The ceiling is
-        // generous because it only gates flood START (subprocess spawn under CI load, #196); the regression
-        // signal lives in the echo budget below, which stays tight.
+        // and give the subscriber connection a moment to register with the stream server. This wait is a
+        // precondition, not the regression assertion: the dot loop forks /bin/sleep per iteration, which
+        // caps it near 30 dots/sec even on a fast machine, so a loaded CI runner needs well over 5s to
+        // clear the 64-byte threshold (#196). The ceiling is generous because it only gates flood start;
+        // the input-latency budget below is what guards the regression, and it stays tight.
         let floodDeadline = Date().addingTimeInterval(30.0)
         var floodedByteCount = 0
         while Date() < floodDeadline {
