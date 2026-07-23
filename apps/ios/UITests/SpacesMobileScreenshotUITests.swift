@@ -9,9 +9,7 @@ import XCTest
 /// StoreKit configuration to supply the local product catalog, so the paywall renders its real price
 /// line; nothing StoreKit-specific is needed here.
 final class SpacesMobileScreenshotUITests: XCTestCase {
-    override func setUpWithError() throws {
-        continueAfterFailure = false
-    }
+    override func setUpWithError() throws { continueAfterFailure = false }
 
     /// Reads `SPACES_MOBILE_SCREENSHOT_*` env vars as plain (non-`TEST_RUNNER_`-prefixed) names —
     /// the same form `SPACES_MOBILE_UI_TEST_CONFIG_PATH` already relies on for `xcodebuild
@@ -20,14 +18,25 @@ final class SpacesMobileScreenshotUITests: XCTestCase {
     /// holds the app foreground and idle so the host can screenshot it.
     func testScreenshotStaging() throws {
         let environment = ProcessInfo.processInfo.environment
-        let configuration = try ScreenshotUITestConfiguration.load(environment: environment)
         let showsPaywall = environment["SPACES_MOBILE_SCREENSHOT_PAYWALL"] == "1"
+        // Demo Mode staging needs no daemon and no paired-device config: the bundled sample recording
+        // supplies every tab's content, so the App Store screenshot set can be produced from a plain
+        // simulator. The daemon-backed lane below is untouched.
+        let usesDemoMode = environment["SPACES_MOBILE_SCREENSHOT_DEMO"] == "1"
 
         let app = XCUIApplication()
-        applyLaunchEnvironment(to: app, configuration: configuration, includePaywallBypass: !showsPaywall)
+        if usesDemoMode {
+            app.launchEnvironment["SPACES_MOBILE_PAYWALL_BYPASS"] = "1"
+            applyCleanSlateLaunchArguments(to: app)
+        } else {
+            let configuration = try ScreenshotUITestConfiguration.load(environment: environment)
+            applyLaunchEnvironment(to: app, configuration: configuration, includePaywallBypass: !showsPaywall)
+        }
         app.launch()
         XCUIDevice.shared.orientation = .portrait
         RunLoop.current.run(until: Date().addingTimeInterval(2))
+
+        if usesDemoMode { XCTAssertTrue(enableDemoMode(in: app, timeout: 20), "Timed out enabling Demo Mode for screenshot staging") }
 
         // The paywall gates the whole app shell, so there is no tab bar to navigate while it is
         // showing: the screenshot is just the paywall itself, held idle below.
@@ -47,24 +56,37 @@ final class SpacesMobileScreenshotUITests: XCTestCase {
         RunLoop.current.run(until: Date().addingTimeInterval(max(holdSeconds, 0)))
     }
 
-    private func applyLaunchEnvironment(
-        to app: XCUIApplication,
-        configuration: ScreenshotUITestConfiguration,
-        includePaywallBypass: Bool
-    ) {
+    /// Shadows the persistence keys through the argument domain so a demo-mode screenshot launch
+    /// starts not-paired and Demo-off regardless of prior simulator state, matching
+    /// `SpacesMobileDemoModeUITests`. The non-Data string "unset" makes `UserDefaults.data(forKey:)`
+    /// return nil; the value must not start with "-" or `NSArgumentDomain` parses it as the next
+    /// option key and the shadow silently never registers.
+    private func applyCleanSlateLaunchArguments(to app: XCUIApplication) {
+        app.launchArguments += [
+            "-spaces.mobile.demo-mode-enabled", "0", "-spaces.mobile.paired-devices", "unset", "-spaces.mobile.connection-settings", "unset",
+        ]
+    }
+
+    /// Taps Try Demo Mode from the unpaired Spaces empty state and waits for the Demo Mode banner.
+    private func enableDemoMode(in app: XCUIApplication, timeout: TimeInterval) -> Bool {
+        let tryDemo = app.buttons["spaces.tryDemoMode"]
+        guard tryDemo.waitForExistence(timeout: timeout) else { return false }
+        tryDemo.tap()
+        // Match the banner across the whole hierarchy: SwiftUI may surface the identified container as
+        // an `other` element or fold it, so a type-specific query is unreliable.
+        return app.descendants(matching: .any)["demo.banner"].waitForExistence(timeout: timeout)
+    }
+
+    private func applyLaunchEnvironment(to app: XCUIApplication, configuration: ScreenshotUITestConfiguration, includePaywallBypass: Bool) {
         // DEBUG-only paywall bypass, mirrors SpacesMobileUITests. Omitted only when the caller wants
         // the real paywall to render, e.g. the App Store Connect subscription-review screenshot.
-        if includePaywallBypass {
-            app.launchEnvironment["SPACES_MOBILE_PAYWALL_BYPASS"] = "1"
-        }
+        if includePaywallBypass { app.launchEnvironment["SPACES_MOBILE_PAYWALL_BYPASS"] = "1" }
         app.launchEnvironment["SPACES_MOBILE_TEST_HOST"] = configuration.host
         app.launchEnvironment["SPACES_MOBILE_TEST_PORT"] = String(configuration.port)
         app.launchEnvironment["SPACES_MOBILE_TEST_AUTH_TOKEN"] = configuration.authToken
         app.launchEnvironment["SPACES_MOBILE_TEST_CERTIFICATE_FINGERPRINT"] = configuration.certificateFingerprint
         app.launchEnvironment["SPACES_MOBILE_TEST_INSTALLATION_ID"] = configuration.installationID
-        if let deviceSeedJSON = configuration.deviceSeedJSON {
-            app.launchEnvironment["SPACES_MOBILE_TEST_DEVICE_SEED_JSON"] = deviceSeedJSON
-        }
+        if let deviceSeedJSON = configuration.deviceSeedJSON { app.launchEnvironment["SPACES_MOBILE_TEST_DEVICE_SEED_JSON"] = deviceSeedJSON }
     }
 
     private func selectTab(_ tab: ScreenshotTab, in app: XCUIApplication, timeout: TimeInterval) -> Bool {
@@ -77,11 +99,7 @@ final class SpacesMobileScreenshotUITests: XCTestCase {
             for scope in [app.tabBars.buttons, app.buttons] {
                 let button = scope.matching(predicate).firstMatch
                 guard button.exists else { continue }
-                if button.isHittable {
-                    button.tap()
-                } else {
-                    button.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
-                }
+                if button.isHittable { button.tap() } else { button.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap() }
                 return true
             }
             RunLoop.current.run(until: Date().addingTimeInterval(0.2))
@@ -101,9 +119,7 @@ final class SpacesMobileScreenshotUITests: XCTestCase {
                 row.tap()
                 return true
             }
-            if row.exists {
-                app.swipeUp()
-            }
+            if row.exists { app.swipeUp() }
             RunLoop.current.run(until: Date().addingTimeInterval(0.3))
         }
         return false
@@ -148,8 +164,7 @@ private struct ScreenshotUITestConfiguration: Decodable {
     /// Builds the same debug device-seed payload `SpacesMobileDeviceStore.applyDebugSeed` decodes,
     /// so a cold launch re-pairs against the same daemon the demo stack already paired.
     var deviceSeedJSON: String? {
-        guard !host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-            (1...65_535).contains(port),
+        guard !host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, (1...65_535).contains(port),
             !authToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
             !certificateFingerprint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         else { return nil }
@@ -158,17 +173,12 @@ private struct ScreenshotUITestConfiguration: Decodable {
             "activeDeviceID": deviceID ?? "",
             "devices": [
                 [
-                    "id": deviceID ?? "",
-                    "name": deviceName ?? "This Mac",
-                    "host": host,
-                    "port": port,
-                    "authToken": authToken,
+                    "id": deviceID ?? "", "name": deviceName ?? "This Mac", "host": host, "port": port, "authToken": authToken,
                     "certificateFingerprint": certificateFingerprint,
                 ]
             ],
         ]
-        guard JSONSerialization.isValidJSONObject(payload),
-            let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
+        guard JSONSerialization.isValidJSONObject(payload), let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
         else { return nil }
         return String(data: data, encoding: .utf8)
     }
@@ -177,14 +187,8 @@ private struct ScreenshotUITestConfiguration: Decodable {
         let configPath = environment["SPACES_MOBILE_UI_TEST_CONFIG_PATH"] ?? defaultConfigPath
         let url = URL(fileURLWithPath: configPath)
         let data: Data
-        do {
-            data = try Data(contentsOf: url)
-        } catch {
-            throw ScreenshotUITestConfigurationError.missingConfigFile(configPath)
-        }
-        do {
-            return try JSONDecoder().decode(Self.self, from: data)
-        } catch {
+        do { data = try Data(contentsOf: url) } catch { throw ScreenshotUITestConfigurationError.missingConfigFile(configPath) }
+        do { return try JSONDecoder().decode(Self.self, from: data) } catch {
             throw ScreenshotUITestConfigurationError.invalidConfigFile(configPath, error.localizedDescription)
         }
     }
@@ -196,10 +200,8 @@ private enum ScreenshotUITestConfigurationError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .missingConfigFile(let path):
-            return "Missing UI test config file at \(path)"
-        case .invalidConfigFile(let path, let message):
-            return "Invalid UI test config file at \(path): \(message)"
+        case .missingConfigFile(let path): return "Missing UI test config file at \(path)"
+        case .invalidConfigFile(let path, let message): return "Invalid UI test config file at \(path): \(message)"
         }
     }
 }

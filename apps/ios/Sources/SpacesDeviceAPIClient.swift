@@ -49,18 +49,31 @@ struct SpacesDeviceAPIClient: Sendable {
     /// This device's display name, captured once by the caller and stored rather than read here on
     /// demand: `UIDevice.current.name` is main-actor-isolated, but this type's request path is not.
     private let deviceName: String
-    private let requestOverride: (@Sendable (SpacesDeviceAPIRequest) async throws -> SpacesDeviceAPIResponse)?
+    /// The transport seam. Defaults to the pinned-TLS network backend; Demo Mode injects an in-memory
+    /// backend. Every request round trip and session stream funnels through it, so swapping the backend
+    /// reroutes the entire client without touching call sites.
+    private let backend: any SpacesDeviceAPIBackend
 
     init(
         settings: SpacesMobileConnectionSettings, deviceName: String = SpacesDeviceAPIClient.fallbackDeviceName,
-        requestOverride: (@Sendable (SpacesDeviceAPIRequest) async throws -> SpacesDeviceAPIResponse)? = nil
+        backend: (any SpacesDeviceAPIBackend)? = nil
     ) {
         self.settings = settings
         self.deviceName = deviceName
-        self.requestOverride = requestOverride
+        self.backend = backend ?? SpacesDeviceNetworkBackend(settings: settings)
     }
 
-    func makeCommandChannel() -> SpacesDeviceAPICommandChannel { SpacesDeviceAPICommandChannel(settings: settings, clientApp: clientAppIdentity) }
+    /// Test seam: injects canned request/response handling while session streams keep using the real
+    /// network path (a closure never intercepted streams, matching the historical behavior). The mobile
+    /// unit suite drives the client through this closure.
+    init(
+        settings: SpacesMobileConnectionSettings, deviceName: String = SpacesDeviceAPIClient.fallbackDeviceName,
+        requestHandler: @escaping @Sendable (SpacesDeviceAPIRequest) async throws -> SpacesDeviceAPIResponse
+    ) { self.init(settings: settings, deviceName: deviceName, backend: SpacesDeviceClosureBackend(settings: settings, handler: requestHandler)) }
+
+    func makeCommandChannel() -> SpacesDeviceAPICommandChannel {
+        SpacesDeviceAPICommandChannel(transport: backend.makeRequestTransport(), authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity)
+    }
 
     func pair(pairingLink: SpacesDevicePairingLink, commandChannel: SpacesDeviceAPICommandChannel? = nil) async throws -> String {
         // Refuse to redeem an incompatible link before the one-time pairing window is consumed.
@@ -437,14 +450,9 @@ struct SpacesDeviceAPIClient: Sendable {
         sessionID: String, clientID: String, onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
         onDisconnect: @escaping @MainActor (Error?) -> Void
     ) throws -> SpacesDeviceAPIStreamHandle {
-        let endpoint = try makeConnection()
         let request = SpacesDeviceAPIRequest(
             command: .subscribe(.init(sessionID: sessionID, clientID: clientID)), authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity)
-        let queue = DispatchQueue(label: "spaces.device.api.stream.\(sessionID).\(clientID)")
-        StreamSubscription(
-            connection: endpoint.connection, host: endpoint.host, port: endpoint.port, request: request, onEvent: onEvent, onDisconnect: onDisconnect
-        ).start(on: queue)
-        return SpacesDeviceAPIStreamHandle { endpoint.connection.cancel() }
+        return try backend.openSessionStream(request: request, onEvent: onEvent, onDisconnect: onDisconnect)
     }
 
     private func mutation(_ request: SpacesDeviceAPIRequest, commandChannel: SpacesDeviceAPICommandChannel?) async throws -> SpacesDeviceAPIResponse {
@@ -460,7 +468,6 @@ struct SpacesDeviceAPIClient: Sendable {
     private func sendRequest(_ request: SpacesDeviceAPIRequest, timeout: Duration = .seconds(3), commandChannel: SpacesDeviceAPICommandChannel?)
         async throws -> SpacesDeviceAPIResponse
     {
-        if let requestOverride { return try await requestOverride(request) }
         if let commandChannel { return try await commandChannel.send(request: request, timeout: timeout) }
         let temporaryCommandChannel = makeCommandChannel()
         do {
@@ -473,13 +480,6 @@ struct SpacesDeviceAPIClient: Sendable {
         }
     }
 
-    private func makeConnection() throws -> (connection: NWConnection, host: String, port: NWEndpoint.Port) {
-        let host = settings.trimmedHost
-        guard let port = NWEndpoint.Port(rawValue: UInt16(settings.port)), !host.isEmpty else { throw SpacesDeviceAPIClientError.invalidEndpoint }
-        let parameters = SpacesPinnedTLSConnector.tlsParameters(certificateFingerprint: settings.certificateFingerprint)
-        return (NWConnection(host: NWEndpoint.Host(host), port: port, using: parameters), host, port)
-    }
-
     private var clientAppIdentity: SpacesDeviceClientApp {
         SpacesDeviceClientApp(
             installationID: settings.installationID, bundleID: Bundle.main.bundleIdentifier ?? SpacesDeviceFirstPartyPolicy.allowedBundleID,
@@ -488,21 +488,105 @@ struct SpacesDeviceAPIClient: Sendable {
 
 }
 
+/// Thin actor over `any SpacesDeviceAPIRequestTransport`. Keeps its name and public surface
+/// (`send(request:timeout:)`, `close()`) so `SpacesMobileAppModel`, `TerminalViewerModel`, and
+/// `ConnectionSettingsView` compile unchanged. It owns the auth-token/client-app defaulting so every
+/// backend transport receives a fully-addressed request.
 actor SpacesDeviceAPICommandChannel {
+    private let transport: any SpacesDeviceAPIRequestTransport
+    private let authToken: String?
+    private let clientApp: SpacesDeviceClientApp
+
+    init(transport: any SpacesDeviceAPIRequestTransport, authToken: String?, clientApp: SpacesDeviceClientApp) {
+        self.transport = transport
+        self.authToken = authToken
+        self.clientApp = clientApp
+    }
+
+    func close() async { await transport.close() }
+
+    func send(request: SpacesDeviceAPIRequest, timeout: Duration) async throws -> SpacesDeviceAPIResponse {
+        var request = request
+        if request.authToken == nil {
+            request = SpacesDeviceAPIRequest(command: request.command, authToken: authToken, clientApp: request.clientApp ?? clientApp)
+        }
+        return try await transport.send(request: request, timeout: timeout)
+    }
+}
+
+/// Production backend: the pinned-TLS Device API over `NWConnection`.
+struct SpacesDeviceNetworkBackend: SpacesDeviceAPIBackend {
+    let settings: SpacesMobileConnectionSettings
+
+    func makeRequestTransport() -> any SpacesDeviceAPIRequestTransport {
+        SpacesDeviceNetworkRequestTransport(host: settings.trimmedHost, port: settings.port, certificateFingerprint: settings.certificateFingerprint)
+    }
+
+    func openSessionStream(
+        request: SpacesDeviceAPIRequest, onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
+        onDisconnect: @escaping @MainActor (Error?) -> Void
+    ) throws -> SpacesDeviceAPIStreamHandle {
+        let endpoint = try makeConnection()
+        let label: String
+        if case .subscribe(let payload) = request.command {
+            label = "spaces.device.api.stream.\(payload.sessionID).\(payload.clientID)"
+        } else {
+            label = "spaces.device.api.stream"
+        }
+        let queue = DispatchQueue(label: label)
+        StreamSubscription(
+            connection: endpoint.connection, host: endpoint.host, port: endpoint.port, request: request, onEvent: onEvent, onDisconnect: onDisconnect
+        ).start(on: queue)
+        return SpacesDeviceAPIStreamHandle { endpoint.connection.cancel() }
+    }
+
+    private func makeConnection() throws -> (connection: NWConnection, host: String, port: NWEndpoint.Port) {
+        let host = settings.trimmedHost
+        guard let port = NWEndpoint.Port(rawValue: UInt16(settings.port)), !host.isEmpty else { throw SpacesDeviceAPIClientError.invalidEndpoint }
+        let parameters = SpacesPinnedTLSConnector.tlsParameters(certificateFingerprint: settings.certificateFingerprint)
+        return (NWConnection(host: NWEndpoint.Host(host), port: port, using: parameters), host, port)
+    }
+}
+
+/// Test backend: routes request round trips through a closure while session streams keep using the
+/// real network path (a closure never intercepted streams). Backs `SpacesDeviceAPIClient(settings:requestHandler:)`.
+struct SpacesDeviceClosureBackend: SpacesDeviceAPIBackend {
+    private let networkBackend: SpacesDeviceNetworkBackend
+    private let handler: @Sendable (SpacesDeviceAPIRequest) async throws -> SpacesDeviceAPIResponse
+
+    init(settings: SpacesMobileConnectionSettings, handler: @escaping @Sendable (SpacesDeviceAPIRequest) async throws -> SpacesDeviceAPIResponse) {
+        networkBackend = SpacesDeviceNetworkBackend(settings: settings)
+        self.handler = handler
+    }
+
+    func makeRequestTransport() -> any SpacesDeviceAPIRequestTransport { SpacesDeviceClosureRequestTransport(handler: handler) }
+
+    func openSessionStream(
+        request: SpacesDeviceAPIRequest, onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
+        onDisconnect: @escaping @MainActor (Error?) -> Void
+    ) throws -> SpacesDeviceAPIStreamHandle { try networkBackend.openSessionStream(request: request, onEvent: onEvent, onDisconnect: onDisconnect) }
+}
+
+private struct SpacesDeviceClosureRequestTransport: SpacesDeviceAPIRequestTransport {
+    let handler: @Sendable (SpacesDeviceAPIRequest) async throws -> SpacesDeviceAPIResponse
+
+    func send(request: SpacesDeviceAPIRequest, timeout: Duration) async throws -> SpacesDeviceAPIResponse { try await handler(request) }
+    func close() async {}
+}
+
+/// Network request transport: owns one pinned-TLS command connection. This is the request/response
+/// half of the former command channel; auth-token/client-app defaulting now lives in the channel.
+actor SpacesDeviceNetworkRequestTransport: SpacesDeviceAPIRequestTransport {
     private let host: String
     private let port: Int
     private let certificateFingerprint: String
-    private let clientApp: SpacesDeviceClientApp
-    private let authToken: String?
     private let queue = DispatchQueue(label: "spaces.device.api.command")
     private var connection: NWConnection?
 
-    init(settings: SpacesMobileConnectionSettings, clientApp: SpacesDeviceClientApp) {
-        host = settings.trimmedHost
-        port = settings.port
-        certificateFingerprint = settings.certificateFingerprint
-        authToken = settings.trimmedAuthToken
-        self.clientApp = clientApp
+    init(host: String, port: Int, certificateFingerprint: String) {
+        self.host = host
+        self.port = port
+        self.certificateFingerprint = certificateFingerprint
     }
 
     func close() {
@@ -512,10 +596,6 @@ actor SpacesDeviceAPICommandChannel {
 
     func send(request: SpacesDeviceAPIRequest, timeout: Duration) async throws -> SpacesDeviceAPIResponse {
         guard !host.isEmpty, port > 0 else { throw SpacesDeviceAPIClientError.invalidEndpoint }
-        var request = request
-        if request.authToken == nil {
-            request = SpacesDeviceAPIRequest(command: request.command, authToken: authToken, clientApp: request.clientApp ?? clientApp)
-        }
         let connection = try await connectIfNeeded(timeout: timeout)
         do {
             try await Self.send(data: encodeDeviceAPIRequestLine(request), on: connection, timeout: timeout)

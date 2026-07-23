@@ -450,39 +450,6 @@ save_to_cache() {
     fi
 }
 
-patch_libxev_for_ios_simulator() {
-    local zig_bin="$1"
-    local zon_file="$GHOSTTY_SOURCE_ROOT/build.zig.zon"
-    [[ -f "$zon_file" ]] || return 0
-
-    local global_cache_dir
-    global_cache_dir="$("$zig_bin" env | awk -F'"' '/global_cache_dir/ { print $2; exit }')"
-    [[ -n "$global_cache_dir" ]] || return 0
-
-    local libxev_hash
-    libxev_hash="$(
-        awk '
-            /\.libxev = \{/ { in_dep = 1; next }
-            in_dep && /hash = / {
-                if (match($0, /"[^"]+"/)) {
-                    print substr($0, RSTART + 1, RLENGTH - 2)
-                    exit
-                }
-            }
-            in_dep && /\},/ { in_dep = 0 }
-        ' "$zon_file"
-    )"
-    [[ -n "$libxev_hash" ]] || return 0
-
-    local backend_file="$global_cache_dir/p/$libxev_hash/src/backend/kqueue.zig"
-    [[ -f "$backend_file" ]] || return 0
-
-    if grep -q 'builtin\.os\.tag != \.macos' "$backend_file"; then
-        echo "==> Patching libxev Mach-port kqueue registration for iOS builds"
-        perl -0pi -e 's/builtin\.os\.tag != \.macos/!builtin.os.tag.isDarwin()/g' "$backend_file"
-    fi
-}
-
 zig_archive_name() {
     case "$(uname -m)" in
         arm64)
@@ -655,7 +622,6 @@ build_from_source() {
     app_version="$(ghostty_app_version)"
 
     echo "==> Building Ghostty artifacts from $GHOSTTY_SOURCE_ROOT ($GHOSTTY_SHA, optimize=$GHOSTTY_BUILD_OPTIMIZE)"
-    patch_libxev_for_ios_simulator "$zig_bin"
     (
         cd "$GHOSTTY_SOURCE_ROOT"
         "$zig_bin" build -Doptimize="$GHOSTTY_BUILD_OPTIMIZE" -Demit-xcframework=true -Demit-macos-app=false -Di18n=false -Dversion-string="$app_version"

@@ -1480,9 +1480,9 @@ require_executable "$spacese2e" "spacese2e"
 require_executable "$terminal_service" "spacesd"
 
 create_demo_root
-project_dir="$temp_root/beacon-status"
+project_dir="$temp_root/harbor-web"
 local_project_dir="$project_dir"
-secondary_project_dir="$temp_root/scout-errors"
+secondary_project_dir="$temp_root/lantern-api"
 app_log="$temp_root/app.log"
 device_api_log="$temp_root/device-api.log"
 performance_log_path="$temp_root/mobile-terminal-performance.jsonl"
@@ -1497,8 +1497,8 @@ stop_existing_profile_app_owner
 stop_existing_demo_profile_services
 stop_device_api_port_listeners
 
-spaces_e2e_create_beacon_fixture_repo "$fixture_template_dir" "$local_project_dir"
-spaces_e2e_create_scout_fixture_repo "$fixture_template_dir" "$secondary_project_dir"
+spaces_e2e_create_harbor_fixture_repo "$fixture_template_dir" "$local_project_dir"
+spaces_e2e_create_lantern_fixture_repo "$fixture_template_dir" "$secondary_project_dir"
 
 run_demo_env \
   HOME="$demo_home" \
@@ -1510,6 +1510,7 @@ run_demo_env \
   SPACES_PROJECT_DIR="$repo_root" \
   "$spacese2e" seed-fixture \
     --project-dir "$local_project_dir" \
+    --template harbor \
     --docs-url 'http://localhost:$SPACES_APP_PORT/docs/' \
     --admin-url 'http://localhost:$SPACES_APP_PORT/admin/' >/dev/null
 
@@ -1523,6 +1524,7 @@ run_demo_env \
   SPACES_PROJECT_DIR="$repo_root" \
   "$spacese2e" seed-fixture \
     --project-dir "$secondary_project_dir" \
+    --template lantern \
     --docs-url 'http://localhost:$SPACES_APP_PORT/docs/' \
     --admin-url 'http://localhost:$SPACES_APP_PORT/admin/' >/dev/null
 
@@ -1531,7 +1533,7 @@ run_demo_env \
   SPACES_DB_PATH="$spaces_db_path" \
   SPACES_RUNTIME_DIR="$spaces_runtime_dir" \
   SPACESD_EXECUTABLE="$terminal_service" \
-  "$spacese2e" hide-workspace --workspace-dir "$temp_root/scout-errors" >/dev/null
+  "$spacese2e" hide-workspace --workspace-dir "$temp_root/lantern-api" >/dev/null
 
 ipad_udid="$(resolve_device_udid "$ipad_name")"
 iphone_udid="$(resolve_device_udid "$iphone_name")"

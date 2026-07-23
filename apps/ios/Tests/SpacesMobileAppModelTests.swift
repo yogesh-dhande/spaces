@@ -402,8 +402,8 @@
 
         func testIncomingLinkRoutingClassifiesValidPairingURLAsPairing() {
             let link = SpacesDevicePairingLink(
-                host: "10.0.0.4", port: 19000, nonce: "nonce", code: "code", certificateFingerprint: "fp", name: "Mac Studio",
-                protocolVersion: 3, appVersion: "1.0")
+                host: "10.0.0.4", port: 19000, nonce: "nonce", code: "code", certificateFingerprint: "fp", name: "Mac Studio", protocolVersion: 3,
+                appVersion: "1.0")
 
             XCTAssertEqual(SpacesIncomingLinkRoute.route(for: link.url), .pairing(link.url))
         }
@@ -436,6 +436,23 @@
 
             XCTAssertNotNil(model.errorMessage)
             XCTAssertNil(model.pendingPairingLink)
+        }
+
+        /// A QR payload scanned from the Spaces tab's not-paired empty state must stage the same way a
+        /// `spaces://pair` deep link does — `prepareScannedPairingLink` shares `preparePairingLink`'s
+        /// staging path, so a valid scan sets `pendingPairingLink` and raises `isShowingConnectionSettings`
+        /// to hand off to the same confirm-and-pair alert.
+        func testPrepareScannedPairingLinkStagesLinkAndRaisesConnectionSettings() {
+            let model = makeModel()
+            let link = SpacesDevicePairingLink(
+                host: "10.0.0.4", port: 19000, nonce: "nonce", code: "code", certificateFingerprint: "fp", name: "Mac Studio", protocolVersion: 3,
+                appVersion: "1.0")
+
+            model.prepareScannedPairingLink(link.absoluteString)
+
+            XCTAssertEqual(model.pendingPairingLink, link)
+            XCTAssertTrue(model.isShowingConnectionSettings)
+            XCTAssertNil(model.errorMessage)
         }
 
         /// A deep link can name a session created after the overview was last fetched (polling pauses

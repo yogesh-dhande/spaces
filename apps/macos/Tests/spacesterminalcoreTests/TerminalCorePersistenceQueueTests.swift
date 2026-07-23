@@ -3,21 +3,27 @@ import XCTest
 
 @testable import spacesterminalcore
 
+#if canImport(Darwin)
+    import Darwin
+#else
+    import Glibc
+#endif
+
 final class TerminalCorePersistenceQueueTests: XCTestCase {
     private var originalDatabasePath: String?
     private var originalRuntimeDirectory: String?
-    private var root: URL!
+    private var databaseRoot: URL?
 
-    // The R4-7 tests below resolve `SpacesProfile.current().databasePath` and rename that file aside via
-    // `breakDatabase`/`restoreDatabase` to force a write failure. Redirecting the profile to a per-test temp
-    // directory (mirroring TerminalSessionGarbageCollectorTests) keeps that destructive rename off the real
-    // shared profile database, which other tests may have open concurrently under `swift test --parallel`.
+    /// The retry tests deliberately break the profile database, and parallel test workers share the
+    /// worktree profile, so every test in this suite runs against its own throwaway profile root — a
+    /// broken database here must never be observable from a concurrently running suite (or vice versa).
     override func setUpWithError() throws {
         try super.setUpWithError()
         originalDatabasePath = ProcessInfo.processInfo.environment["SPACES_DB_PATH"]
         originalRuntimeDirectory = ProcessInfo.processInfo.environment["SPACES_RUNTIME_DIR"]
-        root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        databaseRoot = root
         setenv("SPACES_DB_PATH", root.appendingPathComponent("spaces.db").path, 1)
         setenv("SPACES_RUNTIME_DIR", root.appendingPathComponent("runtime", isDirectory: true).path, 1)
     }
@@ -25,10 +31,12 @@ final class TerminalCorePersistenceQueueTests: XCTestCase {
     override func tearDownWithError() throws {
         if let originalDatabasePath { setenv("SPACES_DB_PATH", originalDatabasePath, 1) } else { unsetenv("SPACES_DB_PATH") }
         if let originalRuntimeDirectory { setenv("SPACES_RUNTIME_DIR", originalRuntimeDirectory, 1) } else { unsetenv("SPACES_RUNTIME_DIR") }
-        try? FileManager.default.removeItem(at: root)
+        if let databaseRoot { try? FileManager.default.removeItem(at: databaseRoot) }
+        databaseRoot = nil
+        originalDatabasePath = nil
+        originalRuntimeDirectory = nil
         try super.tearDownWithError()
     }
-
     /// Records the order in which queued writes actually run, guarded so the serial queue and the draining
     /// test thread never race on the array.
     private final class OrderRecorder: @unchecked Sendable {
