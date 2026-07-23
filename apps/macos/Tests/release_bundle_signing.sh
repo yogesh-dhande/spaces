@@ -9,9 +9,21 @@ RELEASE_DIR="$REPO_ROOT/dist/releases/$VERSION"
 WORK_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/spaces-release-signing.XXXXXX")"
 MOUNT_POINT="$WORK_ROOT/dmg"
 
+# A freshly mounted DMG is often briefly held busy by Spotlight/fseventsd even with
+# -nobrowse, making a single immediate detach flaky ("Resource busy"). Retry with short
+# pauses; force-detach as a last resort (the mount is read-only, so force loses nothing).
+detach_mount() {
+  local attempt
+  for attempt in 1 2 3 4 5; do
+    if hdiutil detach "$MOUNT_POINT" >/dev/null 2>&1; then return 0; fi
+    sleep 2
+  done
+  hdiutil detach -force "$MOUNT_POINT" >/dev/null
+}
+
 cleanup() {
   if mount | grep -q "on $MOUNT_POINT "; then
-    hdiutil detach "$MOUNT_POINT" >/dev/null
+    detach_mount
   fi
   rm -rf "$WORK_ROOT" "$RELEASE_DIR"
 }
@@ -39,7 +51,7 @@ CODESIGN_IDENTITY=- "$REPO_ROOT/scripts/create-dmg.sh" \
 DMG_PATH="$RELEASE_DIR/Spaces-$VERSION.dmg"
 hdiutil attach -nobrowse -readonly -mountpoint "$MOUNT_POINT" "$DMG_PATH" >/dev/null
 assert_caddy_signature "$MOUNT_POINT/Spaces.app/Contents/Resources/caddy"
-hdiutil detach "$MOUNT_POINT" >/dev/null
+detach_mount
 
 CODESIGN_IDENTITY=- "$REPO_ROOT/scripts/create-sparkle-archive.sh" \
   "$APP_ROOT/.build/debug/SpacesApp" \
