@@ -134,6 +134,25 @@ final class RemoteAgentWatchServiceTests: XCTestCase {
         }
     }
 
+    /// Collects the service's injected `logError` lines so a test can assert on (and report) the
+    /// errors the service swallowed, instead of discarding them with `{ _ in }`.
+    private final class ServiceErrorLog: @unchecked Sendable {
+        private let lock = NSLock()
+        private var storedLines: [String] = []
+
+        func append(_ line: String) {
+            lock.lock()
+            storedLines.append(line)
+            lock.unlock()
+        }
+
+        func lines(containing tag: String) -> [String] {
+            lock.lock()
+            defer { lock.unlock() }
+            return storedLines.filter { $0.contains(tag) }
+        }
+    }
+
     private var temporaryDirectory: URL?
     /// Path of the database backing the current test's store, for spinning up a second service
     /// instance on the same database (simulating a daemon restart).
@@ -752,8 +771,14 @@ final class RemoteAgentWatchServiceTests: XCTestCase {
         // (the #196 CI signature of this test).
         transport.failNextListings(Int.max)
         transport.setListing([])
+        // Capture the service's error log instead of discarding it: the startup load swallows a
+        // failed store read (logging it and continuing seed-only, #238), and when that happens the
+        // logged error — not the downstream state mismatch — is the diagnosis. The injected listing
+        // failures above also log, so the assertion below filters for the load's own op tag.
+        let errorLog = ServiceErrorLog()
         let service = RemoteAgentWatchService(
-            databasePath: path, transport: transport.transport, deliver: { sessionID, line in recorder.record(sessionID, line) }, logError: { _ in })
+            databasePath: path, transport: transport.transport, deliver: { sessionID, line in recorder.record(sessionID, line) },
+            logError: { errorLog.append($0) })
         defer { service.stop() }
         service.start()
         // In the same main-actor turn — before the detached load can round-trip — seed child-2, reproducing the
@@ -767,6 +792,11 @@ final class RemoteAgentWatchServiceTests: XCTestCase {
         // any reasonable poll timeout.
         await service.drainStartupLoadForTesting()
 
+        // A failed (and swallowed) baseline load leaves seed-only state; surface the exact store
+        // error here rather than letting the state assertions below report a bare set mismatch.
+        XCTAssertEqual(
+            errorLog.lines(containing: "op=load_baselines"), [],
+            "startup baseline load failed instead of merging (#238)")
         // The load merges the persisted {child-1} into the seed's {child-2}.
         XCTAssertEqual(
             service.debugSnapshot(deviceID: "device-1").map { Set($0.keys) }, ["child-1", "child-2"],
