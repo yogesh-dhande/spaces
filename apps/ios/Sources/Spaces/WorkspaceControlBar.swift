@@ -33,7 +33,8 @@ struct WorkspaceControlBar: View {
             }
             if let onNewTerminal {
                 WorkspaceControlButton(
-                    title: "Terminal", systemImage: "plus", tint: Theme.muted, identifier: "workspace.newTerminal.\(workspace.id)", action: onNewTerminal)
+                    title: "Terminal", systemImage: "plus", tint: Theme.muted, identifier: "workspace.newTerminal.\(workspace.id)",
+                    action: onNewTerminal)
             }
             Spacer(minLength: 0)
         }.disabled(isMutating).opacity(isMutating ? 0.5 : 1).padding(.horizontal, 20).padding(.top, 8)

@@ -215,6 +215,13 @@ enum SpacesDaemonProfileCommandRouting {
     }
     private var terminalLinkTransferAuthorizations: [String: TerminalLinkTransferAuthorization] = [:]
     private var lifecycleTimer: Timer?
+    /// Throttles the ended-session garbage-collection sweep to a coarse cadence: the lifecycle timer fires
+    /// every second for attachment reaping, but collecting removed sessions scans every known session and
+    /// need not run that often. `nil` until the first sweep.
+    /// Engine-isolated: touched only from the garbage-collection sweep (which reads `sessionCores`) and
+    /// seeded on the engine actor at lifecycle-timer start.
+    @TerminalEngineActor private var lastSessionGarbageCollectionAt: Date?
+    private nonisolated static let sessionGarbageCollectionInterval: TimeInterval = 600
     #if os(Linux)
         private let databaseChangeSignalQueue = DispatchQueue(label: "spaces.database-change.signal")
     #endif
@@ -2240,10 +2247,19 @@ enum SpacesDaemonProfileCommandRouting {
 
     private func startLifecycleTimer() {
         lifecycleTimer?.invalidate()
+        // Defer the first garbage-collection sweep by a full interval so clients re-attaching and handoff
+        // resume completing after a daemon (re)start are never mistaken for a removed session. The deferral
+        // marker is engine-isolated (it belongs to the GC path), so seed it on the engine actor; this hop
+        // completes well before the first 1s timer tick reaches the same actor.
+        Task { @TerminalEngineActor [weak self] in self?.lastSessionGarbageCollectionAt = Date() }
         lifecycleTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            // `reapInactiveSessions` is engine-isolated (Step 1), so this hops onto the engine actor
-            // directly rather than the main actor the timer callback fires on.
-            Task { @TerminalEngineActor [weak self] in self?.reapInactiveSessions() }
+            // `reapInactiveSessions` and `garbageCollectRemovedSessionsIfDue` are both engine-isolated
+            // (they read `sessionCores`), so this hops onto the engine actor directly rather than the main
+            // actor the timer callback fires on.
+            Task { @TerminalEngineActor [weak self] in
+                self?.reapInactiveSessions()
+                self?.garbageCollectRemovedSessionsIfDue()
+            }
         }
         if let lifecycleTimer { RunLoop.main.add(lifecycleTimer, forMode: .common) }
     }
@@ -2256,6 +2272,49 @@ enum SpacesDaemonProfileCommandRouting {
             }
             _ = terminateSession(id: sessionID)
         }
+    }
+
+    /// Reclaims the directory, transcript, and rows of sessions the product no longer shows, on a coarse
+    /// cadence. The daemon is the sole owner of each session's on-disk footprint and the only party that
+    /// can see authoritative attachment state across every client, so this GC lives here rather than in a
+    /// client. `TerminalSessionGarbageCollector` enforces the safety gates (ended, unattached, unreferenced
+    /// / age-expired / over-budget); the in-memory `sessionCores` are handed in so a live session the daemon
+    /// owns is never collected. Age-expiry releases a long-ended session's product rows through the
+    /// orchestrator's `releaseEndedTerminalSessionReferences` (agent rows via the finalization chokepoint),
+    /// so the orchestrator is built lazily: the common sweep — nothing expired — never constructs it.
+    /// The orphan sweep runs after collection so its "known" set reflects the rows that survived it.
+    /// Engine-isolated because it reads `sessionCores`, which now lives on `TerminalEngineActor`.
+    @TerminalEngineActor private func garbageCollectRemovedSessionsIfDue(now: Date = Date()) {
+        if let lastSessionGarbageCollectionAt, now.timeIntervalSince(lastSessionGarbageCollectionAt) < Self.sessionGarbageCollectionInterval {
+            return
+        }
+        lastSessionGarbageCollectionAt = now
+        do {
+            let store = try SQLiteStore(path: try DatabaseLocator.defaultPath())
+            var expiryOrchestrator: WorkspaceOrchestrator?
+            try TerminalSessionGarbageCollector.collectRemovedSessions(
+                activeSessionIDs: Set(sessionCores.keys), isReferencedByProduct: { try store.terminalSessionIsReferencedByProduct($0) },
+                releaseExpiredReferences: { [self] sessionID in
+                    let orchestrator = try expiryOrchestrator ?? makeProfileOrchestrator()
+                    expiryOrchestrator = orchestrator
+                    try orchestrator.releaseEndedTerminalSessionReferences(sessionID: sessionID)
+                }, now: now,
+                onPurgeFailure: { sessionID, error in
+                    writeStandardError("spaces: terminal session garbage collection failed to purge \(sessionID), will retry next sweep: \(error)\n")
+                },
+                onBudgetExceeded: { totalBytes in
+                    writeStandardError(
+                        "spaces: ended terminal sessions hold \(totalBytes) bytes, over the \(TerminalSessionRetentionPolicy.standard.endedTranscriptByteBudget)-byte budget with no evictable session; will retry next sweep\n"
+                    )
+                })
+            let knownSessionIDs = Set(try TerminalSessionPersistence.listKnownSessions().map(\.sessionID))
+            try TerminalSessionOrphanSweep.sweep(
+                knownSessionIDs: knownSessionIDs, activeSessionIDs: Set(sessionCores.keys),
+                gracePeriod: TerminalSessionRetentionPolicy.standard.orphanGracePeriod, now: now,
+                onFailure: { path, error in
+                    writeStandardError("spaces: terminal session orphan sweep failed to remove \(path), will retry next sweep: \(error)\n")
+                })
+        } catch { writeStandardError("spaces: terminal session garbage collection failed: \(error)\n") }
     }
 
     /// Single startup repair chokepoint for durable runtime rows a predecessor daemon image (or a

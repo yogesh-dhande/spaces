@@ -80,9 +80,7 @@ import Foundation
                 // Ghostty config files — so the look is owned by the active Spaces theme.
                 try GhosttyThemeConfigGenerator.writeConfiguration(
                     theme: ActiveTheme.descriptor, configRootDirectory: Self.themeConfigRootDirectory()
-                ).withCString { path in
-                    ghostty_config_load_file(newConfig, path)
-                }
+                ).withCString { path in ghostty_config_load_file(newConfig, path) }
                 ghostty_config_finalize(newConfig)
                 self.config = newConfig
                 try startApp(config: newConfig)

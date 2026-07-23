@@ -465,6 +465,26 @@ extension SQLiteStore {
         return decodeAgentWindow(row: row)
     }
 
+    /// Every agent row (all providers, all workspaces) whose `terminal_session_id` references a given
+    /// terminal session. The session-retention release path (`WorkspaceOrchestrator
+    /// .releaseEndedTerminalSessionReferences`) uses this to find the product rows to finalize when a
+    /// long-ended terminal session is being aged out — deliberately unfiltered by provider, since every
+    /// row that pins the session must be released, not just the Spaces-native ones. Keyed on
+    /// `terminal_session_id` (not the joined `runtime_targets.tracking_id`) so it matches exactly the
+    /// column `terminalSessionIsReferencedByProduct` tests as the agent-side reference.
+    public func agentWindowsByTerminalSession(terminalSessionID: String) throws -> [AgentWindowRecord] {
+        let rows = try queryRows(
+            sql: """
+                SELECT
+                  \(Self.agentWindowColumns)
+                FROM agent_sessions
+                LEFT JOIN runtime_targets ON runtime_targets.id = agent_sessions.runtime_target_id
+                WHERE agent_sessions.terminal_session_id = ?
+                ORDER BY agent_sessions.created_at
+                """, bindings: [terminalSessionID])
+        return rows.compactMap { decodeAgentWindow(row: $0) }
+    }
+
     /// The agent row with this id (across every workspace), or `nil` when absent. Subscription
     /// validation resolves the watched agent by its row id to read the terminal it is bound to.
     public func agentWindow(id: String) throws -> AgentWindowRecord? {

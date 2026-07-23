@@ -871,8 +871,7 @@ public final class TerminalServiceServer {
     private var acceptSource: DispatchSourceRead?
 
     public init(
-        socketPath: String, queue: DispatchQueue,
-        livenessResponder: (@Sendable () -> TerminalServiceResponse)? = nil,
+        socketPath: String, queue: DispatchQueue, livenessResponder: (@Sendable () -> TerminalServiceResponse)? = nil,
         handleRequest: @escaping @Sendable (TerminalServiceRequest) throws -> TerminalServiceResponse
     ) {
         self.socketPath = socketPath

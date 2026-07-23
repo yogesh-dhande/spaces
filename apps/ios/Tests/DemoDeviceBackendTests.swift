@@ -5,9 +5,7 @@
     @testable import SpacesMobile
 
     @MainActor final class DemoDeviceBackendTests: XCTestCase {
-        private func loadLibrary(now: Date = Date()) throws -> DemoRecordingLibrary {
-            try DemoRecordingLibrary.load(bundle: .main, now: now)
-        }
+        private func loadLibrary(now: Date = Date()) throws -> DemoRecordingLibrary { try DemoRecordingLibrary.load(bundle: .main, now: now) }
 
         private func settings() -> SpacesMobileConnectionSettings {
             var settings = SpacesMobileConnectionSettings()
@@ -27,14 +25,10 @@
             XCTAssertGreaterThanOrEqual(overview.projects.count, 1)
             XCTAssertGreaterThanOrEqual(overview.workspaces.count, 3)
 
-            let hasWaitingAgent = overview.workspaces.contains { workspace in
-                workspace.codingAgentRows.contains { $0.activityState == .waiting }
-            }
+            let hasWaitingAgent = overview.workspaces.contains { workspace in workspace.codingAgentRows.contains { $0.activityState == .waiting } }
             XCTAssertTrue(hasWaitingAgent, "The demo overview should contain a coding agent waiting on input.")
 
-            let hasExitedProcess = overview.workspaces.contains { workspace in
-                workspace.processRows.contains { $0.runState == .exited }
-            }
+            let hasExitedProcess = overview.workspaces.contains { workspace in workspace.processRows.contains { $0.runState == .exited } }
             XCTAssertTrue(hasExitedProcess, "The demo overview should contain an exited process.")
 
             let events = SpacesMobileAttention.events(in: overview)
@@ -186,7 +180,8 @@
 
             let response = await backend.serve(
                 SpacesDeviceAPIRequest(
-                    command: .runWorkspaceProcess(.init(workspaceID: workspace.id, processKey: row.name, processTemplateID: row.templateID ?? row.id))))
+                    command: .runWorkspaceProcess(.init(workspaceID: workspace.id, processKey: row.name, processTemplateID: row.templateID ?? row.id))
+                ))
             XCTAssertTrue(response.ok)
 
             let mutated = try XCTUnwrap(response.overview?.workspaces.first { $0.id == workspace.id }?.processRows.first { $0.id == row.id })
@@ -258,7 +253,8 @@
 
             // After a resize toward the iPad grid, the iPad recording is served.
             let resize = await backend.serve(
-                SpacesDeviceAPIRequest(command: .terminalControl(.init(action: .resize, sessionID: sessionID, clientID: "c", columns: 116, rows: 78))))
+                SpacesDeviceAPIRequest(command: .terminalControl(.init(action: .resize, sessionID: sessionID, clientID: "c", columns: 116, rows: 78)))
+            )
             XCTAssertTrue(resize.ok)
             let pad = await backend.serve(SpacesDeviceAPIRequest(command: .state(.init(sessionID: sessionID))))
             let padSnapshot = try XCTUnwrap(pad.sessionState?.renderSnapshot)

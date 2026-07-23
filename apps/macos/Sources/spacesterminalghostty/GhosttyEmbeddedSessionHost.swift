@@ -1531,7 +1531,23 @@
             do {
                 let outputHandle = try ensureOutputHandle()
                 try outputHandle.write(contentsOf: data)
-                let outputEndByteOffset = (try? outputHandle.seekToEnd()).map(Self.clampedInt)
+                // The preamble grid only affects cursor placement (mode capture is size-independent), so
+                // an unobserved surface size falls back to the universal 80x24 default rather than
+                // skipping the trim and letting the transcript grow unbounded.
+                let terminalSize = observedSurfaceSize() ?? (columns: 80, rows: 24)
+                var outputEndByteOffset: Int?
+                if let trim = try? Self.appendedTranscriptEndOffset(
+                    outputHandle: outputHandle, outputPath: paths.outputPath, columns: terminalSize.columns, rows: terminalSize.rows)
+                {
+                    if trim.writeHandle !== outputHandle {
+                        // A trim replaced output.log with a fresh inode; adopt its handle before closing
+                        // the old one so the stored handle is always valid. A failed trim throws (caught
+                        // here as nil), leaving the original handle at the just-appended end — still valid.
+                        self.outputHandle = trim.writeHandle
+                        try? outputHandle.close()
+                    }
+                    outputEndByteOffset = Self.clampedInt(trim.endOffset)
+                }
                 requestSurfaceRefreshAction()
                 GhosttyEmbeddedAppService.shared.tick()
                 postOutputDidChange(
@@ -1763,6 +1779,20 @@
         private static func clampedInt(_ value: UInt64) -> Int {
             guard value <= UInt64(Int.max) else { return Int.max }
             return Int(value)
+        }
+
+        /// Positions `outputHandle` at the transcript's end and returns that offset plus the write handle
+        /// to append through, head-truncating the durable `output.log` first when it has grown past the
+        /// live-transcript bound so a long-running session stops accumulating disk without bound. A trim
+        /// atomically replaces `output.log` and returns a fresh handle the caller must adopt (the passed
+        /// `outputHandle` then points at the unlinked old inode); with no trim the same handle is returned.
+        /// See `TerminalTranscriptTrim`.
+        private static func appendedTranscriptEndOffset(outputHandle: FileHandle, outputPath: String, columns: Int, rows: Int) throws
+            -> TerminalTranscriptTrim.TrimResult
+        {
+            let endOffset = try outputHandle.seekToEnd()
+            return try TerminalTranscriptTrim.trimIfNeeded(
+                outputPath: outputPath, writeHandle: outputHandle, currentEndOffset: endOffset, columns: columns, rows: rows)
         }
 
         private static func normalizedSessionMetadataValue(_ value: String?) -> String? {

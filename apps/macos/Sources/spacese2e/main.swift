@@ -742,8 +742,8 @@ private struct RecordMobileDemoCommand: ParsableCommand {
             """)
 
     @Option(help: "Output directory for the recording bundle (manifest.json, overview.json, grids/).") var output: String
-    @Option(name: .customLong("grid"), parsing: .singleValue, help: "Target grid as <cols>x<rows>. Repeat for multiple device classes.")
-    var grids: [String] = []
+    @Option(name: .customLong("grid"), parsing: .singleValue, help: "Target grid as <cols>x<rows>. Repeat for multiple device classes.") var grids:
+        [String] = []
     @Option(help: "Device API host. Defaults to 127.0.0.1.") var host: String = "127.0.0.1"
     @Option(help: "Device API port.") var port: Int
     @Option(help: "Expected daemon certificate fingerprint.") var certificateFingerprint: String
@@ -753,8 +753,7 @@ private struct RecordMobileDemoCommand: ParsableCommand {
     @Option(help: "Recording schema version written to the manifest.") var schemaVersion: Int = 1
     @Option(
         name: .customLong("path-rewrite"), parsing: .singleValue,
-        help: "Rewrite a path prefix as <from>=<to> in overview and payloads for determinism. Repeatable.")
-    var pathRewrites: [String] = []
+        help: "Rewrite a path prefix as <from>=<to> in overview and payloads for determinism. Repeatable.") var pathRewrites: [String] = []
     @Option(help: "Idle time in milliseconds with no new stream frames before a session is considered settled.") var settleMS: Int = 1200
     @Option(help: "Overall per-session capture timeout in milliseconds.") var overallTimeoutMS: Int = 20000
 
@@ -775,8 +774,8 @@ private struct RecordMobileDemoCommand: ParsableCommand {
 
         let outputURL = URL(fileURLWithPath: normalizePath(output), isDirectory: true)
         let recorder = DemoRecorder(
-            host: host, port: port, certificateFingerprint: certificateFingerprint, authToken: authToken,
-            clientInstallationID: clientInstallationID, settleSeconds: Double(settleMS) / 1000, overallSeconds: Double(overallTimeoutMS) / 1000)
+            host: host, port: port, certificateFingerprint: certificateFingerprint, authToken: authToken, clientInstallationID: clientInstallationID,
+            settleSeconds: Double(settleMS) / 1000, overallSeconds: Double(overallTimeoutMS) / 1000)
 
         let overviewResponseData = try recorder.fetchOverviewResponseData()
         let overviewResponse = try SpacesDeviceAPICodec.decodeResponse(overviewResponseData)
@@ -794,7 +793,8 @@ private struct RecordMobileDemoCommand: ParsableCommand {
 
         var capturedSummaries: [DemoRecordedSessionSummary] = []
         for plan in plans {
-            capturedSummaries.append(DemoRecordedSessionSummary(stableID: plan.slug, workspaceName: plan.workspaceName, title: plan.title, kind: plan.kind))
+            capturedSummaries.append(
+                DemoRecordedSessionSummary(stableID: plan.slug, workspaceName: plan.workspaceName, title: plan.title, kind: plan.kind))
         }
 
         for grid in parsedGrids {
@@ -819,8 +819,7 @@ private struct RecordMobileDemoCommand: ParsableCommand {
             rebasingContract:
                 "All ISO8601 timestamp fields in overview.json and every payload are replaced with signed integer second-offset strings relative to referenceDate; the demo backend adds each offset to load-time now. daemonStatus.protocolVersion is patched to the client's expected wire protocol version at load.",
             grids: parsedGrids.map { DemoRecordingGrid(columns: $0.columns, rows: $0.rows) },
-            sessions: capturedSummaries.sorted { $0.stableID < $1.stableID },
-            sessionIDMap: sessionIDMap)
+            sessions: capturedSummaries.sorted { $0.stableID < $1.stableID }, sessionIDMap: sessionIDMap)
         let manifestEncoder = JSONEncoder()
         manifestEncoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
         try manifestEncoder.encode(manifest).write(to: outputURL.appendingPathComponent("manifest.json"))
@@ -927,9 +926,7 @@ private struct DemoRecorder {
             connectedAt: nowISO8601())
     }
 
-    func fetchOverviewResponseData() throws -> Data {
-        try request(command: .overview)
-    }
+    func fetchOverviewResponseData() throws -> Data { try request(command: .overview) }
 
     private func request(command: SpacesDeviceAPICommand) throws -> Data {
         let request = SpacesDeviceAPIRequest(command: command, authToken: authToken, clientApp: clientApp)
@@ -947,14 +944,16 @@ private struct DemoRecorder {
         let sessionID = plan.daemonSessionID
         if plan.isInteractive {
             let attachResponse = try sendControl(
-                SpacesDeviceTerminalControlRequest(action: .attach, sessionID: sessionID, client: recorderClient, attachmentMode: .viewer, appearance: .dark))
+                SpacesDeviceTerminalControlRequest(
+                    action: .attach, sessionID: sessionID, client: recorderClient, attachmentMode: .viewer, appearance: .dark))
             guard attachResponse.ok else { throw ValidationError("attach failed for \(plan.slug): \(attachResponse.message)") }
             let takeoverResponse = try sendControl(
                 SpacesDeviceTerminalControlRequest(action: .takeover, sessionID: sessionID, clientID: recorderClientID))
             guard takeoverResponse.ok else { throw ValidationError("takeover failed for \(plan.slug): \(takeoverResponse.message)") }
             var ownerEpoch = takeoverResponse.sessionState?.renderOwnerEpoch
             if ownerEpoch == nil {
-                ownerEpoch = try? SpacesDeviceAPICodec.decodeResponse(request(command: .state(.init(sessionID: sessionID)))).sessionState?.renderOwnerEpoch
+                ownerEpoch = try? SpacesDeviceAPICodec.decodeResponse(request(command: .state(.init(sessionID: sessionID)))).sessionState?
+                    .renderOwnerEpoch
             }
             let resizeResponse = try sendControl(
                 SpacesDeviceTerminalControlRequest(
@@ -982,9 +981,7 @@ private struct DemoRecorder {
                 if let applied = try? GhosttyRenderUpdateApplier.apply(update, to: baseline) { baseline = applied }
             }
         }
-        guard let baseline, let lastPayload else {
-            throw ValidationError("No render frames received for session \(sessionID).")
-        }
+        guard let baseline, let lastPayload else { throw ValidationError("No render frames received for session \(sessionID).") }
         let frame = GhosttyRenderFrame(sessionRevision: baseline.sessionRevision, ownerEpoch: baseline.ownerEpoch, snapshot: baseline.snapshot)
         let fullUpdate = GhosttyRenderUpdate.full(frame)
         let encoded = try GhosttyRenderUpdateBinaryCodec.encode(fullUpdate)
@@ -1094,12 +1091,9 @@ private struct DemoRecordingTransform {
                 result[key] = transform(element)
             }
             return result
-        case let array as [Any]:
-            return array.map(transform)
-        case let string as String:
-            return transformString(string)
-        default:
-            return value
+        case let array as [Any]: return array.map(transform)
+        case let string as String: return transformString(string)
+        default: return value
         }
     }
 
@@ -1276,8 +1270,7 @@ private struct StopFixturesCommand: ParsableCommand {
 
 private struct SeedFixtureCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
-        commandName: "seed-fixture",
-        abstract: "Register a local git repo as a Spaces project and seed deterministic browser/process defaults.",
+        commandName: "seed-fixture", abstract: "Register a local git repo as a Spaces project and seed deterministic browser/process defaults.",
         discussion: """
             The seeded project serves one of the hand-authored Lighthouse demo templates \
             (harbor, lantern, atlas). Pass --template to pick which one; when the project \
@@ -1288,8 +1281,8 @@ private struct SeedFixtureCommand: ParsableCommand {
             """)
 
     @Option(name: .long) var projectDir: String
-    @Option(name: .long, help: "Demo template to seed: harbor (primary web app), lantern (API service), or atlas (docs site).")
-    var template: String = "harbor"
+    @Option(name: .long, help: "Demo template to seed: harbor (primary web app), lantern (API service), or atlas (docs site).") var template: String =
+        "harbor"
     @Option(name: .long) var docsURL: String
     @Option(name: .long) var adminURL: String
 
@@ -1322,8 +1315,7 @@ private struct SeedFixtureCommand: ParsableCommand {
         // state for the mobile demo recording and the macOS E2E suite.
         let fixtureAgentLaunchers: [AgentLauncher]
         if template == "harbor" {
-            let agentCommand = fixtureServiceCommand(
-                executable: "/usr/bin/env", arguments: ["python3", "-m", "spaces_e2e_demo", "agent"])
+            let agentCommand = fixtureServiceCommand(executable: "/usr/bin/env", arguments: ["python3", "-m", "spaces_e2e_demo", "agent"])
             fixtureAgentLaunchers = [AgentLauncher(name: "Fix checkout 500", command: agentCommand)]
         } else {
             fixtureAgentLaunchers = []

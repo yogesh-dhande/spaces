@@ -93,8 +93,8 @@ import Foundation
                 if response.ok {
                     if requireWireCompatibility { try assertDaemonWireCompatible(response) }
                     TerminalPerformance.logMetric(
-                        "terminal_service_ensure_running", target: "socket=\(socketPath)",
-                        elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true, detail: "launched=0")
+                        "terminal_service_ensure_running", target: "socket=\(socketPath)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
+                        success: true, detail: "launched=0")
                     return false
                 }
                 // The daemon answered but is mid exec-handoff, not dead: wait for the replacement image to
@@ -104,8 +104,8 @@ import Foundation
                 if isTransitionalHandoffPing(response), let liveResponse = Self.waitForLivePongThroughTransition(socketPath: socketPath) {
                     if requireWireCompatibility { try assertDaemonWireCompatible(liveResponse) }
                     TerminalPerformance.logMetric(
-                        "terminal_service_ensure_running", target: "socket=\(socketPath)",
-                        elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true, detail: "launched=0 transitioned=1")
+                        "terminal_service_ensure_running", target: "socket=\(socketPath)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
+                        success: true, detail: "launched=0 transitioned=1")
                     return false
                 }
             }
@@ -134,8 +134,8 @@ import Foundation
                 if response.ok {
                     if requireWireCompatibility { try assertDaemonWireCompatible(response) }
                     TerminalPerformance.logMetric(
-                        "terminal_service_ensure_running", target: "socket=\(socketPath)",
-                        elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true, detail: "launched=0 adopted=1")
+                        "terminal_service_ensure_running", target: "socket=\(socketPath)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
+                        success: true, detail: "launched=0 adopted=1")
                     return false
                 }
                 // Same transitional wait as the pre-lock check above: the winner may be looking at a
@@ -143,8 +143,8 @@ import Foundation
                 if isTransitionalHandoffPing(response), let liveResponse = Self.waitForLivePongThroughTransition(socketPath: socketPath) {
                     if requireWireCompatibility { try assertDaemonWireCompatible(liveResponse) }
                     TerminalPerformance.logMetric(
-                        "terminal_service_ensure_running", target: "socket=\(socketPath)",
-                        elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true, detail: "launched=0 adopted=1 transitioned=1")
+                        "terminal_service_ensure_running", target: "socket=\(socketPath)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
+                        success: true, detail: "launched=0 adopted=1 transitioned=1")
                     return false
                 }
             }
@@ -232,9 +232,7 @@ import Foundation
         /// own liveness probe rather than timing out or refusing to connect. Any other failure (a different
         /// error code, or no response at all) is an ordinary "daemon looks dead" signal and must not pause
         /// here waiting for a handoff that isn't happening.
-        static func isTransitionalHandoffPing(_ response: TerminalServiceResponse) -> Bool {
-            !response.ok && response.errorCode == .shuttingDown
-        }
+        static func isTransitionalHandoffPing(_ response: TerminalServiceResponse) -> Bool { !response.ok && response.errorCode == .shuttingDown }
 
         /// Polls liveness until the daemon that reported a transitional `.shuttingDown` ping answers a live
         /// pong again, or `handoffTransitionTimeout` elapses. Returns the live response, or `nil` on timeout
@@ -247,8 +245,8 @@ import Foundation
         static func waitForLivePongThroughTransition(socketPath: String) -> TerminalServiceResponse? {
             let deadline = Date().addingTimeInterval(handoffTransitionTimeout)
             while Date() < deadline {
-                if let response = try? TerminalServiceClient.send(request: TerminalServiceRequest(command: .ping), socketPath: socketPath, timeout: 1),
-                    response.ok
+                if let response = try? TerminalServiceClient.send(
+                    request: TerminalServiceRequest(command: .ping), socketPath: socketPath, timeout: 1), response.ok
                 {
                     return response
                 }

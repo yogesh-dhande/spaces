@@ -214,6 +214,21 @@ The comparison writes `remote-terminal-latency-compare-summary.json` with Mac- a
 
 Remote Device API runs cache the Linux daemon archive under `apps/macos/.build/linux-e2e-cache/artifacts/` using a source fingerprint, skip re-upload when the remote archive checksum already matches, and reuse the installed remote daemon when the artifact checksum and Device API port marker match and the daemon is healthy.
 
+Linux daemon-side unit suites (the `#if os(Linux)` tests in `spacesterminalcoreTests` and `spacesterminalghosttyTests`) run inside Docker via `apps/macos/scripts/run_linux_tests.sh`:
+
+```bash
+docker run --rm --init --platform linux/amd64 \
+  -v "$PWD":/workspace \
+  -v spaces-linux-src:/root/src \
+  -v spaces-linux-zig:/root/spaces-zig-cache \
+  -v spaces-linux-test-build:/root/spaces-test-build \
+  -e ZIG_LOCAL_CACHE_DIR=/root/spaces-zig-cache/local -e ZIG_GLOBAL_CACHE_DIR=/root/spaces-zig-cache/global \
+  swift:6.2-noble \
+  bash /workspace/apps/macos/scripts/run_linux_tests.sh
+```
+
+On Linux the package manifest declares only the daemon-side graph (the targets the artifact ships plus those two test targets), because `swift test` builds every declared target and the AppKit/SwiftUI client targets do not exist there. The script stages sources onto container-native filesystem first: resource copies from the bind mount fail with EINTR under the amd64 runner, and the staged tree keeps container paths stable so the build scratch volume stays incremental. Linux test suites must use Swift Testing rather than XCTest — corelibs-xctest deadlocks async `@MainActor` test methods (the test job queues to the main executor while XCTest's blocked main thread never drains it), which is also why the older XCTest-based Linux suites are not yet in the script's filter.
+
 The lower-level Linux artifact build command is:
 
 ```bash

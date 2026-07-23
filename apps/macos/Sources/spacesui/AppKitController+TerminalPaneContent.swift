@@ -117,14 +117,16 @@ extension AppKitController {
         Self.deviceTerminalOpenRequest(workspaceID: workspaceID, sessionID: sessionID, overview: overview(forWorkspaceID: workspaceID))
     }
 
-    /// Loads a workspace panel's persisted layout, pruned against the overview's live
-    /// session catalog so dead sessions drop before the panel materializes.
+    /// Loads a workspace panel's persisted layout, pruned against the owning daemon's retained
+    /// terminal-session keep-set so dead sessions drop before the panel materializes. Uses the same
+    /// contract as live pruning (`OpenPanePruning.restorationKeepSet`), so an ended-but-retained shell
+    /// survives relaunch exactly as it survives a live overview refresh.
     func restoredWorkspacePanelLayout(deviceID: String, workspaceID: String) -> PanelLayout? {
         guard let json = try? clientDatabase().workspacePanelLayout(deviceID: deviceID, workspaceID: workspaceID),
             let layout = try? JSONDecoder().decode(PanelLayout.self, from: Data(json.utf8)), layout.version == PanelLayout.currentVersion
         else { return nil }
-        let liveSessionIDs = Set(overview(forWorkspaceID: workspaceID)?.sessions.map(\.id) ?? [])
-        return PanelLayoutEngine.prunedLayout(layout, keepingSessionIDs: liveSessionIDs)
+        let retainedSessionIDs = OpenPanePruning.restorationKeepSet(overview: overview(forWorkspaceID: workspaceID))
+        return PanelLayoutEngine.prunedLayout(layout, keepingSessionIDs: retainedSessionIDs)
     }
 }
 
@@ -145,7 +147,7 @@ extension AppKitController {
         case open(PanelLayout)
     }
 
-    nonisolated static func panelWindowRestoreDecision(layoutJSON: String, loadedDeviceIDs: Set<String>, liveSessionIDs: Set<String>)
+    nonisolated static func panelWindowRestoreDecision(layoutJSON: String, loadedDeviceIDs: Set<String>, retainedSessionIDs: Set<String>)
         -> PanelWindowRestoreDecision
     {
         guard let layout = try? JSONDecoder().decode(PanelLayout.self, from: Data(layoutJSON.utf8)), layout.version == PanelLayout.currentVersion
@@ -157,7 +159,7 @@ extension AppKitController {
                 }
             })
         guard referencedDeviceIDs.isSubset(of: loadedDeviceIDs) else { return .waitForDevices }
-        let pruned = PanelLayoutEngine.prunedLayout(layout, keepingSessionIDs: liveSessionIDs)
+        let pruned = PanelLayoutEngine.prunedLayout(layout, keepingSessionIDs: retainedSessionIDs)
         return pruned.isEmpty ? .discard : .open(pruned)
     }
 
@@ -170,10 +172,12 @@ extension AppKitController {
         guard let pending = pendingPanelWindowRestores, !pending.isEmpty else { return }
         let readySections = deviceSections.filter { $0.loadState == .loaded && $0.overview != nil }
         let loadedDeviceIDs = Set(readySections.map(\.deviceID))
-        let liveSessionIDs = Set(readySections.flatMap { $0.overview?.sessions.map(\.id) ?? [] })
+        let retainedSessionIDs = OpenPanePruning.restorationKeepSet(overviews: readySections.map(\.overview))
         var remaining: [SpacesClientDatabase.PanelWindowRecord] = []
         for record in pending {
-            switch Self.panelWindowRestoreDecision(layoutJSON: record.layoutJSON, loadedDeviceIDs: loadedDeviceIDs, liveSessionIDs: liveSessionIDs) {
+            switch Self.panelWindowRestoreDecision(
+                layoutJSON: record.layoutJSON, loadedDeviceIDs: loadedDeviceIDs, retainedSessionIDs: retainedSessionIDs)
+            {
             case .waitForDevices: remaining.append(record)
             case .skip: break
             case .discard: try? clientDatabase().deletePanelWindow(id: record.id)
@@ -278,9 +282,9 @@ extension AppKitController {
         let scopedWorkspaces: [SessionPickerWorkspaceContext]
         switch scope {
         case .workspace(_, let workspaceID):
-            scopedWorkspaces = overview(forWorkspaceID: workspaceID).map { [SessionPickerWorkspaceContext(workspaceID: workspaceID, overview: $0)] } ?? []
-        case .globalWindow:
-            scopedWorkspaces = orderedSessionPickerWorkspaceContexts()
+            scopedWorkspaces =
+                overview(forWorkspaceID: workspaceID).map { [SessionPickerWorkspaceContext(workspaceID: workspaceID, overview: $0)] } ?? []
+        case .globalWindow: scopedWorkspaces = orderedSessionPickerWorkspaceContexts()
         }
         return Self.sessionPickerPresentation(
             newTerminalWorkspaceID: newTerminalWorkspaceID, newTerminalOverview: overview(forWorkspaceID: newTerminalWorkspaceID),
@@ -314,8 +318,8 @@ extension AppKitController {
     /// processes and agent launchers carry a start choice and are always listed.
     /// `nonisolated static` so it's testable without a live `AppKitController`.
     nonisolated static func sessionPickerPresentation(
-        newTerminalWorkspaceID: String, newTerminalOverview: SpacesDeviceOverviewPayload?,
-        scopedWorkspaces: [SessionPickerWorkspaceContext], openSessionIDs: Set<String>
+        newTerminalWorkspaceID: String, newTerminalOverview: SpacesDeviceOverviewPayload?, scopedWorkspaces: [SessionPickerWorkspaceContext],
+        openSessionIDs: Set<String>
     ) -> (items: [CommandPaletteItem], choices: [String: SessionPickerChoice]) {
         var items: [CommandPaletteItem] = []
         var choices: [String: SessionPickerChoice] = [:]

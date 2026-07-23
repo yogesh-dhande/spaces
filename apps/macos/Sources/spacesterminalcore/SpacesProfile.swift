@@ -247,11 +247,8 @@ public struct SpacesProfile: Sendable, Equatable {
                         executablePath: executablePath, repoRoot: repoRoot, underlyingError: nil)
                 }
                 return context
-            } catch let error as SpacesProfileResolutionError {
-                throw error
-            } catch {
-                throw SpacesProfileResolutionError.repoBuiltGitProbeFailed(
-                    executablePath: executablePath, repoRoot: repoRoot, underlyingError: error)
+            } catch let error as SpacesProfileResolutionError { throw error } catch {
+                throw SpacesProfileResolutionError.repoBuiltGitProbeFailed(executablePath: executablePath, repoRoot: repoRoot, underlyingError: error)
             }
         #else
             return nil

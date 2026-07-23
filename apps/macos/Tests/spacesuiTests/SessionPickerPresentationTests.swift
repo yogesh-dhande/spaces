@@ -33,8 +33,8 @@ import workspacecore
             processRows: [
                 SpacesDeviceWorkspaceProcessRow(
                     id: "row-web-\(id)", workspaceID: id, name: "web", command: "npm run dev", templateID: "tpl-web-\(id)",
-                    processID: "process-web-\(id)", sessionID: "session-web-\(id)", runState: .running, canRun: false, canStop: true,
-                    canRestart: true),
+                    processID: "process-web-\(id)", sessionID: "session-web-\(id)", runState: .running, canRun: false, canStop: true, canRestart: true
+                ),
                 SpacesDeviceWorkspaceProcessRow(
                     id: "row-api-\(id)", workspaceID: id, name: "api", command: "npm run api", templateID: "tpl-api-\(id)", processID: nil,
                     sessionID: nil, runState: .notStarted, canRun: true, canStop: false, canRestart: false),
@@ -62,11 +62,15 @@ import workspacecore
     @Test func listsSidebarTargetsInOrderExcludingBrowsers() {
         let workspace = richWorkspace(id: "workspace-1")
         let presentation = AppKitController.sessionPickerPresentation(
-            newTerminalWorkspaceID: "workspace-1", newTerminalOverview: context(for: workspace).overview,
-            scopedWorkspaces: [context(for: workspace)], openSessionIDs: [])
+            newTerminalWorkspaceID: "workspace-1", newTerminalOverview: context(for: workspace).overview, scopedWorkspaces: [context(for: workspace)],
+            openSessionIDs: [])
 
         // "New terminal session" leads; the browser (docs) is dropped; everything else keeps sidebar order.
-        #expect(presentation.items.map(\.id) == ["picker:new", "picker:workspace-1::1", "picker:workspace-1::2", "picker:workspace-1::3", "picker:workspace-1::4", "picker:workspace-1::5"])
+        #expect(
+            presentation.items.map(\.id) == [
+                "picker:new", "picker:workspace-1::1", "picker:workspace-1::2", "picker:workspace-1::3", "picker:workspace-1::4",
+                "picker:workspace-1::5",
+            ])
         #expect(presentation.items.map(\.label) == ["New terminal session", "web", "api", "claude", "codex", "shell"])
         #expect(presentation.items.map(\.kind) == [.window, .process, .missingConfiguredProcess, .agent, .agentLauncher, .window])
     }
@@ -74,8 +78,8 @@ import workspacecore
     @Test func liveAndExitedTargetsResolveToExistingSessionRequestsBuiltLikeTheSidebar() {
         let workspace = richWorkspace(id: "workspace-1")
         let presentation = AppKitController.sessionPickerPresentation(
-            newTerminalWorkspaceID: "workspace-1", newTerminalOverview: context(for: workspace).overview,
-            scopedWorkspaces: [context(for: workspace)], openSessionIDs: [])
+            newTerminalWorkspaceID: "workspace-1", newTerminalOverview: context(for: workspace).overview, scopedWorkspaces: [context(for: workspace)],
+            openSessionIDs: [])
 
         // The configured process has no overview session entry, so the request is the fallback the
         // sidebar builds from the row (title, dir, kind) rather than an overview-derived one.
@@ -98,8 +102,8 @@ import workspacecore
     @Test func notStartedTargetsCarryStartChoicesAndAlwaysList() {
         let workspace = richWorkspace(id: "workspace-1")
         let presentation = AppKitController.sessionPickerPresentation(
-            newTerminalWorkspaceID: "workspace-1", newTerminalOverview: context(for: workspace).overview,
-            scopedWorkspaces: [context(for: workspace)], openSessionIDs: [])
+            newTerminalWorkspaceID: "workspace-1", newTerminalOverview: context(for: workspace).overview, scopedWorkspaces: [context(for: workspace)],
+            openSessionIDs: [])
 
         guard case .startProcess(let workspaceID, let processKey, let processTemplateID)? = presentation.choices["picker:workspace-1::2"] else {
             Issue.record("expected a startProcess choice for the not-started configured process")
@@ -121,8 +125,8 @@ import workspacecore
     @Test func excludesTargetsAlreadyOpenInAPaneButKeepsNotStartedRows() {
         let workspace = richWorkspace(id: "workspace-1")
         let presentation = AppKitController.sessionPickerPresentation(
-            newTerminalWorkspaceID: "workspace-1", newTerminalOverview: context(for: workspace).overview,
-            scopedWorkspaces: [context(for: workspace)], openSessionIDs: ["session-web-workspace-1", "session-shell-workspace-1"])
+            newTerminalWorkspaceID: "workspace-1", newTerminalOverview: context(for: workspace).overview, scopedWorkspaces: [context(for: workspace)],
+            openSessionIDs: ["session-web-workspace-1", "session-shell-workspace-1"])
 
         // The two open sessions (web, shell) drop; the sessionless not-started rows (api, codex) and
         // the still-closed agent stay.
@@ -141,8 +145,8 @@ import workspacecore
                     runState: .running, canOpenTerminal: true, canStop: true)
             ])
         let presentation = AppKitController.sessionPickerPresentation(
-            newTerminalWorkspaceID: "workspace-1", newTerminalOverview: context(for: workspace).overview,
-            scopedWorkspaces: [context(for: workspace)], openSessionIDs: ["session-shell"])
+            newTerminalWorkspaceID: "workspace-1", newTerminalOverview: context(for: workspace).overview, scopedWorkspaces: [context(for: workspace)],
+            openSessionIDs: ["session-shell"])
 
         #expect(presentation.items.map(\.id) == ["picker:new"])
         guard case .newTerminalSession? = presentation.choices["picker:new"] else {
@@ -166,7 +170,6 @@ import workspacecore
                 "picker:new", "picker:workspace-1::2", "picker:workspace-1::3", "picker:workspace-1::4", "picker:workspace-1::5",
                 "picker:workspace-2::1", "picker:workspace-2::2", "picker:workspace-2::4", "picker:workspace-2::5",
             ])
-        #expect(
-            presentation.items.map(\.label) == ["New terminal session", "api", "claude", "codex", "shell", "web", "api", "codex", "shell"])
+        #expect(presentation.items.map(\.label) == ["New terminal session", "api", "claude", "codex", "shell", "web", "api", "codex", "shell"])
     }
 }

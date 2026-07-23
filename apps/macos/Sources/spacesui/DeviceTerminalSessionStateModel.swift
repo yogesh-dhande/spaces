@@ -226,7 +226,9 @@
                 let isLocalPinMismatch: Bool
                 if case TerminalServiceTLSError.certificatePinMismatch = error { isLocalPinMismatch = true } else { isLocalPinMismatch = false }
                 let isLocalUnauthorizedRejection: Bool
-                if case SpacesDeviceClientError.requestRejected(_, .unauthorized) = error { isLocalUnauthorizedRejection = true } else {
+                if case SpacesDeviceClientError.requestRejected(_, .unauthorized) = error {
+                    isLocalUnauthorizedRejection = true
+                } else {
                     isLocalUnauthorizedRejection = false
                 }
                 guard device.id == SpacesPairedDeviceRecord.localDeviceID,
@@ -255,12 +257,11 @@
         /// in-process `SpacesDeviceAPIServer`; the client is a concrete `final class` with no protocol
         /// seam to fake, so this is the closest faithful integration test of the mapping below.
         nonisolated static func fetchTranscript(
-            sessionID: String, maxBytes: Int, requestClient: SpacesDeviceAPIRequestSessionClient, authToken: String?,
-            clientApp: SpacesDeviceClientApp
+            sessionID: String, maxBytes: Int, requestClient: SpacesDeviceAPIRequestSessionClient, authToken: String?, clientApp: SpacesDeviceClientApp
         ) throws -> RemoteGhosttyTranscript {
             let request = SpacesDeviceAPIRequest(
-                command: .terminalTranscript(SpacesDeviceTerminalTranscriptRequest(sessionID: sessionID, maxBytes: maxBytes)),
-                authToken: authToken, clientApp: clientApp)
+                command: .terminalTranscript(SpacesDeviceTerminalTranscriptRequest(sessionID: sessionID, maxBytes: maxBytes)), authToken: authToken,
+                clientApp: clientApp)
             // The session client's default timeout cannot carry a budget-sized transcript on a
             // slow remote link; use the shared per-command policy instead.
             let response = try requestClient.send(request, timeoutSeconds: SpacesDeviceClient.requestTimeoutSeconds(for: request.command))

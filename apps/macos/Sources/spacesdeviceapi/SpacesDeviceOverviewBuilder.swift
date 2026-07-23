@@ -107,7 +107,34 @@ struct SpacesDeviceOverviewBuilder {
 
         return SpacesDeviceOverviewPayload(
             projects: projectSummaries, workspaces: workspaceSummaries, sessions: workspaceSessionSummaries + adHocSessionSummaries,
-            daemonStatus: daemonStatus)
+            retainedTerminalSessionIDs: retainedTerminalSessionIDs(liveSessions: liveSessions, workspaces: workspaces), daemonStatus: daemonStatus)
+    }
+
+    /// The keep-set the daemon publishes on `SpacesDeviceOverviewPayload.retainedTerminalSessionIDs`:
+    /// every terminal session id whose pane and transcript the daemon still retains.
+    ///
+    /// This is the daemon's authoritative retention rule, mirroring the session garbage collector's
+    /// `SQLiteStore.terminalSessionIsReferencedByProduct` plus a live core: a session is retained while
+    /// it has a live interactive service (`liveSessions`, the same catalog that feeds `sessions`) or while
+    /// a `running_processes`, `agent_sessions`, or `runtime_targets` row references it. It reads the raw
+    /// product records' tracking ids directly, BEFORE `sessions`' live-map stripping drops an ended
+    /// session's id — so a bare ad hoc shell that has exited but is still held by its `runtime_targets`
+    /// (terminal window) row remains in the keep-set, and its client-side ended pane stays open for
+    /// scrollback until that row is removed. Ids are whitespace-trimmed, empties dropped, and sorted so
+    /// the payload is stable tick-to-tick (the client dedupes overviews by equality).
+    private static func retainedTerminalSessionIDs(liveSessions: [TerminalSessionCatalogEntry], workspaces: [WorkspaceDescriptor]) -> [String] {
+        var retained = Set<String>()
+        func insert(_ trackingID: String?) {
+            guard let normalized = trackingID?.trimmingCharacters(in: .whitespacesAndNewlines), !normalized.isEmpty else { return }
+            retained.insert(normalized)
+        }
+        for session in liveSessions { insert(session.sessionID) }
+        for descriptor in workspaces {
+            for process in descriptor.runningProcesses { insert(process.terminalTrackingID) }
+            for agent in descriptor.agentWindows { insert(agent.terminalTrackingID) }
+            for window in descriptor.windows { insert(window.terminalTrackingID) }
+        }
+        return retained.sorted()
     }
 
     static func matchedWorkspace(for session: TerminalSessionCatalogEntry, workspaces: [WorkspaceDescriptor]) -> WorkspaceDescriptor? {

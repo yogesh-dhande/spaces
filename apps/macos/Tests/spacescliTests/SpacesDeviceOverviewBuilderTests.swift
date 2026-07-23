@@ -486,6 +486,67 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
         XCTAssertEqual(overview.workspaces.first?.sessionCount, 2)
     }
 
+    // MARK: - retainedTerminalSessionIDs (the daemon-published pane keep-set)
+
+    /// A live interactive session is retained (it also feeds `sessions`).
+    func testRetainedIncludesLiveAdHocSession() {
+        let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
+        let workspace = WorkspaceRecord(
+            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false, isArchived: false,
+            isRunning: true, lastLaunchedAt: nil)
+        let liveSession = makeSessionCatalogEntry(
+            sessionID: "session-live", title: "Shell", workingDirectory: workspace.dir, workspaceID: workspace.id, attachmentSnapshot: .init())
+
+        let overview = SpacesDeviceOverviewBuilder.build(
+            projects: [project], workspaces: [.init(project: project, workspace: workspace)], sessions: [liveSession])
+
+        XCTAssertTrue(overview.retainedTerminalSessionIDs.contains("session-live"))
+    }
+
+    /// The regression: an ended ad hoc shell is not live and has no process/agent row, but its
+    /// `runtime_targets` (terminal window) row still holds its transcript, so the daemon must keep
+    /// retaining it — even though the builder's live-map strips its id out of `sessions`. This is the
+    /// failing-first case: against the pre-fix payload the id survived on no surface.
+    func testRetainedIncludesEndedSessionReferencedOnlyByRuntimeTargetRow() {
+        let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
+        let workspace = WorkspaceRecord(
+            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false, isArchived: false,
+            isRunning: true, lastLaunchedAt: nil)
+        let endedShellWindow = WindowRecord(
+            id: "window-shell", workspaceID: workspace.id, app: "Spaces", name: "Shell", terminalTrackingID: "session-ended-shell",
+            role: "terminal", orderIndex: 0, lastSeenAt: "now")
+
+        let overview = SpacesDeviceOverviewBuilder.build(
+            projects: [project], workspaces: [.init(project: project, workspace: workspace, windows: [endedShellWindow])], sessions: [])
+
+        // The session left `sessions` the moment it exited, but the daemon still retains it.
+        XCTAssertFalse(overview.sessions.contains { $0.id == "session-ended-shell" })
+        XCTAssertTrue(overview.retainedTerminalSessionIDs.contains("session-ended-shell"))
+    }
+
+    /// An exited process/agent row keeps its session retained too, matching the collector's rule; a
+    /// session with no live core and no product row is not retained.
+    func testRetainedIncludesExitedProductRowsAndExcludesUnreferencedSession() {
+        let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
+        let workspace = WorkspaceRecord(
+            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false, isArchived: false,
+            isRunning: true, lastLaunchedAt: nil)
+        let exitedProcess = RunningProcessRecord(
+            id: "process-api", workspaceID: workspace.id, templateName: "api", command: "npm run dev", terminalApp: "Spaces",
+            terminalTrackingID: "session-process", pid: nil, status: .exited, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: "later")
+        let exitedAgent = AgentWindowRecord(
+            id: "agent-review", workspaceID: workspace.id, provider: .spaces, label: "reviewer", terminalTrackingID: "session-agent",
+            sessionKey: nil, status: .exited, createdAt: "now", updatedAt: "now")
+
+        let overview = SpacesDeviceOverviewBuilder.build(
+            projects: [project],
+            workspaces: [.init(project: project, workspace: workspace, runningProcesses: [exitedProcess], agentWindows: [exitedAgent])],
+            sessions: [])
+
+        XCTAssertEqual(overview.retainedTerminalSessionIDs, ["session-agent", "session-process"])
+        XCTAssertFalse(overview.retainedTerminalSessionIDs.contains("session-never-existed"))
+    }
+
     private func makeSessionCatalogEntry(
         sessionID: String, title: String, workingDirectory: String, state: TerminalSessionState = .running, workspaceID: String,
         kind: TerminalSessionKind = .shell, attachmentSnapshot: TerminalSessionAttachmentSnapshot, isControlAvailable: Bool = true,

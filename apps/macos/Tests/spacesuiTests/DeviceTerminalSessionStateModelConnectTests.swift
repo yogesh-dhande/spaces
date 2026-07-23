@@ -30,9 +30,9 @@ import spacesterminalcore
         defer { stallingListener.close() }
 
         let unreachableDevice = SpacesPairedDeviceRecord(
-            id: "remote-unreachable-\(UUID().uuidString)", name: "Remote", platform: "linux", host: "127.0.0.1",
-            port: stallingListener.port, certificateFingerprint: "SHA256:" + String(repeating: "0", count: 64),
-            createdAt: "2026-07-19T00:00:00Z", updatedAt: "2026-07-19T00:00:00Z", lastSelectedAt: "2026-07-19T00:00:00Z")
+            id: "remote-unreachable-\(UUID().uuidString)", name: "Remote", platform: "linux", host: "127.0.0.1", port: stallingListener.port,
+            certificateFingerprint: "SHA256:" + String(repeating: "0", count: 64), createdAt: "2026-07-19T00:00:00Z",
+            updatedAt: "2026-07-19T00:00:00Z", lastSelectedAt: "2026-07-19T00:00:00Z")
         let model = try DeviceTerminalSessionStateModel(
             device: unreachableDevice, sessionID: "session-\(UUID().uuidString)",
             launchConfiguration: TerminalSessionLaunchConfiguration(
@@ -94,9 +94,7 @@ private final class StallingTLSHandshakeListener {
         var boundAddress = sockaddr_in()
         var boundAddressLength = socklen_t(MemoryLayout<sockaddr_in>.size)
         let getsocknameResult = withUnsafeMutablePointer(to: &boundAddress) { addressPointer -> Int32 in
-            addressPointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { rebound in
-                getsockname(socketFD, rebound, &boundAddressLength)
-            }
+            addressPointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { rebound in getsockname(socketFD, rebound, &boundAddressLength) }
         }
         guard getsocknameResult == 0 else {
             Darwin.close(socketFD)

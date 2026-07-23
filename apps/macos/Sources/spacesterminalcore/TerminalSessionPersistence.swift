@@ -799,6 +799,36 @@ public enum TerminalSessionPersistence {
         }
     }
 
+    /// Reclaims a removed session's persisted footprint: every `terminal_*` row keyed by its root
+    /// directory, plus the on-disk session directory (`output.log`, `service.log`). Control/subscription
+    /// sockets live outside this directory and are already removed at terminate; this drops what
+    /// terminate deliberately keeps for ended-pane replay, and is therefore only safe once the session is
+    /// no longer shown by the product (see `TerminalSessionGarbageCollector`). Removing every table's row
+    /// for the root — not just `terminal_remote_session_states` — keeps the persisted footprint from
+    /// outliving the session it belongs to.
+    ///
+    /// The directory is removed before the rows, not after, so a failure stays retryable: sessions are
+    /// discovered by `listKnownSessions`, which is DB-driven, so a `terminal_sessions` row is what makes a
+    /// session visible to the next collection sweep. If `removeItem` threw after the rows were already
+    /// deleted, the directory would be orphaned with nothing left to rediscover it — a permanent leak. With
+    /// the directory removed first, a `removeItem` failure leaves the rows intact and the whole purge (not
+    /// just the row deletion) is retried on the next sweep; if `removeItem` succeeds but the row deletion
+    /// then fails, the next sweep still lists the session, still reads its runtime/attachment state (those
+    /// are rows, not files), and skips the already-removed directory via the `fileExists` guard below before
+    /// retrying the row deletion.
+    public static func purgeSession(paths: TerminalSessionPaths, fileManager: FileManager = .default) throws {
+        if fileManager.fileExists(atPath: paths.rootDirectory) { try fileManager.removeItem(atPath: paths.rootDirectory) }
+        let root = normalizedRootDirectory(paths.rootDirectory)
+        try withDatabase(paths: paths) { database in
+            try database.withImmediateTransaction {
+                for table in [
+                    "terminal_agent_signal_events", "terminal_attachments", "terminal_clients", "terminal_remote_session_states",
+                    "terminal_runtime_states", "terminal_sessions",
+                ] { try database.execute(sql: "DELETE FROM \(table) WHERE root_directory = ?", bindings: [root]) }
+            }
+        }
+    }
+
     /// Result of an `expireClients` transaction. `.superseded` is NOT a failure: the transaction committed
     /// whatever remained valid, but the durable world moved out from under the original decision (a client
     /// refreshed its lease, a different client took ownership, or the transfer target detached in the race

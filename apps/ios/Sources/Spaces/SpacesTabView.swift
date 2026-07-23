@@ -249,7 +249,8 @@ struct SpacesTabView: View {
                     Image(systemName: isCollapsed ? "chevron.right" : "chevron.down").font(.system(size: 12, weight: .semibold)).foregroundStyle(
                         Theme.mutedSecondary)
                 }.contentShape(Rectangle())
-            }.buttonStyle(.plain).accessibilityIdentifier("workspace.band.\(group.id)").modifier(WorkspaceBandContextMenu(model: model, workspace: group.workspace) { pendingHideWorkspace = group.workspace })
+            }.buttonStyle(.plain).accessibilityIdentifier("workspace.band.\(group.id)").modifier(
+                WorkspaceBandContextMenu(model: model, workspace: group.workspace) { pendingHideWorkspace = group.workspace })
             if !isCollapsed {
                 VStack(spacing: 0) {
                     WorkspaceControlBar(

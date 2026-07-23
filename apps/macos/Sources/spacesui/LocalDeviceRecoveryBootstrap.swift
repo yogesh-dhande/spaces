@@ -37,10 +37,7 @@ import spacesdevicecore
                 // result, which would report a thrown read as a successful "no token" and defeat
                 // the callers' keep-previous-token fallback.
                 let persistedToken: String??
-                do {
-                    persistedToken = try SpacesDeviceCredentialStore.token(
-                        deviceID: SpacesPairedDeviceRecord.localDeviceID, profile: nil)
-                } catch {
+                do { persistedToken = try SpacesDeviceCredentialStore.token(deviceID: SpacesPairedDeviceRecord.localDeviceID, profile: nil) } catch {
                     persistedToken = .none
                 }
                 return Outcome(record: refreshed, persistedToken: persistedToken)

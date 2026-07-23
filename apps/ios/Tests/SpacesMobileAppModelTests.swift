@@ -402,8 +402,8 @@
 
         func testIncomingLinkRoutingClassifiesValidPairingURLAsPairing() {
             let link = SpacesDevicePairingLink(
-                host: "10.0.0.4", port: 19000, nonce: "nonce", code: "code", certificateFingerprint: "fp", name: "Mac Studio",
-                protocolVersion: 3, appVersion: "1.0")
+                host: "10.0.0.4", port: 19000, nonce: "nonce", code: "code", certificateFingerprint: "fp", name: "Mac Studio", protocolVersion: 3,
+                appVersion: "1.0")
 
             XCTAssertEqual(SpacesIncomingLinkRoute.route(for: link.url), .pairing(link.url))
         }
@@ -445,8 +445,8 @@
         func testPrepareScannedPairingLinkStagesLinkAndRaisesConnectionSettings() {
             let model = makeModel()
             let link = SpacesDevicePairingLink(
-                host: "10.0.0.4", port: 19000, nonce: "nonce", code: "code", certificateFingerprint: "fp", name: "Mac Studio",
-                protocolVersion: 3, appVersion: "1.0")
+                host: "10.0.0.4", port: 19000, nonce: "nonce", code: "code", certificateFingerprint: "fp", name: "Mac Studio", protocolVersion: 3,
+                appVersion: "1.0")
 
             model.prepareScannedPairingLink(link.absoluteString)
 

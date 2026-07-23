@@ -63,17 +63,15 @@
             let model = SpacesMobileAppModel()
             model.setDemoMode(true)
 
-            XCTAssertEqual(UserDefaults.standard.data(forKey: devicesKey), blobBefore, "enabling Demo Mode must not rewrite the paired-device records")
-            for device in seeded {
-                XCTAssertEqual(SpacesMobileDeviceStore.authToken(deviceID: device.id), expectedToken(for: device))
-            }
+            XCTAssertEqual(
+                UserDefaults.standard.data(forKey: devicesKey), blobBefore, "enabling Demo Mode must not rewrite the paired-device records")
+            for device in seeded { XCTAssertEqual(SpacesMobileDeviceStore.authToken(deviceID: device.id), expectedToken(for: device)) }
 
             model.setDemoMode(false)
 
-            XCTAssertEqual(UserDefaults.standard.data(forKey: devicesKey), blobBefore, "the paired-device records must be byte-identical across the cycle")
-            for device in seeded {
-                XCTAssertEqual(SpacesMobileDeviceStore.authToken(deviceID: device.id), expectedToken(for: device))
-            }
+            XCTAssertEqual(
+                UserDefaults.standard.data(forKey: devicesKey), blobBefore, "the paired-device records must be byte-identical across the cycle")
+            for device in seeded { XCTAssertEqual(SpacesMobileDeviceStore.authToken(deviceID: device.id), expectedToken(for: device)) }
         }
 
         // MARK: - Persistence across launches
@@ -193,8 +191,10 @@
         // MARK: - Helpers
 
         private func seedRealDevices() -> [SpacesMobilePairedDeviceRecord] {
-            _ = SpacesMobileDeviceStore.upsert(settings: realSettings(host: "10.0.0.10", fingerprint: "SHA256:studio", token: "token-studio"), name: "Studio")
-            let state = SpacesMobileDeviceStore.upsert(settings: realSettings(host: "10.0.0.11", fingerprint: "SHA256:air", token: "token-air"), name: "Air")
+            _ = SpacesMobileDeviceStore.upsert(
+                settings: realSettings(host: "10.0.0.10", fingerprint: "SHA256:studio", token: "token-studio"), name: "Studio")
+            let state = SpacesMobileDeviceStore.upsert(
+                settings: realSettings(host: "10.0.0.11", fingerprint: "SHA256:air", token: "token-air"), name: "Air")
             return state.devices
         }
 
@@ -207,9 +207,7 @@
             return settings
         }
 
-        private func expectedToken(for device: SpacesMobilePairedDeviceRecord) -> String {
-            device.name == "Studio" ? "token-studio" : "token-air"
-        }
+        private func expectedToken(for device: SpacesMobilePairedDeviceRecord) -> String { device.name == "Studio" ? "token-studio" : "token-air" }
 
         private func resetPersistedState() {
             for device in SpacesMobileDeviceStore.load(fallbackSettings: SpacesMobileConnectionSettings()).devices {

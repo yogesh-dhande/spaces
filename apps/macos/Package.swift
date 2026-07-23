@@ -19,6 +19,14 @@ let spacesTerminalCoreExtraDependencies: [Target.Dependency] = [.target(name: "O
 let spacesTerminalCoreExtraLinkerSettings: [LinkerSetting] = [.linkedLibrary("ssl"), .linkedLibrary("crypto")]
 let workspaceCoreExtraDependencies: [Target.Dependency] = [.target(name: "CSQLite3")]
 let spacesDeviceAPIExtraDependencies: [Target.Dependency] = [.target(name: "OpenSSL")]
+// The Linux package graph is exactly what the daemon artifact ships (spacesd + spaces CLI and
+// their libraries) plus the two daemon-side test targets. AppKit/SwiftUI client targets are not
+// declared at all: `swift test` builds every declared target, so a declared-but-unbuildable
+// client target would break the Linux test lane even though no test depends on it.
+let terminalUITargets: [Target] = []
+let macAppTargets: [Target] = []
+let macExecutableTargets: [Target] = []
+let macOnlyProducts: [Product] = []
 #else
 let systemLibraryTargets: [Target] = []
 let ghosttyKitSupportTargets: [Target] = [
@@ -45,6 +53,63 @@ let spacesTerminalCoreExtraDependencies: [Target.Dependency] = []
 let spacesTerminalCoreExtraLinkerSettings: [LinkerSetting] = []
 let workspaceCoreExtraDependencies: [Target.Dependency] = []
 let spacesDeviceAPIExtraDependencies: [Target.Dependency] = []
+let terminalUITargets: [Target] = [
+    .target(
+        name: "spacesterminalui",
+        dependencies: ["spacesterminalcore", "spacesterminalghostty"]
+    )
+]
+let macAppTargets: [Target] = [
+    .target(
+        name: "spacesui",
+        dependencies: [
+            "workspacecore",
+            "systembridge",
+            "spacesdeviceapi",
+            "spacesclientcore",
+            "spacesterminalcore",
+            "spacesterminalui",
+            .product(name: "Sparkle", package: "Sparkle"),
+        ]
+    )
+]
+let macExecutableTargets: [Target] = [
+    .executableTarget(
+        name: "spacese2e",
+        dependencies: [
+            "workspacecore",
+            "systembridge",
+            "spacesclientcore",
+            "spacesdeviceapi",
+            "spacesdevicecore",
+            .product(name: "ArgumentParser", package: "swift-argument-parser")
+        ],
+        path: "Sources/spacese2e"
+    ),
+    .executableTarget(
+        name: "SpacesApp",
+        dependencies: ["spacesui", "spacesterminalcore"],
+        path: "Sources/SpacesApp",
+        exclude: ["Info.plist"],
+        resources: [.copy("AppIcon.icns")],
+        linkerSettings: [
+            .unsafeFlags([
+                "-Xlinker", "-sectcreate",
+                "-Xlinker", "__TEXT",
+                "-Xlinker", "__info_plist",
+                "-Xlinker", "Sources/SpacesApp/Info.plist",
+                "-Xlinker", "-rpath",
+                "-Xlinker", "@executable_path/../Frameworks"
+            ])
+        ]
+    ),
+]
+let macOnlyProducts: [Product] = [
+    .library(name: "spacesterminalui", targets: ["spacesterminalui"]),
+    .library(name: "spacesui", targets: ["spacesui"]),
+    .executable(name: "spacese2e", targets: ["spacese2e"]),
+    .executable(name: "SpacesApp", targets: ["SpacesApp"])
+]
 #endif
 
 let supportTargets: [Target] = ghosttyKitSupportTargets + [
@@ -63,7 +128,7 @@ let supportTargets: [Target] = ghosttyKitSupportTargets + [
     .target(name: "spacesruntimecore"),
 ]
 
-let terminalTargets: [Target] = [
+let baseTerminalTargets: [Target] = [
     .target(
         name: "spacesterminalcore",
         dependencies: [
@@ -96,11 +161,8 @@ let terminalTargets: [Target] = [
         ] + ghosttyKitTargetDependencies,
         linkerSettings: [.linkedLibrary("c++", .when(platforms: [.macOS])), .linkedLibrary("util", .when(platforms: [.linux]))]
     ),
-    .target(
-        name: "spacesterminalui",
-        dependencies: ["spacesterminalcore", "spacesterminalghostty"]
-    ),
-] + mobileGhosttyTargets
+]
+let terminalTargets: [Target] = baseTerminalTargets + terminalUITargets + mobileGhosttyTargets
 
 let appTargets: [Target] = [
     .target(
@@ -116,18 +178,6 @@ let appTargets: [Target] = [
         linkerSettings: [.linkedLibrary("sqlite3")]
     ),
     .target(
-        name: "spacesui",
-        dependencies: [
-            "workspacecore",
-            "systembridge",
-            "spacesdeviceapi",
-            "spacesclientcore",
-            "spacesterminalcore",
-            "spacesterminalui",
-            .product(name: "Sparkle", package: "Sparkle"),
-        ]
-    ),
-    .target(
         name: "spacescli",
         dependencies: [
             "workspacecore",
@@ -140,21 +190,9 @@ let appTargets: [Target] = [
             .product(name: "ArgumentParser", package: "swift-argument-parser")
         ]
     ),
-]
+] + macAppTargets
 
 let executableTargets: [Target] = [
-    .executableTarget(
-        name: "spacese2e",
-        dependencies: [
-            "workspacecore",
-            "systembridge",
-            "spacesclientcore",
-            "spacesdeviceapi",
-            "spacesdevicecore",
-            .product(name: "ArgumentParser", package: "swift-argument-parser")
-        ],
-        path: "Sources/spacese2e"
-    ),
     .executableTarget(
         name: "spacesd",
         dependencies: [
@@ -169,44 +207,37 @@ let executableTargets: [Target] = [
         path: "Sources/spacesd"
     ),
     .executableTarget(name: "spaces", dependencies: ["spacescli"], path: "Sources/spaces"),
-    .executableTarget(
-        name: "SpacesApp",
-        dependencies: ["spacesui", "spacesterminalcore"],
-        path: "Sources/SpacesApp",
-        exclude: ["Info.plist"],
-        resources: [.copy("AppIcon.icns")],
-        linkerSettings: [
-            .unsafeFlags([
-                "-Xlinker", "-sectcreate",
-                "-Xlinker", "__TEXT",
-                "-Xlinker", "__info_plist",
-                "-Xlinker", "Sources/SpacesApp/Info.plist",
-                "-Xlinker", "-rpath",
-                "-Xlinker", "@executable_path/../Frameworks"
-            ])
-        ]
-    ),
-]
+] + macExecutableTargets
 
-let testTargets: [Target] = [
-    .testTarget(name: "spacesterminalcoreTests", dependencies: ["spacesterminalcore"]),
-    .testTarget(name: "spacesterminalghosttyTests", dependencies: ["spacesterminalghostty"]),
-    .testTarget(name: "spacesruntimecoreTests", dependencies: ["spacesruntimecore"]),
-    .testTarget(name: "spacesdTests", dependencies: ["spacesd", "spacesterminalcore"]),
-    .testTarget(name: "spacesterminaluiTests", dependencies: ["spacesterminalui"]),
-    .testTarget(name: "workspacecoreTests", dependencies: ["workspacecore", "spacesdatabase", "systembridge", "spacesterminalcore"]),
-    .testTarget(name: "spacesclientcoreTests", dependencies: ["spacesclientcore"]),
-    .testTarget(name: "spacesdeviceapiTests", dependencies: ["spacesdeviceapi", "spacesdevicecore", "spacesterminalcore"]),
-    .testTarget(name: "spacesuiTests", dependencies: ["spacesui", "spacesclientcore"]),
-    .testTarget(
-        name: "spacescliTests",
-        dependencies: [
-            "spacescli",
-            "spacesdeviceapi",
-            .product(name: "ArgumentParser", package: "swift-argument-parser")
-        ]
-    )
-]
+// On Linux only the daemon-side test targets exist: the others exercise AppKit/SwiftUI/Carbon
+// client code that does not build there. This is what lets the Docker lane run the
+// `#if os(Linux)` suites (headless terminal core, handoff, resize) with `swift test`.
+#if os(Linux)
+    let testTargets: [Target] = [
+        .testTarget(name: "spacesterminalcoreTests", dependencies: ["spacesterminalcore", "ghosttyvtshim"]),
+        .testTarget(name: "spacesterminalghosttyTests", dependencies: ["spacesterminalghostty"]),
+    ]
+#else
+    let testTargets: [Target] = [
+        .testTarget(name: "spacesterminalcoreTests", dependencies: ["spacesterminalcore", "ghosttyvtshim"]),
+        .testTarget(name: "spacesterminalghosttyTests", dependencies: ["spacesterminalghostty"]),
+        .testTarget(name: "spacesruntimecoreTests", dependencies: ["spacesruntimecore"]),
+        .testTarget(name: "spacesdTests", dependencies: ["spacesd", "spacesterminalcore"]),
+        .testTarget(name: "spacesterminaluiTests", dependencies: ["spacesterminalui"]),
+        .testTarget(name: "workspacecoreTests", dependencies: ["workspacecore", "spacesdatabase", "systembridge", "spacesterminalcore"]),
+        .testTarget(name: "spacesclientcoreTests", dependencies: ["spacesclientcore"]),
+        .testTarget(name: "spacesdeviceapiTests", dependencies: ["spacesdeviceapi", "spacesdevicecore", "spacesterminalcore"]),
+        .testTarget(name: "spacesuiTests", dependencies: ["spacesui", "spacesclientcore"]),
+        .testTarget(
+            name: "spacescliTests",
+            dependencies: [
+                "spacescli",
+                "spacesdeviceapi",
+                .product(name: "ArgumentParser", package: "swift-argument-parser")
+            ]
+        )
+    ]
+#endif
 
 let packageTargets: [Target] = systemLibraryTargets + supportTargets + terminalTargets + appTargets + executableTargets + testTargets
 
@@ -221,19 +252,15 @@ let package = Package(
         .library(name: "spacesdatabase", targets: ["spacesdatabase"]),
         .library(name: "spacesterminalcore", targets: ["spacesterminalcore"]),
         .library(name: "spacesterminalghostty", targets: ["spacesterminalghostty"]),
-        .library(name: "spacesterminalui", targets: ["spacesterminalui"]),
         .library(name: "spacesdevicecore", targets: ["spacesdevicecore"]),
         .library(name: "spacesdeviceapi", targets: ["spacesdeviceapi"]),
         .library(name: "spacesclientcore", targets: ["spacesclientcore"]),
         .library(name: "spacesruntimecore", targets: ["spacesruntimecore"]),
         .library(name: "workspacecore", targets: ["workspacecore"]),
-        .library(name: "spacesui", targets: ["spacesui"]),
         .library(name: "spacescli", targets: ["spacescli"]),
-        .executable(name: "spacese2e", targets: ["spacese2e"]),
         .executable(name: "spacesd", targets: ["spacesd"]),
-        .executable(name: "spaces", targets: ["spaces"]),
-        .executable(name: "SpacesApp", targets: ["SpacesApp"])
-    ] + mobileGhosttyProducts,
+        .executable(name: "spaces", targets: ["spaces"])
+    ] + macOnlyProducts + mobileGhosttyProducts,
     dependencies: [
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.5.0"),
         .package(url: "https://github.com/jpsim/Yams.git", from: "6.2.2"),

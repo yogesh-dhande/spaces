@@ -2076,7 +2076,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             }
             switch result {
             case .success(let response):
-                self.applyDeviceMutationResponse(response, selectedWorkspaceID: workspaceID)
+                self.applyDeviceMutationResponse(response, deviceID: device.id, selectedWorkspaceID: workspaceID)
                 guard let request = self.terminalOpenRequest(fromMutationResponse: response, workspaceID: workspaceID) else {
                     completion(nil)
                     return
@@ -2478,6 +2478,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// device that fails to load; otherwise the device is loaded. Keeping this pure makes the
     /// parity-with-remote contract directly testable.
     nonisolated static func localDeviceLoadState(offlineMessage: String?) -> SidebarDeviceLoadState { offlineMessage.map { .offline($0) } ?? .loaded }
+
+    /// Whether a just-received local device snapshot is authoritative enough to prune open local panes
+    /// against its overview's retained keep-set. Pruning may run only against a reachable, wire-compatible
+    /// local daemon: an offline daemon (`.offline` load state) or a reachable-but-incompatible one (a
+    /// non-`.compatible` verdict) carries only an empty placeholder overview, mirroring the remote path's
+    /// `load.overview == nil` branch that must not prune. Absence of a real overview is never evidence a
+    /// session's product row was removed, so this guard protects the never-prune-without-an-authoritative-
+    /// overview invariant. Pure so that invariant is directly testable.
+    nonisolated static func localSnapshotAuthorizesPanePrune(loadState: SidebarDeviceLoadState, compatibility: SpacesWireCompatibility?) -> Bool {
+        loadState == .loaded && compatibility?.isCompatible != false
+    }
 
     /// One paired device's slice of the sidebar. The sidebar shows every paired
     /// device at once; each section loads independently so a slow or unreachable
@@ -4384,19 +4395,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     private func applyDeviceOverview(
-        _ overview: SpacesDeviceOverviewPayload, selectedProjectID preferredProjectID: String? = nil,
+        _ overview: SpacesDeviceOverviewPayload, deviceID: String, selectedProjectID preferredProjectID: String? = nil,
         selectedWorkspaceID preferredWorkspaceID: String? = nil, preserveDetailPane: Bool = false
     ) {
         let shouldPreserveDetailPane = preserveDetailPane && canPreserveDetailPaneAfterSidebarReload()
-        // The mutation's overview belongs to whichever device hosts the affected
-        // workspace; update only that device's section and re-merge so the other
-        // devices' rows stay intact. An archive removes the workspace before this
-        // runs, so fall back to the affected project's device before the current
-        // selection to avoid installing the overview into the wrong section.
-        let deviceID =
-            preferredWorkspaceID.flatMap { findWorkspace(id: $0)?.0.deviceID } ?? preferredProjectID.flatMap { projectID in
-                projects.first(where: { $0.id == projectID })?.deviceID
-            } ?? selectedRowDeviceID() ?? localDeviceID
+        // The mutation's overview belongs to the device that issued it (`deviceID`, threaded from the
+        // call site). Update only that device's section and re-merge so the other devices' rows stay
+        // intact. The originating device is passed explicitly rather than inferred from the current
+        // selection: a mutation that clears the selection (e.g. a remote project delete) would
+        // otherwise fall through to the local device and install a remote overview — and its
+        // pane-prune keep-set — into the local section.
         let collapseStates = (try? SpacesClientDatabase.defaultDatabase().projectCollapseStates(deviceID: deviceID)) ?? [:]
         let mapped = Self.deviceSidebarData(from: overview, deviceID: deviceID, projectCollapseStates: collapseStates)
         if let index = deviceSections.firstIndex(where: { $0.deviceID == deviceID }) {
@@ -4409,6 +4417,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 deviceSections[index].alertsGroups = Self.buildOverviewAlertsGroups(from: overview, deviceID: deviceID)
             }
         }
+        // This is an authoritative overview for `deviceID`: close any open pane whose session it no
+        // longer retains (its product row was removed, possibly from another device), so the pane cannot
+        // outlive the daemon's transcript garbage-collection. The keep-set is the daemon's own published
+        // retention rule (`overview.retainedTerminalSessionIDs`), so an ended session still held by any
+        // product row — including a `runtime_targets` row after its shell exits — stays open for scrollback.
+        panelCoordinator.pruneOpenPanes(deviceID: deviceID, catalogSessionIDs: OpenPanePruning.referencedTerminalSessionIDs(overview: overview))
         if deviceID != localDeviceID, let device = deviceRecord(forDeviceID: deviceID) {
             reconcileRemoteBrowserForwards(device: device, overview: overview)
         }
@@ -4429,11 +4443,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     func applyDeviceMutationResponse(
-        _ response: SpacesDeviceAPIResponse, selectedProjectID preferredProjectID: String? = nil,
+        _ response: SpacesDeviceAPIResponse, deviceID: String, selectedProjectID preferredProjectID: String? = nil,
         selectedWorkspaceID preferredWorkspaceID: String? = nil
     ) {
         if let overview = response.overview {
-            applyDeviceOverview(overview, selectedProjectID: preferredProjectID, selectedWorkspaceID: preferredWorkspaceID, preserveDetailPane: false)
+            applyDeviceOverview(
+                overview, deviceID: deviceID, selectedProjectID: preferredProjectID, selectedWorkspaceID: preferredWorkspaceID,
+                preserveDetailPane: false)
         } else {
             if let preferredWorkspaceID { selectedWorkspaceID = preferredWorkspaceID }
             if let preferredWorkspaceID { Self.setClientActiveWorkspaceID(preferredWorkspaceID) }
@@ -4457,7 +4473,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             workspaceID: workspaceID,
             config: Self.deviceWorkspaceConfig(from: settings, resolvedBrowserSessions: workspace.config.resolvedBrowserSessions), device: device,
             clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
-        applyDeviceMutationResponse(response, selectedWorkspaceID: workspaceID)
+        applyDeviceMutationResponse(response, deviceID: device.id, selectedWorkspaceID: workspaceID)
     }
 
     func refreshSelection() {
@@ -6119,7 +6135,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
             workspaceNotesPopover?.close()
             workspaceNotesPopover = nil
-            applyDeviceMutationResponse(response, selectedWorkspaceID: workspaceID)
+            applyDeviceMutationResponse(response, deviceID: device.id, selectedWorkspaceID: workspaceID)
         } catch { showError(error) }
     }
 
@@ -6284,7 +6300,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                         let response = try SpacesDeviceClient.updateProjectConfig(
                             projectID: project.id, config: updated, device: device,
                             clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
-                        applyDeviceMutationResponse(response, selectedWorkspaceID: workspace.id)
+                        applyDeviceMutationResponse(response, deviceID: device.id, selectedWorkspaceID: workspace.id)
                     } else {
                         showDeviceNotLoadedError()
                     }
@@ -7394,7 +7410,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             sender?.isEnabled = true
             if let result {
                 switch result {
-                case .success(let response): applyDeviceMutationResponse(response, selectedWorkspaceID: workspaceID)
+                case .success(let response):
+                    applyDeviceMutationResponse(response, deviceID: deviceID(forWorkspaceID: workspaceID), selectedWorkspaceID: workspaceID)
                 case .failure(let error): showError(error)
                 }
             } else {
@@ -7567,7 +7584,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             if let device = deviceForDaemonStateMutation() {
                 let response = try SpacesDeviceClient.exportProjectSpacesYAML(
                     projectID: refs.projectID, device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
-                applyDeviceMutationResponse(response)
+                applyDeviceMutationResponse(response, deviceID: device.id)
                 showInfoMessage(title: "Exported spaces.yaml", message: response.message)
                 return
             }
@@ -7599,7 +7616,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 refs.exportButton.isHidden = false
                 refs.discardImportedConfigButton.isHidden = true
                 projectHasUnsavedChanges = false
-                applyDeviceMutationResponse(response)
+                applyDeviceMutationResponse(response, deviceID: device.id)
                 return
             }
             showDeviceNotLoadedError()
@@ -7718,7 +7735,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                     selectedProjectID = nil
                     selectedWorkspaceID = nil
                     closeProjectSettingsWindow()
-                    applyDeviceMutationResponse(response)
+                    // Pass the deleting device explicitly: the selection was just cleared, so any
+                    // selection-based device inference would misroute a remote delete's overview (and
+                    // its pane-prune keep-set) into the local section.
+                    applyDeviceMutationResponse(response, deviceID: device.id)
                 case .failure(let error): showError(error)
                 }
             } else {
@@ -7781,7 +7801,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                         if isRemoteDeviceID(refs.selectedDeviceID) {
                             requestSidebarReload(forceRemoteRefresh: true)
                         } else {
-                            applyDeviceMutationResponse(response, selectedProjectID: response.projectID, selectedWorkspaceID: response.workspaceID)
+                            applyDeviceMutationResponse(
+                                response, deviceID: device.id, selectedProjectID: response.projectID, selectedWorkspaceID: response.workspaceID)
                         }
                     case .failure(let error):
                         // Nothing was cloned yet (the clone is part of the failed Create), so there is
@@ -8028,7 +8049,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                         selectedProjectID = refs.projectID
                         selectedWorkspaceID = response.workspaceID
                         lastSelectedRow = -1
-                        applyDeviceMutationResponse(response, selectedProjectID: refs.projectID, selectedWorkspaceID: response.workspaceID)
+                        applyDeviceMutationResponse(
+                            response, deviceID: device.id, selectedProjectID: refs.projectID, selectedWorkspaceID: response.workspaceID)
                     case .failure(let error): showError(error)
                     }
                 }
@@ -8149,7 +8171,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
         if let result {
             switch result {
-            case .success(let response): applyDeviceMutationResponse(response, selectedWorkspaceID: id)
+            case .success(let response): applyDeviceMutationResponse(response, deviceID: deviceID(forWorkspaceID: id), selectedWorkspaceID: id)
             case .failure(let error): showError(error)
             }
         } else {
@@ -8187,7 +8209,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 // restarted state (a later browser focus then opens fresh tabs).
                 self.closeLocalBrowserSessionWindows(workspaceID: id, configuredBrowserSessionTargetURLs: browserSessionTargetURLs)
                 self.closeWorkspaceTerminalPanes(workspaceID: id)
-                applyDeviceMutationResponse(response, selectedWorkspaceID: id)
+                applyDeviceMutationResponse(response, deviceID: deviceID(forWorkspaceID: id), selectedWorkspaceID: id)
             case .failure(let error): showError(error)
             }
         } else {
@@ -8222,7 +8244,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             case .success(let response):
                 self.closeLocalBrowserSessionWindows(workspaceID: id, configuredBrowserSessionTargetURLs: browserSessionTargetURLs)
                 self.closeWorkspaceTerminalPanes(workspaceID: id)
-                applyDeviceMutationResponse(response, selectedWorkspaceID: id)
+                applyDeviceMutationResponse(response, deviceID: deviceID(forWorkspaceID: id), selectedWorkspaceID: id)
             case .failure(let error): showError(error)
             }
         } else {
@@ -8326,7 +8348,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                     button?.isEnabled = true
                     self.closeLocalBrowserSessionWindows(workspaceID: id, configuredBrowserSessionTargetURLs: browserSessionTargetURLs)
                     self.closeWorkspaceTerminalPanes(workspaceID: id)
-                    applyDeviceMutationResponse(response, selectedProjectID: project.id)
+                    applyDeviceMutationResponse(response, deviceID: device.id, selectedProjectID: project.id)
                 case .failure(let error):
                     requestSidebarReload()
                     button?.isEnabled = true
@@ -8648,7 +8670,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                     logPerfMetric(
                         "workspace_process_launch_ui", target: "workspace=\(workspaceID)", elapsedMS: windowShortcutElapsedMS(since: startedAt),
                         success: true, detail: "route=ipc name=\(processName)")
-                    applyDeviceMutationResponse(response, selectedWorkspaceID: workspaceID)
+                    applyDeviceMutationResponse(response, deviceID: device.id, selectedWorkspaceID: workspaceID)
                     hideAfterSuccessfulExternalWindowAction(.open(hidesApp: false))
                 case .failure(let error):
                     logPerfMetric(
@@ -8677,7 +8699,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                     logPerfMetric(
                         "workspace_process_stop_ui", target: "workspace=\(workspaceID)", elapsedMS: windowShortcutElapsedMS(since: startedAt),
                         success: true, detail: "route=ipc name=\(processName)")
-                    applyDeviceMutationResponse(response, selectedWorkspaceID: workspaceID)
+                    applyDeviceMutationResponse(response, deviceID: device.id, selectedWorkspaceID: workspaceID)
                     return
                 }
                 logPerfMetric(
@@ -8705,7 +8727,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                     logPerfMetric(
                         "workspace_process_restart_ui", target: "workspace=\(workspaceID)", elapsedMS: windowShortcutElapsedMS(since: startedAt),
                         success: true, detail: "route=ipc name=\(processName)")
-                    applyDeviceMutationResponse(response, selectedWorkspaceID: workspaceID)
+                    applyDeviceMutationResponse(response, deviceID: device.id, selectedWorkspaceID: workspaceID)
                     return
                 }
                 logPerfMetric(
@@ -8736,7 +8758,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                     logPerfMetric(
                         "workspace_agent_launch_ui", target: "workspace=\(workspaceID)", elapsedMS: windowShortcutElapsedMS(since: startedAt),
                         success: true, detail: "route=ipc name=\(launcherName)")
-                    applyDeviceMutationResponse(response, selectedWorkspaceID: workspaceID)
+                    applyDeviceMutationResponse(response, deviceID: device.id, selectedWorkspaceID: workspaceID)
                     hideAfterSuccessfulExternalWindowAction(.open(hidesApp: false))
                 case .failure(let error):
                     logPerfMetric(
@@ -9842,7 +9864,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
         switch await Self.deviceMutation(device: device, operation: operation) {
         case .success(let response):
-            applyDeviceMutationResponse(response, selectedWorkspaceID: workspaceID)
+            applyDeviceMutationResponse(response, deviceID: device.id, selectedWorkspaceID: workspaceID)
             return terminalOpenRequest(fromMutationResponse: response, workspaceID: workspaceID)
         case .failure(let error):
             showError(error)
@@ -10436,7 +10458,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             refs.hasPendingImportedConfig = false
             refs.pendingImportUpdateAllWorkspaces = false
             refs.discardImportedConfigButton.isHidden = true
-            applyDeviceMutationResponse(response)
+            applyDeviceMutationResponse(response, deviceID: device.id)
             return
         }
         throw Self.deviceNotLoadedError()

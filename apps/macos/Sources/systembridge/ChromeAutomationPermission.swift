@@ -63,8 +63,7 @@ public enum ChromeAutomationPermission {
     public static func requestAccessOutcome() -> ChromeAutomationAskOutcome {
         #if canImport(CoreServices) && !os(Linux)
             switch determinePermission(askUserIfNeeded: true) {
-            case .granted, .unavailable:
-                return .granted
+            case .granted, .unavailable: return .granted
             case .denied:
                 // The ask was refused. A passive re-read that still says `notDetermined` means macOS
                 // never showed the prompt (a stale-signature TCC record suppressed it); a re-read that
