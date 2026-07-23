@@ -747,7 +747,10 @@
                     try FileManager.default.createDirectory(at: cacheRoot, withIntermediateDirectories: true)
                     if url.lastPathComponent == "slow.png" {
                         await probe.markSlowStarted()
-                        do { try await Task.sleep(for: .seconds(5)) } catch {
+                        // Ordering against the fresher request below is already deterministic via the probe's
+                        // start/cancel continuations, not this duration — it only needs to still be suspended
+                        // (rather than having completed naturally) when the fresher request cancels this task.
+                        do { try await Task.sleep(for: .milliseconds(500)) } catch {
                             await probe.markSlowCancelled()
                             throw error
                         }
@@ -2050,8 +2053,14 @@
 
             let freeCompleted = expectation(description: "background free completed")
             let originalSessionFreeHandler = GhosttyRemoteTerminalHostView.sessionFreeHandlerForTesting
+            // Gate the free handler on a semaphore so the "dismantle didn't block on it" assertion below is
+            // checked while the handler is still provably in flight, instead of picking a duration long enough
+            // that it's probably still running. Always released via defer so a failed assertion above can't
+            // leave the handler's background thread blocked forever.
+            let releaseFree = DispatchSemaphore(value: 0)
+            defer { releaseFree.signal() }
             GhosttyRemoteTerminalHostView.sessionFreeHandlerForTesting = { _ in
-                Thread.sleep(forTimeInterval: 0.5)
+                releaseFree.wait()
                 freeCompleted.fulfill()
             }
             defer { GhosttyRemoteTerminalHostView.sessionFreeHandlerForTesting = originalSessionFreeHandler }
@@ -2064,6 +2073,7 @@
             XCTAssertFalse(hostView.hasActiveSessionForTesting)
             XCTAssertFalse(hostView.hasRetainedSessionStandardInputWriteDescriptorForTesting)
 
+            releaseFree.signal()
             wait(for: [freeCompleted], timeout: 30)
 
             window.isHidden = true

@@ -317,13 +317,18 @@ final class TerminalServiceProtocolTests: XCTestCase {
         let queue = DispatchQueue(label: "terminal-service-liveness-test")
         let handleRequestCalled = LockedFlag()
 
-        // A handleRequest that would block for well beyond the ping timeout if a ping ever reached it,
-        // and records that it was called at all.
+        // A handleRequest that blocks indefinitely if a ping ever reached it (proving the liveness
+        // fast path is what answered, not a slow handler that happened to return before the assertions
+        // ran), and records that it was called at all. Signalled unconditionally at the end of the test
+        // so a buggy routing that did invoke this closure doesn't leak a permanently blocked work-queue
+        // thread past this test.
+        let handleRequestGate = DispatchSemaphore(value: 0)
+        defer { handleRequestGate.signal() }
         let server = TerminalServiceServer(
             socketPath: socketPath, queue: queue, livenessResponder: { TerminalServiceResponse(ok: true, message: "pong", servicePID: 4242) }
         ) { _ in
             handleRequestCalled.set()
-            Thread.sleep(forTimeInterval: 5)
+            handleRequestGate.wait()
             return TerminalServiceResponse(ok: false, message: "should not be used for ping")
         }
         try server.start()
@@ -347,24 +352,29 @@ final class TerminalServiceProtocolTests: XCTestCase {
         let socketPath = root.appendingPathComponent("service.sock").path
         let queue = DispatchQueue(label: "terminal-service-concurrency-test")
 
-        // handleRequest simulates a heavy `.create` holding for longer than a client's ping timeout.
+        // handleRequest simulates a heavy `.create` that holds the work queue until the test releases
+        // it. `slowRequestStarted` is signalled once the handler actually begins, which is the precise
+        // moment the request has reached and occupied the server's worker (replacing a guess at how long
+        // that takes). `releaseSlowRequest` is signalled unconditionally via defer so the handler (and the
+        // background client send below) always unblocks, even if an assertion fails first.
+        let slowRequestStarted = DispatchSemaphore(value: 0)
+        let releaseSlowRequest = DispatchSemaphore(value: 0)
+        defer { releaseSlowRequest.signal() }
         let server = TerminalServiceServer(
             socketPath: socketPath, queue: queue, livenessResponder: { TerminalServiceResponse(ok: true, message: "pong", servicePID: 7) }
         ) { _ in
-            Thread.sleep(forTimeInterval: 3)
+            slowRequestStarted.signal()
+            releaseSlowRequest.wait()
             return TerminalServiceResponse(ok: true, message: "slow-done")
         }
         try server.start()
         defer { server.stop() }
 
         // Start a slow non-ping request that occupies a connection worker, without waiting for it.
-        let slowStarted = expectation(description: "slow request dispatched")
         DispatchQueue.global().async {
-            slowStarted.fulfill()
             _ = try? TerminalServiceClient.send(request: TerminalServiceRequest(command: .list), socketPath: socketPath, timeout: 10)
         }
-        wait(for: [slowStarted], timeout: 2)
-        Thread.sleep(forTimeInterval: 0.3)  // let the slow request reach the server and occupy its worker
+        XCTAssertEqual(slowRequestStarted.wait(timeout: .now() + 2), .success, "Slow request never reached the server")
 
         let start = Date()
         let ping = try TerminalServiceClient.send(request: TerminalServiceRequest(command: .ping), socketPath: socketPath, timeout: 2)

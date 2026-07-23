@@ -131,6 +131,26 @@ final class TerminalCorePersistenceQueueTests: XCTestCase {
         }
     }
 
+    /// Deterministic stand-in for the persistence queue's retry back-off, injected as its `sleep` closure.
+    /// Unlike the production `Thread.sleep`, this blocks the retry loop on a semaphore the test controls
+    /// directly: `waitForRetry()` proves a retry attempt genuinely failed and is now paused (without waiting
+    /// on real wall-clock time to "outlast" the delay), and `releaseOneRetry()` lets exactly that one paused
+    /// attempt proceed. This keeps a retry loop paused for as long as the test needs — e.g. long enough to
+    /// enqueue a superseding write — instead of racing a non-blocking stub through all of its attempts before
+    /// the test thread gets a chance to interject.
+    private final class RetryGate: @unchecked Sendable {
+        private let entered = DispatchSemaphore(value: 0)
+        private let release = DispatchSemaphore(value: 0)
+
+        func sleep(_: TimeInterval) {
+            entered.signal()
+            release.wait()
+        }
+
+        @discardableResult func waitForRetry(timeout: DispatchTime = .now() + 5) -> Bool { entered.wait(timeout: timeout) == .success }
+        func releaseOneRetry() { release.signal() }
+    }
+
     private func makeRunningState(sessionID: String, title: String) -> TerminalSessionRuntimeState {
         TerminalSessionRuntimeState(
             sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: nil, state: .running,
@@ -160,14 +180,18 @@ final class TerminalCorePersistenceQueueTests: XCTestCase {
         let databasePath = try SpacesProfile.current().databasePath
         try Self.breakDatabase(at: databasePath, allowedRoot: XCTUnwrap(databaseRoot))
 
-        let queue = TerminalCorePersistenceQueue(label: "test.persistence.running-retry")
+        // Virtualize the retry back-off with a `RetryGate` instead of a real sleep sized to outlast the
+        // production delay: it proves the first attempt genuinely failed and is now paused before we restore
+        // the database.
+        let retryGate = RetryGate()
+        let queue = TerminalCorePersistenceQueue(
+            label: "test.persistence.running-retry", runtimeStateWriteRetryDelay: 0.001, sleep: retryGate.sleep)
         let recorder = PersistedTitleRecorder()
         let updatedState = makeRunningState(sessionID: launchConfiguration.sessionID, title: "after")
         queue.enqueueRuntimeStateWrite(updatedState, at: Date(), paths: paths) { state, _ in recorder.record(state.title ?? "") }
-        // The first attempt fails against the broken database and the write is now retrying in place. Wait past
-        // the first retry delay to guarantee a genuine failure occurred, then restore so a later attempt lands.
-        try await Task.sleep(nanoseconds: 250_000_000)
+        XCTAssertTrue(retryGate.waitForRetry(), "the first write attempt must genuinely fail against the broken database")
         try Self.restoreDatabase(at: databasePath)
+        retryGate.releaseOneRetry()
 
         let deadline = Date().addingTimeInterval(3)
         while Date() < deadline, recorder.recorded.isEmpty { try? await Task.sleep(nanoseconds: 25_000_000) }
@@ -196,20 +220,30 @@ final class TerminalCorePersistenceQueueTests: XCTestCase {
         let databasePath = try SpacesProfile.current().databasePath
         try Self.breakDatabase(at: databasePath, allowedRoot: XCTUnwrap(databaseRoot))
 
-        let queue = TerminalCorePersistenceQueue(label: "test.persistence.supersede-retry")
+        // Virtualize the retry back-off with a `RetryGate`: it pauses each write's retry loop right after a
+        // genuine failure, so the test can interject deterministically instead of racing real sleeps sized to
+        // outlast the production delay.
+        let retryGate = RetryGate()
+        let queue = TerminalCorePersistenceQueue(
+            label: "test.persistence.supersede-retry", runtimeStateWriteRetryDelay: 0.001, sleep: retryGate.sleep)
         let recorder = PersistedTitleRecorder()
         queue.enqueueRuntimeStateWrite(makeRunningState(sessionID: launchConfiguration.sessionID, title: "old"), at: Date(), paths: paths) {
             state, _ in recorder.record(state.title ?? "")
         }
-        // Let the older write fail and enter its retry loop, then supersede it with a newer write for the same
-        // coalescing key. The generation bump happens synchronously at enqueue, so the older write abandons on
-        // its next retry check rather than looping to exhaustion.
-        try await Task.sleep(nanoseconds: 100_000_000)
+        // Let the older write fail and pause in its retry loop, then supersede it with a newer write for the
+        // same coalescing key. The generation bump happens synchronously at enqueue, so releasing the older
+        // write's paused retry lets it see a stale generation on its next check and abandon (no further sleep
+        // call) rather than looping to exhaustion.
+        XCTAssertTrue(retryGate.waitForRetry(), "the older write must genuinely fail before being superseded")
         queue.enqueueRuntimeStateWrite(makeRunningState(sessionID: launchConfiguration.sessionID, title: "new"), at: Date(), paths: paths) {
             state, _ in recorder.record(state.title ?? "")
         }
-        try await Task.sleep(nanoseconds: 50_000_000)
+        retryGate.releaseOneRetry()
+        // The newer write now runs (FIFO behind the older's abandoned closure) and its own first attempt fails
+        // against the still-broken database, pausing in turn. Wait for that genuine failure before restoring.
+        XCTAssertTrue(retryGate.waitForRetry(), "the newer write must genuinely fail before the database is restored")
         try Self.restoreDatabase(at: databasePath)
+        retryGate.releaseOneRetry()
 
         let deadline = Date().addingTimeInterval(3)
         while Date() < deadline, recorder.recorded.isEmpty { try? await Task.sleep(nanoseconds: 25_000_000) }
@@ -226,9 +260,13 @@ final class TerminalCorePersistenceQueueTests: XCTestCase {
     /// could point this at a real, shared database. Refuse to touch anything outside this suite's own
     /// throwaway profile root instead of silently destroying it.
     private static func breakDatabase(at databasePath: String, allowedRoot: URL) throws {
+        struct UnsafeDatabasePath: Error { let path: String }
         guard databasePath.hasPrefix(allowedRoot.path + "/") else {
+            // Throw (don't just XCTFail-and-return): the callers' later restoreDatabase(at:)
+            // starts by deleting databasePath, so continuing would destroy the very database
+            // this guard refused to touch.
             XCTFail("refusing to break database at \(databasePath): outside this test's isolated root \(allowedRoot.path)")
-            return
+            throw UnsafeDatabasePath(path: databasePath)
         }
         let fileManager = FileManager.default
         for suffix in ["", "-wal", "-shm"] {

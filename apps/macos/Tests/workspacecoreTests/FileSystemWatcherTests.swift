@@ -55,6 +55,9 @@
                         FSEventStreamStop(stream)
                         FSEventStreamInvalidate(stream)
                         FSEventStreamRelease(stream)
+                        // The write may have created the file before throwing, so a callback can
+                        // already be queued; drain it before `box` leaves the extended lifetime.
+                        queue.sync {}
                         return "probe setup failed: \(error)"
                     }
                     let result = box.delivered.wait(timeout: .now() + 30)

@@ -174,7 +174,12 @@ final class TerminalSessionStaleRecoveryTests: XCTestCase {
         // Pre-fix behavior: the suppressed write (`try?`) would still append this session to `finalized`.
         // Post-fix: the bounded retry exhausts, the session is reported `unrepaired`, and the row is left
         // untouched in its prior `.running` state with its clients still attached.
-        let failedResult = try TerminalSessionStaleRecovery.reconcile(ownPID: getpid(), adoptedSessionIDs: [], isProcessAlive: { _ in true })
+        //
+        // `reconcile` blocks synchronously through every retry attempt, so exhausting all of them here would
+        // otherwise cost real wall-clock time (production's `repairWriteRetryDelay` * (attempts - 1)); inject
+        // a near-zero delay and a no-op sleep to virtualize that wait.
+        let failedResult = try TerminalSessionStaleRecovery.reconcile(
+            ownPID: getpid(), adoptedSessionIDs: [], isProcessAlive: { _ in true }, repairWriteRetryDelay: 0.001, sleep: { _ in })
 
         XCTAssertTrue(failedResult.finalized.isEmpty, "a repair whose write cannot commit must NOT be reported finalized (the pre-fix bug)")
         XCTAssertEqual(failedResult.unrepaired, [sessionID], "a repair that could not commit must be reported for the caller to log")
