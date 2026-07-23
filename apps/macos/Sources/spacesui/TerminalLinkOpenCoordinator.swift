@@ -61,6 +61,18 @@
         private var generation: UInt64 = 0
         private var activeTask: Task<Void, Never>?
 
+        /// Every task this coordinator has spawned and not yet finished, keyed by a token minted
+        /// before the task exists (so the task never has to reference its own `Task` handle from
+        /// inside its own closure — the classic self-referencing-`var` pattern is what Swift 6
+        /// strict concurrency flags as a data race) and removed in a `defer` when the body returns.
+        /// `activeTask` remains the *current* fetch for `cancelActiveOpen()`'s purposes, but a fetch
+        /// a newer click has superseded stays in this dictionary — no longer "active", but not yet
+        /// finished — until its own late completion actually runs its course (discarding its result
+        /// via `isCurrent`, per the class doc). `drainActiveWorkForTesting()` awaits this dictionary
+        /// down to empty, so a test can assert on final state deterministically instead of guessing
+        /// a settle window for a cancelled late finisher.
+        private var inFlightOpenTasks: [UUID: Task<Void, Never>] = [:]
+
         /// The temp-directory GC is a whole-app concern, not a per-pane one, so it runs once per launch.
         @MainActor private static var didRunCacheGC = false
 
@@ -140,8 +152,27 @@
         private func startRemoteFileOpen(_ raw: String) {
             let generationAtStart = generation
             banner.showProgress(message: "Resolving link…", onCancel: { [weak self] in self?.cancelActiveOpen() })
-            Self.runCacheGCIfNeeded()
-            activeTask = Task { @MainActor [weak self] in await self?.performRemoteFileOpen(raw, generation: generationAtStart) }
+            startCacheGCIfNeeded()
+            let taskID = UUID()
+            let task = Task { @MainActor [weak self] in
+                defer { self?.inFlightOpenTasks[taskID] = nil }
+                await self?.performRemoteFileOpen(raw, generation: generationAtStart)
+            }
+            inFlightOpenTasks[taskID] = task
+            activeTask = task
+        }
+
+        /// Awaits every task this coordinator has in flight: the current fetch, any fetch a newer
+        /// click has since cancelled and superseded (`Task.value` on a cancelled task still awaits
+        /// its actual completion, so a late finisher unblocked well after being cancelled is not
+        /// still running once this returns), and the one-time cache GC. Loops because draining one
+        /// task can let another appear in the meantime (a new click while draining). Returns once no
+        /// task remains — the seam a test drains after a click instead of polling the recorder/banner
+        /// against a settle window.
+        func drainActiveWorkForTesting() async {
+            while let (_, task) = inFlightOpenTasks.first {
+                await task.value
+            }
         }
 
         private func performRemoteFileOpen(_ raw: String, generation generationAtStart: UInt64) async {
@@ -276,21 +307,33 @@
 
         /// Removes cached artifacts older than 24h, once per app run. Mirrors the iOS preview-cache GC but
         /// stays local to the coordinator. Runs off the main actor since it scans the temp directory.
-        private static func runCacheGCIfNeeded() {
-            guard !didRunCacheGC else { return }
-            didRunCacheGC = true
-            let directory = cacheDirectory
-            Task.detached(priority: .utility) {
-                guard
-                    let files = try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.contentModificationDateKey])
-                else { return }
-                let cutoff = Date().addingTimeInterval(-24 * 60 * 60)
-                for file in files {
-                    let values = try? file.resourceValues(forKeys: [.contentModificationDateKey])
-                    guard let modifiedAt = values?.contentModificationDate, modifiedAt < cutoff else { continue }
-                    try? FileManager.default.removeItem(at: file)
-                }
+        ///
+        /// This used to fire a bare `Task.detached` that no one awaited, escaping `activeTask`
+        /// tracking entirely — the one genuinely fire-and-forget task in this file, since the
+        /// download/chunk-read detached tasks elsewhere are all immediately `await`ed by their
+        /// caller. It is folded into `inFlightOpenTasks` the same way as a fetch, so
+        /// `drainActiveWorkForTesting()` also accounts for it on the one run where it actually fires.
+        private func startCacheGCIfNeeded() {
+            guard !Self.didRunCacheGC else { return }
+            Self.didRunCacheGC = true
+            let directory = Self.cacheDirectory
+            let taskID = UUID()
+            let task = Task { @MainActor [weak self] in
+                defer { self?.inFlightOpenTasks[taskID] = nil }
+                await Task.detached(priority: .utility) {
+                    guard
+                        let files = try? FileManager.default.contentsOfDirectory(
+                            at: directory, includingPropertiesForKeys: [.contentModificationDateKey])
+                    else { return }
+                    let cutoff = Date().addingTimeInterval(-24 * 60 * 60)
+                    for file in files {
+                        let values = try? file.resourceValues(forKeys: [.contentModificationDateKey])
+                        guard let modifiedAt = values?.contentModificationDate, modifiedAt < cutoff else { continue }
+                        try? FileManager.default.removeItem(at: file)
+                    }
+                }.value
             }
+            inFlightOpenTasks[taskID] = task
         }
 
         // MARK: - Device API
