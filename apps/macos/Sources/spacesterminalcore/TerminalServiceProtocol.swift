@@ -729,17 +729,25 @@ public struct TerminalServiceDaemonStatus: Codable, Sendable, Equatable {
 
     public var isLinuxDaemon: Bool { operatingSystem == "Linux" }
 
-    /// A newer Spaces is installed on the daemon's device than the build the daemon is running, so an
-    /// update is staged and applies on its next restart.
+    /// The build installed on the daemon's device when it is newer than the build the daemon is
+    /// running — i.e. the version a restart would apply — and nil when nothing is staged.
     ///
     /// This is a fact about one device, answered by that device, so every client — Mac, iPhone, CLI —
     /// reads the same value. A client must never derive it by comparing the daemon's version against
     /// its *own* build: the iPhone app and the Linux daemon ship on unrelated release trains, so that
     /// comparison says nothing about whether an update is waiting on the other end.
-    public var isUpdatePending: Bool {
-        guard let installedVersion else { return false }
-        return SpacesWireProtocol.isVersion(version, olderThan: installedVersion)
+    ///
+    /// Returning the version rather than just a flag lets `DaemonUpdateRemedy` carry it, so a client
+    /// that has decided an update is staged never has to re-derive which one it is.
+    public var stagedVersion: String? {
+        guard let installedVersion, SpacesWireProtocol.isVersion(version, olderThan: installedVersion) else { return nil }
+        return installedVersion
     }
+
+    /// Whether a newer Spaces is installed on the daemon's device than the build it is running, so an
+    /// update is staged and applies on its next restart. Defined in terms of `stagedVersion` so the two
+    /// can never disagree about what counts as staged.
+    public var isUpdatePending: Bool { stagedVersion != nil }
 }
 
 public struct TerminalServiceResponse: Codable, Sendable, Equatable {
