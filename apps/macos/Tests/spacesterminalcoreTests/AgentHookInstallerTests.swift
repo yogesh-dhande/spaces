@@ -14,7 +14,11 @@
         import Darwin
     #endif
 
-    @Suite struct AgentHookInstallerTests {
+    // Serialized: nearly every test here spawns a real child process (a stub `codex`/shell script) with
+    // a fixed deadline. Running dozens of spawners in this suite concurrently starves those deadlines
+    // under load (parallel: 15 failures; serialized: 47/47 in 5.2s). `.serialized` only orders tests
+    // within this suite, but that is the dominant source of contention.
+    @Suite(.serialized) struct AgentHookInstallerTests {
         /// Availability probing reads `PATH`, then the common install directories, then the user's login
         /// shell. Tests pin all three — an empty `PATH`, a `HomeScopedFileManager` that hides executables
         /// outside the temporary home, and a stub shell probe — so no test depends on what is installed on

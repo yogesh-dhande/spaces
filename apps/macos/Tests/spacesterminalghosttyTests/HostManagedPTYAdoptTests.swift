@@ -48,7 +48,7 @@ final class HostManagedPTYAdoptTests: XCTestCase {
         return path
     }
 
-    @discardableResult private func waitUntil(timeout: TimeInterval = 5, _ condition: () -> Bool) -> Bool {
+    @discardableResult private func waitUntil(timeout: TimeInterval = 30, _ condition: () -> Bool) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             if condition() { return true }
@@ -241,7 +241,20 @@ final class HostManagedPTYAdoptTests: XCTestCase {
         driver.setSessionClosedHandler { sessionClosed.fulfill() }
         try driver.startIfNeeded()
 
-        wait(for: [handlerEntered], timeout: 5)
+        // 10s to match the other spawned-child waits in this file (a child's first PTY output is what
+        // is being awaited, same as lines 128/211); the previous 5s was the file's outlier. Bail on
+        // timeout instead of falling through: the two barrier assertions below both invert their
+        // meaning once no delivery is in flight (buffering returns immediately because nothing blocks
+        // it), so continuing would report two misleading failures for this one.
+        guard XCTWaiter().wait(for: [handlerEntered], timeout: 10) == .completed else {
+            XCTFail("output handler never entered within 10s; the child never delivered its first PTY output")
+            // Pre-signal the release in case output arrives right after the timeout: the handler would
+            // otherwise block forever on releaseHandler.wait(), stalling the read queue that reaps the
+            // child. terminate() then tears the child and its descriptors down before we return.
+            releaseHandler.signal()
+            driver.terminate()
+            return
+        }
         Task {
             await driver.beginHandoffOutputBuffering()
             bufferingReturned.signal()
@@ -251,7 +264,7 @@ final class HostManagedPTYAdoptTests: XCTestCase {
             bufferingReturned.wait(timeout: .now() + 0.1), .timedOut, "buffering must not return while a pre-swap handler delivery is still running")
         releaseHandler.signal()
         XCTAssertEqual(bufferingReturned.wait(timeout: .now() + 5), .success)
-        wait(for: [sessionClosed], timeout: 5)
+        wait(for: [sessionClosed], timeout: 10)
     }
 
     // MARK: - Dead-child adopt

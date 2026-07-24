@@ -44,7 +44,11 @@ import Foundation
 
             if FileManager.default.fileExists(atPath: socketPath) {
                 if runReload(configPath: configPath, socketPath: socketPath, timeout: 2) { return false }
-                if adminSocketHasOwner(socketPath) { throw CaddyServiceError.reloadFailed(configPath) }
+                // The owner probe decides whether it is safe to unlink the socket; a wrong "no
+                // owner" answer destroys a live Caddy's admin socket. It therefore gets its own
+                // generous bound (like the reload above) instead of the caller's startup budget,
+                // which tests legitimately set near zero.
+                if adminSocketHasOwner(socketPath, timeout: 10) { throw CaddyServiceError.reloadFailed(configPath) }
                 try? FileManager.default.removeItem(atPath: socketPath)
             }
 
@@ -127,7 +131,9 @@ import Foundation
         }
 
         private static func terminateProcessesOwningSocket(_ socketPath: String, timeout: TimeInterval) {
-            let pids = serviceProcessIDsOwningSocket(socketPath).filter { $0 > 0 && $0 != getpid() }
+            // An indeterminate sweep (nil) leaves nothing to kill; this stage is best-effort and
+            // stop() removes the socket file regardless.
+            let pids = (serviceProcessIDsOwningSocket(socketPath, timeout: timeout) ?? []).filter { $0 > 0 && $0 != getpid() }
             guard !pids.isEmpty else { return }
             for pid in pids { kill(pid, SIGTERM) }
             let deadline = Date().addingTimeInterval(timeout)
@@ -138,11 +144,16 @@ import Foundation
             for pid in pids where isProcessAlive(pid: Int(pid)) { kill(pid, SIGKILL) }
         }
 
-        private static func serviceProcessIDsOwningSocket(_ socketPath: String) -> Set<pid_t> {
-            TerminalService.serviceProcessIDsOwningSocket(socketPath)
+        private static func serviceProcessIDsOwningSocket(_ socketPath: String, timeout: TimeInterval) -> Set<pid_t>? {
+            TerminalService.serviceProcessIDsOwningSocket(socketPath, timeout: timeout)
         }
 
-        private static func adminSocketHasOwner(_ socketPath: String) -> Bool { !serviceProcessIDsOwningSocket(socketPath).isEmpty }
+        private static func adminSocketHasOwner(_ socketPath: String, timeout: TimeInterval) -> Bool {
+            // An indeterminate sweep must read as "owner present": ensureRunning unlinks the socket
+            // on a "no owner" answer, and a wrong unlink orphans a live Caddy's admin socket.
+            guard let owners = serviceProcessIDsOwningSocket(socketPath, timeout: timeout) else { return true }
+            return !owners.isEmpty
+        }
 
         /// True when a live Caddy owns the profile's admin socket. Unlike checking for the generated
         /// config file or the socket file on disk (both of which survive a crash or `stop()`), this

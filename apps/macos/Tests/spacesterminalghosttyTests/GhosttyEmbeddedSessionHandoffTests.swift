@@ -148,7 +148,7 @@ final class GhosttyEmbeddedSessionHandoffTests: XCTestCase {
     /// that drives io-thread screen mutations to visibility) needs to run there. Each poll hops onto
     /// the engine synchronously to tick and evaluate the (engine-isolated) condition together.
     private func waitAsync(
-        timeout: TimeInterval = 15, file: StaticString = #filePath, line: UInt = #line, _ condition: @escaping @TerminalEngineActor () -> Bool
+        timeout: TimeInterval = 30, file: StaticString = #filePath, line: UInt = #line, _ condition: @escaping @TerminalEngineActor () -> Bool
     ) async throws {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {

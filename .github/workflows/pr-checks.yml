@@ -11,8 +11,49 @@ permissions:
   contents: read
 
 jobs:
+  # Decides which lanes this change can possibly affect, so a docs-only pull request does not pay
+  # for the macOS suite. Deliberately a job with a git diff rather than workflow-level `paths`
+  # filters: a skipped workflow reports nothing, and the `gate` job below is a required check, so
+  # it must always run. Anything it cannot positively classify falls back to running everything.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.classify.outputs.code }}
+      web: ${{ steps.classify.outputs.web }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Classify changed paths
+        id: classify
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          # Only a pull request has a well-defined base to diff against. Pushes to main and manual
+          # runs always run every lane, which is also the safe answer if anything below fails.
+          if [ "$EVENT_NAME" != "pull_request" ] || ! files="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")"; then
+            echo "code=true" >>"$GITHUB_OUTPUT"
+            echo "web=true" >>"$GITHUB_OUTPUT"
+            echo "Not a pull request (or no usable diff); running every lane."
+            exit 0
+          fi
+          printf 'Changed files:\n%s\n' "$files"
+          # Code means anything that is not documentation and not website-only. Workflow files
+          # count as code: a CI change should be validated by the suite it changes.
+          if printf '%s\n' "$files" | grep -qvE '^(docs/|apps/web/)|\.md$'; then code=true; else code=false; fi
+          if printf '%s\n' "$files" | grep -qE '^apps/web/'; then web=true; else web=false; fi
+          echo "code=$code" >>"$GITHUB_OUTPUT"
+          echo "web=$web" >>"$GITHUB_OUTPUT"
+          echo "code=$code web=$web"
+
   publish-ghostty-artifacts:
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    needs: changes
+    if: ${{ needs.changes.outputs.code == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     permissions:
       contents: write
     runs-on: macos-15
@@ -42,8 +83,10 @@ jobs:
         run: apps/macos/scripts/ensure_ghostty_artifacts.sh --publish-missing
 
   verify:
-    needs: publish-ghostty-artifacts
-    if: ${{ always() && github.event_name != 'push' && (needs['publish-ghostty-artifacts'].result == 'success' || needs['publish-ghostty-artifacts'].result == 'skipped') }}
+    needs: [changes, publish-ghostty-artifacts]
+    # Runs on pull requests AND pushes to main: a post-merge verify failure is the only signal
+    # that main itself broke (e.g. a semantic conflict between two individually-green PRs).
+    if: ${{ always() && needs.changes.outputs.code == 'true' && (needs['publish-ghostty-artifacts'].result == 'success' || needs['publish-ghostty-artifacts'].result == 'skipped') }}
     runs-on: macos-15
     concurrency:
       group: pr-checks-verify-${{ github.event.pull_request.number || github.ref }}
@@ -65,6 +108,111 @@ jobs:
           xcrun swift --version
           swift --version
 
+      - name: Setup terminal build dependencies
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: apps/macos/scripts/ensure_ghostty_artifacts.sh
+
+      - name: Resolve SwiftPM dependencies
+        run: scripts/swiftpm.sh package resolve
+
+      - name: Run macOS verification lane
+        # verify.sh is the local one-command gate and runs both lanes; CI splits them into separate
+        # jobs for their own runners, so it composes the same pieces directly instead. verify-prep.sh
+        # must be sourced, not executed: it exports the profile-scoped environment coverage.sh then
+        # depends on, which a child process could not hand back.
+        #
+        # Step-scoped timeout so a wedged run fails through the normal path, which still uploads the
+        # step's logs for diagnosis; a force-cancelled job discards them. This only fires on a
+        # genuine hang the silence watchdog cannot see (an unwrapped build phase, or output
+        # trickling under its threshold).
+        timeout-minutes: 45
+        env:
+          # The runner has 3 logical CPUs, and coverage.sh's auto worker count is uncapped, so it
+          # would start one test worker per core and leave nothing for the processes those tests
+          # spawn -- the python mouse probes, the Caddy stub, PTY children. Starving those is what
+          # a rotating cast of CI-only failures had in common: the child stayed alive but produced
+          # no output before the test's deadline. Keep a core free for them. The uncapped default
+          # was tuned on a 14-core dev machine, where the same ratio leaves far more slack.
+          SPACES_TEST_MAX_AUTO_WORKERS: "2"
+        run: |
+          set -euo pipefail
+          source apps/macos/scripts/verify-prep.sh
+          "$root/scripts/coverage.sh"
+
+      # A recurring CI-only SIGTRAP kills a test worker mid-run (so far always within
+      # TerminalSessionPaneViewControllerTests) and has never reproduced locally; the macOS crash
+      # report is the only artifact that can name the crashed frame.
+      - name: Collect crash reports
+        if: failure()
+        run: |
+          mkdir -p crash-reports
+          cp ~/Library/Logs/DiagnosticReports/*.ips crash-reports/ 2>/dev/null || true
+          cp ~/Library/Logs/DiagnosticReports/*.crash crash-reports/ 2>/dev/null || true
+          ls -la crash-reports/
+
+      - name: Upload crash reports
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: verify-crash-reports
+          path: crash-reports/
+          if-no-files-found: ignore
+
+  # Its own job rather than a lane inside verify: on the three-core macOS runner the iOS build and
+  # the macOS test run starved each other, and only ~16s of this lane is actually running tests --
+  # the rest is simulator boot and build-for-testing. Run directly, so its output lands in the CI
+  # log instead of the file verify.sh has to redirect and tail.
+  ios-tests:
+    needs: [changes, publish-ghostty-artifacts]
+    if: ${{ always() && needs.changes.outputs.code == 'true' && (needs['publish-ghostty-artifacts'].result == 'success' || needs['publish-ghostty-artifacts'].result == 'skipped') }}
+    runs-on: macos-15
+    concurrency:
+      group: pr-checks-ios-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Setup terminal build dependencies
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: apps/macos/scripts/ensure_ghostty_artifacts.sh
+
+      # Warm start only: a stale or partial restore costs a rebuild, never correctness, because
+      # Xcode invalidates its own module cache when inputs change. The restore-keys prefix is the
+      # point -- an exact-key miss still seeds DerivedData so the build is incremental.
+      - name: Cache iOS DerivedData
+        uses: actions/cache@v4
+        with:
+          path: apps/macos/.build/ios-derived-data
+          key: ios-dd-${{ runner.os }}-${{ hashFiles('apps/ios/**/*.pbxproj', 'apps/macos/Package.resolved', 'apps/macos/Package.swift') }}
+          restore-keys: |
+            ios-dd-${{ runner.os }}-
+
+      - name: Run iOS unit test lane
+        # Well under the verify job's ceiling: this lane is a build plus ~16s of tests, and the
+        # simulator boot inside it carries its own deadline.
+        timeout-minutes: 30
+        run: apps/macos/scripts/ios-test-lane.sh
+
+  # Split out of verify so a website change no longer drags the whole macOS suite along, and so the
+  # build runs on a Linux runner instead of an expensive macOS one.
+  website:
+    needs: changes
+    if: ${{ needs.changes.outputs.web == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
@@ -72,28 +220,21 @@ jobs:
           cache: npm
           cache-dependency-path: apps/web/package-lock.json
 
-      - name: Setup terminal build dependencies
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: apps/macos/scripts/ensure_ghostty_artifacts.sh
-
       - name: Install website dependencies
         working-directory: apps/web
         run: npm ci
-
-      - name: Resolve SwiftPM dependencies
-        run: scripts/swiftpm.sh package resolve
-
-      - name: Run Swift verification
-        run: scripts/verify.sh
 
       - name: Build static website
         working-directory: apps/web
         run: npm run build
 
   linux-spacesd-artifact:
+    needs: changes
+    if: ${{ needs.changes.outputs.code == 'true' }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
+    # The x86_64 leg also runs the Linux unit-test lane after the artifact build; its SwiftPM
+    # test build starts cold on a fresh runner, so the ceiling covers both phases.
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -118,10 +259,56 @@ jobs:
             swift:6.2-noble \
             bash -lc 'apt-get update && apt-get install -y curl git xz-utils python3 pkg-config libsqlite3-dev libssl-dev openssl coreutils && apps/macos/scripts/build_linux_spacesd_artifact.sh --arch ${{ matrix.arch }}'
 
+      # The artifact build above stages the Linux libghostty-vt into .local/ghosttyvt/lib-linux,
+      # which is exactly what the unit lane needs; one architecture's run suffices for unit
+      # coverage. The named volumes start empty on a fresh runner — the lane builds its own
+      # test products into them.
+      - name: Run Linux unit-test lane
+        if: ${{ matrix.arch == 'x86_64' }}
+        run: |
+          docker run --rm --init --platform ${{ matrix.docker-platform }} \
+            -v "$PWD":/workspace \
+            -v spaces-linux-src:/root/src \
+            -v spaces-linux-zig:/root/spaces-zig-cache \
+            -v spaces-linux-test-build:/root/spaces-test-build \
+            -e ZIG_LOCAL_CACHE_DIR=/root/spaces-zig-cache/local -e ZIG_GLOBAL_CACHE_DIR=/root/spaces-zig-cache/global \
+            swift:6.2-noble \
+            bash /workspace/apps/macos/scripts/run_linux_tests.sh
+
       - name: Upload Linux spacesd artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: spacesd-ubuntu-24.04-${{ matrix.arch }}
           path: |
             dist/linux/spacesd-ubuntu-24.04-${{ matrix.arch }}.tar.gz
             dist/linux/spacesd-ubuntu-24.04-${{ matrix.arch }}.tar.gz.sha256
+
+  # The single required check. Every other job is skippable (a docs-only change runs none of them),
+  # and a skipped job reports nothing at all -- branch protection reads that as forever-pending, not
+  # as passing. So protection requires this job, which always runs, and it translates the others'
+  # results: succeeded or deliberately skipped is fine, anything else is not. Requiring one context
+  # also means renaming or adding a job cannot silently un-require coverage.
+  gate:
+    needs: [changes, publish-ghostty-artifacts, verify, ios-tests, website, linux-spacesd-artifact]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check lane results
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, sys
+
+          results = json.loads(os.environ["RESULTS"])
+          bad = {name: data["result"] for name, data in sorted(results.items())
+                 if data["result"] not in ("success", "skipped")}
+          for name, data in sorted(results.items()):
+              print(f"{name}: {data['result']}")
+          if bad:
+              print("\nGate failed -- these lanes did not pass: "
+                    + ", ".join(f"{n} ({r})" for n, r in bad.items()), file=sys.stderr)
+              raise SystemExit(1)
+          print("\nGate passed.")
+          PY

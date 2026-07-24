@@ -1551,6 +1551,9 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         let controller = makeGhosttyController(
             sessionID: "session-viewer-final-output", paths: paths, preferredAttachmentMode: .viewer, host: fakeHost, attachClientAction: { _, _ in },
             detachClientAction: { _ in })
+        let pasteboard = NSPasteboard(name: NSPasteboard.Name("pane-copy-\(UUID().uuidString)"))
+        defer { pasteboard.releaseGlobally() }
+        controller.pasteboardOverrideForTesting = pasteboard
 
         XCTAssertTrue(controller.debugShowsTerminalSurface)
         XCTAssertFalse(controller.debugShowsTextRenderer)
@@ -1560,10 +1563,10 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         XCTAssertTrue(normalizedRenderedOutput(controller.debugStateDump().renderedOutput).contains("command failed"))
         XCTAssertFalse(normalizedRenderedOutput(controller.debugStateDump().renderedOutput).contains("output log tail should not render"))
         XCTAssertEqual(normalizedRenderedOutput(controller.debugRenderedOutput), "command failed")
-        NSPasteboard.general.clearContents()
+        pasteboard.clearContents()
         controller.selectAll(nil)
         controller.copy(nil)
-        XCTAssertEqual(NSPasteboard.general.string(forType: .string), "command failed")
+        XCTAssertEqual(pasteboard.string(forType: .string), "command failed")
         XCTAssertEqual(controller.debugRendererSummary, "Renderer: final Ghostty render")
     }
 
@@ -2453,12 +2456,15 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
                 createdAt: "2026-05-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             .init(sessionID: "session-fallback", servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-05-09T00:00:01Z"), paths: paths)
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString("paste-from-test", forType: .string)
 
         let controller = TerminalSessionPaneViewController(
             sessionID: "session-fallback", paths: paths, stateProvider: PersistenceBackedTerminalSessionStateProvider(paths: paths),
             attachClientAction: persistenceBackedAttachAction(paths), detachClientAction: persistenceBackedDetachAction(paths))
+        let pasteboard = NSPasteboard(name: NSPasteboard.Name("owner-status-paste-\(UUID().uuidString)"))
+        defer { pasteboard.releaseGlobally() }
+        controller.pasteboardOverrideForTesting = pasteboard
+        pasteboard.clearContents()
+        pasteboard.setString("paste-from-test", forType: .string)
 
         controller.paste(nil)
 
@@ -3042,6 +3048,138 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         XCTAssertFalse(controller.handleKeyEvent(try keyEvent(keyCode: kVK_ANSI_A, characters: "a", modifiers: [])))
         XCTAssertTrue(controller.debugBannerVisible)
     }
+
+    /// The pane's last reference can be dropped by a background task (e.g. a finished detached
+    /// takeover task holding the final reference), so its deinit must not deallocate its AppKit
+    /// members off the main thread. The box makes the off-main last release deterministic; draining
+    /// the main queue afterward proves the shipped `mainThreadReleaseBag` release actually runs.
+    @MainActor func testControllerLastReleaseOffMainDoesNotTrap() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        final class Box: @unchecked Sendable { var controller: TerminalSessionPaneViewController? }
+        let box = Box()
+        box.controller = TerminalSessionPaneViewController(
+            sessionID: "session-1", paths: .init(rootDirectory: root.path),
+            stateProvider: PersistenceBackedTerminalSessionStateProvider(paths: .init(rootDirectory: root.path)),
+            attachClientAction: persistenceBackedAttachAction(.init(rootDirectory: root.path)),
+            detachClientAction: persistenceBackedDetachAction(.init(rootDirectory: root.path)))
+
+        await Task.detached { box.controller = nil }.value
+        await Task { @MainActor in }.value
+    }
+
+    /// Thread-safe box `DeinitTrackingGhosttySessionHost.deinit` reports into, since deinit for a
+    /// `@MainActor` protocol conformer still runs on whatever thread drops the object's last reference.
+    private final class HostDeinitThreadRecorder: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _wasMainThread: Bool?
+        var wasMainThread: Bool? {
+            lock.lock()
+            defer { lock.unlock() }
+            return _wasMainThread
+        }
+        func record(_ value: Bool) {
+            lock.lock()
+            defer { lock.unlock() }
+            _wasMainThread = value
+        }
+    }
+
+    /// Minimal `TerminalGhosttySessionHosting` fake whose only job is to report which thread tore it
+    /// down. Its `attach` is a no-op — unlike `FakeGhosttySessionHost` it never adds anything to
+    /// `terminalContainer` — so this test proves the controller's *stored reference* to the host
+    /// (`activeGhosttySessionHost`/`clientGhosttySessionHost`) is released on the main thread on its
+    /// own merit, independent of whatever the view hierarchy happens to retain.
+    @MainActor private final class DeinitTrackingGhosttySessionHost: TerminalGhosttySessionHosting {
+        var activeOwnerClientIDValue: String?
+        private let recorder: HostDeinitThreadRecorder
+        init(recorder: HostDeinitThreadRecorder) { self.recorder = recorder }
+        deinit { recorder.record(Thread.isMainThread) }
+        func attach(client: TerminalClient, mode: TerminalAttachmentMode, into container: NSView?) throws {
+            if mode == .owner { activeOwnerClientIDValue = client.id }
+        }
+        func releaseRendererSurface() {}
+        func setFocused(_ focused: Bool, for clientID: String) {}
+        func focusWindow(_ window: NSWindow?) {}
+        @discardableResult func handleKeyEvent(_ event: NSEvent, for clientID: String) -> Bool { false }
+        @discardableResult func synchronizeSurfaceGeometry() -> Bool { true }
+        func activeOwnerClientID() -> String? { activeOwnerClientIDValue }
+        var effectiveTitle: String { "ghostty" }
+        var effectiveWorkingDirectory: String { "/tmp/work" }
+        func hasRenderableSurface() -> Bool { true }
+        func requestSurfaceRefresh() {}
+        func prepareRenderStateExport() {}
+        func snapshot() -> GhosttyTerminalSnapshot? { nil }
+        func snapshotText() -> String? { nil }
+        func sessionSnapshot() -> GhosttyTerminalSnapshot? { nil }
+        func sessionSnapshotText() -> String? { nil }
+        func copySelectionToPasteboard() -> Bool { false }
+        func pasteClipboardContents() -> Bool { false }
+        @discardableResult func sendTextAsPaste(_ text: String) -> Bool { false }
+        @discardableResult func performBindingAction(_ action: String) -> Bool { false }
+        @discardableResult func sendScroll(horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32, pointerPosition: TerminalScrollPointerPosition?)
+            -> Bool { false }
+        @discardableResult func clearScreenAndScrollback() -> Bool { false }
+        var debugSearchState: GhosttyTerminalSearchDebugState {
+            GhosttyTerminalSearchDebugState(isVisible: false, query: "", total: nil, selected: nil)
+        }
+        var debugSurfaceRefreshRequestCount: Int { 0 }
+        func debugVisibleSurfaceText() -> String? { nil }
+    }
+
+    /// Builds an owner-mode pane whose Ghostty host resolution actually runs — mirroring
+    /// `testRuntimeNotificationDuringOwnerHostCreationDoesNotReenterAttachResolution`'s persisted
+    /// launch/runtime state plus an owner attachment record, then `debugForceRefresh()` to drive
+    /// `ensureGhosttyHostAttached` → `switchGhosttySessionHostIfNeeded`, the only place that stores the
+    /// host. `host` is local to this helper so the sole surviving strong references once it returns are
+    /// the controller's own (`activeGhosttySessionHost`, `clientGhosttySessionHost`, and the new
+    /// `activeGhosttySessionHostForMainThreadRelease` release-bag entry) — nothing in the test body
+    /// itself keeps the host alive.
+    @MainActor private func makeOwnerControllerWithAttachedTrackedHost(
+        sessionID: String, paths: TerminalSessionPaths, recorder: HostDeinitThreadRecorder
+    ) throws -> TerminalSessionPaneViewController {
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: sessionID, backend: .ghosttyEmbedded, title: "host-release", workingDirectory: "/tmp/host-release", shell: "/bin/zsh",
+                command: nil, createdAt: "2026-07-23T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-07-23T00:00:01Z"),
+            paths: paths)
+        let host = DeinitTrackingGhosttySessionHost(recorder: recorder)
+        let controller = makeGhosttyController(
+            sessionID: sessionID, paths: paths, preferredAttachmentMode: .owner, performInitialRefresh: false,
+            sessionHostProvider: { _, _ in host })
+        let owner = TerminalClient(
+            id: controller.clientID, kind: .localWindow, identity: .init(label: "Spaces window"), connectedAt: "2026-07-23T00:00:00Z")
+        try TerminalSessionPersistence.attachClient(sessionID: sessionID, client: owner, mode: .owner, paths: paths, attachedAt: "2026-07-23T00:00:00Z")
+        controller.debugForceRefresh()
+        return controller
+    }
+
+    /// `switchGhosttySessionHostIfNeeded` resolves a renderer host whose `GhosttyMirrorTerminalView`
+    /// is not always inside `view`'s hierarchy (a viewer pane never attaches it, and
+    /// `releaseGhosttySurfaceIfNeeded`/this same switch strip `terminalContainer`'s subviews). So the
+    /// view-root retain `mainThreadReleaseBag` alone cannot guarantee the host tears down on the main
+    /// thread — this proves the controller's dedicated host retain covers it: dropping the controller's
+    /// last reference from a detached task must still deallocate the tracked host on the main thread.
+    @MainActor func testControllerLastReleaseOffMainReleasesActiveSessionHostOnMainThread() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+
+        let recorder = HostDeinitThreadRecorder()
+        final class Box: @unchecked Sendable { var controller: TerminalSessionPaneViewController? }
+        let box = Box()
+        box.controller = try makeOwnerControllerWithAttachedTrackedHost(sessionID: "session-host-release", paths: paths, recorder: recorder)
+
+        await Task.detached { box.controller = nil }.value
+        await Task { @MainActor in }.value
+
+        XCTAssertEqual(recorder.wasMainThread, true)
+    }
 }
 
 /// Exercises `TerminalPaneBanner`'s two state layers. The pane's persistent notice and the link
@@ -3052,6 +3190,18 @@ final class TerminalPaneBannerTests: XCTestCase {
     @MainActor private func makeBanner() -> (TerminalPaneBanner, NSView) {
         let host = NSView(frame: NSRect(x: 0, y: 0, width: 600, height: 400))
         return (TerminalPaneBanner(hostView: host), host)
+    }
+
+    /// A banner's last reference can be dropped by a background task (any async caller that
+    /// captured its owning pane controller), so deinit must not assert main-actor isolation.
+    /// `MainActor.assumeIsolated` in deinit trapped exactly here — a CI-only SIGTRAP, because the
+    /// off-main last release needs a slow-scheduled background holder to lose the race. The box
+    /// makes that ordering deterministic: the detached task provably performs the final release.
+    @MainActor func testLastReleaseOffMainDoesNotTrap() async {
+        final class Box: @unchecked Sendable { var banner: TerminalPaneBanner? }
+        let box = Box()
+        box.banner = TerminalPaneBanner(hostView: NSView())
+        await Task.detached { box.banner = nil }.value
     }
 
     @MainActor func testPersistentNoticeShowsUntilCleared() {

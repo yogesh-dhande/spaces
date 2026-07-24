@@ -9,7 +9,11 @@ import Testing
 /// The invariant these tests protect: ownership (`isSpacesOwned`) is version-*less* and drives what a
 /// reinstall strips, while currency (`isCurrent`) is version-aware and drives only what status reports.
 /// Confusing the two either leaves stale hooks behind or duplicates them on every reinstall.
-@Suite struct AgentHookVersionTests {
+// Serialized: several tests spawn a real stub `codex` child process with a fixed deadline; running
+// them concurrently alongside AgentHookInstallerTests' spawners starves those deadlines under load
+// (parallel: 15 failures across the two suites; serialized: 47/47 in 5.2s). `.serialized` only orders
+// tests within this suite.
+@Suite(.serialized) struct AgentHookVersionTests {
     private let bindings: [AgentHookJSONWriter.EventBinding] = [
         .init(eventName: "SessionStart", event: .initialize), .init(eventName: "Stop", event: .done),
     ]

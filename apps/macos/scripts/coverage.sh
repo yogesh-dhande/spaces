@@ -64,6 +64,15 @@ generate_codecov_artifacts() {
     xcrun llvm-cov export -format=text -instr-profile "$profdata_path" "$test_binary" >"$codecov_json_path"
 }
 
+# Decides whether a non-zero `swift test` exit can be attributed to SwiftPM's post-test steps
+# rather than to the tests themselves, which is the only case the caller forgives.
+#
+# A crashed test process is NOT such a case, and it announces itself differently from a failed
+# assertion: the worker dies mid-test, so it never prints the `Test Case ... failed` or `: error: -[`
+# line a normal failure would, while the swift-testing lane can still report its own suites passing.
+# Matching only the failure markers therefore forgave a crash and reported the run green -- the exact
+# shape of the CI-only SIGTRAP that killed test workers in this suite. Treat the runtime's crash
+# announcements as disqualifying too.
 test_log_reports_success() {
     python3 - "$test_log_path" <<'PY'
 import re
@@ -80,19 +89,30 @@ xctest_failed = (
     re.search(r"Test (Suite|Case) '.*' failed", text) is not None
     or re.search(r": error: -\[", text) is not None
 )
+test_process_crashed = (
+    re.search(r"error: Exited with unexpected signal code \d+", text) is not None
+    or re.search(r"^.*: Fatal error:", text, re.MULTILINE) is not None
+)
 
-raise SystemExit(0 if swift_testing_passed and not xctest_failed else 1)
+raise SystemExit(0 if swift_testing_passed and not xctest_failed and not test_process_crashed else 1)
 PY
 }
 
 echo "Building SwiftPM tests with coverage..."
+# scripts/verify.sh pre-builds with this exact flag set before calling this script, so this is
+# normally an incremental no-op; it stays here (rather than being skipped) because it is the
+# correctness guarantee for anyone invoking coverage.sh directly, and costs nothing when the
+# flags already match the last build.
 "$root/scripts/swiftpm.sh" build --build-tests --enable-code-coverage
 
 echo "Running SwiftPM coverage tests..."
 set -- test --skip-build --enable-code-coverage --disable-sandbox
 if [ "${SPACES_TEST_PARALLEL:-1}" = "1" ]; then
     workers="${SPACES_TEST_WORKERS:-}"
-    max_auto_workers="${SPACES_TEST_MAX_AUTO_WORKERS:-8}"
+    # Auto worker count is uncapped by default: measured on a 14-core machine, capping at 8
+    # cost 37% of the test run's wall time (56.5s vs 35.4s). SPACES_TEST_MAX_AUTO_WORKERS
+    # remains available to impose a ceiling.
+    max_auto_workers="${SPACES_TEST_MAX_AUTO_WORKERS:-0}"
     if [ -z "$workers" ]; then
         detected_workers="$(sysctl -n hw.logicalcpu 2>/dev/null || echo "")"
         case "$detected_workers" in

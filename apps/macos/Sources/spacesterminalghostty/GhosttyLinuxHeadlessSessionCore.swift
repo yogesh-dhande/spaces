@@ -1007,8 +1007,8 @@
             guard performanceLoggingEnabled, let startedAt else { return }
             let decodedUpdate = payload.decodedRenderUpdate
             let attributes = GhosttyRenderFrameMetrics.attributes(
-                reason: payload.reason, frame: decodedUpdate?.fullFrame,
-                outputByteCount: outputByteCount, screenStateRevision: payload.screenStateRevision, frameKind: decodedUpdate?.frameKindMetricValue,
+                reason: payload.reason, frame: decodedUpdate?.fullFrame, outputByteCount: outputByteCount,
+                screenStateRevision: payload.screenStateRevision, frameKind: decodedUpdate?.frameKindMetricValue,
                 baseRevision: decodedUpdate?.baseRevision, targetRevision: decodedUpdate?.targetRevision ?? payload.screenStateRevision,
                 operationCount: decodedUpdate?.operationCount, changedCellCount: decodedUpdate?.changedCellCount,
                 scrollOperationCount: decodedUpdate?.scrollOperationCount, fullFrameFallbackReason: decodedUpdate?.fallbackReason)

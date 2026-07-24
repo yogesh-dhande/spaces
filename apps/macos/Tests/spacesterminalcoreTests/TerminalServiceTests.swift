@@ -13,11 +13,24 @@ import XCTest
         func testCapturedStandardOutputDrainsOutputLargerThanThePipeBuffer() throws {
             let result = try XCTUnwrap(
                 TerminalService.capturedStandardOutput(
-                    executableURL: URL(fileURLWithPath: "/bin/sh"), arguments: ["-c", "dd if=/dev/zero bs=1024 count=256 2>/dev/null | tr '\\0' 'x'"])
+                    executableURL: URL(fileURLWithPath: "/bin/sh"),
+                    arguments: ["-c", "dd if=/dev/zero bs=1024 count=256 2>/dev/null | tr '\\0' 'x'"], timeout: 30)
             )
 
             XCTAssertEqual(result.terminationStatus, 0)
             XCTAssertEqual(result.output.count, 256 * 1024)
+        }
+
+        // Regression: the lsof sweep behind serviceProcessIDsOwningSocket had no deadline, so a
+        // loaded machine could block CaddyService.stop()'s bounded shutdown indefinitely.
+        func testCapturedStandardOutputReturnsNilPromptlyWhenChildOutlivesTimeout() throws {
+            let startedAt = Date()
+
+            let result = TerminalService.capturedStandardOutput(
+                executableURL: URL(fileURLWithPath: "/bin/sh"), arguments: ["-c", "sleep 60"], timeout: 1)
+
+            XCTAssertNil(result)
+            XCTAssertLessThan(Date().timeIntervalSince(startedAt), 10)
         }
 
         func testResolveExecutableURLFindsServiceNextToInstalledCLI() throws {

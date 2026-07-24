@@ -56,6 +56,12 @@ extension FileSystemWatcher: FileSystemWatching {}
     // exactly once regardless of how many passes overlap.
     private var installingProjectIDs: Set<String> = []
     private var started = false
+    // Every `spawnTrackedTask` call not yet finished, keyed by a token minted at spawn time and
+    // cleared in the task's own `defer` when it returns. `refreshWatchers`, a watcher's on-change
+    // callback, and `scan()` each fire an untracked-looking `Task` that this dictionary makes
+    // observable, so `drainInFlightWorkForTesting()` can await the service down to quiescence
+    // instead of a test polling watcher counts against a settle window.
+    private var inFlightTasks: [UUID: Task<Void, Never>] = [:]
     // Scans are serialized: a worktree mutation emits several filesystem events in
     // quick succession, and overlapping scans would race to create the same
     // workspace row (a UNIQUE (project_id, branch) violation). A scan requested
@@ -97,7 +103,7 @@ extension FileSystemWatcher: FileSystemWatching {}
     /// scanned once, since it may already contain worktrees.
     public func refreshWatchers() {
         guard started else { return }
-        Task { @MainActor [weak self] in
+        spawnTrackedTask { [weak self] in
             guard let self else { return }
             let desired = await Self.localGitProjectDirsByID(databasePath: self.databasePath)
             guard self.started else { return }
@@ -109,6 +115,36 @@ extension FileSystemWatcher: FileSystemWatching {}
                 await self.installWatcher(projectID: projectID, projectDir: projectDir)
                 self.scan(projectID: projectID)
             }
+        }
+    }
+
+    /// Spawns a task tracked in `inFlightTasks`, keyed by a token minted before the task exists and
+    /// removed in a `defer` once the body returns. The token is generated first, then the task is
+    /// created and immediately stored under it in one synchronous main-actor statement — the task
+    /// never needs to reference its own `Task` handle (a self-referencing `var task; task = Task {
+    /// ... task ... }` capture is what Swift 6 strict concurrency flags as a data race, since a
+    /// mutable local captured by an escaping `Sendable` closure is assumed reachable from another
+    /// thread even though, isolation-wise, it never actually is here). Callable only from the main
+    /// actor: a non-isolated caller (a filesystem watcher's on-change closure, which fires on its own
+    /// queue) must hop onto the main actor first, e.g. `Task { @MainActor in self?.spawnTrackedTask
+    /// { ... } } }`.
+    private func spawnTrackedTask(_ body: @escaping @Sendable @MainActor () async -> Void) {
+        let taskID = UUID()
+        inFlightTasks[taskID] = Task { @MainActor [weak self] in
+            defer { self?.inFlightTasks[taskID] = nil }
+            await body()
+        }
+    }
+
+    /// Awaits every task this service has spawned and not yet finished. Loops because completing
+    /// one can enqueue another — a refresh that discovers a new project also schedules its install
+    /// and scan; a scan with `scanPending` set re-schedules a trailing full re-scan — so a single
+    /// snapshot of the dictionary is not enough to know the service is quiescent. Returns once none
+    /// remain: the seam a test drains after storming `refreshWatchers()` instead of polling watcher
+    /// counts against a settle window.
+    func drainInFlightWorkForTesting() async {
+        while let (_, task) = inFlightTasks.first {
+            await task.value
         }
     }
 
@@ -131,7 +167,15 @@ extension FileSystemWatcher: FileSystemWatching {}
         guard started, watchers[projectID] == nil else { return }
         let watcher = makeWatcher(watchedDirectories, 1) { [weak self] changedPaths in
             guard Self.changedPathsAffectWorktrees(changedPaths, commonDirectory: commonDirectory) else { return }
-            Task { @MainActor [weak self] in await self?.handleChange(projectID: projectID) }
+            // This callback fires on the watcher's own queue (FSEvents/inotify), never the main
+            // actor, so it hops over before calling the main-actor-only `spawnTrackedTask`. The hop
+            // itself is a scheduling gap, not a data race (only main-actor code ever touches
+            // `inFlightTasks`), but it means a change delivered in the instant between this call and
+            // the hop actually running is not yet visible to `drainInFlightWorkForTesting()`. No test
+            // exercises `drainInFlightWorkForTesting()` against a live filesystem watcher's onChange,
+            // only against `refreshWatchers()`/`scan()`, which spawn their tracked task directly on
+            // the main actor with no such gap.
+            Task { @MainActor [weak self] in self?.spawnTrackedTask { [weak self] in await self?.handleChange(projectID: projectID) } }
         }
         do {
             try await watcher.start()
@@ -228,7 +272,7 @@ extension FileSystemWatcher: FileSystemWatching {}
         scanInFlight = true
         let databasePath = databasePath
         let onError = onError
-        Task { @MainActor [weak self] in
+        spawnTrackedTask { [weak self] in
             await Task.detached(priority: .utility) {
                 do {
                     let store = try SQLiteStore(path: databasePath)

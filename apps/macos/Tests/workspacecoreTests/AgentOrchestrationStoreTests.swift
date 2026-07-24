@@ -15,7 +15,7 @@ import spacesterminalcore
 final class AgentOrchestrationStoreTests: XCTestCase {
     func testAnnotatedNoteSurvivesStatusSignalCycle() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
 
         let agent = try orchestrator.registerAgentWindow(
@@ -39,7 +39,7 @@ final class AgentOrchestrationStoreTests: XCTestCase {
 
     func testSetAgentSessionNoteWithEmptyStringClearsNote() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         let agent = try orchestrator.registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "agent-session", status: .idle)
@@ -56,7 +56,7 @@ final class AgentOrchestrationStoreTests: XCTestCase {
     /// agent must not bump it — otherwise an old blocked/finished alert would appear newly occurred.
     func testSetAgentSessionNoteDoesNotChangeUpdatedAt() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         let agent = try orchestrator.registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "agent-session", status: .idle)
@@ -74,7 +74,7 @@ final class AgentOrchestrationStoreTests: XCTestCase {
 
     func testSubscriptionInsertListAndRestrictBlocksBypassDelete() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         let child = try orchestrator.registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "child-session", status: .idle)
@@ -101,7 +101,7 @@ final class AgentOrchestrationStoreTests: XCTestCase {
 
     func testDeleteSubscriptionRemovesOnlyMatchingEdge() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         let first = try orchestrator.registerAgentWindow(workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "first", status: .idle)
         let second = try orchestrator.registerAgentWindow(workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "second", status: .idle)
@@ -145,7 +145,7 @@ final class AgentOrchestrationStoreTests: XCTestCase {
     /// not tool calls — while a real blocked→working resume records a fresh transition event.
     func testDuplicateConsecutiveWorkingSignalsRecordOneTransitionEvent() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         let agent = try orchestrator.registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "agent-session", status: .idle)
@@ -181,7 +181,7 @@ final class AgentOrchestrationStoreTests: XCTestCase {
 
     func testLastAgentSignalAtCountsOnlyHookSignalEvents() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         let agent = try orchestrator.registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "agent-session", status: .idle)
@@ -287,7 +287,7 @@ final class AgentOrchestrationStoreTests: XCTestCase {
 
     func testAgentSessionRowsCarryNoteProjectContextAndReadiness() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (project, workspace) = try makeProjectAndWorkspace(store: store)
         let agent = try orchestrator.registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, label: "Claude Code CLI", terminalTrackingID: "agent-session", status: .waiting)
@@ -314,7 +314,7 @@ final class AgentOrchestrationStoreTests: XCTestCase {
     /// which made remote rendering emit "Reviewer (Reviewer)" and dropped the kind from listings.
     func testAgentSessionRowSeparatesDetectedKindFromLaunchTitle() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         let sessionID = "agent-session"
         _ = try orchestrator.registerAgentWindow(
@@ -339,7 +339,7 @@ final class AgentOrchestrationStoreTests: XCTestCase {
     /// "coding agent"), while `label:` still carries the launch title.
     func testAgentSessionRowLeavesAgentNilWhenNoKindDetected() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         let sessionID = "agent-session"
         _ = try orchestrator.registerAgentWindow(
@@ -362,7 +362,7 @@ final class AgentOrchestrationStoreTests: XCTestCase {
 
     func testAnnotateAgentSessionSanitizesControlCharacters() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         _ = try orchestrator.registerAgentWindow(workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "agent-session", status: .idle)
 
@@ -375,7 +375,7 @@ final class AgentOrchestrationStoreTests: XCTestCase {
 
     func testAnnotateAgentSessionWithEmptyNoteClearsAndReportsNilNote() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         _ = try orchestrator.registerAgentWindow(workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "agent-session", status: .idle)
 
@@ -386,7 +386,7 @@ final class AgentOrchestrationStoreTests: XCTestCase {
 
     func testAnnotateAgentSessionThrowsWhenNoAgentRow() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         _ = try makeProjectAndWorkspace(store: store)
         XCTAssertThrowsError(try orchestrator.annotateAgentSession(terminalSessionID: "missing-session", note: "note"))
     }

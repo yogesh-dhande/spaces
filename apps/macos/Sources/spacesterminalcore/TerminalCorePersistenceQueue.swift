@@ -90,12 +90,27 @@ public final class TerminalCorePersistenceQueue: Sendable {
     /// any state leaves stale durable metadata until the next event. A superseded write abandons its retry
     /// (latest-wins), so a running-state retry can never overwrite a newer state.
     public static let runtimeStateWriteMaxAttempts = 5
+    /// Production back-off between retry attempts. Injectable via `init` (see `runtimeStateWriteRetryDelay`
+    /// below) so tests can virtualize the wait instead of stepping over it with a real sleep; this default is
+    /// what every production call site gets.
     public static let runtimeStateWriteRetryDelay: TimeInterval = 0.2
 
     private let queue: DispatchQueue
     private let coalescingGate = PersistenceCoalescingGate()
+    private let runtimeStateWriteRetryDelay: TimeInterval
+    /// Back-off primitive for the runtime-state retry loop, defaulting to a real `Thread.sleep`. Tests inject
+    /// a non-blocking closure (e.g. one that just signals a semaphore) to observe/synchronize on a retry
+    /// attempt without spending wall-clock time on it.
+    private let sleep: @Sendable (TimeInterval) -> Void
 
-    public init(label: String) { queue = DispatchQueue(label: label) }
+    public init(
+        label: String, runtimeStateWriteRetryDelay: TimeInterval = TerminalCorePersistenceQueue.runtimeStateWriteRetryDelay,
+        sleep: @escaping @Sendable (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) }
+    ) {
+        queue = DispatchQueue(label: label)
+        self.runtimeStateWriteRetryDelay = runtimeStateWriteRetryDelay
+        self.sleep = sleep
+    }
 
     /// Enqueue a durable write with no coalescing (unique mutations: expiry detaches, ownership transfer,
     /// the terminated payload). Runs on the serial persistence queue in enqueue (FIFO) order.
@@ -124,8 +139,9 @@ public final class TerminalCorePersistenceQueue: Sendable {
     public func drainAsync() async { await withCheckedContinuation { continuation in queue.async { continuation.resume() } } }
 
     /// Runs one durable runtime-state write on the serial queue. On failure it retries IN PLACE inside the
-    /// single queued work item — looping up to `runtimeStateWriteMaxAttempts` with a `Thread.sleep` back-off
-    /// between attempts — rather than re-enqueuing. Every state retries, not just `.exited`: the Linux headless
+    /// single queued work item — looping up to `runtimeStateWriteMaxAttempts` with the injected `sleep`
+    /// back-off (real `Thread.sleep` in production, a virtualized wait in tests) between attempts — rather
+    /// than re-enqueuing. Every state retries, not just `.exited`: the Linux headless
     /// core has no periodic refresh, so a dropped write of any state (running included) would otherwise leave
     /// stale durable metadata until the next event. Blocking the per-core persistence queue here IS the
     /// termination fence: it holds this write's FIFO position so the detach-all, terminated payload, and
@@ -144,7 +160,8 @@ public final class TerminalCorePersistenceQueue: Sendable {
     ) {
         let key = Self.runtimeStateCoalescingKey
         let maxAttempts = Self.runtimeStateWriteMaxAttempts
-        let retryDelay = Self.runtimeStateWriteRetryDelay
+        let retryDelay = runtimeStateWriteRetryDelay
+        let sleep = self.sleep
         let gate = coalescingGate
         let generation = gate.nextGeneration(forKey: key)
         queue.async {
@@ -154,7 +171,7 @@ public final class TerminalCorePersistenceQueue: Sendable {
                 do { try TerminalSessionPersistence.writeRuntimeState(state, paths: paths) } catch {
                     attempt += 1
                     guard attempt < maxAttempts else { return }
-                    Thread.sleep(forTimeInterval: retryDelay)
+                    sleep(retryDelay)
                     continue
                 }
                 onPersisted(state, writeAt)

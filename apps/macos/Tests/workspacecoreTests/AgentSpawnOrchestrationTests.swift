@@ -10,7 +10,7 @@ final class AgentSpawnOrchestrationTests: XCTestCase {
     private func makeAgentOrchestrator(
         store: SQLiteStore, launchCapture: TerminalLaunchConfigurationCapture, terminateCapture: TerminalTerminateCapture
     ) -> WorkspaceOrchestrator {
-        WorkspaceOrchestrator(
+        makeTestOrchestrator(
             store: store, builtInTerminalSessionTerminator: { sessionID in terminateCapture.sessionIDs.append(sessionID) },
             builtInTerminalSessionLauncher: { configuration in
                 launchCapture.append(configuration)
@@ -96,7 +96,7 @@ final class AgentSpawnOrchestrationTests: XCTestCase {
 
     func testTerminateSpawnedAgentTerminalSessionReturnsFalseForUnknownSession() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         XCTAssertFalse(try orchestrator.terminateSpawnedAgentTerminalSession(sessionID: "no-such-session"))
     }
 
@@ -140,7 +140,7 @@ final class AgentSpawnOrchestrationTests: XCTestCase {
 
     func testResolveSpacesAgentSessionFindsRowAcrossWorkspacesAndNilForUnknown() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let projectDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
         let project = makeProjectRecord(dir: projectDir)
         try store.upsert(project: project)
@@ -160,7 +160,7 @@ final class AgentSpawnOrchestrationTests: XCTestCase {
 
     func testAgentWindowExistsReflectsSubscriptionTargetPresence() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let projectDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
         let project = makeProjectRecord(dir: projectDir)
         try store.upsert(project: project)
@@ -175,7 +175,7 @@ final class AgentSpawnOrchestrationTests: XCTestCase {
 
     func testForegroundDetectedRowIsNotReadyUntilHookSignal() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let projectDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
         let project = makeProjectRecord(dir: projectDir)
         try store.upsert(project: project)
