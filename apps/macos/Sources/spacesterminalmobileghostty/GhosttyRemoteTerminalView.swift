@@ -84,6 +84,7 @@ import Foundation
         public let isVisible: Bool
         public let acceptsInput: Bool
         public let isBusy: Bool
+        public let fontSize: TerminalFontSize
         public let onInputReadinessChanged: @MainActor (Bool) -> Void
         public let onScrollGestureApplied: (@MainActor () -> Void)?
         public let onRenderedTextChanged: (@MainActor (String) -> Void)?
@@ -96,7 +97,8 @@ import Foundation
 
         public init(
             ownerEpoch: GhosttyRemoteTerminalOwnerEpoch? = nil, endedRender: GhosttyRemoteTerminalEndedRender? = nil, fallbackText: String,
-            isVisible: Bool, acceptsInput: Bool, isBusy: Bool, onInputReadinessChanged: @escaping @MainActor (Bool) -> Void = { _ in },
+            isVisible: Bool, acceptsInput: Bool, isBusy: Bool, fontSize: TerminalFontSize,
+            onInputReadinessChanged: @escaping @MainActor (Bool) -> Void = { _ in },
             onScrollGestureApplied: (@MainActor () -> Void)? = nil, onRenderedTextChanged: (@MainActor (String) -> Void)? = nil,
             onViewportSizeChanged: @escaping @MainActor (Int, Int) -> Void, onSendText: @escaping @MainActor (String, Bool) -> Void,
             onSendKey: @escaping @MainActor (String) -> Void,
@@ -109,6 +111,7 @@ import Foundation
             self.isVisible = isVisible
             self.acceptsInput = acceptsInput
             self.isBusy = isBusy
+            self.fontSize = fontSize
             self.onInputReadinessChanged = onInputReadinessChanged
             self.onScrollGestureApplied = onScrollGestureApplied
             self.onRenderedTextChanged = onRenderedTextChanged
@@ -136,6 +139,7 @@ import Foundation
             hostView.onRenderedTextChanged = onRenderedTextChanged.map { callback in { text in _ = Task { @MainActor in callback(text) } } }
             hostView.setTerminalVisible(isVisible)
             hostView.setAcceptsTerminalInput(acceptsInput && !isBusy)
+            hostView.setTerminalFontSize(fontSize)
             hostView.update(ownerEpoch: ownerEpoch, endedRender: endedRender, fallbackText: fallbackText)
         }
 
@@ -198,7 +202,6 @@ import Foundation
             let pinned: [CGFloat]
         }
 
-        private static let defaultFontSize: CGFloat = 11
         private static let contentInsets = GhosttyRemoteTerminalViewport.contentInsets
         private static let accessoryToolbarHeight: CGFloat = 46
 
@@ -208,6 +211,7 @@ import Foundation
 
         private let surfaceHostView = UIView(frame: .zero)
         private var mirror: ghostty_mirror_t?
+        private var fontSize: TerminalFontSize = .default
         private var activeOwnerEpoch: GhosttyRemoteTerminalOwnerEpoch?
         private var activeEndedRender: GhosttyRemoteTerminalEndedRender?
         private var latestRenderFrame: GhosttyRenderFrame?
@@ -418,6 +422,25 @@ import Foundation
             }
             reloadInputViews()
             reportInputReadinessIfNeeded(force: true)
+        }
+
+        /// Applies a new terminal font size. GhosttyKit exposes no mirror-level font-size setter, so a
+        /// live mirror has to be replaced by one created from a fresh session config at the new size.
+        /// The render state (`latestSnapshot`, `latestRenderFrame`, owner epoch) is deliberately kept —
+        /// unlike `prepareForDismantle()` — so the terminal re-renders its current content at the new
+        /// size instead of blanking until the daemon sends the next frame.
+        public func setTerminalFontSize(_ newFontSize: TerminalFontSize) {
+            guard fontSize != newFontSize else { return }
+            fontSize = newFontSize
+            guard let mirror else { return }
+            mirrorCreationTask?.cancel()
+            mirrorCreationTask = nil
+            retireMirror(mirror)
+            self.mirror = nil
+            lastSurfaceGeometry = nil
+            scheduleMirrorCreationIfNeeded()
+            reportViewportSizeIfNeeded()
+            renderLatestSnapshot()
         }
 
         public func setSoftwareKeyboardVisible(_ visible: Bool) {
@@ -761,7 +784,7 @@ import Foundation
                 config.surface.scale_factor = host.scale_factor
                 config.surface.context = GHOSTTY_SURFACE_CONTEXT_WINDOW
                 config.surface.backend = GHOSTTY_SURFACE_IO_BACKEND_HOST_MANAGED
-                config.surface.font_size = Float(Self.defaultFontSize)
+                config.surface.font_size = Float(fontSize.points)
                 config.parked_host = host
                 emitHostRenderEvent("host_view_mirror_new_begin", dedupeKey: lastRenderKey)
                 mirror = ghostty_mirror_new(app, &host, &config)
@@ -985,7 +1008,7 @@ import Foundation
         }
 
         private func cellMetrics() -> CellMetrics {
-            let font = UIFont.monospacedSystemFont(ofSize: Self.defaultFontSize, weight: .regular)
+            let font = UIFont.monospacedSystemFont(ofSize: CGFloat(fontSize.points), weight: .regular)
             let width = ceil(("W" as NSString).size(withAttributes: [.font: font]).width)
             let height = ceil(font.lineHeight)
             return CellMetrics(width: max(width, 1), height: max(height, 1))
