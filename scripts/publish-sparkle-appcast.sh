@@ -1,16 +1,23 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [ $# -ne 1 ]; then
-  echo "Usage: $0 <version>" >&2
+if [ $# -ne 2 ]; then
+  echo "Usage: $0 <channel> <version>" >&2
+  echo "  channel: stable | nightly" >&2
   exit 1
 fi
 
-VERSION="$1"
+CHANNEL="$1"
+VERSION="$2"
+
+if [[ "$CHANNEL" != "stable" && "$CHANNEL" != "nightly" ]]; then
+  echo "Error: channel must be 'stable' or 'nightly', got '$CHANNEL'" >&2
+  exit 1
+fi
+
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ARCHIVE_PATH="$REPO_ROOT/dist/releases/$VERSION/Spaces-${VERSION}.zip"
-UPDATES_DIR="$REPO_ROOT/dist/updates/stable"
-WEB_RELEASES_DIR="$REPO_ROOT/apps/web/public/releases"
+UPDATES_DIR="$REPO_ROOT/dist/updates/$CHANNEL"
 APPCAST_TOOL="$REPO_ROOT/apps/macos/.build/artifacts/sparkle/Sparkle/bin/generate_appcast"
 APPCAST_PATH="$UPDATES_DIR/appcast.xml"
 
@@ -86,10 +93,4 @@ if ! perl -0ne '
   exit 1
 fi
 
-rm -rf "$WEB_RELEASES_DIR"
-mkdir -p "$WEB_RELEASES_DIR"
-cp -R "$UPDATES_DIR"/. "$WEB_RELEASES_DIR"/
-touch "$WEB_RELEASES_DIR/.gitkeep"
-
 echo "✓ Generated Sparkle updates in $UPDATES_DIR"
-echo "✓ Staged Sparkle updates in $WEB_RELEASES_DIR"

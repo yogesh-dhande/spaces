@@ -1,113 +1,77 @@
 import Foundation
 
+/// Resolves the key specs clients send (`"enter"`, `"shift+enter"`, `"ctrl+c"`, `"cmd+left"`) into
+/// what the session host should do with them.
+///
+/// A spec names a key and its modifiers; it does not name bytes. Encoding lives at the session host
+/// because the correct bytes depend on terminal state only the host has: Shift+Enter is a bare `\r`
+/// in a plain shell but `CSI 13;2u` once an application enables the Kitty keyboard protocol, and
+/// arrows switch between `CSI` and `SS3` forms with DECCKM. The host runs Ghostty's own key encoder
+/// against the live terminal, so Spaces encodes exactly as Ghostty does.
+///
+/// Two kinds of spec are deliberately *not* key presses:
+///
+/// - `cmd+k` is an app action (clear screen and scrollback), not terminal input.
+/// - The Mac line-editing chords are fixed byte sequences. They exist to map a macOS/iOS editing
+///   convention onto readline (`cmd+left` means "beginning of line", so it sends `ctrl+a`), and that
+///   mapping must not vary with terminal mode. Encoding them as Alt-modified key presses would also
+///   break outright: Ghostty only emits an ESC prefix for Alt when DECSET 1036 is on *and*
+///   `macos-option-as-alt` is enabled, so `opt+left` would silently produce nothing.
 public enum TerminalKeyInput {
     public enum HostAction: Equatable, Sendable { case clearScreenAndScrollback }
 
-    private enum KeyModifier: Hashable {
-        case control
-        case command
-        case option
+    /// What a key spec means to the session host.
+    public enum Resolution: Equatable, Sendable {
+        /// An app action rather than terminal input.
+        case hostAction(HostAction)
+        /// A Mac line-editing chord, which is mode-independent by design.
+        case lineEditingBytes([UInt8])
+        /// A key press for the host to encode against the live terminal state.
+        case keyPress(TerminalKeySpec)
     }
 
-    public static func isSupportedSpec(_ spec: String) -> Bool { bytes(for: spec) != nil || hostAction(for: spec) != nil }
+    public static func isSupportedSpec(_ spec: String) -> Bool { resolve(spec) != nil }
 
     public static func hostAction(for spec: String) -> HostAction? {
-        let trimmed = spec.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard case .hostAction(let action) = resolve(spec) else { return nil }
+        return action
+    }
+
+    public static func resolve(_ spec: String) -> Resolution? {
+        let trimmed = spec.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !trimmed.isEmpty else { return nil }
-        let normalized = trimmed.replacingOccurrences(of: "-", with: "+")
-        let parts = normalized.split(separator: "+").map { String($0).lowercased() }
-        guard parts.count == 2, keyModifier(for: parts[0]) == .command, parts[1] == "k" else { return nil }
-        return .clearScreenAndScrollback
-    }
 
-    public static func bytes(for spec: String) -> [UInt8]? {
-        let trimmed = spec.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-        guard hostAction(for: trimmed) == nil else { return nil }
+        // Unmodified keys are matched whole so multi-word names such as `forwarddelete` are not
+        // split apart by the modifier parsing below.
+        if let key = TerminalKey(name: trimmed) { return .keyPress(TerminalKeySpec(key: key)) }
 
-        switch trimmed.lowercased() {
-        case "enter", "return": return [0x0D]
-        case "tab": return [0x09]
-        case "backtab": return Array("\u{1B}[Z".utf8)
-        case "escape", "esc": return [0x1B]
-        case "backspace", "delete": return [0x7F]
-        case "up": return Array("\u{1B}[A".utf8)
-        case "down": return Array("\u{1B}[B".utf8)
-        case "right": return Array("\u{1B}[C".utf8)
-        case "left": return Array("\u{1B}[D".utf8)
-        case "home": return Array("\u{1B}[H".utf8)
-        case "end": return Array("\u{1B}[F".utf8)
-        case "pageup": return Array("\u{1B}[5~".utf8)
-        case "pagedown": return Array("\u{1B}[6~".utf8)
-        case "forwarddelete": return Array("\u{1B}[3~".utf8)
-        case "insert": return Array("\u{1B}[2~".utf8)
-        case "f1": return Array("\u{1B}OP".utf8)
-        case "f2": return Array("\u{1B}OQ".utf8)
-        case "f3": return Array("\u{1B}OR".utf8)
-        case "f4": return Array("\u{1B}OS".utf8)
-        case "f5": return Array("\u{1B}[15~".utf8)
-        case "f6": return Array("\u{1B}[17~".utf8)
-        case "f7": return Array("\u{1B}[18~".utf8)
-        case "f8": return Array("\u{1B}[19~".utf8)
-        case "f9": return Array("\u{1B}[20~".utf8)
-        case "f10": return Array("\u{1B}[21~".utf8)
-        case "f11": return Array("\u{1B}[23~".utf8)
-        case "f12": return Array("\u{1B}[24~".utf8)
-        default: break
+        let parts = trimmed.replacingOccurrences(of: "-", with: "+").split(separator: "+").map(String.init)
+        guard parts.count >= 2, let key = TerminalKey(name: parts[parts.count - 1]) else { return nil }
+        var modifiers: TerminalKeyModifiers = []
+        for token in parts.dropLast() {
+            guard let modifier = TerminalKeyModifiers(token: token), !modifiers.contains(modifier) else { return nil }
+            modifiers.insert(modifier)
         }
 
-        let normalized = trimmed.replacingOccurrences(of: "-", with: "+")
-        let parts = normalized.split(separator: "+").map { String($0).lowercased() }
-        guard parts.count >= 2 else { return nil }
-        let key = parts[parts.count - 1]
-        let modifiers = parts.dropLast().compactMap(keyModifier)
-        guard modifiers.count == parts.count - 1 else { return nil }
+        if modifiers == [.command], key == .character("k") { return .hostAction(.clearScreenAndScrollback) }
+        if let bytes = lineEditingBytes(key: key, modifiers: modifiers) { return .lineEditingBytes(bytes) }
+        // Command chords that are not line-editing chords belong to the app, not the terminal: there is
+        // no useful encoding for Super-modified input, so they are rejected rather than sent.
+        guard !modifiers.contains(.command) else { return nil }
+        return .keyPress(TerminalKeySpec(key: key, modifiers: modifiers))
+    }
 
-        let modifierSet = Set(modifiers)
-        guard modifierSet.count == modifiers.count else { return nil }
-        switch modifierSet {
-        case [.control]: return controlBytes(for: key)
-        case [.command]: return commandBytes(for: key)
-        case [.option]: return optionBytes(for: key)
+    private static func lineEditingBytes(key: TerminalKey, modifiers: TerminalKeyModifiers) -> [UInt8]? {
+        switch (modifiers, key) {
+        case ([.command], .left): return [0x01]  // ctrl+a: beginning of line
+        case ([.command], .right): return [0x05]  // ctrl+e: end of line
+        case ([.command], .backspace): return [0x15]  // ctrl+u: delete to beginning of line
+        case ([.option], .left): return Array("\u{1B}b".utf8)  // meta-b: back one word
+        case ([.option], .right): return Array("\u{1B}f".utf8)  // meta-f: forward one word
+        case ([.option], .backspace): return [0x17]  // ctrl+w: delete previous word
+        // The iOS accessory's Option modifier composes meta chords with ordinary letters.
+        case ([.option], .character(let character)): return [0x1B] + Array(String(character).utf8)
         default: return nil
-        }
-    }
-
-    private static func keyModifier(for token: String) -> KeyModifier? {
-        switch token {
-        case "ctrl", "control": return .control
-        case "cmd", "command": return .command
-        case "opt", "option", "alt", "meta": return .option
-        default: return nil
-        }
-    }
-
-    private static func controlBytes(for key: String) -> [UInt8]? {
-        guard let scalar = key.unicodeScalars.only, scalar.properties.isAlphabetic else { return nil }
-        let uppercase = key.uppercased().unicodeScalars.first?.value ?? scalar.value
-        let controlValue = uppercase & 0x1F
-        return [UInt8(controlValue)]
-    }
-
-    private static func commandBytes(for key: String) -> [UInt8]? {
-        switch key {
-        case "left": return controlBytes(for: "a")
-        case "right": return controlBytes(for: "e")
-        case "backspace", "delete": return controlBytes(for: "u")
-        default: return nil
-        }
-    }
-
-    private static func optionBytes(for key: String) -> [UInt8]? {
-        switch key {
-        case "left": return Array("\u{1B}b".utf8)
-        case "right": return Array("\u{1B}f".utf8)
-        case "backspace", "delete": return controlBytes(for: "w")
-        default:
-            guard key.unicodeScalars.count == 1 else { return nil }
-            return [0x1B] + Array(key.utf8)
         }
     }
 }
-
-extension Collection { fileprivate var only: Element? { count == 1 ? first : nil } }

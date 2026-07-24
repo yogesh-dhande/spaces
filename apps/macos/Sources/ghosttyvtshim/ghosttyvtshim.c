@@ -22,6 +22,17 @@ typedef GhosttyResult (*GhosttyTerminalGetFn)(GhosttyTerminal, GhosttyTerminalDa
 typedef GhosttyResult (*GhosttyTerminalModeGetFn)(GhosttyTerminal, GhosttyMode, bool *);
 typedef GhosttyResult (*GhosttyTerminalSetFn)(GhosttyTerminal, GhosttyTerminalOption, const void *);
 typedef GhosttyResult (*GhosttyPasteEncodeFn)(char *, size_t, bool, char *, size_t, size_t *);
+typedef GhosttyResult (*GhosttyKeyEncoderNewFn)(const GhosttyAllocator *, GhosttyKeyEncoder *);
+typedef void (*GhosttyKeyEncoderFreeFn)(GhosttyKeyEncoder);
+typedef void (*GhosttyKeyEncoderSetoptFromTerminalFn)(GhosttyKeyEncoder, GhosttyTerminal);
+typedef GhosttyResult (*GhosttyKeyEncoderEncodeFn)(GhosttyKeyEncoder, GhosttyKeyEvent, char *, size_t, size_t *);
+typedef GhosttyResult (*GhosttyKeyEventNewFn)(const GhosttyAllocator *, GhosttyKeyEvent *);
+typedef void (*GhosttyKeyEventFreeFn)(GhosttyKeyEvent);
+typedef void (*GhosttyKeyEventSetActionFn)(GhosttyKeyEvent, GhosttyKeyAction);
+typedef void (*GhosttyKeyEventSetKeyFn)(GhosttyKeyEvent, GhosttyKey);
+typedef void (*GhosttyKeyEventSetModsFn)(GhosttyKeyEvent, GhosttyMods);
+typedef void (*GhosttyKeyEventSetUtf8Fn)(GhosttyKeyEvent, const char *, size_t);
+typedef void (*GhosttyKeyEventSetUnshiftedCodepointFn)(GhosttyKeyEvent, uint32_t);
 typedef GhosttyResult (*GhosttyFormatterTerminalNewFn)(
     const GhosttyAllocator *,
     GhosttyFormatter *,
@@ -58,6 +69,17 @@ typedef struct {
     GhosttyTerminalModeGetFn terminal_mode_get;
     GhosttyTerminalSetFn terminal_set;
     GhosttyPasteEncodeFn paste_encode;
+    GhosttyKeyEncoderNewFn key_encoder_new;
+    GhosttyKeyEncoderFreeFn key_encoder_free;
+    GhosttyKeyEncoderSetoptFromTerminalFn key_encoder_setopt_from_terminal;
+    GhosttyKeyEncoderEncodeFn key_encoder_encode;
+    GhosttyKeyEventNewFn key_event_new;
+    GhosttyKeyEventFreeFn key_event_free;
+    GhosttyKeyEventSetActionFn key_event_set_action;
+    GhosttyKeyEventSetKeyFn key_event_set_key;
+    GhosttyKeyEventSetModsFn key_event_set_mods;
+    GhosttyKeyEventSetUtf8Fn key_event_set_utf8;
+    GhosttyKeyEventSetUnshiftedCodepointFn key_event_set_unshifted_codepoint;
     GhosttyFormatterTerminalNewFn formatter_terminal_new;
     GhosttyFormatterFormatAllocFn formatter_format_alloc;
     GhosttyFormatterFreeFn formatter_free;
@@ -289,6 +311,19 @@ static bool spaces_ghostty_vt_load_symbols(SpacesGhosttyVtSymbols *symbols) {
     // of the required-symbol check below so an older library still loads (theming is skipped).
     symbols->terminal_set = (GhosttyTerminalSetFn)dlsym(handle, "ghostty_terminal_set");
     symbols->paste_encode = (GhosttyPasteEncodeFn)dlsym(handle, "ghostty_paste_encode");
+    symbols->key_encoder_new = (GhosttyKeyEncoderNewFn)dlsym(handle, "ghostty_key_encoder_new");
+    symbols->key_encoder_free = (GhosttyKeyEncoderFreeFn)dlsym(handle, "ghostty_key_encoder_free");
+    symbols->key_encoder_setopt_from_terminal =
+        (GhosttyKeyEncoderSetoptFromTerminalFn)dlsym(handle, "ghostty_key_encoder_setopt_from_terminal");
+    symbols->key_encoder_encode = (GhosttyKeyEncoderEncodeFn)dlsym(handle, "ghostty_key_encoder_encode");
+    symbols->key_event_new = (GhosttyKeyEventNewFn)dlsym(handle, "ghostty_key_event_new");
+    symbols->key_event_free = (GhosttyKeyEventFreeFn)dlsym(handle, "ghostty_key_event_free");
+    symbols->key_event_set_action = (GhosttyKeyEventSetActionFn)dlsym(handle, "ghostty_key_event_set_action");
+    symbols->key_event_set_key = (GhosttyKeyEventSetKeyFn)dlsym(handle, "ghostty_key_event_set_key");
+    symbols->key_event_set_mods = (GhosttyKeyEventSetModsFn)dlsym(handle, "ghostty_key_event_set_mods");
+    symbols->key_event_set_utf8 = (GhosttyKeyEventSetUtf8Fn)dlsym(handle, "ghostty_key_event_set_utf8");
+    symbols->key_event_set_unshifted_codepoint =
+        (GhosttyKeyEventSetUnshiftedCodepointFn)dlsym(handle, "ghostty_key_event_set_unshifted_codepoint");
     symbols->formatter_terminal_new = (GhosttyFormatterTerminalNewFn)dlsym(handle, "ghostty_formatter_terminal_new");
     symbols->formatter_format_alloc = (GhosttyFormatterFormatAllocFn)dlsym(handle, "ghostty_formatter_format_alloc");
     symbols->formatter_free = (GhosttyFormatterFreeFn)dlsym(handle, "ghostty_formatter_free");
@@ -318,6 +353,17 @@ static bool spaces_ghostty_vt_load_symbols(SpacesGhosttyVtSymbols *symbols) {
         symbols->terminal_get == NULL ||
         symbols->terminal_mode_get == NULL ||
         symbols->paste_encode == NULL ||
+        symbols->key_encoder_new == NULL ||
+        symbols->key_encoder_free == NULL ||
+        symbols->key_encoder_setopt_from_terminal == NULL ||
+        symbols->key_encoder_encode == NULL ||
+        symbols->key_event_new == NULL ||
+        symbols->key_event_free == NULL ||
+        symbols->key_event_set_action == NULL ||
+        symbols->key_event_set_key == NULL ||
+        symbols->key_event_set_mods == NULL ||
+        symbols->key_event_set_utf8 == NULL ||
+        symbols->key_event_set_unshifted_codepoint == NULL ||
         symbols->formatter_terminal_new == NULL ||
         symbols->formatter_format_alloc == NULL ||
         symbols->formatter_free == NULL ||
@@ -611,6 +657,107 @@ bool spaces_ghostty_vt_session_encode_paste(
     size_t written = 0;
     result = session->symbols.paste_encode(mutable_input, input_len, bracketed, encoded, required, &written);
     free(mutable_input);
+    if (result != GHOSTTY_SUCCESS) {
+        free(encoded);
+        return false;
+    }
+
+    *out_ptr = encoded;
+    *out_len = written;
+    return true;
+}
+
+static GhosttyKey spaces_ghostty_vt_ghostty_key(uint32_t key) {
+    switch ((SpacesGhosttyVtKey)key) {
+        case SPACES_GHOSTTY_VT_KEY_ENTER: return GHOSTTY_KEY_ENTER;
+        case SPACES_GHOSTTY_VT_KEY_TAB: return GHOSTTY_KEY_TAB;
+        case SPACES_GHOSTTY_VT_KEY_BACKSPACE: return GHOSTTY_KEY_BACKSPACE;
+        case SPACES_GHOSTTY_VT_KEY_ESCAPE: return GHOSTTY_KEY_ESCAPE;
+        case SPACES_GHOSTTY_VT_KEY_ARROW_UP: return GHOSTTY_KEY_ARROW_UP;
+        case SPACES_GHOSTTY_VT_KEY_ARROW_DOWN: return GHOSTTY_KEY_ARROW_DOWN;
+        case SPACES_GHOSTTY_VT_KEY_ARROW_LEFT: return GHOSTTY_KEY_ARROW_LEFT;
+        case SPACES_GHOSTTY_VT_KEY_ARROW_RIGHT: return GHOSTTY_KEY_ARROW_RIGHT;
+        case SPACES_GHOSTTY_VT_KEY_HOME: return GHOSTTY_KEY_HOME;
+        case SPACES_GHOSTTY_VT_KEY_END: return GHOSTTY_KEY_END;
+        case SPACES_GHOSTTY_VT_KEY_PAGE_UP: return GHOSTTY_KEY_PAGE_UP;
+        case SPACES_GHOSTTY_VT_KEY_PAGE_DOWN: return GHOSTTY_KEY_PAGE_DOWN;
+        case SPACES_GHOSTTY_VT_KEY_DELETE: return GHOSTTY_KEY_DELETE;
+        case SPACES_GHOSTTY_VT_KEY_INSERT: return GHOSTTY_KEY_INSERT;
+        case SPACES_GHOSTTY_VT_KEY_F1: return GHOSTTY_KEY_F1;
+        case SPACES_GHOSTTY_VT_KEY_F2: return GHOSTTY_KEY_F2;
+        case SPACES_GHOSTTY_VT_KEY_F3: return GHOSTTY_KEY_F3;
+        case SPACES_GHOSTTY_VT_KEY_F4: return GHOSTTY_KEY_F4;
+        case SPACES_GHOSTTY_VT_KEY_F5: return GHOSTTY_KEY_F5;
+        case SPACES_GHOSTTY_VT_KEY_F6: return GHOSTTY_KEY_F6;
+        case SPACES_GHOSTTY_VT_KEY_F7: return GHOSTTY_KEY_F7;
+        case SPACES_GHOSTTY_VT_KEY_F8: return GHOSTTY_KEY_F8;
+        case SPACES_GHOSTTY_VT_KEY_F9: return GHOSTTY_KEY_F9;
+        case SPACES_GHOSTTY_VT_KEY_F10: return GHOSTTY_KEY_F10;
+        case SPACES_GHOSTTY_VT_KEY_F11: return GHOSTTY_KEY_F11;
+        case SPACES_GHOSTTY_VT_KEY_F12: return GHOSTTY_KEY_F12;
+        case SPACES_GHOSTTY_VT_KEY_UNIDENTIFIED: return GHOSTTY_KEY_UNIDENTIFIED;
+    }
+    return GHOSTTY_KEY_UNIDENTIFIED;
+}
+
+bool spaces_ghostty_vt_session_encode_key(
+    SpacesGhosttyVtSession *session,
+    uint32_t key,
+    uint16_t mods,
+    const char *utf8,
+    size_t utf8_len,
+    uint32_t unshifted_codepoint,
+    char **out_ptr,
+    size_t *out_len
+) {
+    if (out_ptr == NULL || out_len == NULL) return false;
+    *out_ptr = NULL;
+    *out_len = 0;
+    if (session == NULL || session->terminal == NULL) return false;
+
+    GhosttyKeyEncoder encoder = NULL;
+    if (session->symbols.key_encoder_new(NULL, &encoder) != GHOSTTY_SUCCESS) return false;
+    // Reading the options off the terminal is the whole point: it is what makes the encoding follow
+    // the running program's Kitty keyboard flags, cursor-key mode, and modifyOtherKeys state.
+    session->symbols.key_encoder_setopt_from_terminal(encoder, session->terminal);
+
+    GhosttyKeyEvent event = NULL;
+    if (session->symbols.key_event_new(NULL, &event) != GHOSTTY_SUCCESS) {
+        session->symbols.key_encoder_free(encoder);
+        return false;
+    }
+    session->symbols.key_event_set_action(event, GHOSTTY_KEY_ACTION_PRESS);
+    session->symbols.key_event_set_key(event, spaces_ghostty_vt_ghostty_key(key));
+    session->symbols.key_event_set_mods(event, (GhosttyMods)mods);
+    session->symbols.key_event_set_unshifted_codepoint(event, unshifted_codepoint);
+    if (utf8 != NULL && utf8_len > 0) session->symbols.key_event_set_utf8(event, utf8, utf8_len);
+
+    size_t required = 0;
+    GhosttyResult result = session->symbols.key_encoder_encode(encoder, event, NULL, 0, &required);
+    if (result != GHOSTTY_OUT_OF_SPACE && result != GHOSTTY_SUCCESS) {
+        session->symbols.key_event_free(event);
+        session->symbols.key_encoder_free(encoder);
+        return false;
+    }
+    // Modifier-only presses and keys the terminal ignores encode to nothing; that is success with an
+    // empty payload, not an error.
+    if (required == 0) {
+        session->symbols.key_event_free(event);
+        session->symbols.key_encoder_free(encoder);
+        return true;
+    }
+
+    char *encoded = (char *)malloc(required);
+    if (encoded == NULL) {
+        session->symbols.key_event_free(event);
+        session->symbols.key_encoder_free(encoder);
+        return false;
+    }
+
+    size_t written = 0;
+    result = session->symbols.key_encoder_encode(encoder, event, encoded, required, &written);
+    session->symbols.key_event_free(event);
+    session->symbols.key_encoder_free(encoder);
     if (result != GHOSTTY_SUCCESS) {
         free(encoded);
         return false;

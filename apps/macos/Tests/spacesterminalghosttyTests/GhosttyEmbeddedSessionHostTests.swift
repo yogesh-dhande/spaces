@@ -114,8 +114,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
     /// (engine-isolated) condition.
     private func waitUntil(
         timeout: TimeInterval = 30, pollInterval: TimeInterval = 0.05, file: StaticString = #filePath, line: UInt = #line,
-        diagnostics: (() -> String)? = nil,
-        _ condition: @escaping @TerminalEngineActor () -> Bool
+        diagnostics: (() -> String)? = nil, _ condition: @escaping @TerminalEngineActor () -> Bool
     ) async throws {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
@@ -161,15 +160,13 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         // A snapshot is a fixed-size terminal grid, so it is mostly blank padding below whatever the
         // probe printed. Drop the blank lines before truncating: taking a raw suffix would log 800
         // spaces from the bottom of the grid and hide the error text sitting at the top.
-        let meaningfulSnapshot =
-            snapshot
-            .map { $0.split(separator: "\n", omittingEmptySubsequences: false).map { $0.trimmingCharacters(in: .whitespaces) } }
-            .map { $0.filter { !$0.isEmpty }.joined(separator: "\\n") }
+        let meaningfulSnapshot = snapshot.map {
+            $0.split(separator: "\n", omittingEmptySubsequences: false).map { $0.trimmingCharacters(in: .whitespaces) }
+        }.map { $0.filter { !$0.isEmpty }.joined(separator: "\\n") }
         let truncatedSnapshot = String((meaningfulSnapshot ?? "<nil>").suffix(800)).debugDescription
         let alive = childPID.map { Self.processIsAlive($0) }
         let scriptExists = FileManager.default.fileExists(atPath: scriptURL.path)
-        return
-            "snapshot=\(truncatedSnapshot) childPID=\(childPID.map(String.init) ?? "nil") "
+        return "snapshot=\(truncatedSnapshot) childPID=\(childPID.map(String.init) ?? "nil") "
             + "foregroundPID=\(foregroundPID.map(String.init) ?? "nil") alive=\(alive.map(String.init) ?? "nil") scriptExists=\(scriptExists)"
     }
 
@@ -746,7 +743,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
                     charactersIgnoringModifiers: "\u{F700}", isARepeat: false, keyCode: UInt16(kVK_UpArrow)))
 
             XCTAssertNil(GhosttyTerminalInputTranslator.ghosttyText(for: event))
-            XCTAssertEqual(GhosttyTerminalInputTranslator.rawKeyFallbackSpecifier(for: event), "up")
+            XCTAssertEqual(GhosttyTerminalInputTranslator.keySpecifier(for: event), "up")
 
         }
     }
@@ -773,7 +770,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
                 NSEvent.keyEvent(
                     with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil, characters: "\u{F72D}",
                     charactersIgnoringModifiers: "\u{F72D}", isARepeat: false, keyCode: UInt16(kVK_PageDown)))
-            let backtabEvent = try! XCTUnwrap(
+            let shiftTabEvent = try! XCTUnwrap(
                 NSEvent.keyEvent(
                     with: .keyDown, location: .zero, modifierFlags: [.shift], timestamp: 0, windowNumber: 0, context: nil, characters: "\u{19}",
                     charactersIgnoringModifiers: "\t", isARepeat: false, keyCode: UInt16(kVK_Tab)))
@@ -782,13 +779,42 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
                     with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil, characters: "\u{F708}",
                     charactersIgnoringModifiers: "\u{F708}", isARepeat: false, keyCode: UInt16(kVK_F5)))
 
-            XCTAssertEqual(GhosttyTerminalInputTranslator.rawKeyFallbackSpecifier(for: rightEvent), "right")
-            XCTAssertEqual(GhosttyTerminalInputTranslator.rawKeyFallbackSpecifier(for: functionRightEvent), "right")
-            XCTAssertEqual(GhosttyTerminalInputTranslator.rawKeyFallbackSpecifier(for: numericFunctionRightEvent), "right")
-            XCTAssertEqual(GhosttyTerminalInputTranslator.rawKeyFallbackSpecifier(for: homeEvent), "home")
-            XCTAssertEqual(GhosttyTerminalInputTranslator.rawKeyFallbackSpecifier(for: pageDownEvent), "pagedown")
-            XCTAssertEqual(GhosttyTerminalInputTranslator.rawKeyFallbackSpecifier(for: backtabEvent), "backtab")
-            XCTAssertEqual(GhosttyTerminalInputTranslator.rawKeyFallbackSpecifier(for: f5Event), "f5")
+            XCTAssertEqual(GhosttyTerminalInputTranslator.keySpecifier(for: rightEvent), "right")
+            XCTAssertEqual(GhosttyTerminalInputTranslator.keySpecifier(for: functionRightEvent), "right")
+            XCTAssertEqual(GhosttyTerminalInputTranslator.keySpecifier(for: numericFunctionRightEvent), "right")
+            XCTAssertEqual(GhosttyTerminalInputTranslator.keySpecifier(for: homeEvent), "home")
+            XCTAssertEqual(GhosttyTerminalInputTranslator.keySpecifier(for: pageDownEvent), "pagedown")
+            XCTAssertEqual(GhosttyTerminalInputTranslator.keySpecifier(for: shiftTabEvent), "shift+tab")
+            XCTAssertEqual(GhosttyTerminalInputTranslator.keySpecifier(for: f5Event), "f5")
+
+        }
+    }
+
+    /// The bug this whole path exists for: a modified key has to reach the host as a *modified* key.
+    /// Naming it "enter" made Shift+Enter indistinguishable from Enter, and modified arrows produced no
+    /// spec at all, so they were silently dropped.
+    func testTerminalInputTranslatorKeepsModifiersOnNamedKeys() async {
+        try await TerminalEngineActor.run {
+            func keyEvent(_ keyCode: Int, _ flags: NSEvent.ModifierFlags, characters: String, unmodified: String? = nil) -> NSEvent {
+                try! XCTUnwrap(
+                    NSEvent.keyEvent(
+                        with: .keyDown, location: .zero, modifierFlags: flags, timestamp: 0, windowNumber: 0, context: nil, characters: characters,
+                        charactersIgnoringModifiers: unmodified ?? characters, isARepeat: false, keyCode: UInt16(keyCode)))
+            }
+
+            XCTAssertEqual(GhosttyTerminalInputTranslator.keySpecifier(for: keyEvent(kVK_Return, [], characters: "\r")), "enter")
+            XCTAssertEqual(GhosttyTerminalInputTranslator.keySpecifier(for: keyEvent(kVK_Return, [.shift], characters: "\r")), "shift+enter")
+            XCTAssertEqual(GhosttyTerminalInputTranslator.keySpecifier(for: keyEvent(kVK_Return, [.control], characters: "\r")), "ctrl+enter")
+            XCTAssertEqual(GhosttyTerminalInputTranslator.keySpecifier(for: keyEvent(kVK_LeftArrow, [.shift], characters: "\u{F702}")), "shift+left")
+            XCTAssertEqual(
+                GhosttyTerminalInputTranslator.keySpecifier(for: keyEvent(kVK_UpArrow, [.control, .shift], characters: "\u{F700}")), "ctrl+shift+up")
+            XCTAssertEqual(
+                GhosttyTerminalInputTranslator.keySpecifier(for: keyEvent(kVK_ANSI_C, [.control], characters: "\u{03}", unmodified: "c")), "ctrl+c")
+            XCTAssertEqual(
+                GhosttyTerminalInputTranslator.keySpecifier(for: keyEvent(kVK_ANSI_C, [.control, .shift], characters: "\u{03}", unmodified: "C")),
+                "ctrl+shift+c")
+            // Shifted letters are text, not named keys: they must keep falling through to the text path.
+            XCTAssertNil(GhosttyTerminalInputTranslator.keySpecifier(for: keyEvent(kVK_ANSI_C, [.shift], characters: "C", unmodified: "C")))
 
         }
     }
@@ -812,10 +838,10 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
                     with: .keyDown, location: .zero, modifierFlags: [.option], timestamp: 0, windowNumber: 0, context: nil, characters: "\u{F703}",
                     charactersIgnoringModifiers: "\u{F703}", isARepeat: false, keyCode: UInt16(kVK_RightArrow)))
 
-            XCTAssertEqual(GhosttyTerminalInputTranslator.rawKeyFallbackSpecifier(for: commandLeftEvent), "cmd+left")
-            XCTAssertEqual(GhosttyTerminalInputTranslator.rawKeyFallbackSpecifier(for: commandRightEvent), "cmd+right")
-            XCTAssertEqual(GhosttyTerminalInputTranslator.rawKeyFallbackSpecifier(for: optionLeftEvent), "opt+left")
-            XCTAssertEqual(GhosttyTerminalInputTranslator.rawKeyFallbackSpecifier(for: optionRightEvent), "opt+right")
+            XCTAssertEqual(GhosttyTerminalInputTranslator.keySpecifier(for: commandLeftEvent), "cmd+left")
+            XCTAssertEqual(GhosttyTerminalInputTranslator.keySpecifier(for: commandRightEvent), "cmd+right")
+            XCTAssertEqual(GhosttyTerminalInputTranslator.keySpecifier(for: optionLeftEvent), "opt+left")
+            XCTAssertEqual(GhosttyTerminalInputTranslator.keySpecifier(for: optionRightEvent), "opt+right")
 
         }
     }

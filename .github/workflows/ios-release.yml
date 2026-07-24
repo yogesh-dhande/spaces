@@ -24,6 +24,8 @@ on:
   push:
     tags:
       - "v*"
+      # Nightly builds are macOS-only (see nightly.yml) and must not cut a TestFlight build.
+      - "!v*.*.*.*"
   workflow_dispatch:
     inputs:
       version:
