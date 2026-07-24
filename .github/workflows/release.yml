@@ -74,7 +74,7 @@ jobs:
             bash -lc 'apt-get update && apt-get install -y curl git xz-utils python3 pkg-config libsqlite3-dev libssl-dev openssl coreutils && apps/macos/scripts/build_linux_spacesd_artifact.sh --arch ${{ matrix.arch }}'
 
       - name: Upload Linux spacesd artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: spacesd-ubuntu-24.04-${{ matrix.arch }}
           path: |
@@ -247,13 +247,13 @@ jobs:
         run: scripts/verify-release-artifacts.sh --require-notarization "$DMG_PATH"
 
       - name: Download Linux x86_64 spacesd artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: spacesd-ubuntu-24.04-x86_64
           path: dist/remote
 
       - name: Download Linux arm64 spacesd artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: spacesd-ubuntu-24.04-arm64
           path: dist/remote
