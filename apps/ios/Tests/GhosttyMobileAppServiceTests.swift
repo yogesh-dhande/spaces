@@ -1621,7 +1621,7 @@
             let scrollableButtons = buttons.filter { $0.isDescendant(of: scrollView) }
             let pinnedButtons = buttons.filter { !$0.isDescendant(of: scrollView) }
             XCTAssertEqual(
-                scrollableButtons.compactMap(\.accessibilityLabel), ["tab", "/", "~", "|", "-", "_", "esc", "Control", "Command", "Option"])
+                scrollableButtons.compactMap(\.accessibilityLabel), ["tab", "/", "~", "|", "-", "_", "esc", "Shift", "Control", "Command", "Option"])
             XCTAssertEqual(pinnedButtons.compactMap(\.accessibilityLabel), ["Compose message", "Arrow key joystick", "Hide keyboard"])
             let joystickButton = try XCTUnwrap(pinnedButtons.first { $0.accessibilityLabel == "Arrow key joystick" })
             XCTAssertEqual(joystickButton.accessibilityCustomActions?.map(\.name) ?? [], ["Up arrow", "Down arrow", "Left arrow", "Right arrow"])
@@ -1764,6 +1764,30 @@
             hostView.insertText("k")
 
             XCTAssertEqual(sentKeys, ["ctrl+c", "cmd+left", "cmd+backspace", "opt+backspace", "cmd+k"])
+            XCTAssertEqual(sentText, [])
+        }
+
+        /// Return arrives as plain text with no modifier flags, so the accessory's Shift is the only way
+        /// to reach Shift+Enter on a device with no hardware keyboard. An unmodified Return must still be
+        /// a plain Enter.
+        func testRemoteTerminalAccessoryShiftAppliesToReturn() throws {
+            let hostView = GhosttyRemoteTerminalHostView(frame: .zero)
+            var sentKeys: [String] = []
+            var sentText: [String] = []
+            hostView.onSendKey = { sentKeys.append($0) }
+            hostView.onSendText = { text, _ in sentText.append(text) }
+            hostView.setAcceptsTerminalInput(true)
+
+            let accessoryView = try XCTUnwrap(hostView.inputAccessoryView)
+            let buttons = descendants(of: accessoryView, matching: UIButton.self)
+            let shiftButton = try XCTUnwrap(buttons.first { $0.accessibilityLabel == "Shift" })
+
+            shiftButton.sendActions(for: .touchUpInside)
+            hostView.insertText("\n")
+            // The modifier is consumed by that one press, so the next Return is unmodified again.
+            hostView.insertText("\n")
+
+            XCTAssertEqual(sentKeys, ["shift+enter", "enter"])
             XCTAssertEqual(sentText, [])
         }
 
