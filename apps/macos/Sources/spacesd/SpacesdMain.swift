@@ -42,6 +42,12 @@ final class DaemonLivenessState: @unchecked Sendable {
     /// HUP-immune child plus a `.running` row that lingers until the next daemon start's stale-session
     /// repair). Monotonic: the process exits, so it is never cleared.
     private var shutdownInProgress = false
+    /// The host string the Device API is configured to bind on (typically the wildcard address),
+    /// cached once at startup (see `startSharedServices()`). This setting doesn't change during a
+    /// daemon's lifetime, unlike the *live addresses* it resolves to (e.g. Tailscale connecting or
+    /// disconnecting), which is why only the setting is cached — `currentDeviceAPIAddresses()` still
+    /// recomputes the live interface walk fresh on every call.
+    private var deviceAPIBoundHost: String?
 
     func storeSessionCount(_ value: Int) {
         lock.lock()
@@ -67,10 +73,35 @@ final class DaemonLivenessState: @unchecked Sendable {
         shutdownInProgress = value
     }
 
+    func storeDeviceAPIBoundHost(_ value: String?) {
+        lock.lock()
+        defer { lock.unlock() }
+        deviceAPIBoundHost = value
+    }
+
     func snapshot() -> (sessionCount: Int, certificateFingerprint: String?, handoffInProgress: Bool, shutdownInProgress: Bool) {
         lock.lock()
         defer { lock.unlock() }
         return (sessionCount, certificateFingerprint, handoffInProgress, shutdownInProgress)
+    }
+
+    /// The addresses this daemon is currently reachable at, in the same order a pairing link would
+    /// advertise them (LAN first, then Tailscale) — see `TerminalServiceDaemonStatus.deviceAPIAddresses`.
+    /// Computed fresh on every call: the interface walk is a cheap syscall with no disk or network I/O,
+    /// so recomputing it here (rather than caching it alongside `deviceAPIBoundHost`) is what lets this
+    /// off-actor fast path reflect a network change (e.g. Tailscale connecting) without ever touching
+    /// the main actor. Returns `[]` — "reported nothing" — before the bound host is learned (a ping that
+    /// races daemon startup) or when spacesdeviceapi is unavailable on this platform.
+    func currentDeviceAPIAddresses() -> [String] {
+        lock.lock()
+        let boundHost = deviceAPIBoundHost
+        lock.unlock()
+        #if canImport(spacesdeviceapi)
+            guard let boundHost else { return [] }
+            return SpacesDeviceAPINetworkInterfaces.pairingLinkHosts(boundHost: boundHost)
+        #else
+            return []
+        #endif
     }
 
     /// Admission decision shared by every session-CREATING gate: the off-actor early-out in
@@ -106,7 +137,7 @@ final class DaemonLivenessState: @unchecked Sendable {
         }
         let status = TerminalServiceDaemonStatus(
             version: AppVersion.current, installedVersion: InstalledSpacesVersion.current(), certificateFingerprint: snapshot.certificateFingerprint,
-            activeSessionCount: snapshot.sessionCount)
+            activeSessionCount: snapshot.sessionCount, deviceAPIAddresses: currentDeviceAPIAddresses())
         return TerminalServiceResponse(ok: true, message: "pong", servicePID: getpid(), daemonStatus: status)
     }
 }
@@ -306,6 +337,14 @@ enum SpacesDaemonProfileCommandRouting {
         // Seed the off-actor liveness snapshot before the socket accepts connections so the very first
         // `.ping` already carries this daemon's identity. Runs on both fresh start and handoff resume.
         livenessState.storeFingerprint(daemonIdentityFingerprint)
+        // Seed the Device API's configured bind host so `livenessState.currentDeviceAPIAddresses()` can
+        // report real addresses from its very first call. Read directly from the settings store (not
+        // through `deviceAPISupervisor`, which is main-actor-isolated) because this value must be usable
+        // from the liveness ping's off-actor fast path; it does not require the Device API server to be
+        // running yet, only its configured host.
+        #if canImport(spacesdeviceapi)
+            livenessState.storeDeviceAPIBoundHost((try? SpacesDeviceAPISettingsStore().loadOrCreate())?.host)
+        #endif
         // The session count is already mirrored into `livenessState` by `sessionCores.didSet` on every
         // mutation (including the handoff-resume inserts that ran before this), so there is nothing to seed
         // here — and reading `sessionCores` from this main-actor context would be an illegal sync wait on
@@ -634,7 +673,10 @@ enum SpacesDaemonProfileCommandRouting {
             version: AppVersion.current, installedVersion: InstalledSpacesVersion.current(), certificateFingerprint: daemonIdentityFingerprint,
             // Reads the off-actor liveness mirror rather than the now engine-isolated `sessionCores`
             // directly, so this main-actor status read never needs to hop onto the engine actor.
-            activeSessionCount: livenessState.snapshot().sessionCount)
+            activeSessionCount: livenessState.snapshot().sessionCount,
+            // Same off-actor helper the liveness ping uses, so both status paths agree on this daemon's
+            // addresses without duplicating the bound-host cache.
+            deviceAPIAddresses: livenessState.currentDeviceAPIAddresses())
     }
 
     // Exec-in-place update trigger: after a short grace so the already-sent RPC response can flush,

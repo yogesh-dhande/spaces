@@ -141,4 +141,30 @@ if [[ "${#MISSING_DECLARATIONS[@]}" -gt 0 || "${#MISSING_SYMBOLS[@]}" -gt 0 ]]; 
     exit 1
 fi
 
-echo "Verified GhosttyKit embedded terminal API contract in $XCFRAMEWORK_ROOT"
+# The shared cache key (<sha>/<xcode-build>-<arch>-<optimize>) carries no
+# build flags, so a Sentry-enabled artifact is otherwise indistinguishable
+# from a correct one. Assert here, not just at build time, because
+# verify_ghosttykit_contract runs on the local-reuse, shared-cache-restore,
+# post-build, and post-download paths alike.
+SENTRY_ARCHIVES=()
+while IFS= read -r archive; do
+    # Assign before testing so an nm failure aborts under `set -e` instead of
+    # reading as an empty symbol table, which would pass the check vacuously.
+    ARCHIVE_SYMBOLS="$(nm -gUj "$archive")"
+    # nm labels every archive member with a "<archive path>(<member>):" header line, so
+    # match symbol names only: a checkout path containing "sentry" would otherwise fail
+    # this check against an artifact that has no sentry symbols at all. Symbol names
+    # never contain a colon, header lines always end with one.
+    if text_matches_regex '^[^:]*sentry[^:]*$' "$ARCHIVE_SYMBOLS"; then
+        SENTRY_ARCHIVES+=("${archive#"$XCFRAMEWORK_ROOT"/}")
+    fi
+done < <(find "$XCFRAMEWORK_ROOT" -type f -name '*.a')
+
+if [[ "${#SENTRY_ARCHIVES[@]}" -gt 0 ]]; then
+    echo "GhosttyKit.xcframework links Ghostty's Sentry crash reporter, which races ghostty_init's locale setup and segfaults spacesd and the iOS app." >&2
+    echo "  offending slices: ${SENTRY_ARCHIVES[*]}" >&2
+    echo "These artifacts predate or were built without -Dsentry=false; rebuild with apps/macos/scripts/setup_ghostty.sh --build." >&2
+    exit 1
+fi
+
+echo "Verified GhosttyKit embedded terminal API contract and Sentry absence in $XCFRAMEWORK_ROOT"

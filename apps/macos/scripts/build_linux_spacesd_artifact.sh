@@ -817,7 +817,13 @@ import ssl
 import sys
 
 pairing = json.load(open(sys.argv[1]))
-host = pairing["host"]
+# A pairing window advertises an ordered candidate address list. This smoke run binds the
+# Device API to a concrete host, which must collapse to exactly that one candidate — a
+# wildcard bind is what produces LAN-then-tailnet fallbacks, and there is none here.
+hosts = pairing["hosts"]
+if hosts != ["127.0.0.1"]:
+    raise SystemExit(f"expected the bound host as the only pairing candidate, got {hosts!r}")
+host = hosts[0]
 port = int(pairing["port"])
 fingerprint = pairing["certificateFingerprint"]
 if not fingerprint.startswith("SHA256:"):

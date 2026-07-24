@@ -155,7 +155,10 @@ fi
 echo "Changed paths vs origin/main (including uncommitted work):"
 sed 's/^/  /' "$changed_paths_file"
 
-select_script="$work_dir/select.py"
+# Helper file names must not collide with any stdlib module name: Python puts a
+# script's own directory first on sys.path, so a `select.py` here would shadow
+# the stdlib `select` that `subprocess` imports and break the helper on import.
+select_script="$work_dir/impacted_select.py"
 cat >"$select_script" <<'PY'
 # Maps changed paths to SwiftPM targets, computes the reverse dependency
 # closure, and prints one of three machine-readable outcomes on stdout for
@@ -341,10 +344,13 @@ PY
 selection_output="$(python3 "$select_script" "$root" "$changed_paths_file")"
 action="$(printf '%s\n' "$selection_output" | head -n 1)"
 
+# The repo-root wrapper, not apps/macos/scripts/swiftpm.sh: the latter runs
+# `xcrun swift` without changing directory, so it only works when the caller's
+# cwd is already the package root. This script runs from any cwd.
 case "$action" in
     FULL)
         echo "Running the full macOS SwiftPM test suite via scripts/swiftpm.sh."
-        "$root/scripts/swiftpm.sh" test
+        "$repo_root/scripts/swiftpm.sh" test
         ;;
     NONE)
         echo "impacted_tests.sh: nothing impacted; skipping tests."
@@ -356,7 +362,7 @@ case "$action" in
         echo "Impacted test target(s):"
         printf '%s\n' "$impacted_targets" | sed 's/^/  /'
         echo "Running: scripts/swiftpm.sh test --filter '$filter'"
-        "$root/scripts/swiftpm.sh" test --filter "$filter"
+        "$repo_root/scripts/swiftpm.sh" test --filter "$filter"
         ;;
     *)
         echo "impacted_tests.sh: internal error: unrecognized selection output from the embedded selector" >&2

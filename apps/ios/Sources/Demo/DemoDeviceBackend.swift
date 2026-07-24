@@ -51,7 +51,7 @@ actor DemoDeviceBackend: SpacesDeviceAPIBackend {
     nonisolated func openSessionStream(
         request: SpacesDeviceAPIRequest, onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
         onDisconnect: @escaping @MainActor (Error?) -> Void
-    ) throws -> SpacesDeviceAPIStreamHandle {
+    ) async throws -> SpacesDeviceAPIStreamHandle {
         guard case .subscribe(let subscription) = request.command else { throw DemoRecordingLibraryError.recordingMissing(sessionID: "unknown") }
         let sessionID = subscription.sessionID
         let lifecycle = DemoStreamLifecycle(onDisconnect: onDisconnect)

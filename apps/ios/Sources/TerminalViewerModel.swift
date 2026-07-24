@@ -252,7 +252,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         TerminalClient(
             kind: .remoteViewer,
             identity: TerminalClientIdentity(
-                label: UIDevice.current.name, hostName: nil, deviceName: UIDevice.current.name, networkAddress: settings.trimmedHost),
+                label: UIDevice.current.name, hostName: nil, deviceName: UIDevice.current.name, networkAddress: settings.primaryHost),
             connectedAt: ISO8601DateFormatter().string(from: Date()))
     }
 
@@ -1247,7 +1247,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
                 lastAppearanceSentToSession = attachAppearance
                 trace("connect_attach_success")
             }
-            let handle = try bridgeClient.subscribe(sessionID: session.id, clientID: remoteClient.id) { [weak self] payload in
+            let handle = try await bridgeClient.subscribe(sessionID: session.id, clientID: remoteClient.id) { [weak self] payload in
                 guard let self else { return }
                 applyLatestState(payload)
             } onDisconnect: { [weak self] error in
@@ -1721,7 +1721,10 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             return true
         }
         switch error {
-        case SpacesDeviceAPIClientError.requestTimedOut: return true
+        // `allCandidatesUnreachable` is the same retry class as a timeout: the endpoint resolver could
+        // not reach the daemon at any of its addresses this instant, which a moment later it often can
+        // (a Wi-Fi handoff, a tailnet path still coming up). It must not surface as a hard error.
+        case SpacesDeviceAPIClientError.requestTimedOut, SpacesDeviceAPIClientError.allCandidatesUnreachable: return true
         case SpacesDeviceAPIClientError.requestFailed(let message, _):
             return message.localizedStandardContains("cancelled") || message.localizedStandardContains("timed out")
                 || message.localizedStandardContains("The operation couldn’t be completed. Operation timed out")
@@ -1742,7 +1745,9 @@ extension SpacesDeviceTerminalLinkArtifactKind {
             return true
         }
         switch error {
-        case SpacesDeviceAPIClientError.requestTimedOut: return true
+        // See `isTransientInputTransportError`: an unreachable-at-every-address failure is retryable,
+        // so a reconnect attempt during a network change stays silent instead of banner-ing an error.
+        case SpacesDeviceAPIClientError.requestTimedOut, SpacesDeviceAPIClientError.allCandidatesUnreachable: return true
         case SpacesDeviceAPIClientError.requestFailed(let message, _), SpacesDeviceAPIClientError.streamFailed(let message, _):
             return message.localizedStandardContains("cancelled") || message.localizedStandardContains("timed out")
                 || message.localizedStandardContains("The operation couldn’t be completed. Operation timed out")

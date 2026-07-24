@@ -120,6 +120,30 @@ final class SpacesDevicePairingClientTests: XCTestCase {
         XCTAssertEqual(deviceAPIHost, "100.64.12.34")
     }
 
+    /// The relayed QR link (`openRemotePairingWindow`) must lead with the SSH-resolved host — the one
+    /// address this Mac has actually proven routable — and still carry the remote daemon's own
+    /// advertised addresses (e.g. its tailnet address), since the phone scanning the code is a
+    /// different device from this Mac and may not share its SSH route.
+    func testRelayedPairingHostsLeadsWithSSHResolvedHostFollowedByAdvertisedHosts() {
+        XCTAssertEqual(
+            SpacesDevicePairingClient.relayedPairingHosts(deviceAPIHost: "studio.local", advertisedHosts: ["10.0.0.5", "100.64.12.34"]),
+            ["studio.local", "10.0.0.5", "100.64.12.34"])
+    }
+
+    /// A daemon that happens to advertise the same address the SSH resolution already produced (a
+    /// common case: SSH resolved straight to the daemon's LAN IPv4) must not be listed twice.
+    func testRelayedPairingHostsDeduplicatesAgainstTheSSHResolvedHost() {
+        XCTAssertEqual(
+            SpacesDevicePairingClient.relayedPairingHosts(deviceAPIHost: "10.0.0.5", advertisedHosts: ["10.0.0.5", "100.64.12.34"]),
+            ["10.0.0.5", "100.64.12.34"])
+    }
+
+    /// A remote daemon that has not (yet) reported any addresses of its own must still yield a usable
+    /// single-host link off the SSH-resolved address alone.
+    func testRelayedPairingHostsFallsBackToSSHResolvedHostAloneWhenNoneAdvertised() {
+        XCTAssertEqual(SpacesDevicePairingClient.relayedPairingHosts(deviceAPIHost: "studio.local", advertisedHosts: []), ["studio.local"])
+    }
+
     func testRemotePairCommandFailureMessageIsUserFacing() {
         let message = SpacesDevicePairingClient.remotePairCommandFailureMessage(
             destination: "builder.local", standardError: "sh: 1: ~/.spaces/bin/spaces: not found", standardOutput: "", exitStatus: 127)

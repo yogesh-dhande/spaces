@@ -11,7 +11,10 @@ GHOSTTY_SOURCE_ROOT="$REPO_ROOT/$SUBMODULE_PATH"
 DEFAULT_GHOSTTY_REPO="https://github.com/yogesh-dhande/ghostty.git"
 ARTIFACT_REPO="${SPACES_GHOSTTY_ARTIFACT_REPO:-${GITHUB_REPOSITORY:-yogesh-dhande/spaces}}"
 ARTIFACT_RELEASE_PREFIX="ghostty-artifacts-"
-BUILD_SCRIPT_VERSION="2"
+# Bump whenever the Ghostty build flags below change. The manifest records no
+# build flags and the artifact release is keyed on the Ghostty SHA alone, so
+# this is the only thing that invalidates artifacts built with older flags.
+BUILD_SCRIPT_VERSION="3"
 MANIFEST_SCHEMA_VERSION="1"
 VALIDATION_XCODE_BUILD_MISMATCH=42
 VALIDATION_OPTIMIZE_MISMATCH=43
@@ -627,7 +630,14 @@ build_from_source() {
         # Ghostty's vendored translate_c build helper shells out to a bare
         # `zig env`, so the pinned toolchain must be first on PATH.
         export PATH="$(dirname "$zig_bin"):$PATH"
-        "$zig_bin" build -Doptimize="$GHOSTTY_BUILD_OPTIMIZE" -Demit-xcframework=true -Demit-macos-app=false -Di18n=false -Dversion-string="$app_version"
+        # -Dsentry=false: sentry-native's init thread reads a (ptr, len) snapshot of
+        # environ while ghostty_init's locale setup calls setenv("LANG", ...) on this
+        # thread, reallocating and freeing that array — a use-after-free that segfaults
+        # spacesd and the iOS app. Spaces configures no DSN and never reads the local
+        # envelopes sentry writes, so disable it rather than race it. The lib-vt build
+        # below never reaches Ghostty's SharedDeps sentry block, so libghostty-vt has no
+        # sentry symbols regardless and needs no flag.
+        "$zig_bin" build -Doptimize="$GHOSTTY_BUILD_OPTIMIZE" -Demit-xcframework=true -Demit-macos-app=false -Di18n=false -Dsentry=false -Dversion-string="$app_version"
         "$zig_bin" build -Doptimize="$GHOSTTY_BUILD_OPTIMIZE" -Demit-lib-vt=true -Dversion-string="$app_version"
     )
 

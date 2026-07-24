@@ -7,8 +7,14 @@ import Foundation
 ///
 /// Client and daemon must speak the exact same version (lockstep — there is no backwards-compatibility
 /// window). Raise `version` whenever the wire contract changes.
+///
+/// Raise it on a branch even when the value already looks raised: two branches that each bump the same
+/// starting number land on the same literal, so git merges them without conflict and two genuinely
+/// different contracts end up both claiming that number. Peers then pass the exact-match gate and fail
+/// afterwards, which is precisely what this integer exists to prevent. Rebase or merge first, then take
+/// the next unused number.
 public enum SpacesWireProtocol {
-    public static let version = 10
+    public static let version = 11
 
     /// Compares dotted numeric version strings (e.g. "0.1.0"). Non-numeric components count as 0 and
     /// empty inputs compare equal, so a missing version never reports an update. Shared by macOS and

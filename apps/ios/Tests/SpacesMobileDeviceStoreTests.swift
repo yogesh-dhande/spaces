@@ -1,0 +1,423 @@
+#if canImport(UIKit)
+    import XCTest
+    @testable import SpacesMobile
+
+    /// Multi-address device pairing: a paired Mac can be reachable at more than one address (LAN and
+    /// Tailscale). These tests cover the legacy single-`host` decode safety net (a decode failure drops
+    /// every paired device, so tolerating the pre-multi-address JSON shape matters), that device identity
+    /// stays address-independent across a rescan, and the `activeHost` warm-start cache.
+    ///
+    /// These tests exercise the real `SpacesMobileDeviceStore` persistence, which lives in
+    /// `UserDefaults.standard` and the Keychain, so each test clears and reseeds that state — see
+    /// `SpacesMobileDemoModeTests` for the same pattern.
+    final class SpacesMobileDeviceStoreTests: XCTestCase {
+        private let devicesKey = "spaces.mobile.paired-devices"
+        private let activeDeviceKey = "spaces.mobile.active-device-id"
+        private let connectionSettingsKey = "spaces.mobile.connection-settings"
+        private let demoModeKey = "spaces.mobile.demo-mode-enabled"
+
+        override func setUp() {
+            super.setUp()
+            resetPersistedState()
+        }
+
+        override func tearDown() {
+            resetPersistedState()
+            super.tearDown()
+        }
+
+        // MARK: - Legacy decode
+
+        /// A device record written by a pre-multi-address build has a single `"host"` string and no
+        /// `"hosts"`/`"activeHost"`. Decoding it must not drop the device: it should wrap the host as a
+        /// one-element `hosts` list. Goes through the store's public `load` so this proves the real
+        /// persistence path, not just `JSONDecoder` in isolation.
+        func testLegacyDeviceRecordJSONDecodesThroughStoreLoad() throws {
+            let legacyJSON = """
+                [{"id":"device-legacy","name":"Legacy Mac","host":"192.168.1.24","port":47847,\
+                "certificateFingerprint":"SHA256:legacy","createdAt":"2024-01-01T00:00:00Z","updatedAt":"2024-01-01T00:00:00Z"}]
+                """
+            UserDefaults.standard.set(Data(legacyJSON.utf8), forKey: devicesKey)
+
+            let state = SpacesMobileDeviceStore.load(fallbackSettings: SpacesMobileConnectionSettings())
+
+            XCTAssertEqual(state.devices.count, 1)
+            let device = try XCTUnwrap(state.devices.first)
+            XCTAssertEqual(device.hosts, ["192.168.1.24"])
+            XCTAssertNil(device.activeHost)
+        }
+
+        /// `SpacesMobileConnectionSettings` tolerates the same legacy `"host"` key.
+        func testLegacyConnectionSettingsJSONDecodesSingleHost() throws {
+            let legacyJSON = #"{"host":"10.1.1.5"}"#
+            let settings = try JSONDecoder().decode(SpacesMobileConnectionSettings.self, from: Data(legacyJSON.utf8))
+            XCTAssertEqual(settings.hosts, ["10.1.1.5"])
+        }
+
+        /// Encoding a multi-host settings blob preserves order and never writes the legacy `"host"` key.
+        func testConnectionSettingsMultiHostRoundTripPreservesOrderAndOmitsLegacyKey() throws {
+            var settings = SpacesMobileConnectionSettings()
+            settings.hosts = ["10.0.0.5", "100.64.0.5"]
+
+            let data = try JSONEncoder().encode(settings)
+            let json = try XCTUnwrap(String(data: data, encoding: .utf8))
+            XCTAssertFalse(json.contains("\"host\":"), "must not encode the legacy singular key")
+            XCTAssertTrue(json.contains("\"hosts\":"))
+
+            let decoded = try JSONDecoder().decode(SpacesMobileConnectionSettings.self, from: data)
+            XCTAssertEqual(decoded.hosts, ["10.0.0.5", "100.64.0.5"])
+        }
+
+        /// Same round-trip contract for the paired-device record type.
+        func testPairedDeviceRecordMultiHostRoundTripPreservesOrderAndOmitsLegacyKey() throws {
+            let record = SpacesMobilePairedDeviceRecord(
+                id: "device-abc", name: "Mac", hosts: ["10.0.0.5", "100.64.0.5"], port: 47_900,
+                certificateFingerprint: "SHA256:mac", createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z",
+                lastSelectedAt: nil, activeHost: nil)
+
+            let data = try JSONEncoder().encode(record)
+            let json = try XCTUnwrap(String(data: data, encoding: .utf8))
+            XCTAssertFalse(json.contains("\"host\":"), "must not encode the legacy singular key")
+            XCTAssertTrue(json.contains("\"hosts\":"))
+
+            let decoded = try JSONDecoder().decode(SpacesMobilePairedDeviceRecord.self, from: data)
+            XCTAssertEqual(decoded.hosts, ["10.0.0.5", "100.64.0.5"])
+        }
+
+        // MARK: - Device identity is address-independent
+
+        /// Two `upsert`s for the same certificate fingerprint and port but different `hosts` (e.g. a QR
+        /// rescan that adds the Tailscale candidate to an already-paired Mac) must fold into one device,
+        /// not create a second row, and the surviving id must be stable.
+        func testUpsertWithDifferentHostsSameFingerprintProducesOneDevice() throws {
+            let first = SpacesMobileDeviceStore.upsert(
+                settings: makeSettings(hosts: ["10.0.0.5"], fingerprint: "SHA256:mac", token: "token-1"), name: "Mac")
+            XCTAssertEqual(first.devices.count, 1)
+            let firstID = try XCTUnwrap(first.devices.first?.id)
+
+            let second = SpacesMobileDeviceStore.upsert(
+                settings: makeSettings(hosts: ["100.64.0.5"], fingerprint: "SHA256:mac", token: "token-2"), name: "Mac")
+
+            XCTAssertEqual(SpacesMobileDeviceStore.load(fallbackSettings: SpacesMobileConnectionSettings()).devices.count, 1)
+            XCTAssertEqual(second.devices.first?.id, firstID, "the rescan must upgrade the existing row, not mint a new id")
+        }
+
+        /// Regression: before `deviceID` excluded the address, folding the id on a rescan orphaned the
+        /// Keychain auth token stored under the old id. The token must stay readable under the surviving id.
+        func testSecondUpsertKeepsAuthTokenReadableUnderSurvivingID() throws {
+            let first = SpacesMobileDeviceStore.upsert(
+                settings: makeSettings(hosts: ["10.0.0.5"], fingerprint: "SHA256:mac", token: "token-1"), name: "Mac")
+            let id = try XCTUnwrap(first.devices.first?.id)
+
+            let second = SpacesMobileDeviceStore.upsert(
+                settings: makeSettings(hosts: ["100.64.0.5"], fingerprint: "SHA256:mac", token: "token-2"), name: "Mac")
+
+            XCTAssertEqual(second.devices.first?.id, id)
+            XCTAssertEqual(SpacesMobileDeviceStore.authToken(deviceID: id), "token-2")
+        }
+
+        /// The second `upsert`'s `hosts` replace the first's outright (the rescan upgrades the row in
+        /// place), `createdAt` is preserved from the original record, and `updatedAt` moves forward.
+        func testSecondUpsertReplacesHostsAndPreservesCreatedAt() throws {
+            let first = SpacesMobileDeviceStore.upsert(
+                settings: makeSettings(hosts: ["10.0.0.5"], fingerprint: "SHA256:mac", token: "token-1"), name: "Mac")
+            let firstRecord = try XCTUnwrap(first.devices.first)
+
+            // ISO8601DateFormatter's default format has one-second resolution; sleep past a full second so
+            // `updatedAt` is provably a later timestamp instead of merely "not asserted".
+            Thread.sleep(forTimeInterval: 1.1)
+
+            let second = SpacesMobileDeviceStore.upsert(
+                settings: makeSettings(hosts: ["100.64.0.5"], fingerprint: "SHA256:mac", token: "token-2"), name: "Mac")
+            let secondRecord = try XCTUnwrap(second.devices.first)
+
+            XCTAssertEqual(secondRecord.hosts, ["100.64.0.5"])
+            XCTAssertEqual(secondRecord.createdAt, firstRecord.createdAt)
+            XCTAssertGreaterThan(secondRecord.updatedAt, firstRecord.updatedAt)
+        }
+
+        /// Two different certificate fingerprints must never fold together, even if hosts overlap.
+        func testUpsertWithDifferentFingerprintsProducesTwoDevices() throws {
+            _ = SpacesMobileDeviceStore.upsert(
+                settings: makeSettings(hosts: ["10.0.0.5"], fingerprint: "SHA256:mac-a", token: "token-a"), name: "Mac A")
+            let state = SpacesMobileDeviceStore.upsert(
+                settings: makeSettings(hosts: ["10.0.0.5"], fingerprint: "SHA256:mac-b", token: "token-b"), name: "Mac B")
+
+            XCTAssertEqual(state.devices.count, 2)
+            XCTAssertEqual(Set(state.devices.map(\.id)).count, 2)
+        }
+
+        // MARK: - activeHost
+
+        /// `recordActiveHost` sets `activeHost` when the host is a member of the matched record's `hosts`.
+        func testRecordActiveHostSetsActiveHostWhenMatched() throws {
+            let state = SpacesMobileDeviceStore.upsert(
+                settings: makeSettings(hosts: ["10.0.0.5", "100.64.0.5"], fingerprint: "SHA256:mac", token: "token"), name: "Mac")
+            let id = try XCTUnwrap(state.devices.first?.id)
+
+            SpacesMobileDeviceStore.recordActiveHost("100.64.0.5", certificateFingerprint: "SHA256:mac")
+
+            let reloaded = SpacesMobileDeviceStore.load(fallbackSettings: SpacesMobileConnectionSettings())
+            XCTAssertEqual(reloaded.devices.first(where: { $0.id == id })?.activeHost, "100.64.0.5")
+        }
+
+        /// A host that is not one of the record's `hosts` must never be adopted as `activeHost` —
+        /// `recordActiveHost` never invents a candidate.
+        func testRecordActiveHostIgnoresHostNotInHosts() throws {
+            let state = SpacesMobileDeviceStore.upsert(
+                settings: makeSettings(hosts: ["10.0.0.5"], fingerprint: "SHA256:mac", token: "token"), name: "Mac")
+            let id = try XCTUnwrap(state.devices.first?.id)
+
+            SpacesMobileDeviceStore.recordActiveHost("192.168.99.99", certificateFingerprint: "SHA256:mac")
+
+            let reloaded = SpacesMobileDeviceStore.load(fallbackSettings: SpacesMobileConnectionSettings())
+            XCTAssertNil(reloaded.devices.first(where: { $0.id == id })?.activeHost)
+        }
+
+        /// Recording the same already-active host a second time must be a true no-op: the persisted
+        /// devices blob is byte-identical before and after, not merely logically unchanged.
+        func testRecordActiveHostIsNoOpWhenUnchanged() throws {
+            _ = SpacesMobileDeviceStore.upsert(
+                settings: makeSettings(hosts: ["10.0.0.5", "100.64.0.5"], fingerprint: "SHA256:mac", token: "token"), name: "Mac")
+            SpacesMobileDeviceStore.recordActiveHost("100.64.0.5", certificateFingerprint: "SHA256:mac")
+            let blobBefore = try XCTUnwrap(UserDefaults.standard.data(forKey: devicesKey))
+
+            SpacesMobileDeviceStore.recordActiveHost("100.64.0.5", certificateFingerprint: "SHA256:mac")
+
+            XCTAssertEqual(UserDefaults.standard.data(forKey: devicesKey), blobBefore)
+        }
+
+        /// `clearActiveHosts` nils the cached candidate on every paired device.
+        func testClearActiveHostsNilsEveryDevice() throws {
+            _ = SpacesMobileDeviceStore.upsert(
+                settings: makeSettings(hosts: ["10.0.0.5"], fingerprint: "SHA256:mac-1", token: "token-1"), name: "Mac 1")
+            _ = SpacesMobileDeviceStore.upsert(
+                settings: makeSettings(hosts: ["10.0.0.6"], fingerprint: "SHA256:mac-2", token: "token-2"), name: "Mac 2")
+            SpacesMobileDeviceStore.recordActiveHost("10.0.0.5", certificateFingerprint: "SHA256:mac-1")
+            SpacesMobileDeviceStore.recordActiveHost("10.0.0.6", certificateFingerprint: "SHA256:mac-2")
+
+            SpacesMobileDeviceStore.clearActiveHosts()
+
+            let reloaded = SpacesMobileDeviceStore.load(fallbackSettings: SpacesMobileConnectionSettings())
+            XCTAssertEqual(reloaded.devices.count, 2)
+            XCTAssertTrue(reloaded.devices.allSatisfy { $0.activeHost == nil })
+        }
+
+        /// An empty advertised list means the daemon reported nothing — never that it has no addresses —
+        /// so it must never overwrite a record's `hosts`, even when they differ from what a later call
+        /// would advertise. Reports no change, since a caller (`SpacesMobileAppModel`) uses that to decide
+        /// whether its live client needs rebuilding.
+        func testMergeAdvertisedHostsIsNoOpWhenHostsIsEmpty() throws {
+            let state = SpacesMobileDeviceStore.upsert(settings: makeSettings(hosts: ["10.0.0.5"], fingerprint: "SHA256:mac", token: "token"), name: "Mac")
+            let id = try XCTUnwrap(state.devices.first?.id)
+
+            let changed = SpacesMobileDeviceStore.mergeAdvertisedHosts([], certificateFingerprint: "SHA256:mac")
+
+            XCTAssertFalse(changed)
+            let reloaded = SpacesMobileDeviceStore.load(fallbackSettings: SpacesMobileConnectionSettings())
+            XCTAssertEqual(reloaded.devices.first(where: { $0.id == id })?.hosts, ["10.0.0.5"])
+        }
+
+        /// The core backfill behavior: a device paired before its Mac had Tailscale has only a LAN
+        /// address stored. Once the daemon reports both addresses, the record's `hosts` leads with the
+        /// daemon's list and order, with no rescan, and reports the change so a live client can be
+        /// rebuilt. (Every address here is also in the daemon's report, so there is no previously-stored
+        /// fallback to append — see `testMergeAdvertisedHostsKeepsPreviouslyKnownAddressAsTrailingFallback`
+        /// for the case that exercises the union's other half.)
+        func testMergeAdvertisedHostsAdoptsDaemonOrder() throws {
+            let state = SpacesMobileDeviceStore.upsert(settings: makeSettings(hosts: ["10.0.0.5"], fingerprint: "SHA256:mac", token: "token"), name: "Mac")
+            let id = try XCTUnwrap(state.devices.first?.id)
+
+            let changed = SpacesMobileDeviceStore.mergeAdvertisedHosts(["10.0.0.5", "100.64.0.5"], certificateFingerprint: "SHA256:mac")
+
+            XCTAssertTrue(changed)
+            let reloaded = SpacesMobileDeviceStore.load(fallbackSettings: SpacesMobileConnectionSettings())
+            XCTAssertEqual(reloaded.devices.first(where: { $0.id == id })?.hosts, ["10.0.0.5", "100.64.0.5"])
+        }
+
+        /// The regression this fix closes: a daemon report that is momentarily missing a previously
+        /// known address (e.g. the Mac's Tailscale drops briefly while this device is on the LAN, so the
+        /// overview reports only the LAN address) must not delete that address from `hosts` — it is kept
+        /// as a trailing fallback so this device can still find its way back once both are reachable
+        /// again. A pure replace would have produced `["10.0.0.5"]` here and permanently stranded a
+        /// device that later loses LAN reachability entirely.
+        func testMergeAdvertisedHostsKeepsPreviouslyKnownAddressAsTrailingFallback() throws {
+            let state = SpacesMobileDeviceStore.upsert(
+                settings: makeSettings(hosts: ["10.0.0.5", "100.64.0.5"], fingerprint: "SHA256:mac", token: "token"), name: "Mac")
+            let id = try XCTUnwrap(state.devices.first?.id)
+
+            let changed = SpacesMobileDeviceStore.mergeAdvertisedHosts(["10.0.0.5"], certificateFingerprint: "SHA256:mac")
+
+            // The union equals what was already stored (daemon-reported "10.0.0.5" leads, the untouched
+            // fallback "100.64.0.5" trails), so this also proves the no-op path fires correctly rather
+            // than re-encoding the device list on every momentary drop.
+            XCTAssertFalse(changed)
+            let reloaded = SpacesMobileDeviceStore.load(fallbackSettings: SpacesMobileConnectionSettings())
+            XCTAssertEqual(reloaded.devices.first(where: { $0.id == id })?.hosts, ["10.0.0.5", "100.64.0.5"])
+        }
+
+        /// The daemon's own order always leads the union, even when it disagrees with the order `hosts`
+        /// happened to be stored in previously (e.g. this device last connected over Tailscale first,
+        /// but the daemon is authoritative that LAN should be preferred).
+        func testMergeAdvertisedHostsDaemonOrderLeadsEvenWhenStoredOrderDiffers() throws {
+            let state = SpacesMobileDeviceStore.upsert(
+                settings: makeSettings(hosts: ["100.64.0.5", "10.0.0.5"], fingerprint: "SHA256:mac", token: "token"), name: "Mac")
+            let id = try XCTUnwrap(state.devices.first?.id)
+
+            let changed = SpacesMobileDeviceStore.mergeAdvertisedHosts(["10.0.0.5", "100.64.0.5"], certificateFingerprint: "SHA256:mac")
+
+            XCTAssertTrue(changed)
+            let reloaded = SpacesMobileDeviceStore.load(fallbackSettings: SpacesMobileConnectionSettings())
+            XCTAssertEqual(reloaded.devices.first(where: { $0.id == id })?.hosts, ["10.0.0.5", "100.64.0.5"])
+        }
+
+        /// A host that arrived some other way and was never in the daemon's own interface list — e.g. the
+        /// SSH-resolved hostname a Mac puts first in a relayed pairing link for a remote device — must
+        /// survive a backfill even though the daemon never reports it as one of its own addresses.
+        func testMergeAdvertisedHostsKeepsAddressNotInDaemonList() throws {
+            let state = SpacesMobileDeviceStore.upsert(
+                settings: makeSettings(hosts: ["studio.tailnet-1234.ts.net", "10.0.0.5"], fingerprint: "SHA256:mac", token: "token"), name: "Mac")
+            let id = try XCTUnwrap(state.devices.first?.id)
+
+            let changed = SpacesMobileDeviceStore.mergeAdvertisedHosts(["10.0.0.5", "100.64.0.5"], certificateFingerprint: "SHA256:mac")
+
+            XCTAssertTrue(changed)
+            let reloaded = SpacesMobileDeviceStore.load(fallbackSettings: SpacesMobileConnectionSettings())
+            XCTAssertEqual(reloaded.devices.first(where: { $0.id == id })?.hosts, ["10.0.0.5", "100.64.0.5", "studio.tailnet-1234.ts.net"])
+        }
+
+        /// The union is bounded so a device that roams across many networks cannot accumulate an
+        /// unbounded candidate list, and the bound trims from the tail — the retained-but-unreported end
+        /// — never from the daemon's own current addresses. Also covers the other half of the
+        /// `activeHost` contract: an `activeHost` that survives the union only by virtue of being at the
+        /// trimmed tail is dropped, same as if the daemon had explicitly stopped reporting it.
+        func testMergeAdvertisedHostsBoundsResultAndTrimsFromTail() throws {
+            let storedHosts = ["10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4", "10.0.0.5", "10.0.0.6"]
+            let state = SpacesMobileDeviceStore.upsert(
+                settings: makeSettings(hosts: storedHosts, fingerprint: "SHA256:mac", token: "token"), name: "Mac")
+            let id = try XCTUnwrap(state.devices.first?.id)
+            SpacesMobileDeviceStore.recordActiveHost("10.0.0.6", certificateFingerprint: "SHA256:mac")
+
+            let changed = SpacesMobileDeviceStore.mergeAdvertisedHosts(["100.64.0.9"], certificateFingerprint: "SHA256:mac")
+
+            XCTAssertTrue(changed)
+            let reloaded = SpacesMobileDeviceStore.load(fallbackSettings: SpacesMobileConnectionSettings())
+            let device = try XCTUnwrap(reloaded.devices.first(where: { $0.id == id }))
+            // The daemon's own address leads, then as many previously-stored fallbacks as fit within the
+            // bound (6 total) — "10.0.0.6" falls off the tail.
+            XCTAssertEqual(device.hosts, ["100.64.0.9", "10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4", "10.0.0.5"])
+            XCTAssertNil(device.activeHost, "the active host was trimmed off the tail, so it must be dropped like any other missing host")
+        }
+
+        /// `activeHost` survives a merge that keeps it in the new list.
+        func testMergeAdvertisedHostsKeepsActiveHostWhenStillPresent() throws {
+            _ = SpacesMobileDeviceStore.upsert(
+                settings: makeSettings(hosts: ["10.0.0.5", "100.64.0.5"], fingerprint: "SHA256:mac", token: "token"), name: "Mac")
+            SpacesMobileDeviceStore.recordActiveHost("100.64.0.5", certificateFingerprint: "SHA256:mac")
+
+            SpacesMobileDeviceStore.mergeAdvertisedHosts(["100.64.0.5", "10.0.0.5"], certificateFingerprint: "SHA256:mac")
+
+            let reloaded = SpacesMobileDeviceStore.load(fallbackSettings: SpacesMobileConnectionSettings())
+            XCTAssertEqual(reloaded.devices.first?.activeHost, "100.64.0.5")
+        }
+
+        /// Merging the record's own current `hosts` (the common steady-state case, and the union of the
+        /// daemon's list with itself) must be a true no-op: the persisted devices blob is byte-identical
+        /// before and after, and no change is reported. See
+        /// `testMergeAdvertisedHostsBoundsResultAndTrimsFromTail` for `activeHost` being dropped when it
+        /// does not survive the union.
+        func testMergeAdvertisedHostsIsNoOpWhenUnchanged() throws {
+            _ = SpacesMobileDeviceStore.upsert(
+                settings: makeSettings(hosts: ["10.0.0.5", "100.64.0.5"], fingerprint: "SHA256:mac", token: "token"), name: "Mac")
+            let blobBefore = try XCTUnwrap(UserDefaults.standard.data(forKey: devicesKey))
+
+            let changed = SpacesMobileDeviceStore.mergeAdvertisedHosts(["10.0.0.5", "100.64.0.5"], certificateFingerprint: "SHA256:mac")
+
+            XCTAssertFalse(changed)
+            XCTAssertEqual(UserDefaults.standard.data(forKey: devicesKey), blobBefore)
+        }
+
+        /// No paired device matches the fingerprint: a no-op, not a crash or an invented record.
+        func testMergeAdvertisedHostsIsNoOpWhenFingerprintUnmatched() throws {
+            _ = SpacesMobileDeviceStore.upsert(settings: makeSettings(hosts: ["10.0.0.5"], fingerprint: "SHA256:mac", token: "token"), name: "Mac")
+
+            let changed = SpacesMobileDeviceStore.mergeAdvertisedHosts(["10.0.0.5", "100.64.0.5"], certificateFingerprint: "SHA256:other")
+
+            XCTAssertFalse(changed)
+            let reloaded = SpacesMobileDeviceStore.load(fallbackSettings: SpacesMobileConnectionSettings())
+            XCTAssertEqual(reloaded.devices.first?.hosts, ["10.0.0.5"])
+        }
+
+        /// The single warm-start mechanism lives in `SpacesDeviceEndpointResolver` seeding its cached
+        /// winner from the persisted `activeHost`, not in `hosts` order: selecting a device must yield
+        /// settings whose `hosts` stays in the record's own order (LAN first) even once
+        /// `recordActiveHost` has learned a different address. Reordering `hosts` here as well used to
+        /// fight the resolver's seed — it captures `hosts` immutably at construction, so a
+        /// Tailscale-reordered list could never be undone by clearing `activeHost` alone. Reached only
+        /// through the public `select` API.
+        func testSelectKeepsHostsInRecordOrderRegardlessOfActiveHost() throws {
+            let state = SpacesMobileDeviceStore.upsert(
+                settings: makeSettings(hosts: ["10.0.0.5", "100.64.0.5"], fingerprint: "SHA256:mac", token: "token", installationID: "INSTALL-1"),
+                name: "Mac")
+            let id = try XCTUnwrap(state.devices.first?.id)
+            SpacesMobileDeviceStore.recordActiveHost("100.64.0.5", certificateFingerprint: "SHA256:mac")
+
+            let selected = try XCTUnwrap(SpacesMobileDeviceStore.select(deviceID: id, installationID: "INSTALL-1"))
+
+            XCTAssertEqual(selected.settings.hosts, ["10.0.0.5", "100.64.0.5"])
+        }
+
+        /// `activeHost(certificateFingerprint:)` is the read half of `recordActiveHost`'s write —
+        /// `SpacesDeviceEndpointResolver.init` calls it to seed its cached winner. Returns the persisted
+        /// value for a matched fingerprint, and `nil` both for an unmatched fingerprint and before any
+        /// address has been recorded.
+        func testActiveHostReadsBackWhatRecordActiveHostWrote() throws {
+            _ = SpacesMobileDeviceStore.upsert(
+                settings: makeSettings(hosts: ["10.0.0.5", "100.64.0.5"], fingerprint: "SHA256:mac", token: "token"), name: "Mac")
+
+            XCTAssertNil(SpacesMobileDeviceStore.activeHost(certificateFingerprint: "SHA256:mac"))
+
+            SpacesMobileDeviceStore.recordActiveHost("100.64.0.5", certificateFingerprint: "SHA256:mac")
+
+            XCTAssertEqual(SpacesMobileDeviceStore.activeHost(certificateFingerprint: "SHA256:mac"), "100.64.0.5")
+            XCTAssertNil(SpacesMobileDeviceStore.activeHost(certificateFingerprint: "SHA256:other"))
+        }
+
+        /// An `activeHost` that is no longer a member of `hosts` (e.g. a rescan replaced the address list)
+        /// must be dropped rather than carried forward onto the new record.
+        func testActiveHostNoLongerInHostsIsDroppedOnUpsert() throws {
+            let first = SpacesMobileDeviceStore.upsert(
+                settings: makeSettings(hosts: ["10.0.0.5"], fingerprint: "SHA256:mac", token: "token-1"), name: "Mac")
+            let id = try XCTUnwrap(first.devices.first?.id)
+            SpacesMobileDeviceStore.recordActiveHost("10.0.0.5", certificateFingerprint: "SHA256:mac")
+
+            let second = SpacesMobileDeviceStore.upsert(
+                settings: makeSettings(hosts: ["100.64.0.5"], fingerprint: "SHA256:mac", token: "token-2"), name: "Mac")
+
+            XCTAssertEqual(second.devices.first?.id, id)
+            XCTAssertNil(second.devices.first?.activeHost)
+        }
+
+        // MARK: - Helpers
+
+        private func makeSettings(hosts: [String], fingerprint: String, token: String, installationID: String = "INSTALL")
+            -> SpacesMobileConnectionSettings
+        {
+            var settings = SpacesMobileConnectionSettings()
+            settings.hosts = hosts
+            settings.port = 47_900
+            settings.certificateFingerprint = fingerprint
+            settings.authToken = token
+            settings.installationID = installationID
+            return settings
+        }
+
+        private func resetPersistedState() {
+            for device in SpacesMobileDeviceStore.load(fallbackSettings: SpacesMobileConnectionSettings()).devices {
+                _ = SpacesMobileDeviceStore.remove(deviceID: device.id, fallbackSettings: SpacesMobileConnectionSettings())
+            }
+            let defaults = UserDefaults.standard
+            for key in [devicesKey, activeDeviceKey, connectionSettingsKey, demoModeKey] { defaults.removeObject(forKey: key) }
+        }
+    }
+#endif

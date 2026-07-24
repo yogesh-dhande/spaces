@@ -68,7 +68,7 @@
 
         private func settings() -> SpacesMobileConnectionSettings {
             var settings = SpacesMobileConnectionSettings()
-            settings.host = "127.0.0.1"
+            settings.hosts = ["127.0.0.1"]
             settings.port = 12345
             settings.authToken = "token"
             settings.certificateFingerprint = "SHA256:test"

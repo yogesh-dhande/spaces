@@ -9,7 +9,7 @@
 
         private func settings() -> SpacesMobileConnectionSettings {
             var settings = SpacesMobileConnectionSettings()
-            settings.host = "demo"
+            settings.hosts = ["demo"]
             settings.port = 1
             settings.authToken = "demo"
             settings.certificateFingerprint = "SHA256:demo"
@@ -101,7 +101,7 @@
 
             let received = XCTestExpectation(description: "subscribe delivers the recorded frame")
             let deliveredText = TextBox()
-            let handle = try client.subscribe(
+            let handle = try await client.subscribe(
                 sessionID: sessionID, clientID: "client-ios",
                 onEvent: { payload in
                     XCTAssertEqual(payload.sessionID, sessionID)
