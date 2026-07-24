@@ -1,0 +1,137 @@
+# Cut a nightly Spaces build once a day (or on demand) from the tip of main.
+#
+# Nightly versions are 4 dotted numeric components (<latest stable version>.<YYYYMMDD>, e.g.
+# 0.5.1.20260725) rather than a "-nightly" suffix on the stable version. SpacesWireProtocol
+# .isVersion (apps/macos/Sources/spacesterminalcore/SpacesWireProtocol.swift) compares versions by
+# splitting on "." and mapping any non-numeric component to 0, so a suffixed string like
+# "0.5.1-nightly" would compare as if every component past the numeric prefix were 0 — sorting
+# BELOW the 0.5.1 release it was built from. A 4th numeric component sorts correctly instead.
+#
+# The CFBundleVersion (build number) is separate from the version string above and is
+# YYYYMMDDHHMM in UTC, not a run number: Sparkle decides "is this update newer" by comparing
+# sparkle:version (CFBundleVersion), and a manual workflow_dispatch can produce a second nightly on
+# the same UTC day sharing the same <version>. Minute-precision build numbers are what makes the
+# second same-day nightly still look newer to Sparkle.
+#
+# The actual build (signing, packaging, notarization, GitHub Release, Sparkle appcast, website
+# deploy) lives in release-build.yml, the same reusable workflow release.yml calls for the stable
+# channel, so nightly and stable run byte-for-byte the same body apart from channel: nightly.
+
+name: Nightly
+
+on:
+  schedule:
+    - cron: "0 9 * * *" # 02:00 PT
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      build-needed: ${{ steps.decide.outputs.build-needed }}
+      version: ${{ steps.decide.outputs.version }}
+      build: ${{ steps.decide.outputs.build }}
+      release-tag: ${{ steps.decide.outputs.release-tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          # Nightly versioning is derived from tag history (latest stable tag, latest nightly
+          # tag), which a shallow checkout does not have.
+          fetch-depth: 0
+
+      - name: Decide whether to build and compute version
+        id: decide
+        run: |
+          set -euo pipefail
+
+          latest_stable_tag="$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n1)"
+          if [[ -z "$latest_stable_tag" ]]; then
+            echo "::error::No stable release tag (v<major>.<minor>.<patch>) found; nightly has nothing to version off of." >&2
+            exit 1
+          fi
+          latest_stable_version="${latest_stable_tag#v}"
+
+          newest_nightly_tag="$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*.[0-9]*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n1)"
+
+          build_needed=true
+          if [[ "${{ github.event_name }}" == "schedule" && -n "$newest_nightly_tag" ]]; then
+            # A manual workflow_dispatch is an explicit request to rebuild the current commit even
+            # if a nightly for it already exists, so this skip check only applies to the schedule
+            # trigger. Comparing the nightly tag's commit to HEAD (not just "does today's tag
+            # exist") means a scheduled run on a quiet day, where main hasn't moved since the last
+            # nightly, doesn't publish a duplicate build of the same commit.
+            if [[ "$(git rev-list -n1 "$newest_nightly_tag")" == "$(git rev-parse HEAD)" ]]; then
+              build_needed=false
+              echo "Newest nightly tag $newest_nightly_tag already points at HEAD; skipping scheduled rebuild."
+            fi
+          fi
+          echo "build-needed=$build_needed" >> "$GITHUB_OUTPUT"
+
+          version="${latest_stable_version}.$(date -u +%Y%m%d)"
+          build="$(date -u +%Y%m%d%H%M)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "build=$build" >> "$GITHUB_OUTPUT"
+          echo "release-tag=v$version" >> "$GITHUB_OUTPUT"
+
+  nightly:
+    needs: plan
+    if: ${{ needs.plan.outputs.build-needed == 'true' }}
+    uses: ./.github/workflows/release-build.yml
+    secrets: inherit
+    with:
+      channel: nightly
+      version: ${{ needs.plan.outputs.version }}
+      build: ${{ needs.plan.outputs.build }}
+      release-tag: ${{ needs.plan.outputs.release-tag }}
+
+  # Nightly prereleases accumulate one per day forever without this: keep only the newest 7 so the
+  # releases page and Firebase/GitHub storage don't grow unbounded.
+  prune:
+    needs: nightly
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Delete nightly prereleases beyond the newest 7
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          nightly_tags="$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*.[0-9]*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | sort -V)"
+          stale_tags="$(printf '%s\n' "$nightly_tags" | head -n -7)"
+
+          if [[ -z "$stale_tags" ]]; then
+            echo "7 or fewer nightly tags exist; nothing to prune."
+            exit 0
+          fi
+
+          while IFS= read -r tag; do
+            [[ -z "$tag" ]] && continue
+            # Only ever delete a release that is (a) tagged with the 4-component nightly pattern
+            # and (b) actually marked prerelease. This is what keeps a stable release — which can
+            # never match the 4-component pattern per release.yml's tag trigger exclusion — from
+            # ever being reachable by this loop, even if the tag list above were ever wrong.
+            if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "Skipping $tag: does not match the 4-component nightly tag pattern." >&2
+              continue
+            fi
+            if ! gh release view "$tag" >/dev/null 2>&1; then
+              echo "Skipping $tag: no matching GitHub release (tag without a release)."
+              continue
+            fi
+            is_prerelease="$(gh release view "$tag" --json isPrerelease --jq .isPrerelease)"
+            if [[ "$is_prerelease" != "true" ]]; then
+              echo "Skipping $tag: release exists but is not marked prerelease." >&2
+              continue
+            fi
+            echo "Pruning nightly release $tag"
+            gh release delete "$tag" --cleanup-tag --yes
+          done <<< "$stale_tags"

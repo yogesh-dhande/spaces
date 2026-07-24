@@ -112,4 +112,58 @@ final class SpacesWireProtocolTests: XCTestCase {
     private func makeStatus(version: String, installedVersion: String?) -> TerminalServiceDaemonStatus {
         TerminalServiceDaemonStatus(version: version, installedVersion: installedVersion, certificateFingerprint: nil, activeSessionCount: 0)
     }
+
+    // MARK: - Nightly channel versions
+
+    // A nightly build's marketing version is the stable release it was built from plus a fourth
+    // numeric component, the build date (e.g. "0.5.1" -> "0.5.1.20260725") — never a "-nightly"
+    // suffix. `isVersion(_:olderThan:)` splits on "." and maps any non-numeric component to 0, so a
+    // suffixed string like "0.5.1-nightly" would compare as "0.5.0" — the whole "1-nightly"
+    // component is non-numeric, so the patch number is lost entirely — and sort *below* "0.5.1",
+    // making the daemon think a nightly install is older than the release it superseded and
+    // silently drop the "an update is staged on this device" hint. The tests below pin the
+    // product behavior (the staged-update decision) that depends on the all-numeric scheme.
+
+    func testNightlyIsStagedUpdateOverItsBaseRelease() {
+        // "0.5.1" -> "0.5.1.20260725" is newer: a nightly built from the running release is staged.
+        let status = makeStatus(version: "0.5.1", installedVersion: "0.5.1.20260725")
+        XCTAssertTrue(status.isUpdatePending)
+        XCTAssertEqual(status.stagedVersion, "0.5.1.20260725")
+    }
+
+    func testBaseReleaseIsNotStagedUpdateOverItsOwnNightly() {
+        // Reverse of the above: a daemon already running the nightly has nothing newer staged.
+        let status = makeStatus(version: "0.5.1.20260725", installedVersion: "0.5.1")
+        XCTAssertFalse(status.isUpdatePending)
+        XCTAssertNil(status.stagedVersion)
+    }
+
+    func testNextStableIsStagedUpdateOverAPriorNightly() {
+        // "0.5.1.20260725" -> "0.5.2" is newer: the next stable release supersedes any nightly cut
+        // from the release before it.
+        let status = makeStatus(version: "0.5.1.20260725", installedVersion: "0.5.2")
+        XCTAssertTrue(status.isUpdatePending)
+        XCTAssertEqual(status.stagedVersion, "0.5.2")
+    }
+
+    func testNightlyIsNotStagedUpdateOverTheNextStableItPredates() {
+        // Reverse of the above: a daemon already running the newer stable has nothing staged.
+        let status = makeStatus(version: "0.5.2", installedVersion: "0.5.1.20260725")
+        XCTAssertFalse(status.isUpdatePending)
+        XCTAssertNil(status.stagedVersion)
+    }
+
+    func testLaterNightlyIsStagedUpdateOverAnEarlierNightly() {
+        // Consecutive nightlies off the same base release order by their date component.
+        let status = makeStatus(version: "0.5.1.20260724", installedVersion: "0.5.1.20260725")
+        XCTAssertTrue(status.isUpdatePending)
+        XCTAssertEqual(status.stagedVersion, "0.5.1.20260725")
+    }
+
+    func testEarlierNightlyIsNotStagedUpdateOverALaterNightly() {
+        // Reverse of the above: a daemon already on the later nightly has nothing staged.
+        let status = makeStatus(version: "0.5.1.20260725", installedVersion: "0.5.1.20260724")
+        XCTAssertFalse(status.isUpdatePending)
+        XCTAssertNil(status.stagedVersion)
+    }
 }
