@@ -286,7 +286,6 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         host.localDeviceID = snapshot.localDeviceID
         host.localDeviceName = snapshot.localDeviceName
         host.localPairedDevice = snapshot.localPairedDevice
-        host.localDeviceOverview = snapshot.localDeviceOverview
         // If the local block was showing, reconcile it against the fresh verdict/status: drop it if the
         // daemon is now compatible, re-render it if the remedy changed (e.g. a staged update appeared),
         // otherwise leave it (canPreserveDetailPaneAfterSidebarReload was evaluated against the stale
@@ -765,10 +764,9 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             // Drop the offline device's cached rows and overview. The merged sidebar data already excludes
             // non-loaded sections, but the section's `overview` is still searched directly by id-based
             // lookups (e.g. `clientWorkspaceID(forTerminalSession:)`); leaving it populated lets an offline
-            // remote's workspace/session ids resolve through the stale overview while `deviceID(forWorkspaceID:)`
-            // falls back to the local daemon, misrouting terminal cleanup to the wrong device. Clearing here
-            // (as the reachable-but-incompatible branch above already does) keeps offline devices out of every
-            // overview lookup from one place.
+            // remote's workspace/session ids keep resolving through a stale overview after its rows are gone
+            // from the sidebar. Clearing here (as the reachable-but-incompatible branch above already does)
+            // keeps offline devices out of every overview lookup from one place.
             host.deviceSections[index].projects = []
             host.deviceSections[index].workspacesByProject = [:]
             host.deviceSections[index].workspaceRuntimeStatusByID = [:]

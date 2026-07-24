@@ -175,7 +175,7 @@ import spacesterminalcore
         // opened before its panel was ever shown (command palette, focus IPC) is not
         // yet in an in-memory panel, so without this the placement search misses it and
         // openSessionInNewTab would overwrite the saved tabs/splits with a one-tab layout.
-        restoreLayoutIfNeeded(scope: workspaceScope(forWorkspaceID: request.workspaceID))
+        if let scope = workspaceScope(forWorkspaceID: request.workspaceID) { restoreLayoutIfNeeded(scope: scope) }
         if let placement = placement(forSessionID: request.sessionID) {
             focus(placement: placement)
             return true
@@ -187,7 +187,7 @@ import spacesterminalcore
     /// cmd+opt+t landing path for a freshly created session), or in an explicit scope
     /// (a global panel window's "+" button).
     @discardableResult func openSessionInNewTab(_ request: AppKitController.DeviceTerminalOpenRequest, in scope: PanelScope? = nil) -> Bool {
-        let resolvedScope = scope ?? workspaceScope(forWorkspaceID: request.workspaceID)
+        guard let resolvedScope = scope ?? workspaceScope(forWorkspaceID: request.workspaceID) else { return false }
         guard let content = ensureContentController(request: request) else { return false }
         let pane = Pane(id: UUID().uuidString, content: content.descriptor)
         mutateLayout(scope: resolvedScope) { PanelLayoutEngine.appendTab(tabID: UUID().uuidString, pane: pane, to: $0) }
@@ -501,8 +501,10 @@ import spacesterminalcore
     private func ensureContentController(request: AppKitController.DeviceTerminalOpenRequest) -> (any TerminalPaneContentHosting)? {
         if let existing = contentControllers[request.sessionID] { return existing }
         if request.preparedCredentials == nil {
-            let content = TerminalPanePlaceholderContentController(
-                request: request, deviceID: request.deviceID ?? host.deviceID(forWorkspaceID: request.workspaceID))
+            // The placeholder holds the device its pane will connect to; with no known owner
+            // there is nothing to connect to, so no pane opens.
+            guard let deviceID = request.deviceID ?? host.deviceID(forWorkspaceID: request.workspaceID) else { return nil }
+            let content = TerminalPanePlaceholderContentController(request: request, deviceID: deviceID)
             installContentController(content, sessionID: request.sessionID)
             scheduleTerminalPaneContentPreparation(request: request)
             return content
@@ -636,8 +638,12 @@ import spacesterminalcore
 
     // MARK: - Rendering / persistence
 
-    private func workspaceScope(forWorkspaceID workspaceID: String) -> PanelScope {
-        .workspace(deviceID: host.deviceID(forWorkspaceID: workspaceID), workspaceID: workspaceID)
+    /// The panel scope for a workspace, or nil when no loaded device owns it. Panel state is
+    /// keyed by (deviceID, workspaceID), so guessing the device would split one workspace's
+    /// panel across two keys and mint a fresh empty panel beside its real one.
+    private func workspaceScope(forWorkspaceID workspaceID: String) -> PanelScope? {
+        guard let deviceID = host.deviceID(forWorkspaceID: workspaceID) else { return nil }
+        return .workspace(deviceID: deviceID, workspaceID: workspaceID)
     }
 
     private func mutateLayout(scope: PanelScope, rerender: Bool = true, _ mutation: (PanelLayout) -> PanelLayout) {

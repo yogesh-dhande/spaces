@@ -189,7 +189,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     var localDeviceID = SpacesPairedDeviceRecord.localDeviceID
     var localDeviceName = "This Mac"
     var localPairedDevice: SpacesPairedDeviceRecord?
-    var localDeviceOverview: SpacesDeviceOverviewPayload?
     var deviceSections: [DeviceSection] = []
     /// `"deviceID|targetVersion"` keys for silent daemon-handoff requests already fired this app run
     /// (see `maybeRequestSilentDaemonHandoff`), so a status refresh never re-requests a handoff that is
@@ -1758,8 +1757,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     func prepareTerminalPaneOpenRequest(_ request: DeviceTerminalOpenRequest) async -> Result<DeviceTerminalOpenRequest, Error> {
         if request.preparedCredentials != nil { return .success(request) }
-        let deviceID = request.deviceID ?? deviceID(forWorkspaceID: request.workspaceID)
-        guard let device = deviceForMutation(deviceID: deviceID) else { return .failure(Self.deviceNotLoadedError()) }
+        guard let deviceID = request.deviceID ?? deviceID(forWorkspaceID: request.workspaceID), let device = deviceForMutation(deviceID: deviceID)
+        else { return .failure(Self.deviceNotLoadedError()) }
         let clientApp = SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)
         let isLocalDevice = device.id == SpacesPairedDeviceRecord.localDeviceID
         // For the local device, re-resolve the daemon's current Device API port (and ensure it is
@@ -1877,8 +1876,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         do {
             let paths = try TerminalSessionPaths.forSession(id: sessionID)
             // A global-window pane can mix devices, so its request carries deviceID
-            // directly; otherwise it derives from the request's workspace.
-            let resolvedDeviceID = request.deviceID ?? deviceID(forWorkspaceID: request.workspaceID)
+            // directly; otherwise it derives from the request's workspace. The id is the pane
+            // descriptor's device key and decides local-vs-remote link handling, so a workspace
+            // no loaded section claims raises not-loaded instead of being treated as local.
+            guard let resolvedDeviceID = request.deviceID ?? deviceID(forWorkspaceID: request.workspaceID) else { throw Self.deviceNotLoadedError() }
             // Prefer the local device endpoint re-resolved during preparation (current port, daemon
             // ensured running) over the possibly-stale stored row, so the model's request client and
             // subscription stream target a live port from the start (issue #185). Remote devices carry
@@ -4313,16 +4314,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         updateAlertsRowAppearance()
     }
 
-    /// The id of the device that owns a workspace/project, falling back to the
-    /// local device. These give every action its per-row device context so it
-    /// routes to the daemon that actually hosts the workspace.
-    func deviceID(forWorkspaceID workspaceID: String) -> String {
-        findWorkspace(id: workspaceID)?.0.deviceID ?? SpacesPairedDeviceRecord.localDeviceID
-    }
+    /// The id of the device that owns a workspace/project, or nil when no loaded device
+    /// section contains that row. These give every action its per-row device context so it
+    /// routes to the daemon that actually hosts the workspace. The miss is deliberately
+    /// visible: an unresolved id means "we do not know which daemon owns this", which is
+    /// never the same thing as "the local daemon owns this" — resolving it to the local
+    /// device would run local endpoints, credentials, paths, and panel state against a
+    /// row that lives on another machine.
+    func deviceID(forWorkspaceID workspaceID: String) -> String? { findWorkspace(id: workspaceID)?.0.deviceID }
 
-    private func deviceID(forProjectID projectID: String) -> String {
-        projects.first(where: { $0.id == projectID })?.deviceID ?? SpacesPairedDeviceRecord.localDeviceID
-    }
+    private func deviceID(forProjectID projectID: String) -> String? { projects.first(where: { $0.id == projectID })?.deviceID }
 
     private func isRemoteDeviceID(_ deviceID: String) -> Bool {
         deviceSection(id: deviceID).map { !$0.isLocal } ?? (deviceID != SpacesPairedDeviceRecord.localDeviceID)
@@ -4351,10 +4352,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     /// Resolves the paired-device record for a mutation target by owning-device id.
-    /// Local ids route to the local record; remote ids route to their loaded
-    /// section, returning nil when that remote section is offline/unloaded so
-    /// callers surface a not-loaded error instead of misrouting the mutation to the
-    /// local daemon (which does not host the workspace).
+    /// Local ids route to the local record; remote ids route to their section's stored
+    /// record, which survives that device going unreachable — so an offline device still
+    /// resolves here and its mutation reaches the right daemon and fails with that
+    /// daemon's own network error rather than being silently misrouted to the local one.
+    /// Nil means no section claims the id at all (an unknown or not-yet-loaded device),
+    /// and callers surface a not-loaded error.
     private func deviceForMutation(deviceID: String) -> SpacesPairedDeviceRecord? {
         if deviceID == SpacesPairedDeviceRecord.localDeviceID { return localPairedDevice }
         return deviceRecord(forDeviceID: deviceID)
@@ -4366,7 +4369,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// change the outline selection, so these actions must resolve their target
     /// from the workspace ID they carry, not the selection.
     func deviceForWorkspaceMutation(workspaceID: String) -> SpacesPairedDeviceRecord? {
-        deviceForMutation(deviceID: deviceID(forWorkspaceID: workspaceID))
+        guard let deviceID = deviceID(forWorkspaceID: workspaceID) else { return nil }
+        return deviceForMutation(deviceID: deviceID)
     }
 
     private static func deviceNotLoadedError() -> NSError {
@@ -4422,7 +4426,6 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             deviceSections[index].workspaceRuntimeStatusByID = mapped.workspaceRuntimeStatusByID
             deviceSections[index].overview = overview
             if deviceSections[index].isLocal {
-                localDeviceOverview = overview
                 deviceSections[index].alertsGroups = Self.buildOverviewAlertsGroups(from: overview, deviceID: deviceID)
             }
         }
@@ -4539,7 +4542,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         // Live setup progress for a remote workspace must bypass the remote overview
         // freshness gate, or its logs/status/completion update only at the metadata
         // interval. A local setup needs no forced remote fetch.
-        requestSidebarReload(forceRemoteRefresh: isRemoteDeviceID(deviceID(forWorkspaceID: workspaceID)))
+        requestSidebarReload(forceRemoteRefresh: deviceID(forWorkspaceID: workspaceID).map(isRemoteDeviceID) == true)
     }
 
     /// Records which single content the detail pane is showing. The `show*` methods render the pane;
@@ -5874,7 +5877,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             self.addWorkspaceWindow?.makeFirstResponder(newBranchField)
         }
         let formTag = createButton.tag
-        guard let device = deviceRecord(forDeviceID: deviceID(forProjectID: project.id)) else {
+        guard let device = deviceRecord(forDeviceID: project.deviceID) else {
             showDeviceNotLoadedError()
             return
         }
@@ -5930,7 +5933,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     func showWorkspaceDetail(project: ProjectSummary, workspace: WorkspaceSummary) {
         // Fully blocked, scoped to the owning device: if its daemon is wire-incompatible, the only
         // detail surface is the compatibility banner. Other devices' workspaces stay usable.
-        let workspaceDeviceID = deviceID(forWorkspaceID: workspace.id)
+        // The owning device comes from the row's own project (callers always pass the pair the
+        // sidebar resolved together), so the panel scope below can never key off a stale id.
+        let workspaceDeviceID = project.deviceID
         if let verdict = deviceCompatibility(forDeviceID: workspaceDeviceID), !verdict.isCompatible {
             showCompatibilityBlock(deviceID: workspaceDeviceID, verdict: verdict)
             return
@@ -6128,7 +6133,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// panel coordinator on layout and title changes.
     func refreshWorkspaceFooterFocusedPane(workspaceID: String) {
         guard workspaceFooterWorkspaceID == workspaceID, let paneLabel = workspaceFooterPaneLabel else { return }
-        let info = panelCoordinator.focusedPaneInfo(deviceID: deviceID(forWorkspaceID: workspaceID), workspaceID: workspaceID)
+        // A workspace with no known owning device has no panel scope, so it has no focused
+        // pane to name — the label clears rather than reporting the local device's pane.
+        let info = deviceID(forWorkspaceID: workspaceID).flatMap { panelCoordinator.focusedPaneInfo(deviceID: $0, workspaceID: workspaceID) }
         paneLabel.stringValue = info?.title ?? ""
         paneLabel.isHidden = info == nil
     }
@@ -6361,9 +6368,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             setupScriptSection.onCommit = { [weak self] value in
                 guard let self else { return }
                 do {
-                    if let device = deviceRecord(forDeviceID: deviceID(forProjectID: project.id)),
-                        let current = deviceProjectSummary(projectID: project.id)?.config
-                    {
+                    if let device = deviceRecord(forDeviceID: project.deviceID), let current = deviceProjectSummary(projectID: project.id)?.config {
                         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
                         let updated = SpacesDeviceProjectConfig(
                             setupScript: trimmed.isEmpty ? nil : value, stopScript: current.stopScript, ports: current.ports,
@@ -6571,8 +6576,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// Live SSH-forward snapshots for a workspace's services: remote workspaces read the forward
     /// manager, local workspaces have no forwards (their assigned port is already local).
     func workspaceServiceForwards(workspaceID: String) -> [BrowserSSHForwardManager.ServiceForwardSnapshot] {
-        let workspaceDeviceID = deviceID(forWorkspaceID: workspaceID)
-        guard isRemoteDeviceID(workspaceDeviceID) else { return [] }
+        guard let workspaceDeviceID = deviceID(forWorkspaceID: workspaceID), isRemoteDeviceID(workspaceDeviceID) else { return [] }
         return browserSSHForwardManager.forwardedServicePorts(deviceID: workspaceDeviceID, workspaceID: workspaceID)
     }
 
@@ -7469,24 +7473,22 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         sender.isEnabled = false
         Task { @MainActor [weak self, weak sender] in
             guard let self else { return }
-            let result: Result<SpacesDeviceAPIResponse, Error>?
-            if let device = deviceForDaemonStateMutation() {
-                result = await Self.deviceMutation(device: device) { device in
-                    try SpacesDeviceClient.runWorkspaceSetup(
-                        workspaceID: workspaceID, device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
-                }
-            } else {
-                result = nil
+            guard let device = deviceForDaemonStateMutation() else {
+                sender?.isEnabled = true
+                showDeviceNotLoadedError()
+                return
+            }
+            let result = await Self.deviceMutation(device: device) { device in
+                try SpacesDeviceClient.runWorkspaceSetup(
+                    workspaceID: workspaceID, device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
             }
             sender?.isEnabled = true
-            if let result {
-                switch result {
-                case .success(let response):
-                    applyDeviceMutationResponse(response, deviceID: deviceID(forWorkspaceID: workspaceID), selectedWorkspaceID: workspaceID)
-                case .failure(let error): showError(error)
-                }
-            } else {
-                showDeviceNotLoadedError()
+            switch result {
+            // The response's overview belongs to the device the mutation was sent to, so it is
+            // installed into that device's section — re-resolving from the workspace id could
+            // name a different device and prune its panes against a foreign keep-set.
+            case .success(let response): applyDeviceMutationResponse(response, deviceID: device.id, selectedWorkspaceID: workspaceID)
+            case .failure(let error): showError(error)
             }
         }
     }
@@ -8093,8 +8095,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 throw WorkspaceError.invalidArgument(
                     message: "Branch '\(branch)' already exists. Choose it from Existing branch or enter a different new branch name.")
             }
-            let workspaceTargetDeviceID = deviceID(forProjectID: refs.projectID)
-            if let device = deviceRecord(forDeviceID: workspaceTargetDeviceID) {
+            if let workspaceTargetDeviceID = deviceID(forProjectID: refs.projectID), let device = deviceRecord(forDeviceID: workspaceTargetDeviceID) {
                 let input = WorkspaceCreateInput(
                     projectID: refs.projectID, branch: branch, baseBranch: baseBranch, notes: resolvedNotes, allowRemoteBranchLookup: true,
                     allowExistingBranchReuse: addWorkspaceBranchMode(refs: refs) == .existing, replaceExistingManagedDirectory: false)
@@ -8234,22 +8235,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     func launchWorkspace(id: String) { Task { @MainActor [weak self] in await self?.performLaunchWorkspace(id: id) } }
 
     private func performLaunchWorkspace(id: String) async {
-        let result: Result<SpacesDeviceAPIResponse, Error>?
-        if let device = deviceForWorkspaceMutation(workspaceID: id) {
-            result = await Self.deviceMutation(device: device) { device in
-                try SpacesDeviceClient.launchWorkspace(
-                    workspaceID: id, device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
-            }
-        } else {
-            result = nil
-        }
-        if let result {
-            switch result {
-            case .success(let response): applyDeviceMutationResponse(response, deviceID: deviceID(forWorkspaceID: id), selectedWorkspaceID: id)
-            case .failure(let error): showError(error)
-            }
-        } else {
+        guard let device = deviceForWorkspaceMutation(workspaceID: id) else {
             showDeviceNotLoadedError()
+            return
+        }
+        let result = await Self.deviceMutation(device: device) { device in
+            try SpacesDeviceClient.launchWorkspace(
+                workspaceID: id, device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+        }
+        switch result {
+        // The overview in the response is the one this device just published, so it is applied to
+        // that device's section (`device.id`) rather than re-resolved from the workspace id.
+        case .success(let response): applyDeviceMutationResponse(response, deviceID: device.id, selectedWorkspaceID: id)
+        case .failure(let error): showError(error)
         }
     }
 
@@ -8266,28 +8264,23 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     private func performRestartWorkspace(id: String) async {
         let browserSessionTargetURLs = configuredBrowserSessionTargetURLsForTeardown(workspaceID: id)
-        let result: Result<SpacesDeviceAPIResponse, Error>?
-        if let device = deviceForWorkspaceMutation(workspaceID: id) {
-            result = await Self.deviceMutation(device: device) { device in
-                try SpacesDeviceClient.restartWorkspace(
-                    workspaceID: id, device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
-            }
-        } else {
-            result = nil
-        }
-        if let result {
-            switch result {
-            case .success(let response):
-                // Restart goes through the daemon stop path; the daemon does not own the
-                // client-side Chrome browser-session tabs, so close them here too for a clean
-                // restarted state (a later browser focus then opens fresh tabs).
-                self.closeLocalBrowserSessionWindows(workspaceID: id, configuredBrowserSessionTargetURLs: browserSessionTargetURLs)
-                self.closeWorkspaceTerminalPanes(workspaceID: id)
-                applyDeviceMutationResponse(response, deviceID: deviceID(forWorkspaceID: id), selectedWorkspaceID: id)
-            case .failure(let error): showError(error)
-            }
-        } else {
+        guard let device = deviceForWorkspaceMutation(workspaceID: id) else {
             showDeviceNotLoadedError()
+            return
+        }
+        let result = await Self.deviceMutation(device: device) { device in
+            try SpacesDeviceClient.restartWorkspace(
+                workspaceID: id, device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+        }
+        switch result {
+        case .success(let response):
+            // Restart goes through the daemon stop path; the daemon does not own the
+            // client-side Chrome browser-session tabs, so close them here too for a clean
+            // restarted state (a later browser focus then opens fresh tabs).
+            self.closeLocalBrowserSessionWindows(workspaceID: id, configuredBrowserSessionTargetURLs: browserSessionTargetURLs)
+            self.closeWorkspaceTerminalPanes(workspaceID: id)
+            applyDeviceMutationResponse(response, deviceID: device.id, selectedWorkspaceID: id)
+        case .failure(let error): showError(error)
         }
     }
 
@@ -8304,25 +8297,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     private func performStopWorkspace(id: String) async {
         let browserSessionTargetURLs = configuredBrowserSessionTargetURLsForTeardown(workspaceID: id)
-        let result: Result<SpacesDeviceAPIResponse, Error>?
-        if let device = deviceForWorkspaceMutation(workspaceID: id) {
-            result = await Self.deviceMutation(device: device) { device in
-                try SpacesDeviceClient.stopWorkspace(
-                    workspaceID: id, device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
-            }
-        } else {
-            result = nil
-        }
-        if let result {
-            switch result {
-            case .success(let response):
-                self.closeLocalBrowserSessionWindows(workspaceID: id, configuredBrowserSessionTargetURLs: browserSessionTargetURLs)
-                self.closeWorkspaceTerminalPanes(workspaceID: id)
-                applyDeviceMutationResponse(response, deviceID: deviceID(forWorkspaceID: id), selectedWorkspaceID: id)
-            case .failure(let error): showError(error)
-            }
-        } else {
+        guard let device = deviceForWorkspaceMutation(workspaceID: id) else {
             showDeviceNotLoadedError()
+            return
+        }
+        let result = await Self.deviceMutation(device: device) { device in
+            try SpacesDeviceClient.stopWorkspace(
+                workspaceID: id, device: device, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+        }
+        switch result {
+        case .success(let response):
+            self.closeLocalBrowserSessionWindows(workspaceID: id, configuredBrowserSessionTargetURLs: browserSessionTargetURLs)
+            self.closeWorkspaceTerminalPanes(workspaceID: id)
+            applyDeviceMutationResponse(response, deviceID: device.id, selectedWorkspaceID: id)
+        case .failure(let error): showError(error)
         }
     }
 
@@ -8594,8 +8582,20 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         // Editor/Finder actions need a path on this Mac; gate them when the affected
         // workspace lives on a remote device. The action carries its own workspace
         // id, which can differ from the selected row, so resolve the owning device
-        // from it and fall back to the selection only for path-based callers.
-        let targetDeviceID = workspaceID.map { deviceID(forWorkspaceID: $0) } ?? selectedRowDeviceID()
+        // from it and use the selection only for path-based callers that name no workspace.
+        let targetDeviceID: String?
+        if let workspaceID {
+            // No loaded section claims this workspace, so we cannot tell whether its path is on
+            // this Mac. Refuse the action instead of pointing Finder/the editor at a path that
+            // belongs to another machine.
+            guard let resolved = deviceID(forWorkspaceID: workspaceID) else {
+                showDeviceNotLoadedError()
+                return true
+            }
+            targetDeviceID = resolved
+        } else {
+            targetDeviceID = selectedRowDeviceID()
+        }
         guard let targetDeviceID, let section = deviceSections.first(where: { $0.deviceID == targetDeviceID }), !section.isLocal else { return false }
         showError(WorkspaceError.invalidArgument(message: Self.remoteWorkspacePathActionErrorMessage(action: action, deviceName: section.deviceName)))
         return true
@@ -8618,10 +8618,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     private func openWorkspaceEditor(workspaceID: String) {
         do {
-            guard let (_, workspace) = findWorkspace(id: workspaceID) else { throw WorkspaceError.invalidArgument(message: "Workspace not found.") }
+            guard let (project, workspace) = findWorkspace(id: workspaceID) else {
+                throw WorkspaceError.invalidArgument(message: "Workspace not found.")
+            }
             guard !workspace.isArchived else { throw WorkspaceError.invalidArgument(message: "Workspace is archived.") }
             let target = try resolveEditorLaunch(try clientAppConfig().editor)
-            let deviceID = deviceID(forWorkspaceID: workspaceID)
+            // The owning device comes from the row the workspace was found in, so the
+            // remote/local branch below can never run the local path for a remote workspace.
+            let deviceID = project.deviceID
             if isRemoteDeviceID(deviceID) {
                 guard let device = deviceRecord(forDeviceID: deviceID), let sshHost = device.sshHost?.trimmingCharacters(in: .whitespacesAndNewlines),
                     !sshHost.isEmpty
@@ -9090,8 +9094,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         if let panelWindowID = panelCoordinator.panelWindowID(forWindow: NSApp.keyWindow) {
             return panelCoordinator.closeFocusedPane(scope: .globalWindow(panelWindowID: panelWindowID))
         }
-        guard NSApp.keyWindow === window, let workspaceID = selectedWorkspaceID else { return false }
-        return panelCoordinator.closeFocusedPane(scope: .workspace(deviceID: deviceID(forWorkspaceID: workspaceID), workspaceID: workspaceID))
+        guard NSApp.keyWindow === window, let workspaceID = selectedWorkspaceID, let deviceID = deviceID(forWorkspaceID: workspaceID) else {
+            return false
+        }
+        return panelCoordinator.closeFocusedPane(scope: .workspace(deviceID: deviceID, workspaceID: workspaceID))
     }
 
     /// Plain ⌘W — no other chord modifiers, so terminal/app chords like ⌘⇧W or ⌥⌘W
@@ -9131,8 +9137,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         case .pass: return false
         case .consume: return true
         case .presentPicker:
-            guard let workspaceID = selectedWorkspaceID else { return false }
-            presentNewTabSessionPicker(scope: .workspace(deviceID: deviceID(forWorkspaceID: workspaceID), workspaceID: workspaceID))
+            guard let workspaceID = selectedWorkspaceID, let deviceID = deviceID(forWorkspaceID: workspaceID) else { return false }
+            presentNewTabSessionPicker(scope: .workspace(deviceID: deviceID, workspaceID: workspaceID))
             return true
         }
     }
@@ -9556,9 +9562,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             target: target, detail: detail)
     }
 
-    /// The overview for the daemon that owns `workspaceID` (local or remote).
+    /// The overview for the daemon that owns `workspaceID` (local or remote), or nil when
+    /// the workspace has no known owning device or that device's section carries no
+    /// overview. Callers must treat nil as "we cannot describe this workspace" and do
+    /// nothing: substituting the local device's overview would resolve another machine's
+    /// workspace/session ids against this Mac's rows and act on whatever happened to match.
     func overview(forWorkspaceID workspaceID: String) -> SpacesDeviceOverviewPayload? {
-        deviceSection(id: deviceID(forWorkspaceID: workspaceID))?.overview ?? localDeviceOverview
+        guard let deviceID = deviceID(forWorkspaceID: workspaceID) else { return nil }
+        return deviceSection(id: deviceID)?.overview
     }
 
     /// Focuses the local Chrome tab for a workspace browser session. Browser-session window ids are
@@ -9769,10 +9780,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 showError(WorkspaceError.invalidArgument(message: "Browser session URL is invalid."))
                 return nil
             }
+            // Whether the URL needs remote-service routing depends on the owning device. With no
+            // known owner there is no answer, and opening the raw URL would point this Mac's
+            // Chrome at a localhost port that belongs to another machine's workspace.
+            guard let workspaceDeviceID = deviceID(forWorkspaceID: workspaceID) else {
+                showDeviceNotLoadedError()
+                return nil
+            }
             let browserSessionTargetURLs = Self.browserSessionTargetURLs(
                 workspaceID: workspaceID, targetURL: targetURL, overview: overview(forWorkspaceID: workspaceID))
             let siblingTargetURLs = Self.browserSessionSiblingTargetURLs(targetURL: targetURL, targetURLs: browserSessionTargetURLs)
-            if isRemoteDeviceID(deviceID(forWorkspaceID: workspaceID)) {
+            if isRemoteDeviceID(workspaceDeviceID) {
                 guard let device = deviceForWorkspaceMutation(workspaceID: workspaceID) else {
                     showDeviceNotLoadedError()
                     return nil
