@@ -64,6 +64,15 @@ generate_codecov_artifacts() {
     xcrun llvm-cov export -format=text -instr-profile "$profdata_path" "$test_binary" >"$codecov_json_path"
 }
 
+# Decides whether a non-zero `swift test` exit can be attributed to SwiftPM's post-test steps
+# rather than to the tests themselves, which is the only case the caller forgives.
+#
+# A crashed test process is NOT such a case, and it announces itself differently from a failed
+# assertion: the worker dies mid-test, so it never prints the `Test Case ... failed` or `: error: -[`
+# line a normal failure would, while the swift-testing lane can still report its own suites passing.
+# Matching only the failure markers therefore forgave a crash and reported the run green -- the exact
+# shape of the CI-only SIGTRAP that killed test workers in this suite. Treat the runtime's crash
+# announcements as disqualifying too.
 test_log_reports_success() {
     python3 - "$test_log_path" <<'PY'
 import re
@@ -80,8 +89,12 @@ xctest_failed = (
     re.search(r"Test (Suite|Case) '.*' failed", text) is not None
     or re.search(r": error: -\[", text) is not None
 )
+test_process_crashed = (
+    re.search(r"error: Exited with unexpected signal code \d+", text) is not None
+    or re.search(r"^.*: Fatal error:", text, re.MULTILINE) is not None
+)
 
-raise SystemExit(0 if swift_testing_passed and not xctest_failed else 1)
+raise SystemExit(0 if swift_testing_passed and not xctest_failed and not test_process_crashed else 1)
 PY
 }
 
