@@ -850,6 +850,16 @@ private enum SpacesMobileMutationTimeoutRecovery {
         isApplyingDaemonUpdate = true
         defer { if daemonUpdateGeneration == generation { isApplyingDaemonUpdate = false } }
 
+        // This flow runs on its own command channel rather than the shared one. The shared channel
+        // carries the overview poll and every user mutation, and the transport does not serialize whole
+        // request/response round trips (issue #248): two callers can interleave on its single connection
+        // and consume each other's responses. The mutation gate below covers the restart RPC, but the
+        // polling phase deliberately runs with mutations enabled for up to `daemonUpdateTimeout`, so a
+        // shared channel would put a half-minute stream of probes alongside whatever the user does next.
+        // A private channel keeps that traffic on its own connection for the life of the update.
+        let updateChannel = bridgeClient.makeCommandChannel()
+        defer { Task { await updateChannel.close() } }
+
         // The restart RPC holds the app-wide mutation gate like every other one-shot mutation, so another
         // mutation cannot be sent into the daemon while it is being told to quiesce and re-exec. The gate
         // is released before the polling phase: that runs for up to `daemonUpdateTimeout`, and holding it
@@ -857,7 +867,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         isMutating = true
         let restartError: Error?
         do {
-            try await bridgeClient.requestDaemonRestart(commandChannel: commandChannel)
+            try await bridgeClient.requestDaemonRestart(commandChannel: updateChannel)
             restartError = nil
         } catch { restartError = error }
         isMutating = false
@@ -881,7 +891,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
             // would add its whole timeout on top of the budget, on top of the sleep that just overran it.
             guard clock.now < deadline else { break }
             guard identity == overviewIdentity else { return }
-            guard let status = try? await bridgeClient.fetchDaemonStatus(commandChannel: commandChannel) else { continue }
+            guard let status = try? await bridgeClient.fetchDaemonStatus(commandChannel: updateChannel) else { continue }
             guard identity == overviewIdentity else { return }
             if case .applyStagedUpdate = DaemonUpdateRemedy.remedy(for: status) { continue }
             // The device no longer reports a staged update: publish the fresh status, then let a full
@@ -923,6 +933,11 @@ private enum SpacesMobileMutationTimeoutRecovery {
             applyCompatibility(status)
         } catch is CancellationError { return } catch {
             guard identity == overviewIdentity else { return }
+            // A requested update takes the device offline on purpose. Clearing the status there would
+            // drop the banner (it renders off `daemonStatus`) and unblock the device (blocking reads
+            // `compatibility`), flashing stale workspace controls back mid-update; keep the last known
+            // facts until the poll learns otherwise.
+            guard !isApplyingDaemonUpdate else { return }
             // Could not read the handshake; leave compatibility unknown rather than blocking.
             daemonStatus = nil
             compatibility = nil

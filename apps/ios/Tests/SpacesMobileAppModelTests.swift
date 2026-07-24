@@ -820,6 +820,50 @@
             XCTAssertLessThan(elapsed, budget + probeDuration + .milliseconds(600), "the poll must stop on its time budget")
         }
 
+        /// The handshake fallback clears the daemon status when it cannot reach the device, which leaves
+        /// compatibility unknown and the device unblocked. During a requested update that outage is
+        /// expected, and clearing would drop the banner and flash stale workspace controls back while the
+        /// update is still running — so the last known facts have to survive it.
+        func testStatusSurvivesAFailedHandshakeDuringTheUpdate() async {
+            let settings = SpacesMobileConnectionSettings()
+            let overviewCounter = SpacesMobilePollCounter()
+            // Blocking plus staged: the device is wire-incompatible and has an update to apply, which is
+            // the state the banner and the blocked-device rule both read.
+            let blockingStaged = daemonStatus(protocolVersion: SpacesWireProtocol.version - 1, installedVersion: "2.0.0")
+            let overview = makeOverview(daemonStatus: blockingStaged)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                switch request.commandName {
+                case "requestDaemonRestart": return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                case "overview":
+                    // The first read establishes the state; everything after it is the handoff outage.
+                    guard await overviewCounter.increment() == 1 else {
+                        return SpacesDeviceAPIResponse(ok: false, message: "The device is unreachable.")
+                    }
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview))
+                // The frozen-core handshake cannot reach the device either, which is what triggers the
+                // clearing path this test guards.
+                default: return SpacesDeviceAPIResponse(ok: false, message: "The device is unreachable.")
+                }
+            }
+            let model = SpacesMobileAppModel(
+                settings: settings, bridgeClient: client, daemonUpdatePollInterval: .milliseconds(20), daemonUpdateTimeout: .seconds(5))
+
+            await model.refresh()
+            XCTAssertNotNil(model.daemonStatus, "precondition: the first read establishes the device's status")
+            XCTAssertTrue(model.isActiveDeviceBlocked)
+
+            let update = Task { await model.requestDaemonUpdate() }
+            while !model.isApplyingDaemonUpdate { try? await Task.sleep(for: .milliseconds(5)) }
+
+            await model.refresh()
+
+            XCTAssertNotNil(model.daemonStatus, "the banner renders off the status; the expected outage must not erase it")
+            XCTAssertTrue(model.isActiveDeviceBlocked, "the device must stay blocked while its daemon is mid-update")
+
+            update.cancel()
+            await update.value
+        }
+
         /// The deadline is re-checked after each wait, not only before it. A probe launched once the
         /// budget has already passed would add its own request timeout on top of a wait that had itself
         /// overrun — the poll would run well past the bound it advertises.
