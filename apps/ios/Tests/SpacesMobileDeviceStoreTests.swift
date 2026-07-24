@@ -1,8 +1,5 @@
 #if canImport(UIKit)
     import XCTest
-    import Network
-    import spacesdevicecore
-    import spacesterminalcore
     @testable import SpacesMobile
 
     /// Multi-address device pairing: a paired Mac can be reachable at more than one address (LAN and
@@ -208,26 +205,29 @@
 
         /// An empty advertised list means the daemon reported nothing — never that it has no addresses —
         /// so it must never overwrite a record's `hosts`, even when they differ from what a later call
-        /// would advertise.
+        /// would advertise. Reports no change, since a caller (`SpacesMobileAppModel`) uses that to decide
+        /// whether its live client needs rebuilding.
         func testMergeAdvertisedHostsIsNoOpWhenHostsIsEmpty() throws {
             let state = SpacesMobileDeviceStore.upsert(settings: makeSettings(hosts: ["10.0.0.5"], fingerprint: "SHA256:mac", token: "token"), name: "Mac")
             let id = try XCTUnwrap(state.devices.first?.id)
 
-            SpacesMobileDeviceStore.mergeAdvertisedHosts([], certificateFingerprint: "SHA256:mac")
+            let changed = SpacesMobileDeviceStore.mergeAdvertisedHosts([], certificateFingerprint: "SHA256:mac")
 
+            XCTAssertFalse(changed)
             let reloaded = SpacesMobileDeviceStore.load(fallbackSettings: SpacesMobileConnectionSettings())
             XCTAssertEqual(reloaded.devices.first(where: { $0.id == id })?.hosts, ["10.0.0.5"])
         }
 
         /// The core backfill behavior: a device paired before its Mac had Tailscale has only a LAN
         /// address stored. Once the daemon reports both addresses, the record adopts the daemon's list
-        /// and order verbatim, with no rescan.
+        /// and order verbatim, with no rescan, and reports the change so a live client can be rebuilt.
         func testMergeAdvertisedHostsAdoptsDaemonOrder() throws {
             let state = SpacesMobileDeviceStore.upsert(settings: makeSettings(hosts: ["10.0.0.5"], fingerprint: "SHA256:mac", token: "token"), name: "Mac")
             let id = try XCTUnwrap(state.devices.first?.id)
 
-            SpacesMobileDeviceStore.mergeAdvertisedHosts(["10.0.0.5", "100.64.0.5"], certificateFingerprint: "SHA256:mac")
+            let changed = SpacesMobileDeviceStore.mergeAdvertisedHosts(["10.0.0.5", "100.64.0.5"], certificateFingerprint: "SHA256:mac")
 
+            XCTAssertTrue(changed)
             let reloaded = SpacesMobileDeviceStore.load(fallbackSettings: SpacesMobileConnectionSettings())
             XCTAssertEqual(reloaded.devices.first(where: { $0.id == id })?.hosts, ["10.0.0.5", "100.64.0.5"])
         }
@@ -258,14 +258,15 @@
         }
 
         /// Merging the record's own current `hosts` (the common steady-state case) must be a true no-op:
-        /// the persisted devices blob is byte-identical before and after.
+        /// the persisted devices blob is byte-identical before and after, and no change is reported.
         func testMergeAdvertisedHostsIsNoOpWhenUnchanged() throws {
             _ = SpacesMobileDeviceStore.upsert(
                 settings: makeSettings(hosts: ["10.0.0.5", "100.64.0.5"], fingerprint: "SHA256:mac", token: "token"), name: "Mac")
             let blobBefore = try XCTUnwrap(UserDefaults.standard.data(forKey: devicesKey))
 
-            SpacesMobileDeviceStore.mergeAdvertisedHosts(["10.0.0.5", "100.64.0.5"], certificateFingerprint: "SHA256:mac")
+            let changed = SpacesMobileDeviceStore.mergeAdvertisedHosts(["10.0.0.5", "100.64.0.5"], certificateFingerprint: "SHA256:mac")
 
+            XCTAssertFalse(changed)
             XCTAssertEqual(UserDefaults.standard.data(forKey: devicesKey), blobBefore)
         }
 
@@ -273,8 +274,9 @@
         func testMergeAdvertisedHostsIsNoOpWhenFingerprintUnmatched() throws {
             _ = SpacesMobileDeviceStore.upsert(settings: makeSettings(hosts: ["10.0.0.5"], fingerprint: "SHA256:mac", token: "token"), name: "Mac")
 
-            SpacesMobileDeviceStore.mergeAdvertisedHosts(["10.0.0.5", "100.64.0.5"], certificateFingerprint: "SHA256:other")
+            let changed = SpacesMobileDeviceStore.mergeAdvertisedHosts(["10.0.0.5", "100.64.0.5"], certificateFingerprint: "SHA256:other")
 
+            XCTAssertFalse(changed)
             let reloaded = SpacesMobileDeviceStore.load(fallbackSettings: SpacesMobileConnectionSettings())
             XCTAssertEqual(reloaded.devices.first?.hosts, ["10.0.0.5"])
         }
@@ -329,173 +331,6 @@
             }
             let defaults = UserDefaults.standard
             for key in [devicesKey, activeDeviceKey, connectionSettingsKey, demoModeKey] { defaults.removeObject(forKey: key) }
-        }
-    }
-
-    /// `SpacesDeviceEndpointResolver` opens real `NWConnection`s, so only the parts of its contract that
-    /// don't depend on a live daemon are covered here: the up-front validation guard, and the shape of the
-    /// error thrown when every candidate is unreachable.
-    final class SpacesDeviceEndpointResolverTests: XCTestCase {
-        /// An empty `hosts` list is rejected before any connection attempt.
-        func testConnectThrowsInvalidEndpointForEmptyHosts() async {
-            var settings = SpacesMobileConnectionSettings()
-            settings.hosts = []
-            settings.port = 47_900
-            let resolver = SpacesDeviceEndpointResolver(settings: settings)
-
-            do {
-                _ = try await resolver.connect(timeout: .seconds(1), queue: .main)
-                XCTFail("expected invalidEndpoint")
-            } catch SpacesDeviceAPIClientError.invalidEndpoint {
-                // expected
-            } catch {
-                XCTFail("unexpected error: \(error)")
-            }
-        }
-
-        /// Every candidate that never answers (and never even resets the connection, so there is no pin
-        /// mismatch to report) surfaces as `allCandidatesUnreachable`, naming every host that was tried —
-        /// which is what proves the resolver walked the whole list rather than giving up on the first.
-        /// Uses RFC 5737 TEST-NET addresses (`192.0.2.1`, `198.51.100.1`) — guaranteed non-routable to a
-        /// live host — instead of a live daemon, so the failure is deterministic. The short `timeout`
-        /// becomes the per-candidate cap (`min(timeout, 5s)`), keeping a test that has to wait out two
-        /// real connect attempts near two seconds instead of the ten a production-sized budget would cost.
-        func testAllCandidatesUnreachableNamesEveryHostTried() async throws {
-            var settings = SpacesMobileConnectionSettings()
-            settings.hosts = ["192.0.2.1", "198.51.100.1"]
-            settings.port = 47_900
-            settings.certificateFingerprint = "SHA256:unreachable"
-            let resolver = SpacesDeviceEndpointResolver(settings: settings)
-
-            do {
-                _ = try await resolver.connect(timeout: .milliseconds(300), queue: .main)
-                XCTFail("expected allCandidatesUnreachable")
-            } catch SpacesDeviceAPIClientError.allCandidatesUnreachable(let hosts) {
-                XCTAssertEqual(hosts, ["192.0.2.1", "198.51.100.1"])
-            } catch {
-                XCTFail("unexpected error: \(error)")
-            }
-        }
-
-        /// The error message names the unreachable addresses and points at Tailscale, since the most
-        /// common real-world cause is being away from the paired Mac's LAN with Tailscale not connected.
-        /// Asserted on the error value directly: the message is a property of the case, so proving its
-        /// content needs no connection attempt.
-        func testAllCandidatesUnreachableDescriptionNamesHostsAndTailscale() throws {
-            let error = SpacesDeviceAPIClientError.allCandidatesUnreachable(hosts: ["192.168.1.24", "100.86.197.104"])
-            let description = try XCTUnwrap(error.errorDescription)
-            XCTAssertTrue(description.contains("192.168.1.24"))
-            XCTAssertTrue(description.contains("100.86.197.104"))
-            XCTAssertTrue(description.contains("Tailscale"))
-        }
-
-        /// Proves the happy-eyeballs race actually races rather than walking `hosts` in order: an
-        /// unreachable candidate listed first (`192.0.2.1`, RFC 5737 TEST-NET, guaranteed non-routable)
-        /// must not force the resolver to wait out that candidate's full timeout before the reachable
-        /// loopback candidate downstream even gets a turn.
-        ///
-        /// A bare TCP listener cannot complete a pinned-TLS handshake — there is no certificate to
-        /// present — so the loopback candidate cannot actually *win* here; the resolver correctly reports
-        /// it as a pin mismatch (a real peer answered at the transport level, but the pinned handshake
-        /// never completed), exactly the signal a genuinely re-paired daemon would produce. That is the
-        /// one true thing this test can assert without standing up a real pinned-TLS daemon:
-        /// `transportAuthenticationFailed` — not `allCandidatesUnreachable`, which would mean the
-        /// loopback listener was never reached at all — and that the whole race finishes near the
-        /// concurrent budget instead of the sequential one (proving the unreachable first candidate did
-        /// not starve the second of a turn).
-        func testReachableCandidateGetsATurnDespiteAnUnreachablePreferredCandidate() async throws {
-            let listener = try LoopbackConnectionSink()
-            let port = try await listener.start()
-            defer { listener.stop() }
-
-            var settings = SpacesMobileConnectionSettings()
-            settings.hosts = ["192.0.2.1", "127.0.0.1"]
-            settings.port = Int(port)
-            settings.certificateFingerprint = "SHA256:unreachable"
-            let resolver = SpacesDeviceEndpointResolver(settings: settings)
-
-            let start = ContinuousClock.now
-            do {
-                _ = try await resolver.connect(timeout: .milliseconds(500), queue: .main)
-                XCTFail("expected transportAuthenticationFailed")
-            } catch SpacesDeviceAPIClientError.transportAuthenticationFailed {
-                // Expected: the loopback candidate answered at the TCP level but never completed the
-                // pinned handshake, which is exactly what a real pin mismatch looks like.
-            } catch {
-                XCTFail("unexpected error: \(error)")
-            }
-            let elapsed = start.duration(to: .now)
-            // Sequential worst case would be roughly two full per-candidate passes (each a ~500ms TLS
-            // wait plus a 750ms plain-TCP mismatch probe) — near 2.5s. The 250ms stagger keeps the raced
-            // version well under that even though both candidates still have to be probed.
-            XCTAssertLessThan(elapsed, .seconds(2))
-        }
-    }
-
-    /// A bare TCP listener with no TLS behind it: stands in for "something answered at the transport
-    /// level" so a test can exercise the pin-mismatch path without a real pinned-TLS daemon. Accepts and
-    /// immediately parks every incoming connection (never sends a TLS handshake), which is what makes a
-    /// pinned-TLS `NWConnection` against it time out rather than succeed or fail outright.
-    private final class LoopbackConnectionSink: @unchecked Sendable {
-        private let listener: NWListener
-        private let queue = DispatchQueue(label: "spaces.device.api.resolver-test.sink")
-        private let lock = NSLock()
-        private var acceptedConnections: [NWConnection] = []
-
-        init() throws { listener = try NWListener(using: .tcp) }
-
-        func start() async throws -> UInt16 {
-            listener.newConnectionHandler = { [weak self] connection in
-                connection.start(queue: self?.queue ?? .main)
-                self?.lock.lock()
-                self?.acceptedConnections.append(connection)
-                self?.lock.unlock()
-            }
-            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
-                let resume = LoopbackConnectionSinkOneShot(continuation)
-                listener.stateUpdateHandler = { state in
-                    switch state {
-                    case .ready: resume.resume(returning: ())
-                    case .failed(let error): resume.resume(throwing: error)
-                    default: break
-                    }
-                }
-                listener.start(queue: queue)
-            }
-            guard let port = listener.port?.rawValue else { throw NSError(domain: "LoopbackConnectionSink", code: 1) }
-            return port
-        }
-
-        func stop() {
-            listener.cancel()
-            lock.lock()
-            let connections = acceptedConnections
-            acceptedConnections.removeAll()
-            lock.unlock()
-            for connection in connections { connection.cancel() }
-        }
-    }
-
-    private final class LoopbackConnectionSinkOneShot: @unchecked Sendable {
-        private let lock = NSLock()
-        private var continuation: CheckedContinuation<Void, any Error>?
-
-        init(_ continuation: CheckedContinuation<Void, any Error>) { self.continuation = continuation }
-
-        func resume(returning value: Void) {
-            lock.lock()
-            let continuation = continuation
-            self.continuation = nil
-            lock.unlock()
-            continuation?.resume(returning: value)
-        }
-
-        func resume(throwing error: any Error) {
-            lock.lock()
-            let continuation = continuation
-            self.continuation = nil
-            lock.unlock()
-            continuation?.resume(throwing: error)
         }
     }
 #endif

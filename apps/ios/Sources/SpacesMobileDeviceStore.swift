@@ -293,20 +293,26 @@ enum SpacesMobileDeviceStore {
     /// exactly like a pairing link would. `activeHost` survives only if it is still a member of the new
     /// list; otherwise the next connect re-evaluates from the top, same as `clearActiveHosts`. Matches
     /// fingerprints the same trimmed+lowercased way `upsert`/`recordActiveHost` do.
-    static func mergeAdvertisedHosts(_ hosts: [String], certificateFingerprint: String) {
-        guard !hosts.isEmpty else { return }
+    ///
+    /// Returns whether the record's `hosts` actually changed, so a caller whose live client was built from
+    /// the pre-backfill list (e.g. `SpacesMobileAppModel`, mid-refresh) knows to rebuild it — otherwise a
+    /// newly learned address sits in the persisted record until the app relaunches or the device is
+    /// reselected, silently defeating the point of backfilling without a rescan.
+    @discardableResult static func mergeAdvertisedHosts(_ hosts: [String], certificateFingerprint: String) -> Bool {
+        guard !hosts.isEmpty else { return false }
         let fingerprint = certificateFingerprint.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         var devices = loadDevices()
         guard
             let index = devices.firstIndex(where: {
                 $0.certificateFingerprint.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == fingerprint
             }), devices[index].hosts != hosts
-        else { return }
+        else { return false }
         devices[index].hosts = hosts
         if let activeHost = devices[index].activeHost, !hosts.contains(activeHost) {
             devices[index].activeHost = nil
         }
         saveDevices(devices)
+        return true
     }
 
     /// Clears the cached active host on every paired device, so the next connect attempt on each

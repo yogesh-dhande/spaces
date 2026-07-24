@@ -65,10 +65,14 @@ struct RootTabView: View {
                 // (e.g. walked back home onto the LAN after being away on the tailnet). Clearing every
                 // paired device's cached active host means the next connect re-evaluates `hosts` from
                 // the top, preferring the LAN address again when it is reachable rather than staying on
-                // the slower tailnet path out of habit. This only resets the persisted store; a
-                // resolver already alive for the current connection keeps its own in-memory cache until
-                // it next fails over on its own (see `SpacesDeviceEndpointResolver`).
+                // the slower tailnet path out of habit. That alone only resets the persisted store, so
+                // also reset the live client: it keeps its own in-memory resolver cache and open command
+                // connection independent of the store until something makes it fail over on its own (see
+                // `SpacesDeviceEndpointResolver`), which a `resetActiveConnectionEndpoint()` foreground
+                // reset with no open failure would otherwise never trigger. That reset deliberately
+                // leaves any open terminal viewer's own stream alone — see its doc comment.
                 SpacesMobileDeviceStore.clearActiveHosts()
+                model.resetActiveConnectionEndpoint()
             case .background: model.browserProxyStop()
             case .inactive: break
             @unknown default: break

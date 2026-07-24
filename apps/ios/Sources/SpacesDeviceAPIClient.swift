@@ -463,6 +463,23 @@ struct SpacesDeviceAPIClient: Sendable {
         return try await backend.openSessionStream(request: request, onEvent: onEvent, onDisconnect: onDisconnect)
     }
 
+    /// The address this client's backend most recently proved reachable, if it has resolved one yet.
+    /// Distinct from `settings.primaryHost` or a paired-device record's persisted `activeHost`: those
+    /// are snapshots that can go stale (settings captured at construction, a record written after the
+    /// fact), while this asks the live resolver what actually completed a handshake. `nil` for a backend
+    /// with no such concept (Demo Mode, the closure test backend) and for a network backend that has not
+    /// resolved anything yet.
+    func currentResolvedHost() async -> String? { await backend.currentResolvedHost() }
+
+    /// Clears this client's endpoint resolution so the next request or stream re-races every candidate
+    /// address instead of continuing on whichever one most recently answered — the foreground
+    /// re-preference for LAN over Tailscale. Resets only the shared resolver; it does not close any
+    /// specific `SpacesDeviceAPICommandChannel`'s open connection, since a client has no visibility into
+    /// channels its callers built independently. A caller holding such a channel should also call its own
+    /// `close()` so its current connection is dropped and the next send reconnects through the reset
+    /// resolver, and must leave any open session stream alone — see `SpacesMobileAppModel.resetActiveConnectionEndpoint()`.
+    func resetEndpointResolution() async { await backend.resetEndpointResolution() }
+
     private func mutation(_ request: SpacesDeviceAPIRequest, commandChannel: SpacesDeviceAPICommandChannel?) async throws -> SpacesDeviceAPIResponse {
         let response = try await sendRequest(request, timeout: .seconds(30), commandChannel: commandChannel)
         guard response.ok else { throw SpacesDeviceAPIClientError.requestFailed(response.message, code: response.errorCode) }
@@ -562,10 +579,28 @@ struct SpacesDeviceNetworkBackend: SpacesDeviceAPIBackend {
         }
         let parameters = SpacesPinnedTLSConnector.tlsParameters(certificateFingerprint: settings.certificateFingerprint)
         let connection = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: parameters)
-        StreamSubscription(connection: connection, host: host, port: nwPort, request: request, onEvent: onEvent, onDisconnect: onDisconnect)
+        // A stream that ends with an error means the address it was on may no longer be good (the device
+        // left the network it was reachable on, the daemon restarted somewhere else, etc.) — clear the
+        // resolver's cached winner here, next to the thing that learned the address, so the caller's own
+        // reconnect (which rebuilds this same stream from `resolver.currentCachedHost()`) re-races every
+        // candidate instead of retrying the same dead one indefinitely. A `nil` error is a clean
+        // cancellation (the caller closed the stream on purpose, e.g. the viewer was dismissed) and must
+        // not invalidate an address that never actually failed.
+        let resolver = self.resolver
+        let invalidatingOnDisconnect: @MainActor (Error?) -> Void = { error in
+            if error != nil { Task { await resolver.clearCachedWinner() } }
+            onDisconnect(error)
+        }
+        StreamSubscription(connection: connection, host: host, port: nwPort, request: request, onEvent: onEvent, onDisconnect: invalidatingOnDisconnect)
             .start(on: queue)
         return SpacesDeviceAPIStreamHandle { connection.cancel() }
     }
+
+    /// The resolver's cached winner, if it has one — see `SpacesDeviceAPIClient.currentResolvedHost()`.
+    func currentResolvedHost() async -> String? { await resolver.currentCachedHost() }
+
+    /// Forgets the resolver's cached winner — see `SpacesDeviceAPIClient.resetEndpointResolution()`.
+    func resetEndpointResolution() async { await resolver.clearCachedWinner() }
 }
 
 /// Test backend: routes request round trips through a closure while session streams keep using the

@@ -39,6 +39,33 @@
         }
     }
 
+    /// A backend whose `currentResolvedHost()` returns a fixed value instead of the default `nil`, so a
+    /// test can prove `SpacesMobileAppModel.updateBrowserRoutes` prefers the client's live-resolved host
+    /// over a stale paired-device record without needing a real `SpacesDeviceEndpointResolver` handshake.
+    /// Requests route through a closure exactly like `SpacesDeviceClosureBackend`; only the resolved-host
+    /// reporting differs.
+    private struct SpacesMobileFakeResolvedHostBackend: SpacesDeviceAPIBackend {
+        let resolvedHost: String?
+        let handler: @Sendable (SpacesDeviceAPIRequest) async throws -> SpacesDeviceAPIResponse
+
+        func makeRequestTransport() -> any SpacesDeviceAPIRequestTransport { SpacesMobileFakeRequestTransport(handler: handler) }
+
+        func openSessionStream(
+            request: SpacesDeviceAPIRequest, onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
+            onDisconnect: @escaping @MainActor (Error?) -> Void
+        ) async throws -> SpacesDeviceAPIStreamHandle {
+            throw SpacesDeviceAPIClientError.invalidEndpoint
+        }
+
+        func currentResolvedHost() async -> String? { resolvedHost }
+    }
+
+    private struct SpacesMobileFakeRequestTransport: SpacesDeviceAPIRequestTransport {
+        let handler: @Sendable (SpacesDeviceAPIRequest) async throws -> SpacesDeviceAPIResponse
+        func send(request: SpacesDeviceAPIRequest, timeout: Duration) async throws -> SpacesDeviceAPIResponse { try await handler(request) }
+        func close() async {}
+    }
+
     @MainActor final class SpacesMobileAppModelTests: XCTestCase {
         func testWorkspaceGroupsFilterByTypeStateAndSearch() {
             let model = makeModel()
@@ -668,6 +695,43 @@
                 XCTAssertEqual(request?.url.absoluteString, "http://web.feature.localhost:47898/dashboard")
                 XCTAssertEqual(request?.authToken, target?.proxyAuthToken)
             }
+        }
+
+        /// The raw-byte service tunnel has to dial the address the command channel actually proved
+        /// reachable, not a possibly-stale persisted record — see `updateBrowserRoutes`'s doc comment.
+        /// The paired device record here still carries a stale LAN `activeHost`; the live client reports
+        /// a different (Tailscale) resolved host, and the routing table must end up pointing at that one.
+        func testMutationOverviewPrefersLiveResolvedHostOverStaleRecord() async {
+            let refreshedOverview = makeOverview(
+                featureAssignedPorts: [SpacesDeviceAssignedPort(name: "web", port: 3_000, url: "http://web.feature.localhost:3000")],
+                featureConfig: SpacesDeviceWorkspaceConfig(resolvedBrowserSessions: [
+                    SpacesDeviceBrowserSession(name: "Dashboard", url: "http://localhost:3000/dashboard")
+                ]))
+            var settings = SpacesMobileConnectionSettings()
+            settings.hosts = ["10.0.0.5", "100.64.0.5"]
+            settings.port = 47_847
+            settings.certificateFingerprint = "fp-1"
+            let backend = SpacesMobileFakeResolvedHostBackend(resolvedHost: "100.64.0.5") { _ in
+                SpacesDeviceAPIResponse(
+                    ok: true, message: "Created workspace.",
+                    result: .mutation(SpacesDeviceMutationResult(overview: refreshedOverview, workspaceID: "workspace-feature")))
+            }
+            let client = SpacesDeviceAPIClient(settings: settings, backend: backend)
+            let proxy = SpacesMobileBrowserProxy(port: UInt16.random(in: 49_152...65_500), installationID: settings.installationID)
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client, browserProxy: proxy)
+            model.activeDeviceID = "device-1"
+            model.pairedDevices = [
+                SpacesMobilePairedDeviceRecord(
+                    id: "device-1", name: "Studio", hosts: settings.hosts, port: settings.port,
+                    certificateFingerprint: settings.certificateFingerprint, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z",
+                    lastSelectedAt: nil, activeHost: "10.0.0.5")
+            ]
+
+            await model.createWorkspace(
+                projectID: "project-1", branch: "feature", baseBranch: "main", directoryName: nil, allowExistingBranchReuse: false)
+
+            let target = await proxy.routeTarget(forHost: "web.feature.localhost")
+            XCTAssertEqual(target?.host, "100.64.0.5")
         }
 
         func testRefreshUsesEmbeddedStatusWithoutSecondHandshake() async {
