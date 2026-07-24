@@ -1193,8 +1193,7 @@
             switch resolution {
             case .hostAction(.clearScreenAndScrollback):
                 return controlResponseForClearScreenRequest(request, startedAt: startedAt, touchClient: false)
-            case .lineEditingBytes(let bytes):
-                enqueueControlInputWrite(Data(bytes))
+            case .lineEditingBytes(let bytes): enqueueControlInputWrite(Data(bytes))
             case .keyPress(let spec):
                 if spec.key == .enter { markLocalOwnerCommandInputOutputResyncPending() }
                 enqueueControlKeyPress(spec)
@@ -2017,8 +2016,8 @@
             guard SpacesDeviceTerminalPerformanceLogger.isEnabled() || TerminalPerformance.isEnabled else { return }
             let decodedUpdate = payload.decodedRenderUpdate
             let renderUpdateAttributes = GhosttyRenderFrameMetrics.attributes(
-                reason: payload.reason, frame: decodedUpdate?.fullFrame,
-                outputByteCount: outputByteCount, screenStateRevision: payload.screenStateRevision, frameKind: decodedUpdate?.frameKindMetricValue,
+                reason: payload.reason, frame: decodedUpdate?.fullFrame, outputByteCount: outputByteCount,
+                screenStateRevision: payload.screenStateRevision, frameKind: decodedUpdate?.frameKindMetricValue,
                 baseRevision: decodedUpdate?.baseRevision, targetRevision: decodedUpdate?.targetRevision ?? payload.screenStateRevision,
                 operationCount: decodedUpdate?.operationCount, changedCellCount: decodedUpdate?.changedCellCount,
                 scrollOperationCount: decodedUpdate?.scrollOperationCount, fullFrameFallbackReason: decodedUpdate?.fallbackReason)
@@ -2026,8 +2025,7 @@
                 name: "remote_state_publish", count: payload.renderUpdate?.count,
                 attributes: [
                     "reason": payload.reason, "owner_kind": ownerClient?.kind.rawValue ?? "nil", "output_bytes": String(outputByteCount ?? 0),
-                    "render_update": payload.renderUpdate == nil ? "0" : "1",
-                    "render_update_bytes": String(payload.renderUpdate?.count ?? 0),
+                    "render_update": payload.renderUpdate == nil ? "0" : "1", "render_update_bytes": String(payload.renderUpdate?.count ?? 0),
                 ])
             logMobileTakeoverPerformance(
                 name: "render_frame_payload_publish", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), count: payload.renderUpdate?.count,

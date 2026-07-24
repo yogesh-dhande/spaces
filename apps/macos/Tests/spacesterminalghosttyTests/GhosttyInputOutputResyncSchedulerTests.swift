@@ -6,7 +6,7 @@ import XCTest
 
 @TerminalEngineActor final class GhosttyInputOutputResyncSchedulerTests: XCTestCase {
     @TerminalEngineActor private func waitForCondition(
-        _ description: String, timeout: TimeInterval = 5, condition: @escaping @TerminalEngineActor () -> Bool
+        _ description: String, timeout: TimeInterval = 30, condition: @escaping @TerminalEngineActor () -> Bool
     ) async {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {

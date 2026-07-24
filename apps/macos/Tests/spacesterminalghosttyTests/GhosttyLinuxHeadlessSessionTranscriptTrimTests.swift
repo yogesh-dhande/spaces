@@ -23,14 +23,31 @@
     /// root-owned Linux CI container, unlike a permission-bit block that `DAC_OVERRIDE` bypasses), while the
     /// already-open `output.log` append fd is untouched.
     ///
-    /// Swift Testing (not XCTest) on purpose: the swift-testing runner executes tests from an async main, so
-    /// `@MainActor` async tests make progress on Linux, where an async `@MainActor` XCTest deadlocks before
-    /// its first line. `.serialized` because each test mutates the process-wide SPACES_* environment and owns
-    /// a real PTY child.
+    /// The headless core runs on `TerminalEngineActor`, so the test body stays nonisolated and hops onto
+    /// the engine for every core call: the core is created inside a `TerminalEngineActor.run` block,
+    /// carried back out through a `Box`, and used only via `runSynchronously`/`run` bridges (or a direct
+    /// `await` for the core's async handoff methods).
+    ///
+    /// Swift Testing (not XCTest) on purpose: the swift-testing runner executes tests from an async main,
+    /// so async tests actually make progress on Linux. Under corelibs-xctest an async test deadlocks
+    /// before its first line regardless of isolation — the test job is queued to run while XCTest's
+    /// blocked main thread polls in a loop that never drains it. The test body stays nonisolated (not
+    /// `@MainActor`) because the headless core is isolated to `TerminalEngineActor`, a distinct global
+    /// actor from `MainActor`: a nonisolated body can legally bridge onto the engine with the synchronous
+    /// `TerminalEngineActor.runSynchronously`, whereas the one-way rule forbids calling that bridge from
+    /// the main actor. `.serialized` because each test mutates the process-wide SPACES_* environment and
+    /// owns a real PTY child.
     @Suite(.serialized) final class GhosttyLinuxHeadlessSessionTranscriptTrimTests {
         private let originalDatabasePath: String?
         private let originalRuntimeDirectory: String?
         private let databaseRoot: URL
+
+        /// Carries an engine-isolated reference (created inside a `TerminalEngineActor.run` block) back out
+        /// to the nonisolated test body; the value is only ever *used* on the engine actor via a later bridge.
+        private final class Box<Value>: @unchecked Sendable {
+            let value: Value
+            init(_ value: Value) { self.value = value }
+        }
 
         init() throws {
             originalDatabasePath = ProcessInfo.processInfo.environment["SPACES_DB_PATH"]
@@ -97,22 +114,28 @@
             waitpid(pty.childPID, &status, WNOHANG)
         }
 
-        // MARK: - Helpers
+        // MARK: - Nonisolated helpers
 
-        @MainActor private func waitUntil(
-            timeout: TimeInterval = 30, _ comment: Comment, condition: @MainActor () -> Bool
+        /// Nonisolated poller so its `Task.sleep` suspensions don't hold the engine's queue while the
+        /// engine runs the queued `handleOutput` tasks the condition is waiting on. Each poll hops onto
+        /// the engine synchronously to evaluate the (engine-isolated) condition. libghostty-vt writes are
+        /// synchronous, so unlike the macOS harness no renderer tick is needed here.
+        private func waitAsync(
+            timeout: TimeInterval = 30, sourceLocation: SourceLocation = #_sourceLocation, _ condition: @escaping @TerminalEngineActor () -> Bool
         ) async throws {
             let deadline = Date().addingTimeInterval(timeout)
             while Date() < deadline {
-                if condition() { return }
+                if TerminalEngineActor.runSynchronously({ condition() }) { return }
                 try? await Task.sleep(for: .milliseconds(30))
             }
-            #expect(condition(), comment)
+            #expect(TerminalEngineActor.runSynchronously { condition() }, "waitAsync timed out", sourceLocation: sourceLocation)
         }
+
+        // MARK: - Engine-isolated helpers (call from inside a run/runSynchronously bridge)
 
         /// Attaches a remote-viewer owner so the core includes screen state in exported payloads (the state
         /// policy gates screen frames on an attached local/remote owner).
-        @MainActor private func attachRemoteOwner(to core: GhosttyEmbeddedSessionCore, id: String) throws {
+        @TerminalEngineActor private static func attachRemoteOwner(to core: GhosttyEmbeddedSessionCore, id: String) {
             let client = TerminalClient(
                 id: id, kind: .remoteViewer, identity: TerminalClientIdentity(label: "iPhone", deviceName: "iPhone"),
                 connectedAt: "2026-07-20T00:00:00Z")
@@ -121,9 +144,9 @@
         }
 
         /// Reconstructs the visible screen text from a self-contained full-frame export.
-        @MainActor private func renderedScreenText(of core: GhosttyEmbeddedSessionCore) -> String? {
+        @TerminalEngineActor private static func renderedScreenText(of core: GhosttyEmbeddedSessionCore) -> String? {
             guard let snapshot = core.currentRemoteStatePayload(reason: TerminalRemoteSessionStateReason.initial)?.renderSnapshot else { return nil }
-            return Self.screenText(of: snapshot)
+            return screenText(of: snapshot)
         }
 
         private static func screenText(of snapshot: GhosttyTerminalSnapshot) -> String {
@@ -154,7 +177,7 @@
         /// bytes at the tail of `output.log`. Pre-fix (one conflated do/catch) the trim throw returned false,
         /// so `clearScreen` returned ok:false and never touched the live renderer even though the clear bytes
         /// were already durable — diverging live state from a future replay.
-        @Test @MainActor func clearScreenSucceedsWhenTrimFailsAfterDurableWrite() async throws {
+        @Test func clearScreenSucceedsWhenTrimFailsAfterDurableWrite() async throws {
             let paths = try makeTemporaryPaths()
             defer { try? FileManager.default.removeItem(atPath: paths.rootDirectory) }
 
@@ -169,19 +192,22 @@
             // seeded from the file size (a fresh start would truncate output.log).
             let configuration = makeConfiguration(sessionID: "trim-clear-\(UUID().uuidString)", command: "cat")
             let pty = try makeAdoptablePTY()
-            let core = GhosttyEmbeddedSessionCore(launchConfiguration: configuration, paths: paths)
+            let coreBox = try await TerminalEngineActor.run { () -> Box<GhosttyEmbeddedSessionCore> in
+                Box(GhosttyEmbeddedSessionCore(launchConfiguration: configuration, paths: paths))
+            }
+            let core = coreBox.value
             defer {
                 tearDown(pty)
-                core.terminate()
+                TerminalEngineActor.runSynchronously { core.terminate() }
             }
             let record = DaemonHandoffSessionRecord(
                 sessionID: configuration.sessionID, masterFD: pty.master, childPID: pty.childPID, columns: 80, rows: 24, ownerEpoch: 0,
                 screenStateRevision: 0, appearance: ThemeAppearance.dark.rawValue)
             try await core.resumeFromHandoff(record)
-            try attachRemoteOwner(to: core, id: "remote-owner")
+            try await TerminalEngineActor.run { Self.attachRemoteOwner(to: core, id: "remote-owner") }
 
             // The replayed transcript renders the marker onto the live screen before the clear.
-            try await waitUntil("the pre-filled marker must render before the clear") { self.renderedScreenText(of: core)?.contains(marker) == true }
+            try await waitAsync { Self.renderedScreenText(of: core)?.contains(marker) == true }
 
             // Make the trim fail without disturbing the append: pre-create a directory at the sibling
             // output.log.trim temp path so the trim's open-for-writing throws EISDIR (unblockable even by
@@ -190,12 +216,14 @@
             try FileManager.default.createDirectory(atPath: trimBlockerPath, withIntermediateDirectories: false)
             defer { try? FileManager.default.removeItem(atPath: trimBlockerPath) }
 
-            let response = core.handleControlRequest(TerminalControlRequest(command: "clearScreen"))
+            let response = TerminalEngineActor.runSynchronously {
+                core.handleControlRequest(TerminalControlRequest(command: "clearScreen"))
+            }
 
             // The append succeeded (bytes durable) even though the trim threw, so clearScreen reports success
             // and applied the clear to the live renderer.
             #expect(response.ok, "clearScreen must report success when only the post-write trim failed: \(response.message)")
-            let screen = try #require(renderedScreenText(of: core))
+            let screen = try #require(TerminalEngineActor.runSynchronously { Self.renderedScreenText(of: core) })
             #expect(!screen.contains(marker), "the live renderer must apply the clear, dropping the marker from the visible screen")
 
             // The clear mutation bytes are durably persisted at the tail of output.log — the trim never

@@ -68,8 +68,9 @@ final class TerminalEngineInputUnderOutputLoadRegressionTests: XCTestCase {
         // and give the subscriber connection a moment to register with the stream server. This wait is a
         // precondition, not the regression assertion: the dot loop forks /bin/sleep per iteration, which
         // caps it near 30 dots/sec even on a fast machine, so a loaded CI runner needs well over 5s to
-        // clear the 64-byte threshold. The 5s input-latency budget below is what guards the regression.
-        let floodDeadline = Date().addingTimeInterval(20.0)
+        // clear the 64-byte threshold (#196). The ceiling is generous because it only gates flood start;
+        // the input-latency budget below is what guards the regression, and it stays tight.
+        let floodDeadline = Date().addingTimeInterval(30.0)
         var floodedByteCount = 0
         while Date() < floodDeadline {
             floodedByteCount = (FileManager.default.contents(atPath: box.outputPath)?.count) ?? 0

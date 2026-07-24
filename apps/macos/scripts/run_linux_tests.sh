@@ -18,12 +18,20 @@ rsync -a --delete \
   /workspace/apps/macos/ /root/src/apps/macos/
 
 cd /root/src/apps/macos
-export SPACES_GHOSTTY_VT_DYLIB_PATH=/root/src/apps/macos/.local/ghosttyvt/lib/libghostty-vt.so
-# The older XCTest-based Linux suites (handoff, submit-ordering) use async @MainActor test
-# methods, which deadlock under corelibs-xctest before the first line — the test job is
-# queued to the main executor while XCTest's main thread waits in a poll that never drains
-# it. Linux suites must use Swift Testing (async-main runner) to actually execute; convert a
-# suite and add it below to bring it into the lane.
+# The Linux ELF build of libghostty-vt stages into lib-linux (the shared lib/ holds the macOS
+# artifacts); it is produced by build_linux_spacesd_artifact.sh — see docs/dev.md for the
+# docker invocation. Fail up front with instructions rather than letting every suite die with
+# an opaque vtSessionUnavailable.
+export SPACES_GHOSTTY_VT_DYLIB_PATH=/root/src/apps/macos/.local/ghosttyvt/lib-linux/libghostty-vt.so
+if [ ! -e "$SPACES_GHOSTTY_VT_DYLIB_PATH" ]; then
+  echo "error: $SPACES_GHOSTTY_VT_DYLIB_PATH is missing." >&2
+  echo "Build the Linux artifacts first: run the build_linux_spacesd_artifact.sh docker command from docs/dev.md." >&2
+  exit 1
+fi
+# Linux daemon-side test suites must use Swift Testing (async-main runner), not XCTest:
+# corelibs-xctest's blocked main thread never drains queued async work, so an async XCTest
+# deadlocks before its first line ever runs (observed as the runner sitting at 0% CPU
+# indefinitely). Convert a suite to Swift Testing and add it below to bring it into the lane.
 #
 # Each Swift Testing suite here mutates the process-wide SPACES_DB_PATH/SPACES_RUNTIME_DIR
 # in its init/deinit, and `.serialized` only orders tests WITHIN a suite — Swift Testing
@@ -33,7 +41,9 @@ export SPACES_GHOSTTY_VT_DYLIB_PATH=/root/src/apps/macos/.local/ghosttyvt/lib/li
 for suite in \
   GhosttyLinuxHeadlessKeyEncodingTests \
   GhosttyLinuxHeadlessSessionResizeTests \
-  GhosttyLinuxHeadlessSessionTranscriptTrimTests; do
+  GhosttyLinuxHeadlessSessionTranscriptTrimTests \
+  GhosttyLinuxHeadlessSessionHandoffTests \
+  GhosttyLinuxHeadlessSubmitOrderingTests; do
   swift test \
     --scratch-path /root/spaces-test-build \
     --jobs 4 \

@@ -89,9 +89,7 @@
             return (coreBox, outputPath)
         }
 
-        private func terminate(_ core: Box<GhosttyEmbeddedSessionCore>) {
-            TerminalEngineActor.runSynchronously { core.value.terminate() }
-        }
+        private func terminate(_ core: Box<GhosttyEmbeddedSessionCore>) { TerminalEngineActor.runSynchronously { core.value.terminate() } }
 
         private func sendKey(_ key: String, to core: Box<GhosttyEmbeddedSessionCore>) {
             let response = TerminalEngineActor.runSynchronously { core.value.handleControlRequest(TerminalControlRequest(command: "key", key: key)) }

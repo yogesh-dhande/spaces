@@ -81,11 +81,27 @@ import spacesterminalghostty
     private var transientMode: TransientMode?
     private var persistentMessage: String?
     private var onCancel: (@MainActor () -> Void)?
-    private var autoDismissTask: Task<Void, Never>?
+    // `nonisolated(unsafe)` so deinit can cancel without asserting main-actor isolation: the last
+    // release of a banner (via its owning pane controller) can land on a background thread when an
+    // async task holds the final reference. `Task.cancel()` is thread-safe and deinit has
+    // exclusive access to self, so the opt-out is sound; every other access stays on the main actor.
+    private nonisolated(unsafe) var autoDismissTask: Task<Void, Never>?
+    // An extra retain on the banner's view-hierarchy root, dropped on the main queue by deinit so an
+    // off-main last release of the banner cannot deallocate AppKit objects on a background thread.
+    // The root suffices — it transitively retains every subview and the gesture recognizer, so
+    // releasing the stored properties off-main drops none of them to zero, and views added later
+    // are covered without touching this.
+    private nonisolated(unsafe) var mainThreadReleaseBag: [AnyObject] = []
 
-    public init(hostView: NSView) { buildUI(in: hostView) }
+    public init(hostView: NSView) {
+        buildUI(in: hostView)
+        mainThreadReleaseBag = [container]
+    }
 
-    deinit { MainActor.assumeIsolated { autoDismissTask?.cancel() } }
+    deinit {
+        autoDismissTask?.cancel()
+        MainThreadRelease.release(mainThreadReleaseBag)
+    }
 
     // MARK: - TerminalPaneBannerPresenting
 

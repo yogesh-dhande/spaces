@@ -130,6 +130,9 @@ private final class NotificationObserverBag: @unchecked Sendable {
     let defersInitialOwnerClientAttach: Bool
     let copySelectionAction: (@MainActor () -> Bool)?
     let pasteClipboardAction: (@MainActor () -> Bool)?
+    /// Unit tests inject a uniquely-named pasteboard here so copy/paste tests never touch the user's
+    /// real clipboard. Nil in the app, where copy/paste keep using `NSPasteboard.general`.
+    public var pasteboardOverrideForTesting: NSPasteboard?
     private let ownerWindowFocusAction: (@MainActor (NSWindow?) -> Void)?
     private let ownerSurfaceFocusAction: (@MainActor (Bool) -> Void)?
     let onWindowFocus: (@MainActor (String) -> Void)?
@@ -166,6 +169,17 @@ private final class NotificationObserverBag: @unchecked Sendable {
     /// Set by the host while it defers the pane's initial owner presentation; the
     /// layout collapses to a full-bleed blank surface until presentation completes.
     var isDeferringInitialOwnerPresentation = false
+    // An extra retain on the pane's view-hierarchy root, dropped on the main queue by deinit so an
+    // off-main last release of the pane cannot deallocate AppKit objects on a background thread.
+    // The root suffices — every UI member below is one of its descendants, so releasing the stored
+    // properties off-main drops none of them to zero, and views added later are covered without
+    // touching this.
+    private nonisolated(unsafe) var mainThreadReleaseBag: [AnyObject] = []
+    // The view root above does not cover the session host: a viewer pane never attaches the host's
+    // Ghostty terminal view, and releasing the surface strips `terminalContainer`'s subviews, so the
+    // host and its C-backed view can outlive the hierarchy. Replaced rather than appended in step
+    // with `activeGhosttySessionHost` — appending would pin every past host's mirror alive.
+    private nonisolated(unsafe) var activeGhosttySessionHostForMainThreadRelease: AnyObject?
 
     /// Title the host should display for this pane (window title today, tab title
     /// later). Updated on every refresh together with `representedWorkingDirectoryURL`,
@@ -250,6 +264,11 @@ private final class NotificationObserverBag: @unchecked Sendable {
         startObservingApplicationActivation()
         buildUI()
         if performInitialRefresh { refreshNow() }
+        mainThreadReleaseBag = [view]
+    }
+
+    deinit {
+        MainThreadRelease.release(mainThreadReleaseBag + [activeGhosttySessionHostForMainThreadRelease].compactMap { $0 })
     }
 
     public func requestOwnershipIfNeeded() {
@@ -779,6 +798,7 @@ private final class NotificationObserverBag: @unchecked Sendable {
         ghosttyRendererHost?.releaseRendererSurface()
         terminalContainer.subviews.forEach { $0.removeFromSuperview() }
         activeGhosttySessionHost = host
+        activeGhosttySessionHostForMainThreadRelease = hostObject
         let resolvedHostComponents = Self.resolveGhosttyHostComponents(host)
         ghosttyRendererHost = resolvedHostComponents.rendererHost
         ghosttySessionInfoProvider = resolvedHostComponents.sessionInfoProvider

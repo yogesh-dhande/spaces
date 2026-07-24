@@ -20,7 +20,7 @@ final class ExitedSpawnedAgentReconcileTests: XCTestCase {
         let recorder = DeliveryRecorder()
         WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter { try recorder.deliver($0, $1) }
         defer { WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter(nil) }
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
 
         let sessionID = UUID().uuidString
@@ -45,7 +45,7 @@ final class ExitedSpawnedAgentReconcileTests: XCTestCase {
         let recorder = DeliveryRecorder()
         WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter { try recorder.deliver($0, $1) }
         defer { WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter(nil) }
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
 
         let sessionID = UUID().uuidString
@@ -72,7 +72,7 @@ final class ExitedSpawnedAgentReconcileTests: XCTestCase {
         let recorder = DeliveryRecorder()
         WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter { try recorder.deliver($0, $1) }
         defer { WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter(nil) }
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
 
         let sessionID = UUID().uuidString
@@ -115,7 +115,7 @@ final class ExitedSpawnedAgentReconcileTests: XCTestCase {
         let recorder = DeliveryRecorder()
         WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter { try recorder.deliver($0, $1) }
         defer { WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter(nil) }
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
 
         let sessionID = UUID().uuidString
@@ -153,7 +153,7 @@ final class ExitedSpawnedAgentReconcileTests: XCTestCase {
         let recorder = DeliveryRecorder()
         WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter { try recorder.deliver($0, $1) }
         defer { WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter(nil) }
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         try store.setWorkspaceAgentLaunchers(workspaceID: workspace.id, launchers: [AgentLauncher(name: "Codex", command: "codex")])
 

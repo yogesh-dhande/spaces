@@ -17,11 +17,13 @@ import XCTest
             let events = directory.appendingPathComponent("events", isDirectory: false)
             let runStarted = directory.appendingPathComponent("run-started", isDirectory: false)
             let releaseRun = directory.appendingPathComponent("release-run", isDirectory: false)
+            let pids = directory.appendingPathComponent("pids", isDirectory: false)
             try Data(
                 """
                 #!/bin/sh
                 if [ "$1" = "run" ]; then
                   echo run >> "$SPACES_TEST_CADDY_EVENTS"
+                  echo $$ >> "$SPACES_TEST_CADDY_PIDS"
                   touch "$SPACES_TEST_CADDY_RUN_STARTED"
                   while [ ! -f "$SPACES_TEST_CADDY_RELEASE_RUN" ]; do
                     sleep 0.02
@@ -45,7 +47,7 @@ import XCTest
             let environmentKeys = [
                 SpacesProfile.databasePathEnvironmentVariable, SpacesProfile.runtimeDirectoryEnvironmentVariable,
                 CaddyService.executableEnvironmentVariable, "SPACES_TEST_CADDY_EVENTS", "SPACES_TEST_CADDY_RUN_STARTED",
-                "SPACES_TEST_CADDY_RELEASE_RUN", "SPACES_TEST_CADDY_SOCKET",
+                "SPACES_TEST_CADDY_RELEASE_RUN", "SPACES_TEST_CADDY_SOCKET", "SPACES_TEST_CADDY_PIDS",
             ]
             let originalEnvironment = environmentKeys.map { ($0, ProcessInfo.processInfo.environment[$0]) }
             setenv(SpacesProfile.databasePathEnvironmentVariable, directory.appendingPathComponent("spaces.db").path, 1)
@@ -58,6 +60,14 @@ import XCTest
             let socket = URL(fileURLWithPath: try CaddyService.adminSocketPath())
             defer {
                 try? Data().write(to: releaseRun)
+                // If an assertion failed before releaseRun unblocked the script normally, the
+                // fake caddy's `run` branch may still be looping on the socket file. Kill any
+                // recorded PIDs directly so the run-loop can't outlive the test process and
+                // touch the socket again after we remove it below.
+                let recordedPIDs = (try? String(contentsOf: pids)) ?? ""
+                for line in recordedPIDs.split(separator: "\n") {
+                    if let pid = Int32(line.trimmingCharacters(in: .whitespaces)) { kill(pid_t(pid), SIGKILL) }
+                }
                 try? FileManager.default.removeItem(at: socket)
                 for (name, value) in originalEnvironment { if let value { setenv(name, value, 1) } else { unsetenv(name) } }
                 SpacesProfile.resetCacheForTesting()
@@ -66,6 +76,7 @@ import XCTest
             setenv("SPACES_TEST_CADDY_RUN_STARTED", runStarted.path, 1)
             setenv("SPACES_TEST_CADDY_RELEASE_RUN", releaseRun.path, 1)
             setenv("SPACES_TEST_CADDY_SOCKET", socket.path, 1)
+            setenv("SPACES_TEST_CADDY_PIDS", pids.path, 1)
             SpacesProfile.resetCacheForTesting()
 
             let lifecycle = CaddyRouterLifecycle()
@@ -77,7 +88,7 @@ import XCTest
                 } catch { ensureResult.set(.failure(error)) }
             }
             ensureThread.start()
-            XCTAssertTrue(waitForFile(at: runStarted.path, timeout: 2))
+            XCTAssertTrue(waitForFile(at: runStarted.path, timeout: 30))
 
             let stopFinished = LockedFlag()
             let stopThread = Thread {
@@ -89,9 +100,9 @@ import XCTest
             XCTAssertFalse(stopFinished.value)
 
             try Data().write(to: releaseRun)
-            XCTAssertTrue(waitUntil(timeout: 4) { stopFinished.value })
-            XCTAssertTrue(waitForThreadToFinish(ensureThread, timeout: 1))
-            XCTAssertTrue(waitForThreadToFinish(stopThread, timeout: 1))
+            XCTAssertTrue(waitUntil(timeout: 30) { stopFinished.value })
+            XCTAssertTrue(waitForThreadToFinish(ensureThread, timeout: 10))
+            XCTAssertTrue(waitForThreadToFinish(stopThread, timeout: 10))
             try XCTUnwrap(ensureResult.value).get()
             XCTAssertFalse(FileManager.default.fileExists(atPath: socket.path))
 

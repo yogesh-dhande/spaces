@@ -530,6 +530,11 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// a device that is actually unreachable is reported promptly. Injectable so tests can shrink it
     /// instead of sleeping through the production wait.
     @ObservationIgnored private let refreshFailureAlertDelay: Duration
+    /// Source of "now" for the refresh-failure streak's start time and elapsed-time check. The streak is
+    /// pure bookkeeping against a clock — no real waiting happens between reading it twice — so tests
+    /// inject a fake that advances on command instead of sleeping past `refreshFailureAlertDelay` in
+    /// real time. Production always uses the real clock.
+    @ObservationIgnored private let now: @Sendable () -> ContinuousClock.Instant
 
     init() {
         #if DEBUG
@@ -545,6 +550,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         daemonUpdatePollInterval = .seconds(3)
         daemonUpdateTimeout = .seconds(30)
         refreshFailureAlertDelay = .seconds(5)
+        now = { ContinuousClock.now }
         // The real settings are persisted regardless of Demo Mode; the demo device is never written to
         // disk, so a launch that lands in Demo Mode still keeps the real records and settings intact.
         SpacesMobileSettingsStore.save(deviceState.settings)
@@ -575,7 +581,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
     init(
         settings: SpacesMobileConnectionSettings, bridgeClient: SpacesDeviceAPIClient, browserProxy: SpacesMobileBrowserProxy? = nil,
         daemonUpdatePollInterval: Duration = .seconds(3), daemonUpdateTimeout: Duration = .seconds(30),
-        refreshFailureAlertDelay: Duration = .seconds(5)
+        refreshFailureAlertDelay: Duration = .seconds(5), now: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now }
     ) {
         self.settings = settings
         pairedDevices = []
@@ -587,6 +593,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         self.daemonUpdatePollInterval = daemonUpdatePollInterval
         self.daemonUpdateTimeout = daemonUpdateTimeout
         self.refreshFailureAlertDelay = refreshFailureAlertDelay
+        self.now = now
     }
 
     /// The workspaces this client lists: neither archived nor hidden, matching the Mac sidebar's
@@ -807,7 +814,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         // unreachable device has already been failing for that long by the time it throws. Paired with
         // the monitoring generation it was measured in, since durations are only comparable within one
         // uninterrupted stretch of watching the connection.
-        let attemptStartedAt = ContinuousClock.now
+        let attemptStartedAt = now()
         let monitoringGeneration = connectionMonitoringGeneration
         defer {
             isLoading = false
@@ -875,7 +882,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
             let streakStartedAt = refreshFailureStreak?.identity == identity ? refreshFailureStreak?.startedAt : nil
             let startedAt = streakStartedAt ?? attemptStartedAt
             refreshFailureStreak = (identity: identity, startedAt: startedAt)
-            guard ContinuousClock.now - startedAt >= refreshFailureAlertDelay else { return }
+            guard now() - startedAt >= refreshFailureAlertDelay else { return }
             errorMessage = error.localizedDescription
         }
     }
