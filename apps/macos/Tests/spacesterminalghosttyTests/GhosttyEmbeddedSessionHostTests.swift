@@ -114,6 +114,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
     /// (engine-isolated) condition.
     private func waitUntil(
         timeout: TimeInterval = 30, pollInterval: TimeInterval = 0.05, file: StaticString = #filePath, line: UInt = #line,
+        diagnostics: (() -> String)? = nil,
         _ condition: @escaping @TerminalEngineActor () -> Bool
     ) async throws {
         let deadline = Date().addingTimeInterval(timeout)
@@ -122,7 +123,9 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             try? await Task.sleep(for: .seconds(pollInterval))
         }
 
-        XCTFail("Timed out waiting for condition.", file: file, line: line)
+        var message = "Timed out waiting for condition."
+        if let diagnostics { message += " \(diagnostics())" }
+        XCTFail(message, file: file, line: line)
         throw NSError(domain: "GhosttyEmbeddedSessionHostTests", code: 1)
     }
 
@@ -144,6 +147,30 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         guard pid > 0 else { return false }
         if kill(pid, 0) == 0 { return true }
         return errno == EPERM
+    }
+
+    /// Shared by both `python3` READY probes below: reports what the surface actually shows and
+    /// whether the child process is still around, so a timeout on "READY never appeared" says why
+    /// instead of just that it happened. `.debugDescription` renders control characters (the mouse
+    /// tracking escape sequences the probes write before READY) as readable `\u{..}` escapes rather
+    /// than letting them mangle the CI log.
+    private func readyProbeDiagnostics(sessionDriver: GhosttyEmbeddedTerminalSessionDriver, scriptURL: URL) -> String {
+        let (snapshot, childPID, foregroundPID) = TerminalEngineActor.runSynchronously {
+            (sessionDriver.snapshotText(), sessionDriver.childPID(), sessionDriver.foregroundPID())
+        }
+        // A snapshot is a fixed-size terminal grid, so it is mostly blank padding below whatever the
+        // probe printed. Drop the blank lines before truncating: taking a raw suffix would log 800
+        // spaces from the bottom of the grid and hide the error text sitting at the top.
+        let meaningfulSnapshot =
+            snapshot
+            .map { $0.split(separator: "\n", omittingEmptySubsequences: false).map { $0.trimmingCharacters(in: .whitespaces) } }
+            .map { $0.filter { !$0.isEmpty }.joined(separator: "\\n") }
+        let truncatedSnapshot = String((meaningfulSnapshot ?? "<nil>").suffix(800)).debugDescription
+        let alive = childPID.map { Self.processIsAlive($0) }
+        let scriptExists = FileManager.default.fileExists(atPath: scriptURL.path)
+        return
+            "snapshot=\(truncatedSnapshot) childPID=\(childPID.map(String.init) ?? "nil") "
+            + "foregroundPID=\(foregroundPID.map(String.init) ?? "nil") alive=\(alive.map(String.init) ?? "nil") scriptExists=\(scriptExists)"
     }
 
     func testHostManagedPTYLaunchesInteractiveShellAsLoginShell() {
@@ -2254,7 +2281,9 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         let sessionDriver = driverBox.value
         defer { TerminalEngineActor.runSynchronously { sessionDriver.terminate() } }
 
-        try await waitUntil { sessionDriver.snapshotText()?.contains("READY") == true }
+        try await waitUntil(diagnostics: { self.readyProbeDiagnostics(sessionDriver: sessionDriver, scriptURL: scriptURL) }) {
+            sessionDriver.snapshotText()?.contains("READY") == true
+        }
         let size = try XCTUnwrap(TerminalEngineActor.runSynchronously { sessionDriver.surfaceCellSize() })
         XCTAssertTrue(
             TerminalEngineActor.runSynchronously {
@@ -2328,7 +2357,9 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         let sessionDriver = driverBox.value
         defer { TerminalEngineActor.runSynchronously { sessionDriver.terminate() } }
 
-        try await waitUntil { sessionDriver.snapshotText()?.contains("READY") == true }
+        try await waitUntil(diagnostics: { self.readyProbeDiagnostics(sessionDriver: sessionDriver, scriptURL: scriptURL) }) {
+            sessionDriver.snapshotText()?.contains("READY") == true
+        }
         let pointerPosition = TerminalScrollPointerPosition(x: 0.5, y: 0.5)
 
         XCTAssertTrue(
