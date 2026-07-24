@@ -497,6 +497,11 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// change of connection restarts the run without every reset site having to clear it. `nil` once a
     /// refresh succeeds.
     @ObservationIgnored private var refreshFailureStreak: (identity: Int, startedAt: ContinuousClock.Instant)?
+    /// Bumped every time the app enters the background. A refresh attempt captures it at the start and
+    /// records nothing about failure timing if it changed, because an attempt that spans suspension has
+    /// no meaningful duration: `ContinuousClock` keeps advancing while the process is frozen, so most of
+    /// what it measured is time the app spent not watching the connection at all.
+    @ObservationIgnored private var appBackgroundGeneration = 0
     /// On-device loopback reverse proxy WKWebView browser sessions load through. Owned for the app's
     /// lifetime (its installation identity is stable across device switches), started/stopped by
     /// `RootTabView`'s scene-phase observation.
@@ -739,7 +744,13 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// failure recorded before the app left and one recorded after it returns are minutes apart with no
     /// evidence of anything in between. Without this, that pair reads as a long-running outage and the
     /// first blip on the way back raises the alert — the very interruption the gate exists to prevent.
-    func noteAppEnteredBackground() { refreshFailureStreak = nil }
+    /// Attempts already in flight are covered too: they resume with a start time from before the app
+    /// left, so `performRefresh` drops their failure timing rather than letting it rebuild the run the
+    /// reset just ended.
+    func noteAppEnteredBackground() {
+        refreshFailureStreak = nil
+        appBackgroundGeneration += 1
+    }
 
     /// The URL a `WKWebView` should load for a browser session row, rebuilt against the proxy's fixed
     /// loopback port. `nil` only if the route's identity host somehow fails to form a valid URL.
@@ -792,8 +803,11 @@ private enum SpacesMobileMutationTimeoutRecovery {
     private func performRefresh(identity: Int) async {
         isLoading = true
         // When this attempt began, not when it failed: a request that burns its whole timeout against an
-        // unreachable device has already been failing for that long by the time it throws.
+        // unreachable device has already been failing for that long by the time it throws. Paired with
+        // the background generation it was measured in, since the two are only comparable within one
+        // foreground stretch.
         let attemptStartedAt = ContinuousClock.now
+        let backgroundGeneration = appBackgroundGeneration
         defer {
             isLoading = false
             refreshInFlight = nil
@@ -853,6 +867,10 @@ private enum SpacesMobileMutationTimeoutRecovery {
             // seconds and the slow case only after a minute; timing the run reports both within one
             // window. User-initiated work (mutations, deep links) does not come through here — it still
             // reports on its first failure.
+            // This attempt started before the app last backgrounded, so its elapsed time is mostly time
+            // spent suspended. It cannot start or extend a run — that would resurrect, with a start time
+            // from before the app left, exactly the run `noteAppEnteredBackground` ended.
+            guard backgroundGeneration == appBackgroundGeneration else { return }
             let streakStartedAt = refreshFailureStreak?.identity == identity ? refreshFailureStreak?.startedAt : nil
             let startedAt = streakStartedAt ?? attemptStartedAt
             refreshFailureStreak = (identity: identity, startedAt: startedAt)

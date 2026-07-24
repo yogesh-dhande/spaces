@@ -796,6 +796,31 @@
             XCTAssertNil(model.errorMessage)
         }
 
+        /// A refresh already in flight when the app backgrounds resumes with a start time from before the
+        /// app left. Letting it record a failure would rebuild the run the background reset just ended,
+        /// dated before the suspension — and the first failure after that alerts on time the app spent
+        /// frozen.
+        func testFailureFromARefreshThatSpannedBackgroundingIsNotTimed() async {
+            let gate = SpacesMobileAsyncGate()
+            let settings = SpacesMobileConnectionSettings()
+            let client = SpacesDeviceAPIClient(settings: settings) { _ in
+                await gate.wait()
+                throw SpacesDeviceAPIClientError.requestFailed("Socket is not connected")
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client, refreshFailureAlertDelay: .milliseconds(50))
+
+            let refresh = Task { await model.refresh() }
+            try? await Task.sleep(for: .milliseconds(10))
+            model.noteAppEnteredBackground()
+            // Stands in for the suspension: by the time the interrupted attempt resumes, more than the
+            // alert delay has passed on a clock that never stops.
+            try? await Task.sleep(for: .milliseconds(60))
+            await gate.open()
+            await refresh.value
+
+            XCTAssertNil(model.errorMessage)
+        }
+
         /// A mutation's refreshed overview proves the device answered, so it ends the run exactly as a
         /// successful poll does — otherwise the next isolated failure inherits a start time from an outage
         /// that demonstrably ended.
