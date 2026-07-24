@@ -497,11 +497,11 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// change of connection restarts the run without every reset site having to clear it. `nil` once a
     /// refresh succeeds.
     @ObservationIgnored private var refreshFailureStreak: (identity: Int, startedAt: ContinuousClock.Instant)?
-    /// Bumped every time the app enters the background. A refresh attempt captures it at the start and
-    /// records nothing about failure timing if it changed, because an attempt that spans suspension has
-    /// no meaningful duration: `ContinuousClock` keeps advancing while the process is frozen, so most of
-    /// what it measured is time the app spent not watching the connection at all.
-    @ObservationIgnored private var appBackgroundGeneration = 0
+    /// Bumped every time the app stops watching this connection (see `noteConnectionMonitoringPaused`).
+    /// A refresh attempt captures it at the start and records nothing about failure timing if it changed,
+    /// because an attempt spanning a pause has no meaningful duration: the clock keeps advancing while
+    /// the app is suspended or idle, so most of what it measured is time nothing was being watched.
+    @ObservationIgnored private var connectionMonitoringGeneration = 0
     /// On-device loopback reverse proxy WKWebView browser sessions load through. Owned for the app's
     /// lifetime (its installation identity is stable across device switches), started/stopped by
     /// `RootTabView`'s scene-phase observation.
@@ -739,17 +739,18 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// Stops the loopback browser proxy and all live tunnels. Call when the app enters the background.
     func browserProxyStop() { Task { await browserProxy.stop() } }
 
-    /// Ends the current run of failed refreshes because the app stopped watching the connection. The
-    /// alert gate reads wall-clock time between failures, and a backgrounded app polls nothing, so a
-    /// failure recorded before the app left and one recorded after it returns are minutes apart with no
-    /// evidence of anything in between. Without this, that pair reads as a long-running outage and the
-    /// first blip on the way back raises the alert — the very interruption the gate exists to prevent.
-    /// Attempts already in flight are covered too: they resume with a start time from before the app
-    /// left, so `performRefresh` drops their failure timing rather than letting it rebuild the run the
-    /// reset just ended.
-    func noteAppEnteredBackground() {
+    /// Ends the current run of failed refreshes because the app stopped watching this connection — it
+    /// backgrounded, or the overview poll paused (a terminal or browser detail opened, another tab took
+    /// over, the device became unpaired). The alert gate reads wall-clock time between failures, and
+    /// nothing polls during a pause, so a failure recorded before it and one recorded after are far apart
+    /// with no evidence of anything in between. Without this, that pair reads as a long-running outage
+    /// and the first blip on the way back raises the alert — the very interruption the gate exists to
+    /// prevent. Attempts already in flight are covered too: they resume with a start time from before the
+    /// pause, so `performRefresh` drops their failure timing rather than letting it rebuild the run this
+    /// just ended.
+    func noteConnectionMonitoringPaused() {
         refreshFailureStreak = nil
-        appBackgroundGeneration += 1
+        connectionMonitoringGeneration += 1
     }
 
     /// The URL a `WKWebView` should load for a browser session row, rebuilt against the proxy's fixed
@@ -804,10 +805,10 @@ private enum SpacesMobileMutationTimeoutRecovery {
         isLoading = true
         // When this attempt began, not when it failed: a request that burns its whole timeout against an
         // unreachable device has already been failing for that long by the time it throws. Paired with
-        // the background generation it was measured in, since the two are only comparable within one
-        // foreground stretch.
+        // the monitoring generation it was measured in, since durations are only comparable within one
+        // uninterrupted stretch of watching the connection.
         let attemptStartedAt = ContinuousClock.now
-        let backgroundGeneration = appBackgroundGeneration
+        let monitoringGeneration = connectionMonitoringGeneration
         defer {
             isLoading = false
             refreshInFlight = nil
@@ -867,10 +868,10 @@ private enum SpacesMobileMutationTimeoutRecovery {
             // seconds and the slow case only after a minute; timing the run reports both within one
             // window. User-initiated work (mutations, deep links) does not come through here — it still
             // reports on its first failure.
-            // This attempt started before the app last backgrounded, so its elapsed time is mostly time
-            // spent suspended. It cannot start or extend a run — that would resurrect, with a start time
-            // from before the app left, exactly the run `noteAppEnteredBackground` ended.
-            guard backgroundGeneration == appBackgroundGeneration else { return }
+            // This attempt started before the app last stopped watching, so its elapsed time is mostly
+            // time nothing was polling. It cannot start or extend a run — that would resurrect, dated
+            // before the pause, exactly the run `noteConnectionMonitoringPaused` ended.
+            guard monitoringGeneration == connectionMonitoringGeneration else { return }
             let streakStartedAt = refreshFailureStreak?.identity == identity ? refreshFailureStreak?.startedAt : nil
             let startedAt = streakStartedAt ?? attemptStartedAt
             refreshFailureStreak = (identity: identity, startedAt: startedAt)

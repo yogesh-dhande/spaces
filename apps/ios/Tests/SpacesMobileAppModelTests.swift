@@ -780,27 +780,27 @@
             XCTAssertNil(model.errorMessage, "the run restarts at the failure after the success, so nothing has persisted yet")
         }
 
-        /// A backgrounded app polls nothing, so time spent there is not evidence of a failing connection.
-        /// A failure recorded before the app left and one recorded after it returns must not read as one
-        /// long outage, or the first blip on the way back raises the alert this gate exists to prevent.
-        func testFailureRunEndsWhenTheAppEntersTheBackground() async {
+        /// Nothing polls while the app is backgrounded or the poll is paused behind a detail route, so
+        /// that time is not evidence of a failing connection. A failure recorded before the pause and one
+        /// recorded after must not read as one long outage, or the first blip on the way back raises the
+        /// alert this gate exists to prevent.
+        func testFailureRunEndsWhenConnectionMonitoringPauses() async {
             let model = makeModel(
                 refreshFailure: SpacesDeviceAPIClientError.requestFailed("Socket is not connected"),
                 refreshFailureAlertDelay: .milliseconds(50))
 
             await model.refresh()
             try? await Task.sleep(for: .milliseconds(60))
-            model.noteAppEnteredBackground()
+            model.noteConnectionMonitoringPaused()
             await model.refresh()
 
             XCTAssertNil(model.errorMessage)
         }
 
-        /// A refresh already in flight when the app backgrounds resumes with a start time from before the
-        /// app left. Letting it record a failure would rebuild the run the background reset just ended,
-        /// dated before the suspension — and the first failure after that alerts on time the app spent
-        /// frozen.
-        func testFailureFromARefreshThatSpannedBackgroundingIsNotTimed() async {
+        /// A refresh already in flight when monitoring pauses resumes with a start time from before the
+        /// pause. Letting it record a failure would rebuild the run the pause just ended, dated before it
+        /// — and the first failure after that alerts on time nothing was being watched.
+        func testFailureFromARefreshThatSpannedAPauseIsNotTimed() async {
             let gate = SpacesMobileAsyncGate()
             let settings = SpacesMobileConnectionSettings()
             let client = SpacesDeviceAPIClient(settings: settings) { _ in
@@ -811,9 +811,9 @@
 
             let refresh = Task { await model.refresh() }
             try? await Task.sleep(for: .milliseconds(10))
-            model.noteAppEnteredBackground()
-            // Stands in for the suspension: by the time the interrupted attempt resumes, more than the
-            // alert delay has passed on a clock that never stops.
+            model.noteConnectionMonitoringPaused()
+            // Stands in for the pause: by the time the interrupted attempt resumes, more than the alert
+            // delay has passed on a clock that never stops.
             try? await Task.sleep(for: .milliseconds(60))
             await gate.open()
             await refresh.value

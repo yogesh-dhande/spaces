@@ -64,7 +64,7 @@ struct RootTabView: View {
             case .active: model.browserProxyStart()
             case .background:
                 model.browserProxyStop()
-                model.noteAppEnteredBackground()
+                model.noteConnectionMonitoringPaused()
             case .inactive: break
             @unknown default: break
             }
