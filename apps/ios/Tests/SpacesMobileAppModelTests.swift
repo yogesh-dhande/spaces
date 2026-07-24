@@ -879,6 +879,40 @@
             XCTAssertFalse(model.isApplyingDaemonUpdate, "the retry releases the flag when it finishes")
         }
 
+        /// A daemon update takes its device offline deliberately, so an overview refresh that fails
+        /// inside that window is expected rather than news. Pausing the poll cannot cover a refresh
+        /// already in flight when the user taps Update, or a pull-to-refresh during the update, so the
+        /// failure path itself stays quiet — but only for the duration of the update.
+        func testOverviewFailureDuringDaemonUpdateStaysQuietButNotAfterward() async {
+            let settings = SpacesMobileConnectionSettings()
+            let unreachable = SpacesDeviceAPIResponse(ok: false, message: "The device is unreachable.")
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                switch request.commandName {
+                case "requestDaemonRestart": return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                // Everything else fails: the daemon is mid-handoff and answering nothing.
+                default: return unreachable
+                }
+            }
+            // A budget long enough that the update is unambiguously still in flight for the refresh
+            // below; the task is cancelled rather than waited out.
+            let model = SpacesMobileAppModel(
+                settings: settings, bridgeClient: client, daemonUpdatePollInterval: .milliseconds(20), daemonUpdateTimeout: .seconds(5))
+
+            let update = Task { await model.requestDaemonUpdate() }
+            while !model.isApplyingDaemonUpdate { try? await Task.sleep(for: .milliseconds(5)) }
+
+            await model.refresh()
+            XCTAssertNil(model.errorMessage, "an outage the update flow is already watching must not raise a connection error")
+
+            update.cancel()
+            await update.value
+            XCTAssertFalse(model.isApplyingDaemonUpdate)
+
+            // The same failure outside the update window is a genuine connection problem and must show.
+            await model.refresh()
+            XCTAssertNotNil(model.errorMessage, "suppression is scoped to the update; an ordinary unreachable device still reports")
+        }
+
         /// Switching the active device mid-poll (modeled here the same way other identity-change tests
         /// do, via `handleAuthenticationFailure`) must not let a stale poll result publish onto the new
         /// device, nor clobber the notice the switch itself raised.

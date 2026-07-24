@@ -809,6 +809,13 @@ private enum SpacesMobileMutationTimeoutRecovery {
                 handleAuthenticationFailure(message: recoveryMessage)
                 return
             }
+            // A requested daemon update takes the device offline on purpose, and `requestDaemonUpdate()`
+            // is already watching across that outage. Pausing the overview poll keeps most refreshes out
+            // of the window, but not one already awaiting its overview when the user taps Update, nor a
+            // pull-to-refresh during it — so the suppression has to live here, where the failure lands,
+            // rather than only at the call sites that start a refresh. An authentication failure above
+            // still surfaces: that is not an outage and does not resolve itself when the daemon returns.
+            guard !isApplyingDaemonUpdate else { return }
             errorMessage = error.localizedDescription
         }
     }
