@@ -1715,7 +1715,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     private static func isTransientInputTransportError(_ error: Error) -> Bool {
         if let code = transientPOSIXErrorCode(error),
             code == Int(EAGAIN) || code == Int(EWOULDBLOCK) || code == Int(ETIMEDOUT) || code == Int(ECONNRESET) || code == Int(ECONNABORTED)
-                || code == Int(EPIPE) || code == Int(ECONNREFUSED) || code == Int(EBADF) || code == Int(ENOTSOCK)
+                || code == Int(EPIPE) || code == Int(ECONNREFUSED) || code == Int(EBADF) || code == Int(ENOTSOCK) || code == Int(ENOTCONN)
         {
             return true
         }
@@ -1730,10 +1730,13 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         }
     }
 
+    /// `ENOTCONN` belongs with the rest: a session's live-state stream is its own connection, outside the
+    /// request transport that drops its socket when the app backgrounds, so it comes back from suspension
+    /// dead and reports "socket is not connected" on the way to a reconnect that immediately succeeds.
     private static func isTransientReconnectError(_ error: Error) -> Bool {
         if let code = transientPOSIXErrorCode(error),
             code == Int(EAGAIN) || code == Int(EWOULDBLOCK) || code == Int(ETIMEDOUT) || code == Int(ECONNRESET) || code == Int(ECONNABORTED)
-                || code == Int(EPIPE) || code == Int(ECONNREFUSED)
+                || code == Int(EPIPE) || code == Int(ECONNREFUSED) || code == Int(ENOTCONN)
         {
             return true
         }
