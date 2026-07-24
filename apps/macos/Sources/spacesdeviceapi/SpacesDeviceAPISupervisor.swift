@@ -84,6 +84,10 @@ import workspacecore
         if let existingServer = server, !existingServer.isRunning {
             advertiser?.stop()
             advertiser = nil
+            // Tear the dead server down before dropping the reference: its connections, stream
+            // relays, and observers stay alive otherwise, so every restart would leak another set
+            // of sockets and timers into the daemon.
+            existingServer.stop()
             server = nil
             log("Device API listener stopped; scheduling restart")
         }
