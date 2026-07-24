@@ -506,6 +506,9 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// Interval between daemon-status polls in `requestDaemonUpdate()`. Injectable so tests can shrink
     /// it instead of sleeping through the production wait.
     @ObservationIgnored private let daemonUpdatePollInterval: Duration
+    /// Bumped by each `requestDaemonUpdate()` call so an invocation can tell whether it still owns
+    /// `isApplyingDaemonUpdate` when it exits. See that method's ownership comment.
+    @ObservationIgnored private var daemonUpdateGeneration = 0
     /// Wall-clock budget `requestDaemonUpdate()` polls for before giving up (production default 30s).
     /// Expressed as time rather than an attempt count because each attempt's own request timeout
     /// (`fetchDaemonStatus`'s 8s) means the two are not proportional — a fixed attempt count against an
@@ -830,8 +833,15 @@ private enum SpacesMobileMutationTimeoutRecovery {
     func requestDaemonUpdate() async {
         guard !isMutating, !isApplyingDaemonUpdate else { return }
         let identity = overviewIdentity
+        // The in-flight flag is released before this invocation's final refresh (see the timeout path
+        // below), so a retry can legitimately start while this one is still finishing. Claim a
+        // generation and only surrender the flag while still holding it, or a slow predecessor's exit
+        // would clear a live successor's state — re-enabling the button mid-update and resuming the
+        // overview poll straight into the handoff this flag exists to protect.
+        daemonUpdateGeneration += 1
+        let generation = daemonUpdateGeneration
         isApplyingDaemonUpdate = true
-        defer { isApplyingDaemonUpdate = false }
+        defer { if daemonUpdateGeneration == generation { isApplyingDaemonUpdate = false } }
 
         do { try await bridgeClient.requestDaemonRestart(commandChannel: commandChannel) } catch is CancellationError { return } catch {
             guard identity == overviewIdentity else { return }

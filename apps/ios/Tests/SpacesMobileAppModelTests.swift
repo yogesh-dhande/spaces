@@ -820,6 +820,65 @@
             XCTAssertLessThan(elapsed, budget + probeDuration + .milliseconds(600), "the poll must stop on its time budget")
         }
 
+        /// A timed-out update releases the in-flight flag before its reconciling refresh, so a retry can
+        /// start while the previous invocation is still finishing that refresh. The slow predecessor must
+        /// not clear the flag out from under the retry: doing so would re-enable the Update Daemon button
+        /// and resume the overview poll in the middle of the retry's handoff.
+        func testSlowPredecessorDoesNotClearARetrysInFlightState() async {
+            let settings = SpacesMobileConnectionSettings()
+            // Both waits are gates rather than sleeps, so each task parks exactly where the test needs it
+            // regardless of machine load: the predecessor inside its post-timeout refresh, the retry
+            // inside its poll. Timing-based staging flakes precisely when the box is busy.
+            let overviewGate = SpacesMobileAsyncGate()
+            let retryProbeGate = SpacesMobileAsyncGate()
+            let probeCounter = SpacesMobilePollCounter()
+            let pendingStatus = daemonStatus(protocolVersion: SpacesWireProtocol.version, installedVersion: "2.0.0")
+            let overview = makeOverview(daemonStatus: pendingStatus)
+            let budget = Duration.milliseconds(50)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                switch request.commandName {
+                case "requestDaemonRestart": return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                case "daemonStatus":
+                    // The predecessor's one probe outlasts its own budget so it times out; every later
+                    // probe belongs to the retry and parks until the test releases it.
+                    if await probeCounter.increment() == 1 {
+                        try? await Task.sleep(for: budget * 2)
+                    } else {
+                        await retryProbeGate.wait()
+                    }
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .daemonStatus(pendingStatus))
+                case "overview":
+                    // Holds the predecessor inside its post-timeout refresh until the test releases it.
+                    await overviewGate.wait()
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview))
+                default: return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                }
+            }
+            let model = SpacesMobileAppModel(
+                settings: settings, bridgeClient: client, daemonUpdatePollInterval: .milliseconds(1), daemonUpdateTimeout: budget)
+
+            let predecessor = Task { await model.requestDaemonUpdate() }
+            // Wait for the predecessor to actually claim ownership before waiting for it to let go —
+            // checking only for the release would fall straight through while its task is still
+            // unscheduled, and the two invocations would then claim generations in the wrong order.
+            while !model.isApplyingDaemonUpdate { try? await Task.sleep(for: .milliseconds(5)) }
+            // The predecessor times out, releases the flag, and parks in its gated refresh.
+            while model.isApplyingDaemonUpdate { try? await Task.sleep(for: .milliseconds(5)) }
+
+            let retry = Task { await model.requestDaemonUpdate() }
+            while !model.isApplyingDaemonUpdate { try? await Task.sleep(for: .milliseconds(5)) }
+
+            // The retry is parked in its probe, so releasing the predecessor cannot be raced by the retry
+            // finishing early — the flag's value here is decided purely by whose generation owns it.
+            await overviewGate.open()
+            await predecessor.value
+
+            XCTAssertTrue(model.isApplyingDaemonUpdate, "the retry still owns the update; its predecessor's exit must not release it")
+            await retryProbeGate.open()
+            await retry.value
+            XCTAssertFalse(model.isApplyingDaemonUpdate, "the retry releases the flag when it finishes")
+        }
+
         /// Switching the active device mid-poll (modeled here the same way other identity-change tests
         /// do, via `handleAuthenticationFailure`) must not let a stale poll result publish onto the new
         /// device, nor clobber the notice the switch itself raised.
