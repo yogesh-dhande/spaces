@@ -358,6 +358,8 @@ private enum StubDisconnectError: Error, Equatable { case dropped }
     /// The offline caption's tooltip is read out of the load state when the row's cell is built, so a
     /// reason that changed mid-outage only reaches the user if that row is rebuilt — and an unchanged
     /// failure, which every watchdog probe of a device that stays down produces, must rebuild nothing.
+    /// The transition itself keeps the device's rows: it repaints them as unreachable rather than
+    /// removing them, so what the update decides is how much of the outline has to be rebuilt.
     @Test func aChangedOfflineReasonRepaintsTheRowWhileAnUnchangedFailureTouchesNothing() {
         #expect(SidebarController.offlineSectionUpdate(loadState: .loaded, reason: "Connection refused") == .transition)
         #expect(SidebarController.offlineSectionUpdate(loadState: .loading, reason: "Connection refused") == .transition)

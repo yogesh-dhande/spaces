@@ -52,9 +52,10 @@ import workspacecore
         // A single loaded device stays a flat project list (no header).
         #expect(!AppKitController.sidebarShowsDeviceHeaders(deviceCount: 1, hasUnloadedSection: false))
         // A single device that is not loaded forces a header row so its caption has somewhere to render:
-        // the "offline" reason and its Retry, and the "loading…" that Retry puts the section in —
-        // otherwise it has no project rows, and the header the button was clicked in would vanish
-        // under the click.
+        // the "offline" reason and its Retry, and the "loading…" that Retry puts the section in. The
+        // device's rows stay listed through the outage, but they are rows, not a caption — nothing else
+        // reports the reason or recovers the device, and a first launch against a daemon that is down
+        // has no rows at all.
         #expect(AppKitController.sidebarShowsDeviceHeaders(deviceCount: 1, hasUnloadedSection: true))
         // More than one device always groups under headers.
         #expect(AppKitController.sidebarShowsDeviceHeaders(deviceCount: 2, hasUnloadedSection: false))
@@ -358,31 +359,58 @@ import workspacecore
                 == .runProcess(workspaceID: "workspace-1", processKey: "web", processTemplateID: "process-web"))
     }
 
-    @Test func offlineTransitionDetectsSelectionOwnedByTheDevice() {
-        // When a device goes offline its rows drop from the merged sidebar data; a selection under it
-        // must be detected so the detail pane can fall back to the alerts view instead of misrouting
-        // follow-up actions to the local daemon.
-        let section = AppKitController.DeviceSection(
-            deviceID: "remote", deviceName: "Remote", isLocal: false, loadState: .loaded, device: nil,
-            projects: [ProjectSummary(id: "proj-r", name: "R", dir: "/r", isGitRepo: true, defaultBranch: "main", deviceID: "remote")],
-            workspacesByProject: [
-                "proj-r": [
-                    WorkspaceSummary(
-                        id: "ws-r", branch: "feature", dir: "/r/feature", isRunning: true, isArchived: false, isDefault: false, deviceID: "remote")
-                ]
-            ])
+    @Test func anUnreachableDeviceKeepsItsRowsInTheMergedSidebarData() {
+        // An outage must not erase the device's subtree: its projects, workspaces, runtime state, and
+        // alerts stay merged for the whole outage, so the user keeps browsing them, the selection under
+        // the device stays valid, and every id-based lookup that reads this merged data still resolves
+        // its rows. A device mid-retry (`.loading` after an outage) keeps them for the same reason.
+        let offline = deviceSection(deviceID: "remote", loadState: .offline("Connection refused"))
+        let retrying = deviceSection(deviceID: "retrying", loadState: .loading)
+        let loaded = deviceSection(deviceID: "local", loadState: .loaded)
 
-        // A workspace selection under the device is detected.
-        #expect(AppKitController.sidebarSelectionBelongsToDeviceSection(selectedWorkspaceID: "ws-r", selectedProjectID: "proj-r", section: section))
-        // A selection on another device is left alone.
-        #expect(
-            !AppKitController.sidebarSelectionBelongsToDeviceSection(
-                selectedWorkspaceID: "ws-local", selectedProjectID: "proj-local", section: section))
-        // A project (header) selection with no workspace selected is detected by project id.
-        #expect(AppKitController.sidebarSelectionBelongsToDeviceSection(selectedWorkspaceID: nil, selectedProjectID: "proj-r", section: section))
-        #expect(!AppKitController.sidebarSelectionBelongsToDeviceSection(selectedWorkspaceID: nil, selectedProjectID: "proj-local", section: section))
-        // No selection never triggers reconciliation.
-        #expect(!AppKitController.sidebarSelectionBelongsToDeviceSection(selectedWorkspaceID: nil, selectedProjectID: nil, section: section))
+        let merged = AppKitController.mergedSidebarData(sections: [loaded, offline, retrying])
+
+        #expect(merged.projects.map(\.id) == ["proj-local", "proj-remote", "proj-retrying"])
+        #expect(merged.workspacesByProject["proj-remote"]?.map(\.id) == ["ws-remote"])
+        #expect(merged.workspaceRuntimeStatusByID["ws-remote"] != nil)
+        #expect(merged.alertsGroups.map(\.workspaceID) == ["ws-local", "ws-remote", "ws-retrying"])
+    }
+
+    @Test func anUnreachableDevicesRowsAreDimmed() {
+        // The rows stay listed but read as not actionable. Dimming plus the section caption is the whole
+        // treatment — no per-row icon — and a device mid-retry stays dimmed until its load lands.
+        #expect(AppKitController.sidebarRowAlpha(loadState: .loaded) == 1)
+        #expect(AppKitController.sidebarRowAlpha(loadState: .offline("Connection refused")) == AppKitController.unreachableDeviceAlpha)
+        #expect(AppKitController.sidebarRowAlpha(loadState: .loading) == AppKitController.unreachableDeviceAlpha)
+    }
+
+    /// One device section carrying a project, its workspace, that workspace's runtime status, and one
+    /// alerts group — enough for the merge to be observable per device.
+    private func deviceSection(deviceID: String, loadState: AppKitController.SidebarDeviceLoadState) -> AppKitController.DeviceSection {
+        let projectID = "proj-\(deviceID)"
+        let workspaceID = "ws-\(deviceID)"
+        return AppKitController.DeviceSection(
+            deviceID: deviceID, deviceName: deviceID, isLocal: deviceID == "local", loadState: loadState, device: nil,
+            projects: [
+                ProjectSummary(id: projectID, name: deviceID, dir: "/\(deviceID)", isGitRepo: true, defaultBranch: "main", deviceID: deviceID)
+            ],
+            workspacesByProject: [
+                projectID: [
+                    WorkspaceSummary(
+                        id: workspaceID, branch: "feature", dir: "/\(deviceID)/feature", isRunning: true, isArchived: false, isDefault: false,
+                        deviceID: deviceID)
+                ]
+            ],
+            workspaceRuntimeStatusByID: [
+                workspaceID: WorkspaceRuntimeStatus(
+                    workspaceID: workspaceID, lifecycleState: .running, runtimeHealth: .healthy, hasTrackedRuntimeIndicators: false,
+                    runningProcessCount: 1, exitedProcessCount: 0, waitingAgentWindowCount: 0, missingConfiguredProcessCount: 0,
+                    missingConfiguredBrowserSessionCount: 0)
+            ],
+            alertsGroups: [
+                AppKitController.AlertsGroup(
+                    projectName: deviceID, workspaceID: workspaceID, workspaceName: "feature", workspaceBranch: "feature", items: [])
+            ])
     }
 
     @Test func deviceSectionDisplayNameRendersLocalDeviceAsLocalRegardlessOfStoredName() {

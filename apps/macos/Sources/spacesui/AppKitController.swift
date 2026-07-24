@@ -2524,17 +2524,38 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         var displayName: String { isLocal ? "Local" : deviceName }
     }
 
-    /// Whether the current sidebar selection points at a workspace or project owned by `section`. Used
-    /// when a device transitions to offline: its rows are about to drop out of the merged sidebar data,
-    /// so a selection under it leaves a stale detail pane that must be reconciled. A selected workspace's
-    /// project is always under the same device, so the workspace check alone suffices when one is selected.
-    nonisolated static func sidebarSelectionBelongsToDeviceSection(selectedWorkspaceID: String?, selectedProjectID: String?, section: DeviceSection)
-        -> Bool
-    {
-        if let selectedWorkspaceID { return section.workspacesByProject.values.contains { $0.contains { $0.id == selectedWorkspaceID } } }
-        if let selectedProjectID { return section.projects.contains { $0.id == selectedProjectID } }
-        return false
+    /// The flat, id-keyed sidebar data: the union of every device section's rows, whatever each device's
+    /// load state is. An unreachable device keeps everything it last reported listed for the whole
+    /// outage — no grace period — so the user can keep browsing it, and so the id-based lookups that read
+    /// this merged data (which device owns a workspace, which overview a row belongs to) keep resolving
+    /// its rows instead of treating them as unknown. Project/workspace ids are globally unique, so the
+    /// union never collides. Pure so the "an offline device is still merged" rule is directly testable.
+    nonisolated static func mergedSidebarData(sections: [DeviceSection]) -> (
+        projects: [ProjectSummary], workspacesByProject: [String: [WorkspaceSummary]],
+        workspaceRuntimeStatusByID: [String: WorkspaceRuntimeStatus], alertsGroups: [AlertsGroup]
+    ) {
+        var mergedProjects: [ProjectSummary] = []
+        var mergedWorkspaces: [String: [WorkspaceSummary]] = [:]
+        var mergedRuntime: [String: WorkspaceRuntimeStatus] = [:]
+        var mergedAlerts: [AlertsGroup] = []
+        for section in sections {
+            mergedProjects.append(contentsOf: section.projects)
+            mergedWorkspaces.merge(section.workspacesByProject) { current, _ in current }
+            mergedRuntime.merge(section.workspaceRuntimeStatusByID) { current, _ in current }
+            mergedAlerts.append(contentsOf: section.alertsGroups)
+        }
+        return (mergedProjects, mergedWorkspaces, mergedRuntime, mergedAlerts)
     }
+
+    /// The opacity a row inherits from its owning device's load state. A device that is not loaded —
+    /// unreachable, or reconnecting after an outage — keeps its rows listed but dimmed, so the subtree
+    /// reads as browsable-but-not-actionable. This is the same treatment the add-project device picker
+    /// gives an offline device; status is carried by the dimming plus the section caption, never by an
+    /// extra per-row icon. Pure so the rule is directly testable.
+    nonisolated static func sidebarRowAlpha(loadState: SidebarDeviceLoadState) -> CGFloat { loadState == .loaded ? 1 : unreachableDeviceAlpha }
+
+    /// The dimming an unreachable device's rows and its add-project picker row share.
+    nonisolated static let unreachableDeviceAlpha: CGFloat = 0.55
 
     enum BackgroundRefreshFailureAction: Equatable {
         case deferredSetup
@@ -4514,7 +4535,19 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         showAlertsDetail()
     }
 
+    /// Whether polling this workspace's setup progress can produce anything. Setup progress is read back
+    /// from the owning daemon, and an unreachable device's rows stay listed for the whole outage, so
+    /// without this the 0.75s poll would keep forcing sidebar reloads against a dead device.
+    private func workspaceSetupDetailRefreshTargetIsReachable(workspaceID: String) -> Bool {
+        guard let deviceID = deviceID(forWorkspaceID: workspaceID) else { return false }
+        return deviceSection(id: deviceID)?.loadState == .loaded
+    }
+
     private func startWorkspaceSetupDetailRefreshTimerIfNeeded(workspaceID: String) {
+        guard workspaceSetupDetailRefreshTargetIsReachable(workspaceID: workspaceID) else {
+            stopWorkspaceSetupDetailRefreshTimer()
+            return
+        }
         if workspaceSetupDetailRefreshWorkspaceID == workspaceID, workspaceSetupDetailRefreshTimer != nil { return }
         stopWorkspaceSetupDetailRefreshTimer()
         workspaceSetupDetailRefreshWorkspaceID = workspaceID
@@ -4530,7 +4563,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     private func refreshWorkspaceSetupDetailIfVisible(workspaceID: String) {
-        guard selectedWorkspaceID == workspaceID, !showingAlerts, !showingSettings, findWorkspace(id: workspaceID) != nil else {
+        guard selectedWorkspaceID == workspaceID, !showingAlerts, !showingSettings, findWorkspace(id: workspaceID) != nil,
+            workspaceSetupDetailRefreshTargetIsReachable(workspaceID: workspaceID)
+        else {
             stopWorkspaceSetupDetailRefreshTimer()
             return
         }
@@ -7558,7 +7593,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         container.layer?.borderWidth = 1
         bindAppearanceReactiveLayer(container) { [weak self] view in view.layer?.borderColor = self?.sidebarCardBorderColor(isSelected: false).cgColor
         }
-        container.alphaValue = selectable ? 1 : 0.55
+        container.alphaValue = selectable ? 1 : Self.unreachableDeviceAlpha
         container.setAccessibilityElement(true)
         container.setAccessibilityRole(.button)
         container.setAccessibilityLabel(section.displayName)
