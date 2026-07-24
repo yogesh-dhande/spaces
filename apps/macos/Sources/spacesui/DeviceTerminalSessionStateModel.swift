@@ -55,6 +55,22 @@
         private(set) var currentAttachmentSnapshot: TerminalSessionAttachmentSnapshot?
         private(set) var latestRemoteStatePayload: GhosttyRemoteSessionStatePayload?
 
+        /// True while the model wants a live subscription for this session but does not have one: the
+        /// stream dropped or a connect failed and a retry is armed (see `scheduleReconnect`).
+        ///
+        /// Kept out of `currentRuntimeState` deliberately. The device's last report stays exactly as the
+        /// device made it, so a session running on a device that went away reads as running-but-
+        /// unreachable rather than as a session that changed state — a pane can then keep the device's
+        /// last frame and say why it is frozen, instead of claiming the session ended.
+        ///
+        /// Published as a session-scoped notification rather than through the listener fan-out. Listeners
+        /// are deliberately never told about a disconnect (see `handleStreamDisconnect`), because the
+        /// render host would re-register and accumulate duplicate listeners on the one shared
+        /// subscription; a notification observers re-read this property on keeps that hazard out of the
+        /// disconnect path entirely, and any number of observers can watch it without touching the
+        /// fan-out.
+        private(set) var isStateStreamDisconnected = false
+
         private struct Listener {
             let id: UUID
             let onUpdate: @MainActor (GhosttyRemoteSessionStatePayload) -> Void
@@ -62,6 +78,9 @@
         }
 
         private var listeners: [Listener] = []
+        // Paces this session's reconnects. Internal (not `private`) so behavior tests can shorten its
+        // delays instead of waiting out real seconds.
+        let reconnectBackoff = TerminalStateStreamReconnectBackoff()
         private var streamClient: (any TerminalRemoteStateStreamClient)?
         // Bumped every time a stream client is installed. `onEvent`/`onDisconnect` callbacks carry the
         // generation they were created under, so a superseded client's late callback (an immediate
@@ -401,6 +420,13 @@
                 client.stop()
                 return false
             }
+            // A `true` result does not prove this client is still the current one (see the note above), so
+            // only a client that is still installed declares the link healthy. Clearing the flag from a
+            // client a racing disconnect already tore down would hide an outage that is still on.
+            if streamClient === client {
+                reconnectBackoff.reset()
+                setStateStreamDisconnected(false)
+            }
             return true
         }
 
@@ -490,7 +516,9 @@
             // Keep listeners attached through a subscribe drop: the asynchronous catch-up
             // `.state` (the final render for an ended session) must still reach them, and
             // not notifying listeners keeps the render host from re-registering and
-            // accumulating duplicates. The model owns reconnection.
+            // accumulating duplicates. The model owns reconnection, and publishes the drop
+            // itself through `isStateStreamDisconnected` — observable without any listener
+            // being notified, so the pane can report the outage while the fan-out stays put.
             // Stop the dropped client before dropping the reference: its pinned-TLS connection is
             // released only by an explicit cancel, so a bare `nil` would orphan the connection and its
             // dispatch queue for the life of the process while the reconnect mints a fresh one.
@@ -535,19 +563,36 @@
 
         var hasActiveStreamClientForTesting: Bool { streamClient != nil }
 
-        /// Re-subscribes after a short delay — only while the session may still be
-        /// interactive and listeners remain. The delay avoids a tight reconnect loop;
-        /// an ended session needs no live stream, so it is left disconnected.
+        /// Re-subscribes after a backoff delay — only while the session may still be interactive and
+        /// listeners remain. An ended session needs no live stream, so it is left disconnected, and it is
+        /// also not reported as disconnected: the daemon streams live sessions only, so refusing an ended
+        /// one is the expected answer rather than a link the user should be told about.
+        ///
+        /// The delay grows with the run of failures (`reconnectBackoff`) instead of retrying flat forever:
+        /// a pane outlives its device going away, and a fixed cadence is a reconnect storm against a device
+        /// that is genuinely down. Marking the link down here rather than in `handleStreamDisconnect` keeps
+        /// the flag meaning exactly what the banner tells the user — the connection dropped and a retry is
+        /// coming.
         private func scheduleReconnect() {
             guard !listeners.isEmpty, currentRuntimeState?.state.isInteractive != false else { return }
+            setStateStreamDisconnected(true)
+            let delay = reconnectBackoff.nextDelay()
             Task { @MainActor [weak self] in
-                try? await Task.sleep(for: .milliseconds(500))
+                try? await Task.sleep(for: delay)
                 guard let self, self.streamClient == nil, !self.listeners.isEmpty, self.currentRuntimeState?.state.isInteractive != false else {
                     return
                 }
                 self.lastSubscriptionAttemptAt = nil
                 self.ensureSubscriptionStarted()
             }
+        }
+
+        /// Publishes a change in link state to this session's observers. Posted only on a flip, so a
+        /// persistently down device does not wake every pane on every retry.
+        private func setStateStreamDisconnected(_ isDisconnected: Bool) {
+            guard isStateStreamDisconnected != isDisconnected else { return }
+            isStateStreamDisconnected = isDisconnected
+            TerminalSessionNotification.post(.spacesTerminalStateStreamConnectionDidChange, sessionID: sessionID)
         }
 
         private func scheduleStateRefreshRetry() {

@@ -5,6 +5,10 @@ extension Notification.Name {
     public static let spacesTerminalSessionMetadataDidChange = Notification.Name("spaces.terminal.session-metadata-did-change")
     public static let spacesTerminalRuntimeStateDidChange = Notification.Name("spaces.terminal.runtime-state-did-change")
     public static let spacesTerminalOutputDidChange = Notification.Name("spaces.terminal.output-did-change")
+    /// Posted when a session's state provider gains or loses its live subscription to the owning
+    /// device. It carries no payload beyond the session id: observers re-read
+    /// `TerminalSessionStateProviding.isStateStreamDisconnected`.
+    public static let spacesTerminalStateStreamConnectionDidChange = Notification.Name("spaces.terminal.state-stream-connection-did-change")
 }
 
 /// Typed helpers for posting and reading the terminal session notifications above.

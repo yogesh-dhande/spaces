@@ -16,6 +16,9 @@ import spacesterminalcore
     var currentRuntimeState: TerminalSessionRuntimeState? { try? TerminalSessionPersistence.readRuntimeState(paths: paths) }
     var currentAttachmentSnapshot: TerminalSessionAttachmentSnapshot? { try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths) }
     var latestRemoteStatePayload: GhosttyRemoteSessionStatePayload? { try? TerminalSessionPersistence.readRemoteSessionState(paths: paths) }
+    /// Settable so a test can put the pane's link down without a device: the on-disk store this reads
+    /// has no notion of a subscription, and the production model owns the flag.
+    var isStateStreamDisconnected = false
     func refreshState() {}
     func startStateStream(
         onUpdate _: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void, onDisconnect _: @escaping @MainActor ((any Error)?) -> Void
@@ -30,6 +33,7 @@ import spacesterminalcore
     var currentRuntimeState: TerminalSessionRuntimeState?
     var currentAttachmentSnapshot: TerminalSessionAttachmentSnapshot?
     var latestRemoteStatePayload: GhosttyRemoteSessionStatePayload?
+    var isStateStreamDisconnected = false
     private(set) var refreshStateCallCount = 0
     private(set) var startStateStreamCallCount = 0
 
@@ -3038,6 +3042,86 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         XCTAssertFalse(controller.debugBannerVisible)
     }
 
+    // MARK: - Disconnected-device banner
+
+    /// The case this exists for: the device hosting a running session goes away. The pane keeps the
+    /// device's last frame — pruning is gated on an authoritative overview — so without the notice the
+    /// user is looking at a normal-looking terminal that silently does nothing.
+    @MainActor func testRunningSessionOnAnUnreachableDeviceShowsTheDisconnectedNotice() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let controller = try makeBannerController(sessionID: "session-banner-offline", state: .running, root: root)
+        XCTAssertFalse(controller.debugBannerVisible)
+
+        let provider = try XCTUnwrap(controller.stateProvider as? PersistenceBackedTerminalSessionStateProvider)
+        provider.isStateStreamDisconnected = true
+        controller.debugSimulateStateStreamConnectionDidChange()
+
+        XCTAssertTrue(controller.debugBannerVisible)
+        XCTAssertEqual(controller.debugBannerMessage, TerminalPaneBannerNotice.disconnected.message)
+    }
+
+    /// The outage ends and the pane goes back to saying nothing: an outage that self-heals in seconds
+    /// must not leave a notice behind claiming otherwise.
+    @MainActor func testDisconnectedNoticeClearsWhenTheDeviceComesBack() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let controller = try makeBannerController(sessionID: "session-banner-recovered", state: .running, root: root)
+        let provider = try XCTUnwrap(controller.stateProvider as? PersistenceBackedTerminalSessionStateProvider)
+        provider.isStateStreamDisconnected = true
+        controller.debugSimulateStateStreamConnectionDidChange()
+        XCTAssertTrue(controller.debugBannerVisible)
+
+        provider.isStateStreamDisconnected = false
+        controller.debugSimulateStateStreamConnectionDidChange()
+
+        XCTAssertFalse(controller.debugBannerVisible)
+        XCTAssertFalse(controller.debugBannerHasPersistentNotice)
+    }
+
+    /// A session that ended keeps saying so even while the link to its device is down: the process is
+    /// gone whatever the connection does, and the drop is the daemon's expected refusal to stream an
+    /// ended session rather than an outage worth reporting.
+    @MainActor func testEndedSessionKeepsItsNoticeWhileTheDeviceIsUnreachable() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let controller = try makeBannerController(sessionID: "session-banner-ended-offline", state: .exited, root: root)
+
+        let provider = try XCTUnwrap(controller.stateProvider as? PersistenceBackedTerminalSessionStateProvider)
+        provider.isStateStreamDisconnected = true
+        controller.debugSimulateStateStreamConnectionDidChange()
+
+        XCTAssertEqual(controller.debugBannerMessage, TerminalPaneBannerNotice.sessionEnded.message)
+    }
+
+    /// Typing into a pane whose device is unreachable reports the reason instead of the keystrokes
+    /// vanishing without a word.
+    @MainActor func testTypingIntoADisconnectedSessionReportsTheDroppedConnection() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let controller = try makeBannerController(sessionID: "session-banner-typing-offline", state: .running, root: root)
+        let provider = try XCTUnwrap(controller.stateProvider as? PersistenceBackedTerminalSessionStateProvider)
+        provider.isStateStreamDisconnected = true
+        controller.debugSimulateStateStreamConnectionDidChange()
+
+        _ = controller.handleKeyEvent(try keyEvent(keyCode: kVK_ANSI_A, characters: "a", modifiers: []))
+
+        XCTAssertEqual(controller.debugInputStatus, TerminalPaneBannerNotice.disconnected.message)
+    }
+
+    /// Precedence between the two facts a pane's persistent notice reports, as a pure rule.
+    @MainActor func testPersistentNoticeSelection() {
+        XCTAssertNil(TerminalPaneBannerNotice.resolve(runtimeState: .running, isStateStreamDisconnected: false))
+        XCTAssertNil(TerminalPaneBannerNotice.resolve(runtimeState: .starting, isStateStreamDisconnected: false))
+        XCTAssertNil(TerminalPaneBannerNotice.resolve(runtimeState: nil, isStateStreamDisconnected: false))
+        XCTAssertEqual(TerminalPaneBannerNotice.resolve(runtimeState: .running, isStateStreamDisconnected: true), .disconnected)
+        // An unreachable device is exactly the case where the session's state is unknown.
+        XCTAssertEqual(TerminalPaneBannerNotice.resolve(runtimeState: nil, isStateStreamDisconnected: true), .disconnected)
+        // A stopped session wins: the process is gone whatever the link is doing.
+        XCTAssertEqual(TerminalPaneBannerNotice.resolve(runtimeState: .exited, isStateStreamDisconnected: true), .sessionEnded)
+        XCTAssertEqual(TerminalPaneBannerNotice.resolve(runtimeState: .failed, isStateStreamDisconnected: true), .sessionFailed)
+    }
+
     /// Typing into a dead pane stays unconsumed — the pulse is emphasis only and must not start
     /// swallowing keys that previously fell through.
     @MainActor func testTypingIntoEndedSessionIsNotConsumed() throws {
@@ -3208,9 +3292,9 @@ final class TerminalPaneBannerTests: XCTestCase {
         let (banner, _) = makeBanner()
         XCTAssertFalse(banner.debugIsVisible)
 
-        banner.showPersistent(message: "Session ended.")
+        banner.showPersistent(.sessionEnded)
         XCTAssertTrue(banner.debugIsVisible)
-        XCTAssertEqual(banner.debugMessage, "Session ended.")
+        XCTAssertEqual(banner.debugMessage, TerminalPaneBannerNotice.sessionEnded.message)
 
         banner.clearPersistent()
         XCTAssertFalse(banner.debugIsVisible)
@@ -3218,14 +3302,14 @@ final class TerminalPaneBannerTests: XCTestCase {
 
     @MainActor func testTransientBannerOverridesPersistentNoticeAndRestoresItOnDismiss() {
         let (banner, _) = makeBanner()
-        banner.showPersistent(message: "Session ended.")
+        banner.showPersistent(.sessionEnded)
 
         banner.showProgress(message: "Fetching link…") {}
         XCTAssertEqual(banner.debugMessage, "Fetching link…")
 
         banner.dismiss()
         XCTAssertTrue(banner.debugIsVisible)
-        XCTAssertEqual(banner.debugMessage, "Session ended.")
+        XCTAssertEqual(banner.debugMessage, TerminalPaneBannerNotice.sessionEnded.message)
     }
 
     @MainActor func testDismissHidesBannerWhenNoPersistentNoticeIsSet() {
@@ -3241,7 +3325,7 @@ final class TerminalPaneBannerTests: XCTestCase {
     /// banner out from under it.
     @MainActor func testClearingPersistentNoticeLeavesActiveTransientBannerUp() {
         let (banner, _) = makeBanner()
-        banner.showPersistent(message: "Session ended.")
+        banner.showPersistent(.sessionEnded)
         banner.showProgress(message: "Fetching link…") {}
 
         banner.clearPersistent()
