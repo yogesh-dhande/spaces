@@ -28,6 +28,17 @@
         }
     }
 
+    /// Counts calls across the fake bridge's `@Sendable` request closure, so a test can make the Nth
+    /// `daemonStatus` poll behave differently from the ones before it (e.g. "unreachable twice, then
+    /// reachable").
+    private actor SpacesMobilePollCounter {
+        private var count = 0
+        func increment() -> Int {
+            count += 1
+            return count
+        }
+    }
+
     @MainActor final class SpacesMobileAppModelTests: XCTestCase {
         func testWorkspaceGroupsFilterByTypeStateAndSearch() {
             let model = makeModel()
@@ -698,6 +709,396 @@
             XCTAssertNil(model.overview)
         }
 
+        // MARK: - Daemon update
+
+        /// Requesting the update fires the RPC, then polls until the device reports the staged update
+        /// applied, at which point the fresh status is published, a full refresh runs, and the notice
+        /// clears — leaving the device usable again.
+        func testRequestDaemonUpdatePollsUntilAppliedThenClearsNotice() async {
+            let recorder = SpacesMobileRequestRecorder()
+            let counter = SpacesMobilePollCounter()
+            let settings = SpacesMobileConnectionSettings()
+            let pendingStatus = daemonStatus(protocolVersion: SpacesWireProtocol.version, installedVersion: "2.0.0")
+            let appliedStatus = daemonStatus(protocolVersion: SpacesWireProtocol.version, version: "2.0.0")
+            let overview = makeOverview(daemonStatus: appliedStatus)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                switch request.commandName {
+                case "requestDaemonRestart": return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                case "daemonStatus":
+                    let attempt = await counter.increment()
+                    let status = attempt < 3 ? pendingStatus : appliedStatus
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .daemonStatus(status))
+                case "overview": return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview))
+                default: return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                }
+            }
+            let model = SpacesMobileAppModel(
+                settings: settings, bridgeClient: client, daemonUpdatePollInterval: .milliseconds(1), daemonUpdateTimeout: .milliseconds(200))
+
+            await model.requestDaemonUpdate()
+
+            XCTAssertNil(model.connectionNotice)
+            XCTAssertNil(model.errorMessage)
+            XCTAssertFalse(model.isApplyingDaemonUpdate)
+            XCTAssertFalse(model.isActiveDeviceBlocked)
+            XCTAssertFalse(model.daemonUpdatePending, "the applied status no longer reports a staged update")
+            XCTAssertEqual(model.overview, overview)
+            let daemonStatusAttempts = await recorder.snapshot().filter { $0.commandName == "daemonStatus" }.count
+            XCTAssertEqual(daemonStatusAttempts, 3, "should stop polling as soon as the applied status is observed")
+        }
+
+        /// The daemon is expected to be briefly unreachable mid-handoff (it quiesces sessions and
+        /// re-execs); a poll attempt that fails to reach it must not surface as a connection error, and
+        /// polling must continue once it becomes reachable again.
+        func testRequestDaemonUpdateSwallowsUnreachableAttemptsThenResolves() async {
+            let recorder = SpacesMobileRequestRecorder()
+            let counter = SpacesMobilePollCounter()
+            let settings = SpacesMobileConnectionSettings()
+            let appliedStatus = daemonStatus(protocolVersion: SpacesWireProtocol.version, version: "2.0.0")
+            let overview = makeOverview(daemonStatus: appliedStatus)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                switch request.commandName {
+                case "requestDaemonRestart": return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                case "daemonStatus":
+                    let attempt = await counter.increment()
+                    if attempt < 3 { throw SpacesDeviceAPIClientError.requestTimedOut }
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .daemonStatus(appliedStatus))
+                case "overview": return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview))
+                default: return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                }
+            }
+            let model = SpacesMobileAppModel(
+                settings: settings, bridgeClient: client, daemonUpdatePollInterval: .milliseconds(1), daemonUpdateTimeout: .milliseconds(200))
+
+            await model.requestDaemonUpdate()
+
+            XCTAssertNil(model.connectionNotice)
+            XCTAssertNil(model.errorMessage, "fetch failures mid-poll must not surface as a connection error")
+            XCTAssertEqual(model.overview, overview)
+        }
+
+        /// A device that never reports the update applied within the attempt budget clears the notice
+        /// and lets a final refresh render whatever is actually true, instead of inventing a failure.
+        func testRequestDaemonUpdateClearsNoticeWithoutErrorWhenBudgetRunsOut() async {
+            let recorder = SpacesMobileRequestRecorder()
+            let settings = SpacesMobileConnectionSettings()
+            let pendingStatus = daemonStatus(protocolVersion: SpacesWireProtocol.version, installedVersion: "2.0.0")
+            let overview = makeOverview(daemonStatus: pendingStatus)
+            // Each status probe is slow, standing in for the request timeout a genuinely unreachable
+            // device burns. This is what separates a wall-clock budget from an attempt count: polling a
+            // fixed number of times would cost attempts × probe duration, many times the stated budget.
+            let probeDuration = Duration.milliseconds(100)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                switch request.commandName {
+                case "requestDaemonRestart": return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                case "daemonStatus":
+                    try? await Task.sleep(for: probeDuration)
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .daemonStatus(pendingStatus))
+                case "overview": return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview))
+                default: return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                }
+            }
+            let budget = Duration.milliseconds(200)
+            let model = SpacesMobileAppModel(
+                settings: settings, bridgeClient: client, daemonUpdatePollInterval: .milliseconds(1), daemonUpdateTimeout: budget)
+
+            // Establish the device's state first, the way a real session would before the user taps.
+            await model.refresh()
+            XCTAssertTrue(model.daemonUpdatePending, "precondition: the device reports a staged update")
+
+            let elapsed = await ContinuousClock().measure { await model.requestDaemonUpdate() }
+
+            XCTAssertNil(model.connectionNotice, "a timed-out poll must not invent a failure message")
+            XCTAssertNil(model.errorMessage)
+            XCTAssertFalse(model.isApplyingDaemonUpdate, "the action is usable again once the budget is spent")
+            // The banner is left showing the last thing the device said, rather than being cleared or
+            // replaced by a connection error, because a slow restart is indistinguishable from a refused
+            // one from here.
+            XCTAssertTrue(model.daemonUpdatePending)
+            let daemonStatusAttempts = await recorder.snapshot().filter { $0.commandName == "daemonStatus" }.count
+            XCTAssertGreaterThanOrEqual(daemonStatusAttempts, 1, "the poll must probe at least once before giving up")
+            // The budget bounds the poll, plus at most one probe already in flight when it expires. The
+            // generous slack keeps this from flaking on a loaded machine while still failing an
+            // implementation that polls a fixed number of times (which would run several times longer).
+            XCTAssertLessThan(elapsed, budget + probeDuration + .milliseconds(600), "the poll must stop on its time budget")
+        }
+
+        /// A device that never comes back leaves the warning in place: the update gives up, re-enables the
+        /// action, and reports nothing. Reconciling with a refresh here would do the opposite — against a
+        /// device that is still down it clears the status the banner renders from and raises a connection
+        /// error, and it cannot run under the expected-outage suppression because that keys off the flag
+        /// this path has to release to re-enable the button.
+        func testATimedOutUpdateLeavesTheWarningInPlaceWithoutAnError() async {
+            let settings = SpacesMobileConnectionSettings()
+            let overviewCounter = SpacesMobilePollCounter()
+            let blockingStaged = daemonStatus(protocolVersion: SpacesWireProtocol.version - 1, installedVersion: "2.0.0")
+            let overview = makeOverview(daemonStatus: blockingStaged)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                switch request.commandName {
+                case "requestDaemonRestart": return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                case "overview":
+                    // One good read to establish state; the device is unreachable from then on.
+                    guard await overviewCounter.increment() == 1 else {
+                        return SpacesDeviceAPIResponse(ok: false, message: "The device is unreachable.")
+                    }
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview))
+                default: return SpacesDeviceAPIResponse(ok: false, message: "The device is unreachable.")
+                }
+            }
+            let model = SpacesMobileAppModel(
+                settings: settings, bridgeClient: client, daemonUpdatePollInterval: .milliseconds(10), daemonUpdateTimeout: .milliseconds(50))
+
+            await model.refresh()
+            XCTAssertTrue(model.isActiveDeviceBlocked, "precondition: the device is blocked with an update to apply")
+
+            await model.requestDaemonUpdate()
+
+            XCTAssertNotNil(model.daemonStatus, "the banner must survive a daemon that never came back")
+            XCTAssertTrue(model.isActiveDeviceBlocked, "an unreturned daemon leaves the device blocked, not silently usable")
+            XCTAssertNil(model.errorMessage, "a slow restart and a refused one look the same here; neither is a reported failure")
+            XCTAssertNil(model.connectionNotice)
+            XCTAssertFalse(model.isApplyingDaemonUpdate, "the action is usable again so the user can retry")
+        }
+
+        /// The handshake fallback clears the daemon status when it cannot reach the device, which leaves
+        /// compatibility unknown and the device unblocked. During a requested update that outage is
+        /// expected, and clearing would drop the banner and flash stale workspace controls back while the
+        /// update is still running — so the last known facts have to survive it.
+        func testStatusSurvivesAFailedHandshakeDuringTheUpdate() async {
+            let settings = SpacesMobileConnectionSettings()
+            let overviewCounter = SpacesMobilePollCounter()
+            // Blocking plus staged: the device is wire-incompatible and has an update to apply, which is
+            // the state the banner and the blocked-device rule both read.
+            let blockingStaged = daemonStatus(protocolVersion: SpacesWireProtocol.version - 1, installedVersion: "2.0.0")
+            let overview = makeOverview(daemonStatus: blockingStaged)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                switch request.commandName {
+                case "requestDaemonRestart": return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                case "overview":
+                    // The first read establishes the state; everything after it is the handoff outage.
+                    guard await overviewCounter.increment() == 1 else {
+                        return SpacesDeviceAPIResponse(ok: false, message: "The device is unreachable.")
+                    }
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview))
+                // The frozen-core handshake cannot reach the device either, which is what triggers the
+                // clearing path this test guards.
+                default: return SpacesDeviceAPIResponse(ok: false, message: "The device is unreachable.")
+                }
+            }
+            let model = SpacesMobileAppModel(
+                settings: settings, bridgeClient: client, daemonUpdatePollInterval: .milliseconds(20), daemonUpdateTimeout: .seconds(5))
+
+            await model.refresh()
+            XCTAssertNotNil(model.daemonStatus, "precondition: the first read establishes the device's status")
+            XCTAssertTrue(model.isActiveDeviceBlocked)
+
+            let update = Task { await model.requestDaemonUpdate() }
+            while !model.isApplyingDaemonUpdate { try? await Task.sleep(for: .milliseconds(5)) }
+
+            await model.refresh()
+
+            XCTAssertNotNil(model.daemonStatus, "the banner renders off the status; the expected outage must not erase it")
+            XCTAssertTrue(model.isActiveDeviceBlocked, "the device must stay blocked while its daemon is mid-update")
+
+            update.cancel()
+            await update.value
+        }
+
+        /// The deadline is re-checked after each wait, not only before it. A probe launched once the
+        /// budget has already passed would add its own request timeout on top of a wait that had itself
+        /// overrun — the poll would run well past the bound it advertises.
+        func testPollLaunchesNoProbeOnceTheBudgetHasPassed() async {
+            let recorder = SpacesMobileRequestRecorder()
+            let settings = SpacesMobileConnectionSettings()
+            let pendingStatus = daemonStatus(protocolVersion: SpacesWireProtocol.version, installedVersion: "2.0.0")
+            let overview = makeOverview(daemonStatus: pendingStatus)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                switch request.commandName {
+                case "requestDaemonRestart": return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                case "daemonStatus": return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .daemonStatus(pendingStatus))
+                case "overview": return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview))
+                default: return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                }
+            }
+            // A budget shorter than one interval: the first wait alone carries the loop past the
+            // deadline, so a correct poll gives up without ever probing.
+            let model = SpacesMobileAppModel(
+                settings: settings, bridgeClient: client, daemonUpdatePollInterval: .milliseconds(200), daemonUpdateTimeout: .milliseconds(50))
+
+            await model.requestDaemonUpdate()
+
+            let probes = await recorder.snapshot().filter { $0.commandName == "daemonStatus" }.count
+            XCTAssertEqual(probes, 0, "a probe must not start after the budget has already run out")
+            XCTAssertNil(model.errorMessage)
+            XCTAssertFalse(model.isApplyingDaemonUpdate)
+        }
+
+        /// A timed-out update releases the in-flight flag before its reconciling refresh, so a retry can
+        /// start while the previous invocation is still finishing that refresh. The slow predecessor must
+        /// not clear the flag out from under the retry: doing so would re-enable the Update Daemon button
+        /// and resume the overview poll in the middle of the retry's handoff.
+        func testSlowPredecessorDoesNotClearARetrysInFlightState() async {
+            let settings = SpacesMobileConnectionSettings()
+            // Both waits are gates rather than sleeps, so each task parks exactly where the test needs it
+            // regardless of machine load: the predecessor inside its post-timeout refresh, the retry
+            // inside its poll. Timing-based staging flakes precisely when the box is busy.
+            let overviewGate = SpacesMobileAsyncGate()
+            let retryProbeGate = SpacesMobileAsyncGate()
+            let probeCounter = SpacesMobilePollCounter()
+            let pendingStatus = daemonStatus(protocolVersion: SpacesWireProtocol.version, installedVersion: "2.0.0")
+            let overview = makeOverview(daemonStatus: pendingStatus)
+            let budget = Duration.milliseconds(50)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                switch request.commandName {
+                case "requestDaemonRestart": return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                case "daemonStatus":
+                    // The predecessor's one probe outlasts its own budget so it times out; every later
+                    // probe belongs to the retry and parks until the test releases it.
+                    if await probeCounter.increment() == 1 { try? await Task.sleep(for: budget * 2) } else { await retryProbeGate.wait() }
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .daemonStatus(pendingStatus))
+                case "overview":
+                    // Holds the predecessor inside its post-timeout refresh until the test releases it.
+                    await overviewGate.wait()
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview))
+                default: return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                }
+            }
+            let model = SpacesMobileAppModel(
+                settings: settings, bridgeClient: client, daemonUpdatePollInterval: .milliseconds(1), daemonUpdateTimeout: budget)
+
+            let predecessor = Task { await model.requestDaemonUpdate() }
+            // Wait for the predecessor to actually claim ownership before waiting for it to let go —
+            // checking only for the release would fall straight through while its task is still
+            // unscheduled, and the two invocations would then claim generations in the wrong order.
+            while !model.isApplyingDaemonUpdate { try? await Task.sleep(for: .milliseconds(5)) }
+            // The predecessor times out, releases the flag, and parks in its gated refresh.
+            while model.isApplyingDaemonUpdate { try? await Task.sleep(for: .milliseconds(5)) }
+
+            let retry = Task { await model.requestDaemonUpdate() }
+            while !model.isApplyingDaemonUpdate { try? await Task.sleep(for: .milliseconds(5)) }
+
+            // The retry is parked in its probe, so releasing the predecessor cannot be raced by the retry
+            // finishing early — the flag's value here is decided purely by whose generation owns it.
+            await overviewGate.open()
+            await predecessor.value
+
+            XCTAssertTrue(model.isApplyingDaemonUpdate, "the retry still owns the update; its predecessor's exit must not release it")
+            await retryProbeGate.open()
+            await retry.value
+            XCTAssertFalse(model.isApplyingDaemonUpdate, "the retry releases the flag when it finishes")
+        }
+
+        /// A daemon update takes its device offline deliberately, so an overview refresh that fails
+        /// inside that window is expected rather than news. Pausing the poll cannot cover a refresh
+        /// already in flight when the user taps Update, or a pull-to-refresh during the update, so the
+        /// failure path itself stays quiet — but only for the duration of the update.
+        func testOverviewFailureDuringDaemonUpdateStaysQuietButNotAfterward() async {
+            let settings = SpacesMobileConnectionSettings()
+            let unreachable = SpacesDeviceAPIResponse(ok: false, message: "The device is unreachable.")
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                switch request.commandName {
+                case "requestDaemonRestart": return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                // Everything else fails: the daemon is mid-handoff and answering nothing.
+                default: return unreachable
+                }
+            }
+            // A budget long enough that the update is unambiguously still in flight for the refresh
+            // below; the task is cancelled rather than waited out.
+            let model = SpacesMobileAppModel(
+                settings: settings, bridgeClient: client, daemonUpdatePollInterval: .milliseconds(20), daemonUpdateTimeout: .seconds(5))
+
+            let update = Task { await model.requestDaemonUpdate() }
+            while !model.isApplyingDaemonUpdate { try? await Task.sleep(for: .milliseconds(5)) }
+
+            await model.refresh()
+            XCTAssertNil(model.errorMessage, "an outage the update flow is already watching must not raise a connection error")
+
+            update.cancel()
+            await update.value
+            XCTAssertFalse(model.isApplyingDaemonUpdate)
+
+            // The same failure outside the update window is a genuine connection problem and must show.
+            await model.refresh()
+            XCTAssertNotNil(model.errorMessage, "suppression is scoped to the update; an ordinary unreachable device still reports")
+        }
+
+        /// Switching the active device mid-poll (modeled here the same way other identity-change tests
+        /// do, via `handleAuthenticationFailure`) must not let a stale poll result publish onto the new
+        /// device, nor clobber the notice the switch itself raised.
+        func testRequestDaemonUpdateDeviceSwitchMidPollDoesNotPublishOntoNewDevice() async {
+            let recorder = SpacesMobileRequestRecorder()
+            let gate = SpacesMobileAsyncGate()
+            let settings = SpacesMobileConnectionSettings()
+            let appliedStatus = daemonStatus(protocolVersion: SpacesWireProtocol.version, version: "2.0.0")
+            let overview = makeOverview(daemonStatus: appliedStatus)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                switch request.commandName {
+                case "requestDaemonRestart": return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                case "daemonStatus":
+                    await gate.wait()
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .daemonStatus(appliedStatus))
+                case "overview": return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview))
+                default: return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                }
+            }
+            let model = SpacesMobileAppModel(
+                settings: settings, bridgeClient: client, daemonUpdatePollInterval: .milliseconds(1), daemonUpdateTimeout: .milliseconds(200))
+
+            let updateTask = Task { await model.requestDaemonUpdate() }
+            // Wait until the first poll attempt is gated on the device's daemonStatus fetch.
+            while !(await recorder.snapshot()).contains(where: { $0.commandName == "daemonStatus" }) { await Task.yield() }
+            model.handleAuthenticationFailure(message: "Switched devices.")
+            await gate.open()
+            await updateTask.value
+
+            XCTAssertEqual(model.connectionNotice, "Switched devices.", "the device switch's own notice must survive the stale poll resolving")
+            XCTAssertNil(model.daemonStatus, "a stale poll result must not publish onto the new identity")
+            XCTAssertNil(model.overview)
+        }
+
+        /// The banner renders straight off `DaemonUpdateRemedy` plus the status it came from: the action
+        /// button only ever appears for `.applyStagedUpdate`, and that one remedy still reads differently
+        /// depending on whether the daemon is also wire-incompatible (`isBlocking`).
+        func testCompatibilityBannerViewRendersExpectedTitleAndSeverityPerRemedy() {
+            let pendingStatus = daemonStatus(protocolVersion: SpacesWireProtocol.version, installedVersion: "2.0.0")
+            let blockingStagedStatus = daemonStatus(protocolVersion: SpacesWireProtocol.version - 1, installedVersion: "2.0.0")
+            let installOnDeviceStatus = daemonStatus(protocolVersion: SpacesWireProtocol.version - 1)
+            let updateClientStatus = daemonStatus(protocolVersion: SpacesWireProtocol.version + 1)
+
+            let pendingBanner = CompatibilityBannerView(
+                remedy: .applyStagedUpdate(installedVersion: "2.0.0"), status: pendingStatus, isMutating: false, isApplyingUpdate: false, onUpdate: {}
+            )
+            XCTAssertFalse(pendingBanner.isBlocking)
+            XCTAssertEqual(pendingBanner.title, "Daemon update pending")
+
+            let blockingBanner = CompatibilityBannerView(
+                remedy: .applyStagedUpdate(installedVersion: "2.0.0"), status: blockingStagedStatus, isMutating: false, isApplyingUpdate: false,
+                onUpdate: {})
+            XCTAssertTrue(blockingBanner.isBlocking)
+            XCTAssertEqual(blockingBanner.title, "This device needs a daemon update")
+
+            let installBanner = CompatibilityBannerView(
+                remedy: .installUpdateOnDevice, status: installOnDeviceStatus, isMutating: false, isApplyingUpdate: false, onUpdate: {})
+            XCTAssertTrue(installBanner.isBlocking)
+            XCTAssertEqual(installBanner.title, "Install the update on this device")
+            XCTAssertFalse(DaemonUpdateRemedy.installUpdateOnDevice.offersDaemonUpdateAction)
+
+            let updateClientBanner = CompatibilityBannerView(
+                remedy: .updateClient, status: updateClientStatus, isMutating: false, isApplyingUpdate: false, onUpdate: {})
+            XCTAssertTrue(updateClientBanner.isBlocking)
+            XCTAssertEqual(updateClientBanner.title, "Update Spaces to use this device")
+            XCTAssertFalse(DaemonUpdateRemedy.updateClient.offersDaemonUpdateAction)
+
+            XCTAssertTrue(
+                DaemonUpdateRemedy.applyStagedUpdate(installedVersion: "2.0.0").offersDaemonUpdateAction,
+                "the only remedy that offers the Update Daemon action")
+        }
+
         // MARK: - Renaming runtime rows
 
         func testRenameAdHocTerminalRowRenamesItsSession() async throws {
@@ -907,9 +1308,10 @@
             return SpacesDeviceOverviewPayload(projects: [project], workspaces: [feature, docs], sessions: sessions, daemonStatus: daemonStatus)
         }
 
-        private func daemonStatus(protocolVersion: Int) -> TerminalServiceDaemonStatus {
+        private func daemonStatus(protocolVersion: Int, version: String = "1.0.0", installedVersion: String? = nil) -> TerminalServiceDaemonStatus {
             TerminalServiceDaemonStatus(
-                version: "1.0.0", installedVersion: nil, certificateFingerprint: nil, activeSessionCount: 0, protocolVersion: protocolVersion)
+                version: version, installedVersion: installedVersion, certificateFingerprint: nil, activeSessionCount: 0,
+                protocolVersion: protocolVersion)
         }
 
         private func makeSession(
