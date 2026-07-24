@@ -269,3 +269,107 @@ private enum StubDisconnectError: Error, Equatable { case dropped }
         #expect(Array(coordinator.reconcile(desiredIDs: ["device-a", "device-b"]).devicesToOpen.keys) == ["device-b"])
     }
 }
+
+/// Behavior of the pacing applied to the sidebar's one-shot overview pulls, which are started by every
+/// local-event sidebar reload and every reachability watchdog tick.
+@Suite @MainActor struct RemoteOverviewPullBackoffTests {
+    private func makeBackoff() -> RemoteOverviewPullBackoff {
+        let backoff = RemoteOverviewPullBackoff()
+        // The hold is a real delayed task; shorten the whole curve so the drain seam resolves promptly,
+        // and pin the jitter so the armed delays are exact.
+        backoff.retryDelay = .milliseconds(1)
+        backoff.maxRetryDelay = .milliseconds(8)
+        backoff.retryJitterFraction = { 0 }
+        return backoff
+    }
+
+    /// The regression: only a pull that returned data stamps the sidebar's freshness window, so nothing
+    /// else paces a device whose pulls fail. Against a remote that refuses connections fast, every
+    /// sidebar reload and watchdog tick would otherwise dial it again the moment the last attempt failed.
+    @Test func aFailedPullIsNotReattemptedUntilItsBackoffElapses() async {
+        let backoff = makeBackoff()
+        let device = "device-a"
+        #expect(backoff.allowsAttempt(deviceID: device))
+
+        #expect(backoff.recordFailure(deviceID: device) == .milliseconds(1))
+        #expect(!backoff.allowsAttempt(deviceID: device))
+
+        await backoff.drainPendingHoldsForTesting()
+        #expect(backoff.allowsAttempt(deviceID: device))
+    }
+
+    /// A remote that stays down must settle into a slow probe, and one that answers again must not
+    /// inherit the delay the previous outage had grown to.
+    @Test func thePullBackoffGrowsWithConsecutiveFailuresAndResetsOnAPullThatReturnsData() async {
+        let backoff = makeBackoff()
+        let device = "device-a"
+
+        for expected: Duration in [.milliseconds(1), .milliseconds(2), .milliseconds(4), .milliseconds(8), .milliseconds(8)] {
+            #expect(backoff.recordFailure(deviceID: device) == expected)
+            await backoff.drainPendingHoldsForTesting()
+        }
+
+        backoff.clear(deviceID: device)
+        #expect(backoff.recordFailure(deviceID: device) == .milliseconds(1))
+        await backoff.drainPendingHoldsForTesting()
+    }
+
+    /// Devices that failed together (one network outage) must not be pulled in lockstep.
+    @Test func thePullBackoffIsSpreadByTheInjectedJitter() {
+        let backoff = makeBackoff()
+        backoff.retryDelay = .milliseconds(4)
+        backoff.retryJitterFraction = { 0.5 }
+
+        #expect(backoff.recordFailure(deviceID: "device-a") == .milliseconds(6))
+    }
+
+    /// The user asking for this device is a stronger signal than the schedule its run of failures grew,
+    /// so Retry must not be answered with "wait another minute".
+    @Test func aUserRetryReleasesTheDeviceImmediately() async {
+        let backoff = makeBackoff()
+        let device = "device-a"
+        backoff.recordFailure(deviceID: device)
+        backoff.recordFailure(deviceID: device)
+        #expect(!backoff.allowsAttempt(deviceID: device))
+
+        backoff.clear(deviceID: device)
+        #expect(backoff.allowsAttempt(deviceID: device))
+        await backoff.drainPendingHoldsForTesting()
+    }
+
+    /// One device's outage must not hold back another device's pulls.
+    @Test func aHeldBackDeviceDoesNotPaceTheOthers() async {
+        let backoff = makeBackoff()
+        backoff.recordFailure(deviceID: "device-a")
+
+        #expect(!backoff.allowsAttempt(deviceID: "device-a"))
+        #expect(backoff.allowsAttempt(deviceID: "device-b"))
+        await backoff.drainPendingHoldsForTesting()
+    }
+}
+
+/// Behavior of the offline device caption: whose reason repaints, and which offline device is offered a
+/// Retry at all.
+@Suite struct SidebarDeviceOfflineCaptionTests {
+    /// The offline caption's tooltip is read out of the load state when the row's cell is built, so a
+    /// reason that changed mid-outage only reaches the user if that row is rebuilt — and an unchanged
+    /// failure, which every watchdog probe of a device that stays down produces, must rebuild nothing.
+    @Test func aChangedOfflineReasonRepaintsTheRowWhileAnUnchangedFailureTouchesNothing() {
+        #expect(SidebarController.offlineSectionUpdate(loadState: .loaded, reason: "Connection refused") == .transition)
+        #expect(SidebarController.offlineSectionUpdate(loadState: .loading, reason: "Connection refused") == .transition)
+        #expect(SidebarController.offlineSectionUpdate(loadState: .offline("Connection refused"), reason: "Connection refused") == .unchanged)
+        #expect(SidebarController.offlineSectionUpdate(loadState: .offline("The connection closed."), reason: "Connection refused") == .repaintReason)
+    }
+
+    /// A remote whose auth token or certificate fingerprint is gone reads "Reconnect required" and is
+    /// recovered by pairing it again; offering Retry there renders a button that does nothing.
+    @Test func aDeviceWithNoCredentialsIsNotOfferedARetry() {
+        #expect(!SidebarController.deviceSectionOffersRetry(loadState: .offline("Reconnect required"), isLocal: false, hasCredentials: false))
+        #expect(SidebarController.deviceSectionOffersRetry(loadState: .offline("Connection refused"), isLocal: false, hasCredentials: true))
+        // The local device has no stored credentials of its own: its retry re-runs the sidebar snapshot.
+        #expect(SidebarController.deviceSectionOffersRetry(loadState: .offline("daemon down"), isLocal: true, hasCredentials: false))
+        // Retry is an offline device's recovery; a loaded or still-loading section offers none.
+        #expect(!SidebarController.deviceSectionOffersRetry(loadState: .loaded, isLocal: false, hasCredentials: true))
+        #expect(!SidebarController.deviceSectionOffersRetry(loadState: .loading, isLocal: true, hasCredentials: true))
+    }
+}

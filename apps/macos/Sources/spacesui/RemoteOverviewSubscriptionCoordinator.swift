@@ -192,7 +192,8 @@ import Foundation
     private func armRetry(deviceID: String) {
         let failures = (consecutiveFailures[deviceID] ?? 0) + 1
         consecutiveFailures[deviceID] = failures
-        let delay = Self.backoffDelay(consecutiveFailures: failures, floor: retryDelay, cap: maxRetryDelay, jitterFraction: retryJitterFraction())
+        let delay = RemoteConnectionBackoff.delay(
+            consecutiveFailures: failures, floor: retryDelay, cap: maxRetryDelay, jitterFraction: retryJitterFraction())
         let task = Task { @MainActor [weak self] in
             try? await Task.sleep(for: delay)
             guard let self, !Task.isCancelled else { return }
@@ -203,15 +204,6 @@ import Foundation
             self.requestReconcile()
         }
         states[deviceID] = .waitingToRetry(task: task, delay: delay)
-    }
-
-    /// Delay before the `consecutiveFailures`-th retry of one device: doubles from `floor`, clamped at
-    /// `cap`, then spread by `jitterFraction`. Pure so the growth curve is directly testable.
-    nonisolated static func backoffDelay(consecutiveFailures: Int, floor: Duration, cap: Duration, jitterFraction: Double) -> Duration {
-        // Clamped before the exponentiation so a device that has been down for hours cannot overflow
-        // the doubling into a nonsensical duration on its way to the cap.
-        let doublings = min(max(consecutiveFailures - 1, 0), 16)
-        return min(floor * pow(2, Double(doublings)), cap) * (1 + jitterFraction)
     }
 
     /// Drops everything tracked for `deviceID` — a live subscription, an in-flight connect's claim on

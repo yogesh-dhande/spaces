@@ -94,6 +94,11 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     /// Remote devices with an overview pull in flight, so nothing starts a second connection to a
     /// device that is still answering (or still timing out).
     private var remoteOverviewPullsInFlight: Set<String> = []
+    /// Pacing for pulls that fail. The in-flight guard above bounds how many connections a failing
+    /// device carries at once but not how often it is dialed, and only a successful pull stamps the
+    /// freshness window; this is what keeps a device that fails fast from being re-dialed by every
+    /// sidebar reload and watchdog tick.
+    private let remoteOverviewPullBackoff = RemoteOverviewPullBackoff()
     /// Repeating reconciliation of device reachability while subscriptions are enabled; see
     /// `runDeviceReachabilityWatchdogTick`.
     private var deviceReachabilityWatchdogTimer: Timer?
@@ -408,7 +413,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             // instant and refreshes immediately. Forced reloads (explicit refresh,
             // mutations that expect fresh remote data) bypass the gate.
             if !forceRefresh, let last = remoteOverviewFetchInstants[record.id], now - last < freshnessWindow { continue }
-            startRemoteOverviewPull(record: record, clientApp: clientApp)
+            startRemoteOverviewPull(record: record, clientApp: clientApp, userInitiated: false)
         }
         if updatedReconnectSection {
             rebuildFlatSidebarData()
@@ -422,10 +427,20 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     /// Starts one overview pull for `record` and applies its result to that device's sidebar section.
     /// The single pull implementation, shared by the freshness-gated path above and the watchdog's
     /// forced refresh of a device that is currently offline.
-    private func startRemoteOverviewPull(record: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp) {
+    ///
+    /// `userInitiated` marks the per-device Retry: the user asking for this device is a stronger signal
+    /// than the schedule its run of failures grew, so that path clears the backoff instead of waiting
+    /// it out.
+    private func startRemoteOverviewPull(record: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp, userInitiated: Bool) {
+        if userInitiated {
+            remoteOverviewPullBackoff.clear(deviceID: record.id)
+        } else if !remoteOverviewPullBackoff.allowsAttempt(deviceID: record.id) {
+            return
+        }
         // Only a successful pull stamps the freshness window, so a device that keeps failing carries no
-        // stamp to throttle it. This guard is what keeps a burst of sidebar reloads — or a watchdog tick
-        // landing while a previous connect is still timing out — from stacking connections on it.
+        // stamp to throttle it; the backoff above is what paces its attempts. This guard is what keeps a
+        // burst of sidebar reloads — or a watchdog tick landing while a previous connect is still timing
+        // out — from stacking connections on it.
         guard remoteOverviewPullsInFlight.insert(record.id).inserted else { return }
         Task { @MainActor [weak self] in
             let result: Result<RemoteDeviceLoad, Error> = await Task.detached(priority: .userInitiated) {
@@ -444,8 +459,14 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             self.remoteOverviewPullsInFlight.remove(record.id)
             // Stamp only a fetch that produced data. A failed pull left nothing fresh to protect, so
             // letting it hold the window would suppress the next 30 s of attempts and keep the device
-            // parked in offline for no reason.
-            if case .success = result { self.remoteOverviewFetchInstants[record.id] = ContinuousClock.now }
+            // parked in offline for no reason; it arms the backoff instead, which paces the retries
+            // without freezing the device's state for a fixed window.
+            switch result {
+            case .success: self.remoteOverviewFetchInstants[record.id] = ContinuousClock.now
+            case .failure:
+                let delay = self.remoteOverviewPullBackoff.recordFailure(deviceID: record.id)
+                DeviceLinkTrace.log(deviceID: record.id, event: "pull_backoff_armed", detail: "delay_ms=\(Self.milliseconds(delay))")
+            }
             self.applyRemoteDeviceSection(deviceID: record.id, result: result)
         }
     }
@@ -492,7 +513,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             // healthy but silent.
             guard let section = host.deviceSections.first(where: { $0.deviceID == record.id }), section.loadState != .loaded else { continue }
             DeviceLinkTrace.log(deviceID: record.id, event: "watchdog_pull")
-            startRemoteOverviewPull(record: record, clientApp: clientApp)
+            startRemoteOverviewPull(record: record, clientApp: clientApp, userInitiated: false)
         }
         // The local device has no stream to drop and no retry of its own. Re-run the snapshot that
         // bootstraps and reads the local daemon — the same path the Reload command uses.
@@ -597,8 +618,11 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     /// an unreachable device is next attempted and is otherwise entirely invisible.
     private func traceArmedRetry(deviceID: String) {
         guard let delay = remoteOverviewSubscriptions.armedRetryDelay(deviceID: deviceID) else { return }
-        let milliseconds = delay.components.seconds * 1000 + delay.components.attoseconds / 1_000_000_000_000_000
-        DeviceLinkTrace.log(deviceID: deviceID, event: "retry_armed", detail: "delay_ms=\(milliseconds)")
+        DeviceLinkTrace.log(deviceID: deviceID, event: "retry_armed", detail: "delay_ms=\(Self.milliseconds(delay))")
+    }
+
+    private static func milliseconds(_ delay: Duration) -> Int64 {
+        delay.components.seconds * 1000 + delay.components.attoseconds / 1_000_000_000_000_000
     }
 
     /// A stream that dropped means the remote daemon or network went away. With no periodic remote
@@ -607,6 +631,26 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     /// stream close carries no error, so fall back to a descriptive reason for the offline tooltip.
     private func markRemoteOverviewSectionOffline(deviceID: String, error: (any Error)?) {
         applyRemoteDeviceSection(deviceID: deviceID, result: .failure(error ?? RemoteOverviewDisconnectError.streamClosed))
+    }
+
+    /// What a failed load must do to a device section that is already painted.
+    enum OfflineSectionUpdate: Equatable {
+        /// The device was not offline yet: run the full offline transition — drop its rows, rebuild the
+        /// outline, reconcile a selection that pointed into it.
+        case transition
+        /// Already offline for a different reason: take the newer reason and rebuild that device's row
+        /// alone, which is where the offline caption's tooltip comes from.
+        case repaintReason
+        /// Already offline for the same reason — every watchdog probe of a device that stays down. There
+        /// is nothing new to tell the user, so nothing is touched.
+        case unchanged
+    }
+
+    /// Pure so the "an offline device's reason stays current, but an unchanged failure never rebuilds
+    /// the outline" rule is directly testable.
+    nonisolated static func offlineSectionUpdate(loadState: SidebarDeviceLoadState, reason: String) -> OfflineSectionUpdate {
+        guard case .offline(let currentReason) = loadState else { return .transition }
+        return currentReason == reason ? .unchanged : .repaintReason
     }
 
     func applyRemoteDeviceSection(deviceID: String, result: Result<RemoteDeviceLoad, Error>) {
@@ -621,6 +665,11 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         var selectionInvalidatedByOffline = false
         switch result {
         case .success(let load):
+            // Any overview that arrives — pulled, or pushed on the subscription — is evidence this
+            // device answers, so it releases the hold a run of failed pulls put it under. Without this a
+            // device that came back on its stream would still have its pulls suppressed until the last
+            // hold elapsed.
+            remoteOverviewPullBackoff.clear(deviceID: deviceID)
             // Compatibility/status can change while the overview stays identical (e.g. after a restart
             // updates a remote daemon), so the unchanged-check must include them or the badge/block
             // would keep showing the stale verdict until an unrelated overview change.
@@ -687,18 +736,22 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
                 deviceID: deviceID, catalogSessionIDs: OpenPanePruning.referencedTerminalSessionIDs(overview: overview.overview))
         case .failure(let error):
             let reason = error.localizedDescription
+            let update = Self.offlineSectionUpdate(loadState: host.deviceSections[index].loadState, reason: reason)
             // Trace the transition and any later change of reason. An unchanged repeat — every watchdog
             // probe of a device that stays down — says nothing new and would grow without bound.
-            if host.deviceSections[index].loadState != .offline(reason) {
-                DeviceLinkTrace.log(deviceID: deviceID, event: "section_offline", detail: "reason=\(reason)")
-            }
-            if case .offline = host.deviceSections[index].loadState {
-                // Already offline: the transition below has run, so the outline's contents are unchanged
-                // and rebuilding it would be redundant. Still take the newer reason — it is the offline
-                // caption's tooltip, and freezing it at the first failure leaves the user reading a
-                // stale explanation (e.g. the original stream-closed message) for the whole outage.
+            if update != .unchanged { DeviceLinkTrace.log(deviceID: deviceID, event: "section_offline", detail: "reason=\(reason)") }
+            switch update {
+            case .unchanged: return
+            case .repaintReason:
+                // Already offline, with a newer reason: freezing the reason at the first failure leaves
+                // the user reading a stale explanation (e.g. the original stream-closed message) for the
+                // whole outage. The caption's tooltip is copied out of the load state when the row's cell
+                // is built, so the new reason only reaches the user by rebuilding that row — and only
+                // that row, because the outline's contents are unchanged.
                 host.deviceSections[index].loadState = .offline(reason)
+                host.outlineView.reloadItem(outlineItemRef(for: .device(deviceID)))
                 return
+            case .transition: break
             }
             // Capture (before the rebuild drops this device's rows from the merged data) whether the
             // current selection belongs to this device, so the offline transition can reconcile a now-
@@ -1032,7 +1085,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             // stays the terse "offline" to match remote devices and avoid widening the sidebar.
             if case .offline(let message)? = section?.loadState, !message.isEmpty { stateLabel.toolTip = message }
             contentRow.addArrangedSubview(stateLabel)
-            if section?.loadState.isOffline == true {
+            if deviceSectionOffersRetry(deviceID: deviceID) {
                 // Device headers are non-selectable, so this caption button is an offline device's only
                 // per-device recovery; without it the user's only option is reloading the whole sidebar.
                 let button = NSButton(title: "Retry", target: self, action: #selector(deviceRetryClicked(_:)))
@@ -1697,12 +1750,36 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         retryDeviceConnection(deviceID: String(raw.dropFirst("retry:".count)))
     }
 
+    /// Whether this device's offline caption offers a Retry. The one place that decides it, consulted
+    /// both by the caption that renders the button and by the action the button fires, so a visible
+    /// Retry always has something to attempt.
+    ///
+    /// The credential read is deliberately behind the offline check: it touches the paired-device
+    /// records and the credential store, and every device row is rebuilt on every outline reload.
+    private func deviceSectionOffersRetry(deviceID: String) -> Bool {
+        guard let section = host.deviceSections.first(where: { $0.deviceID == deviceID }), section.loadState.isOffline else { return false }
+        let hasCredentials =
+            !section.isLocal
+            && (host.macPairedDevices().first(where: { $0.id == deviceID }).map(AppKitController.pairedDeviceHasRequiredCredentials) ?? false)
+        return Self.deviceSectionOffersRetry(loadState: section.loadState, isLocal: section.isLocal, hasCredentials: hasCredentials)
+    }
+
+    /// A remote whose auth token or certificate fingerprint is gone reads "Reconnect required" and is
+    /// recovered by pairing it again, not by reconnecting, so it is offered no Retry. Pure so the rule
+    /// is directly testable.
+    nonisolated static func deviceSectionOffersRetry(loadState: SidebarDeviceLoadState, isLocal: Bool, hasCredentials: Bool) -> Bool {
+        guard loadState.isOffline else { return false }
+        // The local device has no stored credentials of its own; its retry re-runs the sidebar snapshot,
+        // which is what re-probes the local daemon.
+        return isLocal || hasCredentials
+    }
+
     /// User-initiated recovery for one offline device: the work the reachability watchdog does on its
     /// own cadence, run immediately for this device alone and without waiting out its backoff. The
     /// section returns to `.loading` so the click has visible feedback, and the attempt moves it on to
     /// loaded, or back to offline carrying the reason it failed with this time.
     private func retryDeviceConnection(deviceID: String) {
-        guard let index = host.deviceSections.firstIndex(where: { $0.deviceID == deviceID }), host.deviceSections[index].loadState.isOffline else {
+        guard deviceSectionOffersRetry(deviceID: deviceID), let index = host.deviceSections.firstIndex(where: { $0.deviceID == deviceID }) else {
             return
         }
         if host.deviceSections[index].isLocal {
@@ -1712,16 +1789,13 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             requestSidebarReload()
             return
         }
-        // A remote whose credentials are gone reads "Reconnect required" and is recovered by pairing
-        // again, not by reconnecting, so a retry has nothing to attempt for it.
-        guard let record = host.macPairedDevices().first(where: { $0.id == deviceID }),
-            AppKitController.pairedDeviceHasRequiredCredentials(device: record)
-        else { return }
+        guard let record = host.macPairedDevices().first(where: { $0.id == deviceID }) else { return }
         markDeviceSectionRetrying(deviceID: deviceID, index: index)
         remoteOverviewSubscriptions.resetForUserRetry(deviceID: deviceID)?.stop()
-        // Both attempts bypass their throttle deliberately: the pull skips the freshness gate and the
-        // subscribe skips the backoff, because the user asked for this device specifically.
-        startRemoteOverviewPull(record: record, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
+        // Both attempts bypass their throttle deliberately: the pull skips the freshness gate and its
+        // backoff, and the subscribe skips the backoff, because the user asked for this device
+        // specifically.
+        startRemoteOverviewPull(record: record, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short), userInitiated: true)
         refreshRemoteOverviewSubscriptions()
     }
 
