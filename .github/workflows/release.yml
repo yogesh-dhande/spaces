@@ -1,21 +1,13 @@
-# Build, sign, package, and publish a Spaces release when a version tag is pushed.
+# Cut a stable Spaces release when a version tag is pushed.
 #
-# Trigger: push a tag matching v* (e.g. v0.3.0)
+# Trigger: push a tag matching v* (e.g. v0.3.0), excluding the 4-component tags nightly.yml cuts
+# (e.g. v0.5.1.202607250900). A stable tag like v0.5.1 has two dots and never matches a pattern that
+# requires three, so a nightly release/tag can never re-enter the stable pipeline through this
+# trigger.
 #
-# Required secrets:
-#   CODESIGN_IDENTITY - Developer ID Application certificate name for code signing.
-#   CODESIGN_CERTIFICATE_P12 - Base64-encoded Developer ID Application .p12 certificate.
-#   CODESIGN_CERTIFICATE_PASSWORD - Password for the .p12 certificate.
-#   SPARKLE_PUBLIC_ED_KEY - Public Sparkle EdDSA key embedded in the app bundle.
-#   SPARKLE_PRIVATE_ED_KEY - Private Sparkle EdDSA key used for appcast signing.
-#   REMOTE_ARTIFACT_PUBLIC_ED25519_KEY - Public Ed25519 key embedded for remote artifact manifest verification.
-#   REMOTE_ARTIFACT_PRIVATE_ED25519_KEY - Private Ed25519 key used for remote artifact manifest signing.
-#   FIREBASE_SERVICE_ACCOUNT_SPACES_A1814 - Firebase Hosting service account JSON.
-#
-# Optional secrets:
-#   APPLE_ID          - Apple ID email for notarization (requires all three notarization secrets).
-#   TEAM_ID           - Apple Developer Team ID for notarization.
-#   APP_PASSWORD      - App-specific password for notarization.
+# The actual build (signing, packaging, notarization, GitHub Release, Sparkle appcast, website
+# deploy) lives in release-build.yml, a reusable workflow shared with nightly.yml so both channels
+# run byte-for-byte the same body. See release-build.yml for the required/optional secrets list.
 
 name: Release
 
@@ -23,323 +15,33 @@ on:
   push:
     tags:
       - "v*"
+      - "!v*.*.*.*"
 
 permissions:
   contents: write
 
 jobs:
-  linux-spacesd-artifact:
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: x86_64
-            docker-platform: linux/amd64
-            runner: ubuntu-24.04
-          - arch: arm64
-            docker-platform: linux/arm64
-            runner: ubuntu-24.04-arm
+  # GitHub Actions expressions have no substring-trim function, so stripping the tag's leading "v"
+  # needs a real shell step rather than an inline `${{ }}` expression. Kept as its own tiny job
+  # (instead of a step inside `release`) so the version is computed once, in the open, before the
+  # reusable workflow call below.
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-        with:
-          submodules: recursive
-
-      - name: Extract version from tag
+      - name: Strip leading v from tag
         id: version
-        run: |
-          echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-          echo "build=${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
-
-      - name: Sync release metadata
-        env:
-          SPARKLE_PUBLIC_ED_KEY: ${{ secrets.SPARKLE_PUBLIC_ED_KEY }}
-          REMOTE_ARTIFACT_PUBLIC_ED25519_KEY: ${{ secrets.REMOTE_ARTIFACT_PUBLIC_ED25519_KEY }}
-        run: |
-          scripts/sync-app-version.sh \
-            --short "${{ steps.version.outputs.version }}" \
-            --build "${{ steps.version.outputs.build }}" \
-            --feed-url "https://usespaces.dev/releases/appcast.xml" \
-            --public-ed-key "$SPARKLE_PUBLIC_ED_KEY" \
-            --remote-artifact-public-ed-key "$REMOTE_ARTIFACT_PUBLIC_ED25519_KEY"
-
-      - name: Build and smoke Linux spacesd artifact
-        run: |
-          docker run --rm --platform ${{ matrix.docker-platform }} \
-            -v "$PWD":/workspace \
-            -w /workspace \
-            swift:6.2-noble \
-            bash -lc 'apt-get update && apt-get install -y curl git xz-utils python3 pkg-config libsqlite3-dev libssl-dev openssl coreutils && apps/macos/scripts/build_linux_spacesd_artifact.sh --arch ${{ matrix.arch }}'
-
-      - name: Upload Linux spacesd artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: spacesd-ubuntu-24.04-${{ matrix.arch }}
-          path: |
-            dist/linux/spacesd-ubuntu-24.04-${{ matrix.arch }}.tar.gz
-            dist/linux/spacesd-ubuntu-24.04-${{ matrix.arch }}.tar.gz.sha256
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
   release:
-    needs: linux-spacesd-artifact
-    runs-on: macos-15
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-        with:
-          submodules: recursive
-
-      - name: Select Xcode
-        uses: maxim-lobanov/setup-xcode@v1
-        with:
-          xcode-version: latest-stable
-
-      - name: Print Swift toolchain
-        run: |
-          xcode-select -p
-          xcrun swift --version
-          swift --version
-
-      - name: Setup terminal build dependencies
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: apps/macos/scripts/ensure_ghostty_artifacts.sh --publish-missing
-
-      - name: Resolve SwiftPM dependencies
-        run: scripts/swiftpm.sh package resolve
-
-      - name: Extract version from tag
-        id: version
-        run: |
-          echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-          echo "build=${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
-
-      - name: Validate signing configuration
-        env:
-          CODESIGN_IDENTITY: ${{ secrets.CODESIGN_IDENTITY }}
-          CODESIGN_CERTIFICATE_P12: ${{ secrets.CODESIGN_CERTIFICATE_P12 }}
-          CODESIGN_CERTIFICATE_PASSWORD: ${{ secrets.CODESIGN_CERTIFICATE_PASSWORD }}
-          SPARKLE_PUBLIC_ED_KEY: ${{ secrets.SPARKLE_PUBLIC_ED_KEY }}
-          SPARKLE_PRIVATE_ED_KEY: ${{ secrets.SPARKLE_PRIVATE_ED_KEY }}
-          REMOTE_ARTIFACT_PUBLIC_ED25519_KEY: ${{ secrets.REMOTE_ARTIFACT_PUBLIC_ED25519_KEY }}
-          REMOTE_ARTIFACT_PRIVATE_ED25519_KEY: ${{ secrets.REMOTE_ARTIFACT_PRIVATE_ED25519_KEY }}
-          FIREBASE_SERVICE_ACCOUNT_SPACES_A1814: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_SPACES_A1814 }}
-        run: |
-          if [[ -z "$CODESIGN_IDENTITY" ]]; then
-            echo "::error::Missing required secret CODESIGN_IDENTITY." >&2
-            exit 1
-          fi
-          if [[ -z "$CODESIGN_CERTIFICATE_P12" ]]; then
-            echo "::error::Missing required secret CODESIGN_CERTIFICATE_P12. Set it to the base64-encoded Developer ID Application .p12 certificate." >&2
-            exit 1
-          fi
-          if [[ -z "$CODESIGN_CERTIFICATE_PASSWORD" ]]; then
-            echo "::error::Missing required secret CODESIGN_CERTIFICATE_PASSWORD." >&2
-            exit 1
-          fi
-          if [[ -z "$SPARKLE_PUBLIC_ED_KEY" ]]; then
-            echo "::error::Missing required secret SPARKLE_PUBLIC_ED_KEY." >&2
-            exit 1
-          fi
-          if [[ -z "$SPARKLE_PRIVATE_ED_KEY" ]]; then
-            echo "::error::Missing required secret SPARKLE_PRIVATE_ED_KEY." >&2
-            exit 1
-          fi
-          if [[ -z "$REMOTE_ARTIFACT_PUBLIC_ED25519_KEY" ]]; then
-            echo "::error::Missing required secret REMOTE_ARTIFACT_PUBLIC_ED25519_KEY." >&2
-            exit 1
-          fi
-          if [[ -z "$REMOTE_ARTIFACT_PRIVATE_ED25519_KEY" ]]; then
-            echo "::error::Missing required secret REMOTE_ARTIFACT_PRIVATE_ED25519_KEY." >&2
-            exit 1
-          fi
-          if [[ -z "$FIREBASE_SERVICE_ACCOUNT_SPACES_A1814" ]]; then
-            echo "::error::Missing required secret FIREBASE_SERVICE_ACCOUNT_SPACES_A1814." >&2
-            exit 1
-          fi
-
-      - name: Import signing certificate
-        env:
-          CODESIGN_CERTIFICATE_P12: ${{ secrets.CODESIGN_CERTIFICATE_P12 }}
-          CODESIGN_CERTIFICATE_PASSWORD: ${{ secrets.CODESIGN_CERTIFICATE_PASSWORD }}
-        run: |
-          keychain_path="$RUNNER_TEMP/codesign.keychain-db"
-          keychain_password="$(uuidgen)"
-          certificate_path="$RUNNER_TEMP/codesign.p12"
-
-          echo "$CODESIGN_CERTIFICATE_P12" | base64 -D -o "$certificate_path"
-
-          security create-keychain -p "$keychain_password" "$keychain_path"
-          security unlock-keychain -p "$keychain_password" "$keychain_path"
-          security set-keychain-settings -lut 21600 "$keychain_path"
-          security import "$certificate_path" -k "$keychain_path" -P "$CODESIGN_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain_path"
-          security list-keychains -d user -s "$keychain_path" $(security list-keychains -d user | tr -d '"')
-          security default-keychain -d user -s "$keychain_path"
-          security find-identity -v -p codesigning "$keychain_path"
-
-      - name: Sync release metadata
-        env:
-          SPARKLE_PUBLIC_ED_KEY: ${{ secrets.SPARKLE_PUBLIC_ED_KEY }}
-          REMOTE_ARTIFACT_PUBLIC_ED25519_KEY: ${{ secrets.REMOTE_ARTIFACT_PUBLIC_ED25519_KEY }}
-        run: |
-          scripts/sync-app-version.sh \
-            --short "${{ steps.version.outputs.version }}" \
-            --build "${{ steps.version.outputs.build }}" \
-            --feed-url "https://usespaces.dev/releases/appcast.xml" \
-            --public-ed-key "$SPARKLE_PUBLIC_ED_KEY" \
-            --remote-artifact-public-ed-key "$REMOTE_ARTIFACT_PUBLIC_ED25519_KEY"
-
-      - name: Build release
-        run: scripts/swiftpm.sh build -c release --arch arm64 --arch x86_64
-
-      - name: Code sign binaries
-        env:
-          CODESIGN_IDENTITY: ${{ secrets.CODESIGN_IDENTITY }}
-        run: |
-          scripts/codesign.sh \
-            apps/macos/.build/apple/Products/Release/SpacesApp \
-            apps/macos/.build/apple/Products/Release/spaces \
-            apps/macos/.build/apple/Products/Release/spacesd
-
-      - name: Package DMG
-        env:
-          CODESIGN_IDENTITY: ${{ secrets.CODESIGN_IDENTITY }}
-        run: |
-          scripts/create-dmg.sh \
-            apps/macos/.build/apple/Products/Release/SpacesApp \
-            apps/macos/.build/apple/Products/Release/spaces \
-            apps/macos/.build/apple/Products/Release/spacesd \
-            ${{ steps.version.outputs.version }}
-          dmg_name="Spaces-${{ steps.version.outputs.version }}.dmg"
-          echo "DMG_NAME=$dmg_name" >> "$GITHUB_ENV"
-          echo "DMG_PATH=dist/releases/${{ steps.version.outputs.version }}/$dmg_name" >> "$GITHUB_ENV"
-
-      - name: Package Sparkle archive
-        env:
-          CODESIGN_IDENTITY: ${{ secrets.CODESIGN_IDENTITY }}
-        run: |
-          scripts/create-sparkle-archive.sh \
-            apps/macos/.build/apple/Products/Release/SpacesApp \
-            apps/macos/.build/apple/Products/Release/spaces \
-            apps/macos/.build/apple/Products/Release/spacesd \
-            ${{ steps.version.outputs.version }}
-          zip_name="Spaces-${{ steps.version.outputs.version }}.zip"
-          echo "ZIP_NAME=$zip_name" >> "$GITHUB_ENV"
-          echo "ZIP_PATH=dist/releases/${{ steps.version.outputs.version }}/$zip_name" >> "$GITHUB_ENV"
-
-      - name: Notarize
-        env:
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          TEAM_ID: ${{ secrets.TEAM_ID }}
-          APP_PASSWORD: ${{ secrets.APP_PASSWORD }}
-        if: ${{ env.APPLE_ID != '' && env.TEAM_ID != '' && env.APP_PASSWORD != '' }}
-        run: |
-          xcrun notarytool submit "$DMG_PATH" \
-            --apple-id "$APPLE_ID" \
-            --team-id "$TEAM_ID" \
-            --password "$APP_PASSWORD" \
-            --wait
-          xcrun stapler staple "$DMG_PATH"
-
-      - name: Verify release artifacts
-        run: scripts/verify-release-artifacts.sh --require-notarization "$DMG_PATH"
-
-      - name: Download Linux x86_64 spacesd artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: spacesd-ubuntu-24.04-x86_64
-          path: dist/remote
-
-      - name: Download Linux arm64 spacesd artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: spacesd-ubuntu-24.04-arm64
-          path: dist/remote
-
-      - name: Verify remote spacesd artifacts
-        run: |
-          cd dist/remote
-          shasum -a 256 -c spacesd-ubuntu-24.04-x86_64.tar.gz.sha256
-          shasum -a 256 -c spacesd-ubuntu-24.04-arm64.tar.gz.sha256
-          tar -tzf spacesd-ubuntu-24.04-x86_64.tar.gz >/dev/null
-          tar -tzf spacesd-ubuntu-24.04-arm64.tar.gz >/dev/null
-
-      - name: Install remote artifact signing dependency
-        run: python3 -m pip install --user --break-system-packages cryptography
-
-      - name: Sign remote artifact manifest
-        env:
-          REMOTE_ARTIFACT_PRIVATE_ED25519_KEY: ${{ secrets.REMOTE_ARTIFACT_PRIVATE_ED25519_KEY }}
-        run: scripts/create-remote-artifact-manifest.sh "${{ steps.version.outputs.version }}" "$GITHUB_REF_NAME" dist/remote
-
-      - name: Create GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          release_title="Spaces ${{ steps.version.outputs.version }}"
-          release_assets=(
-            "$DMG_PATH"
-            "dist/remote/spacesd-ubuntu-24.04-x86_64.tar.gz"
-            "dist/remote/spacesd-ubuntu-24.04-x86_64.tar.gz.sha256"
-            "dist/remote/spacesd-ubuntu-24.04-arm64.tar.gz"
-            "dist/remote/spacesd-ubuntu-24.04-arm64.tar.gz.sha256"
-            "dist/remote/spaces-remote-artifacts.json"
-            "dist/remote/spaces-remote-artifacts.json.sig"
-          )
-          # --latest keeps releases/latest/download (the install.sh no-version path) pointed at
-          # the newest Spaces release even if another non-prerelease release is created later.
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release edit "$GITHUB_REF_NAME" --title "$release_title" --latest
-            gh release upload "$GITHUB_REF_NAME" "${release_assets[@]}" --clobber
-          else
-            gh release create "$GITHUB_REF_NAME" "${release_assets[@]}" \
-              --title "$release_title" \
-              --latest \
-              --generate-notes
-          fi
-
-      - name: Generate and publish Sparkle appcast
-        env:
-          SPARKLE_PRIVATE_ED_KEY: ${{ secrets.SPARKLE_PRIVATE_ED_KEY }}
-          SPARKLE_DOWNLOAD_URL_PREFIX: https://usespaces.dev/releases
-        run: scripts/publish-sparkle-appcast.sh ${{ steps.version.outputs.version }}
-
-      - name: Build website with staged Sparkle artifacts
-        run: |
-          cd apps/web
-          npm ci
-          npm run build
-
-      - name: Deploy Firebase Hosting
-        id: firebase_deploy
-        continue-on-error: true
-        uses: FirebaseExtended/action-hosting-deploy@v0
-        with:
-          repoToken: ${{ secrets.GITHUB_TOKEN }}
-          firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_SPACES_A1814 }}
-          channelId: live
-          projectId: spaces-a1814
-
-      - name: Confirm Hosting serves this release
-        if: ${{ steps.firebase_deploy.outcome != 'success' }}
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          # When the built site is unchanged, `firebase deploy` to the live channel returns
-          # HTTP 400 "is the current active version" — a no-op, not a real failure. Tolerate that
-          # case only when the live appcast already serves this release; any other deploy failure
-          # (auth, build, quota) leaves the new version absent and still fails the job.
-          set -euo pipefail
-          for attempt in 1 2 3 4 5 6; do
-            appcast="$(curl -fsSL "https://usespaces.dev/releases/appcast.xml?cb=${GITHUB_RUN_ID}-${attempt}" || true)"
-            if printf '%s' "$appcast" | grep -q "<sparkle:shortVersionString>${VERSION}</sparkle:shortVersionString>"; then
-              echo "Live appcast already serves ${VERSION}; treating the unchanged deploy as success."
-              exit 0
-            fi
-            echo "Attempt ${attempt}: live appcast not yet serving ${VERSION}; retrying in 10s…"
-            sleep 10
-          done
-          echo "Firebase Hosting deploy failed and ${VERSION} is not live." >&2
-          exit 1
+    needs: plan
+    uses: ./.github/workflows/release-build.yml
+    secrets: inherit
+    with:
+      channel: stable
+      version: ${{ needs.plan.outputs.version }}
+      # run_number is the stable channel's monotonic build counter: this workflow is the caller,
+      # so github.run_number here is this run's own number, not the reusable workflow's.
+      build: ${{ github.run_number }}
+      release-tag: ${{ github.ref_name }}

@@ -762,6 +762,8 @@ Publish macOS releases to GitHub Releases with:
 scripts/release-and-deploy.sh <version> [build-number]
 ```
 
+In CI the same release is cut by pushing a stable version tag, which runs [`.github/workflows/release.yml`](../.github/workflows/release.yml) — a thin caller of the reusable [`release-build.yml`](../.github/workflows/release-build.yml) it shares with the nightly channel described below.
+
 Local release runs the Ubuntu remote daemon artifact builds inside Docker for `linux/amd64` and `linux/arm64`, so Docker must be available before running the script. These Linux artifacts are installed by the published `https://usespaces.dev/install.sh` script, run on the Ubuntu device manually or by the Mac app over SSH during pairing recovery. Remote Macs use the signed DMG rather than a separate daemon artifact.
 
 This workflow:
@@ -773,12 +775,11 @@ This workflow:
 - creates a signed manual-download DMG
 - creates a Sparkle-served `Spaces.app` zip archive
 - updates `dist/updates/stable/appcast.xml` plus any Sparkle delta files
-- stages the Sparkle feed and Sparkle archives into `apps/web/public/releases`
-- builds the static site so Firebase can serve `https://usespaces.dev/releases/*`
 - optionally notarizes the DMG when `NOTARIZE=1`
 - verifies the final DMG signature plus the bundled installer, app, CLI, and spacesd daemon before publish
-- publishes the DMG to GitHub Releases
+- publishes the DMG, the Sparkle zip, and `appcast.xml` to GitHub Releases
 - publishes `spacesd-ubuntu-24.04-x86_64.tar.gz`, `spacesd-ubuntu-24.04-arm64.tar.gz`, their `.sha256` checksum files, `spaces-remote-artifacts.json`, and `spaces-remote-artifacts.json.sig` to the same GitHub Release
+- builds the static site last, since the site's `prebuild` stages the Sparkle feed back out of the release it just published
 
 Important environment variables:
 - `CODESIGN_IDENTITY`
@@ -798,11 +799,23 @@ Important environment variables:
 
 For GitHub Actions releases, `CODESIGN_CERTIFICATE_P12` must be the base64-encoded Developer ID Application `.p12` bundle that matches `CODESIGN_IDENTITY`, and `CODESIGN_CERTIFICATE_PASSWORD` must be the password used when exporting that `.p12`.
 
-Sparkle update hosting lives under `https://usespaces.dev/releases/` on the static Firebase site. The update feed and Sparkle archives are staged into `apps/web/public/releases`, which Next.js exports as real static files before Firebase deploy. The release pipeline keeps a single DMG, a single Sparkle zip, one stable `appcast.xml`, and signed Linux remote artifacts the installer downloads; the Linux installer itself is published separately at `https://usespaces.dev/install.sh` through the `apps/web` `prebuild` copy rather than as a GitHub release asset. The app bundle carries `spaces`, `spacesd`, and Caddy in `Contents/Resources`; the DMG installer links `/usr/local/bin` and `~/.spaces/bin` helpers to those bundled binaries so installed CLI commands, launchd, and remote Mac pairing use the updated app bundle after Sparkle updates. Linux artifacts link `~/.local/bin/spaces` to the managed `~/.spaces/bin/spaces` helper so user shells can run `spaces` without a system-wide install.
+Stable Sparkle update hosting lives under `https://usespaces.dev/releases/` on the static Firebase site, which Next.js exports as real static files before Firebase deploy. A Firebase Hosting deploy replaces the whole site, so the GitHub release is the source of truth for what that directory contains: `scripts/stage-web-releases.sh` runs from the `apps/web` `prebuild` and downloads `appcast.xml` and the Sparkle zip it names from `releases/latest/download` on every build. Any website build — merge deploy, PR preview, release, local — therefore republishes a complete feed instead of blanking it, and a release that failed to publish those two assets fails the next site build loudly. The Linux installer is published the same way, copied to `https://usespaces.dev/install.sh` by the same `prebuild` rather than as a GitHub release asset. The app bundle carries `spaces`, `spacesd`, and Caddy in `Contents/Resources`; the DMG installer links `/usr/local/bin` and `~/.spaces/bin` helpers to those bundled binaries so installed CLI commands, launchd, and remote Mac pairing use the updated app bundle after Sparkle updates. Linux artifacts link `~/.local/bin/spaces` to the managed `~/.spaces/bin/spaces` helper so user shells can run `spaces` without a system-wide install.
+
+## Nightly Channel
+
+[`.github/workflows/nightly.yml`](../.github/workflows/nightly.yml) cuts a nightly build from the tip of `main` at 09:00 UTC and on `workflow_dispatch`. It shares its entire body with the stable release: both are thin callers of the reusable [`release-build.yml`](../.github/workflows/release-build.yml), which takes `channel`, `version`, `build`, and `release-tag` and resolves the four channel knobs — Sparkle feed URL, appcast download prefix, the host the post-deploy check curls, and the Firebase Hosting entry point — from `channel` alone.
+
+A nightly version is the newest stable tag plus a UTC `YYYYMMDDHHMM` timestamp, `0.5.1.202607250900`, and that same timestamp is its `CFBundleVersion`. Four dotted numeric components are required rather than a `-nightly` suffix: `SpacesWireProtocol.isVersion(_:olderThan:)` maps non-numeric components to `0`, so a suffixed version would sort below the release it was built from and suppress the staged-update hint. Minute precision keeps a second dispatch on the same day distinct in both values — Sparkle compares the build number, while the daemon compares marketing versions to notice a staged build, so a shared version would update the app and leave the daemon on the earlier binary. A scheduled run whose `main` tip already has a nightly tag exits before building; a manual dispatch always builds.
+
+Nightly publishes to its own Firebase Hosting site, `spaces-nightly.web.app`, configured by [`deploy/nightly/firebase.json`](../deploy/nightly/firebase.json) and populated by `scripts/stage-nightly-site.sh`. The site serves only `releases/appcast.xml`, the Sparkle zip, a `noindex` landing page, and a `robots.txt` that disallows crawling; it carries no rewrites, so a missing asset returns 404 rather than an HTML page with HTTP 200. Keeping it a separate site is what lets nightly run daily without deploying `apps/web`, whose `main` state carries unreleased website work.
+
+The nightly DMG, Linux daemon artifacts, and signed manifest go to a GitHub prerelease tagged `v<version>`, pinned with `--target` to the commit that was built. Prereleases never claim `releases/latest`, so `install.sh`'s no-version path stays on stable, while the version-pinned form resolves a nightly the same way it resolves any release. The workflow prunes nightly prereleases beyond the newest seven, acting only on prerelease-marked releases whose tags have four numeric components. `release.yml` and `ios-release.yml` exclude those tags from their `v*` triggers, so a nightly never re-enters the stable pipeline or cuts a TestFlight build.
+
+Creating the hosting site is a one-time step: `firebase hosting:sites:create spaces-nightly --project spaces-a1814`. The existing `FIREBASE_SERVICE_ACCOUNT_SPACES_A1814` secret covers it, and no other secret or DNS record is involved.
 
 ## iOS Release
 
-[`.github/workflows/ios-release.yml`](../.github/workflows/ios-release.yml) builds the iOS app and uploads it to App Store Connect for TestFlight. Pushing a `v*` tag runs both the macOS and iOS release workflows, so the same version ships across every client. A `workflow_dispatch` run with a required `version` input cuts a TestFlight-only build from any branch without tagging a public macOS release. The build number is `GITHUB_RUN_NUMBER` in both cases, and `scripts/sync-app-version.sh --short <version> --build <build>` stamps the shared version metadata while preserving the checked-in Sparkle feed URL and keys.
+[`.github/workflows/ios-release.yml`](../.github/workflows/ios-release.yml) builds the iOS app and uploads it to App Store Connect for TestFlight. Pushing a stable version tag runs both the macOS and iOS release workflows, so the same version ships across every client; both exclude the four-component tags the nightly channel cuts. A `workflow_dispatch` run with a required `version` input cuts a TestFlight-only build from any branch without tagging a public macOS release. The build number is `GITHUB_RUN_NUMBER` in both cases, and `scripts/sync-app-version.sh --short <version> --build <build>` stamps the shared version metadata while preserving the checked-in Sparkle feed URL and keys.
 
 The workflow obtains `GhosttyKit` the same way as the macOS release, running `apps/macos/scripts/ensure_ghostty_artifacts.sh --publish-missing` so the pinned-submodule `GhosttyKit.xcframework` (including its iOS device and simulator slices) is present, then `xcodebuild archive`/`-exportArchive` with [`apps/ios/ExportOptions.plist`](../apps/ios/ExportOptions.plist) (`method: app-store-connect`, `destination: upload`). The export step itself uploads the build to App Store Connect. The `.xcarchive` is retained as a workflow artifact for debugging. In `apps/ios/project.yml`, the `SpacesMobile` scheme's build targets list `SpacesMobileTests` and `SpacesMobileUITests` with `[test]` rather than `all`, so their `BuildActionEntry` gets `buildForArchiving="NO"`: those targets `@testable import SpacesMobile`, which needs the app built with `-enable-testing`, a flag `xcodebuild archive -configuration Release` does not set. Leaving the test targets on `all` would have `archive` compile them in Release and fail every release build; XcodeGen regenerates the shared scheme from this setting, so hand-editing the generated `.xcscheme` does not stick.
 

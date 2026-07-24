@@ -1,0 +1,454 @@
+# Build, sign, package, and publish a Spaces release for one channel.
+#
+# This is a reusable `workflow_call` workflow, not a trigger entry point. release.yml (tag push,
+# channel: stable) and nightly.yml (schedule/dispatch, channel: nightly) are both thin callers
+# that resolve their own version/build/tag and hand them in as inputs. Keeping the actual build
+# body here means both channels run the identical signing, packaging, notarization, and
+# verification pipeline; the only place they diverge is the small set of channel knobs resolved
+# by the "Derive channel config" steps below (feed URL, download prefix, appcast host, Firebase
+# entryPoint).
+#
+# Required secrets:
+#   CODESIGN_IDENTITY - Developer ID Application certificate name for code signing.
+#   CODESIGN_CERTIFICATE_P12 - Base64-encoded Developer ID Application .p12 certificate.
+#   CODESIGN_CERTIFICATE_PASSWORD - Password for the .p12 certificate.
+#   SPARKLE_PUBLIC_ED_KEY - Public Sparkle EdDSA key embedded in the app bundle.
+#   SPARKLE_PRIVATE_ED_KEY - Private Sparkle EdDSA key used for appcast signing.
+#   REMOTE_ARTIFACT_PUBLIC_ED25519_KEY - Public Ed25519 key embedded for remote artifact manifest verification.
+#   REMOTE_ARTIFACT_PRIVATE_ED25519_KEY - Private Ed25519 key used for remote artifact manifest signing.
+#   FIREBASE_SERVICE_ACCOUNT_SPACES_A1814 - Firebase Hosting service account JSON.
+#
+# Optional secrets:
+#   APPLE_ID          - Apple ID email for notarization (requires all three notarization secrets).
+#   TEAM_ID           - Apple Developer Team ID for notarization.
+#   APP_PASSWORD      - App-specific password for notarization.
+
+name: Release Build
+
+on:
+  workflow_call:
+    inputs:
+      channel:
+        description: "Release channel: stable or nightly"
+        required: true
+        type: string
+      version:
+        description: "Spaces version, e.g. 0.5.2 (stable) or 0.5.1.202607250900 (nightly)"
+        required: true
+        type: string
+      build:
+        description: "CFBundleVersion for this build, e.g. the run number (stable) or YYYYMMDDHHMM (nightly)"
+        required: true
+        type: string
+      release-tag:
+        description: "GitHub release tag to create/update, e.g. v0.5.2 or v0.5.1.202607250900"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  linux-spacesd-artifact:
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            docker-platform: linux/amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            docker-platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      # This job only needs the feed URL that sync-app-version.sh bakes into the app bundle; the
+      # rest of the channel config (download prefix, appcast host, Firebase entryPoint) is only
+      # used later in the release job, so it isn't worth deriving here too.
+      - name: Derive channel feed URL
+        id: channel
+        run: |
+          case "${{ inputs.channel }}" in
+            stable)
+              echo "feed-url=https://usespaces.dev/releases/appcast.xml" >> "$GITHUB_OUTPUT"
+              ;;
+            nightly)
+              echo "feed-url=https://spaces-nightly.web.app/releases/appcast.xml" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "::error::Unknown channel '${{ inputs.channel }}'; expected stable or nightly." >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Sync release metadata
+        env:
+          SPARKLE_PUBLIC_ED_KEY: ${{ secrets.SPARKLE_PUBLIC_ED_KEY }}
+          REMOTE_ARTIFACT_PUBLIC_ED25519_KEY: ${{ secrets.REMOTE_ARTIFACT_PUBLIC_ED25519_KEY }}
+        run: |
+          scripts/sync-app-version.sh \
+            --short "${{ inputs.version }}" \
+            --build "${{ inputs.build }}" \
+            --feed-url "${{ steps.channel.outputs.feed-url }}" \
+            --public-ed-key "$SPARKLE_PUBLIC_ED_KEY" \
+            --remote-artifact-public-ed-key "$REMOTE_ARTIFACT_PUBLIC_ED25519_KEY"
+
+      - name: Build and smoke Linux spacesd artifact
+        run: |
+          docker run --rm --platform ${{ matrix.docker-platform }} \
+            -v "$PWD":/workspace \
+            -w /workspace \
+            swift:6.2-noble \
+            bash -lc 'apt-get update && apt-get install -y curl git xz-utils python3 pkg-config libsqlite3-dev libssl-dev openssl coreutils && apps/macos/scripts/build_linux_spacesd_artifact.sh --arch ${{ matrix.arch }}'
+
+      - name: Upload Linux spacesd artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: spacesd-ubuntu-24.04-${{ matrix.arch }}
+          path: |
+            dist/linux/spacesd-ubuntu-24.04-${{ matrix.arch }}.tar.gz
+            dist/linux/spacesd-ubuntu-24.04-${{ matrix.arch }}.tar.gz.sha256
+
+  release:
+    needs: linux-spacesd-artifact
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      # Every channel-specific value the rest of this job needs (feed URL for the app bundle,
+      # download prefix for the appcast, the Hosting host the final curl checks, and which
+      # Firebase Hosting site config to deploy) comes from this one case statement. Fail loudly on
+      # an unrecognized channel instead of silently falling through to stable's URLs, since that
+      # would publish nightly builds under the stable update feed. Kept first so that failure
+      # costs seconds rather than landing after the Ghostty and SwiftPM setup below.
+      - name: Derive channel config
+        id: channel
+        run: |
+          case "${{ inputs.channel }}" in
+            stable)
+              echo "feed-url=https://usespaces.dev/releases/appcast.xml" >> "$GITHUB_OUTPUT"
+              echo "download-url-prefix=https://usespaces.dev/releases" >> "$GITHUB_OUTPUT"
+              echo "appcast-host=https://usespaces.dev" >> "$GITHUB_OUTPUT"
+              echo "firebase-entry-point=." >> "$GITHUB_OUTPUT"
+              ;;
+            nightly)
+              echo "feed-url=https://spaces-nightly.web.app/releases/appcast.xml" >> "$GITHUB_OUTPUT"
+              echo "download-url-prefix=https://spaces-nightly.web.app/releases" >> "$GITHUB_OUTPUT"
+              echo "appcast-host=https://spaces-nightly.web.app" >> "$GITHUB_OUTPUT"
+              echo "firebase-entry-point=deploy/nightly" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "::error::Unknown channel '${{ inputs.channel }}'; expected stable or nightly." >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Print Swift toolchain
+        run: |
+          xcode-select -p
+          xcrun swift --version
+          swift --version
+
+      - name: Setup terminal build dependencies
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: apps/macos/scripts/ensure_ghostty_artifacts.sh --publish-missing
+
+      - name: Resolve SwiftPM dependencies
+        run: scripts/swiftpm.sh package resolve
+
+      - name: Validate signing configuration
+        env:
+          CODESIGN_IDENTITY: ${{ secrets.CODESIGN_IDENTITY }}
+          CODESIGN_CERTIFICATE_P12: ${{ secrets.CODESIGN_CERTIFICATE_P12 }}
+          CODESIGN_CERTIFICATE_PASSWORD: ${{ secrets.CODESIGN_CERTIFICATE_PASSWORD }}
+          SPARKLE_PUBLIC_ED_KEY: ${{ secrets.SPARKLE_PUBLIC_ED_KEY }}
+          SPARKLE_PRIVATE_ED_KEY: ${{ secrets.SPARKLE_PRIVATE_ED_KEY }}
+          REMOTE_ARTIFACT_PUBLIC_ED25519_KEY: ${{ secrets.REMOTE_ARTIFACT_PUBLIC_ED25519_KEY }}
+          REMOTE_ARTIFACT_PRIVATE_ED25519_KEY: ${{ secrets.REMOTE_ARTIFACT_PRIVATE_ED25519_KEY }}
+          FIREBASE_SERVICE_ACCOUNT_SPACES_A1814: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_SPACES_A1814 }}
+        run: |
+          if [[ -z "$CODESIGN_IDENTITY" ]]; then
+            echo "::error::Missing required secret CODESIGN_IDENTITY." >&2
+            exit 1
+          fi
+          if [[ -z "$CODESIGN_CERTIFICATE_P12" ]]; then
+            echo "::error::Missing required secret CODESIGN_CERTIFICATE_P12. Set it to the base64-encoded Developer ID Application .p12 certificate." >&2
+            exit 1
+          fi
+          if [[ -z "$CODESIGN_CERTIFICATE_PASSWORD" ]]; then
+            echo "::error::Missing required secret CODESIGN_CERTIFICATE_PASSWORD." >&2
+            exit 1
+          fi
+          if [[ -z "$SPARKLE_PUBLIC_ED_KEY" ]]; then
+            echo "::error::Missing required secret SPARKLE_PUBLIC_ED_KEY." >&2
+            exit 1
+          fi
+          if [[ -z "$SPARKLE_PRIVATE_ED_KEY" ]]; then
+            echo "::error::Missing required secret SPARKLE_PRIVATE_ED_KEY." >&2
+            exit 1
+          fi
+          if [[ -z "$REMOTE_ARTIFACT_PUBLIC_ED25519_KEY" ]]; then
+            echo "::error::Missing required secret REMOTE_ARTIFACT_PUBLIC_ED25519_KEY." >&2
+            exit 1
+          fi
+          if [[ -z "$REMOTE_ARTIFACT_PRIVATE_ED25519_KEY" ]]; then
+            echo "::error::Missing required secret REMOTE_ARTIFACT_PRIVATE_ED25519_KEY." >&2
+            exit 1
+          fi
+          if [[ -z "$FIREBASE_SERVICE_ACCOUNT_SPACES_A1814" ]]; then
+            echo "::error::Missing required secret FIREBASE_SERVICE_ACCOUNT_SPACES_A1814." >&2
+            exit 1
+          fi
+
+      - name: Import signing certificate
+        env:
+          CODESIGN_CERTIFICATE_P12: ${{ secrets.CODESIGN_CERTIFICATE_P12 }}
+          CODESIGN_CERTIFICATE_PASSWORD: ${{ secrets.CODESIGN_CERTIFICATE_PASSWORD }}
+        run: |
+          keychain_path="$RUNNER_TEMP/codesign.keychain-db"
+          keychain_password="$(uuidgen)"
+          certificate_path="$RUNNER_TEMP/codesign.p12"
+
+          echo "$CODESIGN_CERTIFICATE_P12" | base64 -D -o "$certificate_path"
+
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security import "$certificate_path" -k "$keychain_path" -P "$CODESIGN_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain_path"
+          security list-keychains -d user -s "$keychain_path" $(security list-keychains -d user | tr -d '"')
+          security default-keychain -d user -s "$keychain_path"
+          security find-identity -v -p codesigning "$keychain_path"
+
+      - name: Sync release metadata
+        env:
+          SPARKLE_PUBLIC_ED_KEY: ${{ secrets.SPARKLE_PUBLIC_ED_KEY }}
+          REMOTE_ARTIFACT_PUBLIC_ED25519_KEY: ${{ secrets.REMOTE_ARTIFACT_PUBLIC_ED25519_KEY }}
+        run: |
+          scripts/sync-app-version.sh \
+            --short "${{ inputs.version }}" \
+            --build "${{ inputs.build }}" \
+            --feed-url "${{ steps.channel.outputs.feed-url }}" \
+            --public-ed-key "$SPARKLE_PUBLIC_ED_KEY" \
+            --remote-artifact-public-ed-key "$REMOTE_ARTIFACT_PUBLIC_ED25519_KEY"
+
+      - name: Build release
+        run: scripts/swiftpm.sh build -c release --arch arm64 --arch x86_64
+
+      - name: Code sign binaries
+        env:
+          CODESIGN_IDENTITY: ${{ secrets.CODESIGN_IDENTITY }}
+        run: |
+          scripts/codesign.sh \
+            apps/macos/.build/apple/Products/Release/SpacesApp \
+            apps/macos/.build/apple/Products/Release/spaces \
+            apps/macos/.build/apple/Products/Release/spacesd
+
+      - name: Package DMG
+        env:
+          CODESIGN_IDENTITY: ${{ secrets.CODESIGN_IDENTITY }}
+        run: |
+          scripts/create-dmg.sh \
+            apps/macos/.build/apple/Products/Release/SpacesApp \
+            apps/macos/.build/apple/Products/Release/spaces \
+            apps/macos/.build/apple/Products/Release/spacesd \
+            ${{ inputs.version }}
+          dmg_name="Spaces-${{ inputs.version }}.dmg"
+          echo "DMG_NAME=$dmg_name" >> "$GITHUB_ENV"
+          echo "DMG_PATH=dist/releases/${{ inputs.version }}/$dmg_name" >> "$GITHUB_ENV"
+
+      - name: Package Sparkle archive
+        env:
+          CODESIGN_IDENTITY: ${{ secrets.CODESIGN_IDENTITY }}
+        run: |
+          scripts/create-sparkle-archive.sh \
+            apps/macos/.build/apple/Products/Release/SpacesApp \
+            apps/macos/.build/apple/Products/Release/spaces \
+            apps/macos/.build/apple/Products/Release/spacesd \
+            ${{ inputs.version }}
+          zip_name="Spaces-${{ inputs.version }}.zip"
+          echo "ZIP_NAME=$zip_name" >> "$GITHUB_ENV"
+          echo "ZIP_PATH=dist/releases/${{ inputs.version }}/$zip_name" >> "$GITHUB_ENV"
+
+      - name: Notarize
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          TEAM_ID: ${{ secrets.TEAM_ID }}
+          APP_PASSWORD: ${{ secrets.APP_PASSWORD }}
+        if: ${{ env.APPLE_ID != '' && env.TEAM_ID != '' && env.APP_PASSWORD != '' }}
+        run: |
+          xcrun notarytool submit "$DMG_PATH" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$TEAM_ID" \
+            --password "$APP_PASSWORD" \
+            --wait
+          xcrun stapler staple "$DMG_PATH"
+
+      - name: Verify release artifacts
+        run: scripts/verify-release-artifacts.sh --require-notarization "$DMG_PATH"
+
+      - name: Download Linux x86_64 spacesd artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: spacesd-ubuntu-24.04-x86_64
+          path: dist/remote
+
+      - name: Download Linux arm64 spacesd artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: spacesd-ubuntu-24.04-arm64
+          path: dist/remote
+
+      - name: Verify remote spacesd artifacts
+        run: |
+          cd dist/remote
+          shasum -a 256 -c spacesd-ubuntu-24.04-x86_64.tar.gz.sha256
+          shasum -a 256 -c spacesd-ubuntu-24.04-arm64.tar.gz.sha256
+          tar -tzf spacesd-ubuntu-24.04-x86_64.tar.gz >/dev/null
+          tar -tzf spacesd-ubuntu-24.04-arm64.tar.gz >/dev/null
+
+      - name: Install remote artifact signing dependency
+        run: python3 -m pip install --user --break-system-packages cryptography
+
+      - name: Sign remote artifact manifest
+        env:
+          REMOTE_ARTIFACT_PRIVATE_ED25519_KEY: ${{ secrets.REMOTE_ARTIFACT_PRIVATE_ED25519_KEY }}
+        run: scripts/create-remote-artifact-manifest.sh "${{ inputs.version }}" "${{ inputs.release-tag }}" dist/remote
+
+      # Generate the appcast before creating the GitHub Release: the stable site build downloads
+      # appcast.xml and the Sparkle zip from the release it is about to publish, so the release
+      # (and the appcast asset on it) must exist first. This step itself only needs the local zip
+      # and dist/remote artifacts, so it can run ahead of the release regardless of channel.
+      - name: Generate Sparkle appcast
+        env:
+          SPARKLE_PRIVATE_ED_KEY: ${{ secrets.SPARKLE_PRIVATE_ED_KEY }}
+          SPARKLE_DOWNLOAD_URL_PREFIX: ${{ steps.channel.outputs.download-url-prefix }}
+        run: scripts/publish-sparkle-appcast.sh ${{ inputs.channel }} ${{ inputs.version }}
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          release_title="Spaces ${{ inputs.version }}"
+          release_assets=(
+            "$DMG_PATH"
+            "dist/remote/spacesd-ubuntu-24.04-x86_64.tar.gz"
+            "dist/remote/spacesd-ubuntu-24.04-x86_64.tar.gz.sha256"
+            "dist/remote/spacesd-ubuntu-24.04-arm64.tar.gz"
+            "dist/remote/spacesd-ubuntu-24.04-arm64.tar.gz.sha256"
+            "dist/remote/spaces-remote-artifacts.json"
+            "dist/remote/spaces-remote-artifacts.json.sig"
+          )
+          if [[ "${{ inputs.channel }}" == "stable" ]]; then
+            # Stable ships the Sparkle zip and appcast.xml as release assets too: the Sparkle feed
+            # points updaters at this release's download URLs, and install.sh's no-version path
+            # resolves through releases/latest, so both need to live on the release itself.
+            release_assets+=(
+              "$ZIP_PATH"
+              "dist/updates/stable/appcast.xml"
+            )
+            # --latest keeps releases/latest/download (the install.sh no-version path) pointed at
+            # the newest Spaces release even if another non-prerelease release is created later.
+            if gh release view "${{ inputs.release-tag }}" >/dev/null 2>&1; then
+              gh release edit "${{ inputs.release-tag }}" --title "$release_title" --latest
+              gh release upload "${{ inputs.release-tag }}" "${release_assets[@]}" --clobber
+            else
+              gh release create "${{ inputs.release-tag }}" "${release_assets[@]}" \
+                --title "$release_title" \
+                --latest \
+                --generate-notes
+            fi
+          else
+            # Nightly never ships the appcast or zip as GitHub release assets: nightly's Sparkle
+            # feed and download prefix point at Firebase Hosting (spaces-nightly.web.app), not at
+            # this release, so those two files would just be dead weight on the release page.
+            # Nightly must also never pass --latest: that flag would make releases/latest/download
+            # (install.sh's no-version path, and Sparkle's own "latest stable" notion) resolve to
+            # an unstable prerelease instead of the newest tagged stable build.
+            if gh release view "${{ inputs.release-tag }}" >/dev/null 2>&1; then
+              # A second workflow_dispatch on the same UTC day reuses this tag. Recreate instead of
+              # editing in place so the tag always points at the commit that was just built, not a
+              # mix of two commits' assets. Guard the deletion to a tag with exactly four dotted
+              # numeric components AND a release already marked prerelease, so this path can never
+              # reach (and delete) a stable release even if inputs were ever wrong.
+              if [[ ! "${{ inputs.release-tag }}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                echo "::error::Refusing to delete release '${{ inputs.release-tag }}': tag is not a 4-component nightly version." >&2
+                exit 1
+              fi
+              is_prerelease="$(gh release view "${{ inputs.release-tag }}" --json isPrerelease --jq .isPrerelease)"
+              if [[ "$is_prerelease" != "true" ]]; then
+                echo "::error::Refusing to delete release '${{ inputs.release-tag }}': it is not marked prerelease." >&2
+                exit 1
+              fi
+              gh release delete "${{ inputs.release-tag }}" --cleanup-tag --yes
+            fi
+            # --target pins the new tag to the commit this run actually built. Without it GitHub
+            # creates the tag at the default branch's tip, which drifts from the built commit
+            # whenever main moves during the ~20 minutes this job takes, and points somewhere else
+            # entirely for a workflow_dispatch run from a branch.
+            gh release create "${{ inputs.release-tag }}" "${release_assets[@]}" \
+              --title "$release_title" \
+              --target "$GITHUB_SHA" \
+              --prerelease \
+              --generate-notes
+          fi
+
+      - name: Build website with staged Sparkle artifacts
+        if: ${{ inputs.channel == 'stable' }}
+        run: |
+          cd apps/web
+          npm ci
+          npm run build
+
+      - name: Stage nightly site
+        if: ${{ inputs.channel == 'nightly' }}
+        run: scripts/stage-nightly-site.sh ${{ inputs.version }} ${{ inputs.release-tag }}
+
+      - name: Deploy Firebase Hosting
+        id: firebase_deploy
+        continue-on-error: true
+        uses: FirebaseExtended/action-hosting-deploy@v0
+        with:
+          repoToken: ${{ secrets.GITHUB_TOKEN }}
+          firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_SPACES_A1814 }}
+          channelId: live
+          projectId: spaces-a1814
+          entryPoint: ${{ steps.channel.outputs.firebase-entry-point }}
+
+      - name: Confirm Hosting serves this release
+        if: ${{ steps.firebase_deploy.outcome != 'success' }}
+        env:
+          VERSION: ${{ inputs.version }}
+          APPCAST_HOST: ${{ steps.channel.outputs.appcast-host }}
+        run: |
+          # When the built site is unchanged, `firebase deploy` to the live channel returns
+          # HTTP 400 "is the current active version" — a no-op, not a real failure. Tolerate that
+          # case only when the live appcast already serves this release; any other deploy failure
+          # (auth, build, quota) leaves the new version absent and still fails the job.
+          set -euo pipefail
+          for attempt in 1 2 3 4 5 6; do
+            appcast="$(curl -fsSL "${APPCAST_HOST}/releases/appcast.xml?cb=${GITHUB_RUN_ID}-${attempt}" || true)"
+            if printf '%s' "$appcast" | grep -q "<sparkle:shortVersionString>${VERSION}</sparkle:shortVersionString>"; then
+              echo "Live appcast already serves ${VERSION}; treating the unchanged deploy as success."
+              exit 0
+            fi
+            echo "Attempt ${attempt}: live appcast not yet serving ${VERSION}; retrying in 10s…"
+            sleep 10
+          done
+          echo "Firebase Hosting deploy failed and ${VERSION} is not live." >&2
+          exit 1
