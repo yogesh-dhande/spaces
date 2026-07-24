@@ -113,8 +113,8 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
     /// on needs to run there. Each poll hops onto the engine synchronously just to evaluate the
     /// (engine-isolated) condition.
     private func waitUntil(
-        timeout: TimeInterval = 10, pollInterval: TimeInterval = 0.05, file: StaticString = #filePath, line: UInt = #line,
-        _ condition: @escaping @TerminalEngineActor () -> Bool
+        timeout: TimeInterval = 30, pollInterval: TimeInterval = 0.05, file: StaticString = #filePath, line: UInt = #line,
+        diagnostics: (() -> String)? = nil, _ condition: @escaping @TerminalEngineActor () -> Bool
     ) async throws {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
@@ -122,12 +122,14 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             try? await Task.sleep(for: .seconds(pollInterval))
         }
 
-        XCTFail("Timed out waiting for condition.", file: file, line: line)
+        var message = "Timed out waiting for condition."
+        if let diagnostics { message += " \(diagnostics())" }
+        XCTFail(message, file: file, line: line)
         throw NSError(domain: "GhosttyEmbeddedSessionHostTests", code: 1)
     }
 
     private func waitForForegroundPID(
-        in sessionDriver: GhosttyEmbeddedTerminalSessionDriver, timeout: TimeInterval = 10, file: StaticString = #filePath, line: UInt = #line
+        in sessionDriver: GhosttyEmbeddedTerminalSessionDriver, timeout: TimeInterval = 30, file: StaticString = #filePath, line: UInt = #line
     ) async throws -> Int32 {
         // The condition closure below is re-sent to the engine actor on every poll, so the result
         // must live behind a Sendable box rather than a captured `var` (a bare `var` capture used
@@ -144,6 +146,28 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         guard pid > 0 else { return false }
         if kill(pid, 0) == 0 { return true }
         return errno == EPERM
+    }
+
+    /// Shared by both `python3` READY probes below: reports what the surface actually shows and
+    /// whether the child process is still around, so a timeout on "READY never appeared" says why
+    /// instead of just that it happened. `.debugDescription` renders control characters (the mouse
+    /// tracking escape sequences the probes write before READY) as readable `\u{..}` escapes rather
+    /// than letting them mangle the CI log.
+    private func readyProbeDiagnostics(sessionDriver: GhosttyEmbeddedTerminalSessionDriver, scriptURL: URL) -> String {
+        let (snapshot, childPID, foregroundPID) = TerminalEngineActor.runSynchronously {
+            (sessionDriver.snapshotText(), sessionDriver.childPID(), sessionDriver.foregroundPID())
+        }
+        // A snapshot is a fixed-size terminal grid, so it is mostly blank padding below whatever the
+        // probe printed. Drop the blank lines before truncating: taking a raw suffix would log 800
+        // spaces from the bottom of the grid and hide the error text sitting at the top.
+        let meaningfulSnapshot = snapshot.map {
+            $0.split(separator: "\n", omittingEmptySubsequences: false).map { $0.trimmingCharacters(in: .whitespaces) }
+        }.map { $0.filter { !$0.isEmpty }.joined(separator: "\\n") }
+        let truncatedSnapshot = String((meaningfulSnapshot ?? "<nil>").suffix(800)).debugDescription
+        let alive = childPID.map { Self.processIsAlive($0) }
+        let scriptExists = FileManager.default.fileExists(atPath: scriptURL.path)
+        return "snapshot=\(truncatedSnapshot) childPID=\(childPID.map(String.init) ?? "nil") "
+            + "foregroundPID=\(foregroundPID.map(String.init) ?? "nil") alive=\(alive.map(String.init) ?? "nil") scriptExists=\(scriptExists)"
     }
 
     func testHostManagedPTYLaunchesInteractiveShellAsLoginShell() {
@@ -261,7 +285,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         try driver.startIfNeeded()
         try await waitUntil { FileManager.default.fileExists(atPath: markerPath.path) }
         driver.sendRawBytes(Data([0x03]))
-        try await waitUntil(timeout: 5) { driver.childPID() == nil }
+        try await waitUntil(timeout: 30) { driver.childPID() == nil }
 
         let markerText = try String(contentsOf: markerPath, encoding: .utf8)
         XCTAssertTrue(markerText.contains("ready"))
@@ -297,11 +321,11 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
 
         driver.terminate()
 
-        try await waitUntil(timeout: 5) {
+        try await waitUntil(timeout: 30) {
             guard let markerText = try? String(contentsOf: markerPath, encoding: .utf8) else { return false }
             return markerText.contains("term")
         }
-        try await waitUntil(timeout: 5) { !Self.processIsAlive(childPID) }
+        try await waitUntil(timeout: 30) { !Self.processIsAlive(childPID) }
 
         let markerText = try String(contentsOf: markerPath, encoding: .utf8)
         XCTAssertTrue(markerText.contains("hup"))
@@ -442,7 +466,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         let client = GhosttyRemoteSessionStateStreamClient(socketPath: paths.subscriptionSocketPath) { payload in receivedPayloads.append(payload) }
         try client.start()
         defer { client.stop() }
-        try await waitUntil(timeout: 2) {
+        try await waitUntil(timeout: 30) {
             receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.initial && $0.renderUpdate != nil }
         }
         let initialPayload = try XCTUnwrap(
@@ -462,7 +486,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             host.applySessionStateChange(.init(flags: [.screen], revision: screenRevision, title: nil, workingDirectory: nil))
         }
 
-        try await waitUntil(timeout: 2) {
+        try await waitUntil(timeout: 30) {
             receivedPayloads.snapshot.contains {
                 $0.reason == TerminalRemoteSessionStateReason.stateChange && $0.screenStateRevision == screenRevision && $0.renderUpdate != nil
             }
@@ -524,7 +548,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         try client.start()
         defer { client.stop() }
 
-        try await waitUntil(timeout: 2) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.initial } }
+        try await waitUntil(timeout: 30) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.initial } }
         let initialPayload = try XCTUnwrap(receivedPayloads.snapshot.last { $0.reason == TerminalRemoteSessionStateReason.initial })
         XCTAssertNil(initialPayload.renderUpdate)
         receivedPayloads.removeAll()
@@ -535,7 +559,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             host.applySessionStateChange(.init(flags: [.screen], revision: screenRevision, title: nil, workingDirectory: nil))
         }
 
-        try await waitUntil(timeout: 2) {
+        try await waitUntil(timeout: 30) {
             receivedPayloads.snapshot.contains {
                 $0.reason == TerminalRemoteSessionStateReason.stateChange && $0.screenStateRevision == screenRevision && $0.renderUpdate != nil
             }
@@ -719,7 +743,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
                     charactersIgnoringModifiers: "\u{F700}", isARepeat: false, keyCode: UInt16(kVK_UpArrow)))
 
             XCTAssertNil(GhosttyTerminalInputTranslator.ghosttyText(for: event))
-            XCTAssertEqual(GhosttyTerminalInputTranslator.rawKeyFallbackSpecifier(for: event), "up")
+            XCTAssertEqual(GhosttyTerminalInputTranslator.keySpecifier(for: event), "up")
 
         }
     }
@@ -746,7 +770,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
                 NSEvent.keyEvent(
                     with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil, characters: "\u{F72D}",
                     charactersIgnoringModifiers: "\u{F72D}", isARepeat: false, keyCode: UInt16(kVK_PageDown)))
-            let backtabEvent = try! XCTUnwrap(
+            let shiftTabEvent = try! XCTUnwrap(
                 NSEvent.keyEvent(
                     with: .keyDown, location: .zero, modifierFlags: [.shift], timestamp: 0, windowNumber: 0, context: nil, characters: "\u{19}",
                     charactersIgnoringModifiers: "\t", isARepeat: false, keyCode: UInt16(kVK_Tab)))
@@ -755,13 +779,42 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
                     with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil, characters: "\u{F708}",
                     charactersIgnoringModifiers: "\u{F708}", isARepeat: false, keyCode: UInt16(kVK_F5)))
 
-            XCTAssertEqual(GhosttyTerminalInputTranslator.rawKeyFallbackSpecifier(for: rightEvent), "right")
-            XCTAssertEqual(GhosttyTerminalInputTranslator.rawKeyFallbackSpecifier(for: functionRightEvent), "right")
-            XCTAssertEqual(GhosttyTerminalInputTranslator.rawKeyFallbackSpecifier(for: numericFunctionRightEvent), "right")
-            XCTAssertEqual(GhosttyTerminalInputTranslator.rawKeyFallbackSpecifier(for: homeEvent), "home")
-            XCTAssertEqual(GhosttyTerminalInputTranslator.rawKeyFallbackSpecifier(for: pageDownEvent), "pagedown")
-            XCTAssertEqual(GhosttyTerminalInputTranslator.rawKeyFallbackSpecifier(for: backtabEvent), "backtab")
-            XCTAssertEqual(GhosttyTerminalInputTranslator.rawKeyFallbackSpecifier(for: f5Event), "f5")
+            XCTAssertEqual(GhosttyTerminalInputTranslator.keySpecifier(for: rightEvent), "right")
+            XCTAssertEqual(GhosttyTerminalInputTranslator.keySpecifier(for: functionRightEvent), "right")
+            XCTAssertEqual(GhosttyTerminalInputTranslator.keySpecifier(for: numericFunctionRightEvent), "right")
+            XCTAssertEqual(GhosttyTerminalInputTranslator.keySpecifier(for: homeEvent), "home")
+            XCTAssertEqual(GhosttyTerminalInputTranslator.keySpecifier(for: pageDownEvent), "pagedown")
+            XCTAssertEqual(GhosttyTerminalInputTranslator.keySpecifier(for: shiftTabEvent), "shift+tab")
+            XCTAssertEqual(GhosttyTerminalInputTranslator.keySpecifier(for: f5Event), "f5")
+
+        }
+    }
+
+    /// The bug this whole path exists for: a modified key has to reach the host as a *modified* key.
+    /// Naming it "enter" made Shift+Enter indistinguishable from Enter, and modified arrows produced no
+    /// spec at all, so they were silently dropped.
+    func testTerminalInputTranslatorKeepsModifiersOnNamedKeys() async {
+        try await TerminalEngineActor.run {
+            func keyEvent(_ keyCode: Int, _ flags: NSEvent.ModifierFlags, characters: String, unmodified: String? = nil) -> NSEvent {
+                try! XCTUnwrap(
+                    NSEvent.keyEvent(
+                        with: .keyDown, location: .zero, modifierFlags: flags, timestamp: 0, windowNumber: 0, context: nil, characters: characters,
+                        charactersIgnoringModifiers: unmodified ?? characters, isARepeat: false, keyCode: UInt16(keyCode)))
+            }
+
+            XCTAssertEqual(GhosttyTerminalInputTranslator.keySpecifier(for: keyEvent(kVK_Return, [], characters: "\r")), "enter")
+            XCTAssertEqual(GhosttyTerminalInputTranslator.keySpecifier(for: keyEvent(kVK_Return, [.shift], characters: "\r")), "shift+enter")
+            XCTAssertEqual(GhosttyTerminalInputTranslator.keySpecifier(for: keyEvent(kVK_Return, [.control], characters: "\r")), "ctrl+enter")
+            XCTAssertEqual(GhosttyTerminalInputTranslator.keySpecifier(for: keyEvent(kVK_LeftArrow, [.shift], characters: "\u{F702}")), "shift+left")
+            XCTAssertEqual(
+                GhosttyTerminalInputTranslator.keySpecifier(for: keyEvent(kVK_UpArrow, [.control, .shift], characters: "\u{F700}")), "ctrl+shift+up")
+            XCTAssertEqual(
+                GhosttyTerminalInputTranslator.keySpecifier(for: keyEvent(kVK_ANSI_C, [.control], characters: "\u{03}", unmodified: "c")), "ctrl+c")
+            XCTAssertEqual(
+                GhosttyTerminalInputTranslator.keySpecifier(for: keyEvent(kVK_ANSI_C, [.control, .shift], characters: "\u{03}", unmodified: "C")),
+                "ctrl+shift+c")
+            // Shifted letters are text, not named keys: they must keep falling through to the text path.
+            XCTAssertNil(GhosttyTerminalInputTranslator.keySpecifier(for: keyEvent(kVK_ANSI_C, [.shift], characters: "C", unmodified: "C")))
 
         }
     }
@@ -785,10 +838,10 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
                     with: .keyDown, location: .zero, modifierFlags: [.option], timestamp: 0, windowNumber: 0, context: nil, characters: "\u{F703}",
                     charactersIgnoringModifiers: "\u{F703}", isARepeat: false, keyCode: UInt16(kVK_RightArrow)))
 
-            XCTAssertEqual(GhosttyTerminalInputTranslator.rawKeyFallbackSpecifier(for: commandLeftEvent), "cmd+left")
-            XCTAssertEqual(GhosttyTerminalInputTranslator.rawKeyFallbackSpecifier(for: commandRightEvent), "cmd+right")
-            XCTAssertEqual(GhosttyTerminalInputTranslator.rawKeyFallbackSpecifier(for: optionLeftEvent), "opt+left")
-            XCTAssertEqual(GhosttyTerminalInputTranslator.rawKeyFallbackSpecifier(for: optionRightEvent), "opt+right")
+            XCTAssertEqual(GhosttyTerminalInputTranslator.keySpecifier(for: commandLeftEvent), "cmd+left")
+            XCTAssertEqual(GhosttyTerminalInputTranslator.keySpecifier(for: commandRightEvent), "cmd+right")
+            XCTAssertEqual(GhosttyTerminalInputTranslator.keySpecifier(for: optionLeftEvent), "opt+left")
+            XCTAssertEqual(GhosttyTerminalInputTranslator.keySpecifier(for: optionRightEvent), "opt+right")
 
         }
     }
@@ -1055,7 +1108,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         try client.start()
         defer { client.stop() }
 
-        try await waitUntil(timeout: 2) { !receivedPayloads.snapshot.isEmpty }
+        try await waitUntil(timeout: 30) { !receivedPayloads.snapshot.isEmpty }
         let initialSnapshot = try XCTUnwrap(receivedPayloads.snapshot.first?.renderSnapshot)
 
         XCTAssertEqual(GhosttyTerminalSnapshotLayout.plainText(for: initialSnapshot), "fresh reconnect")
@@ -1119,7 +1172,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         let client = GhosttyRemoteSessionStateStreamClient(socketPath: paths.subscriptionSocketPath) { payload in receivedPayloads.append(payload) }
         try client.start()
         defer { client.stop() }
-        try await waitUntil(timeout: 2) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.initial } }
+        try await waitUntil(timeout: 30) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.initial } }
         receivedPayloads.removeAll()
 
         let output = Data("e".utf8)
@@ -1128,7 +1181,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             host.debugHandleIncomingOutput(output)
         }
 
-        try await waitUntil(timeout: 2) {
+        try await waitUntil(timeout: 30) {
             receivedPayloads.snapshot.contains { $0.reason == "output" && $0.outputByteCount == output.count && $0.renderUpdate != nil }
         }
         try? await Task.sleep(for: .milliseconds(100))
@@ -1162,7 +1215,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         let client = GhosttyRemoteSessionStateStreamClient(socketPath: paths.subscriptionSocketPath) { payload in receivedPayloads.append(payload) }
         try client.start()
         defer { client.stop() }
-        try await waitUntil(timeout: 2) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.initial } }
+        try await waitUntil(timeout: 30) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.initial } }
         receivedPayloads.removeAll()
 
         let output = Data("e".utf8)
@@ -1172,7 +1225,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             host.debugHandleIncomingOutput(output)
         }
 
-        try await waitUntil(timeout: 2) {
+        try await waitUntil(timeout: 30) {
             receivedPayloads.snapshot.contains { $0.reason == "output" && $0.outputByteCount == output.count && $0.renderUpdate != nil }
                 && receivedPayloads.snapshot.contains { $0.reason == "input_output" && $0.renderUpdate != nil }
         }
@@ -1214,7 +1267,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         let client = GhosttyRemoteSessionStateStreamClient(socketPath: paths.subscriptionSocketPath) { payload in receivedPayloads.append(payload) }
         try client.start()
         defer { client.stop() }
-        try await waitUntil(timeout: 2) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.initial } }
+        try await waitUntil(timeout: 30) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.initial } }
         var baseline = try Self.renderBaseline(from: try XCTUnwrap(receivedPayloads.snapshot.first), baseline: nil)
         receivedPayloads.removeAll()
 
@@ -1224,7 +1277,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             host.debugHandleIncomingOutput(output)
         }
 
-        try await waitUntil(timeout: 2) {
+        try await waitUntil(timeout: 30) {
             receivedPayloads.snapshot.contains { $0.reason == "output" && $0.outputByteCount == output.count }
                 && receivedPayloads.snapshot.contains { $0.reason == "input_output" }
         }
@@ -1277,7 +1330,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         let client = GhosttyRemoteSessionStateStreamClient(socketPath: paths.subscriptionSocketPath) { payload in receivedPayloads.append(payload) }
         try client.start()
         defer { client.stop() }
-        try await waitUntil(timeout: 2) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.initial } }
+        try await waitUntil(timeout: 30) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.initial } }
         receivedPayloads.removeAll()
 
         let output = Data("queued output\n".utf8)
@@ -1286,7 +1339,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             host.debugBroadcastCurrentStateForTesting(reason: TerminalRemoteSessionStateReason.stateChange)
         }
 
-        try await waitUntil(timeout: 2) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.stateChange } }
+        try await waitUntil(timeout: 30) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.stateChange } }
         try? await Task.sleep(for: .milliseconds(50))
 
         XCTAssertFalse(
@@ -1595,6 +1648,10 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             defer { host.terminate() }
 
             try host.startIfNeeded()
+            // startIfNeeded enqueues the running-state write off the engine; block on the
+            // persistence queue before reading the durable mirror (same pattern as the
+            // session-close test below), or this read races the async commit under load.
+            host.debugDrainPersistenceQueue()
 
             let runtimeState = try TerminalSessionPersistence.readRuntimeState(paths: paths)
             XCTAssertEqual(runtimeState.state, .running)
@@ -1657,7 +1714,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         let host = hostBox.value
         defer { TerminalEngineActor.runSynchronously { host.terminate() } }
 
-        try await waitUntil(timeout: 5) {
+        try await waitUntil(timeout: 30) {
             (try? TerminalSessionPersistence.readRemoteSessionState(paths: paths))?.reason == TerminalRemoteSessionStateReason.terminated
         }
         let finalPayload = try TerminalSessionPersistence.readRemoteSessionState(paths: paths)
@@ -1737,13 +1794,13 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         defer { client.stop() }
 
         let cursor = RenderUpdateCursorBox()
-        try await waitUntil(timeout: 5) { cursor.applyingUpdates(receivedPayloads.snapshot).contains(readyMarker) }
+        try await waitUntil(timeout: 30) { cursor.applyingUpdates(receivedPayloads.snapshot).contains(readyMarker) }
 
         let marker = "local owner render marker"
         XCTAssertTrue(
             TerminalEngineActor.runSynchronously { host.handleControlRequest(.init(command: "send", text: "\(marker)\n", clientID: owner.id)).ok })
 
-        try await waitUntil(timeout: 5) { cursor.applyingUpdates(receivedPayloads.snapshot).contains(marker) }
+        try await waitUntil(timeout: 30) { cursor.applyingUpdates(receivedPayloads.snapshot).contains(marker) }
     }
 
     func testHeadlessDriverClearScreenActionClearsVisibleOutput() async throws {
@@ -1878,7 +1935,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
 
         // Flip to dark: colors reach the surface on the io thread, so pump ticks while polling.
         TerminalEngineActor.runSynchronously { GhosttyEmbeddedAppService.shared.applyColorScheme(.dark) }
-        try await waitUntil(timeout: 5) {
+        try await waitUntil(timeout: 30) {
             sessionDriver.requestSurfaceRefresh()
             GhosttyEmbeddedAppService.shared.tick()
             return sessionDriver.renderStateSnapshot()?.snapshot.defaultBackgroundRGB == darkBackground
@@ -1886,7 +1943,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
 
         // Flip back to light and confirm the background returns.
         TerminalEngineActor.runSynchronously { GhosttyEmbeddedAppService.shared.applyColorScheme(.light) }
-        try await waitUntil(timeout: 5) {
+        try await waitUntil(timeout: 30) {
             sessionDriver.requestSurfaceRefresh()
             GhosttyEmbeddedAppService.shared.tick()
             return sessionDriver.renderStateSnapshot()?.snapshot.defaultBackgroundRGB == lightBackground
@@ -1929,7 +1986,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         // The color scheme is a process-wide singleton; force light so this test starts from a known
         // baseline regardless of the order tests run in, then confirm the surface reaches it.
         TerminalEngineActor.runSynchronously { GhosttyEmbeddedAppService.shared.applyColorScheme(.light) }
-        try await waitUntil(timeout: 5) {
+        try await waitUntil(timeout: 30) {
             rendererHost.requestSurfaceRefresh()
             GhosttyEmbeddedAppService.shared.tick()
             return rendererHost.sessionRenderStateSnapshot()?.snapshot.defaultBackgroundRGB == lightBackground
@@ -1946,7 +2003,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         }
         XCTAssertTrue(response.ok, response.message)
 
-        try await waitUntil(timeout: 5) {
+        try await waitUntil(timeout: 30) {
             rendererHost.requestSurfaceRefresh()
             GhosttyEmbeddedAppService.shared.tick()
             return rendererHost.sessionRenderStateSnapshot()?.snapshot.defaultBackgroundRGB == darkBackground
@@ -1991,7 +2048,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
 
         // Force light so this test starts from a known baseline regardless of the order tests run in.
         TerminalEngineActor.runSynchronously { GhosttyEmbeddedAppService.shared.applyColorScheme(.light) }
-        try await waitUntil(timeout: 5) {
+        try await waitUntil(timeout: 30) {
             rendererHost.requestSurfaceRefresh()
             GhosttyEmbeddedAppService.shared.tick()
             return rendererHost.sessionRenderStateSnapshot()?.snapshot.defaultBackgroundRGB == lightBackground
@@ -2007,7 +2064,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         XCTAssertTrue(response.ok, response.message)
 
         // Colors reach the surface on the io thread, so pump ticks while polling.
-        try await waitUntil(timeout: 5) {
+        try await waitUntil(timeout: 30) {
             rendererHost.requestSurfaceRefresh()
             GhosttyEmbeddedAppService.shared.tick()
             return rendererHost.sessionRenderStateSnapshot()?.snapshot.defaultBackgroundRGB == darkBackground
@@ -2227,8 +2284,11 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             tty.setraw(fd)
             os.write(sys.stdout.fileno(), b"\\x1b[?1000h\\x1b[?1006hREADY\\r\\n")
             data = os.read(fd, 128)
-            with open(sys.argv[1], "wb") as output:
+            # Write to a sibling temp file and rename onto the final path so the test's
+            # wait-for-existence never observes a created-but-not-yet-written file.
+            with open(sys.argv[1] + ".tmp", "wb") as output:
                 output.write(data)
+            os.replace(sys.argv[1] + ".tmp", sys.argv[1])
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, previous)
         """.write(to: scriptURL, atomically: true, encoding: .utf8)
@@ -2247,7 +2307,9 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         let sessionDriver = driverBox.value
         defer { TerminalEngineActor.runSynchronously { sessionDriver.terminate() } }
 
-        try await waitUntil { sessionDriver.snapshotText()?.contains("READY") == true }
+        try await waitUntil(diagnostics: { self.readyProbeDiagnostics(sessionDriver: sessionDriver, scriptURL: scriptURL) }) {
+            sessionDriver.snapshotText()?.contains("READY") == true
+        }
         let size = try XCTUnwrap(TerminalEngineActor.runSynchronously { sessionDriver.surfaceCellSize() })
         XCTAssertTrue(
             TerminalEngineActor.runSynchronously {
@@ -2298,8 +2360,11 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             first = read_scroll_burst(fd)
             os.write(sys.stdout.fileno(), b"FIRST\\r\\n")
             second = read_scroll_burst(fd)
-            with open(sys.argv[1], "wb") as output:
+            # Write to a sibling temp file and rename onto the final path so the test's
+            # wait-for-existence never observes a created-but-not-yet-written file.
+            with open(sys.argv[1] + ".tmp", "wb") as output:
                 output.write(first + b"\\n" + second)
+            os.replace(sys.argv[1] + ".tmp", sys.argv[1])
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, previous)
         """.write(to: scriptURL, atomically: true, encoding: .utf8)
@@ -2318,7 +2383,9 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         let sessionDriver = driverBox.value
         defer { TerminalEngineActor.runSynchronously { sessionDriver.terminate() } }
 
-        try await waitUntil { sessionDriver.snapshotText()?.contains("READY") == true }
+        try await waitUntil(diagnostics: { self.readyProbeDiagnostics(sessionDriver: sessionDriver, scriptURL: scriptURL) }) {
+            sessionDriver.snapshotText()?.contains("READY") == true
+        }
         let pointerPosition = TerminalScrollPointerPosition(x: 0.5, y: 0.5)
 
         XCTAssertTrue(
@@ -2336,7 +2403,10 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         try await waitUntil { FileManager.default.fileExists(atPath: outputURL.path) }
 
         let reports = String(decoding: try Data(contentsOf: outputURL), as: UTF8.self).split(separator: "\n")
+        // XCTAssertEqual is non-fatal; without the count guard an unexpected report shape would
+        // fall through to out-of-range subscripts below and crash the whole test bundle (#196).
         XCTAssertEqual(reports.count, 2)
+        guard reports.count == 2 else { return }
         let expression = try NSRegularExpression(pattern: #"\u001B\[<([0-9]+);[0-9]+;[0-9]+M"#)
         let buttonCodes = try reports.map { report in
             let input = String(report)

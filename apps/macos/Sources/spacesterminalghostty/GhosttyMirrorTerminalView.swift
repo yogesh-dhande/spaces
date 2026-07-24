@@ -318,9 +318,13 @@
 
         func copySelectionToPasteboard() -> Bool { GhosttyClipboardBridge.copySelection(from: mirrorSurface()) }
 
+        /// Unit tests inject a uniquely-named pasteboard here so paste tests never touch the user's
+        /// real clipboard. Nil in the app, where paste keeps using `NSPasteboard.general`.
+        var pasteboardOverrideForTesting: NSPasteboard?
+
         func pasteClipboardContents() -> Bool {
             guard acceptsTerminalInput else { return false }
-            guard let text = NSPasteboard.general.string(forType: .string), !text.isEmpty else { return false }
+            guard let text = (pasteboardOverrideForTesting ?? .general).string(forType: .string), !text.isEmpty else { return false }
             onSendText?(text, true)
             return true
         }

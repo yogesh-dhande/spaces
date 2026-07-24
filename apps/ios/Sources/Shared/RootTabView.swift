@@ -56,7 +56,9 @@ struct RootTabView: View {
             }
         }
         // The browser proxy serves the whole app, so its lifetime follows the app shell rather than the
-        // Spaces tab: backgrounding closes its tunnels, and foregrounding restores them.
+        // Spaces tab: backgrounding closes its tunnels, and foregrounding restores them. Backgrounding
+        // also ends any run of failed refreshes, since a suspended app polls nothing and cannot claim the
+        // connection kept failing while it was away.
         .task { model.browserProxyStart() }.onChange(of: scenePhase) { _, newPhase in
             switch newPhase {
             case .active:
@@ -73,7 +75,9 @@ struct RootTabView: View {
                 // leaves any open terminal viewer's own stream alone — see its doc comment.
                 SpacesMobileDeviceStore.clearActiveHosts()
                 model.resetActiveConnectionEndpoint()
-            case .background: model.browserProxyStop()
+            case .background:
+                model.browserProxyStop()
+                model.noteConnectionMonitoringPaused()
             case .inactive: break
             @unknown default: break
             }

@@ -215,7 +215,19 @@ let executableTargets: [Target] = [
 #if os(Linux)
     let testTargets: [Target] = [
         .testTarget(name: "spacesterminalcoreTests", dependencies: ["spacesterminalcore", "ghosttyvtshim"]),
-        .testTarget(name: "spacesterminalghosttyTests", dependencies: ["spacesterminalghostty"]),
+        // The ghostty test directory mixes macOS-only suites (AppKit/GhosttyKit imports) with the
+        // Linux headless suites, so the Linux target compiles an explicit whitelist. A new Linux
+        // suite must be added here AND to run_linux_tests.sh's per-suite filter loop.
+        .testTarget(
+            name: "spacesterminalghosttyTests",
+            dependencies: ["spacesterminalghostty"],
+            sources: [
+                "GhosttyLinuxHeadlessSessionHandoffTests.swift",
+                "GhosttyLinuxHeadlessSessionResizeTests.swift",
+                "GhosttyLinuxHeadlessSessionTranscriptTrimTests.swift",
+                "GhosttyLinuxHeadlessSubmitOrderingTests.swift",
+            ]
+        ),
     ]
 #else
     let testTargets: [Target] = [

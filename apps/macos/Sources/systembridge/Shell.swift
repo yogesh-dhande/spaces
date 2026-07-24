@@ -62,6 +62,12 @@ public enum Shell {
             lock.unlock()
             return resolved.path
         }
+
+        func clear() {
+            lock.lock()
+            values.removeAll()
+            lock.unlock()
+        }
     }
 
     private final class PipeCollector: @unchecked Sendable {
@@ -148,6 +154,14 @@ public enum Shell {
     private static let loginShellPathCache = LoginShellPathCache()
     private static let loginShellPathTimeoutFallbackSeconds: TimeInterval = 2
     private static let loginShellPathFailureCacheFallbackSeconds: TimeInterval = 10
+
+    /// Clears the process-wide login-shell PATH cache. A failed probe (e.g. one that times out under
+    /// load) is cached for `loginShellPathFailureCacheFallbackSeconds`, so without a reset a single
+    /// slow probe poisons every subsequent `Shell` call in the process for that window, including
+    /// tests that inject their own mock shell/PATH. Mirrors `SpacesProfile.resetCacheForTesting()`.
+    static func resetLoginShellPathCacheForTesting() {
+        loginShellPathCache.clear()
+    }
 
     static func preparedEnvironment(from environment: [String: String]) -> [String: String] {
         var env = environment

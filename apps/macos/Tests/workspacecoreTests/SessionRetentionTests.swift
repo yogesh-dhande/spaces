@@ -15,7 +15,7 @@ final class SessionRetentionTests: XCTestCase {
     /// under RESTRICT.
     func testReleaseDeletesExitedAgentRowAndItsSubscriptionEdges() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         let sessionID = "ended-agent-session"
         let agent = try orchestrator.registerAgentWindow(
@@ -38,7 +38,7 @@ final class SessionRetentionTests: XCTestCase {
     /// `.spinning` row is released, because the caller has established the backing terminal is gone.
     func testReleaseDeletesAgentRowRegardlessOfStatus() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         let sessionID = "spinning-agent-session"
         let agent = try orchestrator.registerAgentWindow(
@@ -55,7 +55,7 @@ final class SessionRetentionTests: XCTestCase {
     /// workspace is untouched.
     func testReleaseDeletesProcessRowAndTrackedWindowLeavingOthers() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         let endedSession = "ended-process-session"
         let liveSession = "live-process-session"
@@ -86,7 +86,7 @@ final class SessionRetentionTests: XCTestCase {
     /// process or agent) is released by deleting that window row.
     func testReleaseDeletesBareRuntimeTargetRow() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         let sessionID = "ad-hoc-pane-session"
         try store.upsert(
@@ -110,7 +110,7 @@ final class SessionRetentionTests: XCTestCase {
     /// another workspace and still live, must be left untouched.
     func testReleaseTearsDownSubscriberEdgesOfBareTerminalWithNoAgentRow() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, subscriberWorkspace) = try makeProjectAndWorkspace(store: store)
         let (_, watchedWorkspace) = try makeProjectAndWorkspace(store: store)
 
@@ -142,7 +142,7 @@ final class SessionRetentionTests: XCTestCase {
     /// Releasing a session that nothing references is a no-op that does not throw.
     func testReleaseUnreferencedSessionIsNoOp() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         _ = try makeProjectAndWorkspace(store: store)
 
         XCTAssertNoThrow(try orchestrator.releaseEndedTerminalSessionReferences(sessionID: "never-existed"))
@@ -151,7 +151,7 @@ final class SessionRetentionTests: XCTestCase {
     /// Rows referencing a DIFFERENT session are left intact — the release is scoped to the given session id.
     func testReleaseLeavesRowsReferencingOtherSessionsIntact() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         let target = "target-session"
         let other = "other-session"
@@ -182,7 +182,7 @@ final class SessionRetentionTests: XCTestCase {
     /// once its last runtime row is gone.
     func testReleaseClearsRunningFlagForAgentOnlyWorkspace() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
         let sessionID = "agent-only-session"
@@ -202,7 +202,7 @@ final class SessionRetentionTests: XCTestCase {
     /// the release path must do it explicitly for the workspace the deleted window belonged to.
     func testReleaseClearsRunningFlagForAdHocTerminalOnlyWorkspace() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         try store.updateWorkspaceRunning(id: workspace.id, isRunning: true, launchedAt: "now")
         let sessionID = "ad-hoc-only-session"

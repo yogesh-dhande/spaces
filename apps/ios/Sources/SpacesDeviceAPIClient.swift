@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import UIKit
 import spacesdevicecore
 import spacesterminalcore
 
@@ -636,15 +637,44 @@ private struct SpacesDeviceClosureRequestTransport: SpacesDeviceAPIRequestTransp
     func close() async {}
 }
 
+/// Holds an app-backgrounded notification observer for the lifetime of its owner, unregistering it when
+/// the owner goes away. Exists so an actor can register from its `init`: a nonisolated initializer cannot
+/// touch an actor-isolated stored property of non-Sendable type, and the observer token is exactly that.
+/// `@unchecked Sendable` is sound because `observe` is called once, from that initializer, before the
+/// owner escapes; the token is never written again.
+private final class BackgroundNotificationObserver: @unchecked Sendable {
+    private var token: (any NSObjectProtocol)?
+
+    func observe(_ handler: @escaping @Sendable () -> Void) {
+        token = NotificationCenter.default.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: nil) { _ in
+            handler()
+        }
+    }
+
+    deinit {
+        if let token { NotificationCenter.default.removeObserver(token) }
+    }
+}
+
 /// Network request transport: owns one pinned-TLS command connection. This is the request/response
 /// half of the former command channel; auth-token/client-app defaulting now lives in the channel.
 actor SpacesDeviceNetworkRequestTransport: SpacesDeviceAPIRequestTransport {
     private let resolver: SpacesDeviceEndpointResolver
     private let queue = DispatchQueue(label: "spaces.device.api.command")
     private var connection: NWConnection?
+    private let backgroundObserver = BackgroundNotificationObserver()
 
     init(resolver: SpacesDeviceEndpointResolver) {
         self.resolver = resolver
+        // A cached socket cannot survive process suspension: iOS tears it down while the app is in the
+        // background, and the next request on it fails with ENOTCONN before `connectIfNeeded` ever gets
+        // to redial. Dropping the cache here — at the one place that owns it — means every channel built
+        // on this transport (the overview poll, an open terminal viewer, one-shot mutation channels)
+        // dials fresh on the way back to the foreground instead of surfacing a spurious connection error.
+        backgroundObserver.observe { [weak self] in
+            guard let self else { return }
+            Task { await self.close() }
+        }
     }
 
     func close() {

@@ -1,6 +1,7 @@
 import CryptoKit
 import Darwin
 import Foundation
+import Network
 import Observation
 import UIKit
 import spacesdevicecore
@@ -1715,7 +1716,7 @@ extension SpacesDeviceTerminalLinkArtifactKind {
     private static func isTransientInputTransportError(_ error: Error) -> Bool {
         if let code = transientPOSIXErrorCode(error),
             code == Int(EAGAIN) || code == Int(EWOULDBLOCK) || code == Int(ETIMEDOUT) || code == Int(ECONNRESET) || code == Int(ECONNABORTED)
-                || code == Int(EPIPE) || code == Int(ECONNREFUSED) || code == Int(EBADF) || code == Int(ENOTSOCK)
+                || code == Int(EPIPE) || code == Int(ECONNREFUSED) || code == Int(EBADF) || code == Int(ENOTSOCK) || code == Int(ENOTCONN)
         {
             return true
         }
@@ -1733,10 +1734,13 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         }
     }
 
+    /// `ENOTCONN` belongs with the rest: a session's live-state stream is its own connection, outside the
+    /// request transport that drops its socket when the app backgrounds, so it comes back from suspension
+    /// dead and reports "socket is not connected" on the way to a reconnect that immediately succeeds.
     private static func isTransientReconnectError(_ error: Error) -> Bool {
         if let code = transientPOSIXErrorCode(error),
             code == Int(EAGAIN) || code == Int(EWOULDBLOCK) || code == Int(ETIMEDOUT) || code == Int(ECONNRESET) || code == Int(ECONNABORTED)
-                || code == Int(EPIPE) || code == Int(ECONNREFUSED)
+                || code == Int(EPIPE) || code == Int(ECONNREFUSED) || code == Int(ENOTCONN)
         {
             return true
         }
@@ -1778,7 +1782,13 @@ extension SpacesDeviceTerminalLinkArtifactKind {
         }
     }
 
+    /// The errno behind a failure, whichever way it is reported. Network.framework raises `NWError.posix`,
+    /// which bridges to its own error domain rather than `NSPOSIXErrorDomain` — and the live-state stream
+    /// is an `NWConnection`, so every errno it reports arrives that way. Reading only the POSIX domain
+    /// made the classifiers above blind to stream failures: a socket the OS aborted during suspension
+    /// carried `ECONNABORTED`, was listed as transient, and still reached the error banner.
     private static func transientPOSIXErrorCode(_ error: Error) -> Int? {
+        if let networkError = error as? NWError, case .posix(let code) = networkError { return Int(code.rawValue) }
         let nsError = error as NSError
         guard nsError.domain == NSPOSIXErrorDomain else { return nil }
         return nsError.code

@@ -160,12 +160,14 @@ import Foundation
         }
 
         private enum AccessoryModifier: String, CaseIterable {
+            case shift
             case control = "ctrl"
             case command = "cmd"
             case option = "opt"
 
             var accessibilityLabel: String {
                 switch self {
+                case .shift: return "Shift"
                 case .control: return "Control"
                 case .command: return "Command"
                 case .option: return "Option"
@@ -457,8 +459,15 @@ import Foundation
 
         public func insertText(_ text: String) {
             guard acceptsTerminalInput, !text.isEmpty else { return }
+            // Return reaches `insertText` as plain text with no modifier information, so a pending
+            // accessory modifier is the only way to reach Shift+Enter without a hardware keyboard. It has
+            // to be applied here, before the text path below clears the pending modifiers.
+            if text == "\n" || text == "\r" {
+                sendAccessoryKey("enter")
+                return
+            }
             if sendPendingAccessoryModifiersIfNeeded(for: text) { return }
-            if text == "\n" || text == "\r" { onSendKey?("enter") } else { onSendText?(text, false) }
+            onSendText?(text, false)
         }
 
         public override func paste(_ sender: Any?) {
@@ -490,7 +499,13 @@ import Foundation
                 UIKeyCommand(input: UIKeyCommand.inputLeftArrow, modifierFlags: .alternate, action: #selector(sendOptionArrowLeft)),
                 UIKeyCommand(input: UIKeyCommand.inputRightArrow, modifierFlags: .alternate, action: #selector(sendOptionArrowRight)),
                 UIKeyCommand(input: "k", modifierFlags: .command, action: #selector(sendCommandK)),
+                // Modified Return has to be claimed explicitly: an unmodified Return arrives through
+                // `insertText`, which cannot see modifier flags at all.
+                UIKeyCommand(input: "\r", modifierFlags: .shift, action: #selector(sendShiftEnter)),
+                UIKeyCommand(input: "\r", modifierFlags: .control, action: #selector(sendControlEnter)),
+                UIKeyCommand(input: "\r", modifierFlags: .alternate, action: #selector(sendOptionEnter)),
                 UIKeyCommand(input: "\t", modifierFlags: [], action: #selector(sendTab)),
+                UIKeyCommand(input: "\t", modifierFlags: .shift, action: #selector(sendShiftTab)),
                 UIKeyCommand(input: UIKeyCommand.inputEscape, modifierFlags: [], action: #selector(sendEscape)),
             ]
         }
@@ -639,7 +654,11 @@ import Foundation
         @objc private func sendOptionArrowLeft() { sendAccessoryKey("opt+left") }
         @objc private func sendOptionArrowRight() { sendAccessoryKey("opt+right") }
         @objc private func sendCommandK() { sendAccessoryKey("cmd+k") }
+        @objc private func sendShiftEnter() { sendAccessoryKey("shift+enter") }
+        @objc private func sendControlEnter() { sendAccessoryKey("ctrl+enter") }
+        @objc private func sendOptionEnter() { sendAccessoryKey("opt+enter") }
         @objc private func sendTab() { sendAccessoryKey("tab") }
+        @objc private func sendShiftTab() { sendAccessoryKey("shift+tab") }
         @objc private func sendEscape() { sendAccessoryKey("esc") }
 
         private func scheduleFirstResponderRequest() {
@@ -1249,6 +1268,7 @@ import Foundation
                 addTextButton("-") { [weak self] in self?.onText("-") }
                 addTextButton("_") { [weak self] in self?.onText("_") }
                 addTextButton("esc") { [weak self] in self?.onKey("esc") }
+                addModifierButton(.shift)
                 addModifierButton(.control)
                 addModifierButton(.command)
                 addModifierButton(.option)

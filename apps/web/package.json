@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "prebuild": "cp ../../scripts/spaces-install-linux.sh public/install.sh",
+    "prebuild": "cp ../../scripts/spaces-install-linux.sh public/install.sh && ../../scripts/stage-web-releases.sh",
     "dev": "next dev",
     "build": "next build --webpack",
     "start": "next start",

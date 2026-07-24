@@ -134,6 +134,25 @@ final class RemoteAgentWatchServiceTests: XCTestCase {
         }
     }
 
+    /// Collects the service's injected `logError` lines so a test can assert on (and report) the
+    /// errors the service swallowed, instead of discarding them with `{ _ in }`.
+    private final class ServiceErrorLog: @unchecked Sendable {
+        private let lock = NSLock()
+        private var storedLines: [String] = []
+
+        func append(_ line: String) {
+            lock.lock()
+            storedLines.append(line)
+            lock.unlock()
+        }
+
+        func lines(containing tag: String) -> [String] {
+            lock.lock()
+            defer { lock.unlock() }
+            return storedLines.filter { $0.contains(tag) }
+        }
+    }
+
     private var temporaryDirectory: URL?
     /// Path of the database backing the current test's store, for spinning up a second service
     /// instance on the same database (simulating a daemon restart).
@@ -163,7 +182,7 @@ final class RemoteAgentWatchServiceTests: XCTestCase {
     }
 
     @MainActor private func waitUntil(
-        timeout: TimeInterval = 10, pollInterval: TimeInterval = 0.02, file: StaticString = #filePath, line: UInt = #line, message: String = "",
+        timeout: TimeInterval = 30, pollInterval: TimeInterval = 0.02, file: StaticString = #filePath, line: UInt = #line, message: String = "",
         _ condition: @escaping @MainActor () -> Bool
     ) throws {
         let deadline = Date().addingTimeInterval(timeout)
@@ -733,7 +752,7 @@ final class RemoteAgentWatchServiceTests: XCTestCase {
     /// stranded — the seed's {child-2} write is superseded by the load's generation bump, so the mirror stays
     /// at {child-1} — and a later daemon restart loses child-2's baseline and swallows its first transition.
     /// The load's own later-chained, newer-generation write must carry the union to disk.
-    @MainActor func testStartupBaselineLoadPersistsSeedMergedUnion() throws {
+    @MainActor func testStartupBaselineLoadPersistsSeedMergedUnion() async throws {
         let transport = FakeTransport()
         let recorder = DeliveryRecorder()
         let (store, path) = try makeStoreAndPath()
@@ -743,18 +762,24 @@ final class RemoteAgentWatchServiceTests: XCTestCase {
         try store.replaceAgentRemoteWatchBaseline(
             deviceID: "device-1", baseline: ["child-1": makeRow(status: AgentWindowStatus.spinning.rawValue, terminalSessionID: "child-1")])
 
-        // Gate the post-load reconcile's first listing so its `applyRows` never runs and cannot rewrite the
-        // mirror out from under this test's durable assertion.
-        let gate = DispatchSemaphore(value: 0)
-        transport.setListGate(gate)
+        // Fail the post-load reconcile's listing pulls so `applyRows` never runs and cannot rewrite the
+        // mirror out from under this test's durable assertion: a failed pull leaves the baseline
+        // untouched and schedules its retry beyond this test's lifetime. Deliberately NOT a semaphore
+        // gate on the listing: that blocks the cooperative-pool thread running the transport closure,
+        // and under machine-wide CPU saturation the pool does not grow past a blocked thread — the
+        // startup load below then never gets scheduled and the merge wait deadlocks to its ceiling
+        // (the #196 CI signature of this test).
+        transport.failNextListings(Int.max)
         transport.setListing([])
+        // Capture the service's error log instead of discarding it: the startup load swallows a
+        // failed store read (logging it and continuing seed-only, #238), and when that happens the
+        // logged error — not the downstream state mismatch — is the diagnosis. The injected listing
+        // failures above also log, so the assertion below filters for the load's own op tag.
+        let errorLog = ServiceErrorLog()
         let service = RemoteAgentWatchService(
-            databasePath: path, transport: transport.transport, deliver: { sessionID, line in recorder.record(sessionID, line) }, logError: { _ in })
-        defer {
-            transport.setListGate(nil)
-            for _ in 0..<8 { gate.signal() }
-            service.stop()
-        }
+            databasePath: path, transport: transport.transport, deliver: { sessionID, line in recorder.record(sessionID, line) },
+            logError: { errorLog.append($0) })
+        defer { service.stop() }
         service.start()
         // In the same main-actor turn — before the detached load can round-trip — seed child-2, reproducing the
         // subscribe path firing a seed while start()'s baseline load is still in flight.
@@ -762,19 +787,30 @@ final class RemoteAgentWatchServiceTests: XCTestCase {
             deviceID: "device-1", childTerminalSessionID: "child-2",
             row: makeRow(status: AgentWindowStatus.spinning.rawValue, terminalSessionID: "child-2"))
 
+        // Await the startup load (merge + its durable persist) to completion instead of polling under a
+        // wall-clock ceiling: on a saturated machine the load's detached task can be starved well past
+        // any reasonable poll timeout.
+        await service.drainStartupLoadForTesting()
+
+        // A failed (and swallowed) baseline load leaves seed-only state; surface the exact store
+        // error here rather than letting the state assertions below report a bare set mismatch.
+        XCTAssertEqual(
+            errorLog.lines(containing: "op=load_baselines"), [],
+            "startup baseline load failed instead of merging (#238)")
         // The load merges the persisted {child-1} into the seed's {child-2}.
-        try waitUntil(message: "startup load never merged the persisted baseline with the seed") {
-            service.debugSnapshot(deviceID: "device-1").map { Set($0.keys) } == ["child-1", "child-2"]
-        }
+        XCTAssertEqual(
+            service.debugSnapshot(deviceID: "device-1").map { Set($0.keys) }, ["child-1", "child-2"],
+            "startup load never merged the persisted baseline with the seed")
         // The merged union must reach the durable mirror, not just memory.
         func mirroredChildren() -> Set<String> { Set(((try? store.agentRemoteWatchBaselines())?["device-1"] ?? [:]).keys) }
-        try waitUntil(message: "durable mirror never converged to the seed-merged union {child-1, child-2}") {
-            mirroredChildren() == ["child-1", "child-2"]
-        }
+        XCTAssertEqual(
+            mirroredChildren(), ["child-1", "child-2"], "durable mirror never converged to the seed-merged union {child-1, child-2}")
         // And it must stay there — not regress once a later, stale-generation write on the chain runs.
+        // `Task.sleep` (not `RunLoop.main.run`, which is unavailable from an async context) still yields
+        // the main actor between checks so any such queued write gets its turn to run.
         let stabilityDeadline = Date().addingTimeInterval(0.3)
         while Date() < stabilityDeadline {
-            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+            try await Task.sleep(for: .milliseconds(20))
             XCTAssertEqual(mirroredChildren(), ["child-1", "child-2"], "durable mirror regressed after converging to the seed-merged union")
         }
     }

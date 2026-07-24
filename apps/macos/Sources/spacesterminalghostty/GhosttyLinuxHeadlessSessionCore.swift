@@ -700,11 +700,22 @@
             guard ownerRequestIsCurrent(request) else {
                 return TerminalControlResponse(ok: false, message: "Only the active owner can send input.", errorCode: .ownershipRejected)
             }
-            guard let key = request.key, let bytes = TerminalKeyInput.bytes(for: key) else {
+            guard let key = request.key, let resolution = TerminalKeyInput.resolve(key) else {
                 return TerminalControlResponse(ok: false, message: "Unsupported terminal key.", errorCode: .invalidArgument)
             }
-            if bytes.contains(0x0D) { markLocalOwnerCommandInputOutputResyncPending() }
-            enqueueControlInputWrite(Data(bytes))
+            switch resolution {
+            case .hostAction(.clearScreenAndScrollback): return clearScreen(request)
+            case .lineEditingBytes(let bytes): enqueueControlInputWrite(Data(bytes))
+            case .keyPress(let spec):
+                // The vt session is the live terminal state the encoding depends on, so a key press has
+                // nowhere to be encoded without it.
+                guard let vtSession, let bytes = GhosttyLinuxKeyEncoder.encode(spec, session: vtSession) else {
+                    return TerminalControlResponse(ok: false, message: "Unable to encode terminal key.", errorCode: .sessionNotAvailable)
+                }
+                if spec.key == .enter { markLocalOwnerCommandInputOutputResyncPending() }
+                // Some presses legitimately encode to nothing; that is a successful no-op, not a failure.
+                if !bytes.isEmpty { enqueueControlInputWrite(bytes) }
+            }
             return TerminalControlResponse(ok: true, message: "Sent key.")
         }
 
@@ -996,8 +1007,8 @@
             guard performanceLoggingEnabled, let startedAt else { return }
             let decodedUpdate = payload.decodedRenderUpdate
             let attributes = GhosttyRenderFrameMetrics.attributes(
-                reason: payload.reason, frame: decodedUpdate?.fullFrame,
-                outputByteCount: outputByteCount, screenStateRevision: payload.screenStateRevision, frameKind: decodedUpdate?.frameKindMetricValue,
+                reason: payload.reason, frame: decodedUpdate?.fullFrame, outputByteCount: outputByteCount,
+                screenStateRevision: payload.screenStateRevision, frameKind: decodedUpdate?.frameKindMetricValue,
                 baseRevision: decodedUpdate?.baseRevision, targetRevision: decodedUpdate?.targetRevision ?? payload.screenStateRevision,
                 operationCount: decodedUpdate?.operationCount, changedCellCount: decodedUpdate?.changedCellCount,
                 scrollOperationCount: decodedUpdate?.scrollOperationCount, fullFrameFallbackReason: decodedUpdate?.fallbackReason)
