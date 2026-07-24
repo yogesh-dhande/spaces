@@ -73,6 +73,33 @@ import workspacecore
         #expect(!AppKitController.addProjectDeviceIsSelectable(loadState: .offline("daemon down")))
     }
 
+    @Test func onlyALoadedDeviceAcceptsDaemonBackedActions() {
+        // Browse, don't act: an unreachable device keeps its projects, workspaces and alerts listed and
+        // readable, but every action that has to reach its daemon is refused up front rather than dialled
+        // and failed. A section that has not finished loading is equally not actionable — its record may
+        // not be installed yet.
+        #expect(AppKitController.deviceAcceptsDaemonActions(loadState: .loaded))
+        #expect(!AppKitController.deviceAcceptsDaemonActions(loadState: .offline("Connection refused")))
+        #expect(!AppKitController.deviceAcceptsDaemonActions(loadState: .loading))
+    }
+
+    @Test func actionsRefusedByAnOutageNameTheDeviceInsteadOfClaimingSpacesIsLoading() {
+        // The refusal a user reads has to match what they can see: the device's rows are on screen, so
+        // "Spaces has not finished loading" would be plainly wrong. It names the device and says offline,
+        // matching the add-project device step's refusal.
+        let error = AppKitController.deviceUnreachableError(deviceName: "workshop", isLocal: false)
+        #expect(error.localizedDescription == "workshop is offline.")
+        #expect(error.localizedRecoverySuggestion == "Reconnect it and try again.")
+    }
+
+    @Test func theLocalMacIsToldToRestartItsDaemonRatherThanReconnectToItself() {
+        // "Reconnect it" sends the user looking for a control that cannot exist for their own Mac; the
+        // action that resolves this one is the daemon relaunch in Devices settings.
+        let error = AppKitController.deviceUnreachableError(deviceName: "Local", isLocal: true)
+        #expect(error.localizedDescription == "Local is offline.")
+        #expect(error.localizedRecoverySuggestion == "Restart the local daemon and try again.")
+    }
+
     @Test func localDaemonRestartActionIsOfferedOnlyForRelaunchResolvableFailures() {
         // Known reachability failures a relaunch can resolve — the daemon answered that its Device API is
         // not running, or its control endpoint was unreachable (daemon down) — offer the action.

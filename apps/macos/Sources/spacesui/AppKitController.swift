@@ -1652,9 +1652,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     /// The device that owns a terminal session: its overview's device, the device
     /// of the workspace that carries it, or the local device as a last resort.
+    /// Ownership is read ungated — a session on an unreachable device still belongs to that
+    /// device, and refusing to name it here would drop through to the local-device fallback and
+    /// read another machine's session from this Mac. Acting on the session is gated separately.
     private func terminalSessionOwningDevice(sessionID: String) -> SpacesPairedDeviceRecord? {
         if let match = terminalSessionSummaryMatch(sessionID: sessionID) { return match.device }
-        if let workspaceID = clientWorkspaceID(forTerminalSession: sessionID) { return deviceForWorkspaceMutation(workspaceID: workspaceID) }
+        if let workspaceID = clientWorkspaceID(forTerminalSession: sessionID), let deviceID = deviceID(forWorkspaceID: workspaceID) {
+            return deviceOwning(deviceID: deviceID)
+        }
         return localPairedDevice
     }
 
@@ -2070,7 +2075,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// resolves the pane open request for panel entry points.
     func createTerminalSessionForPane(workspaceID: String, completion: @escaping (DeviceTerminalOpenRequest?) -> Void) {
         guard let device = deviceForWorkspaceMutation(workspaceID: workspaceID) else {
-            showDeviceNotLoadedError()
+            showWorkspaceDeviceUnavailableError(workspaceID: workspaceID)
             completion(nil)
             return
         }
@@ -4367,21 +4372,30 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return nil
     }
 
+    /// The device a selection-driven daemon action targets. With nothing selected the action
+    /// belongs to this Mac, so the local id stands in and is gated like any other.
     func deviceForDaemonStateMutation() -> SpacesPairedDeviceRecord? {
-        if let deviceID = selectedRowDeviceID(), let device = deviceRecord(forDeviceID: deviceID) { return device }
-        return localPairedDevice
+        deviceForMutation(deviceID: selectedRowDeviceID() ?? SpacesPairedDeviceRecord.localDeviceID)
     }
 
-    /// Resolves the paired-device record for a mutation target by owning-device id.
-    /// Local ids route to the local record; remote ids route to their section's stored
-    /// record, which survives that device going unreachable — so an offline device still
-    /// resolves here and its mutation reaches the right daemon and fails with that
-    /// daemon's own network error rather than being silently misrouted to the local one.
-    /// Nil means no section claims the id at all (an unknown or not-yet-loaded device),
-    /// and callers surface a not-loaded error.
-    private func deviceForMutation(deviceID: String) -> SpacesPairedDeviceRecord? {
+    /// The paired-device record a device id names, whatever that device's load state is.
+    /// Read paths must resolve the true owner even during an outage: falling through to the
+    /// local record would dial this Mac for another machine's rows.
+    private func deviceOwning(deviceID: String) -> SpacesPairedDeviceRecord? {
         if deviceID == SpacesPairedDeviceRecord.localDeviceID { return localPairedDevice }
         return deviceRecord(forDeviceID: deviceID)
+    }
+
+    /// Resolves the paired-device record for a mutation target by owning-device id, refusing any
+    /// device that cannot service a daemon-backed action. An unreachable device keeps its section
+    /// (and therefore its record) for the whole outage so its rows stay browsable, so resolution
+    /// alone is not permission to act: this is the chokepoint where "browse, don't act" is enforced,
+    /// and every caller surfaces the nil as an error rather than dialling a daemon that is not there.
+    /// Nil therefore means either that no loaded section claims the id (unknown or still loading) or
+    /// that its device is unreachable; `deviceUnavailableError` tells those two apart for the message.
+    private func deviceForMutation(deviceID: String) -> SpacesPairedDeviceRecord? {
+        guard let section = deviceSection(id: deviceID), Self.deviceAcceptsDaemonActions(loadState: section.loadState) else { return nil }
+        return deviceOwning(deviceID: deviceID)
     }
 
     /// The device that owns a specific workspace, so per-workspace mutations route
@@ -4394,6 +4408,36 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return deviceForMutation(deviceID: deviceID)
     }
 
+    /// Whether a device can service an action that needs its daemon. An unreachable device's rows
+    /// stay listed and readable, but everything behind them is refused up front instead of dialled
+    /// and failed — the user browses the subtree and acts on it once the device returns. A section
+    /// that has not finished loading is equally not actionable: its record may not be installed yet.
+    /// Pure so the rule is directly testable and so the refusing chokepoint and the controls that
+    /// disable themselves ahead of it can never disagree.
+    nonisolated static func deviceAcceptsDaemonActions(loadState: SidebarDeviceLoadState) -> Bool { loadState == .loaded }
+
+    /// Whether the daemon-backed controls for a workspace's row should be offered. An id no section
+    /// claims has no daemon to act on either, so it reads as not actionable.
+    func deviceAcceptsDaemonActions(forWorkspaceID workspaceID: String) -> Bool {
+        deviceID(forWorkspaceID: workspaceID).map(deviceAcceptsDaemonActions(forDeviceID:)) ?? false
+    }
+
+    func deviceAcceptsDaemonActions(forDeviceID deviceID: String) -> Bool {
+        deviceSection(id: deviceID).map { Self.deviceAcceptsDaemonActions(loadState: $0.loadState) } ?? false
+    }
+
+    /// The tooltip a control disabled by an outage carries, naming the device the way the sidebar rows
+    /// and the add-project device picker do. Nil for any other state — a device that is merely still
+    /// loading is not offline, so its controls keep their own tooltips rather than claiming an outage.
+    func unreachableDeviceTooltip(forDeviceID deviceID: String) -> String? {
+        guard let section = deviceSection(id: deviceID), section.loadState.isOffline else { return nil }
+        return "\(section.displayName) is offline"
+    }
+
+    func unreachableDeviceTooltip(forWorkspaceID workspaceID: String) -> String? {
+        deviceID(forWorkspaceID: workspaceID).flatMap(unreachableDeviceTooltip(forDeviceID:))
+    }
+
     private static func deviceNotLoadedError() -> NSError {
         NSError(
             domain: "Spaces", code: 1001,
@@ -4401,6 +4445,41 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 NSLocalizedDescriptionKey: "Spaces has not finished loading.",
                 NSLocalizedRecoverySuggestionErrorKey: "Wait for Spaces to load, or reload Spaces, and try again.",
             ])
+    }
+
+    /// Raised when an action needs a device's daemon and that device is unreachable. An outage leaves
+    /// the device's rows on screen, so the refusal has to name the device and say it is offline; the
+    /// not-loaded error would describe a state the user can plainly see they are not in.
+    /// A remote device is recovered by reconnecting to it, but this Mac cannot be reconnected to
+    /// itself — its daemon is simply not running, and Devices settings carries the action that
+    /// relaunches it. Telling a user to reconnect their own Mac sends them looking for a control
+    /// that does not exist.
+    nonisolated static func deviceUnreachableError(deviceName: String, isLocal: Bool) -> NSError {
+        NSError(
+            domain: "Spaces", code: 1003,
+            userInfo: [
+                NSLocalizedDescriptionKey: "\(deviceName) is offline.",
+                NSLocalizedRecoverySuggestionErrorKey: isLocal
+                    ? "Restart the local daemon and try again." : "Reconnect it and try again.",
+            ])
+    }
+
+    /// The error for a device that cannot service a daemon-backed action, telling apart the two ways
+    /// `deviceForMutation` refuses: an unreachable section names its device and says offline, while an
+    /// id no section claims — or one whose section is still loading — is genuinely a not-loaded state.
+    private func deviceUnavailableError(deviceID: String?) -> NSError {
+        guard let deviceID, let section = deviceSection(id: deviceID), section.loadState.isOffline else { return Self.deviceNotLoadedError() }
+        return Self.deviceUnreachableError(deviceName: section.displayName, isLocal: section.isLocal)
+    }
+
+    /// Surfaces why a per-workspace daemon action could not resolve its device.
+    func showWorkspaceDeviceUnavailableError(workspaceID: String) {
+        showError(deviceUnavailableError(deviceID: deviceID(forWorkspaceID: workspaceID)))
+    }
+
+    /// Surfaces why a selection-driven daemon action could not resolve its device.
+    func showSelectedDeviceUnavailableError() {
+        showError(deviceUnavailableError(deviceID: selectedRowDeviceID() ?? SpacesPairedDeviceRecord.localDeviceID))
     }
 
     /// Raised when a terminal window is opened by id but neither the caller nor a fresh
@@ -4496,7 +4575,9 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         // selection: free-standing surfaces (the workspace settings dialog) can outlive
         // a selection change, and misrouting would hit the wrong daemon or fail to find
         // the workspace.
-        guard let device = deviceForWorkspaceMutation(workspaceID: workspaceID) else { throw Self.deviceNotLoadedError() }
+        guard let device = deviceForWorkspaceMutation(workspaceID: workspaceID) else {
+            throw deviceUnavailableError(deviceID: deviceID(forWorkspaceID: workspaceID))
+        }
         guard let workspace = deviceWorkspaceSummary(workspaceID: workspaceID) else {
             throw WorkspaceError.invalidArgument(message: "Workspace not found.")
         }
@@ -4535,16 +4616,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         showAlertsDetail()
     }
 
-    /// Whether polling this workspace's setup progress can produce anything. Setup progress is read back
-    /// from the owning daemon, and an unreachable device's rows stay listed for the whole outage, so
-    /// without this the 0.75s poll would keep forcing sidebar reloads against a dead device.
-    private func workspaceSetupDetailRefreshTargetIsReachable(workspaceID: String) -> Bool {
-        guard let deviceID = deviceID(forWorkspaceID: workspaceID) else { return false }
-        return deviceSection(id: deviceID)?.loadState == .loaded
-    }
-
+    /// Setup progress is polled back from the owning daemon, and an unreachable device's rows stay
+    /// listed for the whole outage, so the timer runs only while that device can service the poll —
+    /// the same predicate that decides whether its actions are offered at all.
     private func startWorkspaceSetupDetailRefreshTimerIfNeeded(workspaceID: String) {
-        guard workspaceSetupDetailRefreshTargetIsReachable(workspaceID: workspaceID) else {
+        guard deviceAcceptsDaemonActions(forWorkspaceID: workspaceID) else {
             stopWorkspaceSetupDetailRefreshTimer()
             return
         }
@@ -4564,14 +4640,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     private func refreshWorkspaceSetupDetailIfVisible(workspaceID: String) {
         guard selectedWorkspaceID == workspaceID, !showingAlerts, !showingSettings, findWorkspace(id: workspaceID) != nil,
-            workspaceSetupDetailRefreshTargetIsReachable(workspaceID: workspaceID)
+            deviceAcceptsDaemonActions(forWorkspaceID: workspaceID)
         else {
             stopWorkspaceSetupDetailRefreshTimer()
             return
         }
         guard deviceForDaemonStateMutation() != nil else {
             stopWorkspaceSetupDetailRefreshTimer()
-            showDeviceNotLoadedError()
+            showSelectedDeviceUnavailableError()
             return
         }
         // Live setup progress for a remote workspace must bypass the remote overview
@@ -5801,6 +5877,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         // The new-workspace form is git-only: non-git projects own a single workspace
         // (the project directory) and offer no way to add more.
         guard project.isGitRepo else { return }
+        // Creating a workspace clones and configures it on the owning daemon, so an unreachable
+        // device has no form to fill in — refuse before opening it, the way the add-project device
+        // picker refuses an offline device. The sidebar's + button is disabled for the same reason,
+        // but the add-workspace shortcut reaches this directly from the selection.
+        guard deviceForMutation(deviceID: project.deviceID) != nil else {
+            showError(deviceUnavailableError(deviceID: project.deviceID))
+            return
+        }
         clearActiveAddWorkspaceFormState()
 
         let stack = NSStackView()
@@ -6111,12 +6195,16 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         footer.addArrangedSubview(spacer)
         refreshWorkspaceFooterFocusedPane(workspaceID: workspace.id)
 
+        // Everything below writes through the owning daemon, so an unreachable device's footer reads
+        // its workspace but offers no action that would only raise an error dialog. The overflow button
+        // stays enabled: its menu also carries the path actions, which need nothing from the daemon.
         let notes = (workspace.notes ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let notesButton = footerActionButton(
             symbol: "note.text", tooltip: notes.isEmpty ? "Add notes" : notes, action: #selector(showWorkspaceNotesEditor(_:)))
         notesButton.contentTintColor = notes.isEmpty ? .tertiaryLabelColor : accentColor
         notesButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
         notesButton.setAccessibilityIdentifier("workspace-detail-notes")
+        disableWhenDeviceCannotAct(notesButton, workspaceID: workspace.id)
         footer.addArrangedSubview(notesButton)
 
         // Lifecycle actions follow the workspace's state, matching the sidebar row's context menu: a stopped
@@ -6126,12 +6214,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             action: workspace.isRunning ? #selector(restartWorkspace(_:)) : #selector(launchWorkspace(_:)))
         launchOrRestartButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
         launchOrRestartButton.setAccessibilityIdentifier("workspace-detail-launch-restart")
+        disableWhenDeviceCannotAct(launchOrRestartButton, workspaceID: workspace.id)
         footer.addArrangedSubview(launchOrRestartButton)
 
         if workspace.isRunning {
             let stopButton = footerActionButton(symbol: "stop.circle", tooltip: "Stop", action: #selector(stopWorkspace(_:)))
             stopButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
             stopButton.setAccessibilityIdentifier("workspace-detail-stop")
+            disableWhenDeviceCannotAct(stopButton, workspaceID: workspace.id)
             footer.addArrangedSubview(stopButton)
         }
 
@@ -6139,6 +6229,29 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         overflowButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
         overflowButton.setAccessibilityIdentifier("workspace-detail-overflow")
         footer.addArrangedSubview(overflowButton)
+    }
+
+    /// Takes a detail-pane control out of service while the workspace's device cannot reach its
+    /// daemon, dimming it to the opacity an unreachable device's rows carry and naming the device in
+    /// its tooltip — the same treatment the sidebar rows and the add-project device picker use. The
+    /// detail pane is not dimmed as a whole, so the control carries the dimming itself. This only
+    /// ever removes availability, so a control the caller already disabled for its own reason (a
+    /// setup that is already running) stays disabled whatever order the two are applied in.
+    func disableWhenDeviceCannotAct(_ control: NSControl, workspaceID: String) {
+        guard !deviceAcceptsDaemonActions(forWorkspaceID: workspaceID) else { return }
+        control.isEnabled = false
+        control.alphaValue = Self.unreachableDeviceAlpha
+        if let tooltip = unreachableDeviceTooltip(forWorkspaceID: workspaceID) { control.toolTip = tooltip }
+    }
+
+    /// The device-scoped counterpart, for a control that targets a device rather than a workspace
+    /// (creating a workspace in a project, which has no workspace to resolve from yet). It sets no
+    /// opacity of its own: its caller is a sidebar row button, and the row already carries the
+    /// owning device's dimming, so dimming again would compound into a barely visible control.
+    func disableWhenDeviceCannotAct(_ control: NSControl, deviceID: String) {
+        guard !deviceAcceptsDaemonActions(forDeviceID: deviceID) else { return }
+        control.isEnabled = false
+        if let tooltip = unreachableDeviceTooltip(forDeviceID: deviceID) { control.toolTip = tooltip }
     }
 
     private func footerActionButton(symbol: String, tooltip: String, action: Selector) -> NSButton {
@@ -6239,7 +6352,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private func saveWorkspaceNotes(workspaceID: String, text: String) {
         do {
             guard let device = deviceForDaemonStateMutation() else {
-                showDeviceNotLoadedError()
+                showSelectedDeviceUnavailableError()
                 return
             }
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -6345,11 +6458,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         runButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
         runButton.isEnabled = setupState.status != .running
         runButton.setAccessibilityIdentifier("workspace-setup-run")
+        // Running setup and opening a terminal both run on the owning daemon; Reveal and Copy Log below
+        // read what is already on this Mac, so they stay available through an outage.
+        disableWhenDeviceCannotAct(runButton, workspaceID: workspace.id)
 
         let terminalButton = actionButton(
             title: "Terminal", symbol: "terminal", tooltip: "Open a workspace terminal", action: #selector(openWorkspaceTerminal(_:)), primary: false)
         terminalButton.identifier = NSUserInterfaceItemIdentifier(workspace.id)
         terminalButton.setAccessibilityIdentifier("workspace-setup-terminal")
+        disableWhenDeviceCannotAct(terminalButton, workspaceID: workspace.id)
 
         let revealButton = actionButton(
             title: "Reveal", symbol: "folder", tooltip: "Reveal workspace in Finder", action: #selector(revealDirectoryInFinder(_:)), primary: false)
@@ -6403,7 +6520,10 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             setupScriptSection.onCommit = { [weak self] value in
                 guard let self else { return }
                 do {
-                    if let device = deviceRecord(forDeviceID: project.deviceID), let current = deviceProjectSummary(projectID: project.id)?.config {
+                    // Saving the script writes it through the owning daemon, so it goes through the
+                    // mutation chokepoint: an unreachable device keeps the editor readable and refuses
+                    // only the commit.
+                    if let device = deviceForMutation(deviceID: project.deviceID), let current = deviceProjectSummary(projectID: project.id)?.config {
                         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
                         let updated = SpacesDeviceProjectConfig(
                             setupScript: trimmed.isEmpty ? nil : value, stopScript: current.stopScript, ports: current.ports,
@@ -6413,7 +6533,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                             clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
                         applyDeviceMutationResponse(response, deviceID: device.id, selectedWorkspaceID: workspace.id)
                     } else {
-                        showDeviceNotLoadedError()
+                        showError(deviceUnavailableError(deviceID: project.deviceID))
                     }
                 } catch { showError(error) }
             }
@@ -7510,7 +7630,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             guard let self else { return }
             guard let device = deviceForDaemonStateMutation() else {
                 sender?.isEnabled = true
-                showDeviceNotLoadedError()
+                showSelectedDeviceUnavailableError()
                 return
             }
             let result = await Self.deviceMutation(device: device) { device in
@@ -7699,7 +7819,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 showInfoMessage(title: "Exported spaces.yaml", message: response.message)
                 return
             }
-            showDeviceNotLoadedError()
+            showSelectedDeviceUnavailableError()
         } catch { showError(error) }
     }
 
@@ -7730,7 +7850,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 applyDeviceMutationResponse(response, deviceID: device.id)
                 return
             }
-            showDeviceNotLoadedError()
+            showSelectedDeviceUnavailableError()
         } catch { showError(error) }
     }
 
@@ -7853,7 +7973,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 case .failure(let error): showError(error)
                 }
             } else {
-                showDeviceNotLoadedError()
+                showSelectedDeviceUnavailableError()
             }
         }
     }
@@ -7942,7 +8062,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         // not selectable in the device step, but the device step is skipped for a lone local device, so
         // guard here too and surface the offline state instead.
         if let section = deviceSection(id: refs.selectedDeviceID), !Self.addProjectDeviceIsSelectable(loadState: section.loadState) {
-            showError(WorkspaceError.invalidArgument(message: "\(section.displayName) is offline. Reconnect it and try again."))
+            showError(Self.deviceUnreachableError(deviceName: section.displayName, isLocal: section.isLocal))
             return
         }
         guard let device = deviceRecord(forDeviceID: refs.selectedDeviceID) else {
@@ -8130,7 +8250,8 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 throw WorkspaceError.invalidArgument(
                     message: "Branch '\(branch)' already exists. Choose it from Existing branch or enter a different new branch name.")
             }
-            if let workspaceTargetDeviceID = deviceID(forProjectID: refs.projectID), let device = deviceRecord(forDeviceID: workspaceTargetDeviceID) {
+            if let workspaceTargetDeviceID = deviceID(forProjectID: refs.projectID), let device = deviceForMutation(deviceID: workspaceTargetDeviceID)
+            {
                 let input = WorkspaceCreateInput(
                     projectID: refs.projectID, branch: branch, baseBranch: baseBranch, notes: resolvedNotes, allowRemoteBranchLookup: true,
                     allowExistingBranchReuse: addWorkspaceBranchMode(refs: refs) == .existing, replaceExistingManagedDirectory: false)
@@ -8166,7 +8287,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 }
                 return
             }
-            showDeviceNotLoadedError()
+            showError(deviceUnavailableError(deviceID: deviceID(forProjectID: refs.projectID)))
         } catch { showError(error) }
     }
 
@@ -8271,7 +8392,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     private func performLaunchWorkspace(id: String) async {
         guard let device = deviceForWorkspaceMutation(workspaceID: id) else {
-            showDeviceNotLoadedError()
+            showWorkspaceDeviceUnavailableError(workspaceID: id)
             return
         }
         let result = await Self.deviceMutation(device: device) { device in
@@ -8300,7 +8421,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private func performRestartWorkspace(id: String) async {
         let browserSessionTargetURLs = configuredBrowserSessionTargetURLsForTeardown(workspaceID: id)
         guard let device = deviceForWorkspaceMutation(workspaceID: id) else {
-            showDeviceNotLoadedError()
+            showWorkspaceDeviceUnavailableError(workspaceID: id)
             return
         }
         let result = await Self.deviceMutation(device: device) { device in
@@ -8333,7 +8454,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     private func performStopWorkspace(id: String) async {
         let browserSessionTargetURLs = configuredBrowserSessionTargetURLsForTeardown(workspaceID: id)
         guard let device = deviceForWorkspaceMutation(workspaceID: id) else {
-            showDeviceNotLoadedError()
+            showWorkspaceDeviceUnavailableError(workspaceID: id)
             return
         }
         let result = await Self.deviceMutation(device: device) { device in
@@ -8496,18 +8617,26 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// workspace path (for Copy/Reveal) or workspace ID (for Archive/Hide) in their
     /// `identifier.rawValue`. Reveal also carries the workspace id in
     /// `representedObject` so remote/local gating resolves the action target itself.
-    static func makeWorkspaceOverflowMenu(workspaceID: String, path: String, target: AnyObject?, isLocalDevice: Bool = true) -> NSMenu {
+    /// `daemonActionsEnabled` is false while the owning device cannot service its daemon: the
+    /// menu keeps its shape — the items stay listed so the menu does not reshuffle mid-outage —
+    /// and only the ones that need the daemon are disabled. Auto-enabling is off so those
+    /// decisions are the menu's own rather than AppKit's responder-chain guess.
+    static func makeWorkspaceOverflowMenu(workspaceID: String, path: String, target: AnyObject?, isLocalDevice: Bool, daemonActionsEnabled: Bool)
+        -> NSMenu
+    {
         let menu = NSMenu()
+        menu.autoenablesItems = false
 
         func addItem(
             title: String, symbol: String?, action: Selector, keyEquivalent: String, modifiers: NSEvent.ModifierFlags, identifier: String,
-            representedObject: Any? = nil
+            representedObject: Any? = nil, isEnabled: Bool = true
         ) {
             let item = NSMenuItem(title: title, action: action, keyEquivalent: keyEquivalent)
             item.keyEquivalentModifierMask = modifiers
             item.identifier = NSUserInterfaceItemIdentifier(identifier)
             item.representedObject = representedObject
             item.target = target
+            item.isEnabled = isEnabled
             if let symbol { item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil) }
             menu.addItem(item)
         }
@@ -8525,14 +8654,15 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         menu.addItem(.separator())
         addItem(
             title: "Archive…", symbol: "archivebox", action: #selector(AppKitController.archiveWorkspace(_:)), keyEquivalent: "", modifiers: [],
-            identifier: workspaceID)
+            identifier: workspaceID, isEnabled: daemonActionsEnabled)
         return menu
     }
 
     @objc private func showWorkspaceOverflowMenu(_ sender: NSButton) {
         guard let workspaceID = sender.identifier?.rawValue, let workspace = workspaceIndex[workspaceID]?.workspace else { return }
         let menu = Self.makeWorkspaceOverflowMenu(
-            workspaceID: workspaceID, path: workspace.dir, target: self, isLocalDevice: isLocalWorkspace(workspace))
+            workspaceID: workspaceID, path: workspace.dir, target: self, isLocalDevice: isLocalWorkspace(workspace),
+            daemonActionsEnabled: deviceAcceptsDaemonActions(forWorkspaceID: workspaceID))
         let origin = NSPoint(x: 0, y: sender.bounds.maxY + 4)
         menu.popUp(positioning: nil, at: origin, in: sender)
     }
@@ -8796,7 +8926,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             logPerfMetric(
                 "workspace_process_launch_ui", target: "workspace=\(workspaceID)", elapsedMS: windowShortcutElapsedMS(since: startedAt),
                 success: false, detail: "route=ipc name=\(processName)")
-            showDeviceNotLoadedError()
+            showWorkspaceDeviceUnavailableError(workspaceID: workspaceID)
         }
     }
 
@@ -8818,7 +8948,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 logPerfMetric(
                     "workspace_process_stop_ui", target: "workspace=\(workspaceID)", elapsedMS: windowShortcutElapsedMS(since: startedAt),
                     success: false, detail: "route=ipc name=\(processName)")
-                showDeviceNotLoadedError()
+                showWorkspaceDeviceUnavailableError(workspaceID: workspaceID)
             } catch {
                 logPerfMetric(
                     "workspace_process_stop_ui", target: "workspace=\(workspaceID)", elapsedMS: windowShortcutElapsedMS(since: startedAt),
@@ -8846,7 +8976,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                 logPerfMetric(
                     "workspace_process_restart_ui", target: "workspace=\(workspaceID)", elapsedMS: windowShortcutElapsedMS(since: startedAt),
                     success: false, detail: "route=ipc name=\(processName)")
-                showDeviceNotLoadedError()
+                showWorkspaceDeviceUnavailableError(workspaceID: workspaceID)
             } catch {
                 logPerfMetric(
                     "workspace_process_restart_ui", target: "workspace=\(workspaceID)", elapsedMS: windowShortcutElapsedMS(since: startedAt),
@@ -8884,7 +9014,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             logPerfMetric(
                 "workspace_agent_launch_ui", target: "workspace=\(workspaceID)", elapsedMS: windowShortcutElapsedMS(since: startedAt), success: false,
                 detail: "route=ipc name=\(launcherName)")
-            showDeviceNotLoadedError()
+            showWorkspaceDeviceUnavailableError(workspaceID: workspaceID)
         }
     }
 
@@ -9827,7 +9957,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             let siblingTargetURLs = Self.browserSessionSiblingTargetURLs(targetURL: targetURL, targetURLs: browserSessionTargetURLs)
             if isRemoteDeviceID(workspaceDeviceID) {
                 guard let device = deviceForWorkspaceMutation(workspaceID: workspaceID) else {
-                    showDeviceNotLoadedError()
+                    showWorkspaceDeviceUnavailableError(workspaceID: workspaceID)
                     return nil
                 }
                 guard let workspace = deviceWorkspaceSummary(workspaceID: workspaceID) else {
@@ -9922,8 +10052,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             )
         }
         // Window-focus terminal targets are always workspace-backed (they come from a
-        // workspace's run-target list), so a missing device is a not-loaded state.
-        guard deviceForWorkspaceMutation(workspaceID: request.workspaceID) != nil else {
+        // workspace's run-target list), so a workspace whose owning device is unknown is a not-loaded
+        // state. Reachability is deliberately not required here: focusing a pane is browsing, so an
+        // already-open pane on an unreachable device stays focusable and a pane opened for one renders
+        // as disconnected. The daemon-backed resolutions that create a session are gated at their own
+        // mutations, so nothing that needs the daemon slips through this check.
+        guard deviceID(forWorkspaceID: request.workspaceID) != nil else {
             showDeviceNotLoadedError()
             logTerminalPaneFocus(success: false, reason: "device_not_loaded")
             return false
@@ -10006,7 +10140,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         async -> DeviceTerminalOpenRequest?
     {
         guard let device = deviceForWorkspaceMutation(workspaceID: workspaceID) else {
-            showDeviceNotLoadedError()
+            showWorkspaceDeviceUnavailableError(workspaceID: workspaceID)
             return nil
         }
         switch await Self.deviceMutation(device: device, operation: operation) {
@@ -10605,7 +10739,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             applyDeviceMutationResponse(response, deviceID: device.id)
             return
         }
-        throw Self.deviceNotLoadedError()
+        throw deviceUnavailableError(deviceID: selectedRowDeviceID() ?? SpacesPairedDeviceRecord.localDeviceID)
     }
 
     private func commitEditing() {

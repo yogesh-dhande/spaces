@@ -1230,6 +1230,10 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
                 symbol: "plus", tooltip: "New workspace in \(project.name)", action: #selector(AppKitController.addWorkspace(_:)))
             addButton.identifier = NSUserInterfaceItemIdentifier(project.id)
             addButton.setAccessibilityIdentifier("sidebar-project-add-workspace-\(project.id)")
+            // Creating a workspace runs on the owning daemon, so it is offered only while that device
+            // can service it. The settings gear beside it stays enabled: the dialog reads the cached
+            // config, and only its saves are refused.
+            host.disableWhenDeviceCannotAct(addButton, deviceID: project.deviceID)
             accessoryStack.addArrangedSubview(addButton)
         }
         // A project row carries a right-edge disclosure chevron mirroring its collapse state. A git
@@ -1521,19 +1525,35 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     /// the workspace id so it resolves remote/local state against the clicked row, not the selection.
     private func workspaceContextMenu(workspace: WorkspaceSummary) -> NSMenu {
         let menu = NSMenu()
-        func addItem(_ title: String, symbol: String, target: AnyObject, action: Selector, identifier: String, representedObject: Any? = nil) {
+        // The menu keeps its shape while the owning device is unreachable — the same items in the same
+        // order — and disables only the ones that need its daemon, so lifecycle, Hide and Archive read
+        // as temporarily unavailable rather than silently disappearing mid-outage. Auto-enabling is off
+        // so those decisions are the menu's own rather than AppKit's responder-chain guess.
+        menu.autoenablesItems = false
+        let daemonActionsEnabled = host.deviceAcceptsDaemonActions(forWorkspaceID: workspace.id)
+        func addItem(
+            _ title: String, symbol: String, target: AnyObject, action: Selector, identifier: String, representedObject: Any? = nil,
+            isEnabled: Bool = true
+        ) {
             let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
             item.target = target
             item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
             item.identifier = NSUserInterfaceItemIdentifier(identifier)
             item.representedObject = representedObject
+            item.isEnabled = isEnabled
             menu.addItem(item)
         }
         if workspace.isRunning {
-            addItem("Restart", symbol: "arrow.clockwise", target: self, action: #selector(restartWorkspaceMenuItem(_:)), identifier: workspace.id)
-            addItem("Stop", symbol: "stop", target: self, action: #selector(stopWorkspaceMenuItem(_:)), identifier: workspace.id)
+            addItem(
+                "Restart", symbol: "arrow.clockwise", target: self, action: #selector(restartWorkspaceMenuItem(_:)), identifier: workspace.id,
+                isEnabled: daemonActionsEnabled)
+            addItem(
+                "Stop", symbol: "stop", target: self, action: #selector(stopWorkspaceMenuItem(_:)), identifier: workspace.id,
+                isEnabled: daemonActionsEnabled)
         } else {
-            addItem("Start", symbol: "play", target: self, action: #selector(startWorkspaceMenuItem(_:)), identifier: workspace.id)
+            addItem(
+                "Start", symbol: "play", target: self, action: #selector(startWorkspaceMenuItem(_:)), identifier: workspace.id,
+                isEnabled: daemonActionsEnabled)
         }
         menu.addItem(.separator())
         addItem("Copy path", symbol: "doc.on.doc", target: host, action: #selector(AppKitController.copyDirectoryPath(_:)), identifier: workspace.dir)
@@ -1545,10 +1565,15 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
                 representedObject: AppKitController.WorkspacePathActionContext(workspaceID: workspace.id, path: workspace.dir))
         }
         menu.addItem(.separator())
-        addItem("Hide", symbol: "eye.slash", target: self, action: #selector(hideWorkspaceMenuItem(_:)), identifier: workspace.id)
+        // Hide stops the workspace through its daemon before hiding the row, so it is a daemon action.
+        addItem(
+            "Hide", symbol: "eye.slash", target: self, action: #selector(hideWorkspaceMenuItem(_:)), identifier: workspace.id,
+            isEnabled: daemonActionsEnabled)
         // Archive is destructive (it removes the git worktree), so it sits last, below the separator, and
         // routes through the same confirmation the detail ⋯ overflow menu uses.
-        addItem("Archive…", symbol: "archivebox", target: self, action: #selector(archiveWorkspaceMenuItem(_:)), identifier: workspace.id)
+        addItem(
+            "Archive…", symbol: "archivebox", target: self, action: #selector(archiveWorkspaceMenuItem(_:)), identifier: workspace.id,
+            isEnabled: daemonActionsEnabled)
         return menu
     }
 
@@ -1580,21 +1605,32 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     private func runtimeTargetMenu(workspace: WorkspaceSummary, item: SidebarRuntimeTargetItem) -> NSMenu {
         let context = RuntimeTargetMenuContext(workspaceID: workspace.id, item: item)
         let menu = NSMenu()
-        func addItem(_ title: String, symbol: String, action: Selector?) {
+        // Same rule as the workspace menu: the items stay listed while the owning device is
+        // unreachable, and the ones that need its daemon are disabled instead of removed.
+        menu.autoenablesItems = false
+        let daemonActionsEnabled = host.deviceAcceptsDaemonActions(forWorkspaceID: workspace.id)
+        func addItem(_ title: String, symbol: String, action: Selector?, isEnabled: Bool = true) {
             let menuItem = NSMenuItem(title: title, action: action, keyEquivalent: "")
             menuItem.target = action == nil ? nil : self
             menuItem.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
             menuItem.representedObject = context
+            menuItem.isEnabled = isEnabled && action != nil
             menu.addItem(menuItem)
         }
-        if item.canRun { addItem("Start", symbol: "play", action: #selector(startRuntimeTargetMenuItem(_:))) }
-        if item.canStop { addItem("Stop", symbol: "stop", action: #selector(stopRuntimeTargetMenuItem(_:))) }
-        if item.canRestart { addItem("Restart", symbol: "arrow.clockwise", action: #selector(restartRuntimeTargetMenuItem(_:))) }
+        if item.canRun { addItem("Start", symbol: "play", action: #selector(startRuntimeTargetMenuItem(_:)), isEnabled: daemonActionsEnabled) }
+        if item.canStop { addItem("Stop", symbol: "stop", action: #selector(stopRuntimeTargetMenuItem(_:)), isEnabled: daemonActionsEnabled) }
+        if item.canRestart {
+            addItem("Restart", symbol: "arrow.clockwise", action: #selector(restartRuntimeTargetMenuItem(_:)), isEnabled: daemonActionsEnabled)
+        }
         if !menu.items.isEmpty { menu.addItem(.separator()) }
-        addItem("Rename", symbol: "pencil", action: #selector(renameRuntimeTargetMenuItem(_:)))
+        // Rename writes the new name through the daemon (a session rename command or a workspace
+        // config edit), so it is a daemon action too.
+        addItem("Rename", symbol: "pencil", action: #selector(renameRuntimeTargetMenuItem(_:)), isEnabled: daemonActionsEnabled)
         if item.kind != .browser {
             // Only session-backed targets can move into a panel window; a target that
             // hasn't started yet keeps the item visible but disabled for discoverability.
+            // Moving an already-open session into a window is client-side, so an outage does not
+            // disable it — the pane it opens carries its own disconnected state.
             addItem(
                 "Open in New Window", symbol: "macwindow.badge.plus",
                 action: item.sessionID == nil ? nil : #selector(openRuntimeTargetInNewWindowMenuItem(_:)))
