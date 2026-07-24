@@ -248,6 +248,11 @@ final class HostManagedPTYAdoptTests: XCTestCase {
         // it), so continuing would report two misleading failures for this one.
         guard XCTWaiter().wait(for: [handlerEntered], timeout: 10) == .completed else {
             XCTFail("output handler never entered within 10s; the child never delivered its first PTY output")
+            // Pre-signal the release in case output arrives right after the timeout: the handler would
+            // otherwise block forever on releaseHandler.wait(), stalling the read queue that reaps the
+            // child. terminate() then tears the child and its descriptors down before we return.
+            releaseHandler.signal()
+            driver.terminate()
             return
         }
         Task {
