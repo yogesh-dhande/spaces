@@ -226,7 +226,7 @@ manifest = {
     "ghostty_sha": ghostty_sha,
     "source_url": "https://example.invalid/ghostty.git",
     "zig_version": "0.16.0",
-    "build_script_version": 2,
+    "build_script_version": 3,
     "xcode_version": "17.0",
     "xcode_build_version": "17C52",
     "swift_version": "Swift release fixture",
@@ -366,7 +366,7 @@ fi
 grep -q "Replacing stale Ghostty cache entry" "$TMP_ROOT/stale.out" || fail "stale entry was not reported as replaced"
 [[ -s "$GH_LOG" ]] || fail "stale-entry run should have downloaded fresh artifacts"
 STALE_VERSION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["build_script_version"])' "$CACHE_ENTRY/ghostty-artifacts/manifest.json")"
-[[ "$STALE_VERSION" == "2" ]] || fail "stale cache entry was not replaced with current artifacts (build_script_version=$STALE_VERSION)"
+[[ "$STALE_VERSION" == "3" ]] || fail "stale cache entry was not replaced with current artifacts (build_script_version=$STALE_VERSION)"
 
 # --- 4. Dirty builds stay local and never reach the shared cache. ---
 DIRTY_CACHE_DIR="$TMP_ROOT/cache-dirty"
