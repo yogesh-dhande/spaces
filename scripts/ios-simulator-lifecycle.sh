@@ -117,13 +117,15 @@ spaces_ios_simulator_boot_if_needed() {
     fi
 
     # A wedged bootstatus wait usually means CoreSimulator itself is stuck, not that the boot
-    # will ever complete on its own; shutdown+erase resets the device to a clean Shutdown state
-    # so the retry's boot has a fair chance. Both are tolerant of failure -- the device may
-    # already be down, or erase may fail on a device that never finished booting -- and either
-    # way we still want to fall through and retry rather than give up here.
-    printf 'iOS simulator %s appears wedged; shutting down and erasing before retrying...\n' "$udid" >&2
-    xcrun simctl shutdown "$udid" >&2 || true
-    xcrun simctl erase "$udid" >&2 || true
+    # will ever complete on its own. Resetting the device (shutdown + erase) was tried first and
+    # did not help: a wedged boot came back and failed the retry the same way, which says the stuck
+    # layer is CoreSimulator itself rather than the device's contents. So reset the service --
+    # shut every device down, then kill the daemon, which launchd respawns clean on the next simctl
+    # call. Everything here tolerates failure: the device may already be down and the daemon may
+    # already be gone, and either way the retry below is what we actually care about.
+    printf 'iOS simulator %s appears wedged; resetting CoreSimulator before retrying...\n' "$udid" >&2
+    xcrun simctl shutdown all >&2 || true
+    killall -9 com.apple.CoreSimulator.CoreSimulatorService >/dev/null 2>&1 || true
   done
 }
 

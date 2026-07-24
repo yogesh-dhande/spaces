@@ -80,7 +80,16 @@ PY
   shutdown)
     udid="$1"
     printf 'shutdown %s\n' "$udid" >>"$SPACES_TEST_SIMCTL_LOG"
-    printf 'Shutdown\n' >"$SPACES_TEST_SIMULATOR_STATE_ROOT/$udid"
+    # The wedge recovery shuts every device down at once; there is no device named "all" to
+    # record a state for, so mark each known device instead.
+    if [[ "$udid" == "all" ]]; then
+      for device in "$SPACES_TEST_SIMULATOR_STATE_ROOT"/*; do
+        [[ -e "$device" ]] || continue
+        printf 'Shutdown\n' >"$device"
+      done
+    else
+      printf 'Shutdown\n' >"$SPACES_TEST_SIMULATOR_STATE_ROOT/$udid"
+    fi
     ;;
   erase)
     udid="$1"
@@ -94,6 +103,14 @@ PY
 esac
 EOF
 chmod +x "$STUB_BIN/xcrun"
+
+# The wedge recovery kills the CoreSimulator daemon. Stub killall so this test records the call
+# instead of taking down the real service on a developer's machine mid-run.
+cat >"$STUB_BIN/killall" <<'EOF'
+#!/bin/bash
+printf 'killall %s\n' "$*" >>"$SPACES_TEST_SIMCTL_LOG"
+EOF
+chmod +x "$STUB_BIN/killall"
 
 export PATH="$STUB_BIN:$PATH"
 export SPACES_TEST_SIMULATOR_STATE_ROOT="$STATE_ROOT"
@@ -223,13 +240,15 @@ rm -f "$hang_marker"
   spaces_ios_simulator_boot_if_needed iphone-wedged
   spaces_ios_simulator_shutdown_owned 0
 )
-# Attempt 1 wedges (bootstatus #1, then recovery: 1 shutdown + 1 erase); attempt 2 boots again
-# (boot #2, bootstatus #2) and succeeds since the hang is single-shot. The owned-simulator
-# teardown at the end issues one more shutdown, for 2 total.
+# Attempt 1 wedges (bootstatus #1), then recovery resets the service (shutdown all + killall);
+# attempt 2 boots again (boot #2, bootstatus #2) and succeeds since the hang is single-shot. The
+# only per-device shutdown is the owned-simulator teardown at the end.
 assert_count 2 "boot iphone-wedged"
 assert_count 2 "bootstatus iphone-wedged"
-assert_count 1 "erase iphone-wedged"
-assert_count 2 "shutdown iphone-wedged"
+assert_count 1 "shutdown all"
+assert_count 1 "killall -9 com.apple.CoreSimulator.CoreSimulatorService"
+assert_count 0 "erase iphone-wedged"
+assert_count 1 "shutdown iphone-wedged"
 [[ "$(cat "$STATE_ROOT/iphone-wedged")" == "Shutdown" ]] || fail "recovered simulator was not shut down at teardown"
 
 reset_fixture
@@ -247,7 +266,10 @@ set -e
 [[ "$double_wedge_status" != "0" ]] || fail "expected boot_if_needed to fail when both attempts wedge"
 assert_count 2 "boot iphone-double-wedged"
 assert_count 2 "bootstatus iphone-double-wedged"
-assert_count 1 "shutdown iphone-double-wedged"
-assert_count 1 "erase iphone-double-wedged"
+# One recovery, after the first attempt only: the last attempt's wedge gives up rather than
+# resetting a service nothing will use again.
+assert_count 1 "shutdown all"
+assert_count 1 "killall -9 com.apple.CoreSimulator.CoreSimulatorService"
+assert_count 0 "erase iphone-double-wedged"
 
 echo "iOS simulator lifecycle tests passed"
