@@ -841,11 +841,7 @@
                 case "daemonStatus":
                     // The predecessor's one probe outlasts its own budget so it times out; every later
                     // probe belongs to the retry and parks until the test releases it.
-                    if await probeCounter.increment() == 1 {
-                        try? await Task.sleep(for: budget * 2)
-                    } else {
-                        await retryProbeGate.wait()
-                    }
+                    if await probeCounter.increment() == 1 { try? await Task.sleep(for: budget * 2) } else { await retryProbeGate.wait() }
                     return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .daemonStatus(pendingStatus))
                 case "overview":
                     // Holds the predecessor inside its post-timeout refresh until the test releases it.
@@ -958,22 +954,25 @@
             let updateClientStatus = daemonStatus(protocolVersion: SpacesWireProtocol.version + 1)
 
             let pendingBanner = CompatibilityBannerView(
-                remedy: .applyStagedUpdate(installedVersion: "2.0.0"), status: pendingStatus, isMutating: false, onUpdate: {})
+                remedy: .applyStagedUpdate(installedVersion: "2.0.0"), status: pendingStatus, isMutating: false, isApplyingUpdate: false, onUpdate: {}
+            )
             XCTAssertFalse(pendingBanner.isBlocking)
             XCTAssertEqual(pendingBanner.title, "Daemon update pending")
 
             let blockingBanner = CompatibilityBannerView(
-                remedy: .applyStagedUpdate(installedVersion: "2.0.0"), status: blockingStagedStatus, isMutating: false, onUpdate: {})
+                remedy: .applyStagedUpdate(installedVersion: "2.0.0"), status: blockingStagedStatus, isMutating: false, isApplyingUpdate: false,
+                onUpdate: {})
             XCTAssertTrue(blockingBanner.isBlocking)
             XCTAssertEqual(blockingBanner.title, "This device needs a daemon update")
 
             let installBanner = CompatibilityBannerView(
-                remedy: .installUpdateOnDevice, status: installOnDeviceStatus, isMutating: false, onUpdate: {})
+                remedy: .installUpdateOnDevice, status: installOnDeviceStatus, isMutating: false, isApplyingUpdate: false, onUpdate: {})
             XCTAssertTrue(installBanner.isBlocking)
             XCTAssertEqual(installBanner.title, "Install the update on this device")
             XCTAssertFalse(DaemonUpdateRemedy.installUpdateOnDevice.offersDaemonUpdateAction)
 
-            let updateClientBanner = CompatibilityBannerView(remedy: .updateClient, status: updateClientStatus, isMutating: false, onUpdate: {})
+            let updateClientBanner = CompatibilityBannerView(
+                remedy: .updateClient, status: updateClientStatus, isMutating: false, isApplyingUpdate: false, onUpdate: {})
             XCTAssertTrue(updateClientBanner.isBlocking)
             XCTAssertEqual(updateClientBanner.title, "Update Spaces to use this device")
             XCTAssertFalse(DaemonUpdateRemedy.updateClient.offersDaemonUpdateAction)

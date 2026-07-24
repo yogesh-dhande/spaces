@@ -18,6 +18,9 @@ struct CompatibilityBannerView: View {
     let remedy: DaemonUpdateRemedy
     let status: TerminalServiceDaemonStatus
     let isMutating: Bool
+    /// True while this app is applying a daemon update and polling for it to land, so the action can
+    /// report progress rather than just going inert for the length of the poll.
+    let isApplyingUpdate: Bool
     let onUpdate: () -> Void
 
     var body: some View {
@@ -31,8 +34,14 @@ struct CompatibilityBannerView: View {
             Text(detail).font(.system(size: 13)).foregroundStyle(Theme.mutedSecondary).fixedSize(horizontal: false, vertical: true)
             if remedy.offersDaemonUpdateAction {
                 Button(action: onUpdate) {
-                    Text("Update Daemon").font(.system(size: 13, weight: .semibold)).frame(maxWidth: .infinity).padding(.vertical, 9)
-                }.buttonStyle(.borderedProminent).tint(isBlocking ? Theme.orange : Theme.accent).disabled(isMutating)
+                    // The update polls for up to half a minute while the daemon restarts, and this
+                    // banner is the only place the user is watching: a disabled button alone reads as
+                    // an unresponsive tap, so the label says what is happening for the whole wait.
+                    HStack(spacing: 6) {
+                        if isApplyingUpdate { ProgressView().controlSize(.small) }
+                        Text(isApplyingUpdate ? "Updating…" : "Update Daemon").font(.system(size: 13, weight: .semibold))
+                    }.frame(maxWidth: .infinity).padding(.vertical, 9)
+                }.buttonStyle(.borderedProminent).tint(isBlocking ? Theme.orange : Theme.accent).disabled(isMutating || isApplyingUpdate)
             }
         }.padding(14).frame(maxWidth: .infinity, alignment: .leading).background(
             Theme.surface, in: RoundedRectangle(cornerRadius: 10, style: .continuous)
@@ -73,15 +82,16 @@ struct CompatibilityBannerView: View {
     var detail: String {
         switch remedy {
         case .updateClient:
-            "This device is running Spaces \(status.version), newer than this app's Spaces \(MobileAppVersion.current). Update the app from the "
-                + "App Store to reconnect."
+            "This device runs Spaces \(status.version) and this app is Spaces \(MobileAppVersion.current). The device speaks a newer connection "
+                + "protocol than this app, so update the app from the App Store to reconnect."
         case .installUpdateOnDevice:
             isLinuxDaemon
                 ? "This device's daemon is running Spaces \(status.version) and has no newer build installed to restart into. Update it from the "
                     + "Spaces app on your Mac — this app can't update a Linux daemon directly. Running terminals, agents, and processes on it are "
-                    + "preserved. It reconnects once updated."
+                    + "preserved."
                 : "This device's daemon is running Spaces \(status.version) and has no newer build installed to restart into. Open Spaces on it "
-                    + "and install the update. Running terminals, agents, and processes on it are preserved. It reconnects once updated."
+                    + "and install the update; this banner then offers to apply it to the daemon. Running terminals, agents, and processes on it "
+                    + "are preserved."
         case .applyStagedUpdate(let installedVersion):
             isBlocking
                 ? "Spaces \(installedVersion) is installed on this device, ahead of the daemon's Spaces \(status.version). Update the daemon to "

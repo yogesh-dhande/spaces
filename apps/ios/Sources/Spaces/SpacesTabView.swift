@@ -136,7 +136,7 @@ struct SpacesTabView: View {
             // The update action fires directly: `requestDaemonUpdate()` re-execs the daemon onto
             // whatever build is staged and preserves running terminals, processes, and coding agents,
             // so there is nothing to confirm or defer.
-            CompatibilityBannerView(remedy: remedy, status: status, isMutating: model.isMutating || model.isApplyingDaemonUpdate) {
+            CompatibilityBannerView(remedy: remedy, status: status, isMutating: model.isMutating, isApplyingUpdate: model.isApplyingDaemonUpdate) {
                 Task { await model.requestDaemonUpdate() }
             }
         }
