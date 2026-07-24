@@ -491,7 +491,12 @@
             // `.state` (the final render for an ended session) must still reach them, and
             // not notifying listeners keeps the render host from re-registering and
             // accumulating duplicates. The model owns reconnection.
+            // Stop the dropped client before dropping the reference: its pinned-TLS connection is
+            // released only by an explicit cancel, so a bare `nil` would orphan the connection and its
+            // dispatch queue for the life of the process while the reconnect mints a fresh one.
+            let disconnectedClient = streamClient
             streamClient = nil
+            disconnectedClient?.stop()
             // Gate strictly on `.unauthorized` for the local device: an unauthorized subscribe rejection means
             // the daemon is reachable but the boxed token is stale, recoverable only by re-bootstrapping.
             // Ended-session rejections (session-not-running/not-available) and remote devices must never
