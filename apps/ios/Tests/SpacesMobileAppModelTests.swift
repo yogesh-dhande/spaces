@@ -820,6 +820,36 @@
             XCTAssertLessThan(elapsed, budget + probeDuration + .milliseconds(600), "the poll must stop on its time budget")
         }
 
+        /// The deadline is re-checked after each wait, not only before it. A probe launched once the
+        /// budget has already passed would add its own request timeout on top of a wait that had itself
+        /// overrun — the poll would run well past the bound it advertises.
+        func testPollLaunchesNoProbeOnceTheBudgetHasPassed() async {
+            let recorder = SpacesMobileRequestRecorder()
+            let settings = SpacesMobileConnectionSettings()
+            let pendingStatus = daemonStatus(protocolVersion: SpacesWireProtocol.version, installedVersion: "2.0.0")
+            let overview = makeOverview(daemonStatus: pendingStatus)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                await recorder.append(request)
+                switch request.commandName {
+                case "requestDaemonRestart": return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                case "daemonStatus": return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .daemonStatus(pendingStatus))
+                case "overview": return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview))
+                default: return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                }
+            }
+            // A budget shorter than one interval: the first wait alone carries the loop past the
+            // deadline, so a correct poll gives up without ever probing.
+            let model = SpacesMobileAppModel(
+                settings: settings, bridgeClient: client, daemonUpdatePollInterval: .milliseconds(200), daemonUpdateTimeout: .milliseconds(50))
+
+            await model.requestDaemonUpdate()
+
+            let probes = await recorder.snapshot().filter { $0.commandName == "daemonStatus" }.count
+            XCTAssertEqual(probes, 0, "a probe must not start after the budget has already run out")
+            XCTAssertNil(model.errorMessage)
+            XCTAssertFalse(model.isApplyingDaemonUpdate)
+        }
+
         /// A timed-out update releases the in-flight flag before its reconciling refresh, so a retry can
         /// start while the previous invocation is still finishing that refresh. The slow predecessor must
         /// not clear the flag out from under the retry: doing so would re-enable the Update Daemon button

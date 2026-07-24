@@ -850,9 +850,21 @@ private enum SpacesMobileMutationTimeoutRecovery {
         isApplyingDaemonUpdate = true
         defer { if daemonUpdateGeneration == generation { isApplyingDaemonUpdate = false } }
 
-        do { try await bridgeClient.requestDaemonRestart(commandChannel: commandChannel) } catch is CancellationError { return } catch {
+        // The restart RPC holds the app-wide mutation gate like every other one-shot mutation, so another
+        // mutation cannot be sent into the daemon while it is being told to quiesce and re-exec. The gate
+        // is released before the polling phase: that runs for up to `daemonUpdateTimeout`, and holding it
+        // there would freeze every mutating control in the app for the whole wait.
+        isMutating = true
+        let restartError: Error?
+        do {
+            try await bridgeClient.requestDaemonRestart(commandChannel: commandChannel)
+            restartError = nil
+        } catch { restartError = error }
+        isMutating = false
+        if let restartError {
+            if restartError is CancellationError { return }
             guard identity == overviewIdentity else { return }
-            errorMessage = error.localizedDescription
+            errorMessage = restartError.localizedDescription
             return
         }
         guard identity == overviewIdentity else { return }
@@ -865,6 +877,9 @@ private enum SpacesMobileMutationTimeoutRecovery {
             // sleep would otherwise let every remaining attempt run back-to-back with no wait, spinning
             // the whole budget in one turn of the loop.
             do { try await Task.sleep(for: daemonUpdatePollInterval) } catch { return }
+            // The deadline can pass during that sleep. Re-check before probing: launching a request here
+            // would add its whole timeout on top of the budget, on top of the sleep that just overran it.
+            guard clock.now < deadline else { break }
             guard identity == overviewIdentity else { return }
             guard let status = try? await bridgeClient.fetchDaemonStatus(commandChannel: commandChannel) else { continue }
             guard identity == overviewIdentity else { return }
