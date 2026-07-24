@@ -795,6 +795,11 @@ private enum SpacesMobileMutationTimeoutRecovery {
         // address yet (freshly paired, no request issued through this client).
         let activeDeviceRecord = pairedDevices.first(where: { $0.id == activeDeviceID })
         let liveResolvedHost = await bridgeClient.currentResolvedHost()
+        // The user can switch or remove the active device while that await is suspended. Everything
+        // captured above belongs to the previous connection, while `settings` and `activeDeviceName` below
+        // already read the new one — merging that mixture would register routes keyed to the old device
+        // carrying the new device's port and fingerprint, or resurrect routes for a device just removed.
+        guard identity == overviewIdentity else { return }
         let resolvedHost = liveResolvedHost ?? activeDeviceRecord?.activeHost ?? settings.primaryHost
         browserRoutingTable.merge(
             deviceID: activeDeviceID, deviceName: activeDeviceName ?? settings.primaryHost, host: resolvedHost, port: settings.port,
@@ -1115,6 +1120,12 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// re-prefer a lower-latency path. An open viewer keeps its stream, which re-races on its own the next
     /// time it actually disconnects (see `SpacesDeviceNetworkBackend.openSessionStream`'s disconnect
     /// handling).
+    ///
+    /// Accepted race: a connect already suspended inside `connectIfNeeded` when this runs can install its
+    /// connection and repopulate the resolver's cache afterwards, leaving the app on the address it had
+    /// rather than re-preferring the LAN one. The overview poll runs every couple of seconds, so the
+    /// window is real but the consequence is only staying on a path that already works, and the next
+    /// foreground clears it again. Not worth generation-stamping every connect to close.
     func resetActiveConnectionEndpoint() {
         let client = bridgeClient
         let channel = commandChannel
