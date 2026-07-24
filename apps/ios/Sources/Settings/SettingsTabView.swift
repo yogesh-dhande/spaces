@@ -9,6 +9,7 @@ struct SettingsTabView: View {
     @Environment(SubscriptionStore.self) private var subscription
     @State private var path: [SpacesMobileSettingsRoute] = []
     @AppStorage(AppAppearanceStorage.key) private var appearanceMode: AppAppearanceMode = .default
+    @AppStorage(TerminalFontSizeStorage.key) private var terminalFontSize: TerminalFontSize = .default
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -20,7 +21,7 @@ struct SettingsTabView: View {
                         }
                     }
                     SubscriptionSettingsSection(store: subscription)
-                    settingsGroup("Appearance") { themeRow }
+                    appearanceGroup
                     demoModeGroup
                     settingsGroup("About") { versionRow }
                 }.padding(.vertical, 12)
@@ -71,6 +72,17 @@ struct SettingsTabView: View {
         }.buttonStyle(.plain).accessibilityIdentifier(identifier)
     }
 
+    /// Theme picker plus terminal font size picker, with a footer explaining the font size row.
+    private var appearanceGroup: some View {
+        settingsGroup("Appearance") {
+            themeRow
+            fontSizeRow
+            Text("Terminal text size on this device. Larger text fits fewer columns.").font(.system(size: 12)).foregroundStyle(
+                Theme.mutedSecondary
+            ).frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 20).padding(.top, 2)
+        }
+    }
+
     /// Demo Mode toggle plus its footer. Flipping it swaps the active client to the bundled sample data
     /// (or restores the real devices) and refreshes so the tabs repopulate immediately.
     private var demoModeGroup: some View {
@@ -100,6 +112,16 @@ struct SettingsTabView: View {
                 ForEach(AppAppearanceMode.allCases, id: \.self) { mode in Text(mode.displayName).tag(mode) }
             }.pickerStyle(.menu).labelsHidden().tint(Theme.mutedSecondary)
         }.settingsRowPadding().accessibilityIdentifier("settings.theme")
+    }
+
+    private var fontSizeRow: some View {
+        HStack(spacing: 10) {
+            settingsLabel("Font Size")
+            Spacer(minLength: 0)
+            Picker("Font Size", selection: $terminalFontSize) {
+                ForEach(TerminalFontSize.allCases, id: \.self) { size in Text(size.displayName).tag(size) }
+            }.pickerStyle(.menu).labelsHidden().tint(Theme.mutedSecondary)
+        }.settingsRowPadding().accessibilityIdentifier("settings.terminalFontSize")
     }
 
     private var versionRow: some View {
