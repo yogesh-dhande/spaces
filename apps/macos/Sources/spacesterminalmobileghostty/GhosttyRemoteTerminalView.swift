@@ -428,7 +428,9 @@ import Foundation
         /// live mirror has to be replaced by one created from a fresh session config at the new size.
         /// The render state (`latestSnapshot`, `latestRenderFrame`, owner epoch) is deliberately kept —
         /// unlike `prepareForDismantle()` — so the terminal re-renders its current content at the new
-        /// size instead of blanking until the daemon sends the next frame.
+        /// size instead of blanking until the daemon sends the next frame. The new grid is reported
+        /// once the replacement mirror is up rather than here, so the daemon resizes to the surface's
+        /// own metrics instead of the `cellMetrics()` estimate a mirror-less viewport would produce.
         public func setTerminalFontSize(_ newFontSize: TerminalFontSize) {
             guard fontSize != newFontSize else { return }
             fontSize = newFontSize
@@ -439,7 +441,6 @@ import Foundation
             self.mirror = nil
             lastSurfaceGeometry = nil
             scheduleMirrorCreationIfNeeded()
-            reportViewportSizeIfNeeded()
             renderLatestSnapshot()
         }
 
@@ -766,6 +767,10 @@ import Foundation
                 self.mirrorCreationTask = nil
                 self.createMirrorIfNeeded()
                 self.renderLatestSnapshot()
+                // A live surface measures the grid with its own font, which the pre-mirror
+                // `cellMetrics()` estimate only approximates, so re-report now that it exists. The
+                // report dedupes, so this is a no-op when the estimate already matched.
+                self.reportViewportSizeIfNeeded()
             }
         }
 
