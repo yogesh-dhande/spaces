@@ -277,6 +277,38 @@ enum SpacesMobileDeviceStore {
         saveDevices(devices)
     }
 
+    /// Backfills a paired device's `hosts` from the addresses its daemon reports it is reachable at
+    /// (`TerminalServiceDaemonStatus.deviceAPIAddresses`). This is how a device paired before its Mac
+    /// ever had Tailscale silently gains the tailnet fallback the moment the Mac gets one — with no
+    /// rescan required, since the daemon now advertises its own live addresses on every connection.
+    ///
+    /// No-ops when `hosts` is empty: an empty list means the daemon reported nothing (it predates this
+    /// field, or this call raced a path that could not enumerate interfaces), never that the daemon has
+    /// no addresses — see `TerminalServiceDaemonStatus.deviceAPIAddresses`. Also no-ops when `hosts`
+    /// already equals the matched record's `hosts`, the common steady-state case, to avoid re-encoding
+    /// the whole device list into `UserDefaults` on every overview fetch.
+    ///
+    /// The daemon's order replaces the record's order outright (rather than merging) because the daemon
+    /// is authoritative about its own reachability and its order already encodes LAN-first preference
+    /// exactly like a pairing link would. `activeHost` survives only if it is still a member of the new
+    /// list; otherwise the next connect re-evaluates from the top, same as `clearActiveHosts`. Matches
+    /// fingerprints the same trimmed+lowercased way `upsert`/`recordActiveHost` do.
+    static func mergeAdvertisedHosts(_ hosts: [String], certificateFingerprint: String) {
+        guard !hosts.isEmpty else { return }
+        let fingerprint = certificateFingerprint.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        var devices = loadDevices()
+        guard
+            let index = devices.firstIndex(where: {
+                $0.certificateFingerprint.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == fingerprint
+            }), devices[index].hosts != hosts
+        else { return }
+        devices[index].hosts = hosts
+        if let activeHost = devices[index].activeHost, !hosts.contains(activeHost) {
+            devices[index].activeHost = nil
+        }
+        saveDevices(devices)
+    }
+
     /// Clears the cached active host on every paired device, so the next connect attempt on each
     /// re-evaluates from the top of its `hosts` list instead of trusting a possibly-stale cache (e.g.
     /// after the app returns to the foreground on a different network).

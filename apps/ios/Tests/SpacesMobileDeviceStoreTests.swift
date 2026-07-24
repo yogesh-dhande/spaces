@@ -206,6 +206,79 @@
             XCTAssertTrue(reloaded.devices.allSatisfy { $0.activeHost == nil })
         }
 
+        /// An empty advertised list means the daemon reported nothing — never that it has no addresses —
+        /// so it must never overwrite a record's `hosts`, even when they differ from what a later call
+        /// would advertise.
+        func testMergeAdvertisedHostsIsNoOpWhenHostsIsEmpty() throws {
+            let state = SpacesMobileDeviceStore.upsert(settings: makeSettings(hosts: ["10.0.0.5"], fingerprint: "SHA256:mac", token: "token"), name: "Mac")
+            let id = try XCTUnwrap(state.devices.first?.id)
+
+            SpacesMobileDeviceStore.mergeAdvertisedHosts([], certificateFingerprint: "SHA256:mac")
+
+            let reloaded = SpacesMobileDeviceStore.load(fallbackSettings: SpacesMobileConnectionSettings())
+            XCTAssertEqual(reloaded.devices.first(where: { $0.id == id })?.hosts, ["10.0.0.5"])
+        }
+
+        /// The core backfill behavior: a device paired before its Mac had Tailscale has only a LAN
+        /// address stored. Once the daemon reports both addresses, the record adopts the daemon's list
+        /// and order verbatim, with no rescan.
+        func testMergeAdvertisedHostsAdoptsDaemonOrder() throws {
+            let state = SpacesMobileDeviceStore.upsert(settings: makeSettings(hosts: ["10.0.0.5"], fingerprint: "SHA256:mac", token: "token"), name: "Mac")
+            let id = try XCTUnwrap(state.devices.first?.id)
+
+            SpacesMobileDeviceStore.mergeAdvertisedHosts(["10.0.0.5", "100.64.0.5"], certificateFingerprint: "SHA256:mac")
+
+            let reloaded = SpacesMobileDeviceStore.load(fallbackSettings: SpacesMobileConnectionSettings())
+            XCTAssertEqual(reloaded.devices.first(where: { $0.id == id })?.hosts, ["10.0.0.5", "100.64.0.5"])
+        }
+
+        /// `activeHost` survives a merge that keeps it in the new list.
+        func testMergeAdvertisedHostsKeepsActiveHostWhenStillPresent() throws {
+            _ = SpacesMobileDeviceStore.upsert(
+                settings: makeSettings(hosts: ["10.0.0.5", "100.64.0.5"], fingerprint: "SHA256:mac", token: "token"), name: "Mac")
+            SpacesMobileDeviceStore.recordActiveHost("100.64.0.5", certificateFingerprint: "SHA256:mac")
+
+            SpacesMobileDeviceStore.mergeAdvertisedHosts(["100.64.0.5", "10.0.0.5"], certificateFingerprint: "SHA256:mac")
+
+            let reloaded = SpacesMobileDeviceStore.load(fallbackSettings: SpacesMobileConnectionSettings())
+            XCTAssertEqual(reloaded.devices.first?.activeHost, "100.64.0.5")
+        }
+
+        /// `activeHost` is dropped (not carried forward as an invented candidate) when the daemon's
+        /// advertised list no longer includes it.
+        func testMergeAdvertisedHostsDropsActiveHostNoLongerPresent() throws {
+            _ = SpacesMobileDeviceStore.upsert(
+                settings: makeSettings(hosts: ["10.0.0.5", "100.64.0.5"], fingerprint: "SHA256:mac", token: "token"), name: "Mac")
+            SpacesMobileDeviceStore.recordActiveHost("100.64.0.5", certificateFingerprint: "SHA256:mac")
+
+            SpacesMobileDeviceStore.mergeAdvertisedHosts(["10.0.0.5"], certificateFingerprint: "SHA256:mac")
+
+            let reloaded = SpacesMobileDeviceStore.load(fallbackSettings: SpacesMobileConnectionSettings())
+            XCTAssertNil(reloaded.devices.first?.activeHost)
+        }
+
+        /// Merging the record's own current `hosts` (the common steady-state case) must be a true no-op:
+        /// the persisted devices blob is byte-identical before and after.
+        func testMergeAdvertisedHostsIsNoOpWhenUnchanged() throws {
+            _ = SpacesMobileDeviceStore.upsert(
+                settings: makeSettings(hosts: ["10.0.0.5", "100.64.0.5"], fingerprint: "SHA256:mac", token: "token"), name: "Mac")
+            let blobBefore = try XCTUnwrap(UserDefaults.standard.data(forKey: devicesKey))
+
+            SpacesMobileDeviceStore.mergeAdvertisedHosts(["10.0.0.5", "100.64.0.5"], certificateFingerprint: "SHA256:mac")
+
+            XCTAssertEqual(UserDefaults.standard.data(forKey: devicesKey), blobBefore)
+        }
+
+        /// No paired device matches the fingerprint: a no-op, not a crash or an invented record.
+        func testMergeAdvertisedHostsIsNoOpWhenFingerprintUnmatched() throws {
+            _ = SpacesMobileDeviceStore.upsert(settings: makeSettings(hosts: ["10.0.0.5"], fingerprint: "SHA256:mac", token: "token"), name: "Mac")
+
+            SpacesMobileDeviceStore.mergeAdvertisedHosts(["10.0.0.5", "100.64.0.5"], certificateFingerprint: "SHA256:other")
+
+            let reloaded = SpacesMobileDeviceStore.load(fallbackSettings: SpacesMobileConnectionSettings())
+            XCTAssertEqual(reloaded.devices.first?.hosts, ["10.0.0.5"])
+        }
+
         /// Warm-start reordering: once `recordActiveHost` has learned an address, selecting that device
         /// must yield settings whose `hosts` starts with that address even though it was not first in the
         /// record's own `hosts` list. Reached only through the public `select` API.
@@ -314,6 +387,115 @@
             XCTAssertTrue(description.contains("192.168.1.24"))
             XCTAssertTrue(description.contains("100.86.197.104"))
             XCTAssertTrue(description.contains("Tailscale"))
+        }
+
+        /// Proves the happy-eyeballs race actually races rather than walking `hosts` in order: an
+        /// unreachable candidate listed first (`192.0.2.1`, RFC 5737 TEST-NET, guaranteed non-routable)
+        /// must not force the resolver to wait out that candidate's full timeout before the reachable
+        /// loopback candidate downstream even gets a turn.
+        ///
+        /// A bare TCP listener cannot complete a pinned-TLS handshake — there is no certificate to
+        /// present — so the loopback candidate cannot actually *win* here; the resolver correctly reports
+        /// it as a pin mismatch (a real peer answered at the transport level, but the pinned handshake
+        /// never completed), exactly the signal a genuinely re-paired daemon would produce. That is the
+        /// one true thing this test can assert without standing up a real pinned-TLS daemon:
+        /// `transportAuthenticationFailed` — not `allCandidatesUnreachable`, which would mean the
+        /// loopback listener was never reached at all — and that the whole race finishes near the
+        /// concurrent budget instead of the sequential one (proving the unreachable first candidate did
+        /// not starve the second of a turn).
+        func testReachableCandidateGetsATurnDespiteAnUnreachablePreferredCandidate() async throws {
+            let listener = try LoopbackConnectionSink()
+            let port = try await listener.start()
+            defer { listener.stop() }
+
+            var settings = SpacesMobileConnectionSettings()
+            settings.hosts = ["192.0.2.1", "127.0.0.1"]
+            settings.port = Int(port)
+            settings.certificateFingerprint = "SHA256:unreachable"
+            let resolver = SpacesDeviceEndpointResolver(settings: settings)
+
+            let start = ContinuousClock.now
+            do {
+                _ = try await resolver.connect(timeout: .milliseconds(500), queue: .main)
+                XCTFail("expected transportAuthenticationFailed")
+            } catch SpacesDeviceAPIClientError.transportAuthenticationFailed {
+                // Expected: the loopback candidate answered at the TCP level but never completed the
+                // pinned handshake, which is exactly what a real pin mismatch looks like.
+            } catch {
+                XCTFail("unexpected error: \(error)")
+            }
+            let elapsed = start.duration(to: .now)
+            // Sequential worst case would be roughly two full per-candidate passes (each a ~500ms TLS
+            // wait plus a 750ms plain-TCP mismatch probe) — near 2.5s. The 250ms stagger keeps the raced
+            // version well under that even though both candidates still have to be probed.
+            XCTAssertLessThan(elapsed, .seconds(2))
+        }
+    }
+
+    /// A bare TCP listener with no TLS behind it: stands in for "something answered at the transport
+    /// level" so a test can exercise the pin-mismatch path without a real pinned-TLS daemon. Accepts and
+    /// immediately parks every incoming connection (never sends a TLS handshake), which is what makes a
+    /// pinned-TLS `NWConnection` against it time out rather than succeed or fail outright.
+    private final class LoopbackConnectionSink: @unchecked Sendable {
+        private let listener: NWListener
+        private let queue = DispatchQueue(label: "spaces.device.api.resolver-test.sink")
+        private let lock = NSLock()
+        private var acceptedConnections: [NWConnection] = []
+
+        init() throws { listener = try NWListener(using: .tcp) }
+
+        func start() async throws -> UInt16 {
+            listener.newConnectionHandler = { [weak self] connection in
+                connection.start(queue: self?.queue ?? .main)
+                self?.lock.lock()
+                self?.acceptedConnections.append(connection)
+                self?.lock.unlock()
+            }
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+                let resume = LoopbackConnectionSinkOneShot(continuation)
+                listener.stateUpdateHandler = { state in
+                    switch state {
+                    case .ready: resume.resume(returning: ())
+                    case .failed(let error): resume.resume(throwing: error)
+                    default: break
+                    }
+                }
+                listener.start(queue: queue)
+            }
+            guard let port = listener.port?.rawValue else { throw NSError(domain: "LoopbackConnectionSink", code: 1) }
+            return port
+        }
+
+        func stop() {
+            listener.cancel()
+            lock.lock()
+            let connections = acceptedConnections
+            acceptedConnections.removeAll()
+            lock.unlock()
+            for connection in connections { connection.cancel() }
+        }
+    }
+
+    private final class LoopbackConnectionSinkOneShot: @unchecked Sendable {
+        private let lock = NSLock()
+        private var continuation: CheckedContinuation<Void, any Error>?
+
+        init(_ continuation: CheckedContinuation<Void, any Error>) { self.continuation = continuation }
+
+        func resume(returning value: Void) {
+            lock.lock()
+            let continuation = continuation
+            self.continuation = nil
+            lock.unlock()
+            continuation?.resume(returning: value)
+        }
+
+        func resume(throwing error: any Error) {
+            lock.lock()
+            let continuation = continuation
+            self.continuation = nil
+            lock.unlock()
+            continuation?.resume(throwing: error)
         }
     }
 #endif

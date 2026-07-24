@@ -630,6 +630,9 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
             XCTAssertEqual(status.runningProcesses, 1)
             XCTAssertEqual(status.activeAgents, 1)
             XCTAssertEqual(status.waitingAgents, 1)
+            // The server is bound to a pinned (non-wildcard) host, so `pairingLinkHosts` returns it
+            // verbatim — same derivation a pairing link uses, so the two can never disagree.
+            XCTAssertEqual(status.deviceAPIAddresses, ["127.0.0.1"])
         }
     }
 

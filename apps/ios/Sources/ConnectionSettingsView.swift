@@ -126,10 +126,14 @@ struct ConnectionSettingsView: View {
                             if device.id == SpacesMobileDemoDevice.id { demoTag }
                         }
                         // Show the address actually in use, not necessarily the most-preferred
-                        // candidate: `activeHost` is the one that most recently connected.
-                        Text("\(device.activeHost ?? device.hosts.first ?? ""):\(device.port)").font(.caption.monospaced()).foregroundStyle(
-                            .secondary
-                        ).lineLimit(1).truncationMode(.middle)
+                        // candidate: `activeHost` is the one that most recently connected. Labeled by
+                        // kind ("Local network" / "Tailscale") rather than shown as a bare host:port —
+                        // which network path a device is reachable over is the useful signal here, not
+                        // its literal port (every device uses the same default port, so it was only ever
+                        // incidental detail). Not monospaced: `docs/design.md` reserves that treatment
+                        // for path-like content (paths, commands, branches, ports), not this row's
+                        // now-prose label.
+                        Text(activeHostLabel(for: device)).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                     }
                 }
                 Spacer(minLength: 0)
@@ -151,6 +155,15 @@ struct ConnectionSettingsView: View {
                 }
             }
         }
+    }
+
+    /// "Tailscale · 100.86.197.104" / "Local network · 192.168.50.5" for the device's in-use address —
+    /// matching the labeling `SpacesDeviceHostAddressKind` already gives the Mac pairing pane. Empty
+    /// when the device has no known address at all (should not happen for a paired device, but a blank
+    /// row is the honest degenerate case rather than a fabricated label).
+    private func activeHostLabel(for device: SpacesMobilePairedDeviceRecord) -> String {
+        guard let host = device.activeHost ?? device.hosts.first else { return "" }
+        return "\(SpacesDeviceHostAddressKind(host: host).label) · \(host)"
     }
 
     /// Compact chip marking the synthetic Demo Mac in the device list.

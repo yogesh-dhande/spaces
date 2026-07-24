@@ -549,13 +549,22 @@ struct SpacesDeviceNetworkBackend: SpacesDeviceAPIBackend {
             label = "spaces.device.api.stream"
         }
         let queue = DispatchQueue(label: label)
-        // Reuses `StreamSubscription`'s own "waiting for the first payload" budget as the resolver's
-        // connect timeout: before candidate-walking, connecting was an instant, unstarted
-        // `NWConnection`, so that 12s timer alone covered handshake + first payload together. Reusing
-        // it here keeps that combined budget unchanged for the common single-candidate case.
-        let resolved = try await resolver.connect(timeout: StreamSubscription.initialEventTimeout, queue: queue)
-        StreamSubscription(connection: resolved.connection, request: request, onEvent: onEvent, onDisconnect: onDisconnect).start(on: queue)
-        return SpacesDeviceAPIStreamHandle { resolved.connection.cancel() }
+        // Takes the address the command channel already proved rather than racing candidates again: a
+        // viewer always attaches (a command-channel request) before it subscribes, so by now the
+        // resolver has a cached winner. That keeps this entry point non-blocking — it hands
+        // `StreamSubscription` an unstarted connection and lets that own the handshake inside its own
+        // "connect plus first payload" budget, so a subscribe against a hung endpoint cannot stall the
+        // caller's post-subscribe state refresh (which is what surfaces an authentication failure fast).
+        // Falling back to the first candidate covers a stream opened before any command on this client.
+        let host = await resolver.currentCachedHost() ?? settings.trimmedHosts.first ?? ""
+        guard let nwPort = UInt16(exactly: settings.port).flatMap(NWEndpoint.Port.init(rawValue:)), !host.isEmpty else {
+            throw SpacesDeviceAPIClientError.invalidEndpoint
+        }
+        let parameters = SpacesPinnedTLSConnector.tlsParameters(certificateFingerprint: settings.certificateFingerprint)
+        let connection = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: parameters)
+        StreamSubscription(connection: connection, host: host, port: nwPort, request: request, onEvent: onEvent, onDisconnect: onDisconnect)
+            .start(on: queue)
+        return SpacesDeviceAPIStreamHandle { connection.cancel() }
     }
 }
 
@@ -712,6 +721,16 @@ enum SpacesDeviceAPIConnectionSupport {
         return false
     }
 
+    /// Classifies a stream that never produced its first payload. An open TCP port behind a TLS
+    /// handshake that never completed means the daemon's certificate did not match the pinned
+    /// fingerprint, which has to reach the re-pair recovery flow rather than read as a stalled stream.
+    static func pendingSecureConnectionTimeoutError(host: String, port: NWEndpoint.Port) async -> Error {
+        if await canOpenPlainTCPConnection(host: host, port: port, timeout: .milliseconds(750)) {
+            return SpacesDeviceAPIClientError.transportAuthenticationFailed
+        }
+        return SpacesDeviceAPIClientError.streamFailed("Timed out waiting for terminal state.")
+    }
+
     static func withTimeout<T: Sendable>(_ timeout: Duration, operation: @escaping @Sendable () async throws -> T) async throws -> T {
         let timeoutState = TimeoutOperationHolder<T>()
         return try await withTaskCancellationHandler {
@@ -831,54 +850,75 @@ private final class StreamLifecycle: @unchecked Sendable {
 }
 
 private final class StreamSubscription: @unchecked Sendable {
-    /// Matches the pre-multi-address budget: when connecting was an instant, unstarted `NWConnection`,
-    /// this was the whole window from starting the connection to decoding the first payload.
-    /// `SpacesDeviceNetworkBackend.openSessionStream` now also uses this value as the resolver's
-    /// connect timeout, so the combined "connect + first event" budget stays unchanged. Not
-    /// file-private: that backend method reads it too.
-    fileprivate static let initialEventTimeout: Duration = .seconds(12)
+    /// One budget covering the whole way from starting the connection to decoding the first payload,
+    /// since this type owns the handshake as well as the wait for terminal state.
+    private static let initialEventTimeout: Duration = .seconds(12)
 
     private let connection: NWConnection
+    private let host: String
+    private let port: NWEndpoint.Port
     private let request: SpacesDeviceAPIRequest
     private let lifecycle: StreamLifecycle
     private let onEvent: @MainActor (GhosttyRemoteSessionStatePayload) -> Void
     private var buffer = Data()
     private var decodedState = false
+    private var connectionReady = false
 
     init(
-        connection: NWConnection, request: SpacesDeviceAPIRequest, onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
-        onDisconnect: @escaping @MainActor (Error?) -> Void
+        connection: NWConnection, host: String, port: NWEndpoint.Port, request: SpacesDeviceAPIRequest,
+        onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void, onDisconnect: @escaping @MainActor (Error?) -> Void
     ) {
         self.connection = connection
+        self.host = host
+        self.port = port
         self.request = request
         self.onEvent = onEvent
         lifecycle = StreamLifecycle(onDisconnect: onDisconnect)
     }
 
-    /// Starts the stream over a connection the caller (`SpacesDeviceNetworkBackend.openSessionStream`)
-    /// has already brought to `.ready` via `SpacesDeviceEndpointResolver`. Must not call
-    /// `connection.start(queue:)`: an `NWConnection` may only be started once, and the resolver already
-    /// started this one on `queue` while completing the pinned-TLS handshake. A fresh
-    /// `stateUpdateHandler` is still installed here because the resolver's own handler was one-shot —
-    /// it only ever needed to observe the transition into `.ready` — so failures or cancellation after
-    /// that point would otherwise go unnoticed.
+    /// Starts the unstarted connection the caller handed over and drives it to the first payload. This
+    /// owns the handshake deliberately: doing it here rather than awaiting a ready connection in
+    /// `openSessionStream` keeps subscribing non-blocking, so the viewer's post-subscribe state refresh
+    /// still runs (and can surface an authentication failure promptly) even when the endpoint accepts
+    /// TCP but never completes TLS.
+    ///
+    /// `host`/`port` exist only for that timeout's classification: an endpoint whose TCP port is open
+    /// while TLS never completed is a certificate-pin mismatch, which must route into re-pair recovery
+    /// rather than read as a stalled stream.
     func start(on queue: DispatchQueue) {
         queue.asyncAfter(deadline: .now() + Self.initialEventTimeout.timeInterval) { [weak self] in
             guard let self, !decodedState else { return }
-            // The connection was already `.ready` (pinned certificate validated) before this
-            // subscription started, so a timeout here only ever means "no terminal state arrived in
-            // time" — never a possible pin mismatch, which the resolver already ruled out.
-            lifecycle.finish(error: SpacesDeviceAPIClientError.streamFailed("Timed out waiting for terminal state."))
-            connection.cancel()
+            guard !connectionReady else {
+                lifecycle.finish(error: SpacesDeviceAPIClientError.streamFailed("Timed out waiting for terminal state."))
+                connection.cancel()
+                return
+            }
+            let host = host
+            let port = port
+            Task { [weak self] in
+                let error = await SpacesDeviceAPIConnectionSupport.pendingSecureConnectionTimeoutError(host: host, port: port)
+                queue.async { [weak self] in
+                    guard let self, !decodedState else { return }
+                    if connectionReady {
+                        lifecycle.finish(error: SpacesDeviceAPIClientError.streamFailed("Timed out waiting for terminal state."))
+                    } else {
+                        lifecycle.finish(error: error)
+                    }
+                    connection.cancel()
+                }
+            }
         }
         connection.stateUpdateHandler = { [self] state in
             switch state {
+            case .ready:
+                connectionReady = true
+                sendInitialRequest()
             case .failed(let error): lifecycle.finish(error: error)
             case .cancelled: lifecycle.finish(error: nil)
             default: break
             }
         }
-        sendInitialRequest()
+        connection.start(queue: queue)
     }
 
     private func sendInitialRequest() {

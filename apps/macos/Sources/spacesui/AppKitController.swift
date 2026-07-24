@@ -11212,6 +11212,9 @@ extension SpacesDeviceOverviewPayload {
     /// Empty stand-in rendered for an offline or wire-incompatible device, which has no decodable
     /// overview. Its inline daemon status is never consulted — sidebar sections track live status
     /// separately — so it advertises the unknown protocol version rather than a fabricated match.
+    /// `deviceAPIAddresses` is left at its `[]` default: this status describes no real device (there is
+    /// nothing to query interfaces on), and `[]` is exactly the "reported nothing" value a client
+    /// should treat as absence of information — the correct answer for a placeholder.
     fileprivate static let offlinePlaceholder = SpacesDeviceOverviewPayload(
         workspaces: [], sessions: [],
         daemonStatus: TerminalServiceDaemonStatus(

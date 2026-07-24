@@ -789,6 +789,11 @@ private enum SpacesMobileMutationTimeoutRecovery {
             let overview = try await bridgeClient.fetchOverview(commandChannel: commandChannel)
             guard identity == overviewIdentity else { return }
             applyCompatibility(overview.daemonStatus)
+            // The daemon reports the addresses it is currently reachable at on every connection. This is
+            // how a device paired before its Mac ever had Tailscale silently gains the tailnet fallback
+            // the moment the Mac gets one — no rescan needed, unlike the pre-existing QR-rescan path.
+            SpacesMobileDeviceStore.mergeAdvertisedHosts(
+                overview.daemonStatus.deviceAPIAddresses, certificateFingerprint: settings.certificateFingerprint)
             // A decodable overview whose daemon nonetheless reports an incompatible protocol is blocked;
             // show the restart/update block, not its stale workspace data.
             let acceptedOverview = isActiveDeviceBlocked ? nil : overview
