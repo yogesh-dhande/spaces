@@ -734,6 +734,13 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// Stops the loopback browser proxy and all live tunnels. Call when the app enters the background.
     func browserProxyStop() { Task { await browserProxy.stop() } }
 
+    /// Ends the current run of failed refreshes because the app stopped watching the connection. The
+    /// alert gate reads wall-clock time between failures, and a backgrounded app polls nothing, so a
+    /// failure recorded before the app left and one recorded after it returns are minutes apart with no
+    /// evidence of anything in between. Without this, that pair reads as a long-running outage and the
+    /// first blip on the way back raises the alert — the very interruption the gate exists to prevent.
+    func noteAppEnteredBackground() { refreshFailureStreak = nil }
+
     /// The URL a `WKWebView` should load for a browser session row, rebuilt against the proxy's fixed
     /// loopback port. `nil` only if the route's identity host somehow fails to form a valid URL.
     func browserSessionProxyURL(for row: SpacesMobileBrowserSessionRow) -> URL? {
@@ -1581,6 +1588,11 @@ private enum SpacesMobileMutationTimeoutRecovery {
         self.overview = overview
         connectionNotice = nil
         errorMessage = nil
+        // A mutation's refreshed overview is proof the device answered, so it ends any run of failed
+        // refreshes exactly as a successful poll does. Otherwise a run interrupted by a successful
+        // mutation keeps its original start time, and the next isolated failure alerts on the strength
+        // of an outage that demonstrably ended.
+        refreshFailureStreak = nil
     }
 
     private func handleBridgeError(_ error: Error) {
@@ -1610,6 +1622,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
             overview = refreshedOverview
             errorMessage = nil
             connectionNotice = nil
+            refreshFailureStreak = nil
             return timeoutRecovery.acceptsFreshSession(refreshedSession(forRowID: rowID))
         } catch { return nil }
     }

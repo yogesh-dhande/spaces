@@ -780,6 +780,48 @@
             XCTAssertNil(model.errorMessage, "the run restarts at the failure after the success, so nothing has persisted yet")
         }
 
+        /// A backgrounded app polls nothing, so time spent there is not evidence of a failing connection.
+        /// A failure recorded before the app left and one recorded after it returns must not read as one
+        /// long outage, or the first blip on the way back raises the alert this gate exists to prevent.
+        func testFailureRunEndsWhenTheAppEntersTheBackground() async {
+            let model = makeModel(
+                refreshFailure: SpacesDeviceAPIClientError.requestFailed("Socket is not connected"),
+                refreshFailureAlertDelay: .milliseconds(50))
+
+            await model.refresh()
+            try? await Task.sleep(for: .milliseconds(60))
+            model.noteAppEnteredBackground()
+            await model.refresh()
+
+            XCTAssertNil(model.errorMessage)
+        }
+
+        /// A mutation's refreshed overview proves the device answered, so it ends the run exactly as a
+        /// successful poll does — otherwise the next isolated failure inherits a start time from an outage
+        /// that demonstrably ended.
+        func testMutationOverviewEndsTheFailureRun() async {
+            let settings = SpacesMobileConnectionSettings()
+            let overview = makeOverview()
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                guard request.commandName == "runWorkspaceProcess" else {
+                    throw SpacesDeviceAPIClientError.requestFailed("Socket is not connected")
+                }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client, refreshFailureAlertDelay: .milliseconds(50))
+            let row = SpacesDeviceWorkspaceProcessRow(
+                id: "process-api", workspaceID: "workspace-feature", name: "api", command: "npm run dev", processID: "runtime-api",
+                sessionID: "session-api", runState: .notStarted, canRun: true, canStop: false, canRestart: false)
+
+            await model.refresh()
+            try? await Task.sleep(for: .milliseconds(60))
+            _ = await model.run(row: SpacesMobileWorkspaceRuntimeRow(source: .process(row)))
+            XCTAssertEqual(model.overview, overview)
+            await model.refresh()
+
+            XCTAssertNil(model.errorMessage)
+        }
+
         /// Failures gathered against one connection say nothing about the next one, so a connection change
         /// mid-run starts the clock over rather than letting the new connection inherit it.
         func testFailureRunDoesNotCarryAcrossAConnectionChange() async {
