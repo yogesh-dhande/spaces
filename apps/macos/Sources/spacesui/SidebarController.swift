@@ -285,9 +285,11 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         host.localDeviceName = snapshot.localDeviceName
         host.localPairedDevice = snapshot.localPairedDevice
         host.localDeviceOverview = snapshot.localDeviceOverview
-        // If the local block was showing and the daemon is now compatible, drop the obsolete block
-        // (canPreserveDetailPaneAfterSidebarReload was evaluated against the stale pre-reload verdict).
-        host.clearCompatibilityBlockIfResolved(deviceID: snapshot.localDeviceID)
+        // If the local block was showing, reconcile it against the fresh verdict/status: drop it if the
+        // daemon is now compatible, re-render it if the remedy changed (e.g. a staged update appeared),
+        // otherwise leave it (canPreserveDetailPaneAfterSidebarReload was evaluated against the stale
+        // pre-reload verdict).
+        host.reconcileCompatibilityBlock(deviceID: snapshot.localDeviceID)
         // Authoritative local overview: close any open local pane whose session the local daemon no
         // longer retains (its product row was removed by the CLI or another paired client), so the pane
         // cannot outlive the local daemon's transcript garbage-collection. The keep-set is the daemon's
@@ -562,8 +564,10 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             host.deviceSections[index].daemonStatus = load.daemonStatus
             host.deviceSections[index].compatibility = load.compatibility
             host.maybeRequestSilentDaemonHandoff(deviceID: deviceID, status: load.daemonStatus)
-            // If this device's block was showing and it is now compatible, drop the obsolete block.
-            host.clearCompatibilityBlockIfResolved(deviceID: deviceID)
+            // If this device's block was showing, reconcile it against the fresh verdict/status — drop it
+            // if now compatible, re-render it if the remedy changed (e.g. a staged update appeared while
+            // still incompatible), otherwise leave it.
+            host.reconcileCompatibilityBlock(deviceID: deviceID)
             guard let overview = load.overview else {
                 // Reachable but wire-incompatible: present an empty loaded section so the sidebar shows
                 // the compatibility badge instead of a generic offline error.
@@ -640,7 +644,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             host.deviceSections[index].compatibility = nil
             host.deviceSections[index].daemonStatus = nil
             host.deviceSections[index].loadState = .offline(error.localizedDescription)
-            host.clearCompatibilityBlockIfResolved(deviceID: deviceID)
+            host.reconcileCompatibilityBlock(deviceID: deviceID)
             host.stopRemoteBrowserForwards(deviceID: deviceID)
         }
         rebuildFlatSidebarData()

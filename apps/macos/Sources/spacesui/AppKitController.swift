@@ -205,6 +205,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     var visibleDetailWorkspaceID: String? { detailPane.workspaceID }
     var visibleCompatibilityBlockDeviceID: String? { detailPane.compatibilityBlockDeviceID }
     var showingAlerts: Bool { detailPane.isAlerts }
+    /// The `BlockRemedy` the visible compatibility block was last rendered with, so
+    /// `reconcileCompatibilityBlock` can tell "still showing the current guidance" apart from "the
+    /// device's wire status moved on and this block is now stale" without re-deriving what was already on
+    /// screen. Set in `showCompatibilityBlock`; cleared automatically whenever `presentDetailPane` moves
+    /// away from a compatibility block, so it is always `nil` exactly when no block is visible.
+    private(set) var visibleCompatibilityBlockRemedy: CompatibilityBlockView.BlockRemedy?
 
     var selectedProjectID: String? { didSet { overlays.updateOperationProgressOverlayVisibility() } }
     var selectedWorkspaceID: String? { didSet { overlays.updateOperationProgressOverlayVisibility() } }
@@ -4540,6 +4546,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     func presentDetailPane(_ pane: DetailPane) {
         detailPane = pane
         if pane.workspaceID == nil { hideWorkspacePanelTabStrip() }
+        if pane.compatibilityBlockDeviceID == nil { visibleCompatibilityBlockRemedy = nil }
     }
 
     private func hideWorkspacePanelTabStrip() {
@@ -4606,21 +4613,71 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     func deviceDaemonStatus(forDeviceID deviceID: String) -> TerminalServiceDaemonStatus? { deviceSection(id: deviceID)?.daemonStatus }
 
-    /// If the device whose compatibility block is currently shown is no longer incompatible (e.g. after
-    /// a restart updated its daemon), drop the obsolete block and re-resolve the detail pane. Called
-    /// from the apply paths after a reload updates a section's verdict.
-    func clearCompatibilityBlockIfResolved(deviceID: String) {
-        guard visibleCompatibilityBlockDeviceID == deviceID else { return }
-        if deviceCompatibility(forDeviceID: deviceID)?.isCompatible == false { return }
-        // The guard above establishes the pane is this device's compatibility block, so clearing it
-        // leaves the pane empty until `refreshSelection` re-resolves it.
-        presentDetailPane(.none)
-        refreshSelection()
+    /// What `reconcileCompatibilityBlock` should do with the visible compatibility block for the device
+    /// whose verdict/status just changed: drop it (the device needs no block any more), rebuild it with a
+    /// different remedy (the device still needs a block, but the wire facts driving its copy/action have
+    /// moved on), or leave the rendered block exactly as it is.
+    enum CompatibilityBlockReconciliation: Equatable {
+        case clear
+        case rerender(CompatibilityBlockView.BlockRemedy)
+        case leaveAlone
+    }
+
+    /// Pure "should the visible compatibility block change" decision, factored out so it is testable
+    /// without AppKit. `isVisibleBlockDevice` mirrors the identity check every caller needs — a device
+    /// that doesn't own the currently-rendered block never touches it. Otherwise this always re-derives
+    /// the remedy through `CompatibilityBlockView.blockRemedy(verdict:status:)`, the same function
+    /// `showCompatibilityBlock` renders from, so the two can never disagree about what a given
+    /// verdict/status pair means: a `nil` verdict (unknown/offline) or a compatible verdict both produce
+    /// no remedy and therefore `.clear`.
+    nonisolated static func reconcileCompatibilityBlockAction(
+        isVisibleBlockDevice: Bool, renderedRemedy: CompatibilityBlockView.BlockRemedy, verdict: SpacesWireCompatibility?,
+        status: TerminalServiceDaemonStatus?
+    ) -> CompatibilityBlockReconciliation {
+        guard isVisibleBlockDevice else { return .leaveAlone }
+        guard let verdict, let newRemedy = CompatibilityBlockView.blockRemedy(verdict: verdict, status: status) else { return .clear }
+        return newRemedy == renderedRemedy ? .leaveAlone : .rerender(newRemedy)
+    }
+
+    /// Reconciles the visible compatibility block (if any) against `deviceID`'s current verdict/status:
+    /// drops an obsolete block and re-resolves the detail pane once the device is compatible again (e.g.
+    /// after a restart updated its daemon), or re-renders the block once the device still needs one but
+    /// under a different remedy (e.g. a too-old daemon with nothing staged now reports a staged update —
+    /// the block must switch from "install it on that Mac" to "Update Daemon" without the user having to
+    /// navigate away and back). Called from every apply path after a reload updates a section's
+    /// verdict/status. See `reconcileCompatibilityBlockAction` for the pure decision.
+    func reconcileCompatibilityBlock(deviceID: String) {
+        guard let renderedRemedy = visibleCompatibilityBlockRemedy else { return }
+        let verdict = deviceCompatibility(forDeviceID: deviceID)
+        let action = Self.reconcileCompatibilityBlockAction(
+            isVisibleBlockDevice: visibleCompatibilityBlockDeviceID == deviceID, renderedRemedy: renderedRemedy, verdict: verdict,
+            status: deviceDaemonStatus(forDeviceID: deviceID))
+        switch action {
+        case .leaveAlone: return
+        case .clear:
+            // The block was established above to be this device's, so clearing it leaves the pane empty
+            // until `refreshSelection` re-resolves it.
+            presentDetailPane(.none)
+            refreshSelection()
+        case .rerender:
+            // `verdict` is guaranteed non-nil here: `.rerender` only comes from `blockRemedy` returning a
+            // remedy, which itself requires a non-optional verdict.
+            guard let verdict else { return }
+            showCompatibilityBlock(deviceID: deviceID, verdict: verdict)
+        }
     }
 
     /// Renders the full-pane compatibility block for an incompatible device, with the restart-impact
     /// report and a restart action. Switching to a compatible device in the sidebar leaves it.
     func showCompatibilityBlock(deviceID: String, verdict: SpacesWireCompatibility) {
+        let status = deviceDaemonStatus(forDeviceID: deviceID)
+        guard let remedy = CompatibilityBlockView.blockRemedy(verdict: verdict, status: status) else {
+            // A device with no remedy needs no block — leave the detail pane exactly as it is rather
+            // than clearing it out for a card that would have nothing to say.
+            return
+        }
+        visibleCompatibilityBlockRemedy = remedy
+
         clearActiveAddFormStateAndCloseWindows()
         stopWorkspaceSetupDetailRefreshTimer()
         presentDetailPane(.compatibilityBlock(deviceID: deviceID))
@@ -4642,10 +4699,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         clearWorkspaceDetailFooter()
         for view in detailContainer.subviews { view.removeFromSuperview() }
 
-        let status = deviceDaemonStatus(forDeviceID: deviceID)
+        let isLocalDevice = deviceID == SpacesPairedDeviceRecord.localDeviceID
+        let offersCheckForUpdates = Self.shouldOfferCheckForUpdatesAction(isLocalDevice: isLocalDevice, updaterAvailable: updaterController != nil)
         let card = CompatibilityBlockView(
-            verdict: verdict, deviceName: deviceSection(id: deviceID)?.deviceName ?? deviceID, status: status,
-            onRestart: verdict == .clientTooOld ? nil : { [weak self] in self?.requestDaemonRestart(deviceID: deviceID) })
+            remedy: remedy, deviceName: deviceSection(id: deviceID)?.deviceName ?? deviceID, isLocalDevice: isLocalDevice,
+            isLinuxDaemon: status?.isLinuxDaemon == true,
+            onRestart: remedy.offersDaemonUpdateAction ? { [weak self] in self?.requestDaemonRestart(deviceID: deviceID) } : nil,
+            onCheckForUpdates: offersCheckForUpdates ? { [weak self] in self?.updaterController?.checkForUpdates(nil) } : nil)
         card.translatesAutoresizingMaskIntoConstraints = false
         detailContainer.addSubview(card)
         NSLayoutConstraint.activate([
@@ -4697,6 +4757,14 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// already been requested.
     nonisolated static func shouldFireSilentDaemonHandoff(updatePending: Bool, compatibilityIsCompatible: Bool, alreadyRequestedKey: Bool) -> Bool {
         updatePending && compatibilityIsCompatible && !alreadyRequestedKey
+    }
+
+    /// Pure eligibility for the compatibility block's "Check for Updates…" action, factored out so it's
+    /// testable without AppKit or a Sparkle instance. It is offered only for this Mac's own daemon — a
+    /// remote device's Spaces install can't be checked/updated from here — and only when Sparkle has an
+    /// updater to drive (a dev build launched outside an app bundle has none; see `updaterController`).
+    nonisolated static func shouldOfferCheckForUpdatesAction(isLocalDevice: Bool, updaterAvailable: Bool) -> Bool {
+        isLocalDevice && updaterAvailable
     }
 
     /// Silently requests a daemon exec-in-place handoff when a compatible daemon reports a staged
