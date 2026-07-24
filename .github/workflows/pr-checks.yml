@@ -92,6 +92,14 @@ jobs:
         # 13-16 minutes, so this only fires on a genuine hang the silence watchdog cannot see
         # (an unwrapped build phase, or output trickling under its threshold).
         timeout-minutes: 45
+        env:
+          # The runner has 3 logical CPUs, and coverage.sh's auto worker count is uncapped, so it
+          # would start one test worker per core and leave nothing for the processes those tests
+          # spawn -- the python mouse probes, the Caddy stub, PTY children. Starving those is what
+          # a rotating cast of CI-only failures had in common: the child stayed alive but produced
+          # no output before the test's deadline. Keep a core free for them. The uncapped default
+          # was tuned on a 14-core dev machine, where the same ratio leaves far more slack.
+          SPACES_TEST_MAX_AUTO_WORKERS: "2"
         run: scripts/verify.sh
 
       # A recurring CI-only SIGTRAP kills a test worker mid-run (so far always within
