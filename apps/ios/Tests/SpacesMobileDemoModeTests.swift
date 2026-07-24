@@ -105,14 +105,14 @@
             XCTAssertEqual(model.pairedDevices.map(\.id), [SpacesMobileDemoDevice.id])
 
             model.connectionNotice = nil
-            model.preparePairingLink(URL(string: "spaces://pair?v=3")!)
+            model.preparePairingLink(URL(string: "spaces://pair?v=4")!)
             XCTAssertEqual(model.connectionNotice, "Turn off Demo Mode to pair or switch devices.")
             XCTAssertNil(model.pendingPairingLink)
             XCTAssertFalse(model.isShowingConnectionSettings)
 
             model.connectionNotice = nil
             var paired = SpacesMobileConnectionSettings()
-            paired.host = "10.0.0.42"
+            paired.hosts = ["10.0.0.42"]
             paired.certificateFingerprint = "SHA256:new"
             paired.authToken = "token-new"
             model.applyConnectionSettings(paired)
@@ -165,7 +165,7 @@
             let staleOverview = try DemoRecordingLibrary.load(bundle: .main).overview
             let workspace = try XCTUnwrap(staleOverview.workspaces.first)
             var connectionSettings = SpacesMobileConnectionSettings()
-            connectionSettings.host = "127.0.0.1"
+            connectionSettings.hosts = ["127.0.0.1"]
             connectionSettings.port = 12_345
             connectionSettings.authToken = "token"
             connectionSettings.certificateFingerprint = "SHA256:test"
@@ -200,7 +200,7 @@
 
         private func realSettings(host: String, fingerprint: String, token: String) -> SpacesMobileConnectionSettings {
             var settings = SpacesMobileConnectionSettings()
-            settings.host = host
+            settings.hosts = [host]
             settings.port = 47_900
             settings.certificateFingerprint = fingerprint
             settings.authToken = token

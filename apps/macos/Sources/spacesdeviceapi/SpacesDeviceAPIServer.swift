@@ -1092,20 +1092,20 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         }
     }
 
-    public func openPairingWindow(host linkHost: String, name: String, duration: TimeInterval = SpacesDevicePairingCoordinator.defaultWindowDuration)
-        -> SpacesDevicePairingWindow
-    {
+    public func openPairingWindow(
+        hosts linkHosts: [String], name: String, duration: TimeInterval = SpacesDevicePairingCoordinator.defaultWindowDuration
+    ) -> SpacesDevicePairingWindow {
         pairingCoordinator.openWindow(
-            host: linkHost, port: listeningPort > 0 ? listeningPort : port, certificateFingerprint: identity.certificateFingerprint, name: name,
+            hosts: linkHosts, port: listeningPort > 0 ? listeningPort : port, certificateFingerprint: identity.certificateFingerprint, name: name,
             protocolVersion: SpacesWireProtocol.version, appVersion: AppVersion.short, duration: duration)
     }
 
     public func openPairingWindow(
-        host linkHost: String, name: String, duration: TimeInterval = SpacesDevicePairingCoordinator.defaultWindowDuration, code: String,
+        hosts linkHosts: [String], name: String, duration: TimeInterval = SpacesDevicePairingCoordinator.defaultWindowDuration, code: String,
         nonce: String? = nil
     ) -> SpacesDevicePairingWindow {
         pairingCoordinator.openWindow(
-            host: linkHost, port: listeningPort > 0 ? listeningPort : port, certificateFingerprint: identity.certificateFingerprint, name: name,
+            hosts: linkHosts, port: listeningPort > 0 ? listeningPort : port, certificateFingerprint: identity.certificateFingerprint, name: name,
             protocolVersion: SpacesWireProtocol.version, appVersion: AppVersion.short, duration: duration, code: code, nonce: nonce)
     }
 

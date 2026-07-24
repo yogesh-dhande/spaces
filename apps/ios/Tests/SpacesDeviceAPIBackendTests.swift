@@ -54,7 +54,7 @@
         func openSessionStream(
             request: SpacesDeviceAPIRequest, onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
             onDisconnect: @escaping @MainActor (Error?) -> Void
-        ) throws -> SpacesDeviceAPIStreamHandle {
+        ) async throws -> SpacesDeviceAPIStreamHandle {
             subscribeRequestBox.set(request)
             if let streamPayload { Task { @MainActor in onEvent(streamPayload) } }
             return SpacesDeviceAPIStreamHandle {}
@@ -64,7 +64,7 @@
     @MainActor final class SpacesDeviceAPIBackendTests: XCTestCase {
         private func settings() -> SpacesMobileConnectionSettings {
             var settings = SpacesMobileConnectionSettings()
-            settings.host = "127.0.0.1"
+            settings.hosts = ["127.0.0.1"]
             settings.port = 12_345
             settings.authToken = "token"
             settings.certificateFingerprint = "SHA256:test"
@@ -115,7 +115,7 @@
                 settings: settings(), backend: backend(subscribeRequestBox: subscribeRequestBox, streamPayload: payload))
 
             let received = XCTestExpectation(description: "onEvent delivers the recorded payload")
-            let handle = try client.subscribe(
+            let handle = try await client.subscribe(
                 sessionID: "terminal-session", clientID: "client-ios",
                 onEvent: { delivered in
                     XCTAssertEqual(delivered.sessionID, "terminal-session")

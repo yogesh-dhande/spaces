@@ -405,7 +405,7 @@
         /// thrown parse error gets swallowed and the link silently falls through to another branch.
         func testIncomingLinkRoutingClassifiesMalformedPairingShapedURLAsPairing() {
             let unsupportedVersion = URL(string: "spaces://pair?v=1&host=10.0.0.4&port=19000&nonce=n&code=c&fp=f&pv=3&av=1.0")!
-            let missingFields = URL(string: "spaces://pair?v=3")!
+            let missingFields = URL(string: "spaces://pair?v=4")!
 
             XCTAssertEqual(SpacesIncomingLinkRoute.route(for: unsupportedVersion), .pairing(unsupportedVersion))
             XCTAssertEqual(SpacesIncomingLinkRoute.route(for: missingFields), .pairing(missingFields))
@@ -413,7 +413,7 @@
 
         func testIncomingLinkRoutingClassifiesValidPairingURLAsPairing() {
             let link = SpacesDevicePairingLink(
-                host: "10.0.0.4", port: 19000, nonce: "nonce", code: "code", certificateFingerprint: "fp", name: "Mac Studio", protocolVersion: 3,
+                hosts: ["10.0.0.4"], port: 19000, nonce: "nonce", code: "code", certificateFingerprint: "fp", name: "Mac Studio", protocolVersion: 3,
                 appVersion: "1.0")
 
             XCTAssertEqual(SpacesIncomingLinkRoute.route(for: link.url), .pairing(link.url))
@@ -456,7 +456,7 @@
         func testPrepareScannedPairingLinkStagesLinkAndRaisesConnectionSettings() {
             let model = makeModel()
             let link = SpacesDevicePairingLink(
-                host: "10.0.0.4", port: 19000, nonce: "nonce", code: "code", certificateFingerprint: "fp", name: "Mac Studio", protocolVersion: 3,
+                hosts: ["10.0.0.4"], port: 19000, nonce: "nonce", code: "code", certificateFingerprint: "fp", name: "Mac Studio", protocolVersion: 3,
                 appVersion: "1.0")
 
             model.prepareScannedPairingLink(link.absoluteString)
@@ -625,7 +625,7 @@
                 ]))
             let recorder = SpacesMobileRequestRecorder()
             var settings = SpacesMobileConnectionSettings()
-            settings.host = "127.0.0.1"
+            settings.hosts = ["127.0.0.1"]
             settings.port = 47_847
             settings.certificateFingerprint = "fp-1"
             let client = SpacesDeviceAPIClient(settings: settings) { request in
@@ -639,8 +639,9 @@
             model.activeDeviceID = "device-1"
             model.pairedDevices = [
                 SpacesMobilePairedDeviceRecord(
-                    id: "device-1", name: "Studio", host: settings.host, port: settings.port, certificateFingerprint: settings.certificateFingerprint,
-                    createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z", lastSelectedAt: nil)
+                    id: "device-1", name: "Studio", hosts: settings.hosts, port: settings.port,
+                    certificateFingerprint: settings.certificateFingerprint, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z",
+                    lastSelectedAt: nil)
             ]
 
             await model.createWorkspace(

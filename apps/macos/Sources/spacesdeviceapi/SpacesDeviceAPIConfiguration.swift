@@ -187,23 +187,61 @@ public enum SpacesDeviceAPINetworkInterfaces {
 
     public static func ipv4Addresses() -> [String] { sortedIPv4Addresses(from: ipv4InterfaceAddresses()) }
 
-    public static func pairingLinkHost(boundHost: String) -> String { pairingLinkHost(boundHost: boundHost, networkAddresses: ipv4Addresses()) }
-
-    public static func pairingLinkHost(boundHost: String, networkAddresses: [String]) -> String {
-        let host = boundHost.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !SpacesDeviceAPIDefaults.isWildcardHost(host) { return host }
-        return networkAddresses.first ?? SpacesDeviceAPIDefaults.loopbackHost
+    /// Convenience overload that walks the live network interfaces itself; production callers use this.
+    public static func pairingLinkHosts(boundHost: String) -> [String] {
+        pairingLinkHosts(boundHost: boundHost, interfaceAddresses: ipv4InterfaceAddresses())
     }
 
-    static func sortedIPv4Addresses(from interfaceAddresses: [IPv4InterfaceAddress]) -> [String] {
+    /// The ordered set of addresses a pairing link should advertise, most-preferred first. A pinned
+    /// (non-wildcard) bind address is returned verbatim: an operator who chose a specific address gets
+    /// exactly that and nothing else. Otherwise the top-ranked LAN candidate is offered first, followed
+    /// by the top-ranked tailnet candidate (if any) as a fallback path a client can retry when the LAN
+    /// address is unreachable — e.g. the pairing device is off the same network but on the same tailnet.
+    /// Takes the `IPv4InterfaceAddress` struct (rather than the flattened `[String]` `ipv4Addresses()`
+    /// returns) because picking out the tailnet candidate needs the interface flags and name, not just
+    /// the address text.
+    static func pairingLinkHosts(boundHost: String, interfaceAddresses: [IPv4InterfaceAddress]) -> [String] {
+        let host = boundHost.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !SpacesDeviceAPIDefaults.isWildcardHost(host) { return [host] }
+
+        let ranked = rankedIPv4InterfaceAddresses(from: interfaceAddresses)
+        let lanAddress = ranked.first { !isTailnetInterfaceAddress($0) }?.address
+        let tailnetAddress = ranked.first { isTailnetInterfaceAddress($0) }?.address
+
         var seenAddresses = Set<String>()
-        return interfaceAddresses.filter { $0.flags & upFlag != 0 && $0.flags & loopbackFlag == 0 && ipv4Octets($0.address) != nil }.sorted {
+        let hosts = [lanAddress, tailnetAddress].compactMap { $0 }.filter { !$0.isEmpty && seenAddresses.insert($0).inserted }
+        return hosts.isEmpty ? [SpacesDeviceAPIDefaults.loopbackHost] : hosts
+    }
+
+    /// True when the address is in the Tailscale/CGNAT range (`100.64.0.0/10`) *and* bound to an
+    /// interface that looks like a tunnel (point-to-point, or a known virtual/peer interface name).
+    /// A CGNAT-range address on a tunnel interface is the Tailscale signature on both macOS (`utunN`)
+    /// and Linux (`tailscale0`): detecting it this way needs no `tailscale` CLI call or LocalAPI socket,
+    /// so it works from a headless Linux daemon and inside the sandboxed Tailscale build. Requiring the
+    /// tunnel interface (rather than the address range alone) stops a genuine carrier-CGNAT LAN address
+    /// from being mislabelled as a tailnet address.
+    static func isTailnetInterfaceAddress(_ interfaceAddress: IPv4InterfaceAddress) -> Bool {
+        guard let octets = ipv4Octets(interfaceAddress.address), octets[0] == 100, (64...127).contains(octets[1]) else { return false }
+        return interfaceAddress.flags & pointToPointFlag != 0 || isVirtualOrPeerInterfaceName(interfaceAddress.name.lowercased())
+    }
+
+    /// Interfaces filtered to those eligible for a pairing address, ranked most-preferred first. Shared
+    /// by `sortedIPv4Addresses(from:)` (which flattens to addresses for `SpacesDeviceAPIStatus.networkAddresses`)
+    /// and `pairingLinkHosts(boundHost:interfaceAddresses:)` (which needs the interface metadata to split
+    /// out the tailnet fallback candidate).
+    private static func rankedIPv4InterfaceAddresses(from interfaceAddresses: [IPv4InterfaceAddress]) -> [IPv4InterfaceAddress] {
+        interfaceAddresses.filter { $0.flags & upFlag != 0 && $0.flags & loopbackFlag == 0 && ipv4Octets($0.address) != nil }.sorted {
             lhs, rhs in
             let lhsRank = pairingPreferenceRank(lhs)
             let rhsRank = pairingPreferenceRank(rhs)
             if lhsRank != rhsRank { return lhsRank < rhsRank }
             return lhs.discoveryIndex < rhs.discoveryIndex
-        }.compactMap { interfaceAddress in
+        }
+    }
+
+    static func sortedIPv4Addresses(from interfaceAddresses: [IPv4InterfaceAddress]) -> [String] {
+        var seenAddresses = Set<String>()
+        return rankedIPv4InterfaceAddresses(from: interfaceAddresses).compactMap { interfaceAddress in
             guard seenAddresses.insert(interfaceAddress.address).inserted else { return nil }
             return interfaceAddress.address
         }
@@ -241,6 +279,11 @@ public enum SpacesDeviceAPINetworkInterfaces {
         return addresses
     }
 
+    /// Point-to-point and virtual/peer (tunnel) interfaces are penalized here, but that is no longer an
+    /// exclusion — it expresses fallback preference. `pairingLinkHosts` deliberately offers the
+    /// top-ranked tailnet address as a secondary candidate, so pushing tunnel interfaces to the bottom
+    /// of this ranking is exactly what makes the LAN address the first choice and the tailnet address
+    /// the fallback.
     private static func pairingPreferenceRank(_ interfaceAddress: IPv4InterfaceAddress) -> Int {
         let name = interfaceAddress.name.lowercased()
         var rank = 0

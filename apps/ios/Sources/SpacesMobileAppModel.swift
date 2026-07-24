@@ -32,7 +32,7 @@ private enum SpacesMobileSettingsStore {
     {
         var resolved = settings
 
-        if let host = trimmed(environment["SPACES_MOBILE_TEST_HOST"]) { resolved.host = host }
+        if let host = trimmed(environment["SPACES_MOBILE_TEST_HOST"]) { resolved.hosts = [host] }
         if let port = trimmed(environment["SPACES_MOBILE_TEST_PORT"]).flatMap(Int.init), (1...65535).contains(port) { resolved.port = port }
         if let authToken = trimmed(environment["SPACES_MOBILE_TEST_AUTH_TOKEN"]) { resolved.authToken = authToken }
         if let certificateFingerprint = trimmed(environment["SPACES_MOBILE_TEST_CERTIFICATE_FINGERPRINT"]) {
@@ -686,7 +686,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
 
     var connectionSummary: String {
         if let activeDeviceName { return activeDeviceName }
-        return "\(settings.trimmedHost):\(settings.port)"
+        return "\(settings.primaryHost):\(settings.port)"
     }
 
     var activeDeviceName: String? {
@@ -742,8 +742,15 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// the SwiftUI refresh cycle.
     private func updateBrowserRoutes(overview: SpacesDeviceOverviewPayload) async {
         guard let activeDeviceID else { return }
+        // The raw-byte service tunnel must reach the daemon over the same path the command channel
+        // (which just fetched `overview`) proved reachable. Prefer the paired device record's
+        // `activeHost` — the address `SpacesDeviceEndpointResolver` most recently proved answers —
+        // falling back to the first candidate only when no address has been proven yet (a
+        // freshly-paired device with no successful connect behind it).
+        let activeDeviceRecord = pairedDevices.first(where: { $0.id == activeDeviceID })
+        let resolvedHost = activeDeviceRecord?.activeHost ?? settings.primaryHost
         browserRoutingTable.merge(
-            deviceID: activeDeviceID, deviceName: activeDeviceName ?? settings.trimmedHost, host: settings.trimmedHost, port: settings.port,
+            deviceID: activeDeviceID, deviceName: activeDeviceName ?? settings.primaryHost, host: resolvedHost, port: settings.port,
             certificateFingerprint: settings.certificateFingerprint, overview: overview)
         let table = browserRoutingTable
         await browserProxy.updateRoutes(table)
@@ -955,7 +962,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         let previousCommandChannel = commandChannel
         let deviceState =
             settings.isPaired
-            ? SpacesMobileDeviceStore.upsert(settings: settings, name: deviceName ?? settings.trimmedHost)
+            ? SpacesMobileDeviceStore.upsert(settings: settings, name: deviceName ?? settings.primaryHost)
             : SpacesMobileDeviceStore.load(fallbackSettings: settings)
         self.settings = deviceState.settings
         pairedDevices = deviceState.devices

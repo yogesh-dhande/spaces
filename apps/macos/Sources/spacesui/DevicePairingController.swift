@@ -215,7 +215,31 @@ import workspacecore
         var rows: [NSView] = []
         rows.append(devicePairingInstructionLabel("Scan this QR code with Spaces on iPhone or iPad to pair it with \(window.deviceName)."))
         rows.append(mobileQRCodeView(link: window.linkString))
+        let hosts = (try? SpacesDevicePairingLink.parse(window.linkString))?.hosts ?? []
+        if !hosts.isEmpty { rows.append(pairingLinkAddressesView(hosts: hosts)) }
         return mobilePanelSection(icon: "qrcode", title: "Pair iPhone or iPad", rows: rows)
+    }
+
+    /// Summarizes the addresses this pairing link advertises, so the person scanning the QR code can
+    /// tell at a glance whether a tailnet fallback was found. When the daemon found no tailnet address
+    /// (only ever the case for a bare LAN-only link) this shows guidance instead of a one-item list,
+    /// since a single "Local network · ..." line would otherwise read like the pairing feature is
+    /// incomplete rather than like a deliberate, capability-gated fallback.
+    private func pairingLinkAddressesView(hosts: [String]) -> NSView {
+        guard hosts.contains(where: { SpacesDeviceHostAddressKind(host: $0) == .tailscale }) else {
+            return host.helpTextLabel("Reaching this Mac from outside its local network needs Tailscale (or another VPN) running on both devices.")
+        }
+        let accentColor = host.sidebarThemeColor(light: (13, 95, 93), dark: (61, 198, 184))
+        let labels = hosts.map { candidate -> NSTextField in
+            let label = host.helpTextLabel("\(SpacesDeviceHostAddressKind(host: candidate).label) · \(candidate)")
+            label.textColor = accentColor
+            return label
+        }
+        let stack = NSStackView(views: labels)
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 2
+        return stack
     }
 
     private func connectedDevicesSection(response: SpacesDeviceAPIControlResponse) -> NSView {

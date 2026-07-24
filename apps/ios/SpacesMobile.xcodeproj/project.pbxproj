@@ -47,6 +47,7 @@
 		8D4631F6072D0D6F5FB8FC01 /* MobileAppVersion.swift in Sources */ = {isa = PBXBuildFile; fileRef = 684BF4A0996100451CA52A51 /* MobileAppVersion.swift */; };
 		8D7BDE377CE95CEA15E0F28F /* AgentsTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70794A5FB7ED310FA4568364 /* AgentsTabView.swift */; };
 		913DCFD3AD91359729209DC2 /* SpacesDeviceAPIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 03832ADD9E34BC981F089A96 /* SpacesDeviceAPIClient.swift */; };
+		193C1E4D449D4EB2A2DC5F5A /* SpacesDeviceEndpointResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1C93ACA6FB7D455CB9F0B48D /* SpacesDeviceEndpointResolver.swift */; };
 		97C8F1FB9702650BC7FB37BC /* BrowserSessionDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 07AE33B363649D6D32B8D2D8 /* BrowserSessionDetailView.swift */; };
 		9D468643EDDB619AC44A5356 /* TerminalImageAttachmentsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E710F27AEEACD124B4C5ED8 /* TerminalImageAttachmentsTests.swift */; };
 		9FE76441EB7F3AA2798D2995 /* SpacesMobileDemoModeUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E8FE2BBCE61C8A226A4E5C39 /* SpacesMobileDemoModeUITests.swift */; };
@@ -74,6 +75,7 @@
 		D678F5742B641547A7EED9CE /* SubscriptionSettingsSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = FECD63B029F4A187893C7082 /* SubscriptionSettingsSection.swift */; };
 		D9779D2EE653AD02A715A6CE /* SpacesDeviceAPIBackendTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9AE7E061996534CE9D4C699 /* SpacesDeviceAPIBackendTests.swift */; };
 		DF409C0DEEF5DCBD7552FF95 /* SpacesMobileDemoModeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 48C23068DC0BCEFED66259E6 /* SpacesMobileDemoModeTests.swift */; };
+		F560D44CB0394593A8B240E6 /* SpacesMobileDeviceStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9DC72517F3FA475B966B52D8 /* SpacesMobileDeviceStoreTests.swift */; };
 		DFEA974255F4E847A69176ED /* SpacesTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6B6AD8F5E136746F49A212A1 /* SpacesTabView.swift */; };
 		E1AC38A01996EE501A1F0F05 /* BandPrimitives.swift in Sources */ = {isa = PBXBuildFile; fileRef = E211844B3CD4B88CDE16411F /* BandPrimitives.swift */; };
 		E26222105D277E714368D8C1 /* TerminalImageAttachments.swift in Sources */ = {isa = PBXBuildFile; fileRef = 79297BA89CDDB8E95545E9FB /* TerminalImageAttachments.swift */; };
@@ -106,6 +108,7 @@
 		01CF826C2C94E7C075B96D26 /* SpacesMobileScreenshotUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacesMobileScreenshotUITests.swift; sourceTree = "<group>"; };
 		01EA5212204832CDA41A1793 /* SettingsTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsTabView.swift; sourceTree = "<group>"; };
 		03832ADD9E34BC981F089A96 /* SpacesDeviceAPIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacesDeviceAPIClient.swift; sourceTree = "<group>"; };
+		1C93ACA6FB7D455CB9F0B48D /* SpacesDeviceEndpointResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacesDeviceEndpointResolver.swift; sourceTree = "<group>"; };
 		07AE33B363649D6D32B8D2D8 /* BrowserSessionDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserSessionDetailView.swift; sourceTree = "<group>"; };
 		0A56446BAD1906D81A4B8823 /* BrowserProxyRoutingTable.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserProxyRoutingTable.swift; sourceTree = "<group>"; };
 		11FEAC1705996DF60D174EFB /* AppAppearance.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppAppearance.swift; sourceTree = "<group>"; };
@@ -121,6 +124,7 @@
 		41C157DD37A42EDAF1DC5407 /* macos */ = {isa = PBXFileReference; lastKnownFileType = folder; name = macos; path = ../macos; sourceTree = SOURCE_ROOT; };
 		41E15C5763CA61AE8C9C2D6E /* SubscriptionStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubscriptionStore.swift; sourceTree = "<group>"; };
 		48C23068DC0BCEFED66259E6 /* SpacesMobileDemoModeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacesMobileDemoModeTests.swift; sourceTree = "<group>"; };
+		9DC72517F3FA475B966B52D8 /* SpacesMobileDeviceStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacesMobileDeviceStoreTests.swift; sourceTree = "<group>"; };
 		4AB35B6A91EFCEA885942088 /* SubscriptionStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubscriptionStoreTests.swift; sourceTree = "<group>"; };
 		4CDCD5118B25B0A1ACA33A12 /* TerminalComposerSendTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalComposerSendTests.swift; sourceTree = "<group>"; };
 		4CE224F40DCBDF15B9DF5A0D /* SpacesDeviceAPIClientPasteImageTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacesDeviceAPIClientPasteImageTests.swift; sourceTree = "<group>"; };
@@ -258,6 +262,7 @@
 				B9115C75CD6E289D76B640B9 /* ScreenshotMarkupPresenter.swift */,
 				BC1BDE1EAB567C36A820E82C /* ScreenshotStager.swift */,
 				03832ADD9E34BC981F089A96 /* SpacesDeviceAPIClient.swift */,
+				1C93ACA6FB7D455CB9F0B48D /* SpacesDeviceEndpointResolver.swift */,
 				A1A8A24AA9252CFEE41B435E /* SpacesMobileApp.swift */,
 				35C5584696D86B15B55614E4 /* SpacesMobileAppModel.swift */,
 				963003F71BEC294FD1E99887 /* SpacesMobileConnectionSettings.swift */,
@@ -295,6 +300,7 @@
 				5746D7B660E9B5038B0DDEAF /* SpacesMobileAlertsTests.swift */,
 				4159C5F22837F10A5A814E23 /* SpacesMobileAppModelTests.swift */,
 				48C23068DC0BCEFED66259E6 /* SpacesMobileDemoModeTests.swift */,
+				9DC72517F3FA475B966B52D8 /* SpacesMobileDeviceStoreTests.swift */,
 				9FE5D9FFF657B6A463220FCC /* StagedScreenshotStoreTests.swift */,
 				4AB35B6A91EFCEA885942088 /* SubscriptionStoreTests.swift */,
 				3C3A209B5AB578545E3F3D74 /* TerminalArtifactViewersTests.swift */,
@@ -589,6 +595,7 @@
 				C24148CFBBE2C8AF70320093 /* SettingsTabView.swift in Sources */,
 				913DCFD3AD91359729209DC2 /* SpacesDeviceAPIClient.swift in Sources */,
 				C911B567E552FC40D15B682E /* SpacesDeviceAPITransport.swift in Sources */,
+				193C1E4D449D4EB2A2DC5F5A /* SpacesDeviceEndpointResolver.swift in Sources */,
 				317C6199E7E4075EFA52B4F7 /* SpacesMobileApp.swift in Sources */,
 				ECD7605414703F81C20D3C1F /* SpacesMobileAppModel.swift in Sources */,
 				BF1953C7983E74DEEBABC73C /* SpacesMobileConnectionSettings.swift in Sources */,
@@ -625,6 +632,7 @@
 				690D6FC159F64BF7E519C01C /* SpacesMobileAlertsTests.swift in Sources */,
 				053C34166110A5C90FCCD9A9 /* SpacesMobileAppModelTests.swift in Sources */,
 				DF409C0DEEF5DCBD7552FF95 /* SpacesMobileDemoModeTests.swift in Sources */,
+				F560D44CB0394593A8B240E6 /* SpacesMobileDeviceStoreTests.swift in Sources */,
 				357ADA9DAA6DB4741C79D102 /* StagedScreenshotStoreTests.swift in Sources */,
 				5E0A3983646DC39F85340B5C /* SubscriptionStoreTests.swift in Sources */,
 				636C2B8EB59BDDBE8707D1E1 /* TerminalArtifactViewersTests.swift in Sources */,

@@ -7,6 +7,12 @@ enum SpacesDeviceAPIClientError: LocalizedError {
     case invalidEndpoint
     case requestFailed(String, code: SpacesDeviceErrorCode? = nil)
     case transportAuthenticationFailed
+    /// Every candidate in the paired device's `hosts` list was tried and none answered, with no pin
+    /// mismatch seen on any of them (a mismatch instead throws `transportAuthenticationFailed`, which
+    /// routes into re-pair recovery — see `SpacesDeviceEndpointResolver.connect`). Carries the hosts
+    /// that were tried so the message can name them and point at Tailscale as the likely fix, since the
+    /// most common cause is being away from the device's local network with Tailscale not connected.
+    case allCandidatesUnreachable(hosts: [String])
     case missingOverview
     case streamFailed(String, code: SpacesDeviceErrorCode? = nil)
     case requestTimedOut
@@ -16,6 +22,8 @@ enum SpacesDeviceAPIClientError: LocalizedError {
         case .invalidEndpoint: "The Device API host or port is invalid."
         case .requestFailed(let message, _): message
         case .transportAuthenticationFailed: "The secure Device API transport could not authenticate."
+        case .allCandidatesUnreachable(let hosts):
+            "Could not reach the device at any of its known addresses (\(hosts.joined(separator: ", "))). If you're away from its network, make sure Tailscale is connected on both devices."
         case .missingOverview: "The Device API did not return a workspace or terminal overview."
         case .streamFailed(let message, _): message
         case .requestTimedOut: "The Device API request timed out."
@@ -449,10 +457,10 @@ struct SpacesDeviceAPIClient: Sendable {
     func subscribe(
         sessionID: String, clientID: String, onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
         onDisconnect: @escaping @MainActor (Error?) -> Void
-    ) throws -> SpacesDeviceAPIStreamHandle {
+    ) async throws -> SpacesDeviceAPIStreamHandle {
         let request = SpacesDeviceAPIRequest(
             command: .subscribe(.init(sessionID: sessionID, clientID: clientID)), authToken: settings.trimmedAuthToken, clientApp: clientAppIdentity)
-        return try backend.openSessionStream(request: request, onEvent: onEvent, onDisconnect: onDisconnect)
+        return try await backend.openSessionStream(request: request, onEvent: onEvent, onDisconnect: onDisconnect)
     }
 
     private func mutation(_ request: SpacesDeviceAPIRequest, commandChannel: SpacesDeviceAPICommandChannel?) async throws -> SpacesDeviceAPIResponse {
@@ -517,16 +525,23 @@ actor SpacesDeviceAPICommandChannel {
 /// Production backend: the pinned-TLS Device API over `NWConnection`.
 struct SpacesDeviceNetworkBackend: SpacesDeviceAPIBackend {
     let settings: SpacesMobileConnectionSettings
+    /// Shared by both `makeRequestTransport()` and `openSessionStream(...)`: this backend value is
+    /// created once per `SpacesDeviceAPIClient` but read from two independent call paths, and both
+    /// must converge on the same cached winner and in-flight candidate walk (see
+    /// `SpacesDeviceEndpointResolver`'s doc comment).
+    let resolver: SpacesDeviceEndpointResolver
 
-    func makeRequestTransport() -> any SpacesDeviceAPIRequestTransport {
-        SpacesDeviceNetworkRequestTransport(host: settings.trimmedHost, port: settings.port, certificateFingerprint: settings.certificateFingerprint)
+    init(settings: SpacesMobileConnectionSettings) {
+        self.settings = settings
+        resolver = SpacesDeviceEndpointResolver(settings: settings)
     }
+
+    func makeRequestTransport() -> any SpacesDeviceAPIRequestTransport { SpacesDeviceNetworkRequestTransport(resolver: resolver) }
 
     func openSessionStream(
         request: SpacesDeviceAPIRequest, onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
         onDisconnect: @escaping @MainActor (Error?) -> Void
-    ) throws -> SpacesDeviceAPIStreamHandle {
-        let endpoint = try makeConnection()
+    ) async throws -> SpacesDeviceAPIStreamHandle {
         let label: String
         if case .subscribe(let payload) = request.command {
             label = "spaces.device.api.stream.\(payload.sessionID).\(payload.clientID)"
@@ -534,17 +549,13 @@ struct SpacesDeviceNetworkBackend: SpacesDeviceAPIBackend {
             label = "spaces.device.api.stream"
         }
         let queue = DispatchQueue(label: label)
-        StreamSubscription(
-            connection: endpoint.connection, host: endpoint.host, port: endpoint.port, request: request, onEvent: onEvent, onDisconnect: onDisconnect
-        ).start(on: queue)
-        return SpacesDeviceAPIStreamHandle { endpoint.connection.cancel() }
-    }
-
-    private func makeConnection() throws -> (connection: NWConnection, host: String, port: NWEndpoint.Port) {
-        let host = settings.trimmedHost
-        guard let port = NWEndpoint.Port(rawValue: UInt16(settings.port)), !host.isEmpty else { throw SpacesDeviceAPIClientError.invalidEndpoint }
-        let parameters = SpacesPinnedTLSConnector.tlsParameters(certificateFingerprint: settings.certificateFingerprint)
-        return (NWConnection(host: NWEndpoint.Host(host), port: port, using: parameters), host, port)
+        // Reuses `StreamSubscription`'s own "waiting for the first payload" budget as the resolver's
+        // connect timeout: before candidate-walking, connecting was an instant, unstarted
+        // `NWConnection`, so that 12s timer alone covered handshake + first payload together. Reusing
+        // it here keeps that combined budget unchanged for the common single-candidate case.
+        let resolved = try await resolver.connect(timeout: StreamSubscription.initialEventTimeout, queue: queue)
+        StreamSubscription(connection: resolved.connection, request: request, onEvent: onEvent, onDisconnect: onDisconnect).start(on: queue)
+        return SpacesDeviceAPIStreamHandle { resolved.connection.cancel() }
     }
 }
 
@@ -564,7 +575,9 @@ struct SpacesDeviceClosureBackend: SpacesDeviceAPIBackend {
     func openSessionStream(
         request: SpacesDeviceAPIRequest, onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
         onDisconnect: @escaping @MainActor (Error?) -> Void
-    ) throws -> SpacesDeviceAPIStreamHandle { try networkBackend.openSessionStream(request: request, onEvent: onEvent, onDisconnect: onDisconnect) }
+    ) async throws -> SpacesDeviceAPIStreamHandle {
+        try await networkBackend.openSessionStream(request: request, onEvent: onEvent, onDisconnect: onDisconnect)
+    }
 }
 
 private struct SpacesDeviceClosureRequestTransport: SpacesDeviceAPIRequestTransport {
@@ -577,16 +590,12 @@ private struct SpacesDeviceClosureRequestTransport: SpacesDeviceAPIRequestTransp
 /// Network request transport: owns one pinned-TLS command connection. This is the request/response
 /// half of the former command channel; auth-token/client-app defaulting now lives in the channel.
 actor SpacesDeviceNetworkRequestTransport: SpacesDeviceAPIRequestTransport {
-    private let host: String
-    private let port: Int
-    private let certificateFingerprint: String
+    private let resolver: SpacesDeviceEndpointResolver
     private let queue = DispatchQueue(label: "spaces.device.api.command")
     private var connection: NWConnection?
 
-    init(host: String, port: Int, certificateFingerprint: String) {
-        self.host = host
-        self.port = port
-        self.certificateFingerprint = certificateFingerprint
+    init(resolver: SpacesDeviceEndpointResolver) {
+        self.resolver = resolver
     }
 
     func close() {
@@ -595,7 +604,6 @@ actor SpacesDeviceNetworkRequestTransport: SpacesDeviceAPIRequestTransport {
     }
 
     func send(request: SpacesDeviceAPIRequest, timeout: Duration) async throws -> SpacesDeviceAPIResponse {
-        guard !host.isEmpty, port > 0 else { throw SpacesDeviceAPIClientError.invalidEndpoint }
         let connection = try await connectIfNeeded(timeout: timeout)
         do {
             try await Self.send(data: encodeDeviceAPIRequestLine(request), on: connection, timeout: timeout)
@@ -603,26 +611,20 @@ actor SpacesDeviceNetworkRequestTransport: SpacesDeviceAPIRequestTransport {
             return try SpacesDeviceAPICodec.decodeResponse(responseData)
         } catch {
             close()
+            // A send/receive failure means the cached "known-good" address may no longer be reachable
+            // (e.g. this device left the network it was last connected from) — clear the resolver's
+            // cache so the very next attempt re-walks every candidate from the top instead of retrying
+            // the same address first.
+            await resolver.clearCachedWinner()
             throw error
         }
     }
 
     private func connectIfNeeded(timeout: Duration) async throws -> NWConnection {
         if let connection { return connection }
-        guard let nwPort = NWEndpoint.Port(rawValue: UInt16(port)) else { throw SpacesDeviceAPIClientError.invalidEndpoint }
-        let parameters = SpacesPinnedTLSConnector.tlsParameters(certificateFingerprint: certificateFingerprint)
-        let createdConnection = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: parameters)
-        do { try await SpacesDeviceAPIConnectionSupport.waitUntilReady(createdConnection, queue: queue, timeout: timeout) } catch {
-            createdConnection.cancel()
-            if SpacesDeviceAPIConnectionSupport.isRequestTimedOut(error),
-                await SpacesDeviceAPIConnectionSupport.canOpenPlainTCPConnection(host: host, port: nwPort, timeout: .milliseconds(750))
-            {
-                throw SpacesDeviceAPIClientError.transportAuthenticationFailed
-            }
-            throw error
-        }
-        connection = createdConnection
-        return createdConnection
+        let resolved = try await resolver.connect(timeout: timeout, queue: queue)
+        connection = resolved.connection
+        return resolved.connection
     }
 
     private static func send(data: Data, on connection: NWConnection, timeout: Duration) async throws {
@@ -673,7 +675,9 @@ actor SpacesDeviceNetworkRequestTransport: SpacesDeviceAPIRequestTransport {
     }
 }
 
-private enum SpacesDeviceAPIConnectionSupport {
+/// Not file-private: `SpacesDeviceEndpointResolver` (a separate file) also walks candidate connects
+/// through `waitUntilReady`/`canOpenPlainTCPConnection`/`isRequestTimedOut`.
+enum SpacesDeviceAPIConnectionSupport {
     static func waitUntilReady(_ connection: NWConnection, queue: DispatchQueue, timeout: Duration) async throws {
         try await withTimeout(timeout) {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
@@ -706,13 +710,6 @@ private enum SpacesDeviceAPIConnectionSupport {
     static func isRequestTimedOut(_ error: Error) -> Bool {
         if case SpacesDeviceAPIClientError.requestTimedOut = error { return true }
         return false
-    }
-
-    static func pendingSecureConnectionTimeoutError(host: String, port: NWEndpoint.Port) async -> Error {
-        if await canOpenPlainTCPConnection(host: host, port: port, timeout: .milliseconds(750)) {
-            return SpacesDeviceAPIClientError.transportAuthenticationFailed
-        }
-        return SpacesDeviceAPIClientError.streamFailed("Timed out waiting for terminal state.")
     }
 
     static func withTimeout<T: Sendable>(_ timeout: Duration, operation: @escaping @Sendable () async throws -> T) async throws -> T {
@@ -834,64 +831,54 @@ private final class StreamLifecycle: @unchecked Sendable {
 }
 
 private final class StreamSubscription: @unchecked Sendable {
-    private static let initialEventTimeout: Duration = .seconds(12)
+    /// Matches the pre-multi-address budget: when connecting was an instant, unstarted `NWConnection`,
+    /// this was the whole window from starting the connection to decoding the first payload.
+    /// `SpacesDeviceNetworkBackend.openSessionStream` now also uses this value as the resolver's
+    /// connect timeout, so the combined "connect + first event" budget stays unchanged. Not
+    /// file-private: that backend method reads it too.
+    fileprivate static let initialEventTimeout: Duration = .seconds(12)
 
     private let connection: NWConnection
-    private let host: String
-    private let port: NWEndpoint.Port
     private let request: SpacesDeviceAPIRequest
     private let lifecycle: StreamLifecycle
     private let onEvent: @MainActor (GhosttyRemoteSessionStatePayload) -> Void
     private var buffer = Data()
     private var decodedState = false
-    private var connectionReady = false
 
     init(
-        connection: NWConnection, host: String, port: NWEndpoint.Port, request: SpacesDeviceAPIRequest,
-        onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void, onDisconnect: @escaping @MainActor (Error?) -> Void
+        connection: NWConnection, request: SpacesDeviceAPIRequest, onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
+        onDisconnect: @escaping @MainActor (Error?) -> Void
     ) {
         self.connection = connection
-        self.host = host
-        self.port = port
         self.request = request
         self.onEvent = onEvent
         lifecycle = StreamLifecycle(onDisconnect: onDisconnect)
     }
 
+    /// Starts the stream over a connection the caller (`SpacesDeviceNetworkBackend.openSessionStream`)
+    /// has already brought to `.ready` via `SpacesDeviceEndpointResolver`. Must not call
+    /// `connection.start(queue:)`: an `NWConnection` may only be started once, and the resolver already
+    /// started this one on `queue` while completing the pinned-TLS handshake. A fresh
+    /// `stateUpdateHandler` is still installed here because the resolver's own handler was one-shot —
+    /// it only ever needed to observe the transition into `.ready` — so failures or cancellation after
+    /// that point would otherwise go unnoticed.
     func start(on queue: DispatchQueue) {
         queue.asyncAfter(deadline: .now() + Self.initialEventTimeout.timeInterval) { [weak self] in
             guard let self, !decodedState else { return }
-            guard !connectionReady else {
-                lifecycle.finish(error: SpacesDeviceAPIClientError.streamFailed("Timed out waiting for terminal state."))
-                connection.cancel()
-                return
-            }
-            let host = host
-            let port = port
-            Task { [weak self] in
-                let error = await SpacesDeviceAPIConnectionSupport.pendingSecureConnectionTimeoutError(host: host, port: port)
-                queue.async { [weak self] in
-                    guard let self, !decodedState else { return }
-                    if connectionReady {
-                        lifecycle.finish(error: SpacesDeviceAPIClientError.streamFailed("Timed out waiting for terminal state."))
-                    } else {
-                        lifecycle.finish(error: error)
-                    }
-                    connection.cancel()
-                }
-            }
+            // The connection was already `.ready` (pinned certificate validated) before this
+            // subscription started, so a timeout here only ever means "no terminal state arrived in
+            // time" — never a possible pin mismatch, which the resolver already ruled out.
+            lifecycle.finish(error: SpacesDeviceAPIClientError.streamFailed("Timed out waiting for terminal state."))
+            connection.cancel()
         }
         connection.stateUpdateHandler = { [self] state in
             switch state {
-            case .ready:
-                connectionReady = true
-                sendInitialRequest()
             case .failed(let error): lifecycle.finish(error: error)
             case .cancelled: lifecycle.finish(error: nil)
             default: break
             }
         }
-        connection.start(queue: queue)
+        sendInitialRequest()
     }
 
     private func sendInitialRequest() {

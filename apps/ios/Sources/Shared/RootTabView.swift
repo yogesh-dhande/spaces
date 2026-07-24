@@ -59,7 +59,16 @@ struct RootTabView: View {
         // Spaces tab: backgrounding closes its tunnels, and foregrounding restores them.
         .task { model.browserProxyStart() }.onChange(of: scenePhase) { _, newPhase in
             switch newPhase {
-            case .active: model.browserProxyStart()
+            case .active:
+                model.browserProxyStart()
+                // Returning to the foreground is the moment this device has plausibly moved networks
+                // (e.g. walked back home onto the LAN after being away on the tailnet). Clearing every
+                // paired device's cached active host means the next connect re-evaluates `hosts` from
+                // the top, preferring the LAN address again when it is reachable rather than staying on
+                // the slower tailnet path out of habit. This only resets the persisted store; a
+                // resolver already alive for the current connection keeps its own in-memory cache until
+                // it next fails over on its own (see `SpacesDeviceEndpointResolver`).
+                SpacesMobileDeviceStore.clearActiveHosts()
             case .background: model.browserProxyStop()
             case .inactive: break
             @unknown default: break

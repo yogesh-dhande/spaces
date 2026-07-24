@@ -212,9 +212,12 @@ public enum SpacesDevicePairingClient {
         link: SpacesDevicePairingLink, clientInstallationID: String, clientBundleID: String, clientDeviceName: String, clientAppVersion: String?,
         profile: SpacesProfile? = nil
     ) throws -> SpacesRemoteDevicePairingResult {
+        guard let host = link.hosts.first else {
+            throw SpacesRemoteDevicePairingError.invalidRemotePairingOutput("Pairing link is missing a Device API host.")
+        }
         try assertPairingCompatible(deviceProtocolVersion: link.protocolVersion, deviceAppVersion: link.appVersion, deviceName: link.name)
-        let deviceID = stablePairedDeviceID(certificateFingerprint: link.certificateFingerprint, host: link.host, port: link.port)
-        let client = try SpacesDeviceAPIRequestClient(host: link.host, port: link.port, certificateFingerprint: link.certificateFingerprint)
+        let deviceID = stablePairedDeviceID(certificateFingerprint: link.certificateFingerprint, host: host, port: link.port)
+        let client = try SpacesDeviceAPIRequestClient(host: host, port: link.port, certificateFingerprint: link.certificateFingerprint)
         let response: SpacesDeviceAPIResponse
         do {
             response = try client.request(
@@ -223,7 +226,7 @@ public enum SpacesDevicePairingClient {
                     clientApp: SpacesDeviceClientApp(
                         installationID: clientInstallationID, bundleID: clientBundleID, platform: clientPlatform, deviceName: clientDeviceName,
                         appVersion: clientAppVersion)))
-        } catch { throw SpacesRemoteDevicePairingError.deviceAPIUnreachable(host: link.host, port: link.port, message: error.localizedDescription) }
+        } catch { throw SpacesRemoteDevicePairingError.deviceAPIUnreachable(host: host, port: link.port, message: error.localizedDescription) }
         guard response.ok else { throw SpacesRemoteDevicePairingError.pairingRejected(response.message) }
         guard let authToken = normalized(response.issuedAuthToken) else { throw SpacesRemoteDevicePairingError.missingAuthToken }
 
@@ -231,11 +234,11 @@ public enum SpacesDevicePairingClient {
         let database = try SpacesClientDatabase.defaultDatabase()
         try database.upsert(
             device: SpacesPairedDeviceRecord(
-                id: deviceID, name: link.name, platform: "remote", host: link.host, port: link.port,
+                id: deviceID, name: link.name, platform: "remote", host: host, port: link.port,
                 certificateFingerprint: link.certificateFingerprint, sshHost: nil, sshUser: nil, sshPort: nil, createdAt: now, updatedAt: now,
                 lastSelectedAt: now))
         try SpacesDeviceCredentialStore.saveToken(authToken, deviceID: deviceID, profile: profile)
-        return SpacesRemoteDevicePairingResult(deviceID: deviceID, name: link.name, host: link.host, port: link.port)
+        return SpacesRemoteDevicePairingResult(deviceID: deviceID, name: link.name, host: host, port: link.port)
     }
 
     private static var clientPlatform: String {
@@ -278,7 +281,7 @@ public enum SpacesDevicePairingClient {
         let metadata = try loadRemotePairingMetadata(
             destination: destination, port: device.sshPort, probe: probe, appVersion: appVersion, profile: profile)
         let link = SpacesDevicePairingLink(
-            host: deviceAPIHost, port: metadata.port, nonce: metadata.pairingNonce, code: metadata.pairingCode,
+            hosts: [deviceAPIHost], port: metadata.port, nonce: metadata.pairingNonce, code: metadata.pairingCode,
             certificateFingerprint: metadata.certificateFingerprint, name: metadata.name, protocolVersion: metadata.protocolVersion,
             appVersion: metadata.appVersion)
         return SpacesRemoteDevicePairingWindowResult(

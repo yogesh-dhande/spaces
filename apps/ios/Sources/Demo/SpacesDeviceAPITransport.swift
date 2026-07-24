@@ -31,5 +31,5 @@ protocol SpacesDeviceAPIBackend: Sendable {
     func openSessionStream(
         request: SpacesDeviceAPIRequest, onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
         onDisconnect: @escaping @MainActor (Error?) -> Void
-    ) throws -> SpacesDeviceAPIStreamHandle
+    ) async throws -> SpacesDeviceAPIStreamHandle
 }

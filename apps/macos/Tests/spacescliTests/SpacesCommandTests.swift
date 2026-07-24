@@ -327,7 +327,7 @@ final class SpacesCommandTests: XCTestCase {
     func testPairCommandLinesUseSpacesScheme() throws {
         let window = SpacesDevicePairingWindowSnapshot(
             window: SpacesDevicePairingCoordinator().openWindow(
-                host: "studio.local", port: 7443, certificateFingerprint: "SHA256:abc", name: "Studio", protocolVersion: 5, appVersion: "0.1.0",
+                hosts: ["studio.local"], port: 7443, certificateFingerprint: "SHA256:abc", name: "Studio", protocolVersion: 5, appVersion: "0.1.0",
                 now: Date(timeIntervalSince1970: 1_782_000_000), duration: 300, code: "12345678", nonce: "N"))
         let lines = try pairCommandLines {
             SpacesDeviceAPIControlResponse(ok: true, message: "ok", result: .pairingWindow(.init(pairingWindow: window)))
@@ -343,7 +343,7 @@ final class SpacesCommandTests: XCTestCase {
     func testPairCommandJSONPayloadUsesDeviceMetadata() throws {
         let window = SpacesDevicePairingWindowSnapshot(
             window: SpacesDevicePairingCoordinator().openWindow(
-                host: "studio.local", port: 7443, certificateFingerprint: "SHA256:abc", name: "Studio", protocolVersion: 5, appVersion: "0.1.0",
+                hosts: ["studio.local"], port: 7443, certificateFingerprint: "SHA256:abc", name: "Studio", protocolVersion: 5, appVersion: "0.1.0",
                 now: Date(timeIntervalSince1970: 1_782_000_000), duration: 300, code: "12345678", nonce: "N"))
 
         let payload = try pairCommandPayload {
@@ -351,7 +351,7 @@ final class SpacesCommandTests: XCTestCase {
         }
 
         XCTAssertEqual(payload.name, "Studio")
-        XCTAssertEqual(payload.host, "studio.local")
+        XCTAssertEqual(payload.hosts, ["studio.local"])
         XCTAssertEqual(payload.port, 7443)
         XCTAssertEqual(payload.pairingCode, "12345678")
         XCTAssertEqual(payload.pairingNonce, "N")

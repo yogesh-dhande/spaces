@@ -140,7 +140,7 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
             try server.start()
             defer { server.stop() }
 
-            let window = server.openPairingWindow(host: "127.0.0.1", name: "Test Mac", code: "12345678", nonce: "NONCE")
+            let window = server.openPairingWindow(hosts: ["127.0.0.1"], name: "Test Mac", code: "12345678", nonce: "NONCE")
             let clientApp = SpacesDeviceClientApp(
                 installationID: "INSTALLATION-TLS", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "ios", deviceName: "iPhone",
                 appVersion: "1.0")
@@ -162,7 +162,7 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
             try server.start()
             defer { server.stop() }
 
-            let window = server.openPairingWindow(host: "127.0.0.1", name: "Test Mac", code: "12345678", nonce: "NONCE")
+            let window = server.openPairingWindow(hosts: ["127.0.0.1"], name: "Test Mac", code: "12345678", nonce: "NONCE")
             let clientApp = SpacesDeviceClientApp(
                 installationID: "INSTALLATION-VERSION", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID, platform: "ios", deviceName: "iPhone",
                 appVersion: "1.0")
@@ -200,7 +200,7 @@ final class SpacesDeviceAPIServerTransportTests: XCTestCase {
             try server.start()
             defer { server.stop() }
 
-            let window = server.openPairingWindow(host: "127.0.0.1", name: "Test Mac", code: "12345678", nonce: "NONCE")
+            let window = server.openPairingWindow(hosts: ["127.0.0.1"], name: "Test Mac", code: "12345678", nonce: "NONCE")
             let unsupportedClientApp = SpacesDeviceClientApp(
                 installationID: "INSTALLATION-UNSUPPORTED", bundleID: "com.example.thirdparty", platform: "ios", deviceName: "Third Party",
                 appVersion: "1.0")
