@@ -224,7 +224,7 @@ manifest = {
     "ghostty_sha": ghostty_sha,
     "source_url": "https://example.invalid/ghostty.git",
     "zig_version": "0.16.0",
-    "build_script_version": 2,
+    "build_script_version": 3,
     "xcode_version": "17.0",
     "xcode_build_version": "17C529",
     "swift_version": "Swift release fixture",
