@@ -492,6 +492,10 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// The in-flight overview fetch, tagged with the identity it serves. `refresh()` joins it when
     /// the identity still matches, and re-fetches after it completes when the identity moved on.
     @ObservationIgnored private var refreshInFlight: (identity: Int, task: Task<Void, Never>)?
+    /// Consecutive failed overview fetches for one connection, gating the connection-error alert (see
+    /// `refreshFailuresBeforeAlert`). Tagged with the identity they were counted against so any change of
+    /// connection restarts the count without every reset site having to clear it.
+    @ObservationIgnored private var refreshFailureStreak: (identity: Int, count: Int) = (identity: 0, count: 0)
     /// On-device loopback reverse proxy WKWebView browser sessions load through. Owned for the app's
     /// lifetime (its installation identity is stable across device switches), started/stopped by
     /// `RootTabView`'s scene-phase observation.
@@ -515,6 +519,10 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// unreachable device would cost attempts × (interval + request timeout), several times the stated
     /// budget. Injectable so tests can shrink it instead of sleeping through the production wait.
     @ObservationIgnored private let daemonUpdateTimeout: Duration
+    /// Consecutive failed overview fetches before the connection-error alert is raised. Three, against
+    /// the overview poll's two-second interval, keeps a self-healing blip silent while still reporting a
+    /// device that is actually unreachable within a few seconds.
+    private static let refreshFailuresBeforeAlert = 3
 
     init() {
         #if DEBUG
@@ -790,6 +798,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
             self.overview = acceptedOverview
             connectionNotice = nil
             errorMessage = nil
+            refreshFailureStreak = (identity: identity, count: 0)
         } catch is CancellationError { return } catch {
             guard identity == overviewIdentity else { return }
             // The overview did not decode (a wire-incompatible daemon) or the device is unreachable. The
@@ -816,8 +825,23 @@ private enum SpacesMobileMutationTimeoutRecovery {
             // rather than only at the call sites that start a refresh. An authentication failure above
             // still surfaces: that is not an outage and does not resolve itself when the daemon returns.
             guard !isApplyingDaemonUpdate else { return }
+            // The overview poll runs every two seconds, and a single failed round trip is routinely
+            // recoverable — a Wi-Fi blip, or a socket the OS dropped out from under the app. Raising the
+            // modal connection alert on the first failure interrupts the user for something that heals
+            // itself before they can read it, so the alert waits for a run of failures. A device that is
+            // genuinely unreachable keeps failing and surfaces within a few seconds. User-initiated work
+            // (mutations, deep links) does not go through here: it still reports on its first failure.
+            refreshFailureStreak = (identity: identity, count: consecutiveRefreshFailures(identity: identity) + 1)
+            guard refreshFailureStreak.count >= Self.refreshFailuresBeforeAlert else { return }
             errorMessage = error.localizedDescription
         }
+    }
+
+    /// Failures already counted for `identity`. A streak recorded against a different connection is
+    /// discarded rather than carried over: a device switch, removal, auth reset, or Demo Mode toggle
+    /// bumps `overviewIdentity`, and the new connection starts with a clean slate.
+    private func consecutiveRefreshFailures(identity: Int) -> Int {
+        refreshFailureStreak.identity == identity ? refreshFailureStreak.count : 0
     }
 
     /// Requests the active device's daemon exec-in-place handoff: it quiesces sessions, applies any
