@@ -148,6 +148,7 @@ Scroll stays inside the active-owner control boundary. Requests carry Ghostty sc
 - The fork adds headless-session, render-frame, and mirror-renderer entrypoints without changing default Ghostty app behavior.
 - The daemon is the only PTY and session-state owner. Clients import frames into local mirror state and may send input, resize, mouse, keyboard, binding-action, or scroll events only while their client ID and owner epoch match the active owner.
 - Clients materialize v2 updates back into Ghostty mirror snapshots until the prebuilt GhosttyKit contract exposes native render-update apply calls.
+- Ghostty's Sentry crash reporter is disabled in Spaces artifacts (`-Dsentry=false`). Its initialization thread reads a pointer-and-length snapshot of `environ` while `ghostty_init`'s locale setup calls `setenv` on the calling thread, which reallocates and frees that array; the resulting use-after-free segfaults the daemon and the iOS app. Spaces configures no DSN, so the reporter only writes envelopes to a local directory nothing reads — there is nothing to trade against the crash. On the daemon the failure is easy to miss, because launchd relaunches within a second and the visible symptom is every connected client losing its streams and the device appearing offline.
 - Pixel streaming is not the architecture.
 
 ## Hard-Earned Learnings
