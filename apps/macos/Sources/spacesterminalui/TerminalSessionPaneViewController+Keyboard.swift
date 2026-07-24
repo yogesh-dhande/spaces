@@ -259,6 +259,15 @@ extension TerminalSessionPaneViewController {
         banner.flash()
     }
 
+    /// Retires the message `reportDisconnectedInputAttempt` left behind once the link is back. The row
+    /// holds one message at a time and every other writer owns its own, so this clears only its exact
+    /// text: an unrelated status the user is looking at (a send error, an ownership refusal) says
+    /// nothing about the connection and must survive a reconnect it had no part in.
+    func clearDisconnectedInputStatusIfResolved() {
+        guard !isStateStreamDisconnected, inputStatusLabel.stringValue == TerminalPaneBannerNotice.disconnected.message else { return }
+        updateInputStatus(message: "", isError: false)
+    }
+
     private func isImagePasteKeyEvent(_ event: NSEvent) -> Bool {
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask).subtracting([.function, .numericPad])
         return Int(event.keyCode) == kVK_ANSI_V && flags == [.control]

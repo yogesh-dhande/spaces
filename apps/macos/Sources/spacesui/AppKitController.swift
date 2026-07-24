@@ -1762,8 +1762,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     func prepareTerminalPaneOpenRequest(_ request: DeviceTerminalOpenRequest) async -> Result<DeviceTerminalOpenRequest, Error> {
         if request.preparedCredentials != nil { return .success(request) }
-        guard let deviceID = request.deviceID ?? deviceID(forWorkspaceID: request.workspaceID), let device = deviceForMutation(deviceID: deviceID)
-        else { return .failure(Self.deviceNotLoadedError()) }
+        // Opening a pane connects to the owning daemon, so an unreachable device is refused here with
+        // the same named-and-offline message its other actions carry rather than a generic not-loaded
+        // one the user can see they are not in.
+        let requestedDeviceID = request.deviceID ?? deviceID(forWorkspaceID: request.workspaceID)
+        guard let requestedDeviceID, let device = deviceForMutation(deviceID: requestedDeviceID) else {
+            return .failure(deviceUnavailableError(deviceID: requestedDeviceID))
+        }
         let clientApp = SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short)
         let isLocalDevice = device.id == SpacesPairedDeviceRecord.localDeviceID
         // For the local device, re-resolve the daemon's current Device API port (and ensure it is
@@ -4394,7 +4399,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// Nil therefore means either that no loaded section claims the id (unknown or still loading) or
     /// that its device is unreachable; `deviceUnavailableError` tells those two apart for the message.
     private func deviceForMutation(deviceID: String) -> SpacesPairedDeviceRecord? {
-        guard let section = deviceSection(id: deviceID), Self.deviceAcceptsDaemonActions(loadState: section.loadState) else { return nil }
+        guard Self.deviceAcceptsDaemonActions(deviceID: deviceID, loadState: deviceSection(id: deviceID)?.loadState) else { return nil }
         return deviceOwning(deviceID: deviceID)
     }
 
@@ -4408,13 +4413,27 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return deviceForMutation(deviceID: deviceID)
     }
 
-    /// Whether a device can service an action that needs its daemon. An unreachable device's rows
-    /// stay listed and readable, but everything behind them is refused up front instead of dialled
-    /// and failed — the user browses the subtree and acts on it once the device returns. A section
-    /// that has not finished loading is equally not actionable: its record may not be installed yet.
-    /// Pure so the rule is directly testable and so the refusing chokepoint and the controls that
-    /// disable themselves ahead of it can never disagree.
-    nonisolated static func deviceAcceptsDaemonActions(loadState: SidebarDeviceLoadState) -> Bool { loadState == .loaded }
+    /// Whether a device can service an action that needs its daemon, given the load state of the
+    /// sidebar section that claims it — `nil` when no section claims it at all.
+    ///
+    /// An unreachable device's rows stay listed and readable, but everything behind them is refused
+    /// up front instead of dialled and failed — the user browses the subtree and acts on it once the
+    /// device returns. A section that has not finished loading is equally not actionable: its record
+    /// may not be installed yet.
+    ///
+    /// "No section yet" is a different fact from "the device is offline", and the two ids part ways
+    /// there. This Mac is actionable before any section exists: it is the machine the app is running
+    /// on, its record comes from `bootstrapLocalDevice` rather than from a sidebar load, and an
+    /// `openTerminalSessionWindow`/focus IPC routinely arrives on a cold launch before the first
+    /// sidebar snapshot — refusing then would fail a pane open the app explicitly supports. A remote
+    /// id that no section claims is genuinely unknown: nothing has told the app that device exists,
+    /// so there is no daemon to dial and it stays refused. Pure so the rule is directly testable and
+    /// so the refusing chokepoint and the controls that disable themselves ahead of it can never
+    /// disagree.
+    nonisolated static func deviceAcceptsDaemonActions(deviceID: String, loadState: SidebarDeviceLoadState?) -> Bool {
+        guard let loadState else { return deviceID == SpacesPairedDeviceRecord.localDeviceID }
+        return loadState == .loaded
+    }
 
     /// Whether the daemon-backed controls for a workspace's row should be offered. An id no section
     /// claims has no daemon to act on either, so it reads as not actionable.
@@ -4423,8 +4442,32 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     func deviceAcceptsDaemonActions(forDeviceID deviceID: String) -> Bool {
-        deviceSection(id: deviceID).map { Self.deviceAcceptsDaemonActions(loadState: $0.loadState) } ?? false
+        Self.deviceAcceptsDaemonActions(deviceID: deviceID, loadState: deviceSection(id: deviceID)?.loadState)
     }
+
+    /// Whether a device crossing into or out of its actionable state must rebuild the workspace detail
+    /// currently on screen. `disableWhenDeviceCannotAct` decides a control's availability while the
+    /// detail is being built, so a retained pane keeps whatever it was built with: a device that goes
+    /// offline underneath it would keep offering actions that are now refused, and one that comes back
+    /// would keep withholding actions that work until the user reselected the row.
+    ///
+    /// Gated on an actual change in actionability, not on any load-state report: an unreachable device
+    /// is re-reported with the same state on every probe for the whole outage, and rebuilding the
+    /// detail each time would throw away the user's scroll position and focus repeatedly. A reason-only
+    /// change (`.offline(a)` to `.offline(b)`) changes nothing a control does, so it does not qualify
+    /// either. Pure so the "transition, not poll" rule is directly testable.
+    nonisolated static func shouldRebuildWorkspaceDetailForDeviceLoadStateChange(
+        visibleDetailWorkspaceDeviceID: String?, deviceID: String, previousLoadState: SidebarDeviceLoadState, newLoadState: SidebarDeviceLoadState
+    ) -> Bool {
+        guard visibleDetailWorkspaceDeviceID == deviceID else { return false }
+        return deviceAcceptsDaemonActions(deviceID: deviceID, loadState: previousLoadState)
+            != deviceAcceptsDaemonActions(deviceID: deviceID, loadState: newLoadState)
+    }
+
+    /// The device owning the workspace whose detail pane is on screen, or nil when the detail shows
+    /// anything else. Read at the moment a device's load state moves, to decide whether that pane's
+    /// daemon-backed controls are now wrong.
+    func visibleWorkspaceDetailDeviceID() -> String? { visibleDetailWorkspaceID.flatMap(deviceID(forWorkspaceID:)) }
 
     /// The tooltip a control disabled by an outage carries, naming the device the way the sidebar rows
     /// and the add-project device picker do. Nil for any other state — a device that is merely still

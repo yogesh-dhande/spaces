@@ -3109,6 +3109,43 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         XCTAssertEqual(controller.debugInputStatus, TerminalPaneBannerNotice.disconnected.message)
     }
 
+    /// The reason left on the input status row is retired when the link returns. The row is what the
+    /// debug dump reports the pane's input state from, so a stale "connection lost" there describes a
+    /// pane that is working again.
+    @MainActor func testDisconnectedInputStatusIsRetiredWhenTheLinkReturns() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let controller = try makeBannerController(sessionID: "session-input-status-recovered", state: .running, root: root)
+        let provider = try XCTUnwrap(controller.stateProvider as? PersistenceBackedTerminalSessionStateProvider)
+        provider.isStateStreamDisconnected = true
+        controller.debugSimulateStateStreamConnectionDidChange()
+        _ = controller.handleKeyEvent(try keyEvent(keyCode: kVK_ANSI_A, characters: "a", modifiers: []))
+        XCTAssertEqual(controller.debugInputStatus, TerminalPaneBannerNotice.disconnected.message)
+
+        provider.isStateStreamDisconnected = false
+        controller.debugSimulateStateStreamConnectionDidChange()
+
+        XCTAssertEqual(controller.debugInputStatus, "")
+        XCTAssertFalse(controller.debugShowsInputStatus)
+    }
+
+    /// The row holds one message at a time, so the reconnect clears only its own: a status the user is
+    /// looking at for an unrelated reason says nothing about the connection and must survive.
+    @MainActor func testReconnectingLeavesAnUnrelatedInputStatusAlone() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let controller = try makeBannerController(sessionID: "session-input-status-unrelated", state: .running, root: root)
+        let provider = try XCTUnwrap(controller.stateProvider as? PersistenceBackedTerminalSessionStateProvider)
+        provider.isStateStreamDisconnected = true
+        controller.debugSimulateStateStreamConnectionDidChange()
+        controller.updateInputStatus(message: "Take over ownership before sending terminal input.", isError: true)
+
+        provider.isStateStreamDisconnected = false
+        controller.debugSimulateStateStreamConnectionDidChange()
+
+        XCTAssertEqual(controller.debugInputStatus, "Take over ownership before sending terminal input.")
+    }
+
     /// Precedence between the two facts a pane's persistent notice reports, as a pure rule.
     @MainActor func testPersistentNoticeSelection() {
         XCTAssertNil(TerminalPaneBannerNotice.resolve(runtimeState: .running, isStateStreamDisconnected: false))

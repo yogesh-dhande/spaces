@@ -899,6 +899,7 @@ private final class NotificationObserverBag: @unchecked Sendable {
                     self.refreshRuntimeStateFromProvider()
                     self.updatePersistentBanner(
                         runtimeState: self.lastObservedRuntimeState, isStateStreamDisconnected: self.isStateStreamDisconnected)
+                    self.clearDisconnectedInputStatusIfResolved()
                 }
             })
         notificationObservers.tokens.append(

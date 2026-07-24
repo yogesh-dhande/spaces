@@ -350,6 +350,18 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         {
             host.refreshSelection()
             host.logStartupProfile("apply_snapshot_selection_preserved_ready")
+        } else if let previousLoadState = previousLocalSection?.loadState,
+            AppKitController.shouldRebuildWorkspaceDetailForDeviceLoadStateChange(
+                visibleDetailWorkspaceDeviceID: host.visibleWorkspaceDetailDeviceID(), deviceID: snapshot.localDeviceID,
+                previousLoadState: previousLoadState, newLoadState: localLoadState)
+        {
+            // This Mac's daemon crossed into or out of being actionable while its workspace detail was
+            // retained, so that pane's daemon-backed controls no longer match what the device can do.
+            // `shouldRefreshVisibleWorkspaceDetail` above only covers a focused main window; a daemon
+            // that drops or returns while the user is in another app must still reconcile the controls
+            // they come back to. Gated on the transition, so the poll of a daemon that stays down —
+            // which repeats every refresh interval — rebuilds nothing.
+            host.refreshSelection()
         }
         updateAlertsSidebarBadge()
         host.logStartupProfile("apply_snapshot_alerts_badge_ready", details: "group_count=\(host.alertsGroups.count)")
@@ -680,7 +692,8 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         // A background refresh re-fetches each remote; only touch the outline when
         // the device's overview or load state actually changed, so unchanged polls
         // don't collapse expanded projects.
-        let wasLoaded = host.deviceSections[index].loadState == .loaded
+        let previousLoadState = host.deviceSections[index].loadState
+        let wasLoaded = previousLoadState == .loaded
         switch result {
         case .success(let load):
             // Any overview that arrives — pulled, or pushed on the subscription — is evidence this
@@ -793,10 +806,19 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         host.reopenPersistedPanelWindowsIfPossible()
         // The Alerts pane's cards and `alertsFocusRequestMap` were built from the pre-rebuild groups, so
         // when it is visible it must be rebuilt to pick up this device's new state — its alerts stay
-        // listed, marked stale. The selection is deliberately left alone: an unreachable device's rows
-        // stay in the merged data, so a selection under it is still valid and its detail pane still
-        // renders from the retained overview.
-        if host.showingAlerts { host.showAlertsDetail() }
+        // listed, marked stale. The selection itself is deliberately left alone: an unreachable device's
+        // rows stay in the merged data, so a selection under it is still valid and its detail pane still
+        // renders from the retained overview. Only the pane's controls have to be rebuilt, and only when
+        // this device crossed into or out of being actionable — every earlier branch of the switch
+        // returned for a report that changed nothing.
+        if host.showingAlerts {
+            host.showAlertsDetail()
+        } else if AppKitController.shouldRebuildWorkspaceDetailForDeviceLoadStateChange(
+            visibleDetailWorkspaceDeviceID: host.visibleWorkspaceDetailDeviceID(), deviceID: deviceID, previousLoadState: previousLoadState,
+            newLoadState: host.deviceSections[index].loadState)
+        {
+            host.refreshSelection()
+        }
     }
 
     /// Recomputes the flat, id-keyed sidebar dictionaries as the union of every device section,

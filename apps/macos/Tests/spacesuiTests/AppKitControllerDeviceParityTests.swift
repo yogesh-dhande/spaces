@@ -78,9 +78,55 @@ import workspacecore
         // readable, but every action that has to reach its daemon is refused up front rather than dialled
         // and failed. A section that has not finished loading is equally not actionable — its record may
         // not be installed yet.
-        #expect(AppKitController.deviceAcceptsDaemonActions(loadState: .loaded))
-        #expect(!AppKitController.deviceAcceptsDaemonActions(loadState: .offline("Connection refused")))
-        #expect(!AppKitController.deviceAcceptsDaemonActions(loadState: .loading))
+        let remoteID = "device-remote"
+        #expect(AppKitController.deviceAcceptsDaemonActions(deviceID: remoteID, loadState: .loaded))
+        #expect(!AppKitController.deviceAcceptsDaemonActions(deviceID: remoteID, loadState: .offline("Connection refused")))
+        #expect(!AppKitController.deviceAcceptsDaemonActions(deviceID: remoteID, loadState: .loading))
+
+        // The same states decide it for this Mac, so an unreachable local daemon refuses exactly like a
+        // remote one rather than being trusted for being local.
+        let localID = SpacesPairedDeviceRecord.localDeviceID
+        #expect(AppKitController.deviceAcceptsDaemonActions(deviceID: localID, loadState: .loaded))
+        #expect(!AppKitController.deviceAcceptsDaemonActions(deviceID: localID, loadState: .offline("Connection refused")))
+        #expect(!AppKitController.deviceAcceptsDaemonActions(deviceID: localID, loadState: .loading))
+    }
+
+    @Test func thisMacIsActionableBeforeTheFirstSidebarSnapshotButAnUnknownDeviceIsNot() {
+        // No section yet is not the same fact as offline. An openTerminalSessionWindow/focus IPC arrives
+        // on a cold launch before the first sidebar load, and the pane it opens is on this Mac — whose
+        // record comes from the local-device bootstrap, not from a sidebar section. Refusing then would
+        // fail that open with "Spaces has not finished loading".
+        #expect(AppKitController.deviceAcceptsDaemonActions(deviceID: SpacesPairedDeviceRecord.localDeviceID, loadState: nil))
+        // A remote id no section claims is genuinely unknown: nothing has told the app that device exists,
+        // so it must stay refused rather than falling through to this Mac's daemon.
+        #expect(!AppKitController.deviceAcceptsDaemonActions(deviceID: "device-never-seen", loadState: nil))
+    }
+
+    @Test func aRetainedWorkspaceDetailIsRebuiltOnlyWhenItsDeviceCrossesTheActionableLine() {
+        typealias LoadState = AppKitController.SidebarDeviceLoadState
+        let deviceID = "device-remote"
+        let offline = LoadState.offline("Connection refused")
+        func rebuilds(detailDevice: String?, from: LoadState, to: LoadState) -> Bool {
+            AppKitController.shouldRebuildWorkspaceDetailForDeviceLoadStateChange(
+                visibleDetailWorkspaceDeviceID: detailDevice, deviceID: deviceID, previousLoadState: from, newLoadState: to)
+        }
+
+        // Going offline under the selection: the pane's footer/setup controls were built enabled and
+        // would keep offering actions the device now refuses. Coming back: they were built disabled and
+        // would stay that way until the user reselected the row.
+        #expect(rebuilds(detailDevice: deviceID, from: .loaded, to: offline))
+        #expect(rebuilds(detailDevice: deviceID, from: offline, to: .loaded))
+
+        // A device that stays down is re-reported on every probe for the whole outage; rebuilding then
+        // would throw away the user's scroll and focus repeatedly for a state that did not move. A newer
+        // failure reason changes the caption, not what any control can do.
+        #expect(!rebuilds(detailDevice: deviceID, from: offline, to: offline))
+        #expect(!rebuilds(detailDevice: deviceID, from: offline, to: .offline("Stream closed")))
+
+        // Another device's outage leaves this pane alone, and a detail showing something other than a
+        // workspace (alerts, a compatibility block) has no controls keyed to this device.
+        #expect(!rebuilds(detailDevice: "device-other", from: .loaded, to: offline))
+        #expect(!rebuilds(detailDevice: nil, from: .loaded, to: offline))
     }
 
     @Test func actionsRefusedByAnOutageNameTheDeviceInsteadOfClaimingSpacesIsLoading() {
