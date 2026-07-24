@@ -61,11 +61,30 @@ PY
     printf 'Booted\n' >"$SPACES_TEST_SIMULATOR_STATE_ROOT/$udid"
     ;;
   bootstatus)
-    printf 'bootstatus %s\n' "$1" >>"$SPACES_TEST_SIMCTL_LOG"
+    udid="$1"
+    printf 'bootstatus %s\n' "$udid" >>"$SPACES_TEST_SIMCTL_LOG"
+    if [[ "${SPACES_TEST_SIMCTL_BOOTSTATUS_HANG_UDID:-}" == "$udid" ]]; then
+      # Opt-in hang for the timeout/recovery tests: the production code SIGKILLs this process
+      # on deadline, so `exec` replaces this shell with `sleep` -- the killed pid IS the sleep,
+      # leaving no orphan behind. A marker file makes the hang single-shot: once set, the first
+      # call touches it and hangs; later calls for the same udid see it exists and succeed
+      # normally, which is how the "recovery succeeds on retry" test lets attempt 2 through. The
+      # both-attempts-wedge test simply leaves the marker var unset, so every call hangs.
+      marker="${SPACES_TEST_SIMCTL_BOOTSTATUS_HANG_MARKER:-}"
+      if [[ -z "$marker" || ! -e "$marker" ]]; then
+        [[ -n "$marker" ]] && : >"$marker"
+        exec sleep 60
+      fi
+    fi
     ;;
   shutdown)
     udid="$1"
     printf 'shutdown %s\n' "$udid" >>"$SPACES_TEST_SIMCTL_LOG"
+    printf 'Shutdown\n' >"$SPACES_TEST_SIMULATOR_STATE_ROOT/$udid"
+    ;;
+  erase)
+    udid="$1"
+    printf 'erase %s\n' "$udid" >>"$SPACES_TEST_SIMCTL_LOG"
     printf 'Shutdown\n' >"$SPACES_TEST_SIMULATOR_STATE_ROOT/$udid"
     ;;
   *)
@@ -190,5 +209,45 @@ interrupt_status=$?
 set -e
 [[ "$interrupt_status" == "130" ]] || fail "interrupt cleanup returned $interrupt_status instead of 130"
 assert_count 1 "shutdown iphone-interrupt"
+
+reset_fixture
+printf 'Shutdown\n' >"$STATE_ROOT/iphone-wedged"
+hang_marker="$TMP_ROOT/wedge-hang-marker"
+rm -f "$hang_marker"
+(
+  # shellcheck source=/dev/null
+  source "$LIFECYCLE_HELPER"
+  export SPACES_IOS_SIMULATOR_BOOT_TIMEOUT=1
+  export SPACES_TEST_SIMCTL_BOOTSTATUS_HANG_UDID=iphone-wedged
+  export SPACES_TEST_SIMCTL_BOOTSTATUS_HANG_MARKER="$hang_marker"
+  spaces_ios_simulator_boot_if_needed iphone-wedged
+  spaces_ios_simulator_shutdown_owned 0
+)
+# Attempt 1 wedges (bootstatus #1, then recovery: 1 shutdown + 1 erase); attempt 2 boots again
+# (boot #2, bootstatus #2) and succeeds since the hang is single-shot. The owned-simulator
+# teardown at the end issues one more shutdown, for 2 total.
+assert_count 2 "boot iphone-wedged"
+assert_count 2 "bootstatus iphone-wedged"
+assert_count 1 "erase iphone-wedged"
+assert_count 2 "shutdown iphone-wedged"
+[[ "$(cat "$STATE_ROOT/iphone-wedged")" == "Shutdown" ]] || fail "recovered simulator was not shut down at teardown"
+
+reset_fixture
+printf 'Shutdown\n' >"$STATE_ROOT/iphone-double-wedged"
+set +e
+(
+  # shellcheck source=/dev/null
+  source "$LIFECYCLE_HELPER"
+  export SPACES_IOS_SIMULATOR_BOOT_TIMEOUT=1
+  export SPACES_TEST_SIMCTL_BOOTSTATUS_HANG_UDID=iphone-double-wedged
+  spaces_ios_simulator_boot_if_needed iphone-double-wedged
+)
+double_wedge_status=$?
+set -e
+[[ "$double_wedge_status" != "0" ]] || fail "expected boot_if_needed to fail when both attempts wedge"
+assert_count 2 "boot iphone-double-wedged"
+assert_count 2 "bootstatus iphone-double-wedged"
+assert_count 1 "shutdown iphone-double-wedged"
+assert_count 1 "erase iphone-double-wedged"
 
 echo "iOS simulator lifecycle tests passed"
