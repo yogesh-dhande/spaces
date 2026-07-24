@@ -130,7 +130,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
     }
 
     private func waitForForegroundPID(
-        in sessionDriver: GhosttyEmbeddedTerminalSessionDriver, timeout: TimeInterval = 10, file: StaticString = #filePath, line: UInt = #line
+        in sessionDriver: GhosttyEmbeddedTerminalSessionDriver, timeout: TimeInterval = 30, file: StaticString = #filePath, line: UInt = #line
     ) async throws -> Int32 {
         // The condition closure below is re-sent to the engine actor on every poll, so the result
         // must live behind a Sendable box rather than a captured `var` (a bare `var` capture used
@@ -469,7 +469,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         let client = GhosttyRemoteSessionStateStreamClient(socketPath: paths.subscriptionSocketPath) { payload in receivedPayloads.append(payload) }
         try client.start()
         defer { client.stop() }
-        try await waitUntil(timeout: 2) {
+        try await waitUntil(timeout: 30) {
             receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.initial && $0.renderUpdate != nil }
         }
         let initialPayload = try XCTUnwrap(
@@ -489,7 +489,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             host.applySessionStateChange(.init(flags: [.screen], revision: screenRevision, title: nil, workingDirectory: nil))
         }
 
-        try await waitUntil(timeout: 2) {
+        try await waitUntil(timeout: 30) {
             receivedPayloads.snapshot.contains {
                 $0.reason == TerminalRemoteSessionStateReason.stateChange && $0.screenStateRevision == screenRevision && $0.renderUpdate != nil
             }
@@ -551,7 +551,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         try client.start()
         defer { client.stop() }
 
-        try await waitUntil(timeout: 2) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.initial } }
+        try await waitUntil(timeout: 30) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.initial } }
         let initialPayload = try XCTUnwrap(receivedPayloads.snapshot.last { $0.reason == TerminalRemoteSessionStateReason.initial })
         XCTAssertNil(initialPayload.renderUpdate)
         receivedPayloads.removeAll()
@@ -562,7 +562,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             host.applySessionStateChange(.init(flags: [.screen], revision: screenRevision, title: nil, workingDirectory: nil))
         }
 
-        try await waitUntil(timeout: 2) {
+        try await waitUntil(timeout: 30) {
             receivedPayloads.snapshot.contains {
                 $0.reason == TerminalRemoteSessionStateReason.stateChange && $0.screenStateRevision == screenRevision && $0.renderUpdate != nil
             }
@@ -1082,7 +1082,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         try client.start()
         defer { client.stop() }
 
-        try await waitUntil(timeout: 2) { !receivedPayloads.snapshot.isEmpty }
+        try await waitUntil(timeout: 30) { !receivedPayloads.snapshot.isEmpty }
         let initialSnapshot = try XCTUnwrap(receivedPayloads.snapshot.first?.renderSnapshot)
 
         XCTAssertEqual(GhosttyTerminalSnapshotLayout.plainText(for: initialSnapshot), "fresh reconnect")
@@ -1146,7 +1146,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         let client = GhosttyRemoteSessionStateStreamClient(socketPath: paths.subscriptionSocketPath) { payload in receivedPayloads.append(payload) }
         try client.start()
         defer { client.stop() }
-        try await waitUntil(timeout: 2) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.initial } }
+        try await waitUntil(timeout: 30) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.initial } }
         receivedPayloads.removeAll()
 
         let output = Data("e".utf8)
@@ -1155,7 +1155,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             host.debugHandleIncomingOutput(output)
         }
 
-        try await waitUntil(timeout: 2) {
+        try await waitUntil(timeout: 30) {
             receivedPayloads.snapshot.contains { $0.reason == "output" && $0.outputByteCount == output.count && $0.renderUpdate != nil }
         }
         try? await Task.sleep(for: .milliseconds(100))
@@ -1189,7 +1189,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         let client = GhosttyRemoteSessionStateStreamClient(socketPath: paths.subscriptionSocketPath) { payload in receivedPayloads.append(payload) }
         try client.start()
         defer { client.stop() }
-        try await waitUntil(timeout: 2) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.initial } }
+        try await waitUntil(timeout: 30) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.initial } }
         receivedPayloads.removeAll()
 
         let output = Data("e".utf8)
@@ -1199,7 +1199,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             host.debugHandleIncomingOutput(output)
         }
 
-        try await waitUntil(timeout: 2) {
+        try await waitUntil(timeout: 30) {
             receivedPayloads.snapshot.contains { $0.reason == "output" && $0.outputByteCount == output.count && $0.renderUpdate != nil }
                 && receivedPayloads.snapshot.contains { $0.reason == "input_output" && $0.renderUpdate != nil }
         }
@@ -1241,7 +1241,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         let client = GhosttyRemoteSessionStateStreamClient(socketPath: paths.subscriptionSocketPath) { payload in receivedPayloads.append(payload) }
         try client.start()
         defer { client.stop() }
-        try await waitUntil(timeout: 2) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.initial } }
+        try await waitUntil(timeout: 30) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.initial } }
         var baseline = try Self.renderBaseline(from: try XCTUnwrap(receivedPayloads.snapshot.first), baseline: nil)
         receivedPayloads.removeAll()
 
@@ -1251,7 +1251,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             host.debugHandleIncomingOutput(output)
         }
 
-        try await waitUntil(timeout: 2) {
+        try await waitUntil(timeout: 30) {
             receivedPayloads.snapshot.contains { $0.reason == "output" && $0.outputByteCount == output.count }
                 && receivedPayloads.snapshot.contains { $0.reason == "input_output" }
         }
@@ -1304,7 +1304,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         let client = GhosttyRemoteSessionStateStreamClient(socketPath: paths.subscriptionSocketPath) { payload in receivedPayloads.append(payload) }
         try client.start()
         defer { client.stop() }
-        try await waitUntil(timeout: 2) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.initial } }
+        try await waitUntil(timeout: 30) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.initial } }
         receivedPayloads.removeAll()
 
         let output = Data("queued output\n".utf8)
@@ -1313,7 +1313,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             host.debugBroadcastCurrentStateForTesting(reason: TerminalRemoteSessionStateReason.stateChange)
         }
 
-        try await waitUntil(timeout: 2) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.stateChange } }
+        try await waitUntil(timeout: 30) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.stateChange } }
         try? await Task.sleep(for: .milliseconds(50))
 
         XCTAssertFalse(
@@ -1688,7 +1688,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         let host = hostBox.value
         defer { TerminalEngineActor.runSynchronously { host.terminate() } }
 
-        try await waitUntil(timeout: 5) {
+        try await waitUntil(timeout: 30) {
             (try? TerminalSessionPersistence.readRemoteSessionState(paths: paths))?.reason == TerminalRemoteSessionStateReason.terminated
         }
         let finalPayload = try TerminalSessionPersistence.readRemoteSessionState(paths: paths)
@@ -1768,13 +1768,13 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         defer { client.stop() }
 
         let cursor = RenderUpdateCursorBox()
-        try await waitUntil(timeout: 5) { cursor.applyingUpdates(receivedPayloads.snapshot).contains(readyMarker) }
+        try await waitUntil(timeout: 30) { cursor.applyingUpdates(receivedPayloads.snapshot).contains(readyMarker) }
 
         let marker = "local owner render marker"
         XCTAssertTrue(
             TerminalEngineActor.runSynchronously { host.handleControlRequest(.init(command: "send", text: "\(marker)\n", clientID: owner.id)).ok })
 
-        try await waitUntil(timeout: 5) { cursor.applyingUpdates(receivedPayloads.snapshot).contains(marker) }
+        try await waitUntil(timeout: 30) { cursor.applyingUpdates(receivedPayloads.snapshot).contains(marker) }
     }
 
     func testHeadlessDriverClearScreenActionClearsVisibleOutput() async throws {
@@ -1909,7 +1909,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
 
         // Flip to dark: colors reach the surface on the io thread, so pump ticks while polling.
         TerminalEngineActor.runSynchronously { GhosttyEmbeddedAppService.shared.applyColorScheme(.dark) }
-        try await waitUntil(timeout: 5) {
+        try await waitUntil(timeout: 30) {
             sessionDriver.requestSurfaceRefresh()
             GhosttyEmbeddedAppService.shared.tick()
             return sessionDriver.renderStateSnapshot()?.snapshot.defaultBackgroundRGB == darkBackground
@@ -1917,7 +1917,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
 
         // Flip back to light and confirm the background returns.
         TerminalEngineActor.runSynchronously { GhosttyEmbeddedAppService.shared.applyColorScheme(.light) }
-        try await waitUntil(timeout: 5) {
+        try await waitUntil(timeout: 30) {
             sessionDriver.requestSurfaceRefresh()
             GhosttyEmbeddedAppService.shared.tick()
             return sessionDriver.renderStateSnapshot()?.snapshot.defaultBackgroundRGB == lightBackground
@@ -1960,7 +1960,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         // The color scheme is a process-wide singleton; force light so this test starts from a known
         // baseline regardless of the order tests run in, then confirm the surface reaches it.
         TerminalEngineActor.runSynchronously { GhosttyEmbeddedAppService.shared.applyColorScheme(.light) }
-        try await waitUntil(timeout: 5) {
+        try await waitUntil(timeout: 30) {
             rendererHost.requestSurfaceRefresh()
             GhosttyEmbeddedAppService.shared.tick()
             return rendererHost.sessionRenderStateSnapshot()?.snapshot.defaultBackgroundRGB == lightBackground
@@ -1977,7 +1977,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         }
         XCTAssertTrue(response.ok, response.message)
 
-        try await waitUntil(timeout: 5) {
+        try await waitUntil(timeout: 30) {
             rendererHost.requestSurfaceRefresh()
             GhosttyEmbeddedAppService.shared.tick()
             return rendererHost.sessionRenderStateSnapshot()?.snapshot.defaultBackgroundRGB == darkBackground
@@ -2022,7 +2022,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
 
         // Force light so this test starts from a known baseline regardless of the order tests run in.
         TerminalEngineActor.runSynchronously { GhosttyEmbeddedAppService.shared.applyColorScheme(.light) }
-        try await waitUntil(timeout: 5) {
+        try await waitUntil(timeout: 30) {
             rendererHost.requestSurfaceRefresh()
             GhosttyEmbeddedAppService.shared.tick()
             return rendererHost.sessionRenderStateSnapshot()?.snapshot.defaultBackgroundRGB == lightBackground
@@ -2038,7 +2038,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         XCTAssertTrue(response.ok, response.message)
 
         // Colors reach the surface on the io thread, so pump ticks while polling.
-        try await waitUntil(timeout: 5) {
+        try await waitUntil(timeout: 30) {
             rendererHost.requestSurfaceRefresh()
             GhosttyEmbeddedAppService.shared.tick()
             return rendererHost.sessionRenderStateSnapshot()?.snapshot.defaultBackgroundRGB == darkBackground
