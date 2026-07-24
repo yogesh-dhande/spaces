@@ -43,6 +43,7 @@
 		7DDB293A89690CBA0099D136 /* AgentGroups.swift in Sources */ = {isa = PBXBuildFile; fileRef = CB9E795017B860ABC7458AE3 /* AgentGroups.swift */; };
 		80D3ABF883A2086A4640F3B2 /* DemoMode.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6F4FA0908BD2A07419E7AAD5 /* DemoMode.swift */; };
 		86DE89DD870097152C07726A /* AppAppearance.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11FEAC1705996DF60D174EFB /* AppAppearance.swift */; };
+		890842A7C996FCFF798FB056 /* TerminalFontSizeSettingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6B47F7663F6BEF7DBB35014D /* TerminalFontSizeSettingTests.swift */; };
 		8C4445C0E3B95A44BA7EEE21 /* ScreenshotStagingFlowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F9E6C2EA4A8629D32905544D /* ScreenshotStagingFlowTests.swift */; };
 		8D4631F6072D0D6F5FB8FC01 /* MobileAppVersion.swift in Sources */ = {isa = PBXBuildFile; fileRef = 684BF4A0996100451CA52A51 /* MobileAppVersion.swift */; };
 		8D7BDE377CE95CEA15E0F28F /* AgentsTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70794A5FB7ED310FA4568364 /* AgentsTabView.swift */; };
@@ -77,6 +78,7 @@
 		DFEA974255F4E847A69176ED /* SpacesTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6B6AD8F5E136746F49A212A1 /* SpacesTabView.swift */; };
 		E1AC38A01996EE501A1F0F05 /* BandPrimitives.swift in Sources */ = {isa = PBXBuildFile; fileRef = E211844B3CD4B88CDE16411F /* BandPrimitives.swift */; };
 		E26222105D277E714368D8C1 /* TerminalImageAttachments.swift in Sources */ = {isa = PBXBuildFile; fileRef = 79297BA89CDDB8E95545E9FB /* TerminalImageAttachments.swift */; };
+		E7ED7D59DF2C65BC86BE1E56 /* TerminalFontSizeStorage.swift in Sources */ = {isa = PBXBuildFile; fileRef = DCB861DE08F903AE3ED56ADF /* TerminalFontSizeStorage.swift */; };
 		E90E0BD172C314AB1A2422BB /* BrowserProxyRoutingTable.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0A56446BAD1906D81A4B8823 /* BrowserProxyRoutingTable.swift */; };
 		ECD7605414703F81C20D3C1F /* SpacesMobileAppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 35C5584696D86B15B55614E4 /* SpacesMobileAppModel.swift */; };
 		EF5A873F100F9A6B3757F99E /* spacesterminalcore in Frameworks */ = {isa = PBXBuildFile; productRef = 43EB21BA2206002F56560C15 /* spacesterminalcore */; };
@@ -131,6 +133,7 @@
 		5C920538A76B1EF14F680074 /* WorkspaceControlBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceControlBar.swift; sourceTree = "<group>"; };
 		684BF4A0996100451CA52A51 /* MobileAppVersion.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileAppVersion.swift; sourceTree = "<group>"; };
 		68ACEAFCA89C7E530880B3F0 /* StagedScreenshotStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StagedScreenshotStore.swift; sourceTree = "<group>"; };
+		6B47F7663F6BEF7DBB35014D /* TerminalFontSizeSettingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalFontSizeSettingTests.swift; sourceTree = "<group>"; };
 		6B6AD8F5E136746F49A212A1 /* SpacesTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacesTabView.swift; sourceTree = "<group>"; };
 		6E710F27AEEACD124B4C5ED8 /* TerminalImageAttachmentsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalImageAttachmentsTests.swift; sourceTree = "<group>"; };
 		6EEB37B2CC9ED6BDEB491044 /* DemoRecording */ = {isa = PBXFileReference; lastKnownFileType = folder; name = DemoRecording; path = Resources/DemoRecording; sourceTree = SOURCE_ROOT; };
@@ -169,6 +172,7 @@
 		C39C8CAB0348FE24E6F0A46D /* BrowserProxyTunnel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserProxyTunnel.swift; sourceTree = "<group>"; };
 		C6930FB499F3E9C3B13AA59E /* RowPrimitives.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RowPrimitives.swift; sourceTree = "<group>"; };
 		CB9E795017B860ABC7458AE3 /* AgentGroups.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentGroups.swift; sourceTree = "<group>"; };
+		DCB861DE08F903AE3ED56ADF /* TerminalFontSizeStorage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalFontSizeStorage.swift; sourceTree = "<group>"; };
 		E211844B3CD4B88CDE16411F /* BandPrimitives.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BandPrimitives.swift; sourceTree = "<group>"; };
 		E27B3DF6C14953F91F1A311D /* SpacesMobileTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = SpacesMobileTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		E8FE2BBCE61C8A226A4E5C39 /* SpacesMobileDemoModeUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacesMobileDemoModeUITests.swift; sourceTree = "<group>"; };
@@ -265,6 +269,7 @@
 				68ACEAFCA89C7E530880B3F0 /* StagedScreenshotStore.swift */,
 				C3768855D78AF654041E08AB /* TerminalComposerSheet.swift */,
 				7507CC71C61F95FB1D0F26DA /* TerminalDetailView.swift */,
+				DCB861DE08F903AE3ED56ADF /* TerminalFontSizeStorage.swift */,
 				79297BA89CDDB8E95545E9FB /* TerminalImageAttachments.swift */,
 				7CB657C9D6E4D2D2EA3DAD06 /* TerminalMarkdownArtifactView.swift */,
 				F92F892C7AB88FC7A037ABB6 /* TerminalTextArtifactView.swift */,
@@ -299,6 +304,7 @@
 				4AB35B6A91EFCEA885942088 /* SubscriptionStoreTests.swift */,
 				3C3A209B5AB578545E3F3D74 /* TerminalArtifactViewersTests.swift */,
 				4CDCD5118B25B0A1ACA33A12 /* TerminalComposerSendTests.swift */,
+				6B47F7663F6BEF7DBB35014D /* TerminalFontSizeSettingTests.swift */,
 				6E710F27AEEACD124B4C5ED8 /* TerminalImageAttachmentsTests.swift */,
 			);
 			path = Tests;
@@ -601,6 +607,7 @@
 				7CB275F461388D1B1B686182 /* TerminalComposerSheet.swift in Sources */,
 				246792578DBC4C17B7038206 /* TerminalDetailView.swift in Sources */,
 				B4B0A237C6F8325405C27F93 /* TerminalFlow.swift in Sources */,
+				E7ED7D59DF2C65BC86BE1E56 /* TerminalFontSizeStorage.swift in Sources */,
 				E26222105D277E714368D8C1 /* TerminalImageAttachments.swift in Sources */,
 				B476AD376F17B415C12E45F2 /* TerminalMarkdownArtifactView.swift in Sources */,
 				43857F33AFBE626C3EF5B3A6 /* TerminalTextArtifactView.swift in Sources */,
@@ -629,6 +636,7 @@
 				5E0A3983646DC39F85340B5C /* SubscriptionStoreTests.swift in Sources */,
 				636C2B8EB59BDDBE8707D1E1 /* TerminalArtifactViewersTests.swift in Sources */,
 				C89EA4905FBBFA2C7E358961 /* TerminalComposerSendTests.swift in Sources */,
+				890842A7C996FCFF798FB056 /* TerminalFontSizeSettingTests.swift in Sources */,
 				9D468643EDDB619AC44A5356 /* TerminalImageAttachmentsTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

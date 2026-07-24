@@ -28,6 +28,7 @@ struct TerminalDetailView: View {
     /// mode here, and a `.system` mode lets it track the OS trait, so observing it covers both an appearance
     /// setting flip and an OS switch — either way the live session is re-themed to match the app.
     @Environment(\.colorScheme) private var colorScheme
+    @AppStorage(TerminalFontSizeStorage.key) private var terminalFontSize: TerminalFontSize = .default
     private var e2eConfig: SpacesMobileE2EConfig { .shared }
     private var shouldCaptureRenderedText: Bool { e2eConfig.isEnabled && e2eConfig.matches(sessionID: session.id) }
     private var e2eCommandRequestPath: String? {
@@ -64,6 +65,7 @@ struct TerminalDetailView: View {
                         GhosttyRemoteTerminalView(
                             ownerEpoch: model.ownerRenderEpoch, endedRender: model.endedRender, fallbackText: model.visibleText,
                             isVisible: model.shouldPresentLiveSurface, acceptsInput: model.keepsTerminalInputSurfaceActive, isBusy: model.isBusy,
+                            fontSize: terminalFontSize,
                             onInputReadinessChanged: { ready in
                                 model.setInputSurfaceReady(ready)
                                 writeE2EEventIfNeeded(kind: "input_readiness", detail: ready ? "ready" : "pending")
