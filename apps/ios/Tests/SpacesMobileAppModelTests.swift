@@ -39,6 +39,33 @@
         }
     }
 
+    /// A backend whose `currentResolvedHost()` returns a fixed value instead of the default `nil`, so a
+    /// test can prove `SpacesMobileAppModel.updateBrowserRoutes` prefers the client's live-resolved host
+    /// over a stale paired-device record without needing a real `SpacesDeviceEndpointResolver` handshake.
+    /// Requests route through a closure exactly like `SpacesDeviceClosureBackend`; only the resolved-host
+    /// reporting differs.
+    private struct SpacesMobileFakeResolvedHostBackend: SpacesDeviceAPIBackend {
+        let resolvedHost: String?
+        let handler: @Sendable (SpacesDeviceAPIRequest) async throws -> SpacesDeviceAPIResponse
+
+        func makeRequestTransport() -> any SpacesDeviceAPIRequestTransport { SpacesMobileFakeRequestTransport(handler: handler) }
+
+        func openSessionStream(
+            request: SpacesDeviceAPIRequest, onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
+            onDisconnect: @escaping @MainActor (Error?) -> Void
+        ) async throws -> SpacesDeviceAPIStreamHandle {
+            throw SpacesDeviceAPIClientError.invalidEndpoint
+        }
+
+        func currentResolvedHost() async -> String? { resolvedHost }
+    }
+
+    private struct SpacesMobileFakeRequestTransport: SpacesDeviceAPIRequestTransport {
+        let handler: @Sendable (SpacesDeviceAPIRequest) async throws -> SpacesDeviceAPIResponse
+        func send(request: SpacesDeviceAPIRequest, timeout: Duration) async throws -> SpacesDeviceAPIResponse { try await handler(request) }
+        func close() async {}
+    }
+
     /// Lets the refresh-failure tests cross `refreshFailureAlertDelay` by advancing time rather than
     /// sleeping past it, so the assertions do not depend on how fast the machine runs them.
     private final class TestClock: @unchecked Sendable {
@@ -414,7 +441,7 @@
         /// thrown parse error gets swallowed and the link silently falls through to another branch.
         func testIncomingLinkRoutingClassifiesMalformedPairingShapedURLAsPairing() {
             let unsupportedVersion = URL(string: "spaces://pair?v=1&host=10.0.0.4&port=19000&nonce=n&code=c&fp=f&pv=3&av=1.0")!
-            let missingFields = URL(string: "spaces://pair?v=3")!
+            let missingFields = URL(string: "spaces://pair?v=4")!
 
             XCTAssertEqual(SpacesIncomingLinkRoute.route(for: unsupportedVersion), .pairing(unsupportedVersion))
             XCTAssertEqual(SpacesIncomingLinkRoute.route(for: missingFields), .pairing(missingFields))
@@ -422,7 +449,7 @@
 
         func testIncomingLinkRoutingClassifiesValidPairingURLAsPairing() {
             let link = SpacesDevicePairingLink(
-                host: "10.0.0.4", port: 19000, nonce: "nonce", code: "code", certificateFingerprint: "fp", name: "Mac Studio", protocolVersion: 3,
+                hosts: ["10.0.0.4"], port: 19000, nonce: "nonce", code: "code", certificateFingerprint: "fp", name: "Mac Studio", protocolVersion: 3,
                 appVersion: "1.0")
 
             XCTAssertEqual(SpacesIncomingLinkRoute.route(for: link.url), .pairing(link.url))
@@ -465,7 +492,7 @@
         func testPrepareScannedPairingLinkStagesLinkAndRaisesConnectionSettings() {
             let model = makeModel()
             let link = SpacesDevicePairingLink(
-                host: "10.0.0.4", port: 19000, nonce: "nonce", code: "code", certificateFingerprint: "fp", name: "Mac Studio", protocolVersion: 3,
+                hosts: ["10.0.0.4"], port: 19000, nonce: "nonce", code: "code", certificateFingerprint: "fp", name: "Mac Studio", protocolVersion: 3,
                 appVersion: "1.0")
 
             model.prepareScannedPairingLink(link.absoluteString)
@@ -634,7 +661,7 @@
                 ]))
             let recorder = SpacesMobileRequestRecorder()
             var settings = SpacesMobileConnectionSettings()
-            settings.host = "127.0.0.1"
+            settings.hosts = ["127.0.0.1"]
             settings.port = 47_847
             settings.certificateFingerprint = "fp-1"
             let client = SpacesDeviceAPIClient(settings: settings) { request in
@@ -648,8 +675,9 @@
             model.activeDeviceID = "device-1"
             model.pairedDevices = [
                 SpacesMobilePairedDeviceRecord(
-                    id: "device-1", name: "Studio", host: settings.host, port: settings.port, certificateFingerprint: settings.certificateFingerprint,
-                    createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z", lastSelectedAt: nil)
+                    id: "device-1", name: "Studio", hosts: settings.hosts, port: settings.port,
+                    certificateFingerprint: settings.certificateFingerprint, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z",
+                    lastSelectedAt: nil)
             ]
 
             await model.createWorkspace(
@@ -676,6 +704,43 @@
                 XCTAssertEqual(request?.url.absoluteString, "http://web.feature.localhost:47898/dashboard")
                 XCTAssertEqual(request?.authToken, target?.proxyAuthToken)
             }
+        }
+
+        /// The raw-byte service tunnel has to dial the address the command channel actually proved
+        /// reachable, not a possibly-stale persisted record — see `updateBrowserRoutes`'s doc comment.
+        /// The paired device record here still carries a stale LAN `activeHost`; the live client reports
+        /// a different (Tailscale) resolved host, and the routing table must end up pointing at that one.
+        func testMutationOverviewPrefersLiveResolvedHostOverStaleRecord() async {
+            let refreshedOverview = makeOverview(
+                featureAssignedPorts: [SpacesDeviceAssignedPort(name: "web", port: 3_000, url: "http://web.feature.localhost:3000")],
+                featureConfig: SpacesDeviceWorkspaceConfig(resolvedBrowserSessions: [
+                    SpacesDeviceBrowserSession(name: "Dashboard", url: "http://localhost:3000/dashboard")
+                ]))
+            var settings = SpacesMobileConnectionSettings()
+            settings.hosts = ["10.0.0.5", "100.64.0.5"]
+            settings.port = 47_847
+            settings.certificateFingerprint = "fp-1"
+            let backend = SpacesMobileFakeResolvedHostBackend(resolvedHost: "100.64.0.5") { _ in
+                SpacesDeviceAPIResponse(
+                    ok: true, message: "Created workspace.",
+                    result: .mutation(SpacesDeviceMutationResult(overview: refreshedOverview, workspaceID: "workspace-feature")))
+            }
+            let client = SpacesDeviceAPIClient(settings: settings, backend: backend)
+            let proxy = SpacesMobileBrowserProxy(port: UInt16.random(in: 49_152...65_500), installationID: settings.installationID)
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client, browserProxy: proxy)
+            model.activeDeviceID = "device-1"
+            model.pairedDevices = [
+                SpacesMobilePairedDeviceRecord(
+                    id: "device-1", name: "Studio", hosts: settings.hosts, port: settings.port,
+                    certificateFingerprint: settings.certificateFingerprint, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z",
+                    lastSelectedAt: nil, activeHost: "10.0.0.5")
+            ]
+
+            await model.createWorkspace(
+                projectID: "project-1", branch: "feature", baseBranch: "main", directoryName: nil, allowExistingBranchReuse: false)
+
+            let target = await proxy.routeTarget(forHost: "web.feature.localhost")
+            XCTAssertEqual(target?.host, "100.64.0.5")
         }
 
         func testRefreshUsesEmbeddedStatusWithoutSecondHandshake() async {
@@ -716,6 +781,84 @@
             XCTAssertTrue(model.isActiveDeviceBlocked)
             // Blocked: do not surface the incompatible daemon's stale workspace data.
             XCTAssertNil(model.overview)
+        }
+
+        /// The "Local network"/"Tailscale" label `ConnectionSettingsView` renders reads
+        /// `pairedDevices[...].activeHost`, but `recordActiveHost` (called by the resolver once it
+        /// learns a new winner) writes straight to the persisted store — a separate copy from this
+        /// in-memory snapshot. `performRefresh` must notice the live client's resolved host no longer
+        /// matches what `pairedDevices` holds and reload from the store, or the label would keep
+        /// showing the pre-failover address for the rest of the session.
+        func testRefreshRepublishesPairedDevicesWhenResolvedHostDiffersFromStaleRecord() async throws {
+            var settings = SpacesMobileConnectionSettings()
+            settings.hosts = ["10.0.0.5", "100.64.0.5"]
+            settings.port = 47_847
+            settings.certificateFingerprint = "SHA256:refresh-active-host-test"
+            settings.authToken = "token"
+            let upserted = SpacesMobileDeviceStore.upsert(settings: settings, name: "Studio")
+            let deviceID = try XCTUnwrap(upserted.devices.first?.id)
+            defer { _ = SpacesMobileDeviceStore.remove(deviceID: deviceID, fallbackSettings: SpacesMobileConnectionSettings()) }
+            // The resolver has already persisted the failover to the tailnet address (this is what a
+            // real `SpacesDeviceEndpointResolver.connect()` success does), but nothing has told this
+            // model's in-memory `pairedDevices` snapshot yet — it still holds the pre-failover value.
+            SpacesMobileDeviceStore.recordActiveHost("100.64.0.5", certificateFingerprint: "SHA256:refresh-active-host-test")
+
+            let overview = makeOverview(daemonStatus: daemonStatus(protocolVersion: SpacesWireProtocol.version))
+            let backend = SpacesMobileFakeResolvedHostBackend(resolvedHost: "100.64.0.5") { _ in
+                SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview))
+            }
+            let client = SpacesDeviceAPIClient(settings: settings, backend: backend)
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            model.activeDeviceID = deviceID
+            model.pairedDevices = [
+                SpacesMobilePairedDeviceRecord(
+                    id: deviceID, name: "Studio", hosts: settings.hosts, port: settings.port,
+                    certificateFingerprint: settings.certificateFingerprint, createdAt: "2026-01-01T00:00:00Z",
+                    updatedAt: "2026-01-01T00:00:00Z", lastSelectedAt: nil, activeHost: "10.0.0.5")
+            ]
+
+            await model.refresh()
+
+            XCTAssertEqual(model.pairedDevices.first(where: { $0.id == deviceID })?.activeHost, "100.64.0.5")
+        }
+
+        /// A refresh that observes no change between the live-resolved host and what `pairedDevices`
+        /// already holds must not reload from the store — the common steady-state case stays cheap.
+        func testRefreshDoesNotReloadPairedDevicesWhenResolvedHostMatchesRecord() async throws {
+            var settings = SpacesMobileConnectionSettings()
+            settings.hosts = ["10.0.0.5", "100.64.0.5"]
+            settings.port = 47_847
+            settings.certificateFingerprint = "SHA256:refresh-active-host-unchanged"
+            settings.authToken = "token"
+            defer {
+                // Safety net: if the assertion below ever fails because a reload *did* happen, `load()`
+                // auto-pairs an unmatched-but-paired settings value into a brand-new persisted record —
+                // clean that up too so a failing run here cannot leak state into later test runs.
+                for device in SpacesMobileDeviceStore.load(fallbackSettings: SpacesMobileConnectionSettings()).devices
+                where device.certificateFingerprint == settings.certificateFingerprint {
+                    _ = SpacesMobileDeviceStore.remove(deviceID: device.id, fallbackSettings: SpacesMobileConnectionSettings())
+                }
+            }
+
+            let overview = makeOverview(daemonStatus: daemonStatus(protocolVersion: SpacesWireProtocol.version))
+            let backend = SpacesMobileFakeResolvedHostBackend(resolvedHost: "10.0.0.5") { _ in
+                SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview))
+            }
+            let client = SpacesDeviceAPIClient(settings: settings, backend: backend)
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            model.activeDeviceID = "device-1"
+            let unchangedRecord = SpacesMobilePairedDeviceRecord(
+                id: "device-1", name: "Studio", hosts: settings.hosts, port: settings.port,
+                certificateFingerprint: settings.certificateFingerprint, createdAt: "2026-01-01T00:00:00Z",
+                updatedAt: "2026-01-01T00:00:00Z", lastSelectedAt: nil, activeHost: "10.0.0.5")
+            model.pairedDevices = [unchangedRecord]
+
+            await model.refresh()
+
+            // Nothing paired under this fingerprint exists in the real store, so a reload would have
+            // wiped `pairedDevices` down to whatever `SpacesMobileDeviceStore.load` actually persists —
+            // proving no reload happened at all, not merely that the value looks the same.
+            XCTAssertEqual(model.pairedDevices, [unchangedRecord])
         }
 
         // MARK: - Connection error tolerance
@@ -876,10 +1019,10 @@
         /// mid-run starts the clock over rather than letting the new connection inherit it.
         func testFailureRunDoesNotCarryAcrossAConnectionChange() async {
             // Resetting authentication rebuilds the client from `settings`, so the refresh after it runs
-            // against the real network transport rather than the fake. An empty host makes that refresh
-            // fail on the spot (`invalidEndpoint`) instead of dialing anything.
+            // against the real network transport rather than the fake. An empty candidate list makes that
+            // refresh fail on the spot (`invalidEndpoint`) instead of dialing anything.
             var settings = SpacesMobileConnectionSettings()
-            settings.host = ""
+            settings.hosts = []
             let client = SpacesDeviceAPIClient(settings: settings) { _ in
                 throw SpacesDeviceAPIClientError.requestFailed("Socket is not connected")
             }

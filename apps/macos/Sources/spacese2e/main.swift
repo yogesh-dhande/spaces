@@ -551,7 +551,7 @@ private struct MobileRequestCommand: ParsableCommand {
 
     func run() throws {
         let link = try pairingLink.map { try SpacesDevicePairingLink.parse($0) }
-        let resolvedHost = host ?? link?.host ?? "127.0.0.1"
+        let resolvedHost = host ?? link?.hosts.first ?? "127.0.0.1"
         guard let resolvedPort = port ?? link?.port else { throw ValidationError("Provide --port or a pairing link.") }
         guard (1...65_535).contains(resolvedPort) else { throw ValidationError("Port must be between 1 and 65535.") }
         guard let resolvedFingerprint = certificateFingerprint ?? link?.certificateFingerprint else {
@@ -2295,7 +2295,7 @@ private final class MobileServePairingWindowEmitter: @unchecked Sendable {
         nextPairingCode = nil
         lock.unlock()
 
-        let window = server.openPairingWindow(host: linkHost, name: "Spaces Standalone", code: code)
+        let window = server.openPairingWindow(hosts: [linkHost], name: "Spaces Standalone", code: code)
         print(
             "\(label)\thost=\(bindHost)\tport=\(server.listeningPort)\tpairing_link=\(window.linkString)\tpairing_code=\(window.code)\texpires_at=\(e2eISO8601Formatter.string(from: window.expiresAt))\tbundle=\(SpacesDeviceFirstPartyPolicy.allowedBundleID)"
         )
@@ -2709,7 +2709,9 @@ private final class TunnelChunkBox: @unchecked Sendable {
     }
 }
 
-private func mobileServePairingLinkHost(host: String) -> String { SpacesDeviceAPINetworkInterfaces.pairingLinkHost(boundHost: host) }
+private func mobileServePairingLinkHost(host: String) -> String {
+    SpacesDeviceAPINetworkInterfaces.pairingLinkHosts(boundHost: host).first ?? SpacesDeviceAPIDefaults.loopbackHost
+}
 
 private func profileShellQuoted(_ value: String) -> String {
     let escaped = value.replacingOccurrences(of: "'", with: #"'\"'\"'"#)

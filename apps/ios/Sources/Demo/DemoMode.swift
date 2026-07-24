@@ -38,8 +38,8 @@ enum SpacesMobileDemoDevice {
     /// it is never written to `SpacesMobileDeviceStore`.
     static func record() -> SpacesMobilePairedDeviceRecord {
         SpacesMobilePairedDeviceRecord(
-            id: id, name: name, host: host, port: port, certificateFingerprint: certificateFingerprint, createdAt: timestamp, updatedAt: timestamp,
-            lastSelectedAt: timestamp)
+            id: id, name: name, hosts: [host], port: port, certificateFingerprint: certificateFingerprint, createdAt: timestamp,
+            updatedAt: timestamp, lastSelectedAt: timestamp)
     }
 
     /// Connection settings for the synthetic device. `isPaired` is `true` (both a token and a
@@ -47,7 +47,7 @@ enum SpacesMobileDemoDevice {
     /// stays stable across the toggle.
     static func settings(installationID: String) -> SpacesMobileConnectionSettings {
         var settings = SpacesMobileConnectionSettings()
-        settings.host = host
+        settings.hosts = [host]
         settings.port = port
         settings.authToken = authToken
         settings.certificateFingerprint = certificateFingerprint

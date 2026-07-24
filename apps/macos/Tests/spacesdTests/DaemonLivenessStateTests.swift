@@ -34,6 +34,28 @@ import XCTest
             XCTAssertEqual(response.daemonStatus?.certificateFingerprint, "abc")
         }
 
+        /// Before the Device API's bound host is learned (a ping racing daemon startup), the ping must
+        /// report "no addresses known" rather than guessing — see `deviceAPIAddresses`'s "empty means
+        /// reported nothing" contract.
+        func testDeviceAPIAddressesEmptyBeforeBoundHostIsKnown() {
+            let state = DaemonLivenessState()
+
+            XCTAssertEqual(state.currentDeviceAPIAddresses(), [])
+            XCTAssertEqual(state.pingResponse().daemonStatus?.deviceAPIAddresses, [])
+        }
+
+        /// A pinned (non-wildcard) bound host is reported verbatim — same derivation
+        /// `SpacesDeviceAPINetworkInterfaces.pairingLinkHosts(boundHost:)` uses for a pairing link, so
+        /// this test needs no live-interface enumeration to be deterministic.
+        func testDeviceAPIAddressesReflectsPinnedBoundHostVerbatim() {
+            let state = DaemonLivenessState()
+
+            state.storeDeviceAPIBoundHost("192.168.1.50")
+
+            XCTAssertEqual(state.currentDeviceAPIAddresses(), ["192.168.1.50"])
+            XCTAssertEqual(state.pingResponse().daemonStatus?.deviceAPIAddresses, ["192.168.1.50"])
+        }
+
         func testPingRejectsWhileHandoffInProgress() {
             let state = DaemonLivenessState()
 
