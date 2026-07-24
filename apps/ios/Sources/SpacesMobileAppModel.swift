@@ -492,10 +492,11 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// The in-flight overview fetch, tagged with the identity it serves. `refresh()` joins it when
     /// the identity still matches, and re-fetches after it completes when the identity moved on.
     @ObservationIgnored private var refreshInFlight: (identity: Int, task: Task<Void, Never>)?
-    /// Consecutive failed overview fetches for one connection, gating the connection-error alert (see
-    /// `refreshFailuresBeforeAlert`). Tagged with the identity they were counted against so any change of
-    /// connection restarts the count without every reset site having to clear it.
-    @ObservationIgnored private var refreshFailureStreak: (identity: Int, count: Int) = (identity: 0, count: 0)
+    /// When the current run of failed overview fetches began, gating the connection-error alert (see
+    /// `refreshFailureAlertDelay`). Tagged with the connection identity it was gathered against, so any
+    /// change of connection restarts the run without every reset site having to clear it. `nil` once a
+    /// refresh succeeds.
+    @ObservationIgnored private var refreshFailureStreak: (identity: Int, startedAt: ContinuousClock.Instant)?
     /// On-device loopback reverse proxy WKWebView browser sessions load through. Owned for the app's
     /// lifetime (its installation identity is stable across device switches), started/stopped by
     /// `RootTabView`'s scene-phase observation.
@@ -519,10 +520,11 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// unreachable device would cost attempts × (interval + request timeout), several times the stated
     /// budget. Injectable so tests can shrink it instead of sleeping through the production wait.
     @ObservationIgnored private let daemonUpdateTimeout: Duration
-    /// Consecutive failed overview fetches before the connection-error alert is raised. Three, against
-    /// the overview poll's two-second interval, keeps a self-healing blip silent while still reporting a
-    /// device that is actually unreachable within a few seconds.
-    private static let refreshFailuresBeforeAlert = 3
+    /// How long overview fetches must keep failing before the connection-error alert is raised (production
+    /// default 5s). Long enough to cover a blip and the poll's retry two seconds later, short enough that
+    /// a device that is actually unreachable is reported promptly. Injectable so tests can shrink it
+    /// instead of sleeping through the production wait.
+    @ObservationIgnored private let refreshFailureAlertDelay: Duration
 
     init() {
         #if DEBUG
@@ -537,6 +539,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         browserProxy = SpacesMobileBrowserProxy(installationID: deviceState.settings.installationID, deviceName: deviceName)
         daemonUpdatePollInterval = .seconds(3)
         daemonUpdateTimeout = .seconds(30)
+        refreshFailureAlertDelay = .seconds(5)
         // The real settings are persisted regardless of Demo Mode; the demo device is never written to
         // disk, so a launch that lands in Demo Mode still keeps the real records and settings intact.
         SpacesMobileSettingsStore.save(deviceState.settings)
@@ -566,7 +569,8 @@ private enum SpacesMobileMutationTimeoutRecovery {
 
     init(
         settings: SpacesMobileConnectionSettings, bridgeClient: SpacesDeviceAPIClient, browserProxy: SpacesMobileBrowserProxy? = nil,
-        daemonUpdatePollInterval: Duration = .seconds(3), daemonUpdateTimeout: Duration = .seconds(30)
+        daemonUpdatePollInterval: Duration = .seconds(3), daemonUpdateTimeout: Duration = .seconds(30),
+        refreshFailureAlertDelay: Duration = .seconds(5)
     ) {
         self.settings = settings
         pairedDevices = []
@@ -577,6 +581,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         self.browserProxy = browserProxy ?? SpacesMobileBrowserProxy(installationID: settings.installationID)
         self.daemonUpdatePollInterval = daemonUpdatePollInterval
         self.daemonUpdateTimeout = daemonUpdateTimeout
+        self.refreshFailureAlertDelay = refreshFailureAlertDelay
     }
 
     /// The workspaces this client lists: neither archived nor hidden, matching the Mac sidebar's
@@ -779,6 +784,9 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// overwrite the reset state the identity change just established.
     private func performRefresh(identity: Int) async {
         isLoading = true
+        // When this attempt began, not when it failed: a request that burns its whole timeout against an
+        // unreachable device has already been failing for that long by the time it throws.
+        let attemptStartedAt = ContinuousClock.now
         defer {
             isLoading = false
             refreshInFlight = nil
@@ -798,7 +806,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
             self.overview = acceptedOverview
             connectionNotice = nil
             errorMessage = nil
-            refreshFailureStreak = (identity: identity, count: 0)
+            refreshFailureStreak = nil
         } catch is CancellationError { return } catch {
             guard identity == overviewIdentity else { return }
             // The overview did not decode (a wire-incompatible daemon) or the device is unreachable. The
@@ -825,23 +833,25 @@ private enum SpacesMobileMutationTimeoutRecovery {
             // rather than only at the call sites that start a refresh. An authentication failure above
             // still surfaces: that is not an outage and does not resolve itself when the daemon returns.
             guard !isApplyingDaemonUpdate else { return }
-            // The overview poll runs every two seconds, and a single failed round trip is routinely
-            // recoverable — a Wi-Fi blip, or a socket the OS dropped out from under the app. Raising the
-            // modal connection alert on the first failure interrupts the user for something that heals
-            // itself before they can read it, so the alert waits for a run of failures. A device that is
-            // genuinely unreachable keeps failing and surfaces within a few seconds. User-initiated work
-            // (mutations, deep links) does not go through here: it still reports on its first failure.
-            refreshFailureStreak = (identity: identity, count: consecutiveRefreshFailures(identity: identity) + 1)
-            guard refreshFailureStreak.count >= Self.refreshFailuresBeforeAlert else { return }
+            // A single failed round trip is routinely recoverable — a Wi-Fi blip, or a socket the OS
+            // dropped out from under the app while it was suspended — and the poll retries every two
+            // seconds, so raising the modal alert on the first one interrupts the user for something that
+            // heals itself before they can read it. The alert instead waits until failures have persisted
+            // for `refreshFailureAlertDelay`.
+            //
+            // Measured in wall-clock time rather than failure count because the two kinds of failure are
+            // not comparable in duration: a dead socket throws immediately, while an unreachable host
+            // burns the request's full eight-second timeout (twice, counting the compatibility handshake
+            // above) before it throws even once. Counting attempts would report the fast case in a few
+            // seconds and the slow case only after a minute; timing the run reports both within one
+            // window. User-initiated work (mutations, deep links) does not come through here — it still
+            // reports on its first failure.
+            let streakStartedAt = refreshFailureStreak?.identity == identity ? refreshFailureStreak?.startedAt : nil
+            let startedAt = streakStartedAt ?? attemptStartedAt
+            refreshFailureStreak = (identity: identity, startedAt: startedAt)
+            guard ContinuousClock.now - startedAt >= refreshFailureAlertDelay else { return }
             errorMessage = error.localizedDescription
         }
-    }
-
-    /// Failures already counted for `identity`. A streak recorded against a different connection is
-    /// discarded rather than carried over: a device switch, removal, auth reset, or Demo Mode toggle
-    /// bumps `overviewIdentity`, and the new connection starts with a clean slate.
-    private func consecutiveRefreshFailures(identity: Int) -> Int {
-        refreshFailureStreak.identity == identity ? refreshFailureStreak.count : 0
     }
 
     /// Requests the active device's daemon exec-in-place handoff: it quiesces sessions, applies any
