@@ -903,17 +903,20 @@ private enum SpacesMobileMutationTimeoutRecovery {
             return
         }
 
-        // Timed out. Do not invent a failure message: a slow restart and a refused handoff both simply
-        // land back on the banner, and a final refresh lets whatever is actually true render (including
-        // a real connection error at that point).
+        // Timed out. Drop the progress notice and re-enable the action, leaving the banner showing the
+        // last thing the device actually said — a slow restart and a refused handoff look identical from
+        // here, and neither is worth inventing a failure message for.
+        //
+        // Deliberately does not reconcile with a refresh. Against a device that is still down, that
+        // fetch would take the ordinary failure path — clearing the status the banner renders from and
+        // raising a connection error — which is the opposite of leaving the warning in place. It cannot
+        // run under the expected-outage suppression either, because that keys off the same flag this
+        // path has to release to re-enable the button. Releasing the flag resumes the overview poll,
+        // which reconciles on its own cadence and reports a genuinely unreachable device the ordinary
+        // way, so nothing is left stale.
         guard identity == overviewIdentity else { return }
         connectionNotice = nil
-        // Release the in-flight flag before reconciling rather than letting the `defer` do it after: the
-        // update attempt is over at the deadline, but this refresh is an ordinary overview fetch that
-        // against a still-unreachable device costs its own request timeouts. Holding the flag across it
-        // would keep the Update Daemon button disabled well past the budget the poll just enforced.
         isApplyingDaemonUpdate = false
-        await refresh()
     }
 
     private func applyCompatibility(_ status: TerminalServiceDaemonStatus) {

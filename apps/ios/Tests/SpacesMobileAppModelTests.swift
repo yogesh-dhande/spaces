@@ -805,12 +805,18 @@
             let model = SpacesMobileAppModel(
                 settings: settings, bridgeClient: client, daemonUpdatePollInterval: .milliseconds(1), daemonUpdateTimeout: budget)
 
+            // Establish the device's state first, the way a real session would before the user taps.
+            await model.refresh()
+            XCTAssertTrue(model.daemonUpdatePending, "precondition: the device reports a staged update")
+
             let elapsed = await ContinuousClock().measure { await model.requestDaemonUpdate() }
 
             XCTAssertNil(model.connectionNotice, "a timed-out poll must not invent a failure message")
             XCTAssertNil(model.errorMessage)
-            XCTAssertFalse(model.isApplyingDaemonUpdate)
-            // Still pending: the final refresh renders what is actually true rather than a stuck notice.
+            XCTAssertFalse(model.isApplyingDaemonUpdate, "the action is usable again once the budget is spent")
+            // The banner is left showing the last thing the device said, rather than being cleared or
+            // replaced by a connection error, because a slow restart is indistinguishable from a refused
+            // one from here.
             XCTAssertTrue(model.daemonUpdatePending)
             let daemonStatusAttempts = await recorder.snapshot().filter { $0.commandName == "daemonStatus" }.count
             XCTAssertGreaterThanOrEqual(daemonStatusAttempts, 1, "the poll must probe at least once before giving up")
@@ -818,6 +824,43 @@
             // generous slack keeps this from flaking on a loaded machine while still failing an
             // implementation that polls a fixed number of times (which would run several times longer).
             XCTAssertLessThan(elapsed, budget + probeDuration + .milliseconds(600), "the poll must stop on its time budget")
+        }
+
+        /// A device that never comes back leaves the warning in place: the update gives up, re-enables the
+        /// action, and reports nothing. Reconciling with a refresh here would do the opposite — against a
+        /// device that is still down it clears the status the banner renders from and raises a connection
+        /// error, and it cannot run under the expected-outage suppression because that keys off the flag
+        /// this path has to release to re-enable the button.
+        func testATimedOutUpdateLeavesTheWarningInPlaceWithoutAnError() async {
+            let settings = SpacesMobileConnectionSettings()
+            let overviewCounter = SpacesMobilePollCounter()
+            let blockingStaged = daemonStatus(protocolVersion: SpacesWireProtocol.version - 1, installedVersion: "2.0.0")
+            let overview = makeOverview(daemonStatus: blockingStaged)
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                switch request.commandName {
+                case "requestDaemonRestart": return SpacesDeviceAPIResponse(ok: true, message: "ok")
+                case "overview":
+                    // One good read to establish state; the device is unreachable from then on.
+                    guard await overviewCounter.increment() == 1 else {
+                        return SpacesDeviceAPIResponse(ok: false, message: "The device is unreachable.")
+                    }
+                    return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview))
+                default: return SpacesDeviceAPIResponse(ok: false, message: "The device is unreachable.")
+                }
+            }
+            let model = SpacesMobileAppModel(
+                settings: settings, bridgeClient: client, daemonUpdatePollInterval: .milliseconds(10), daemonUpdateTimeout: .milliseconds(50))
+
+            await model.refresh()
+            XCTAssertTrue(model.isActiveDeviceBlocked, "precondition: the device is blocked with an update to apply")
+
+            await model.requestDaemonUpdate()
+
+            XCTAssertNotNil(model.daemonStatus, "the banner must survive a daemon that never came back")
+            XCTAssertTrue(model.isActiveDeviceBlocked, "an unreturned daemon leaves the device blocked, not silently usable")
+            XCTAssertNil(model.errorMessage, "a slow restart and a refused one look the same here; neither is a reported failure")
+            XCTAssertNil(model.connectionNotice)
+            XCTAssertFalse(model.isApplyingDaemonUpdate, "the action is usable again so the user can retry")
         }
 
         /// The handshake fallback clears the daemon status when it cannot reach the device, which leaves
