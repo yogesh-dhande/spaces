@@ -33,7 +33,7 @@ on:
         required: true
         type: string
       version:
-        description: "Spaces version, e.g. 0.5.2 (stable) or 0.5.1.20260725 (nightly)"
+        description: "Spaces version, e.g. 0.5.2 (stable) or 0.5.1.202607250900 (nightly)"
         required: true
         type: string
       build:
@@ -41,7 +41,7 @@ on:
         required: true
         type: string
       release-tag:
-        description: "GitHub release tag to create/update, e.g. v0.5.2 or v0.5.1.20260725"
+        description: "GitHub release tag to create/update, e.g. v0.5.2 or v0.5.1.202607250900"
         required: true
         type: string
 

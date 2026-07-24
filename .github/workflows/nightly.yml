@@ -1,17 +1,17 @@
 # Cut a nightly Spaces build once a day (or on demand) from the tip of main.
 #
-# Nightly versions are 4 dotted numeric components (<latest stable version>.<YYYYMMDD>, e.g.
-# 0.5.1.20260725) rather than a "-nightly" suffix on the stable version. SpacesWireProtocol
+# Nightly versions are 4 dotted numeric components (<latest stable version>.<YYYYMMDDHHMM> in UTC,
+# e.g. 0.5.1.202607250900) rather than a "-nightly" suffix on the stable version. SpacesWireProtocol
 # .isVersion (apps/macos/Sources/spacesterminalcore/SpacesWireProtocol.swift) compares versions by
 # splitting on "." and mapping any non-numeric component to 0, so a suffixed string like
 # "0.5.1-nightly" would compare as if every component past the numeric prefix were 0 — sorting
 # BELOW the 0.5.1 release it was built from. A 4th numeric component sorts correctly instead.
 #
-# The CFBundleVersion (build number) is separate from the version string above and is
-# YYYYMMDDHHMM in UTC, not a run number: Sparkle decides "is this update newer" by comparing
-# sparkle:version (CFBundleVersion), and a manual workflow_dispatch can produce a second nightly on
-# the same UTC day sharing the same <version>. Minute-precision build numbers are what makes the
-# second same-day nightly still look newer to Sparkle.
+# The same UTC timestamp is also the CFBundleVersion, which is what Sparkle compares to decide
+# whether an update is newer. Both carry minute precision because a manual workflow_dispatch can
+# cut a second nightly on a day the schedule already ran: two builds sharing a marketing version
+# would update through Sparkle but leave the daemon, which compares marketing versions to spot a
+# staged build, running the earlier binary.
 #
 # The actual build (signing, packaging, notarization, GitHub Release, Sparkle appcast, website
 # deploy) lives in release-build.yml, the same reusable workflow release.yml calls for the stable
@@ -48,14 +48,20 @@ jobs:
         run: |
           set -euo pipefail
 
-          latest_stable_tag="$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n1)"
+          # `|| true` on both pipelines below: git's tag globs are fnmatch and cannot express
+          # "exactly three components", so the component count is enforced by grep -- which exits
+          # 1 when nothing matches. Under `set -euo pipefail` that status propagates out of the
+          # command substitution and kills the step, so the very first nightly run (no nightly
+          # tags yet) would die here, and the explicit "no stable tag" error below could never
+          # print. An empty result is a real answer for both, and each is handled as one.
+          latest_stable_tag="$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n1 || true)"
           if [[ -z "$latest_stable_tag" ]]; then
             echo "::error::No stable release tag (v<major>.<minor>.<patch>) found; nightly has nothing to version off of." >&2
             exit 1
           fi
           latest_stable_version="${latest_stable_tag#v}"
 
-          newest_nightly_tag="$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*.[0-9]*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n1)"
+          newest_nightly_tag="$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*.[0-9]*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n1 || true)"
 
           build_needed=true
           if [[ "${{ github.event_name }}" == "schedule" && -n "$newest_nightly_tag" ]]; then
@@ -71,8 +77,15 @@ jobs:
           fi
           echo "build-needed=$build_needed" >> "$GITHUB_OUTPUT"
 
-          version="${latest_stable_version}.$(date -u +%Y%m%d)"
-          build="$(date -u +%Y%m%d%H%M)"
+          # One UTC timestamp is both the version's fourth component and the build number. Minute
+          # precision rather than a plain date because two nightlies can be cut on the same day
+          # (a manual dispatch after the scheduled run): sharing a marketing version would let
+          # Sparkle install the second build while the daemon, which compares marketing versions
+          # to decide whether a newer build is staged, saw no change and kept running the first
+          # build's binary until some later restart.
+          stamp="$(date -u +%Y%m%d%H%M)"
+          version="${latest_stable_version}.${stamp}"
+          build="$stamp"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "build=$build" >> "$GITHUB_OUTPUT"
           echo "release-tag=v$version" >> "$GITHUB_OUTPUT"
@@ -105,7 +118,9 @@ jobs:
         run: |
           set -euo pipefail
 
-          nightly_tags="$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*.[0-9]*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | sort -V)"
+          # `|| true` for the same reason as the plan job: no matching tags is an answer, not a
+          # failure, and grep's exit 1 would otherwise kill the step under pipefail.
+          nightly_tags="$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*.[0-9]*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | sort -V || true)"
           stale_tags="$(printf '%s\n' "$nightly_tags" | head -n -7)"
 
           if [[ -z "$stale_tags" ]]; then

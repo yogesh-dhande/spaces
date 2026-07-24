@@ -14,7 +14,7 @@ description: Prepare and publish a Spaces release through the repository's tag-t
 
 ## Suggest and confirm a tag
 
-1. Compare the version in `apps/macos/AppVersion.plist`, the highest published stable Spaces version, and the user-visible changes since the preceding release. The nightly channel publishes prereleases tagged with a fourth numeric component (`v0.5.1.20260725`); ignore them when picking a stable version, and never tag a stable release in that form — `release.yml` excludes it.
+1. Compare the version in `apps/macos/AppVersion.plist`, the highest published stable Spaces version, and the user-visible changes since the preceding release. The nightly channel publishes prereleases tagged with a fourth numeric component (`v0.5.1.202607250900`); ignore them when picking a stable version, and never tag a stable release in that form — `release.yml` excludes it.
 2. Suggest one SemVer tag in `vMAJOR.MINOR.PATCH` form. Explain briefly whether the scope supports a patch, minor, or major increment.
 3. Show the exact tag and commit SHA that would be tagged.
 4. Ask the user for explicit confirmation before creating or pushing the tag. Do not treat a general request to make a release as confirmation of the suggested tag.

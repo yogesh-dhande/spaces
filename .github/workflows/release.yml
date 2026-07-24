@@ -1,7 +1,7 @@
 # Cut a stable Spaces release when a version tag is pushed.
 #
 # Trigger: push a tag matching v* (e.g. v0.3.0), excluding the 4-component tags nightly.yml cuts
-# (e.g. v0.5.1.20260725). A stable tag like v0.5.1 has two dots and never matches a pattern that
+# (e.g. v0.5.1.202607250900). A stable tag like v0.5.1 has two dots and never matches a pattern that
 # requires three, so a nightly release/tag can never re-enter the stable pipeline through this
 # trigger.
 #
