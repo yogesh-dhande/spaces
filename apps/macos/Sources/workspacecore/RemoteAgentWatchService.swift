@@ -36,6 +36,12 @@ import spacesdevicecore
 
     private var streams: [String: any RemoteAgentOverviewStreamHandle] = [:]
     private var connecting: Set<String> = []
+    /// Devices whose stream dropped while their connect was still in flight. The transport starts the
+    /// receive loop before it hands the handle back, so a disconnect can land before `openStream`
+    /// records the stream; recording it here is what makes that connect result discard the handle it
+    /// is about to store. Without it the dead handle is cached, `reconcile` skips the device forever
+    /// because it looks connected, and the watch is silently lost for the life of the daemon.
+    private var disconnectedWhileConnecting: Set<String> = []
     /// Per-device baseline: watched child terminal session id → last-seen row. Retained across
     /// disconnects and mirrored to `agent_remote_watch_baselines` on every change, so the first
     /// listing after a reconnect — or after a daemon restart, which `start()` seeds from the persisted
@@ -180,6 +186,7 @@ import spacesdevicecore
         for (_, client) in streams { client.stop() }
         streams.removeAll()
         connecting.removeAll()
+        disconnectedWhileConnecting.removeAll()
         snapshots.removeAll()
         listingInFlight.removeAll()
         listingQueued.removeAll()
@@ -313,8 +320,12 @@ import spacesdevicecore
                 self.logError("spacesd remote_agent_watch device=\(deviceID) unpaired dropping_edges\n")
                 await self.dropAllEdges(deviceID: deviceID)
                 self.connecting.remove(deviceID)
+                self.disconnectedWhileConnecting.remove(deviceID)
             case .unavailable(let reason):
                 self.connecting.remove(deviceID)
+                // A drop recorded against this failed attempt must not outlive it, or it would discard
+                // the next attempt's healthy handle.
+                self.disconnectedWhileConnecting.remove(deviceID)
                 self.logError("spacesd remote_agent_watch device=\(deviceID) connect_unavailable reason=\(reason) scheduling_retry\n")
                 self.scheduleReconnect()
             case .connected(let handle):
@@ -323,8 +334,18 @@ import spacesdevicecore
                 // in the window before the stream is recorded.
                 let stillWatched = await self.deviceIsStillWatched(deviceID)
                 self.connecting.remove(deviceID)
+                let droppedWhileConnecting = self.disconnectedWhileConnecting.remove(deviceID) != nil
                 guard !self.isStopped, stillWatched else {
                     handle.stop()
+                    return
+                }
+                guard !droppedWhileConnecting else {
+                    // The stream this connect opened already dropped, so the handle is dead. Retaining
+                    // it would leave the device looking connected to every later reconcile while no
+                    // signal could ever arrive again; retry instead, the same as any dropped stream.
+                    handle.stop()
+                    self.logError("spacesd remote_agent_watch device=\(deviceID) stream_disconnected_while_connecting scheduling_retry\n")
+                    self.scheduleReconnect()
                     return
                 }
                 self.streams[deviceID] = handle
@@ -502,11 +523,20 @@ import spacesdevicecore
     }
 
     private func handleDisconnected(deviceID: String, error: (any Error)?) {
-        // Ignore disconnects for streams we intentionally removed in reconcile.
-        guard streams[deviceID] != nil else { return }
+        guard let disconnectedStream = streams[deviceID] else {
+            // No stream recorded. Either the connect is still in flight — record the drop so its
+            // result discards the dead handle instead of caching it — or reconcile removed the
+            // stream on purpose, which is not a failure and needs no retry.
+            if connecting.contains(deviceID) { disconnectedWhileConnecting.insert(deviceID) }
+            return
+        }
         // The baseline is deliberately kept: the reconnect diffs its first listing against it so
         // transitions from the outage window are delivered instead of silently re-seeded.
+        // Stop the dropped stream before dropping the reference: its pinned-TLS connection is released
+        // only by an explicit cancel, so a bare `nil` would orphan the connection and its dispatch queue
+        // for the life of the daemon while the reconnect mints a fresh one.
         streams[deviceID] = nil
+        disconnectedStream.stop()
         guard !isStopped else { return }
         logError(
             "spacesd remote_agent_watch device=\(deviceID) stream_disconnected error=\(error?.localizedDescription ?? "closed") scheduling_retry\n")

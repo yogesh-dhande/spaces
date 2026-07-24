@@ -20,6 +20,7 @@ final class RemoteAgentWatchServiceTests: XCTestCase {
         private var connections: [(onSignal: @Sendable () -> Void, onDisconnect: @Sendable ((any Error)?) -> Void)] = []
         private var listing: [SpacesDeviceAgentSessionRow] = []
         private var listGate: DispatchSemaphore?
+        private var connectGate: DispatchSemaphore?
         private var listCallCount = 0
         private var pendingListFailures = 0
         private var pendingUnpairedFailures = 0
@@ -31,7 +32,12 @@ final class RemoteAgentWatchServiceTests: XCTestCase {
                 connect: { _, onSignal, onDisconnect in
                     self.lock.lock()
                     self.connections.append((onSignal: onSignal, onDisconnect: onDisconnect))
+                    let gate = self.connectGate
+                    self.connectGate = nil
                     self.lock.unlock()
+                    // Held open so a test can deliver this stream's disconnect before the handle is
+                    // ever returned, which is the window the connect-time drop race lives in.
+                    gate?.wait()
                     return .connected(FakeStreamHandle())
                 },
                 listAgentSessions: { _ in
@@ -87,6 +93,14 @@ final class RemoteAgentWatchServiceTests: XCTestCase {
         func setListGate(_ gate: DispatchSemaphore?) {
             lock.lock()
             listGate = gate
+            lock.unlock()
+        }
+
+        /// Blocks the next `connect` after it registers its callbacks and before it returns the
+        /// handle, so a test owns the ordering of a disconnect against that connect's result.
+        func setConnectGate(_ gate: DispatchSemaphore?) {
+            lock.lock()
+            connectGate = gate
             lock.unlock()
         }
 
@@ -214,6 +228,41 @@ final class RemoteAgentWatchServiceTests: XCTestCase {
             (try? store.agentRemoteWatchBaselines())?["device-1"]?["child-1"]?.status == baselineStatus
         }
         return (service, store)
+    }
+
+    /// A stream that drops while its own connect is still in flight must not leave the device
+    /// looking connected. The transport starts the receive loop before it hands the handle back, so
+    /// the disconnect can land first; retaining the handle anyway would make every later reconcile
+    /// skip the device as already-streaming while no signal could ever arrive again, silently losing
+    /// the watch for the life of the daemon.
+    @MainActor func testStreamDroppedWhileConnectingIsNotRetainedAndReconnects() throws {
+        let (store, path) = try makeStoreAndPath()
+        try store.insertAgentRemoteSubscription(subscriberTerminalSessionID: "sub-1", deviceID: "device-1", agentSessionID: "child-1", createdAt: "t")
+        let transport = FakeTransport()
+        transport.setListing([makeRow(status: AgentWindowStatus.spinning.rawValue)])
+        let recorder = DeliveryRecorder()
+
+        // Hold the first connect open after it registers its callbacks, so the disconnect below is
+        // delivered strictly before the handle it belongs to is returned.
+        let connectGate = DispatchSemaphore(value: 0)
+        transport.setConnectGate(connectGate)
+
+        let service = RemoteAgentWatchService(
+            databasePath: path, transport: transport.transport, deliver: { sessionID, line in recorder.record(sessionID, line) }, logError: { _ in })
+        service.reconnectDelay = .milliseconds(10)
+        defer { service.stop() }
+        service.start()
+
+        try waitUntil(message: "connect was never attempted") { transport.connectionCount == 1 }
+        transport.fireDisconnect(connection: 0)
+        try waitUntil(message: "the connect-time disconnect was never processed") { service.debugStreamingDeviceIDs.isEmpty }
+        connectGate.signal()
+
+        // The dead handle must be discarded rather than recorded, and the retry must reopen the
+        // stream on a fresh connect.
+        try waitUntil(message: "the dropped stream was retained or never reconnected") {
+            transport.connectionCount == 2 && service.debugStreamingDeviceIDs == ["device-1"]
+        }
     }
 
     /// A watched child that goes blocked while the stream is down must be reported after the
