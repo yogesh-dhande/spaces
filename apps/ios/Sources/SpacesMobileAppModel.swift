@@ -492,6 +492,16 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// The in-flight overview fetch, tagged with the identity it serves. `refresh()` joins it when
     /// the identity still matches, and re-fetches after it completes when the identity moved on.
     @ObservationIgnored private var refreshInFlight: (identity: Int, task: Task<Void, Never>)?
+    /// When the current run of failed overview fetches began, gating the connection-error alert (see
+    /// `refreshFailureAlertDelay`). Tagged with the connection identity it was gathered against, so any
+    /// change of connection restarts the run without every reset site having to clear it. `nil` once a
+    /// refresh succeeds.
+    @ObservationIgnored private var refreshFailureStreak: (identity: Int, startedAt: ContinuousClock.Instant)?
+    /// Bumped every time the app stops watching this connection (see `noteConnectionMonitoringPaused`).
+    /// A refresh attempt captures it at the start and records nothing about failure timing if it changed,
+    /// because an attempt spanning a pause has no meaningful duration: the clock keeps advancing while
+    /// the app is suspended or idle, so most of what it measured is time nothing was being watched.
+    @ObservationIgnored private var connectionMonitoringGeneration = 0
     /// On-device loopback reverse proxy WKWebView browser sessions load through. Owned for the app's
     /// lifetime (its installation identity is stable across device switches), started/stopped by
     /// `RootTabView`'s scene-phase observation.
@@ -515,6 +525,11 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// unreachable device would cost attempts × (interval + request timeout), several times the stated
     /// budget. Injectable so tests can shrink it instead of sleeping through the production wait.
     @ObservationIgnored private let daemonUpdateTimeout: Duration
+    /// How long overview fetches must keep failing before the connection-error alert is raised (production
+    /// default 5s). Long enough to cover a blip and the poll's retry two seconds later, short enough that
+    /// a device that is actually unreachable is reported promptly. Injectable so tests can shrink it
+    /// instead of sleeping through the production wait.
+    @ObservationIgnored private let refreshFailureAlertDelay: Duration
 
     init() {
         #if DEBUG
@@ -529,6 +544,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         browserProxy = SpacesMobileBrowserProxy(installationID: deviceState.settings.installationID, deviceName: deviceName)
         daemonUpdatePollInterval = .seconds(3)
         daemonUpdateTimeout = .seconds(30)
+        refreshFailureAlertDelay = .seconds(5)
         // The real settings are persisted regardless of Demo Mode; the demo device is never written to
         // disk, so a launch that lands in Demo Mode still keeps the real records and settings intact.
         SpacesMobileSettingsStore.save(deviceState.settings)
@@ -558,7 +574,8 @@ private enum SpacesMobileMutationTimeoutRecovery {
 
     init(
         settings: SpacesMobileConnectionSettings, bridgeClient: SpacesDeviceAPIClient, browserProxy: SpacesMobileBrowserProxy? = nil,
-        daemonUpdatePollInterval: Duration = .seconds(3), daemonUpdateTimeout: Duration = .seconds(30)
+        daemonUpdatePollInterval: Duration = .seconds(3), daemonUpdateTimeout: Duration = .seconds(30),
+        refreshFailureAlertDelay: Duration = .seconds(5)
     ) {
         self.settings = settings
         pairedDevices = []
@@ -569,6 +586,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         self.browserProxy = browserProxy ?? SpacesMobileBrowserProxy(installationID: settings.installationID)
         self.daemonUpdatePollInterval = daemonUpdatePollInterval
         self.daemonUpdateTimeout = daemonUpdateTimeout
+        self.refreshFailureAlertDelay = refreshFailureAlertDelay
     }
 
     /// The workspaces this client lists: neither archived nor hidden, matching the Mac sidebar's
@@ -721,6 +739,20 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// Stops the loopback browser proxy and all live tunnels. Call when the app enters the background.
     func browserProxyStop() { Task { await browserProxy.stop() } }
 
+    /// Ends the current run of failed refreshes because the app stopped watching this connection — it
+    /// backgrounded, or the overview poll paused (a terminal or browser detail opened, another tab took
+    /// over, the device became unpaired). The alert gate reads wall-clock time between failures, and
+    /// nothing polls during a pause, so a failure recorded before it and one recorded after are far apart
+    /// with no evidence of anything in between. Without this, that pair reads as a long-running outage
+    /// and the first blip on the way back raises the alert — the very interruption the gate exists to
+    /// prevent. Attempts already in flight are covered too: they resume with a start time from before the
+    /// pause, so `performRefresh` drops their failure timing rather than letting it rebuild the run this
+    /// just ended.
+    func noteConnectionMonitoringPaused() {
+        refreshFailureStreak = nil
+        connectionMonitoringGeneration += 1
+    }
+
     /// The URL a `WKWebView` should load for a browser session row, rebuilt against the proxy's fixed
     /// loopback port. `nil` only if the route's identity host somehow fails to form a valid URL.
     func browserSessionProxyURL(for row: SpacesMobileBrowserSessionRow) -> URL? {
@@ -771,6 +803,12 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// overwrite the reset state the identity change just established.
     private func performRefresh(identity: Int) async {
         isLoading = true
+        // When this attempt began, not when it failed: a request that burns its whole timeout against an
+        // unreachable device has already been failing for that long by the time it throws. Paired with
+        // the monitoring generation it was measured in, since durations are only comparable within one
+        // uninterrupted stretch of watching the connection.
+        let attemptStartedAt = ContinuousClock.now
+        let monitoringGeneration = connectionMonitoringGeneration
         defer {
             isLoading = false
             refreshInFlight = nil
@@ -790,6 +828,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
             self.overview = acceptedOverview
             connectionNotice = nil
             errorMessage = nil
+            refreshFailureStreak = nil
         } catch is CancellationError { return } catch {
             guard identity == overviewIdentity else { return }
             // The overview did not decode (a wire-incompatible daemon) or the device is unreachable. The
@@ -816,6 +855,27 @@ private enum SpacesMobileMutationTimeoutRecovery {
             // rather than only at the call sites that start a refresh. An authentication failure above
             // still surfaces: that is not an outage and does not resolve itself when the daemon returns.
             guard !isApplyingDaemonUpdate else { return }
+            // A single failed round trip is routinely recoverable — a Wi-Fi blip, or a socket the OS
+            // dropped out from under the app while it was suspended — and the poll retries every two
+            // seconds, so raising the modal alert on the first one interrupts the user for something that
+            // heals itself before they can read it. The alert instead waits until failures have persisted
+            // for `refreshFailureAlertDelay`.
+            //
+            // Measured in wall-clock time rather than failure count because the two kinds of failure are
+            // not comparable in duration: a dead socket throws immediately, while an unreachable host
+            // burns the request's full eight-second timeout (twice, counting the compatibility handshake
+            // above) before it throws even once. Counting attempts would report the fast case in a few
+            // seconds and the slow case only after a minute; timing the run reports both within one
+            // window. User-initiated work (mutations, deep links) does not come through here — it still
+            // reports on its first failure.
+            // This attempt started before the app last stopped watching, so its elapsed time is mostly
+            // time nothing was polling. It cannot start or extend a run — that would resurrect, dated
+            // before the pause, exactly the run `noteConnectionMonitoringPaused` ended.
+            guard monitoringGeneration == connectionMonitoringGeneration else { return }
+            let streakStartedAt = refreshFailureStreak?.identity == identity ? refreshFailureStreak?.startedAt : nil
+            let startedAt = streakStartedAt ?? attemptStartedAt
+            refreshFailureStreak = (identity: identity, startedAt: startedAt)
+            guard ContinuousClock.now - startedAt >= refreshFailureAlertDelay else { return }
             errorMessage = error.localizedDescription
         }
     }
@@ -1547,6 +1607,11 @@ private enum SpacesMobileMutationTimeoutRecovery {
         self.overview = overview
         connectionNotice = nil
         errorMessage = nil
+        // A mutation's refreshed overview is proof the device answered, so it ends any run of failed
+        // refreshes exactly as a successful poll does. Otherwise a run interrupted by a successful
+        // mutation keeps its original start time, and the next isolated failure alerts on the strength
+        // of an outage that demonstrably ended.
+        refreshFailureStreak = nil
     }
 
     private func handleBridgeError(_ error: Error) {
@@ -1576,6 +1641,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
             overview = refreshedOverview
             errorMessage = nil
             connectionNotice = nil
+            refreshFailureStreak = nil
             return timeoutRecovery.acceptsFreshSession(refreshedSession(forRowID: rowID))
         } catch { return nil }
     }

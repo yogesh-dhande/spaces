@@ -224,6 +224,11 @@ struct OverviewPollingModifier: ViewModifier {
 
     func body(content: Content) -> some View {
         content.task(id: taskID) {
+            // Every end of this task is a boundary where the connection stops being watched from here —
+            // a detail route opening, another tab taking over, the app leaving the foreground, the device
+            // going unpaired. The connection-error alert times how long refreshes have been failing, so
+            // that clock must not keep running across a gap in which nothing refreshed at all.
+            defer { model.noteConnectionMonitoringPaused() }
             guard shouldPoll else { return }
             if !isPaused { await model.refresh() }
             while !Task.isCancelled {
