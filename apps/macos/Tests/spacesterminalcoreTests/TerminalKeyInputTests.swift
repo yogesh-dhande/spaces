@@ -3,55 +3,71 @@ import XCTest
 @testable import spacesterminalcore
 
 final class TerminalKeyInputTests: XCTestCase {
-    func testNamedKeysEncodeExpectedBytes() {
-        XCTAssertEqual(TerminalKeyInput.bytes(for: "enter"), [0x0D])
-        XCTAssertEqual(TerminalKeyInput.bytes(for: "esc"), [0x1B])
-        XCTAssertEqual(TerminalKeyInput.bytes(for: "up"), Array("\u{1B}[A".utf8))
-        XCTAssertEqual(TerminalKeyInput.bytes(for: "home"), Array("\u{1B}[H".utf8))
-        XCTAssertEqual(TerminalKeyInput.bytes(for: "end"), Array("\u{1B}[F".utf8))
-        XCTAssertEqual(TerminalKeyInput.bytes(for: "pageup"), Array("\u{1B}[5~".utf8))
-        XCTAssertEqual(TerminalKeyInput.bytes(for: "pagedown"), Array("\u{1B}[6~".utf8))
-        XCTAssertEqual(TerminalKeyInput.bytes(for: "forwarddelete"), Array("\u{1B}[3~".utf8))
-        XCTAssertEqual(TerminalKeyInput.bytes(for: "insert"), Array("\u{1B}[2~".utf8))
-        XCTAssertEqual(TerminalKeyInput.bytes(for: "backtab"), Array("\u{1B}[Z".utf8))
+    private func keyPress(_ spec: String) -> TerminalKeySpec? {
+        guard case .keyPress(let keySpec) = TerminalKeyInput.resolve(spec) else { return nil }
+        return keySpec
     }
 
-    func testFunctionKeysEncodeGhosttyTerminfoSequences() {
-        XCTAssertEqual(TerminalKeyInput.bytes(for: "f1"), Array("\u{1B}OP".utf8))
-        XCTAssertEqual(TerminalKeyInput.bytes(for: "f4"), Array("\u{1B}OS".utf8))
-        XCTAssertEqual(TerminalKeyInput.bytes(for: "f5"), Array("\u{1B}[15~".utf8))
-        XCTAssertEqual(TerminalKeyInput.bytes(for: "f10"), Array("\u{1B}[21~".utf8))
-        XCTAssertEqual(TerminalKeyInput.bytes(for: "f12"), Array("\u{1B}[24~".utf8))
+    private func lineEditingBytes(_ spec: String) -> [UInt8]? {
+        guard case .lineEditingBytes(let bytes) = TerminalKeyInput.resolve(spec) else { return nil }
+        return bytes
     }
 
-    func testCtrlChordEncodesControlByte() {
-        XCTAssertEqual(TerminalKeyInput.bytes(for: "ctrl+c"), [0x03])
-        XCTAssertEqual(TerminalKeyInput.bytes(for: "ctrl+l"), [0x0C])
-        XCTAssertEqual(TerminalKeyInput.bytes(for: "ctrl+u"), [0x15])
-        XCTAssertEqual(TerminalKeyInput.bytes(for: "ctrl+w"), [0x17])
-        XCTAssertEqual(TerminalKeyInput.bytes(for: "ctrl-z"), [0x1A])
+    func testNamedKeysResolveToUnmodifiedKeyPresses() {
+        XCTAssertEqual(keyPress("enter"), TerminalKeySpec(key: .enter))
+        XCTAssertEqual(keyPress("return"), TerminalKeySpec(key: .enter))
+        XCTAssertEqual(keyPress("esc"), TerminalKeySpec(key: .escape))
+        XCTAssertEqual(keyPress("up"), TerminalKeySpec(key: .up))
+        XCTAssertEqual(keyPress("home"), TerminalKeySpec(key: .home))
+        XCTAssertEqual(keyPress("pagedown"), TerminalKeySpec(key: .pageDown))
+        XCTAssertEqual(keyPress("forwarddelete"), TerminalKeySpec(key: .forwardDelete))
+        XCTAssertEqual(keyPress("insert"), TerminalKeySpec(key: .insert))
+        XCTAssertEqual(keyPress("f1"), TerminalKeySpec(key: .function(1)))
+        XCTAssertEqual(keyPress("f12"), TerminalKeySpec(key: .function(12)))
     }
 
-    func testMacLineEditingChordsEncodeExpectedBytes() {
-        XCTAssertEqual(TerminalKeyInput.bytes(for: "cmd+left"), [0x01])
-        XCTAssertEqual(TerminalKeyInput.bytes(for: "command+right"), [0x05])
-        XCTAssertEqual(TerminalKeyInput.bytes(for: "cmd+backspace"), [0x15])
-        XCTAssertEqual(TerminalKeyInput.bytes(for: "opt+left"), Array("\u{1B}b".utf8))
-        XCTAssertEqual(TerminalKeyInput.bytes(for: "option+right"), Array("\u{1B}f".utf8))
-        XCTAssertEqual(TerminalKeyInput.bytes(for: "alt+backspace"), [0x17])
+    func testModifiedKeysKeepTheirModifiers() {
+        XCTAssertEqual(keyPress("shift+enter"), TerminalKeySpec(key: .enter, modifiers: [.shift]))
+        XCTAssertEqual(keyPress("ctrl+enter"), TerminalKeySpec(key: .enter, modifiers: [.control]))
+        XCTAssertEqual(keyPress("shift+tab"), TerminalKeySpec(key: .tab, modifiers: [.shift]))
+        XCTAssertEqual(keyPress("shift+left"), TerminalKeySpec(key: .left, modifiers: [.shift]))
+        XCTAssertEqual(keyPress("ctrl+c"), TerminalKeySpec(key: .character("c"), modifiers: [.control]))
+    }
+
+    func testModifierOrderAndSeparatorDoNotMatter() {
+        let expected = TerminalKeySpec(key: .left, modifiers: [.control, .shift])
+        XCTAssertEqual(keyPress("ctrl+shift+left"), expected)
+        XCTAssertEqual(keyPress("shift+ctrl+left"), expected)
+        XCTAssertEqual(keyPress("shift-ctrl-left"), expected)
+        XCTAssertEqual(keyPress("SHIFT+Ctrl+Left"), expected)
+        XCTAssertEqual(keyPress("control+z"), TerminalKeySpec(key: .character("z"), modifiers: [.control]))
+    }
+
+    /// These chords map a Mac editing convention onto readline and must stay fixed byte sequences, so
+    /// they resolve ahead of key-press encoding rather than through it.
+    func testMacLineEditingChordsResolveToFixedBytes() {
+        XCTAssertEqual(lineEditingBytes("cmd+left"), [0x01])
+        XCTAssertEqual(lineEditingBytes("command+right"), [0x05])
+        XCTAssertEqual(lineEditingBytes("cmd+backspace"), [0x15])
+        XCTAssertEqual(lineEditingBytes("opt+left"), Array("\u{1B}b".utf8))
+        XCTAssertEqual(lineEditingBytes("option+right"), Array("\u{1B}f".utf8))
+        XCTAssertEqual(lineEditingBytes("alt+backspace"), [0x17])
+        XCTAssertEqual(lineEditingBytes("opt+b"), Array("\u{1B}b".utf8))
     }
 
     func testCommandKIsHostClearScreenAction() {
-        XCTAssertNil(TerminalKeyInput.bytes(for: "cmd+k"))
-        XCTAssertEqual(TerminalKeyInput.hostAction(for: "cmd+k"), .clearScreenAndScrollback)
+        XCTAssertEqual(TerminalKeyInput.resolve("cmd+k"), .hostAction(.clearScreenAndScrollback))
         XCTAssertEqual(TerminalKeyInput.hostAction(for: "command-k"), .clearScreenAndScrollback)
         XCTAssertTrue(TerminalKeyInput.isSupportedSpec("cmd+k"))
     }
 
-    func testUnsupportedKeyReturnsNil() {
-        XCTAssertNil(TerminalKeyInput.bytes(for: ""))
-        XCTAssertNil(TerminalKeyInput.bytes(for: "ctrl+1"))
-        XCTAssertNil(TerminalKeyInput.bytes(for: "cmd+z"))
-        XCTAssertNil(TerminalKeyInput.bytes(for: "f13"))
+    func testUnsupportedSpecsResolveToNothing() {
+        XCTAssertNil(TerminalKeyInput.resolve(""))
+        XCTAssertNil(TerminalKeyInput.resolve("f13"))
+        XCTAssertNil(TerminalKeyInput.resolve("hyper+enter"))
+        XCTAssertNil(TerminalKeyInput.resolve("shift+shift+enter"))
+        // Command shortcuts that are not line-editing chords belong to the app, not the terminal.
+        XCTAssertNil(TerminalKeyInput.resolve("cmd+z"))
+        XCTAssertNil(TerminalKeyInput.resolve("cmd+up"))
     }
 }

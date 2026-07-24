@@ -7,6 +7,52 @@
 
 typedef struct SpacesGhosttyVtSession SpacesGhosttyVtSession;
 
+// The keys `spaces_ghostty_vt_session_encode_key` can name. This is a Spaces-owned enum rather than
+// ghostty's: `GhosttyKey` values are ordinals that shift whenever ghostty adds a key, so pinning
+// callers to them would silently remap keys across a libghostty upgrade. The shim translates.
+//
+// Printable keys use `UNIDENTIFIED` and are carried by the call's `utf8` and `unshifted_codepoint`
+// instead, which is what ghostty's encoder reads for them anyway (the control byte for a ctrl chord,
+// the CSI-u code under the Kitty protocol).
+typedef enum {
+    SPACES_GHOSTTY_VT_KEY_UNIDENTIFIED = 0,
+    SPACES_GHOSTTY_VT_KEY_ENTER = 1,
+    SPACES_GHOSTTY_VT_KEY_TAB = 2,
+    SPACES_GHOSTTY_VT_KEY_BACKSPACE = 3,
+    SPACES_GHOSTTY_VT_KEY_ESCAPE = 4,
+    SPACES_GHOSTTY_VT_KEY_ARROW_UP = 5,
+    SPACES_GHOSTTY_VT_KEY_ARROW_DOWN = 6,
+    SPACES_GHOSTTY_VT_KEY_ARROW_LEFT = 7,
+    SPACES_GHOSTTY_VT_KEY_ARROW_RIGHT = 8,
+    SPACES_GHOSTTY_VT_KEY_HOME = 9,
+    SPACES_GHOSTTY_VT_KEY_END = 10,
+    SPACES_GHOSTTY_VT_KEY_PAGE_UP = 11,
+    SPACES_GHOSTTY_VT_KEY_PAGE_DOWN = 12,
+    SPACES_GHOSTTY_VT_KEY_DELETE = 13,
+    SPACES_GHOSTTY_VT_KEY_INSERT = 14,
+    SPACES_GHOSTTY_VT_KEY_F1 = 15,
+    SPACES_GHOSTTY_VT_KEY_F2 = 16,
+    SPACES_GHOSTTY_VT_KEY_F3 = 17,
+    SPACES_GHOSTTY_VT_KEY_F4 = 18,
+    SPACES_GHOSTTY_VT_KEY_F5 = 19,
+    SPACES_GHOSTTY_VT_KEY_F6 = 20,
+    SPACES_GHOSTTY_VT_KEY_F7 = 21,
+    SPACES_GHOSTTY_VT_KEY_F8 = 22,
+    SPACES_GHOSTTY_VT_KEY_F9 = 23,
+    SPACES_GHOSTTY_VT_KEY_F10 = 24,
+    SPACES_GHOSTTY_VT_KEY_F11 = 25,
+    SPACES_GHOSTTY_VT_KEY_F12 = 26,
+} SpacesGhosttyVtKey;
+
+// Modifier bits for `spaces_ghostty_vt_session_encode_key`, mirroring `GhosttyMods` for the four
+// modifiers Spaces key specs carry.
+enum {
+    SPACES_GHOSTTY_VT_MODS_SHIFT = 1 << 0,
+    SPACES_GHOSTTY_VT_MODS_CTRL = 1 << 1,
+    SPACES_GHOSTTY_VT_MODS_ALT = 1 << 2,
+    SPACES_GHOSTTY_VT_MODS_SUPER = 1 << 3,
+};
+
 typedef struct {
     uint32_t codepoint;
     uint32_t foreground_rgb;
@@ -80,6 +126,25 @@ bool spaces_ghostty_vt_session_encode_paste(
     SpacesGhosttyVtSession *session,
     const uint8_t *input,
     size_t input_len,
+    char **out_ptr,
+    size_t *out_len
+);
+
+// Encodes one key press with ghostty's own key encoder, configured from this session's live terminal
+// state, so the bytes match what ghostty would send: Kitty keyboard protocol sequences once the
+// running program enables them, DECCKM-aware cursor keys, legacy sequences otherwise. `key` is a
+// `SpacesGhosttyVtKey` and `mods` a `SPACES_GHOSTTY_VT_MODS_*` bitmask. `utf8` carries the text the key would type
+// (NULL for keys that type nothing) and `unshifted_codepoint` its layout-independent codepoint;
+// ghostty needs both to encode ctrl chords. The buffer is malloc'd and must be freed with
+// `spaces_ghostty_vt_free_buffer`. A key that encodes to nothing succeeds with `*out_len == 0` and a
+// NULL `*out_ptr`.
+bool spaces_ghostty_vt_session_encode_key(
+    SpacesGhosttyVtSession *session,
+    uint32_t key,
+    uint16_t mods,
+    const char *utf8,
+    size_t utf8_len,
+    uint32_t unshifted_codepoint,
     char **out_ptr,
     size_t *out_len
 );

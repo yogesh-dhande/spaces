@@ -31,6 +31,7 @@ export SPACES_GHOSTTY_VT_DYLIB_PATH=/root/src/apps/macos/.local/ghosttyvt/lib/li
 # clobber each other's environment. Run each suite in its OWN invocation so each gets an
 # isolated process; the shared build is cached, so the extra invocations are cheap.
 for suite in \
+  GhosttyLinuxHeadlessKeyEncodingTests \
   GhosttyLinuxHeadlessSessionResizeTests \
   GhosttyLinuxHeadlessSessionTranscriptTrimTests; do
   swift test \

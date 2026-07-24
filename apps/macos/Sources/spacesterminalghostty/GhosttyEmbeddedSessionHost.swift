@@ -95,6 +95,13 @@
             inputActivityHandler?(data.count)
         }
 
+        /// Sends a named key press, letting ghostty encode it against the live terminal state. The
+        /// encoded length is not observable from here, so owner input activity counts the press itself.
+        func sendKey(_ spec: TerminalKeySpec) {
+            GhosttyEmbeddedKeyEvent.withKeyEvent(for: spec) { sessionDriver.sendKey($0) }
+            inputActivityHandler?(1)
+        }
+
         @discardableResult public func sendTextAsPaste(_ text: String) -> Bool {
             guard !text.isEmpty else { return false }
             sessionDriver.sendTextAsPaste(text)
@@ -1158,6 +1165,12 @@
             controlInputSequencer.enqueueWrite { [weak self] in await TerminalEngineActor.run { self?.rendererHostStorage.sendRawBytes(bytes) } }
         }
 
+        /// Queued through the same sequencer as text writes so a key press never overtakes the text it was
+        /// meant to follow.
+        private func enqueueControlKeyPress(_ spec: TerminalKeySpec) {
+            controlInputSequencer.enqueueWrite { [weak self] in await TerminalEngineActor.run { self?.rendererHostStorage.sendKey(spec) } }
+        }
+
         private func enqueueControlSubmitCarriageReturn() {
             controlInputSequencer.enqueueSubmitCarriageReturn { [weak self] in
                 await TerminalEngineActor.run { self?.rendererHostStorage.sendRawBytes(Data([0x0D])) }
@@ -1171,17 +1184,21 @@
             }
             touchClientLease(request.clientID)
             if let rejection = ownerRequestRejection(for: request, commandName: "key", startedAt: startedAt) { return rejection }
-            if let key = request.key, TerminalKeyInput.hostAction(for: key) == .clearScreenAndScrollback {
-                return controlResponseForClearScreenRequest(request, startedAt: startedAt, touchClient: false)
-            }
-            guard let key = request.key, let bytes = TerminalKeyInput.bytes(for: key) else {
+            guard let key = request.key, let resolution = TerminalKeyInput.resolve(key) else {
                 TerminalPerformance.logMetric(
                     "terminal_control_key", target: "session=\(launchConfiguration.sessionID)",
                     elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: false)
                 return TerminalControlResponse(ok: false, message: "Unsupported terminal key.", errorCode: .invalidArgument)
             }
-            if bytes.contains(0x0D) { markLocalOwnerCommandInputOutputResyncPending() }
-            enqueueControlInputWrite(Data(bytes))
+            switch resolution {
+            case .hostAction(.clearScreenAndScrollback):
+                return controlResponseForClearScreenRequest(request, startedAt: startedAt, touchClient: false)
+            case .lineEditingBytes(let bytes):
+                enqueueControlInputWrite(Data(bytes))
+            case .keyPress(let spec):
+                if spec.key == .enter { markLocalOwnerCommandInputOutputResyncPending() }
+                enqueueControlKeyPress(spec)
+            }
             TerminalPerformance.logMetric(
                 "terminal_control_key", target: "session=\(launchConfiguration.sessionID)",
                 elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true, detail: "key=\(key)")
