@@ -13,9 +13,12 @@ struct SpacesMobilePairedDeviceRecord: Codable, Equatable, Identifiable, Sendabl
     var updatedAt: String
     var lastSelectedAt: String?
     /// The candidate that most recently connected successfully. This is a cache/hint, not
-    /// authority: `recordActiveHost` only ever sets it to a value already present in `hosts`, and
-    /// the connect path always re-validates it against `hosts` before use. Clearing it (e.g. via
-    /// `clearActiveHosts`) just means the next connect attempt re-evaluates from the top of `hosts`.
+    /// authority: `recordActiveHost` only ever sets it to a value already present in `hosts`, and the
+    /// only reader — `SpacesDeviceEndpointResolver.init`, via `activeHost(certificateFingerprint:)` —
+    /// re-validates it against `hosts` before trusting it as a seed. `hosts` itself is never reordered
+    /// around this value (see `settings(from:)`); the warm start lives only in the resolver's seeded
+    /// cache. Clearing it (e.g. via `clearActiveHosts`) just means the next resolver built from this
+    /// record starts with no seed and races `hosts` from the top.
     var activeHost: String?
 
     private enum CodingKeys: String, CodingKey {
@@ -256,15 +259,28 @@ enum SpacesMobileDeviceStore {
     /// tunnel with this token, so it needs to look the secret up out of band from the settings flow.
     static func authToken(deviceID: String) -> String? { secret(deviceID: deviceID, kind: .authToken) }
 
-    /// Persists the candidate that most recently connected successfully, so the next
-    /// `settings(from:)` read gets a warm start. Called by `SpacesDeviceEndpointResolver` once it
-    /// learns which address answered. Keyed by certificate fingerprint rather than device id: the
-    /// resolver validates a candidate by its pinned certificate, not by looking up a device row, so
-    /// the fingerprint is the only identifier it actually has on hand. Matches fingerprints the same
-    /// trimmed+lowercased way `upsert` does. Ignores `host` values that are not already one of the
-    /// matched record's `hosts` rather than inventing a candidate — `activeHost` is only ever a member
-    /// of `hosts`. Every connection reports its winner, so this no-ops when the value is unchanged
-    /// rather than re-encoding the whole device list into `UserDefaults` on each reconnect.
+    /// Reads the persisted warm-start candidate `recordActiveHost` last wrote for the device matching
+    /// `certificateFingerprint`, if any. `SpacesDeviceEndpointResolver` reads this at construction to
+    /// seed its own in-memory cached winner — the resolver's cache and this persisted value are the
+    /// same warm-start fact, so a freshly built resolver (e.g. after a hosts backfill rebuilds the live
+    /// client) starts already knowing what the last one learned instead of re-racing every candidate
+    /// once more. Matches fingerprints the same trimmed+lowercased way `recordActiveHost` does.
+    static func activeHost(certificateFingerprint: String) -> String? {
+        let fingerprint = certificateFingerprint.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return loadDevices().first(where: { $0.certificateFingerprint.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == fingerprint })?
+            .activeHost
+    }
+
+    /// Persists the candidate that most recently connected successfully, so the next resolver built
+    /// for this device (via `activeHost(certificateFingerprint:)`) gets a warm start. Called by
+    /// `SpacesDeviceEndpointResolver` once it learns which address answered. Keyed by certificate
+    /// fingerprint rather than device id: the resolver validates a candidate by its pinned
+    /// certificate, not by looking up a device row, so the fingerprint is the only identifier it
+    /// actually has on hand. Matches fingerprints the same trimmed+lowercased way `upsert` does.
+    /// Ignores `host` values that are not already one of the matched record's `hosts` rather than
+    /// inventing a candidate — `activeHost` is only ever a member of `hosts`. Every connection reports
+    /// its winner, so this no-ops when the value is unchanged rather than re-encoding the whole device
+    /// list into `UserDefaults` on each reconnect.
     static func recordActiveHost(_ host: String, certificateFingerprint: String) {
         let fingerprint = certificateFingerprint.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         var devices = loadDevices()
@@ -347,14 +363,13 @@ enum SpacesMobileDeviceStore {
 
     private static func settings(from device: SpacesMobilePairedDeviceRecord, installationID: String) -> SpacesMobileConnectionSettings {
         var settings = SpacesMobileConnectionSettings()
-        // Put the device's last-known-good address first when it's still one of the candidates, so
-        // the connect path gets a warm start for free: `SpacesDeviceAPIClient` reads `primaryHost`
-        // today, and the follow-up candidate-walking transport will read `hosts` in order.
-        if let activeHost = device.activeHost, device.hosts.contains(activeHost) {
-            settings.hosts = [activeHost] + device.hosts.filter { $0 != activeHost }
-        } else {
-            settings.hosts = device.hosts
-        }
+        // `hosts` always stays in the record's own order (daemon/pairing-link order, LAN first) — the
+        // warm start lives in exactly one place, `SpacesDeviceEndpointResolver` seeding its cached
+        // winner from `activeHost` at construction (see its `init`), not here too. Reordering here as
+        // well used to fight that: the resolver captures `hosts` immutably at construction, so once it
+        // reordered Tailscale-first, clearing `activeHost` and the resolver's cache on foreground could
+        // not actually restore LAN-first racing — the resolver kept walking its already-reordered list.
+        settings.hosts = device.hosts
         settings.port = device.port
         settings.certificateFingerprint = device.certificateFingerprint
         settings.authToken = secret(deviceID: device.id, kind: .authToken) ?? ""

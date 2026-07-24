@@ -774,6 +774,84 @@
             XCTAssertNil(model.overview)
         }
 
+        /// The "Local network"/"Tailscale" label `ConnectionSettingsView` renders reads
+        /// `pairedDevices[...].activeHost`, but `recordActiveHost` (called by the resolver once it
+        /// learns a new winner) writes straight to the persisted store — a separate copy from this
+        /// in-memory snapshot. `performRefresh` must notice the live client's resolved host no longer
+        /// matches what `pairedDevices` holds and reload from the store, or the label would keep
+        /// showing the pre-failover address for the rest of the session.
+        func testRefreshRepublishesPairedDevicesWhenResolvedHostDiffersFromStaleRecord() async throws {
+            var settings = SpacesMobileConnectionSettings()
+            settings.hosts = ["10.0.0.5", "100.64.0.5"]
+            settings.port = 47_847
+            settings.certificateFingerprint = "SHA256:refresh-active-host-test"
+            settings.authToken = "token"
+            let upserted = SpacesMobileDeviceStore.upsert(settings: settings, name: "Studio")
+            let deviceID = try XCTUnwrap(upserted.devices.first?.id)
+            defer { _ = SpacesMobileDeviceStore.remove(deviceID: deviceID, fallbackSettings: SpacesMobileConnectionSettings()) }
+            // The resolver has already persisted the failover to the tailnet address (this is what a
+            // real `SpacesDeviceEndpointResolver.connect()` success does), but nothing has told this
+            // model's in-memory `pairedDevices` snapshot yet — it still holds the pre-failover value.
+            SpacesMobileDeviceStore.recordActiveHost("100.64.0.5", certificateFingerprint: "SHA256:refresh-active-host-test")
+
+            let overview = makeOverview(daemonStatus: daemonStatus(protocolVersion: SpacesWireProtocol.version))
+            let backend = SpacesMobileFakeResolvedHostBackend(resolvedHost: "100.64.0.5") { _ in
+                SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview))
+            }
+            let client = SpacesDeviceAPIClient(settings: settings, backend: backend)
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            model.activeDeviceID = deviceID
+            model.pairedDevices = [
+                SpacesMobilePairedDeviceRecord(
+                    id: deviceID, name: "Studio", hosts: settings.hosts, port: settings.port,
+                    certificateFingerprint: settings.certificateFingerprint, createdAt: "2026-01-01T00:00:00Z",
+                    updatedAt: "2026-01-01T00:00:00Z", lastSelectedAt: nil, activeHost: "10.0.0.5")
+            ]
+
+            await model.refresh()
+
+            XCTAssertEqual(model.pairedDevices.first(where: { $0.id == deviceID })?.activeHost, "100.64.0.5")
+        }
+
+        /// A refresh that observes no change between the live-resolved host and what `pairedDevices`
+        /// already holds must not reload from the store — the common steady-state case stays cheap.
+        func testRefreshDoesNotReloadPairedDevicesWhenResolvedHostMatchesRecord() async throws {
+            var settings = SpacesMobileConnectionSettings()
+            settings.hosts = ["10.0.0.5", "100.64.0.5"]
+            settings.port = 47_847
+            settings.certificateFingerprint = "SHA256:refresh-active-host-unchanged"
+            settings.authToken = "token"
+            defer {
+                // Safety net: if the assertion below ever fails because a reload *did* happen, `load()`
+                // auto-pairs an unmatched-but-paired settings value into a brand-new persisted record —
+                // clean that up too so a failing run here cannot leak state into later test runs.
+                for device in SpacesMobileDeviceStore.load(fallbackSettings: SpacesMobileConnectionSettings()).devices
+                where device.certificateFingerprint == settings.certificateFingerprint {
+                    _ = SpacesMobileDeviceStore.remove(deviceID: device.id, fallbackSettings: SpacesMobileConnectionSettings())
+                }
+            }
+
+            let overview = makeOverview(daemonStatus: daemonStatus(protocolVersion: SpacesWireProtocol.version))
+            let backend = SpacesMobileFakeResolvedHostBackend(resolvedHost: "10.0.0.5") { _ in
+                SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview))
+            }
+            let client = SpacesDeviceAPIClient(settings: settings, backend: backend)
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            model.activeDeviceID = "device-1"
+            let unchangedRecord = SpacesMobilePairedDeviceRecord(
+                id: "device-1", name: "Studio", hosts: settings.hosts, port: settings.port,
+                certificateFingerprint: settings.certificateFingerprint, createdAt: "2026-01-01T00:00:00Z",
+                updatedAt: "2026-01-01T00:00:00Z", lastSelectedAt: nil, activeHost: "10.0.0.5")
+            model.pairedDevices = [unchangedRecord]
+
+            await model.refresh()
+
+            // Nothing paired under this fingerprint exists in the real store, so a reload would have
+            // wiped `pairedDevices` down to whatever `SpacesMobileDeviceStore.load` actually persists —
+            // proving no reload happened at all, not merely that the value looks the same.
+            XCTAssertEqual(model.pairedDevices, [unchangedRecord])
+        }
+
         // MARK: - Daemon update
 
         /// Requesting the update fires the RPC, then polls until the device reports the staged update

@@ -20,6 +20,15 @@ import spacesterminalcore
 /// converge on the same cached winner — a command-channel request that fails over from the LAN address
 /// to the tailnet address should mean the very next stream subscribe also starts from the tailnet
 /// address, not repeat the same failed LAN attempt from scratch.
+///
+/// Commands and streams pick a candidate two different ways for the same underlying reason: a command
+/// (`connect(timeout:queue:)`) can afford to race every candidate within one call because a caller
+/// waiting on a response is already paying for a round trip. A session stream cannot — it has to stay
+/// non-blocking (see `SpacesDeviceNetworkBackend.openSessionStream`) so a hung endpoint never delays
+/// the viewer's post-subscribe state refresh, which is what surfaces an authentication failure
+/// promptly. So a stream instead picks one candidate per attempt (`nextStreamHost()`) and rotates to
+/// the next on failure (`noteStreamFailed(host:)`), converging on the right address across reconnect
+/// attempts rather than within a single one.
 actor SpacesDeviceEndpointResolver {
     /// A connection the resolver has already brought to `.ready` (the pinned-TLS handshake is
     /// complete and the certificate fingerprint matched), plus the candidate host it answered on.
@@ -50,11 +59,23 @@ actor SpacesDeviceEndpointResolver {
     /// cached address may no longer be right (its connection just broke, or the app returned to the
     /// foreground on a possibly different network).
     private var cachedHost: String?
+    /// Candidates a session stream has recently failed on — consulted by `nextStreamHost()`, never by
+    /// `connect(timeout:queue:)`. See `nextStreamHost()` for why streams need this and races don't.
+    private var streamFailedHosts: Set<String> = []
 
     init(settings: SpacesMobileConnectionSettings) {
         hosts = settings.trimmedHosts
         port = settings.port
         certificateFingerprint = settings.certificateFingerprint
+        // Warm-starts the cache from the last address that actually worked, so a freshly constructed
+        // resolver (e.g. after `settings(from:)` rebuilds the live client with a widened `hosts` list)
+        // does not have to re-race every candidate on its very first use. Reads the persisted record
+        // the same way `recordActiveHost` below writes it — by certificate fingerprint — and only
+        // trusts a value that is still a member of this instance's own `hosts`, exactly like `connect`
+        // already re-validates a cached winner before using it.
+        if let seeded = SpacesMobileDeviceStore.activeHost(certificateFingerprint: certificateFingerprint), hosts.contains(seeded) {
+            cachedHost = seeded
+        }
     }
 
     /// The candidate most recently proven reachable by this resolver instance, if any.
@@ -62,6 +83,36 @@ actor SpacesDeviceEndpointResolver {
 
     /// Forgets the cached winner. The next `connect` call re-walks `hosts` from the top.
     func clearCachedWinner() { cachedHost = nil }
+
+    /// The host a new session stream should use. Unlike `connect(timeout:queue:)`, this never races:
+    /// `SpacesDeviceNetworkBackend.openSessionStream` must stay non-blocking so a hung endpoint cannot
+    /// stall the viewer's post-subscribe state refresh — the thing that surfaces an authentication
+    /// failure promptly against an endpoint that accepts TCP but never completes TLS. A stream
+    /// therefore cannot pay a blocking race without delaying the error reporting the viewer depends
+    /// on, so instead of converging within one attempt like a command does, a stream converges across
+    /// reconnect attempts: each fresh stream tries the next untried candidate, and `noteStreamFailed`
+    /// records the ones that didn't work.
+    ///
+    /// Prefers the cached winner (a command-channel request already proved it, or it was seeded from
+    /// the persisted record at construction). Otherwise walks `hosts` for the first candidate not
+    /// already reported failed; if every candidate has failed, the failed set is cleared and the walk
+    /// restarts from the top — bounded (at most `hosts.count` candidates are ever "recently failed" at
+    /// once) and self-resetting, so it can never wedge on a permanently dead candidate.
+    func nextStreamHost() -> String? {
+        if let cachedHost { return cachedHost }
+        if let candidate = hosts.first(where: { !streamFailedHosts.contains($0) }) { return candidate }
+        streamFailedHosts.removeAll()
+        return hosts.first
+    }
+
+    /// Records that a session stream failed on `host`, so the next call to `nextStreamHost()` moves on
+    /// to a different candidate instead of retrying the one that just broke. Also clears the cached
+    /// winner if `host` was it, so a command-channel request racing right after does not trust the same
+    /// now-suspect address either.
+    func noteStreamFailed(host: String) {
+        streamFailedHosts.insert(host)
+        if cachedHost == host { cachedHost = nil }
+    }
 
     /// Opens a ready, pinned-TLS connection to the first candidate that answers, racing the preferred
     /// order (the cached winner first, if it is still a member of `hosts`, then the rest of `hosts`)

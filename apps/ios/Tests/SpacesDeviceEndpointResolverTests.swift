@@ -12,6 +12,20 @@
     /// `Process` to run) — so a handful of tests can drive the resolver to an actual cached-winner success
     /// without a real daemon, covering the multi-address failover invalidation paths that need one.
     final class SpacesDeviceEndpointResolverTests: XCTestCase {
+        // Seeding-from-persisted-`activeHost` and `nextStreamHost()`/`noteStreamFailed(host:)` tests
+        // below read and write `SpacesMobileDeviceStore`'s real `UserDefaults.standard` persistence —
+        // reset it around every test the same way `SpacesMobileDeviceStoreTests` does, so a fingerprint
+        // used by one test can never leak a seeded cache into another.
+        override func setUp() {
+            super.setUp()
+            resetDeviceStorePersistedState()
+        }
+
+        override func tearDown() {
+            resetDeviceStorePersistedState()
+            super.tearDown()
+        }
+
         /// An empty `hosts` list is rejected before any connection attempt.
         func testConnectThrowsInvalidEndpointForEmptyHosts() async {
             var settings = SpacesMobileConnectionSettings()
@@ -206,6 +220,122 @@
             await fulfillment(of: [disconnected], timeout: 5)
             let cachedHostAfterCleanClose = await backend.resolver.currentCachedHost()
             XCTAssertEqual(cachedHostAfterCleanClose, "127.0.0.1")
+        }
+
+        // MARK: - Single warm-start mechanism (item 3)
+
+        /// The resolver seeds its cached winner from the persisted `activeHost` at construction, so a
+        /// freshly built resolver (e.g. after `SpacesMobileAppModel.rebuildLiveClientAfterHostsBackfill`
+        /// swaps in a new client) starts already knowing the last address that worked instead of having
+        /// to re-race every candidate on its very first use.
+        func testInitSeedsCachedWinnerFromPersistedActiveHost() async {
+            var settings = SpacesMobileConnectionSettings()
+            settings.hosts = ["10.0.0.5", "100.64.0.5"]
+            settings.certificateFingerprint = "SHA256:seed-from-active-host"
+            _ = SpacesMobileDeviceStore.upsert(settings: settings, name: "Mac")
+            SpacesMobileDeviceStore.recordActiveHost("100.64.0.5", certificateFingerprint: "SHA256:seed-from-active-host")
+
+            let resolver = SpacesDeviceEndpointResolver(settings: settings)
+
+            let seeded = await resolver.currentCachedHost()
+            XCTAssertEqual(seeded, "100.64.0.5")
+        }
+
+        /// A persisted `activeHost` that is not a member of *this* resolver's own `hosts` (e.g. a rescan
+        /// narrowed the candidate list since the value was recorded) must never be adopted as a seed —
+        /// mirrors the re-validation `connect(timeout:queue:)` already performs on a cached winner.
+        func testInitDoesNotSeedActiveHostMissingFromItsOwnHosts() async {
+            var pairedSettings = SpacesMobileConnectionSettings()
+            pairedSettings.hosts = ["10.0.0.5", "100.64.0.5"]
+            pairedSettings.certificateFingerprint = "SHA256:seed-narrowed-hosts"
+            _ = SpacesMobileDeviceStore.upsert(settings: pairedSettings, name: "Mac")
+            SpacesMobileDeviceStore.recordActiveHost("100.64.0.5", certificateFingerprint: "SHA256:seed-narrowed-hosts")
+
+            var narrowedSettings = pairedSettings
+            narrowedSettings.hosts = ["10.0.0.5"]
+            let resolver = SpacesDeviceEndpointResolver(settings: narrowedSettings)
+
+            let seeded = await resolver.currentCachedHost()
+            XCTAssertNil(seeded)
+        }
+
+        // MARK: - Stream-host rotation (item 2)
+
+        /// With no cached winner, `nextStreamHost()` starts at the top of `hosts`, same as a fresh
+        /// `connect` race would prefer the first candidate.
+        func testNextStreamHostStartsAtFirstCandidateWithNoCachedWinner() async {
+            var settings = SpacesMobileConnectionSettings()
+            settings.hosts = ["10.0.0.5", "100.64.0.5"]
+            settings.certificateFingerprint = "SHA256:rotate-no-cache"
+            let resolver = SpacesDeviceEndpointResolver(settings: settings)
+
+            let host = await resolver.nextStreamHost()
+
+            XCTAssertEqual(host, "10.0.0.5")
+        }
+
+        /// The core of item 2's fix: a viewer reconnecting an already-attached owner subscribes again
+        /// with no intervening command request, so the resolver has no fresh cached winner to hand back.
+        /// `noteStreamFailed` on the dead candidate must move the *next* stream attempt to the other
+        /// candidate instead of retrying the same dead LAN address forever.
+        func testNextStreamHostMovesToNextCandidateAfterNotedFailure() async {
+            var settings = SpacesMobileConnectionSettings()
+            settings.hosts = ["10.0.0.5", "100.64.0.5"]
+            settings.certificateFingerprint = "SHA256:rotate-after-failure"
+            let resolver = SpacesDeviceEndpointResolver(settings: settings)
+
+            let first = await resolver.nextStreamHost()
+            XCTAssertEqual(first, "10.0.0.5")
+            await resolver.noteStreamFailed(host: "10.0.0.5")
+
+            let second = await resolver.nextStreamHost()
+            XCTAssertEqual(second, "100.64.0.5")
+        }
+
+        /// Bounded and self-resetting: once every candidate has been noted as failed, the next call
+        /// clears the failed set and restarts the walk from the top rather than returning `nil` and
+        /// dead-ending a viewer that keeps trying to reconnect.
+        func testNextStreamHostResetsOnceEveryCandidateHasFailed() async {
+            var settings = SpacesMobileConnectionSettings()
+            settings.hosts = ["10.0.0.5", "100.64.0.5"]
+            settings.certificateFingerprint = "SHA256:rotate-full-reset"
+            let resolver = SpacesDeviceEndpointResolver(settings: settings)
+
+            await resolver.noteStreamFailed(host: "10.0.0.5")
+            await resolver.noteStreamFailed(host: "100.64.0.5")
+
+            let afterFullReset = await resolver.nextStreamHost()
+
+            XCTAssertEqual(afterFullReset, "10.0.0.5")
+        }
+
+        /// `nextStreamHost()` prefers a cached winner over the failed-candidate walk, and
+        /// `noteStreamFailed` clears that cache when the failure was on the cached address itself — so a
+        /// command-channel request racing right after does not trust the same now-suspect address.
+        func testNoteStreamFailedClearsCachedWinnerWhenItMatchesAndFallsThroughToNextCandidate() async {
+            var settings = SpacesMobileConnectionSettings()
+            settings.hosts = ["10.0.0.5", "100.64.0.5"]
+            settings.certificateFingerprint = "SHA256:rotate-clears-cache"
+            _ = SpacesMobileDeviceStore.upsert(settings: settings, name: "Mac")
+            SpacesMobileDeviceStore.recordActiveHost("10.0.0.5", certificateFingerprint: "SHA256:rotate-clears-cache")
+            let resolver = SpacesDeviceEndpointResolver(settings: settings)
+            let cachedBeforeFailure = await resolver.currentCachedHost()
+            XCTAssertEqual(cachedBeforeFailure, "10.0.0.5", "sanity: seeded from the persisted activeHost at construction")
+
+            await resolver.noteStreamFailed(host: "10.0.0.5")
+
+            let cachedAfterFailure = await resolver.currentCachedHost()
+            XCTAssertNil(cachedAfterFailure)
+            let nextHost = await resolver.nextStreamHost()
+            XCTAssertEqual(nextHost, "100.64.0.5")
+        }
+
+        private func resetDeviceStorePersistedState() {
+            for device in SpacesMobileDeviceStore.load(fallbackSettings: SpacesMobileConnectionSettings()).devices {
+                _ = SpacesMobileDeviceStore.remove(deviceID: device.id, fallbackSettings: SpacesMobileConnectionSettings())
+            }
+            let defaults = UserDefaults.standard
+            for key in ["spaces.mobile.paired-devices", "spaces.mobile.active-device-id"] { defaults.removeObject(forKey: key) }
         }
     }
 

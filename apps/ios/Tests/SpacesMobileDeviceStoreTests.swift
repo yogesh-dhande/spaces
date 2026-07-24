@@ -281,10 +281,14 @@
             XCTAssertEqual(reloaded.devices.first?.hosts, ["10.0.0.5"])
         }
 
-        /// Warm-start reordering: once `recordActiveHost` has learned an address, selecting that device
-        /// must yield settings whose `hosts` starts with that address even though it was not first in the
-        /// record's own `hosts` list. Reached only through the public `select` API.
-        func testSelectReordersHostsWithActiveHostFirst() throws {
+        /// The single warm-start mechanism lives in `SpacesDeviceEndpointResolver` seeding its cached
+        /// winner from the persisted `activeHost`, not in `hosts` order: selecting a device must yield
+        /// settings whose `hosts` stays in the record's own order (LAN first) even once
+        /// `recordActiveHost` has learned a different address. Reordering `hosts` here as well used to
+        /// fight the resolver's seed — it captures `hosts` immutably at construction, so a
+        /// Tailscale-reordered list could never be undone by clearing `activeHost` alone. Reached only
+        /// through the public `select` API.
+        func testSelectKeepsHostsInRecordOrderRegardlessOfActiveHost() throws {
             let state = SpacesMobileDeviceStore.upsert(
                 settings: makeSettings(hosts: ["10.0.0.5", "100.64.0.5"], fingerprint: "SHA256:mac", token: "token", installationID: "INSTALL-1"),
                 name: "Mac")
@@ -293,7 +297,23 @@
 
             let selected = try XCTUnwrap(SpacesMobileDeviceStore.select(deviceID: id, installationID: "INSTALL-1"))
 
-            XCTAssertEqual(selected.settings.hosts, ["100.64.0.5", "10.0.0.5"])
+            XCTAssertEqual(selected.settings.hosts, ["10.0.0.5", "100.64.0.5"])
+        }
+
+        /// `activeHost(certificateFingerprint:)` is the read half of `recordActiveHost`'s write —
+        /// `SpacesDeviceEndpointResolver.init` calls it to seed its cached winner. Returns the persisted
+        /// value for a matched fingerprint, and `nil` both for an unmatched fingerprint and before any
+        /// address has been recorded.
+        func testActiveHostReadsBackWhatRecordActiveHostWrote() throws {
+            _ = SpacesMobileDeviceStore.upsert(
+                settings: makeSettings(hosts: ["10.0.0.5", "100.64.0.5"], fingerprint: "SHA256:mac", token: "token"), name: "Mac")
+
+            XCTAssertNil(SpacesMobileDeviceStore.activeHost(certificateFingerprint: "SHA256:mac"))
+
+            SpacesMobileDeviceStore.recordActiveHost("100.64.0.5", certificateFingerprint: "SHA256:mac")
+
+            XCTAssertEqual(SpacesMobileDeviceStore.activeHost(certificateFingerprint: "SHA256:mac"), "100.64.0.5")
+            XCTAssertNil(SpacesMobileDeviceStore.activeHost(certificateFingerprint: "SHA256:other"))
         }
 
         /// An `activeHost` that is no longer a member of `hosts` (e.g. a rescan replaced the address list)

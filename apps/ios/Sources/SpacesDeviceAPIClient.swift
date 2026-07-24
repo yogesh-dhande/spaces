@@ -566,29 +566,34 @@ struct SpacesDeviceNetworkBackend: SpacesDeviceAPIBackend {
             label = "spaces.device.api.stream"
         }
         let queue = DispatchQueue(label: label)
-        // Takes the address the command channel already proved rather than racing candidates again: a
-        // viewer always attaches (a command-channel request) before it subscribes, so by now the
-        // resolver has a cached winner. That keeps this entry point non-blocking — it hands
-        // `StreamSubscription` an unstarted connection and lets that own the handshake inside its own
-        // "connect plus first payload" budget, so a subscribe against a hung endpoint cannot stall the
-        // caller's post-subscribe state refresh (which is what surfaces an authentication failure fast).
-        // Falling back to the first candidate covers a stream opened before any command on this client.
-        let host = await resolver.currentCachedHost() ?? settings.trimmedHosts.first ?? ""
+        // Non-blocking by design — it hands `StreamSubscription` an unstarted connection and lets that
+        // own the handshake inside its own "connect plus first payload" budget, so a subscribe against
+        // a hung endpoint cannot stall the caller's post-subscribe state refresh (which is what
+        // surfaces an authentication failure fast). That rules out racing candidates here the way
+        // `connect(timeout:queue:)` does for commands: a stream cannot pay a blocking race without
+        // delaying the very error reporting the viewer depends on. So a stream instead converges across
+        // reconnect attempts rather than within one — `nextStreamHost()` prefers the resolver's cached
+        // winner (typically already warm from a command-channel request or the resolver's own
+        // construction-time seed) and otherwise walks to the next candidate this backend has not
+        // already reported failed, so a viewer that keeps reconnecting an already-attached owner (no
+        // intervening command request to refresh the cache) still makes forward progress through every
+        // candidate instead of retrying the same dead address forever.
+        let host = await resolver.nextStreamHost() ?? ""
         guard let nwPort = UInt16(exactly: settings.port).flatMap(NWEndpoint.Port.init(rawValue:)), !host.isEmpty else {
             throw SpacesDeviceAPIClientError.invalidEndpoint
         }
         let parameters = SpacesPinnedTLSConnector.tlsParameters(certificateFingerprint: settings.certificateFingerprint)
         let connection = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: parameters)
         // A stream that ends with an error means the address it was on may no longer be good (the device
-        // left the network it was reachable on, the daemon restarted somewhere else, etc.) — clear the
-        // resolver's cached winner here, next to the thing that learned the address, so the caller's own
-        // reconnect (which rebuilds this same stream from `resolver.currentCachedHost()`) re-races every
-        // candidate instead of retrying the same dead one indefinitely. A `nil` error is a clean
-        // cancellation (the caller closed the stream on purpose, e.g. the viewer was dismissed) and must
-        // not invalidate an address that never actually failed.
+        // left the network it was reachable on, the daemon restarted somewhere else, etc.) — report the
+        // failure to the resolver here, next to the thing that learned the address, so the next stream
+        // this backend opens (via `nextStreamHost()`) moves on to a different candidate instead of
+        // retrying the same dead one indefinitely. A `nil` error is a clean cancellation (the caller
+        // closed the stream on purpose, e.g. the viewer was dismissed) and must not invalidate an
+        // address that never actually failed.
         let resolver = self.resolver
         let invalidatingOnDisconnect: @MainActor (Error?) -> Void = { error in
-            if error != nil { Task { await resolver.clearCachedWinner() } }
+            if error != nil { Task { await resolver.noteStreamFailed(host: host) } }
             onDisconnect(error)
         }
         StreamSubscription(connection: connection, host: host, port: nwPort, request: request, onEvent: onEvent, onDisconnect: invalidatingOnDisconnect)

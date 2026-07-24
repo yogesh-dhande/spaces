@@ -740,7 +740,11 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// browser-session rows are read straight back out of `overview` by `workspaceRuntimeRows(for:)`,
     /// but the proxy needs its own copy of the host->target mapping to route requests independently of
     /// the SwiftUI refresh cycle.
-    private func updateBrowserRoutes(overview: SpacesDeviceOverviewPayload) async {
+    /// `identity` is the caller's `overviewIdentity` snapshot, captured before its own await chain
+    /// started — the same guard every caller already re-checks right after this returns, needed here
+    /// too because this method can itself publish into `pairedDevices` (see below) before that
+    /// downstream guard runs.
+    private func updateBrowserRoutes(overview: SpacesDeviceOverviewPayload, identity: Int) async {
         guard let activeDeviceID else { return }
         // The raw-byte service tunnel has to reach the daemon over the path the command channel that just
         // fetched `overview` actually proved reachable, so ask the live client's resolver directly rather
@@ -751,12 +755,26 @@ private enum SpacesMobileMutationTimeoutRecovery {
         // record's `activeHost`, then `settings.primaryHost`, only for a device with no live-resolved
         // address yet (freshly paired, no request issued through this client).
         let activeDeviceRecord = pairedDevices.first(where: { $0.id == activeDeviceID })
-        let resolvedHost = await bridgeClient.currentResolvedHost() ?? activeDeviceRecord?.activeHost ?? settings.primaryHost
+        let liveResolvedHost = await bridgeClient.currentResolvedHost()
+        let resolvedHost = liveResolvedHost ?? activeDeviceRecord?.activeHost ?? settings.primaryHost
         browserRoutingTable.merge(
             deviceID: activeDeviceID, deviceName: activeDeviceName ?? settings.primaryHost, host: resolvedHost, port: settings.port,
             certificateFingerprint: settings.certificateFingerprint, overview: overview)
         let table = browserRoutingTable
         await browserProxy.updateRoutes(table)
+        // Keeps `ConnectionSettingsView`'s "Local network"/"Tailscale" address label in sync with the
+        // address the live client is actually using. `recordActiveHost` (called by the resolver once
+        // its cached winner changes) writes straight to `UserDefaults`; `pairedDevices` is a separate
+        // in-memory snapshot the view reads and nothing else refreshes it after a failover, so without
+        // this the label would keep showing the pre-failover address for the rest of the session. Only
+        // a real, resolver-confirmed address (`liveResolvedHost`, not the `resolvedHost` fallback chain
+        // above) counts as a change worth reloading for; cheap in the common case since a reload only
+        // happens when that address actually differs from what `pairedDevices` currently holds, and the
+        // identity re-check keeps a stale refresh from publishing into a connection the user has since
+        // switched away from.
+        if let liveResolvedHost, activeDeviceRecord?.activeHost != liveResolvedHost, identity == overviewIdentity {
+            pairedDevices = SpacesMobileDeviceStore.load(fallbackSettings: settings).devices
+        }
     }
 
     /// Fetches and publishes the active device's overview. Reentrant: a call while a fetch for the
@@ -800,7 +818,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
             // A decodable overview whose daemon nonetheless reports an incompatible protocol is blocked;
             // show the restart/update block, not its stale workspace data.
             let acceptedOverview = isActiveDeviceBlocked ? nil : overview
-            if let acceptedOverview { await updateBrowserRoutes(overview: acceptedOverview) }
+            if let acceptedOverview { await updateBrowserRoutes(overview: acceptedOverview, identity: identity) }
             guard identity == overviewIdentity else { return }
             self.overview = acceptedOverview
             connectionNotice = nil
@@ -1608,7 +1626,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// must not overwrite the new connection's state with the previous backend's overview.
     private func applyMutationResponse(_ response: SpacesDeviceAPIResponse, identity: Int) async {
         guard let overview = response.overview, identity == overviewIdentity else { return }
-        await updateBrowserRoutes(overview: overview)
+        await updateBrowserRoutes(overview: overview, identity: identity)
         guard identity == overviewIdentity else { return }
         self.overview = overview
         connectionNotice = nil
@@ -1637,7 +1655,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
             // The connection changed while reconciling: this overview is the previous backend's, so it must
             // not be published as the current connection's state.
             guard identity == overviewIdentity else { return nil }
-            await updateBrowserRoutes(overview: refreshedOverview)
+            await updateBrowserRoutes(overview: refreshedOverview, identity: identity)
             guard identity == overviewIdentity else { return nil }
             overview = refreshedOverview
             errorMessage = nil

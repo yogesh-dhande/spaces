@@ -232,6 +232,7 @@ let executableTargets: [Target] = [
             name: "spacescliTests",
             dependencies: [
                 "spacescli",
+                "spacesclientcore",
                 "spacesdeviceapi",
                 .product(name: "ArgumentParser", package: "swift-argument-parser")
             ]

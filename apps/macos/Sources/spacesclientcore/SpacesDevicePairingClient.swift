@@ -281,11 +281,27 @@ public enum SpacesDevicePairingClient {
         let metadata = try loadRemotePairingMetadata(
             destination: destination, port: device.sshPort, probe: probe, appVersion: appVersion, profile: profile)
         let link = SpacesDevicePairingLink(
-            hosts: [deviceAPIHost], port: metadata.port, nonce: metadata.pairingNonce, code: metadata.pairingCode,
-            certificateFingerprint: metadata.certificateFingerprint, name: metadata.name, protocolVersion: metadata.protocolVersion,
-            appVersion: metadata.appVersion)
+            hosts: relayedPairingHosts(deviceAPIHost: deviceAPIHost, advertisedHosts: metadata.hosts), port: metadata.port,
+            nonce: metadata.pairingNonce, code: metadata.pairingCode, certificateFingerprint: metadata.certificateFingerprint, name: metadata.name,
+            protocolVersion: metadata.protocolVersion, appVersion: metadata.appVersion)
         return SpacesRemoteDevicePairingWindowResult(
             name: metadata.name, host: deviceAPIHost, port: metadata.port, linkString: link.absoluteString, expiresAt: metadata.expiresAt)
+    }
+
+    /// Builds the host list for a relayed pairing link (`openRemotePairingWindow`, the "Pair iPhone or
+    /// iPad with a remote device" QR shown for an already-connected remote Mac): `deviceAPIHost` — the
+    /// SSH-resolved effective OpenSSH `HostName` — leads, because it is the one address *this* Mac has
+    /// actually proven routable right now. The remote daemon's own advertised `hosts` (its pairing
+    /// metadata's view of its own LAN/tailnet addresses) follow rather than get discarded: the phone
+    /// scanning the code is a different device from this Mac, so a route that works from here (an SSH
+    /// alias, a jump host, a LAN this Mac happens to share with the target) is not guaranteed to work
+    /// from the phone, while the daemon's own tailnet address usually is. De-duplicated, order otherwise
+    /// preserved, so a daemon that happens to advertise its own SSH-resolved address back is not listed
+    /// twice.
+    static func relayedPairingHosts(deviceAPIHost: String, advertisedHosts: [String]) -> [String] {
+        var hosts = [deviceAPIHost]
+        for host in advertisedHosts where !hosts.contains(host) { hosts.append(host) }
+        return hosts
     }
 
     public static func localMacClientInstallationID(profile: SpacesProfile? = nil) -> String {
@@ -767,9 +783,17 @@ struct RemoteInstallProbe: Equatable, Sendable {
     let linuxVersionID: String?
 }
 
-private struct RemotePairingMetadata: Decodable, Sendable {
+// Kept internal (not `private`) rather than `private` to this file: the JSON round-trip test in
+// spacescliTests decodes real production output through this exact type — see
+// `SpacesCommandTests.testPairingWindowPayloadRoundTripsThroughRemotePairingMetadata` — so the
+// producer (`PairingWindowPayload` in spacescli) and this consumer can never again drift apart
+// silently the way `host` (singular) vs `hosts` (plural) once did.
+struct RemotePairingMetadata: Decodable, Sendable {
     let name: String
-    let host: String
+    /// Ordered candidate daemon addresses the remote daemon's own pairing link advertised (its LAN
+    /// IPv4, then its Tailscale address). Decoded from the JSON `spaces device pair --json` prints —
+    /// see `PairingWindowPayload` in spacescli, the producer of this exact shape.
+    let hosts: [String]
     let port: Int
     let pairingNonce: String
     let pairingCode: String
@@ -784,7 +808,7 @@ private struct RemotePairingMetadata: Decodable, Sendable {
         guard trimmed(name) != nil else {
             throw SpacesRemoteDevicePairingError.invalidRemotePairingOutput("Remote pairing JSON is missing a device name.")
         }
-        guard trimmed(host) != nil else {
+        guard !hosts.isEmpty else {
             throw SpacesRemoteDevicePairingError.invalidRemotePairingOutput("Remote pairing JSON is missing a Device API host.")
         }
         guard (1...65_535).contains(port) else {
