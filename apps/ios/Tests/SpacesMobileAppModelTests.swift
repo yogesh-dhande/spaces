@@ -709,6 +709,201 @@
             XCTAssertNil(model.overview)
         }
 
+        // MARK: - Connection error tolerance
+
+        /// The overview poll runs every two seconds and a failed round trip that throws immediately —
+        /// most visibly when the app returns from the background onto a socket the OS dropped — routinely
+        /// heals on the next one, so it must not raise the modal connection alert.
+        func testFailureThatThrowsImmediatelyDoesNotSurfaceConnectionError() async {
+            let model = makeModel(refreshFailure: SpacesDeviceAPIClientError.requestFailed("Socket is not connected"))
+
+            await model.refresh()
+            await model.refresh()
+
+            XCTAssertNil(model.errorMessage)
+        }
+
+        /// A device that is genuinely unreachable keeps failing, and the alert must still arrive once the
+        /// failures have gone on long enough to be more than a blip.
+        func testFailuresThatPersistPastTheDelaySurfaceConnectionError() async {
+            let model = makeModel(
+                refreshFailure: SpacesDeviceAPIClientError.requestFailed("Socket is not connected"),
+                refreshFailureAlertDelay: .milliseconds(50))
+
+            await model.refresh()
+            XCTAssertNil(model.errorMessage, "the alert must not appear while the failures could still be a blip")
+            try? await Task.sleep(for: .milliseconds(60))
+            await model.refresh()
+
+            XCTAssertEqual(model.errorMessage, "Socket is not connected")
+        }
+
+        /// An unreachable host does not refuse the connection, it swallows it: a single refresh burns the
+        /// overview request's timeout and the compatibility handshake's before throwing once. Gating on
+        /// elapsed time rather than a failure count is what keeps that case from waiting several more
+        /// timeouts — the first failure has already been failing for longer than the delay.
+        func testFailureThatBurnsTheDelayBeforeThrowingSurfacesImmediately() async {
+            let settings = SpacesMobileConnectionSettings()
+            let client = SpacesDeviceAPIClient(settings: settings) { _ in
+                try? await Task.sleep(for: .milliseconds(60))
+                throw SpacesDeviceAPIClientError.requestTimedOut
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client, refreshFailureAlertDelay: .milliseconds(50))
+
+            await model.refresh()
+
+            XCTAssertNotNil(model.errorMessage)
+        }
+
+        /// Recovery ends the run: failures, a success, then one more immediate failure is not a run that
+        /// has persisted, and must stay silent.
+        func testSuccessfulRefreshEndsTheFailureRun() async {
+            let counter = SpacesMobilePollCounter()
+            let settings = SpacesMobileConnectionSettings()
+            let overview = makeOverview()
+            // Counted per overview request, not per request: a failed refresh also issues the frozen-core
+            // handshake, so "the second refresh" is not "the second request".
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                guard request.commandName == "overview" else { throw SpacesDeviceAPIClientError.requestFailed("Socket is not connected") }
+                let attempt = await counter.increment()
+                guard attempt == 2 else { throw SpacesDeviceAPIClientError.requestFailed("Socket is not connected") }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client, refreshFailureAlertDelay: .milliseconds(50))
+
+            await model.refresh()
+            await model.refresh()
+            XCTAssertEqual(model.overview, overview)
+            try? await Task.sleep(for: .milliseconds(60))
+            await model.refresh()
+
+            XCTAssertNil(model.errorMessage, "the run restarts at the failure after the success, so nothing has persisted yet")
+        }
+
+        /// Nothing polls while the app is backgrounded or the poll is paused behind a detail route, so
+        /// that time is not evidence of a failing connection. A failure recorded before the pause and one
+        /// recorded after must not read as one long outage, or the first blip on the way back raises the
+        /// alert this gate exists to prevent.
+        func testFailureRunEndsWhenConnectionMonitoringPauses() async {
+            let model = makeModel(
+                refreshFailure: SpacesDeviceAPIClientError.requestFailed("Socket is not connected"),
+                refreshFailureAlertDelay: .milliseconds(50))
+
+            await model.refresh()
+            try? await Task.sleep(for: .milliseconds(60))
+            model.noteConnectionMonitoringPaused()
+            await model.refresh()
+
+            XCTAssertNil(model.errorMessage)
+        }
+
+        /// A refresh already in flight when monitoring pauses resumes with a start time from before the
+        /// pause. Letting it record a failure would rebuild the run the pause just ended, dated before it
+        /// — and the first failure after that alerts on time nothing was being watched.
+        func testFailureFromARefreshThatSpannedAPauseIsNotTimed() async {
+            let gate = SpacesMobileAsyncGate()
+            let settings = SpacesMobileConnectionSettings()
+            let client = SpacesDeviceAPIClient(settings: settings) { _ in
+                await gate.wait()
+                throw SpacesDeviceAPIClientError.requestFailed("Socket is not connected")
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client, refreshFailureAlertDelay: .milliseconds(50))
+
+            let refresh = Task { await model.refresh() }
+            try? await Task.sleep(for: .milliseconds(10))
+            model.noteConnectionMonitoringPaused()
+            // Stands in for the pause: by the time the interrupted attempt resumes, more than the alert
+            // delay has passed on a clock that never stops.
+            try? await Task.sleep(for: .milliseconds(60))
+            await gate.open()
+            await refresh.value
+
+            XCTAssertNil(model.errorMessage)
+        }
+
+        /// A mutation's refreshed overview proves the device answered, so it ends the run exactly as a
+        /// successful poll does — otherwise the next isolated failure inherits a start time from an outage
+        /// that demonstrably ended.
+        func testMutationOverviewEndsTheFailureRun() async {
+            let settings = SpacesMobileConnectionSettings()
+            let overview = makeOverview()
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                guard request.commandName == "runWorkspaceProcess" else {
+                    throw SpacesDeviceAPIClientError.requestFailed("Socket is not connected")
+                }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok", result: .overview(overview))
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client, refreshFailureAlertDelay: .milliseconds(50))
+            let row = SpacesDeviceWorkspaceProcessRow(
+                id: "process-api", workspaceID: "workspace-feature", name: "api", command: "npm run dev", processID: "runtime-api",
+                sessionID: "session-api", runState: .notStarted, canRun: true, canStop: false, canRestart: false)
+
+            await model.refresh()
+            try? await Task.sleep(for: .milliseconds(60))
+            _ = await model.run(row: SpacesMobileWorkspaceRuntimeRow(source: .process(row)))
+            XCTAssertEqual(model.overview, overview)
+            await model.refresh()
+
+            XCTAssertNil(model.errorMessage)
+        }
+
+        /// Failures gathered against one connection say nothing about the next one, so a connection change
+        /// mid-run starts the clock over rather than letting the new connection inherit it.
+        func testFailureRunDoesNotCarryAcrossAConnectionChange() async {
+            // Resetting authentication rebuilds the client from `settings`, so the refresh after it runs
+            // against the real network transport rather than the fake. An empty host makes that refresh
+            // fail on the spot (`invalidEndpoint`) instead of dialing anything.
+            var settings = SpacesMobileConnectionSettings()
+            settings.host = ""
+            let client = SpacesDeviceAPIClient(settings: settings) { _ in
+                throw SpacesDeviceAPIClientError.requestFailed("Socket is not connected")
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client, refreshFailureAlertDelay: .milliseconds(50))
+
+            await model.refresh()
+            try? await Task.sleep(for: .milliseconds(60))
+            model.handleAuthenticationFailure(message: "Pair this device again.")
+            await model.refresh()
+
+            XCTAssertNil(model.errorMessage)
+        }
+
+        /// The tolerance covers unreachability, not a device that refuses this client: an authentication
+        /// failure is not going to resolve itself, so it routes to the re-pair flow on the first failure.
+        func testAuthenticationFailureIsReportedOnTheFirstRefresh() async {
+            let settings = SpacesMobileConnectionSettings()
+            let client = SpacesDeviceAPIClient(settings: settings) { _ in
+                SpacesDeviceAPIResponse(ok: false, message: "Invalid device auth token.", errorCode: .unauthorized)
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+
+            await model.refresh()
+
+            XCTAssertNotNil(model.connectionNotice)
+            XCTAssertTrue(model.isShowingConnectionSettings)
+            XCTAssertNil(model.errorMessage)
+        }
+
+        /// A mutation is something the user just asked for, so its failure is reported immediately rather
+        /// than waiting for a run of failures the way a background poll does.
+        func testMutationFailureSurfacesErrorImmediately() async {
+            let settings = SpacesMobileConnectionSettings()
+            let client = SpacesDeviceAPIClient(settings: settings) { request in
+                if request.commandName == "runWorkspaceProcess" { throw SpacesDeviceAPIClientError.requestFailed("Process failed to start.") }
+                return SpacesDeviceAPIResponse(ok: true, message: "ok")
+            }
+            let model = SpacesMobileAppModel(settings: settings, bridgeClient: client)
+            model.overview = makeOverview()
+            let row = SpacesDeviceWorkspaceProcessRow(
+                id: "process-api", workspaceID: "workspace-feature", name: "api", command: "npm run dev", processID: "runtime-api",
+                sessionID: "session-api", runState: .notStarted, canRun: true, canStop: false, canRestart: false)
+
+            let session = await model.run(row: SpacesMobileWorkspaceRuntimeRow(source: .process(row)))
+
+            XCTAssertNil(session)
+            XCTAssertEqual(model.errorMessage, "Process failed to start.")
+        }
+
         // MARK: - Daemon update
 
         /// Requesting the update fires the RPC, then polls until the device reports the staged update
@@ -1008,8 +1203,11 @@
             }
             // A budget long enough that the update is unambiguously still in flight for the refresh
             // below; the task is cancelled rather than waited out.
+            // A zero alert delay isolates the update-scoped suppression from the failure-run gate below:
+            // any refresh failure this test allows through reports on the spot.
             let model = SpacesMobileAppModel(
-                settings: settings, bridgeClient: client, daemonUpdatePollInterval: .milliseconds(20), daemonUpdateTimeout: .seconds(5))
+                settings: settings, bridgeClient: client, daemonUpdatePollInterval: .milliseconds(20), daemonUpdateTimeout: .seconds(5),
+                refreshFailureAlertDelay: .zero)
 
             let update = Task { await model.requestDaemonUpdate() }
             while !model.isApplyingDaemonUpdate { try? await Task.sleep(for: .milliseconds(5)) }
@@ -1329,6 +1527,14 @@
             let settings = SpacesMobileConnectionSettings()
             let client = SpacesDeviceAPIClient(settings: settings) { _ in SpacesDeviceAPIResponse(ok: true, message: "ok") }
             return SpacesMobileAppModel(settings: settings, bridgeClient: client)
+        }
+
+        /// A model whose device is unreachable: every request — the overview fetch and the frozen-core
+        /// handshake it falls back to — throws.
+        private func makeModel(refreshFailure: any Error, refreshFailureAlertDelay: Duration = .seconds(5)) -> SpacesMobileAppModel {
+            let settings = SpacesMobileConnectionSettings()
+            let client = SpacesDeviceAPIClient(settings: settings) { _ in throw refreshFailure }
+            return SpacesMobileAppModel(settings: settings, bridgeClient: client, refreshFailureAlertDelay: refreshFailureAlertDelay)
         }
 
         private func waitForBrowserProxyStatus(_ model: SpacesMobileAppModel, _ expected: BrowserProxyStatus) async throws {
