@@ -735,6 +735,19 @@ enum SpacesDeviceAPIConnectionSupport {
                     switch state {
                     case .ready: resume.resume(returning: ())
                     case .failed(let error): resume.resume(throwing: error)
+                    case .waiting(let error) where SpacesDeviceAPIAuthentication.isTransportAuthenticationFailure(error):
+                        // Network.framework treats a rejected pinned certificate as a retryable
+                        // condition and parks the connection in `.waiting` rather than failing it
+                        // outright, so left alone this would silently keep redialing the same rejected
+                        // handshake for the rest of the timeout budget instead of surfacing the failure
+                        // (the "silently retries forever" symptom a rotated daemon identity produces).
+                        // Unlike other `.waiting` causes — a momentarily unreachable route, a network
+                        // interface still coming up — a rejected pin is not going to resolve itself on
+                        // the next retry, so this classifies it immediately instead of waiting out the
+                        // budget. Every other `.waiting` cause falls through to `default` unchanged, so a
+                        // connection with a genuine chance of recovering within the timeout still gets
+                        // that chance.
+                        resume.resume(throwing: error)
                     case .cancelled: resume.resume(throwing: SpacesDeviceAPIClientError.requestFailed("The Device API connection was cancelled."))
                     default: break
                     }

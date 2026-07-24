@@ -293,6 +293,15 @@ enum SpacesMobileDeviceStore {
         saveDevices(devices)
     }
 
+    /// Bounds the candidate list `mergeAdvertisedHosts` produces. Without a cap, a device that roams
+    /// across many networks over its lifetime (home Wi-Fi swapped for a new router, a hotel LAN, a
+    /// second Tailscale exit node, ...) could accumulate an ever-growing tail of stale fallback
+    /// addresses, each one costing every future `SpacesDeviceEndpointResolver` race a wasted candidate
+    /// slot. Six comfortably covers the real shape of the problem — a daemon's own reported list (LAN +
+    /// tailnet, rarely more than two) plus a small handful of previously-known fallbacks — while still
+    /// bounding the pathological case.
+    private static let maxAdvertisedHostCandidates = 6
+
     /// Backfills a paired device's `hosts` from the addresses its daemon reports it is reachable at
     /// (`TerminalServiceDaemonStatus.deviceAPIAddresses`). This is how a device paired before its Mac
     /// ever had Tailscale silently gains the tailnet fallback the moment the Mac gets one — with no
@@ -300,15 +309,31 @@ enum SpacesMobileDeviceStore {
     ///
     /// No-ops when `hosts` is empty: an empty list means the daemon reported nothing (it predates this
     /// field, or this call raced a path that could not enumerate interfaces), never that the daemon has
-    /// no addresses — see `TerminalServiceDaemonStatus.deviceAPIAddresses`. Also no-ops when `hosts`
-    /// already equals the matched record's `hosts`, the common steady-state case, to avoid re-encoding
-    /// the whole device list into `UserDefaults` on every overview fetch.
+    /// no addresses — see `TerminalServiceDaemonStatus.deviceAPIAddresses`. Also no-ops when the union
+    /// computed below already equals the matched record's `hosts`, the common steady-state case, to
+    /// avoid re-encoding the whole device list into `UserDefaults` on every overview fetch.
     ///
-    /// The daemon's order replaces the record's order outright (rather than merging) because the daemon
-    /// is authoritative about its own reachability and its order already encodes LAN-first preference
-    /// exactly like a pairing link would. `activeHost` survives only if it is still a member of the new
-    /// list; otherwise the next connect re-evaluates from the top, same as `clearActiveHosts`. Matches
-    /// fingerprints the same trimmed+lowercased way `upsert`/`recordActiveHost` do.
+    /// Unions rather than replaces: the daemon's reported addresses lead, in the order it reported them
+    /// (it is authoritative about reachability preference — LAN before tailnet), followed by any
+    /// previously-stored address the daemon did not report this time, in their existing relative order.
+    /// A pure replace can permanently strand this device with no way back — e.g. the Mac's Tailscale
+    /// drops briefly while this device is on the LAN, the next overview reports only the LAN address, and
+    /// once the Mac is back on the tailnet and this device has left the LAN, replacing would have already
+    /// thrown away the only address still able to reach it. A union also protects a host that arrived
+    /// some other way and was never in the daemon's own interface list — notably the SSH-resolved
+    /// hostname a Mac puts first in a relayed pairing link for a remote device (see
+    /// `SpacesDevicePairingClient.relayedPairingHosts`) — which is exactly the address already proven
+    /// reachable and must not be silently dropped just because this device's own interface enumeration
+    /// does not happen to include it.
+    ///
+    /// The result is capped at `maxAdvertisedHostCandidates`, trimming from the tail. Because the
+    /// daemon's own addresses always lead the union, a plain tail trim only ever drops the appended,
+    /// previously-stored-but-unreported fallbacks — the least-recently-useful candidates — never one of
+    /// the daemon's own current addresses.
+    ///
+    /// `activeHost` survives only if it is still a member of the union; otherwise the next connect
+    /// re-evaluates from the top, same as `clearActiveHosts`. Matches fingerprints the same
+    /// trimmed+lowercased way `upsert`/`recordActiveHost` do.
     ///
     /// Returns whether the record's `hosts` actually changed, so a caller whose live client was built from
     /// the pre-backfill list (e.g. `SpacesMobileAppModel`, mid-refresh) knows to rebuild it — otherwise a
@@ -321,14 +346,29 @@ enum SpacesMobileDeviceStore {
         guard
             let index = devices.firstIndex(where: {
                 $0.certificateFingerprint.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == fingerprint
-            }), devices[index].hosts != hosts
+            })
         else { return false }
-        devices[index].hosts = hosts
-        if let activeHost = devices[index].activeHost, !hosts.contains(activeHost) {
+
+        let merged = unionPreservingDaemonOrder(daemonReported: hosts, previouslyStored: devices[index].hosts)
+        guard merged != devices[index].hosts else { return false }
+        devices[index].hosts = merged
+        if let activeHost = devices[index].activeHost, !merged.contains(activeHost) {
             devices[index].activeHost = nil
         }
         saveDevices(devices)
         return true
+    }
+
+    /// The union `mergeAdvertisedHosts` persists: `daemonReported`, de-duplicated and in its own order,
+    /// followed by whatever member of `previouslyStored` was not already included, in its own relative
+    /// order, then bounded to `maxAdvertisedHostCandidates` from the tail.
+    private static func unionPreservingDaemonOrder(daemonReported: [String], previouslyStored: [String]) -> [String] {
+        var seen = Set<String>()
+        var merged: [String] = []
+        for host in daemonReported where seen.insert(host).inserted { merged.append(host) }
+        for host in previouslyStored where seen.insert(host).inserted { merged.append(host) }
+        if merged.count > maxAdvertisedHostCandidates { merged.removeLast(merged.count - maxAdvertisedHostCandidates) }
+        return merged
     }
 
     /// Clears the cached active host on every paired device, so the next connect attempt on each

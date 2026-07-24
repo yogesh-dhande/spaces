@@ -121,6 +121,42 @@
             XCTAssertLessThan(elapsed, .seconds(2))
         }
 
+        /// The common shape of a real pin mismatch: the verify block rejects the certificate outright and
+        /// the `NWConnection` fails immediately (an `NWError.tls`-shaped failure), not a timeout. Uses a
+        /// genuine pinned-TLS listener (`PinnedTLSLoopbackServer`) with a deliberately wrong
+        /// `certificateFingerprint`, so the mismatch is real rather than simulated. Must classify as a pin
+        /// mismatch and make the race throw `transportAuthenticationFailed` — not `allCandidatesUnreachable`,
+        /// which is treated as a transient, silently-retried error upstream and would never surface the
+        /// re-pair prompt this failure needs to reach.
+        func testImmediateCertificateMismatchClassifiesAsPinMismatch() async throws {
+            let server = try PinnedTLSLoopbackServer()
+            let port = try await server.start()
+            defer { server.stop() }
+
+            var settings = SpacesMobileConnectionSettings()
+            settings.hosts = ["127.0.0.1"]
+            settings.port = Int(port)
+            settings.certificateFingerprint = "SHA256:" + String(repeating: "0", count: 64)
+            XCTAssertNotEqual(settings.certificateFingerprint, server.certificateFingerprint, "sanity: must be a genuine mismatch")
+            let resolver = SpacesDeviceEndpointResolver(settings: settings)
+
+            let start = ContinuousClock.now
+            do {
+                _ = try await resolver.connect(timeout: .seconds(3), queue: .main)
+                XCTFail("expected transportAuthenticationFailed")
+            } catch SpacesDeviceAPIClientError.transportAuthenticationFailed {
+                // Expected.
+            } catch {
+                XCTFail("unexpected error: \(error)")
+            }
+            let elapsed = start.duration(to: .now)
+            // An immediate certificate rejection must be classified without waiting out the per-candidate
+            // timeout budget — that is the whole point of checking
+            // `SpacesDeviceAPIAuthentication.isTransportAuthenticationFailure` before falling through to
+            // the timeout-plus-plain-TCP-probe path.
+            XCTAssertLessThan(elapsed, .seconds(2))
+        }
+
         /// `SpacesDeviceAPIClient.resetEndpointResolution()` — the foreground LAN re-preference — must
         /// reach all the way down to the resolver's actual cached winner, not just some intermediate
         /// layer. Seeds a genuine cached winner via a real pinned-TLS handshake against

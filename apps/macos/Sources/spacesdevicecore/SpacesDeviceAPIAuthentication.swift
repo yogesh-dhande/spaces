@@ -45,7 +45,13 @@ public enum SpacesDeviceAPIAuthentication {
             || message.localizedStandardContains("secure Device API transport")
     }
 
-    private static func isTransportAuthenticationFailure(_ error: Error) -> Bool {
+    /// The single authority for "this transport error means the pinned identity did not check out".
+    /// Used both here, to compose the re-pair recovery message, and by
+    /// `SpacesDeviceEndpointResolver.attempt` on iOS, to classify a candidate's failed connect attempt
+    /// as a pin mismatch during the multi-address race. Keeping one definition means a transport error
+    /// shape recognized in one place is automatically recognized in the other, rather than the two
+    /// call sites drifting out of sync over what counts as an authentication failure.
+    public static func isTransportAuthenticationFailure(_ error: Error) -> Bool {
         // A pin mismatch means the daemon's TLS identity no longer matches the fingerprint recorded
         // at pairing time (identity rotated or wrong endpoint) — recoverable only by re-pairing.
         if case TerminalServiceTLSError.certificatePinMismatch = error { return true }

@@ -219,8 +219,11 @@
         }
 
         /// The core backfill behavior: a device paired before its Mac had Tailscale has only a LAN
-        /// address stored. Once the daemon reports both addresses, the record adopts the daemon's list
-        /// and order verbatim, with no rescan, and reports the change so a live client can be rebuilt.
+        /// address stored. Once the daemon reports both addresses, the record's `hosts` leads with the
+        /// daemon's list and order, with no rescan, and reports the change so a live client can be
+        /// rebuilt. (Every address here is also in the daemon's report, so there is no previously-stored
+        /// fallback to append — see `testMergeAdvertisedHostsKeepsPreviouslyKnownAddressAsTrailingFallback`
+        /// for the case that exercises the union's other half.)
         func testMergeAdvertisedHostsAdoptsDaemonOrder() throws {
             let state = SpacesMobileDeviceStore.upsert(settings: makeSettings(hosts: ["10.0.0.5"], fingerprint: "SHA256:mac", token: "token"), name: "Mac")
             let id = try XCTUnwrap(state.devices.first?.id)
@@ -230,6 +233,80 @@
             XCTAssertTrue(changed)
             let reloaded = SpacesMobileDeviceStore.load(fallbackSettings: SpacesMobileConnectionSettings())
             XCTAssertEqual(reloaded.devices.first(where: { $0.id == id })?.hosts, ["10.0.0.5", "100.64.0.5"])
+        }
+
+        /// The regression this fix closes: a daemon report that is momentarily missing a previously
+        /// known address (e.g. the Mac's Tailscale drops briefly while this device is on the LAN, so the
+        /// overview reports only the LAN address) must not delete that address from `hosts` — it is kept
+        /// as a trailing fallback so this device can still find its way back once both are reachable
+        /// again. A pure replace would have produced `["10.0.0.5"]` here and permanently stranded a
+        /// device that later loses LAN reachability entirely.
+        func testMergeAdvertisedHostsKeepsPreviouslyKnownAddressAsTrailingFallback() throws {
+            let state = SpacesMobileDeviceStore.upsert(
+                settings: makeSettings(hosts: ["10.0.0.5", "100.64.0.5"], fingerprint: "SHA256:mac", token: "token"), name: "Mac")
+            let id = try XCTUnwrap(state.devices.first?.id)
+
+            let changed = SpacesMobileDeviceStore.mergeAdvertisedHosts(["10.0.0.5"], certificateFingerprint: "SHA256:mac")
+
+            // The union equals what was already stored (daemon-reported "10.0.0.5" leads, the untouched
+            // fallback "100.64.0.5" trails), so this also proves the no-op path fires correctly rather
+            // than re-encoding the device list on every momentary drop.
+            XCTAssertFalse(changed)
+            let reloaded = SpacesMobileDeviceStore.load(fallbackSettings: SpacesMobileConnectionSettings())
+            XCTAssertEqual(reloaded.devices.first(where: { $0.id == id })?.hosts, ["10.0.0.5", "100.64.0.5"])
+        }
+
+        /// The daemon's own order always leads the union, even when it disagrees with the order `hosts`
+        /// happened to be stored in previously (e.g. this device last connected over Tailscale first,
+        /// but the daemon is authoritative that LAN should be preferred).
+        func testMergeAdvertisedHostsDaemonOrderLeadsEvenWhenStoredOrderDiffers() throws {
+            let state = SpacesMobileDeviceStore.upsert(
+                settings: makeSettings(hosts: ["100.64.0.5", "10.0.0.5"], fingerprint: "SHA256:mac", token: "token"), name: "Mac")
+            let id = try XCTUnwrap(state.devices.first?.id)
+
+            let changed = SpacesMobileDeviceStore.mergeAdvertisedHosts(["10.0.0.5", "100.64.0.5"], certificateFingerprint: "SHA256:mac")
+
+            XCTAssertTrue(changed)
+            let reloaded = SpacesMobileDeviceStore.load(fallbackSettings: SpacesMobileConnectionSettings())
+            XCTAssertEqual(reloaded.devices.first(where: { $0.id == id })?.hosts, ["10.0.0.5", "100.64.0.5"])
+        }
+
+        /// A host that arrived some other way and was never in the daemon's own interface list — e.g. the
+        /// SSH-resolved hostname a Mac puts first in a relayed pairing link for a remote device — must
+        /// survive a backfill even though the daemon never reports it as one of its own addresses.
+        func testMergeAdvertisedHostsKeepsAddressNotInDaemonList() throws {
+            let state = SpacesMobileDeviceStore.upsert(
+                settings: makeSettings(hosts: ["studio.tailnet-1234.ts.net", "10.0.0.5"], fingerprint: "SHA256:mac", token: "token"), name: "Mac")
+            let id = try XCTUnwrap(state.devices.first?.id)
+
+            let changed = SpacesMobileDeviceStore.mergeAdvertisedHosts(["10.0.0.5", "100.64.0.5"], certificateFingerprint: "SHA256:mac")
+
+            XCTAssertTrue(changed)
+            let reloaded = SpacesMobileDeviceStore.load(fallbackSettings: SpacesMobileConnectionSettings())
+            XCTAssertEqual(reloaded.devices.first(where: { $0.id == id })?.hosts, ["10.0.0.5", "100.64.0.5", "studio.tailnet-1234.ts.net"])
+        }
+
+        /// The union is bounded so a device that roams across many networks cannot accumulate an
+        /// unbounded candidate list, and the bound trims from the tail — the retained-but-unreported end
+        /// — never from the daemon's own current addresses. Also covers the other half of the
+        /// `activeHost` contract: an `activeHost` that survives the union only by virtue of being at the
+        /// trimmed tail is dropped, same as if the daemon had explicitly stopped reporting it.
+        func testMergeAdvertisedHostsBoundsResultAndTrimsFromTail() throws {
+            let storedHosts = ["10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4", "10.0.0.5", "10.0.0.6"]
+            let state = SpacesMobileDeviceStore.upsert(
+                settings: makeSettings(hosts: storedHosts, fingerprint: "SHA256:mac", token: "token"), name: "Mac")
+            let id = try XCTUnwrap(state.devices.first?.id)
+            SpacesMobileDeviceStore.recordActiveHost("10.0.0.6", certificateFingerprint: "SHA256:mac")
+
+            let changed = SpacesMobileDeviceStore.mergeAdvertisedHosts(["100.64.0.9"], certificateFingerprint: "SHA256:mac")
+
+            XCTAssertTrue(changed)
+            let reloaded = SpacesMobileDeviceStore.load(fallbackSettings: SpacesMobileConnectionSettings())
+            let device = try XCTUnwrap(reloaded.devices.first(where: { $0.id == id }))
+            // The daemon's own address leads, then as many previously-stored fallbacks as fit within the
+            // bound (6 total) — "10.0.0.6" falls off the tail.
+            XCTAssertEqual(device.hosts, ["100.64.0.9", "10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4", "10.0.0.5"])
+            XCTAssertNil(device.activeHost, "the active host was trimmed off the tail, so it must be dropped like any other missing host")
         }
 
         /// `activeHost` survives a merge that keeps it in the new list.
@@ -244,21 +321,11 @@
             XCTAssertEqual(reloaded.devices.first?.activeHost, "100.64.0.5")
         }
 
-        /// `activeHost` is dropped (not carried forward as an invented candidate) when the daemon's
-        /// advertised list no longer includes it.
-        func testMergeAdvertisedHostsDropsActiveHostNoLongerPresent() throws {
-            _ = SpacesMobileDeviceStore.upsert(
-                settings: makeSettings(hosts: ["10.0.0.5", "100.64.0.5"], fingerprint: "SHA256:mac", token: "token"), name: "Mac")
-            SpacesMobileDeviceStore.recordActiveHost("100.64.0.5", certificateFingerprint: "SHA256:mac")
-
-            SpacesMobileDeviceStore.mergeAdvertisedHosts(["10.0.0.5"], certificateFingerprint: "SHA256:mac")
-
-            let reloaded = SpacesMobileDeviceStore.load(fallbackSettings: SpacesMobileConnectionSettings())
-            XCTAssertNil(reloaded.devices.first?.activeHost)
-        }
-
-        /// Merging the record's own current `hosts` (the common steady-state case) must be a true no-op:
-        /// the persisted devices blob is byte-identical before and after, and no change is reported.
+        /// Merging the record's own current `hosts` (the common steady-state case, and the union of the
+        /// daemon's list with itself) must be a true no-op: the persisted devices blob is byte-identical
+        /// before and after, and no change is reported. See
+        /// `testMergeAdvertisedHostsBoundsResultAndTrimsFromTail` for `activeHost` being dropped when it
+        /// does not survive the union.
         func testMergeAdvertisedHostsIsNoOpWhenUnchanged() throws {
             _ = SpacesMobileDeviceStore.upsert(
                 settings: makeSettings(hosts: ["10.0.0.5", "100.64.0.5"], fingerprint: "SHA256:mac", token: "token"), name: "Mac")

@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import spacesdevicecore
 import spacesterminalcore
 
 /// Resolves the daemon endpoint for a paired Mac out of its ordered list of candidate addresses.
@@ -149,10 +150,17 @@ actor SpacesDeviceEndpointResolver {
             SpacesMobileDeviceStore.recordActiveHost(host, certificateFingerprint: certificateFingerprint)
             return ResolvedConnection(connection: connection, host: host)
         case .failure(let sawPinMismatch):
+            // A pin mismatch on any candidate wins over every other candidate merely being unreachable,
+            // even though "unreachable" is the more common outcome across the rest of the field (e.g. the
+            // LAN address when away from home). It is the only failure a user can actually act on — it
+            // has a dedicated re-pair recovery flow — while "unreachable" just means try again later or
+            // check Tailscale. Surfacing "unreachable" instead here would bury a genuine re-pair signal
+            // and leave the caller silently retrying forever (`allCandidatesUnreachable` is treated as a
+            // transient, retryable error upstream).
+            if sawPinMismatch { throw SpacesDeviceAPIClientError.transportAuthenticationFailed }
             // No candidate answered and no pin mismatch was seen anywhere: name every address that was
             // tried and point at Tailscale, rather than surfacing whichever raw transport error happened
             // to come from one candidate (which says nothing about the others also tried).
-            if sawPinMismatch { throw SpacesDeviceAPIClientError.transportAuthenticationFailed }
             throw SpacesDeviceAPIClientError.allCandidatesUnreachable(hosts: orderedHosts)
         }
     }
@@ -168,10 +176,17 @@ actor SpacesDeviceEndpointResolver {
     /// One candidate's outcome, before folding into `RaceOutcome` across the whole field.
     private enum CandidateOutcome: Sendable {
         case success(host: String, connection: NWConnection)
-        /// Distinguishes "this candidate's TLS handshake never completed, but a plain TCP probe to the
-        /// same address succeeded" (the pinned certificate did not match — a genuine re-pair signal,
-        /// `pinMismatch: true`) from "nothing answered" or "this attempt was cancelled by the race
-        /// (another candidate already won)" (`pinMismatch: false`).
+        /// A pin mismatch (`pinMismatch: true`) can surface two different ways, both handled in
+        /// `attempt(...)`: the verify block can reject the certificate outright — Network.framework
+        /// reports that as a `.waiting` state carrying the rejection as its error rather than an outright
+        /// `.failed`, which `SpacesDeviceAPIConnectionSupport.waitUntilReady` already resolves immediately
+        /// rather than idling out the timeout (see its own documentation), so this sees it as a transport
+        /// error `SpacesDeviceAPIAuthentication.isTransportAuthenticationFailure` recognizes (most common
+        /// in practice); or the handshake can simply never complete while the address still accepts plain
+        /// TCP, which only a follow-up probe can tell apart from "nothing is listening there at all".
+        /// Anything else — nothing answered, or this attempt was cancelled by the race because another
+        /// candidate already won — is
+        /// `pinMismatch: false`.
         case failure(pinMismatch: Bool)
     }
 
@@ -236,6 +251,16 @@ actor SpacesDeviceEndpointResolver {
             return .success(host: host, connection: connection)
         } catch {
             connection.cancel()
+            // The common shape of a pin mismatch: the verify block rejects the certificate and the
+            // connection fails immediately with a transport error, not a timeout. Checked first — and
+            // via the same authority `SpacesDeviceAPIAuthentication.recoveryMessage(for:)` uses to route
+            // a raw transport failure into the re-pair flow — so this and that stay in agreement about
+            // what counts as "the pinned identity did not check out".
+            if SpacesDeviceAPIAuthentication.isTransportAuthenticationFailure(error) { return .failure(pinMismatch: true) }
+            // The other shape: an endpoint that accepts TCP and then stalls without ever completing or
+            // explicitly rejecting the handshake. A timed-out wait alone cannot distinguish that from
+            // "nothing is listening there", so this only classifies as a mismatch once the follow-up
+            // plain-TCP probe proves something answered.
             if SpacesDeviceAPIConnectionSupport.isRequestTimedOut(error),
                 await SpacesDeviceAPIConnectionSupport.canOpenPlainTCPConnection(host: host, port: port, timeout: .milliseconds(750))
             {
