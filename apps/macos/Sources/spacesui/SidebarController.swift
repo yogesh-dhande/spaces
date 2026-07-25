@@ -413,7 +413,10 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             // instant and refreshes immediately. Forced reloads (explicit refresh,
             // mutations that expect fresh remote data) bypass the gate.
             if !forceRefresh, let last = remoteOverviewFetchInstants[record.id], now - last < freshnessWindow { continue }
-            startRemoteOverviewPull(record: record, clientApp: clientApp, userInitiated: false)
+            // A forced reload bypasses the failure backoff for the same reason it bypasses the freshness
+            // gate: it is an explicit request for fresh remote data — the Reload command, or a mutation
+            // whose response the user is waiting on — not the ambient cadence the backoff exists to pace.
+            startRemoteOverviewPull(record: record, clientApp: clientApp, bypassesBackoff: forceRefresh)
         }
         if updatedReconnectSection {
             rebuildFlatSidebarData()
@@ -428,11 +431,12 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     /// The single pull implementation, shared by the freshness-gated path above and the watchdog's
     /// forced refresh of a device that is currently offline.
     ///
-    /// `userInitiated` marks the per-device Retry: the user asking for this device is a stronger signal
-    /// than the schedule its run of failures grew, so that path clears the backoff instead of waiting
-    /// it out.
-    private func startRemoteOverviewPull(record: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp, userInitiated: Bool) {
-        if userInitiated {
+    /// `bypassesBackoff` marks an explicitly requested pull — the per-device Retry, the Reload command,
+    /// or a mutation whose fresh remote data the user is waiting on. Asking for a device outright is a
+    /// stronger signal than the schedule its run of failures grew, so those paths clear the backoff
+    /// instead of waiting it out; only the ambient cadence the backoff exists to pace is held back.
+    private func startRemoteOverviewPull(record: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp, bypassesBackoff: Bool) {
+        if bypassesBackoff {
             remoteOverviewPullBackoff.clear(deviceID: record.id)
         } else if !remoteOverviewPullBackoff.allowsAttempt(deviceID: record.id) {
             return
@@ -513,7 +517,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             // healthy but silent.
             guard let section = host.deviceSections.first(where: { $0.deviceID == record.id }), section.loadState != .loaded else { continue }
             DeviceLinkTrace.log(deviceID: record.id, event: "watchdog_pull")
-            startRemoteOverviewPull(record: record, clientApp: clientApp, userInitiated: false)
+            startRemoteOverviewPull(record: record, clientApp: clientApp, bypassesBackoff: false)
         }
         // The local device has no stream to drop and no retry of its own. Re-run the snapshot that
         // bootstraps and reads the local daemon — the same path the Reload command uses.
@@ -1795,7 +1799,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         // Both attempts bypass their throttle deliberately: the pull skips the freshness gate and its
         // backoff, and the subscribe skips the backoff, because the user asked for this device
         // specifically.
-        startRemoteOverviewPull(record: record, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short), userInitiated: true)
+        startRemoteOverviewPull(record: record, clientApp: SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short), bypassesBackoff: true)
         refreshRemoteOverviewSubscriptions()
     }
 

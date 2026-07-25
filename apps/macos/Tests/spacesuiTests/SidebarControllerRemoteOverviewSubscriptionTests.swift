@@ -323,9 +323,13 @@ private enum StubDisconnectError: Error, Equatable { case dropped }
         #expect(backoff.recordFailure(deviceID: "device-a") == .milliseconds(6))
     }
 
-    /// The user asking for this device is a stronger signal than the schedule its run of failures grew,
-    /// so Retry must not be answered with "wait another minute".
-    @Test func aUserRetryReleasesTheDeviceImmediately() async {
+    /// Asking for a device outright is a stronger signal than the schedule its run of failures grew, so
+    /// an explicit request must not be answered with "wait another minute". Both bypass paths clear the
+    /// hold through here: the per-device Retry, and a forced reload — the Reload command and the
+    /// post-mutation refreshes, which already bypass the freshness gate for the same reason. A forced
+    /// reload that did not bypass would be the worse regression of the two: it is the escape hatch a
+    /// user reaches for precisely when a device looks stuck.
+    @Test func anExplicitlyRequestedPullReleasesTheDeviceImmediately() async {
         let backoff = makeBackoff()
         let device = "device-a"
         backoff.recordFailure(deviceID: device)
