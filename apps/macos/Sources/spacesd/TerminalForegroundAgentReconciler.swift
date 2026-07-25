@@ -13,16 +13,28 @@ import workspacecore
 ///
 /// Foreground changes can arrive faster than a reconcile completes, so events that
 /// land mid-flight collapse into a single trailing re-run.
+///
+/// Terminal runtime state changes with terminal output, so this is one of the daemon's
+/// hottest notification loops. Its database connection is therefore long-lived and owned
+/// by `DaemonReconcileStore` — a connection per pass made routine terminal output pay a
+/// WAL checkpoint and fsync per pass. Each pass builds its own `WorkspaceOrchestrator`
+/// (cheap, and its per-instance lifecycle gates stay pass-scoped).
 @MainActor final class TerminalForegroundAgentReconciler {
-    private let databasePath: String
+    private let reconcileStore: DaemonReconcileStore
     private let onError: (@Sendable (any Error) -> Void)?
     private var observer: NSObjectProtocol?
     private var inFlight = false
     private var pending = false
+    /// Latched by `stop()`. Removing the observer is not enough on its own: a notification posted
+    /// just before the stop can still be waiting to be delivered on the main queue, and a reconcile
+    /// task created just before the stop has not necessarily begun its first pass.
+    private var stopped = false
 
     init(databasePath: String, onError: (@Sendable (any Error) -> Void)? = nil) {
-        self.databasePath = databasePath
         self.onError = onError
+        reconcileStore = DaemonReconcileStore(label: "spaces.daemon.foreground-agent-reconcile", databasePath: databasePath) { store in
+            _ = try WorkspaceOrchestrator(store: store).reconcileTerminalForegroundAgentClassifications()
+        }
     }
 
     func start() {
@@ -32,32 +44,33 @@ import workspacecore
         }
     }
 
+    /// Quiesces the loop and releases the database connection, taking its final WAL checkpoint. Every
+    /// gate the loop consults is on the main actor along with this, so once `stopped` is set no
+    /// further pass can be submitted and the close is the last thing the store ever does.
     func stop() {
+        stopped = true
+        pending = false
         if let observer {
             NotificationCenter.default.removeObserver(observer)
             self.observer = nil
         }
+        reconcileStore.close()
     }
 
     private func reconcile() {
+        guard !stopped else { return }
         guard !inFlight else {
             pending = true
             return
         }
         inFlight = true
-        let databasePath = databasePath
-        let onError = onError
         Task { @MainActor [weak self] in
             guard let self else { return }
-            repeat {
+            while !self.stopped {
                 self.pending = false
-                await Task.detached(priority: .utility) {
-                    do {
-                        let store = try SQLiteStore(path: databasePath)
-                        _ = try WorkspaceOrchestrator(store: store).reconcileTerminalForegroundAgentClassifications()
-                    } catch { onError?(error) }
-                }.value
-            } while self.pending
+                do { try await self.reconcileStore.runPass() } catch { self.onError?(error) }
+                guard self.pending else { break }
+            }
             self.inFlight = false
         }
     }
