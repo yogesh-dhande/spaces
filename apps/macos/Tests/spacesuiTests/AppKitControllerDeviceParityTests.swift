@@ -52,7 +52,7 @@ import workspacecore
         // A single loaded device stays a flat project list (no header).
         #expect(!AppKitController.sidebarShowsDeviceHeaders(deviceCount: 1, hasUnloadedSection: false))
         // A single device that is not loaded forces a header row so its caption has somewhere to render:
-        // the "offline" reason and its Retry, and the "loading…" that Retry puts the section in. The
+        // the outage and its recovery button, and the "loading…" that button puts the section in. The
         // device's rows stay listed through the outage, but they are rows, not a caption — nothing else
         // reports the reason or recovers the device, and a first launch against a daemon that is down
         // has no rows at all.
@@ -127,6 +127,21 @@ import workspacecore
         // workspace (alerts, a compatibility block) has no controls keyed to this device.
         #expect(!rebuilds(detailDevice: "device-other", from: .loaded, to: offline))
         #expect(!rebuilds(detailDevice: nil, from: .loaded, to: offline))
+    }
+
+    @Test func anOpenTerminalPaneStaysFocusableWhileOfflineButANewOneIsRefused() {
+        // The two operations behind one sidebar click part ways during an outage. Focusing a pane that is
+        // already open is client-side — it owns its state model and renders the disconnected notice — so
+        // an unreachable device never withholds it.
+        #expect(AppKitController.canOpenOrFocusTerminalPane(hasExistingPane: true, deviceAcceptsDaemonActions: false))
+        #expect(AppKitController.canOpenOrFocusTerminalPane(hasExistingPane: true, deviceAcceptsDaemonActions: true))
+
+        // Opening a pane the layout does not have yet can only work by attaching to the owning daemon, so
+        // it is refused while the device cannot act — and refused before the install, because installing
+        // adds the pane to the layout and persists it before credentials are prepared: a pane admitted
+        // here is saved as permanently failed and never retries when the device returns.
+        #expect(!AppKitController.canOpenOrFocusTerminalPane(hasExistingPane: false, deviceAcceptsDaemonActions: false))
+        #expect(AppKitController.canOpenOrFocusTerminalPane(hasExistingPane: false, deviceAcceptsDaemonActions: true))
     }
 
     @Test func actionsRefusedByAnOutageNameTheDeviceInsteadOfClaimingSpacesIsLoading() {

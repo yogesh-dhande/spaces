@@ -2029,7 +2029,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                         transcriptProvider: { [weak stateModel] maxBytes in
                             guard let stateModel else { throw WorkspaceError.invalidArgument(message: "Terminal state model was released.") }
                             return try await stateModel.fetchTranscript(maxBytes: maxBytes)
-                        }, agentSignalHandler: agentSignalHandler, linkOpenHandler: { [linkOpenBox] rawLink in linkOpenBox.open(rawLink) })
+                        }, agentSignalHandler: agentSignalHandler, linkOpenHandler: { [linkOpenBox] rawLink in linkOpenBox.open(rawLink) },
+                        // A keystroke that cannot reach the device is the pane's earliest evidence its link
+                        // is gone; the state model owns that verdict, so the raw failure goes there rather
+                        // than being classified or acted on at the render host.
+                        inputFailureHandler: { [weak stateModel] error in Task { @MainActor in stateModel?.reportFailedInputSend(error) } })
                 })
             let linkOpenCoordinator = TerminalLinkOpenCoordinator(
                 sessionID: sessionID, deviceID: resolvedDeviceID, isLocalDevice: resolvedDeviceID == SpacesPairedDeviceRecord.localDeviceID,
@@ -2488,7 +2492,7 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
 
     /// The sidebar groups projects under per-device header rows when more than one device is paired, or
     /// when any section is not loaded so its caption — the only surface for an unreachable daemon's
-    /// reason, its Retry, and the "loading…" that retry puts it in — still has a header row to render
+    /// reason, its recovery button, and the "loading…" that button puts it in — still has a header row to render
     /// in. A single loaded device stays a flat project list. Pure so the single-unloaded-device rule is
     /// directly testable.
     nonisolated static func sidebarShowsDeviceHeaders(deviceCount: Int, hasUnloadedSection: Bool) -> Bool { deviceCount > 1 || hasUnloadedSection }
@@ -2585,12 +2589,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         launchConfiguration: TerminalSessionLaunchConfiguration, paths: TerminalSessionPaths,
         terminalServiceRequestSender: RemoteGhosttyTerminalServiceRequestSender? = nil,
         stateStreamSubscriber: RemoteGhosttyStateStreamSubscriber? = nil, transcriptProvider: RemoteGhosttyTranscriptProvider? = nil,
-        agentSignalHandler: RemoteGhosttyAgentSignalHandler? = nil, linkOpenHandler: (@MainActor (String) -> Void)? = nil
+        agentSignalHandler: RemoteGhosttyAgentSignalHandler? = nil, linkOpenHandler: (@MainActor (String) -> Void)? = nil,
+        inputFailureHandler: RemoteGhosttyInputFailureHandler? = nil
     ) -> any TerminalGhosttySessionHosting {
         RemoteGhosttySessionHost(
             launchConfiguration: launchConfiguration, paths: paths, terminalServiceRequestSender: terminalServiceRequestSender,
             stateStreamSubscriber: stateStreamSubscriber, transcriptProvider: transcriptProvider, agentSignalHandler: agentSignalHandler,
-            linkOpenHandler: linkOpenHandler)
+            linkOpenHandler: linkOpenHandler, inputFailureHandler: inputFailureHandler)
     }
 
     nonisolated static func launchServiceBuiltInTerminalSession(_ launchConfiguration: TerminalSessionLaunchConfiguration) throws
@@ -4445,6 +4450,31 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         Self.deviceAcceptsDaemonActions(deviceID: deviceID, loadState: deviceSection(id: deviceID)?.loadState)
     }
 
+    /// Whether the daemon a pane for this request would attach to can service that attach. The
+    /// request's pinned `deviceID` wins over the workspace lookup, matching
+    /// `prepareTerminalPaneOpenRequest`: a cold-resolved or deep-linked request names its owning
+    /// device directly, and its workspace may not be listed in the sidebar yet.
+    func deviceAcceptsDaemonActions(forTerminalOpenRequest request: DeviceTerminalOpenRequest) -> Bool {
+        guard let deviceID = request.deviceID ?? deviceID(forWorkspaceID: request.workspaceID) else { return false }
+        return deviceAcceptsDaemonActions(forDeviceID: deviceID)
+    }
+
+    /// Whether a terminal target may be acted on at all, given whether its session already occupies a
+    /// pane and whether its owning device can service daemon-backed work. This is the line between the
+    /// two operations `openOrFocusTerminalPane` performs.
+    ///
+    /// Focusing a pane that already exists is client-side: the pane owns its state model and renders
+    /// its own disconnected notice, so an unreachable device never withholds it — an open pane on a
+    /// device that dropped is exactly what that notice is for. Installing a pane the layout does not
+    /// have yet can only work by attaching to the owning daemon, so it is refused while that device
+    /// cannot act — and refused *before* the install, because installing adds the pane to the layout
+    /// and persists it before credentials are prepared: a pane admitted here would be saved as
+    /// permanently failed and would not retry when the device came back. Pure so the
+    /// "focus, don't open" line is directly testable.
+    nonisolated static func canOpenOrFocusTerminalPane(hasExistingPane: Bool, deviceAcceptsDaemonActions: Bool) -> Bool {
+        hasExistingPane || deviceAcceptsDaemonActions
+    }
+
     /// Whether a device crossing into or out of its actionable state must rebuild the workspace detail
     /// currently on screen. `disableWhenDeviceCannotAct` decides a control's availability while the
     /// detail is being built, so a retained pane keeps whatever it was built with: a device that goes
@@ -4518,6 +4548,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     /// Surfaces why a per-workspace daemon action could not resolve its device.
     func showWorkspaceDeviceUnavailableError(workspaceID: String) {
         showError(deviceUnavailableError(deviceID: deviceID(forWorkspaceID: workspaceID)))
+    }
+
+    /// Surfaces why a pane could not be opened for a terminal target, naming the device the request
+    /// pinned rather than re-deriving it from a workspace the sidebar may not list.
+    func showTerminalOpenRequestDeviceUnavailableError(_ request: DeviceTerminalOpenRequest) {
+        showError(deviceUnavailableError(deviceID: request.deviceID ?? deviceID(forWorkspaceID: request.workspaceID)))
     }
 
     /// Surfaces why a selection-driven daemon action could not resolve its device.
@@ -10096,10 +10132,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
         // Window-focus terminal targets are always workspace-backed (they come from a
         // workspace's run-target list), so a workspace whose owning device is unknown is a not-loaded
-        // state. Reachability is deliberately not required here: focusing a pane is browsing, so an
-        // already-open pane on an unreachable device stays focusable and a pane opened for one renders
-        // as disconnected. The daemon-backed resolutions that create a session are gated at their own
-        // mutations, so nothing that needs the daemon slips through this check.
+        // state. Reachability is deliberately not required here, because this entry point covers both
+        // focusing an existing pane (client-side, and available through an outage — that pane renders
+        // as disconnected) and opening one that does not exist yet. Only the latter needs the daemon,
+        // and it is refused inside `openOrFocusTerminalPane`, which is where the two are told apart
+        // once the workspace's persisted layout has been adopted; the resolutions that create a
+        // session are gated at their own mutations.
         guard deviceID(forWorkspaceID: request.workspaceID) != nil else {
             showDeviceNotLoadedError()
             logTerminalPaneFocus(success: false, reason: "device_not_loaded")

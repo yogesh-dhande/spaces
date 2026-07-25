@@ -352,8 +352,8 @@ private enum StubDisconnectError: Error, Equatable { case dropped }
     }
 }
 
-/// Behavior of the offline device caption: whose reason repaints, and which offline device is offered a
-/// Retry at all.
+/// Behavior of the offline device caption: whose reason repaints, which offline device is offered a
+/// recovery action at all, and whether its header reads that state as text or as the button.
 @Suite struct SidebarDeviceOfflineCaptionTests {
     /// The offline caption's tooltip is read out of the load state when the row's cell is built, so a
     /// reason that changed mid-outage only reaches the user if that row is rebuilt — and an unchanged
@@ -367,8 +367,30 @@ private enum StubDisconnectError: Error, Equatable { case dropped }
         #expect(SidebarController.offlineSectionUpdate(loadState: .offline("The connection closed."), reason: "Connection refused") == .repaintReason)
     }
 
+    /// One control carries both the outage and its recovery: an offline device that can be reconnected
+    /// renders the button alone, tinted as the problem state it is, because a red "offline" caption beside
+    /// it stated the same fact twice. An offline device with no action to offer has no button to carry the
+    /// status, so it must keep a caption rather than reading as a device with nothing wrong.
+    @Test func anActionableOutageReadsAsOneButtonWhileAnUnrecoverableOneKeepsItsCaption() {
+        typealias Status = SidebarDeviceSectionStatus
+        func status(
+            loadState: AppKitController.SidebarDeviceLoadState, isLocal: Bool = false, offersRetry: Bool = false, isUpdatePending: Bool = false
+        ) -> Status { Status.resolve(loadState: loadState, isLocal: isLocal, offersRetry: offersRetry, isUpdatePending: isUpdatePending) }
+
+        #expect(status(loadState: .offline("Connection refused"), offersRetry: true) == .recoveryButton(title: "Reconnect"))
+        // You cannot reconnect to the machine the app runs on: an offline local device means its own daemon
+        // is down and needs relaunching, matching the wording its refused actions use.
+        #expect(status(loadState: .offline("daemon down"), isLocal: true, offersRetry: true) == .recoveryButton(title: "Restart"))
+        // "Reconnect required" is recovered by pairing again, so it keeps the failed-tint caption.
+        #expect(status(loadState: .offline("Reconnect required")) == .caption(text: "offline", isFailure: true))
+        // A retry in flight and a healthy device are unchanged by any of this.
+        #expect(status(loadState: .loading) == .caption(text: "loading…", isFailure: false))
+        #expect(status(loadState: .loaded) == Status.none)
+        #expect(status(loadState: .loaded, isUpdatePending: true) == .caption(text: "update pending", isFailure: false))
+    }
+
     /// A remote whose auth token or certificate fingerprint is gone reads "Reconnect required" and is
-    /// recovered by pairing it again; offering Retry there renders a button that does nothing.
+    /// recovered by pairing it again; offering a recovery button there renders one that does nothing.
     @Test func aDeviceWithNoCredentialsIsNotOfferedARetry() {
         #expect(!SidebarController.deviceSectionOffersRetry(loadState: .offline("Reconnect required"), isLocal: false, hasCredentials: false))
         #expect(SidebarController.deviceSectionOffersRetry(loadState: .offline("Connection refused"), isLocal: false, hasCredentials: true))
@@ -377,5 +399,25 @@ private enum StubDisconnectError: Error, Equatable { case dropped }
         // Retry is an offline device's recovery; a loaded or still-loading section offers none.
         #expect(!SidebarController.deviceSectionOffersRetry(loadState: .loaded, isLocal: false, hasCredentials: true))
         #expect(!SidebarController.deviceSectionOffersRetry(loadState: .loading, isLocal: true, hasCredentials: true))
+    }
+
+    /// Losing credentials takes a device out of the actionable state with no failed pull involved, so that
+    /// transition owes the retained workspace detail the same rebuild an ordinary outage does — its
+    /// footer and setup controls were built enabled and every action on them is refused from then on.
+    @Test func losingAPairedDevicesCredentialsReconcilesItsRetainedWorkspaceDetail() {
+        typealias LoadState = AppKitController.SidebarDeviceLoadState
+        let deviceID = "device-remote"
+        let reconnectRequired = LoadState.offline("Reconnect required")
+        func rebuilds(from: LoadState, to: LoadState) -> Bool {
+            AppKitController.shouldRebuildWorkspaceDetailForDeviceLoadStateChange(
+                visibleDetailWorkspaceDeviceID: deviceID, deviceID: deviceID, previousLoadState: from, newLoadState: to)
+        }
+
+        #expect(rebuilds(from: .loaded, to: reconnectRequired))
+        // Re-pairing restores the actions the detail withheld while the credentials were gone.
+        #expect(rebuilds(from: reconnectRequired, to: .loaded))
+        // The credential-less state is re-derived on every sidebar load — far more often than a watchdog
+        // probe — so the unchanged repeat must rebuild nothing rather than discard scroll and focus.
+        #expect(!rebuilds(from: reconnectRequired, to: reconnectRequired))
     }
 }

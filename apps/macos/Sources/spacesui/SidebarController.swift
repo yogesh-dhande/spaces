@@ -426,11 +426,27 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         let now = ContinuousClock.now
         let freshnessWindow = Duration.seconds(PollingConstants.remoteOverviewFreshnessInterval)
         var updatedReconnectSection = false
+        var rebuildWorkspaceDetail = false
         for record in remotes {
             guard AppKitController.pairedDeviceHasRequiredCredentials(device: record) else {
                 if let index = host.deviceSections.firstIndex(where: { $0.deviceID == record.id }) {
-                    updatedReconnectSection = updatedReconnectSection || host.deviceSections[index].loadState != .offline("Reconnect required")
-                    host.deviceSections[index].loadState = .offline("Reconnect required")
+                    let previousLoadState = host.deviceSections[index].loadState
+                    let newLoadState = SidebarDeviceLoadState.offline("Reconnect required")
+                    // This is a load-state transition like any other, so it owes the same detail-pane
+                    // reconciliation `applyRemoteDeviceSection` does: a retained selected workspace under
+                    // this device keeps footer/setup controls that were built enabled, and every action on
+                    // them is refused from here on. Both this and the outline reload are gated on an actual
+                    // change, because a device that stays credential-less is re-derived on every sidebar
+                    // load and rebuilding then would repeatedly throw away scroll position and focus.
+                    if previousLoadState != newLoadState {
+                        updatedReconnectSection = true
+                        rebuildWorkspaceDetail =
+                            rebuildWorkspaceDetail
+                            || AppKitController.shouldRebuildWorkspaceDetailForDeviceLoadStateChange(
+                                visibleDetailWorkspaceDeviceID: host.visibleWorkspaceDetailDeviceID(), deviceID: record.id,
+                                previousLoadState: previousLoadState, newLoadState: newLoadState)
+                        host.deviceSections[index].loadState = newLoadState
+                    }
                     host.deviceSections[index].device = record
                 }
                 continue
@@ -452,6 +468,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             host.outlineView.reloadData()
             applySidebarProjectExpansionState()
             updateAlertsSidebarBadge()
+            if rebuildWorkspaceDetail { host.refreshSelection() }
         }
         refreshRemoteOverviewSubscriptions()
     }
@@ -861,7 +878,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
 
     /// True when the sidebar groups projects under per-device header rows: whenever more than one device
     /// is paired, or when any section is not loaded so its caption — the only surface for an unreachable
-    /// daemon's reason and its Retry — still has a header row to render in (a single offline local
+    /// daemon's reason and its recovery button — still has a header row to render in (a single offline local
     /// device otherwise has no project rows and would show nothing, and a lone device retrying would
     /// lose the header the button it was clicked in lives on). A single loaded device stays a flat list.
     var showsDeviceHeaders: Bool {
@@ -1025,8 +1042,8 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
         guard let ref = item as? OutlineItemRef else { return nil }
         switch ref.item {
-        // The device row is never dimmed: it carries the "offline" caption, its reason, and the Retry
-        // that recovers the device, which are the surfaces the outage is read and acted on through.
+        // The device row is never dimmed: it carries the section's state, the failure reason, and the
+        // action that recovers the device, which are the surfaces the outage is read and acted on through.
         case .device(let deviceID): return sidebarSectionRowCell(deviceID: deviceID)
         case .project(let project):
             // A non-git project row stands in for its single workspace, so it reads as
@@ -1063,24 +1080,20 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         host.deviceSections.first(where: { $0.deviceID == deviceID })?.displayName ?? deviceID
     }
 
-    private func deviceSectionLoadStateLabel(deviceID: String) -> (text: String, color: NSColor)? {
-        guard let section = host.deviceSections.first(where: { $0.deviceID == deviceID }) else { return nil }
-        switch section.loadState {
-        case .loading: return ("loading…", .tertiaryLabelColor)
-        case .offline: return ("offline", sidebarFailedIndicatorColor())
-        case .loaded:
-            // Incompatible devices render an actionable button in the caption (see sidebarSectionRowCell);
-            // a device with a newer build installed than its daemon is running shows a quiet
-            // "update pending" caption.
-            if section.compatibility?.isCompatible == false { return nil }
-            if section.daemonStatus?.isUpdatePending == true { return ("update pending", .tertiaryLabelColor) }
-            return nil
-        }
+    /// Gathers this device's section facts and resolves what its header's caption area shows. The
+    /// retry-availability read is the same one the button's action consults, so a visible recovery button
+    /// always has something to attempt.
+    private func deviceSectionStatus(deviceID: String) -> SidebarDeviceSectionStatus {
+        guard let section = host.deviceSections.first(where: { $0.deviceID == deviceID }) else { return .none }
+        return SidebarDeviceSectionStatus.resolve(
+            loadState: section.loadState, isLocal: section.isLocal, offersRetry: deviceSectionOffersRetry(deviceID: deviceID),
+            isUpdatePending: section.daemonStatus?.isUpdatePending == true)
     }
 
     /// Renders a paired device as a quiet, non-interactive section caption. The device node stays a
     /// structural parent of its project rows (always expanded), so the caption carries no chevron or
-    /// selection chrome; load state is shown inline as muted trailing text.
+    /// selection chrome; load state is shown inline as muted trailing text, or — where the state is
+    /// actionable — as the tinted button that both reports and recovers it.
     private func sidebarSectionRowCell(deviceID: String) -> NSTableCellView {
         let cell = NSTableCellView()
 
@@ -1111,29 +1124,38 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             button.setContentHuggingPriority(.required, for: .horizontal)
             button.setContentCompressionResistancePriority(.required, for: .horizontal)
             contentRow.addArrangedSubview(button)
-        } else if let state = deviceSectionLoadStateLabel(deviceID: deviceID) {
-            let stateLabel = NSTextField(labelWithString: state.text)
-            stateLabel.font = .systemFont(ofSize: 11, weight: .regular)
-            stateLabel.textColor = state.color
-            stateLabel.lineBreakMode = .byTruncatingTail
-            stateLabel.setContentHuggingPriority(.required, for: .horizontal)
-            stateLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
-            // Surface the offline reason (e.g. the daemon startup error) on hover; the caption itself
-            // stays the terse "offline" to match remote devices and avoid widening the sidebar.
-            if case .offline(let message)? = section?.loadState, !message.isEmpty { stateLabel.toolTip = message }
-            contentRow.addArrangedSubview(stateLabel)
-            if deviceSectionOffersRetry(deviceID: deviceID) {
+        } else {
+            // The offline reason (e.g. the daemon startup error) is surfaced on hover wherever the state
+            // is drawn; the visible text stays terse so the sidebar does not widen.
+            let offlineReason: String? = {
+                guard case .offline(let message)? = section?.loadState, !message.isEmpty else { return nil }
+                return message
+            }()
+            switch deviceSectionStatus(deviceID: deviceID) {
+            case .caption(let text, let isFailure):
+                let stateLabel = NSTextField(labelWithString: text)
+                stateLabel.font = .systemFont(ofSize: 11, weight: .regular)
+                stateLabel.textColor = isFailure ? sidebarFailedIndicatorColor() : .tertiaryLabelColor
+                stateLabel.lineBreakMode = .byTruncatingTail
+                stateLabel.setContentHuggingPriority(.required, for: .horizontal)
+                stateLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+                stateLabel.toolTip = offlineReason
+                contentRow.addArrangedSubview(stateLabel)
+            case .recoveryButton(let title):
                 // Device headers are non-selectable, so this caption button is an offline device's only
-                // per-device recovery; without it the user's only option is reloading the whole sidebar.
-                let button = NSButton(title: "Retry", target: self, action: #selector(deviceRetryClicked(_:)))
+                // per-device recovery; without it the user's only option is reloading the whole sidebar. It
+                // also stands in for the offline caption, so it keeps the failed tint and the reason tooltip.
+                let button = NSButton(title: title, target: self, action: #selector(deviceRetryClicked(_:)))
                 button.bezelStyle = .inline
                 button.controlSize = .small
                 button.font = .systemFont(ofSize: 11, weight: .semibold)
                 button.contentTintColor = sidebarFailedIndicatorColor()
                 button.identifier = NSUserInterfaceItemIdentifier("retry:\(deviceID)")
+                button.toolTip = offlineReason
                 button.setContentHuggingPriority(.required, for: .horizontal)
                 button.setContentCompressionResistancePriority(.required, for: .horizontal)
                 contentRow.addArrangedSubview(button)
+            case .none: break
             }
         }
 
@@ -1652,10 +1674,16 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             // Only session-backed targets can move into a panel window; a target that
             // hasn't started yet keeps the item visible but disabled for discoverability.
             // Moving an already-open session into a window is client-side, so an outage does not
-            // disable it — the pane it opens carries its own disconnected state.
+            // disable it — the pane it opens carries its own disconnected state. A session that is
+            // not open in a pane is the other operation: it would install a fresh pane against the
+            // device's daemon, so it follows the same rule the open chokepoint enforces rather than
+            // being offered and then refused.
+            let sessionIsOpenInAPane = item.sessionID.map { host.panelCoordinator.placement(forSessionID: $0) != nil } ?? false
             addItem(
                 "Open in New Window", symbol: "macwindow.badge.plus",
-                action: item.sessionID == nil ? nil : #selector(openRuntimeTargetInNewWindowMenuItem(_:)))
+                action: item.sessionID == nil ? nil : #selector(openRuntimeTargetInNewWindowMenuItem(_:)),
+                isEnabled: AppKitController.canOpenOrFocusTerminalPane(
+                    hasExistingPane: sessionIsOpenInAPane, deviceAcceptsDaemonActions: daemonActionsEnabled))
         }
         return menu
     }
@@ -1823,9 +1851,9 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         retryDeviceConnection(deviceID: String(raw.dropFirst("retry:".count)))
     }
 
-    /// Whether this device's offline caption offers a Retry. The one place that decides it, consulted
-    /// both by the caption that renders the button and by the action the button fires, so a visible
-    /// Retry always has something to attempt.
+    /// Whether this device's header offers a recovery button (Reconnect, or Restart for this Mac). The one
+    /// place that decides it, consulted both by the header that renders the button and by the action the
+    /// button fires, so a visible button always has something to attempt.
     ///
     /// The credential read is deliberately behind the offline check: it touches the paired-device
     /// records and the credential store, and every device row is rebuilt on every outline reload.
@@ -1838,8 +1866,9 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     }
 
     /// A remote whose auth token or certificate fingerprint is gone reads "Reconnect required" and is
-    /// recovered by pairing it again, not by reconnecting, so it is offered no Retry. Pure so the rule
-    /// is directly testable.
+    /// recovered by pairing it again, not by reconnecting, so it is offered no recovery button — which is
+    /// why that state keeps a caption, the only thing left to report it. Pure so the rule is directly
+    /// testable.
     nonisolated static func deviceSectionOffersRetry(loadState: SidebarDeviceLoadState, isLocal: Bool, hasCredentials: Bool) -> Bool {
         guard loadState.isOffline else { return false }
         // The local device has no stored credentials of its own; its retry re-runs the sidebar snapshot,

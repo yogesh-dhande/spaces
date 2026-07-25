@@ -543,6 +543,49 @@
             scheduleReconnect()
         }
 
+        /// Reports that a terminal input send for this session failed, so the link state follows the
+        /// client's own first-hand evidence instead of waiting on the subscription.
+        ///
+        /// Input travels on a different connection than the state stream. When a network path dies
+        /// silently, nothing tears the subscription's socket down until TCP keepalive gives up 60–90
+        /// seconds later, but the very next keystroke's request fails immediately — so a failed send is
+        /// the earliest proof the device is unreachable, and dropping that evidence leaves the pane
+        /// looking live for a minute while every keystroke goes nowhere.
+        ///
+        /// Only a transport failure qualifies (`isTransportFailureEvidenceOfLostLink`). The reaction is
+        /// the ordinary disconnect one — drop the subscription and arm the paced reconnect — rather than
+        /// only raising the flag, so the claim stays falsifiable: the reconnect either succeeds and clears
+        /// the notice, or keeps failing and the notice is right. `scheduleReconnect` owns the rest, which
+        /// is also why an ended session (no stream wanted) and a pane with no listeners report nothing.
+        func reportFailedInputSend(_ error: any Error) {
+            guard Self.isTransportFailureEvidenceOfLostLink(error) else { return }
+            // Typing produces one of these per keystroke for as long as the outage lasts. A link already
+            // reported down has a retry armed, so re-reporting it must add no reconnect and no notice.
+            guard !isStateStreamDisconnected else { return }
+            // Retire this client's generation before stopping it: `stop()` cancels the connection, whose
+            // receive loop then delivers one final disconnect callback, and that callback must not arm a
+            // second reconnect on top of the one below.
+            streamClientGeneration &+= 1
+            let deadClient = streamClient
+            streamClient = nil
+            deadClient?.stop()
+            scheduleReconnect()
+        }
+
+        /// Whether a failed request proves this session's link is gone. True only for a transport failure:
+        /// the request never reached the daemon.
+        ///
+        /// A reachable daemon that answers with a coded rejection — the session is not running, another
+        /// client owns it, the token was revoked — says nothing about the link, and reporting one as a
+        /// dropped connection would put a false notice on the pane and dial a device that is answering.
+        /// The classification is `SpacesDeviceClient`'s, shared with the reachability degrade the sidebar
+        /// uses, so "the transport failed" means one thing across the app; a rejection the render host has
+        /// already flattened into an opaque message error is not a transport failure by type and stays out
+        /// without any message matching.
+        nonisolated static func isTransportFailureEvidenceOfLostLink(_ error: any Error) -> Bool {
+            SpacesDeviceClient.isDeviceAPITransportFailure(error)
+        }
+
         /// Applies a live stream event only when it belongs to the current stream generation, so a
         /// superseded client cannot feed state after replacement. Catch-up `.state` responses bypass this
         /// and call `apply` directly — they carry no generation and their staleness is handled by

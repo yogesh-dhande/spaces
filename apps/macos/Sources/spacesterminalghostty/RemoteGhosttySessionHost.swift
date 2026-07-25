@@ -5,6 +5,11 @@
 
     public typealias RemoteGhosttyTerminalServiceRequestSender = @Sendable (TerminalServiceRequest) throws -> TerminalServiceResponse
     public typealias RemoteGhosttyAgentSignalHandler = @MainActor @Sendable ([TerminalServiceAgentSignalEvent]) throws -> [String]
+    /// Reports that a terminal input request the user typed failed to reach the device. Raised from the
+    /// serial input queue (off the main actor) with the error the send threw, and deliberately not
+    /// classified here: the host knows only that its request failed, while the owner of the session's
+    /// link state knows whether a given failure is evidence about the link.
+    public typealias RemoteGhosttyInputFailureHandler = @Sendable (any Error) -> Void
     public typealias RemoteGhosttyStateStreamSubscriber =
         @Sendable (
             _ sessionID: String, _ onEvent: @escaping @Sendable (GhosttyRemoteSessionStatePayload) -> Void,
@@ -38,6 +43,11 @@
         private let stateStreamSubscriber: RemoteGhosttyStateStreamSubscriber?
         private let transcriptProvider: RemoteGhosttyTranscriptProvider?
         private let agentSignalHandler: RemoteGhosttyAgentSignalHandler?
+        /// Notified when a keystroke's or paste's control request throws. Input rides a different
+        /// connection than the state subscription, so a send that cannot reach the device is the earliest
+        /// proof the link is gone — a silently dead network path leaves the subscription's socket looking
+        /// healthy until TCP keepalive gives up a minute or more later.
+        private let inputFailureHandler: RemoteGhosttyInputFailureHandler?
         private let terminalView: GhosttyMirrorTerminalView
         private var latestState: GhosttyRemoteSessionStatePayload?
         private var stateReducer = TerminalRemoteStateReducer()
@@ -91,7 +101,8 @@
             launchConfiguration: TerminalSessionLaunchConfiguration, paths: TerminalSessionPaths,
             terminalServiceRequestSender: RemoteGhosttyTerminalServiceRequestSender? = nil,
             stateStreamSubscriber: RemoteGhosttyStateStreamSubscriber? = nil, transcriptProvider: RemoteGhosttyTranscriptProvider? = nil,
-            agentSignalHandler: RemoteGhosttyAgentSignalHandler? = nil, linkOpenHandler: (@MainActor (String) -> Void)? = nil
+            agentSignalHandler: RemoteGhosttyAgentSignalHandler? = nil, linkOpenHandler: (@MainActor (String) -> Void)? = nil,
+            inputFailureHandler: RemoteGhosttyInputFailureHandler? = nil
         ) {
             self.launchConfiguration = launchConfiguration
             self.paths = paths
@@ -99,6 +110,7 @@
             self.stateStreamSubscriber = stateStreamSubscriber
             self.transcriptProvider = transcriptProvider
             self.agentSignalHandler = agentSignalHandler
+            self.inputFailureHandler = inputFailureHandler
             terminalView = GhosttyMirrorTerminalView(launchConfiguration: launchConfiguration)
             terminalView.onOpenLink = linkOpenHandler
             ensureStateStreamStartedIfNeeded()
@@ -557,14 +569,17 @@
             let sessionID = launchConfiguration.sessionID
             let requestSender = terminalServiceRequestSender
             let shouldRefreshAfterControl = requestSender != nil && stateStreamSubscriber == nil
-            inputQueue.enqueue(priority: .userInitiated) {
-                _ = try Self.sendControlRequest(
-                    TerminalControlRequest(
-                        command: .send(
-                            .init(text: text, bytes: nil, clientID: clientID, ownerEpoch: ownerEpoch, appendNewline: false, asPaste: asPaste))),
-                    sessionID: sessionID, socketPath: socketPath, requestSender: requestSender)
-                if shouldRefreshAfterControl { Task { @MainActor [weak self] in self?.requestDirectStateRefresh(reason: "input") } }
-            }
+            let inputFailureHandler = self.inputFailureHandler
+            inputQueue.enqueue(
+                priority: .userInitiated,
+                operation: {
+                    _ = try Self.sendControlRequest(
+                        TerminalControlRequest(
+                            command: .send(
+                                .init(text: text, bytes: nil, clientID: clientID, ownerEpoch: ownerEpoch, appendNewline: false, asPaste: asPaste))),
+                        sessionID: sessionID, socketPath: socketPath, requestSender: requestSender)
+                    if shouldRefreshAfterControl { Task { @MainActor [weak self] in self?.requestDirectStateRefresh(reason: "input") } }
+                }, onError: { error in inputFailureHandler?(error) })
         }
 
         private func sendRemoteKey(_ key: String) {
@@ -587,12 +602,15 @@
             let sessionID = launchConfiguration.sessionID
             let requestSender = terminalServiceRequestSender
             let shouldRefreshAfterControl = requestSender != nil && stateStreamSubscriber == nil
-            inputQueue.enqueue(priority: .userInitiated) {
-                _ = try Self.sendControlRequest(
-                    TerminalControlRequest(command: .key(.init(key: key, clientID: clientID, ownerEpoch: ownerEpoch))), sessionID: sessionID,
-                    socketPath: socketPath, requestSender: requestSender)
-                if shouldRefreshAfterControl { Task { @MainActor [weak self] in self?.requestDirectStateRefresh(reason: "input") } }
-            }
+            let inputFailureHandler = self.inputFailureHandler
+            inputQueue.enqueue(
+                priority: .userInitiated,
+                operation: {
+                    _ = try Self.sendControlRequest(
+                        TerminalControlRequest(command: .key(.init(key: key, clientID: clientID, ownerEpoch: ownerEpoch))), sessionID: sessionID,
+                        socketPath: socketPath, requestSender: requestSender)
+                    if shouldRefreshAfterControl { Task { @MainActor [weak self] in self?.requestDirectStateRefresh(reason: "input") } }
+                }, onError: { error in inputFailureHandler?(error) })
         }
 
         private func sendRemoteClearScreenAndScrollback() {
