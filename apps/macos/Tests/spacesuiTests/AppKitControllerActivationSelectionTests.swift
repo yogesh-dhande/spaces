@@ -8,8 +8,8 @@ import spacesdevicecore
         #expect(AppKitController.activationSelectionTarget(focusedWorkspaceID: "workspace-focused") == .workspace("workspace-focused"))
     }
 
-    @Test func activationShowsAlertsWhenFocusedWindowIsNotTracked() {
-        #expect(AppKitController.activationSelectionTarget(focusedWorkspaceID: nil) == .alerts)
+    @Test func activationKeepsCurrentViewWhenFocusedWindowIsNotTracked() {
+        #expect(AppKitController.activationSelectionTarget(focusedWorkspaceID: nil) == nil)
     }
 
     @Test func appTogglePrefersFocusedBuiltInTerminalWorkspace() {
