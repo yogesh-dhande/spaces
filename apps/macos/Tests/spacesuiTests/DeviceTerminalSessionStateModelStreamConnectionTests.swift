@@ -4,6 +4,7 @@ import spacesclientcore
 import spacesdevicecore
 import spacesterminalcore
 
+@testable import spacesdeviceapi
 @testable import spacesui
 
 /// Guards how a device-backed session publishes the health of its state subscription.
@@ -25,8 +26,33 @@ import spacesterminalcore
 /// listener registration from dialing the network at all (`ensureSubscriptionStarted` returns early
 /// while a stream is installed), which keeps the suite hermetic.
 ///
-/// XCTest (serial within the class), matching `DeviceTerminalSessionStateModelRecoveryTests`.
+/// XCTest (serial within the class), matching `DeviceTerminalSessionStateModelRecoveryTests`. Two tests
+/// below drive a real in-process `SpacesDeviceAPIServer`, which re-resolves `SPACES_DB_PATH`/
+/// `SPACES_RUNTIME_DIR` from the process environment at request time — the same reason
+/// `DeviceTerminalSessionStateModelRecoveryTests` stays XCTest rather than Swift Testing.
 final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
+    private var originalDatabasePath: String?
+    private var originalRuntimeDirectory: String?
+    private var profileRoot: URL!
+
+    override func setUpWithError() throws {
+        try super.setUpWithError()
+        originalDatabasePath = ProcessInfo.processInfo.environment["SPACES_DB_PATH"]
+        originalRuntimeDirectory = ProcessInfo.processInfo.environment["SPACES_RUNTIME_DIR"]
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        profileRoot = root
+        setenv("SPACES_DB_PATH", root.appendingPathComponent("spaces.db").path, 1)
+        setenv("SPACES_RUNTIME_DIR", root.appendingPathComponent("runtime", isDirectory: true).path, 1)
+    }
+
+    override func tearDownWithError() throws {
+        if let originalDatabasePath { setenv("SPACES_DB_PATH", originalDatabasePath, 1) } else { unsetenv("SPACES_DB_PATH") }
+        if let originalRuntimeDirectory { setenv("SPACES_RUNTIME_DIR", originalRuntimeDirectory, 1) } else { unsetenv("SPACES_RUNTIME_DIR") }
+        if let profileRoot { try? FileManager.default.removeItem(at: profileRoot) }
+        try super.tearDownWithError()
+    }
+
     @MainActor func testDroppedStreamPublishesDisconnectedStateAndNotifiesForTheSession() throws {
         let sessionID = "session-\(UUID().uuidString)"
         let model = try makeModel(sessionID: sessionID)
@@ -182,10 +208,148 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
             Model.isTransportFailureEvidenceOfLostLink(TerminalServiceTLSError.certificatePinMismatch(expected: "SHA256:aa", actual: "SHA256:bb")))
     }
 
+    /// The race: a keystroke fails while a connect is in flight, `reportFailedInputSend`'s retry is
+    /// dropped by `ensureSubscriptionStarted`'s in-flight guard because the original connect is still
+    /// running, and that connect then finishes reporting success (`start()` can return true even for a
+    /// client that was concurrently stopped — stopping it does not abort a low-level connect already past
+    /// that point) while `streamClient` is still nil. Before the fix nothing is left to retry: the pane
+    /// stays connected to nothing until it is reopened or the app restarts. Drives a real in-process
+    /// `SpacesDeviceAPIServer` so the retry's own connect, once armed, actually reconnects — proving
+    /// recovery, not just that a flag got set — and controls the first connect's resolution through
+    /// `stateStreamConnectOverrideForTesting` so the race is reproduced deterministically instead of
+    /// racing real network timing.
+    @MainActor func testAFailedInputSendDuringAnInFlightConnectStillArmsAReconnectAndRecovers() async throws {
+        let identity = try TerminalServiceTLSIdentityStore.loadOrCreate(root: Self.tlsRoot)
+        let pairingStore = AlwaysAuthorizedStreamConnectionPairingStore()
+        let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore)
+        try server.start()
+        defer { server.stop() }
+
+        let sessionID = "session-\(UUID().uuidString)"
+        let device = SpacesPairedDeviceRecord(
+            id: "remote-\(UUID().uuidString)", name: "Remote", platform: "linux", host: "127.0.0.1", port: server.listeningPort,
+            certificateFingerprint: identity.certificateFingerprint, createdAt: "2026-07-24T00:00:00Z", updatedAt: "2026-07-24T00:00:00Z",
+            lastSelectedAt: "2026-07-24T00:00:00Z")
+        let model = try DeviceTerminalSessionStateModel(
+            device: device, sessionID: sessionID,
+            launchConfiguration: TerminalSessionLaunchConfiguration(
+                sessionID: sessionID, title: "t", workingDirectory: "/tmp", shell: "/bin/zsh", command: nil, createdAt: "2026-07-24T00:00:00Z",
+                workspaceID: "workspace", kind: .shell),
+            clientApp: SpacesDeviceClientApp(
+                installationID: "INSTALLATION-RACE-\(UUID().uuidString)", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID,
+                platform: "macos", deviceName: "Mac", appVersion: "1.0"),
+            preparedCredentials: .init(certificateFingerprint: identity.certificateFingerprint, authToken: pairingStore.authToken))
+        model.reconnectBackoff.retryDelay = .milliseconds(5)
+        model.reconnectBackoff.maxRetryDelay = .milliseconds(5)
+        model.reconnectBackoff.retryJitterFraction = { 0 }
+
+        // Fires once for the initial connect `startStateStream` triggers, and again when the retry
+        // `reportFailedInputSend` arms below actually runs (and is eaten by the in-flight guard, since
+        // the controlled connect below is still pending at that point). Awaiting a second fulfillment
+        // proves that retry ran its course for real, instead of guessing how long a real delay takes.
+        let ensureSubscriptionStartedInvoked = expectation(description: "ensureSubscriptionStarted ran for the initial connect and the eaten retry")
+        ensureSubscriptionStartedInvoked.expectedFulfillmentCount = 2
+        model.ensureSubscriptionStartedInvokedForTesting = { ensureSubscriptionStartedInvoked.fulfill() }
+
+        // Holds the first connect open until the test resumes it, reproducing `streamClient` being
+        // cleared while that connect is still in flight without racing real network timing.
+        let reachedConnect = expectation(description: "the first connect reached the controlled resolution point")
+        var resumeConnect: ((Bool) -> Void)?
+        model.stateStreamConnectOverrideForTesting = { [weak model] in
+            await withCheckedContinuation { continuation in
+                resumeConnect = { continuation.resume(returning: $0) }
+                // Only the first connect is controlled; the retry this test drives afterward must reach
+                // the real server so recovery can be observed, not just that a retry got armed.
+                model?.stateStreamConnectOverrideForTesting = nil
+                reachedConnect.fulfill()
+            }
+        }
+
+        model.startStateStream(onUpdate: { _ in }, onDisconnect: { _ in })
+        await fulfillment(of: [reachedConnect], timeout: 5)
+        XCTAssertTrue(model.hasActiveStreamClientForTesting, "the stream client must be installed before its blocking connect resolves")
+
+        // A keystroke fails while the connect above is still in flight: the model's own evidence the
+        // link is down, arriving before the subscription itself would notice.
+        model.reportFailedInputSend(SpacesDeviceAPIRequestClientError.connectionFailed("Connection refused"))
+        XCTAssertFalse(model.hasActiveStreamClientForTesting, "the failed send must clear the stream client immediately")
+
+        // Let the retry the failed send armed actually fire — and be dropped by the in-flight guard,
+        // because the connect above is still running. This is the exact ordering the bug depends on.
+        await fulfillment(of: [ensureSubscriptionStartedInvoked], timeout: 5)
+        // Detach the hook now that both fulfillments it needs have landed: the retry the armed reconnect
+        // below fires calls `ensureSubscriptionStarted` too, and firing into an already-satisfied
+        // expectation crashes XCTest's bookkeeping instead of just failing the assertion.
+        model.ensureSubscriptionStartedInvokedForTesting = nil
+        XCTAssertFalse(model.hasArmedReconnectForTesting, "the eaten retry must have cleared its own armed state")
+
+        // Resolve the connect as successful now that the client backing it has already been cleared and
+        // its own retry already spent.
+        resumeConnect?(true)
+        await model.drainPendingConnectForTesting()
+
+        XCTAssertTrue(model.hasArmedReconnectForTesting, "a connect that finished without installing a client must leave a retry armed")
+
+        // Let the armed retry run its course against the real server; it must actually reconnect.
+        await model.drainPendingReconnectForTesting()
+        XCTAssertTrue(model.hasActiveStreamClientForTesting, "the armed retry must reconnect the session")
+        XCTAssertFalse(model.isStateStreamDisconnected, "a successful reconnect must clear the disconnected notice")
+    }
+
+    /// `establishStateStreamConnection`'s own failure path (a connect that reports failure) already calls
+    /// `scheduleReconnect()` before returning; the connect-completion check in `ensureSubscriptionStarted`
+    /// then finds `streamClient` still nil and calls it again. Without idempotency this doubles the
+    /// backoff on top of the retry already armed; asserting the armed delay stays at the floor proves
+    /// only one of the two calls actually armed anything.
+    ///
+    /// Drives a real, reachable in-process `SpacesDeviceAPIServer` — not an unreachable port — because
+    /// `ensureSubscriptionStarted` unconditionally fires the catch-up `.state` request first, on a
+    /// separate request client `stateStreamConnectOverrideForTesting` does not reach; against an
+    /// unreachable device that catch-up blocks for the request client's own connect timeout, which is not
+    /// guaranteed to be fast. Only the stream connect itself is made to fail, deterministically, through
+    /// the override.
+    @MainActor func testScheduleReconnectDoesNotStackConcurrentRetries() async throws {
+        let identity = try TerminalServiceTLSIdentityStore.loadOrCreate(root: Self.tlsRoot)
+        let pairingStore = AlwaysAuthorizedStreamConnectionPairingStore()
+        let server = SpacesDeviceAPIServer(host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore)
+        try server.start()
+        defer { server.stop() }
+
+        let sessionID = "session-\(UUID().uuidString)"
+        let device = SpacesPairedDeviceRecord(
+            id: "remote-\(UUID().uuidString)", name: "Remote", platform: "linux", host: "127.0.0.1", port: server.listeningPort,
+            certificateFingerprint: identity.certificateFingerprint, createdAt: "2026-07-24T00:00:00Z", updatedAt: "2026-07-24T00:00:00Z",
+            lastSelectedAt: "2026-07-24T00:00:00Z")
+        let model = try DeviceTerminalSessionStateModel(
+            device: device, sessionID: sessionID,
+            launchConfiguration: TerminalSessionLaunchConfiguration(
+                sessionID: sessionID, title: "t", workingDirectory: "/tmp", shell: "/bin/zsh", command: nil, createdAt: "2026-07-24T00:00:00Z",
+                workspaceID: "workspace", kind: .shell),
+            clientApp: SpacesDeviceClientApp(
+                installationID: "INSTALLATION-STACK-\(UUID().uuidString)", bundleID: SpacesDeviceFirstPartyPolicy.allowedBundleID,
+                platform: "macos", deviceName: "Mac", appVersion: "1.0"),
+            preparedCredentials: .init(certificateFingerprint: identity.certificateFingerprint, authToken: pairingStore.authToken))
+        model.reconnectBackoff.retryDelay = .milliseconds(10)
+        model.reconnectBackoff.maxRetryDelay = .seconds(10)
+        model.reconnectBackoff.retryJitterFraction = { 0 }
+        model.stateStreamConnectOverrideForTesting = { false }
+
+        model.startStateStream(onUpdate: { _ in }, onDisconnect: { _ in })
+        await model.drainPendingConnectForTesting()
+
+        XCTAssertTrue(model.hasArmedReconnectForTesting, "the failed connect must arm a retry")
+        XCTAssertEqual(
+            model.lastReconnectDelayForTesting, .milliseconds(10),
+            "a second, redundant scheduleReconnect() call must not recompute the backoff and double the armed delay")
+    }
+
     // MARK: Fixtures
 
-    /// A model pointed at a device that cannot be reached (port 1 refuses immediately). Nothing in
-    /// these tests lets it dial: a stream client is installed before any listener registers.
+    /// A model pointed at a device on port 1, an address nothing in these tests actually dials: each
+    /// test either installs a stream client before any listener registers, or overrides the connect
+    /// through `stateStreamConnectOverrideForTesting`. A real connect's failure timing is not something
+    /// to depend on here — a refused port is not guaranteed to fail before the pinned-TLS connector's own
+    /// connect timeout.
     @MainActor private func makeModel(sessionID: String) throws -> DeviceTerminalSessionStateModel {
         let device = SpacesPairedDeviceRecord(
             id: "remote-\(UUID().uuidString)", name: "Remote", platform: "linux", host: "127.0.0.1", port: 1,
@@ -212,8 +376,33 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
                 sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: nil, state: .exited, updatedAt: "2026-07-24T00:00:01Z",
                 exitedAt: "2026-07-24T00:00:01Z"), attachmentSnapshot: nil, title: "t", workingDirectory: "/tmp", outputByteCount: nil)
     }
+
+    /// One pinned-TLS identity per test process: generation is expensive and every server/client pair
+    /// only needs a stable certificate to pin. Mirrors `DeviceTerminalSessionStateModelRecoveryTests`.
+    private static let tlsRoot = FileManager.default.temporaryDirectory.appendingPathComponent(
+        "device-terminal-session-state-model-stream-connection-tests-tls-\(UUID().uuidString)", isDirectory: true)
 }
 
 /// `TerminalRemoteStateStreamClient` requires only `stop()`; the model treats any conforming object as
 /// an installed stream, which is all these tests need.
 private final class FakeStreamClient: TerminalRemoteStateStreamClient, @unchecked Sendable { func stop() {} }
+
+/// A pairing store that authorizes any request carrying its fixed token. Mirrors the file-private
+/// fixture `DeviceTerminalSessionStateModelRecoveryTests` defines for the same purpose — the connect
+/// race test just needs the real server reachable, not any particular pairing behavior.
+private final class AlwaysAuthorizedStreamConnectionPairingStore: SpacesDevicePairingStoreProtocol {
+    let authToken = "valid-token"
+
+    func issueToken(for _: SpacesDeviceClientApp, presentedToken _: String?) throws -> String { authToken }
+    func listDevices() throws -> [SpacesDevicePairedClient] { [] }
+    func revoke(installationID _: String) throws {}
+    func removeAll() throws {}
+    func authorize(clientApp: SpacesDeviceClientApp?, authToken: String?) throws {
+        guard clientApp != nil, authToken == self.authToken else {
+            throw NSError(
+                domain: "DeviceTerminalSessionStateModelStreamConnectionTests", code: 401,
+                userInfo: [NSLocalizedDescriptionKey: "Invalid device auth token."])
+        }
+    }
+    func validate(clientApp _: SpacesDeviceClientApp) throws {}
+}

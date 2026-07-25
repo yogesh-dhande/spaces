@@ -94,6 +94,14 @@
         // semaphore, so it must never run on the main actor; while a connect is in flight this guards
         // `ensureSubscriptionStarted` from starting a second one.
         private var subscriptionConnectTask: Task<Void, Never>?
+        // Holds `scheduleReconnect`'s delayed retry so a second call while one is already pending is a
+        // no-op instead of stacking a competing timer and doubling the backoff. Both
+        // `establishStateStreamConnection`'s own failure paths and the connect-completion check in
+        // `ensureSubscriptionStarted` can each decide the same failed connect owes a retry, so
+        // `scheduleReconnect` has to tolerate being called twice for one failure. Cleared when the retry
+        // fires (or the model is torn down); nothing else clears it early, so a connect that installs a
+        // client on its own simply leaves the stale retry to find `streamClient` set and no-op when it runs.
+        private var reconnectTask: Task<Void, Never>?
 
         // Emission time of the newest payload already applied. The catch-up `.state`
         // request runs in parallel with the live subscription, so a catch-up response
@@ -140,6 +148,7 @@
                 streamClient?.stop()
                 stateRefreshRetryTask?.cancel()
                 subscriptionConnectTask?.cancel()
+                reconnectTask?.cancel()
                 requestClientBox.current.client.cancel()
             }
         }
@@ -335,6 +344,10 @@
         }
 
         private func ensureSubscriptionStarted(now: Date = Date()) {
+            // Test seam: fires on every call, including one the guard below immediately turns away, so
+            // `spacesuiTests` can observe a delayed retry actually running (and being eaten by the
+            // in-flight guard) instead of guessing whether real time has passed. Nil in production.
+            ensureSubscriptionStartedInvokedForTesting?()
             if streamClient != nil || subscriptionConnectTask != nil { return }
             if let lastSubscriptionAttemptAt, now.timeIntervalSince(lastSubscriptionAttemptAt) < 0.5 { return }
             lastSubscriptionAttemptAt = now
@@ -345,7 +358,19 @@
             refreshState()
             subscriptionConnectTask = Task { @MainActor [weak self] in
                 await self?.establishStateStreamConnection()
-                self?.subscriptionConnectTask = nil
+                guard let self else { return }
+                self.subscriptionConnectTask = nil
+                // Establishes the invariant a connect that finishes without leaving `streamClient`
+                // installed always leaves a retry armed. `establishStateStreamConnection`'s own failure
+                // paths already call `scheduleReconnect()` before returning, so this only does new work
+                // when the connect reported success (`openStateStream` returned true) while a competing
+                // disconnect — e.g. a failed input send racing the connect (`reportFailedInputSend`) —
+                // had already cleared `streamClient` and lost its own retry to the
+                // `subscriptionConnectTask != nil` guard above, which is still armed for as long as this
+                // task is in flight. Without this, that race leaves the pane connected to nothing with no
+                // retry coming. `scheduleReconnect()` is idempotent, so the common case — a retry is
+                // already pending from one of those failure paths — is a no-op here.
+                if self.streamClient == nil { self.scheduleReconnect() }
             }
         }
 
@@ -407,12 +432,20 @@
                     })
             } catch { return false }
             streamClient = client
-            let started = await Task.detached(priority: .userInitiated) { () -> Bool in
-                do {
-                    try client.start()
-                    return true
-                } catch { return false }
-            }.value
+            let started: Bool
+            if let connectOverrideForTesting = stateStreamConnectOverrideForTesting {
+                // Test seam: lets `spacesuiTests` control exactly when and how the blocking connect
+                // resolves, so it can reproduce `start()` succeeding for a client a competing disconnect
+                // already stopped without racing real network timing. See the property's doc comment.
+                started = await connectOverrideForTesting()
+            } else {
+                started = await Task.detached(priority: .userInitiated) { () -> Bool in
+                    do {
+                        try client.start()
+                        return true
+                    } catch { return false }
+                }.value
+            }
             guard started else {
                 // Only clear the installed client if it is still this one; a racing disconnect (or a newer
                 // connect) may already have replaced it, and clearing then would drop a healthy stream.
@@ -606,6 +639,40 @@
 
         var hasActiveStreamClientForTesting: Bool { streamClient != nil }
 
+        /// Overrides the blocking pinned-TLS connect `openStateStream` normally runs in a detached task,
+        /// so a test can control exactly when and how it resolves instead of racing real network timing.
+        /// `spacesuiTests` uses it to reproduce the connect-vs-disconnect race the post-connect check in
+        /// `ensureSubscriptionStarted` guards against: resolving the connect only after a competing
+        /// `reportFailedInputSend` has already cleared `streamClient` reproduces `start()` succeeding for
+        /// a client that was concurrently stopped, deterministically. Nil in production, where the real
+        /// detached connect always runs.
+        var stateStreamConnectOverrideForTesting: (@MainActor () async -> Bool)?
+
+        /// See the call site in `ensureSubscriptionStarted`.
+        var ensureSubscriptionStartedInvokedForTesting: (@MainActor () -> Void)?
+
+        /// The delay `scheduleReconnect` last actually armed a retry with, or nil once that retry has
+        /// fired. A call that no-ops because a retry is already pending leaves this untouched, so
+        /// `spacesuiTests` can prove a competing call never stacks a second timer or silently doubles the
+        /// backoff on top of the one already armed.
+        private(set) var lastReconnectDelayForTesting: Duration?
+
+        /// Whether a delayed reconnect is currently armed and waiting to fire.
+        var hasArmedReconnectForTesting: Bool { reconnectTask != nil }
+
+        /// Awaits the in-flight connect `ensureSubscriptionStarted` started, if any, so a test can observe
+        /// its outcome deterministically instead of polling.
+        func drainPendingConnectForTesting() async { await subscriptionConnectTask?.value }
+
+        /// Awaits an armed reconnect through its (test-shortened) backoff delay and the connect it starts,
+        /// so a test can drive a real retry to completion deterministically instead of polling or sleeping
+        /// out the interval. A no-op when no reconnect is armed.
+        func drainPendingReconnectForTesting() async {
+            guard let reconnectTask else { return }
+            await reconnectTask.value
+            await subscriptionConnectTask?.value
+        }
+
         /// Re-subscribes after a backoff delay — only while the session may still be interactive and
         /// listeners remain. An ended session needs no live stream, so it is left disconnected, and it is
         /// also not reported as disconnected: the daemon streams live sessions only, so refusing an ended
@@ -616,13 +683,22 @@
         /// that is genuinely down. Marking the link down here rather than in `handleStreamDisconnect` keeps
         /// the flag meaning exactly what the banner tells the user — the connection dropped and a retry is
         /// coming.
+        ///
+        /// Idempotent while a retry is already pending (`reconnectTask != nil`): more than one caller can
+        /// decide the same failed connect owes a retry (see the connect-completion check in
+        /// `ensureSubscriptionStarted`), and a second call here must not stack a competing timer or double
+        /// the backoff on top of the one already armed.
         private func scheduleReconnect() {
+            guard reconnectTask == nil else { return }
             guard !listeners.isEmpty, currentRuntimeState?.state.isInteractive != false else { return }
             setStateStreamDisconnected(true)
             let delay = reconnectBackoff.nextDelay()
-            Task { @MainActor [weak self] in
+            lastReconnectDelayForTesting = delay
+            reconnectTask = Task { @MainActor [weak self] in
                 try? await Task.sleep(for: delay)
-                guard let self, self.streamClient == nil, !self.listeners.isEmpty, self.currentRuntimeState?.state.isInteractive != false else {
+                guard let self else { return }
+                self.reconnectTask = nil
+                guard self.streamClient == nil, !self.listeners.isEmpty, self.currentRuntimeState?.state.isInteractive != false else {
                     return
                 }
                 self.lastSubscriptionAttemptAt = nil
