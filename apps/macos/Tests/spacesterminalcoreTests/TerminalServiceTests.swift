@@ -14,8 +14,7 @@ import XCTest
             let result = try XCTUnwrap(
                 TerminalService.capturedStandardOutput(
                     executableURL: URL(fileURLWithPath: "/bin/sh"),
-                    arguments: ["-c", "dd if=/dev/zero bs=1024 count=256 2>/dev/null | tr '\\0' 'x'"], timeout: 30)
-            )
+                    arguments: ["-c", "dd if=/dev/zero bs=1024 count=256 2>/dev/null | tr '\\0' 'x'"], timeout: 30))
 
             XCTAssertEqual(result.terminationStatus, 0)
             XCTAssertEqual(result.output.count, 256 * 1024)
@@ -41,7 +40,7 @@ import XCTest
             try makeExecutableFile(at: cli)
             try makeExecutableFile(at: service)
 
-            let resolved = try TerminalService.resolveExecutableURL(environment: ["_": cli.path])
+            let resolved = try TerminalService.resolveExecutableURL(environment: ["_": cli.path], profile: makeProfile(source: .installedFallback))
 
             XCTAssertEqual(resolved.path, service.path)
         }
@@ -58,7 +57,8 @@ import XCTest
             try makeExecutableFile(at: appExecutable)
             try makeExecutableFile(at: service)
 
-            let resolved = try TerminalService.resolveExecutableURL(environment: ["_": appExecutable.path])
+            let resolved = try TerminalService.resolveExecutableURL(
+                environment: ["_": appExecutable.path], profile: makeProfile(source: .installedFallback))
 
             XCTAssertEqual(resolved.path, service.path)
         }
@@ -73,7 +73,7 @@ import XCTest
             try makeExecutableFile(at: cli)
             try makeExecutableFile(at: service)
 
-            let resolved = try TerminalService.resolveExecutableURL(environment: ["_": cli.path])
+            let resolved = try TerminalService.resolveExecutableURL(environment: ["_": cli.path], profile: makeProfile(source: .installedFallback))
 
             XCTAssertEqual(resolved.path, service.path)
         }
@@ -94,9 +94,94 @@ import XCTest
             try FileManager.default.createSymbolicLink(at: cliHelper, withDestinationURL: cliTarget)
             try FileManager.default.createSymbolicLink(at: serviceHelper, withDestinationURL: serviceTarget)
 
-            let resolved = try TerminalService.resolveExecutableURL(environment: ["_": cliHelper.path])
+            let resolved = try TerminalService.resolveExecutableURL(
+                environment: ["_": cliHelper.path], profile: makeProfile(source: .installedFallback))
 
             XCTAssertEqual(resolved.path, serviceHelper.path)
+        }
+
+        // The installed profile is the only one the location-fixed installed links may serve, and it
+        // still reaches them when nothing beside the running executable matches.
+        func testResolveExecutableURLUsesInstalledLinkForInstalledProfile() throws {
+            let layout = try makeDaemonResolutionLayout()
+            defer { try? FileManager.default.removeItem(at: layout.root) }
+
+            let resolved = try TerminalService.resolveExecutableURL(
+                environment: ["_": layout.buildCLI.path], fileManager: layout.fileManager, profile: makeProfile(source: .installedFallback),
+                installedLinkURLs: [layout.installedDaemon])
+
+            XCTAssertEqual(resolved.path, layout.installedDaemon.path)
+        }
+
+        // Regression: a repo-local profile whose own `.build/debug/spacesd` was not executable fell
+        // through to `~/.spaces/bin/spacesd` and started the installed release against the development
+        // profile's runtime directory and socket. That daemon answered on an older wire protocol, so the
+        // sidebar reload failed with `daemonWireIncompatible` and the real cause — the wrong binary
+        // entirely — was invisible. A development profile must fail instead of borrowing another build.
+        func testResolveExecutableURLRefusesInstalledLinkForDevelopmentProfile() throws {
+            let layout = try makeDaemonResolutionLayout()
+            defer { try? FileManager.default.removeItem(at: layout.root) }
+            let profile = makeProfile(source: .developmentWorktree)
+
+            XCTAssertThrowsError(
+                try TerminalService.resolveExecutableURL(
+                    environment: ["_": layout.buildCLI.path], fileManager: layout.fileManager, profile: profile,
+                    installedLinkURLs: [layout.installedDaemon])
+            ) { error in
+                guard case TerminalServiceError.developmentDaemonNotFound(let profileRoot, let searchedPaths) = error else {
+                    return XCTFail("Expected developmentDaemonNotFound, got \(error)")
+                }
+                XCTAssertEqual(profileRoot, profile.rootDirectory)
+                XCTAssertFalse(searchedPaths.contains(layout.installedDaemon.path))
+                let message = (error as? TerminalServiceError)?.errorDescription ?? ""
+                XCTAssertTrue(message.contains(profile.rootDirectory))
+                XCTAssertTrue(message.contains("never starts the installed daemon"))
+            }
+        }
+
+        // An explicit SPACES_DB_PATH names a data location that is not the installed profile's, so it is
+        // governed by the same rule as a worktree profile.
+        func testResolveExecutableURLRefusesInstalledLinkForExplicitDatabaseProfile() throws {
+            let layout = try makeDaemonResolutionLayout()
+            defer { try? FileManager.default.removeItem(at: layout.root) }
+
+            XCTAssertThrowsError(
+                try TerminalService.resolveExecutableURL(
+                    environment: ["_": layout.buildCLI.path], fileManager: layout.fileManager, profile: makeProfile(source: .explicitDatabasePath),
+                    installedLinkURLs: [layout.installedDaemon])
+            ) { error in
+                guard case TerminalServiceError.developmentDaemonNotFound = error else {
+                    return XCTFail("Expected developmentDaemonNotFound, got \(error)")
+                }
+            }
+        }
+
+        func testResolveExecutableURLUsesDevelopmentBuildDaemonForDevelopmentProfile() throws {
+            let layout = try makeDaemonResolutionLayout()
+            defer { try? FileManager.default.removeItem(at: layout.root) }
+            let buildDaemon = layout.buildCLI.deletingLastPathComponent().appendingPathComponent("spacesd", isDirectory: false)
+            try makeExecutableFile(at: buildDaemon)
+
+            let resolved = try TerminalService.resolveExecutableURL(
+                environment: ["_": layout.buildCLI.path], fileManager: layout.fileManager, profile: makeProfile(source: .developmentWorktree),
+                installedLinkURLs: [layout.installedDaemon])
+
+            XCTAssertEqual(resolved.path, buildDaemon.path)
+        }
+
+        // SPACESD_EXECUTABLE names one binary outright, so it is a deliberate choice rather than a silent
+        // substitution and keeps winning for every profile — the terminal E2E scripts pin their daemon with it.
+        func testResolveExecutableURLHonorsExplicitOverrideForDevelopmentProfile() throws {
+            let layout = try makeDaemonResolutionLayout()
+            defer { try? FileManager.default.removeItem(at: layout.root) }
+            let overrideDaemon = layout.root.appendingPathComponent("override-spacesd", isDirectory: false)
+            try makeExecutableFile(at: overrideDaemon)
+
+            let resolved = try TerminalService.resolveExecutableURL(
+                environment: ["_": layout.buildCLI.path, "SPACESD_EXECUTABLE": overrideDaemon.path], fileManager: layout.fileManager,
+                profile: makeProfile(source: .developmentWorktree), installedLinkURLs: [layout.installedDaemon])
+
+            XCTAssertEqual(resolved.path, overrideDaemon.path)
         }
 
         func testParseProcessIDsIgnoresWhitespaceAndInvalidLines() {
@@ -183,5 +268,53 @@ import XCTest
             try Data().write(to: url)
             try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
         }
+
+        private func makeProfile(source: SpacesProfileSource) -> SpacesProfile {
+            let root = "/tmp/spaces-profile-\(UUID().uuidString)"
+            return SpacesProfile(
+                source: source, databasePath: "\(root)/spaces.db", rootDirectory: root, runtimeDirectory: "\(root)/runtime",
+                ipcNotificationObject: "spaces.profile.test", developmentContext: nil, branchSlug: nil, worktreeHash: nil)
+        }
+
+        /// A checkout-style build directory whose `spacesd` exists but is not executable (the observed
+        /// failure), an installed link that is executable, and a working directory with no `.build` tree so
+        /// the checkout-relative candidates can't resolve the real daemon this suite was built alongside.
+        private struct DaemonResolutionLayout {
+            let root: URL
+            let buildCLI: URL
+            let installedDaemon: URL
+            let fileManager: FileManager
+        }
+
+        private func makeDaemonResolutionLayout() throws -> DaemonResolutionLayout {
+            let root = try makeTemporaryDirectory()
+            let buildDirectory = root.appendingPathComponent("checkout/apps/macos/.build/debug", isDirectory: true)
+            let installedBinDirectory = root.appendingPathComponent("home/.spaces/bin", isDirectory: true)
+            let workingDirectory = root.appendingPathComponent("cwd", isDirectory: true)
+            for directory in [buildDirectory, installedBinDirectory, workingDirectory] {
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            }
+            let buildCLI = buildDirectory.appendingPathComponent("spaces", isDirectory: false)
+            try makeExecutableFile(at: buildCLI)
+            try Data().write(to: buildDirectory.appendingPathComponent("spacesd", isDirectory: false))
+            let installedDaemon = installedBinDirectory.appendingPathComponent("spacesd", isDirectory: false)
+            try makeExecutableFile(at: installedDaemon)
+            return DaemonResolutionLayout(
+                root: root, buildCLI: buildCLI, installedDaemon: installedDaemon,
+                fileManager: FixedWorkingDirectoryFileManager(workingDirectoryPath: workingDirectory.path))
+        }
+    }
+
+    /// Pins `currentDirectoryPath` so daemon resolution's checkout-relative candidates are controlled by
+    /// the test rather than by wherever the test runner happens to have been launched.
+    private final class FixedWorkingDirectoryFileManager: FileManager {
+        private let workingDirectoryPath: String
+
+        init(workingDirectoryPath: String) {
+            self.workingDirectoryPath = workingDirectoryPath
+            super.init()
+        }
+
+        override var currentDirectoryPath: String { workingDirectoryPath }
     }
 #endif

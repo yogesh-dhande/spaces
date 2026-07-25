@@ -42,6 +42,11 @@ final class SpacesDeviceClientBootstrapErrorTests: XCTestCase {
         // errors, which is the path the offline fallback otherwise misses.
         XCTAssertTrue(SpacesDeviceClient.isLocalDaemonUnreachableError(TerminalServiceError.serviceStartupTimedOut("/path/to/spacesd")))
         XCTAssertTrue(SpacesDeviceClient.isLocalDaemonUnreachableError(TerminalServiceError.executableNotFound))
+        // A development profile that has no daemon of its own is equally down: it refuses to borrow the
+        // installed daemon, so nothing can answer its socket.
+        XCTAssertTrue(
+            SpacesDeviceClient.isLocalDaemonUnreachableError(
+                TerminalServiceError.developmentDaemonNotFound(profileRoot: "/dev/profile", searchedPaths: ["/dev/profile/spacesd"])))
         // A generic terminal request failure is not a clear daemon-down signal, so it surfaces as an error.
         XCTAssertFalse(SpacesDeviceClient.isLocalDaemonUnreachableError(TerminalServiceError.requestFailed("boom")))
     }

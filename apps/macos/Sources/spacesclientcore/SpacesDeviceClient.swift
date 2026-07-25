@@ -157,12 +157,13 @@ public enum SpacesDeviceClient {
         // The Device API network transport (used by the overview round-trip) couldn't reach the daemon.
         if isDeviceAPITransportFailure(error) { return true }
         #if os(macOS)
-            // The terminal service couldn't bring spacesd up at all — it timed out starting, or the
-            // executable is missing — so the local daemon is down, the same offline state as an unreachable
-            // socket. These cases exist only in the macOS TerminalService, which is where local bootstrap runs.
+            // The terminal service couldn't bring spacesd up at all — it timed out starting, or no daemon
+            // binary this profile may launch exists — so the local daemon is down, the same offline state
+            // as an unreachable socket. These cases exist only in the macOS TerminalService, which is where
+            // local bootstrap runs.
             if let terminalError = error as? TerminalServiceError {
                 switch terminalError {
-                case .serviceStartupTimedOut, .executableNotFound: return true
+                case .serviceStartupTimedOut, .executableNotFound, .developmentDaemonNotFound: return true
                 case .daemonWireIncompatible, .requestFailed: return false
                 }
             }
