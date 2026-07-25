@@ -343,6 +343,73 @@ final class DeviceTerminalSessionStateModelStreamConnectionTests: XCTestCase {
             "a second, redundant scheduleReconnect() call must not recompute the backoff and double the armed delay")
     }
 
+    /// `reportFailedInputSend`'s return value is the `RemoteGhosttyInputFailureHandler` contract: whether
+    /// this particular failure proves the link is gone, not whether the call did fresh work. A reachable
+    /// daemon's coded rejection must answer false (nothing to drop). The first transport failure of an
+    /// outage does fresh work (tears the stream down) and must answer true. A second transport failure
+    /// during the same outage does no fresh work — a retry is already armed — but the link is still gone,
+    /// so it must still answer true: getting this branch backwards would silently stop the render host
+    /// from dropping every keystroke after the first one typed into a pane whose link is already down.
+    @MainActor func testReportFailedInputSendReturnValueTracksWhetherTheLinkIsGoneNotWhetherItDidFreshWork() throws {
+        let sessionID = "session-\(UUID().uuidString)"
+        let model = try makeModel(sessionID: sessionID)
+        model.installStreamClientForTesting(FakeStreamClient())
+        model.startStateStream(onUpdate: { _ in }, onDisconnect: { _ in })
+
+        XCTAssertFalse(
+            model.reportFailedInputSend(
+                SpacesDeviceAPIRequestClientError.requestRejected(message: "Session is not running.", code: .sessionNotAvailable)))
+        XCTAssertFalse(model.isStateStreamDisconnected)
+
+        XCTAssertTrue(model.reportFailedInputSend(SpacesDeviceAPIRequestClientError.connectionFailed("Connection refused")))
+        XCTAssertTrue(model.isStateStreamDisconnected)
+
+        XCTAssertTrue(
+            model.reportFailedInputSend(SpacesDeviceAPIRequestClientError.timeout("Timed out.")),
+            "a repeat failure during an outage already reported down must still say the link is gone")
+    }
+
+    /// The interactive control commands on the hot per-keystroke path (typed input, key, scroll, resize,
+    /// clear-screen) get the shortened deadline; every other control command — session-management calls
+    /// like attach/detach/heartbeat/takeover/appearance, off that path — keeps the Device API's own
+    /// default. Asserted directly against the pure decision function `sendTerminalServiceRequest` sends
+    /// through, so the split is provable without a real send waiting out either deadline to reveal which
+    /// one was chosen.
+    func testControlRequestTimeoutSecondsUsesTheShortenedDeadlineOnlyForInteractiveCommands() throws {
+        typealias Model = DeviceTerminalSessionStateModel
+        let sessionID = "session-\(UUID().uuidString)"
+        let interactiveRequests: [TerminalControlRequest] = [
+            TerminalControlRequest(command: .send(.init(text: "a", bytes: nil, clientID: "client", ownerEpoch: 0, appendNewline: false))),
+            TerminalControlRequest(command: .key(.init(key: "enter", clientID: "client", ownerEpoch: 0))),
+            TerminalControlRequest(command: .clearScreen(.init(clientID: "client", ownerEpoch: 0))),
+            TerminalControlRequest(command: .resize(.init(clientID: "client", columns: 80, rows: 24, ownerEpoch: 0, resizeSerial: 1))),
+            TerminalControlRequest(
+                command: .scroll(.init(clientID: "client", ownerEpoch: 0, scrollHorizontal: 0, scrollVertical: 1, scrollMods: nil))),
+        ]
+        let nonInteractiveRequests: [TerminalControlRequest] = [
+            TerminalControlRequest(command: .attach(.init(client: nil, attachmentMode: .owner, appearance: nil))),
+            TerminalControlRequest(command: .detach(.init(clientID: "client"))),
+            TerminalControlRequest(command: .heartbeat(.init(clientID: "client"))),
+            TerminalControlRequest(command: .takeover(.init(clientID: "client"))),
+            TerminalControlRequest(command: .setAppearance(.init(clientID: "client", appearance: .dark))),
+        ]
+
+        for controlRequest in interactiveRequests {
+            let deviceRequest = try AppKitController.deviceTerminalControlRequest(sessionID: sessionID, controlRequest: controlRequest)
+            XCTAssertEqual(
+                Model.controlRequestTimeoutSeconds(for: controlRequest, command: .terminalControl(deviceRequest)),
+                Model.interactiveControlRequestTimeoutSeconds, "'\(controlRequest.command)' must use the shortened interactive deadline")
+        }
+        for controlRequest in nonInteractiveRequests {
+            let deviceRequest = try AppKitController.deviceTerminalControlRequest(sessionID: sessionID, controlRequest: controlRequest)
+            let command = SpacesDeviceAPICommand.terminalControl(deviceRequest)
+            XCTAssertEqual(
+                Model.controlRequestTimeoutSeconds(for: controlRequest, command: command), SpacesDeviceClient.requestTimeoutSeconds(for: command),
+                "'\(controlRequest.command)' must keep the default deadline")
+        }
+        XCTAssertEqual(Model.interactiveControlRequestTimeoutSeconds, 5, "healthy sends measure 0.7-1.5s; re-measure before tightening this")
+    }
+
     // MARK: Fixtures
 
     /// A model pointed at a device on port 1, an address nothing in these tests actually dials: each

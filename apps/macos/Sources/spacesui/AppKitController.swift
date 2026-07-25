@@ -2032,8 +2032,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
                         }, agentSignalHandler: agentSignalHandler, linkOpenHandler: { [linkOpenBox] rawLink in linkOpenBox.open(rawLink) },
                         // A keystroke that cannot reach the device is the pane's earliest evidence its link
                         // is gone; the state model owns that verdict, so the raw failure goes there rather
-                        // than being classified or acted on at the render host.
-                        inputFailureHandler: { [weak stateModel] error in Task { @MainActor in stateModel?.reportFailedInputSend(error) } })
+                        // than being classified or acted on at the render host. `reportFailedInputSend` is
+                        // main-actor-isolated and this handler is not, so `await` straight into it — its
+                        // return value is exactly the `RemoteGhosttyInputFailureHandler` contract (whether
+                        // the failure proves the link is gone), and the host awaits it to decide whether to
+                        // drop this pane's queued input.
+                        inputFailureHandler: { [weak stateModel] error in await stateModel?.reportFailedInputSend(error) ?? false })
                 })
             let linkOpenCoordinator = TerminalLinkOpenCoordinator(
                 sessionID: sessionID, deviceID: resolvedDeviceID, isLocalDevice: resolvedDeviceID == SpacesPairedDeviceRecord.localDeviceID,

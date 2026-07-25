@@ -5,11 +5,17 @@
 
     public typealias RemoteGhosttyTerminalServiceRequestSender = @Sendable (TerminalServiceRequest) throws -> TerminalServiceResponse
     public typealias RemoteGhosttyAgentSignalHandler = @MainActor @Sendable ([TerminalServiceAgentSignalEvent]) throws -> [String]
-    /// Reports that a terminal input request the user typed failed to reach the device. Raised from the
-    /// serial input queue (off the main actor) with the error the send threw, and deliberately not
-    /// classified here: the host knows only that its request failed, while the owner of the session's
-    /// link state knows whether a given failure is evidence about the link.
-    public typealias RemoteGhosttyInputFailureHandler = @Sendable (any Error) -> Void
+    /// Reports that an interactive control request — typed input, key, scroll, resize, or clear-screen
+    /// — failed to reach the device. Raised from the serial input queue (off the main actor, awaited
+    /// through its `async` `onError`) with the error the send threw, and deliberately not classified
+    /// here: the host knows only that its request failed, while the owner of the session's link state
+    /// (`DeviceTerminalSessionStateModel.isTransportFailureEvidenceOfLostLink`) knows whether a given
+    /// failure is evidence about the link.
+    ///
+    /// Returns whether the failure itself proves the link is gone. When `true`, the host discards this
+    /// pane's queued input (`TerminalInputSerialQueue.cancelAll()`) instead of letting a backlog typed
+    /// during the outage drain and deliver late — including any Enter — once the link recovers.
+    public typealias RemoteGhosttyInputFailureHandler = @Sendable (any Error) async -> Bool
     public typealias RemoteGhosttyStateStreamSubscriber =
         @Sendable (
             _ sessionID: String, _ onEvent: @escaping @Sendable (GhosttyRemoteSessionStatePayload) -> Void,
@@ -43,10 +49,12 @@
         private let stateStreamSubscriber: RemoteGhosttyStateStreamSubscriber?
         private let transcriptProvider: RemoteGhosttyTranscriptProvider?
         private let agentSignalHandler: RemoteGhosttyAgentSignalHandler?
-        /// Notified when a keystroke's or paste's control request throws. Input rides a different
-        /// connection than the state subscription, so a send that cannot reach the device is the earliest
-        /// proof the link is gone — a silently dead network path leaves the subscription's socket looking
-        /// healthy until TCP keepalive gives up a minute or more later.
+        /// Notified when an interactive control request — typed input, paste, key, scroll, resize, or
+        /// clear-screen — throws. Input rides a different connection than the state subscription, so a
+        /// send that cannot reach the device is the earliest proof the link is gone — a silently dead
+        /// network path leaves the subscription's socket looking healthy until TCP keepalive gives up a
+        /// minute or more later. See `reportInputFailure`, the shared call point every one of those
+        /// requests funnels its failure through.
         private let inputFailureHandler: RemoteGhosttyInputFailureHandler?
         private let terminalView: GhosttyMirrorTerminalView
         private var latestState: GhosttyRemoteSessionStatePayload?
@@ -285,6 +293,16 @@
 
         func debugSetBindingActionHandler(_ handler: (@MainActor (String) -> Bool)?) { terminalView.debugBindingActionHandler = handler }
         var debugRecordedBindingActions: [String] { terminalView.debugRecordedBindingActions }
+
+        /// Awaits the serial input queue's current tail, so a test can observe every send enqueued so far
+        /// — including one discarded by a `cancelAll()` triggered mid-chain — has settled, instead of
+        /// guessing how long that takes.
+        func drainInputQueueForTesting() async { await inputQueue.drain() }
+
+        /// Awaits the in-flight viewport resize task, if any — resize runs off `inputQueue` in its own
+        /// detached task, so a test needs this rather than `drainInputQueueForTesting` to observe its
+        /// outcome (including its `reportInputFailure` call) instead of guessing how long it takes.
+        func drainPendingResizeForTesting() async { await pendingViewportResizeTask?.value }
 
         public var effectiveTitle: String {
             ensureStateStreamStartedIfNeeded()
@@ -570,7 +588,8 @@
             let requestSender = terminalServiceRequestSender
             let shouldRefreshAfterControl = requestSender != nil && stateStreamSubscriber == nil
             let inputFailureHandler = self.inputFailureHandler
-            inputQueue.enqueue(
+            let queue = inputQueue
+            queue.enqueue(
                 priority: .userInitiated,
                 operation: {
                     _ = try Self.sendControlRequest(
@@ -579,7 +598,8 @@
                                 .init(text: text, bytes: nil, clientID: clientID, ownerEpoch: ownerEpoch, appendNewline: false, asPaste: asPaste))),
                         sessionID: sessionID, socketPath: socketPath, requestSender: requestSender)
                     if shouldRefreshAfterControl { Task { @MainActor [weak self] in self?.requestDirectStateRefresh(reason: "input") } }
-                }, onError: { error in inputFailureHandler?(error) })
+                },
+                onError: { error in await Self.reportInputFailure(error, inputFailureHandler: inputFailureHandler, inputQueue: queue) })
         }
 
         private func sendRemoteKey(_ key: String) {
@@ -603,14 +623,16 @@
             let requestSender = terminalServiceRequestSender
             let shouldRefreshAfterControl = requestSender != nil && stateStreamSubscriber == nil
             let inputFailureHandler = self.inputFailureHandler
-            inputQueue.enqueue(
+            let queue = inputQueue
+            queue.enqueue(
                 priority: .userInitiated,
                 operation: {
                     _ = try Self.sendControlRequest(
                         TerminalControlRequest(command: .key(.init(key: key, clientID: clientID, ownerEpoch: ownerEpoch))), sessionID: sessionID,
                         socketPath: socketPath, requestSender: requestSender)
                     if shouldRefreshAfterControl { Task { @MainActor [weak self] in self?.requestDirectStateRefresh(reason: "input") } }
-                }, onError: { error in inputFailureHandler?(error) })
+                },
+                onError: { error in await Self.reportInputFailure(error, inputFailureHandler: inputFailureHandler, inputQueue: queue) })
         }
 
         private func sendRemoteClearScreenAndScrollback() {
@@ -623,12 +645,17 @@
             let sessionID = launchConfiguration.sessionID
             let requestSender = terminalServiceRequestSender
             let shouldRefreshAfterControl = requestSender != nil && stateStreamSubscriber == nil
-            inputQueue.enqueue(priority: .userInitiated) {
-                _ = try Self.sendControlRequest(
-                    TerminalControlRequest(command: .clearScreen(.init(clientID: clientID, ownerEpoch: ownerEpoch))), sessionID: sessionID,
-                    socketPath: socketPath, requestSender: requestSender)
-                if shouldRefreshAfterControl { Task { @MainActor [weak self] in self?.requestDirectStateRefresh(reason: "clear_screen") } }
-            }
+            let inputFailureHandler = self.inputFailureHandler
+            let queue = inputQueue
+            queue.enqueue(
+                priority: .userInitiated,
+                operation: {
+                    _ = try Self.sendControlRequest(
+                        TerminalControlRequest(command: .clearScreen(.init(clientID: clientID, ownerEpoch: ownerEpoch))), sessionID: sessionID,
+                        socketPath: socketPath, requestSender: requestSender)
+                    if shouldRefreshAfterControl { Task { @MainActor [weak self] in self?.requestDirectStateRefresh(reason: "clear_screen") } }
+                },
+                onError: { error in await Self.reportInputFailure(error, inputFailureHandler: inputFailureHandler, inputQueue: queue) })
         }
 
         private func sendRemoteScroll(horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32, pointerPosition: TerminalScrollPointerPosition?) {
@@ -804,18 +831,23 @@
             let sessionID = launchConfiguration.sessionID
             let requestSender = terminalServiceRequestSender
             let shouldRefreshAfterControl = requestSender != nil && stateStreamSubscriber == nil
-            inputQueue.enqueue(priority: .userInitiated) {
-                defer { Task { @MainActor in onFinished() } }
-                _ = try Self.sendControlRequest(
-                    TerminalControlRequest(
-                        command: .scroll(
-                            .init(
-                                clientID: clientID, ownerEpoch: ownerEpoch, scrollHorizontal: batch.horizontal, scrollVertical: batch.vertical,
-                                scrollMods: batch.scrollMods == 0 ? nil : batch.scrollMods, scrollPointerX: batch.pointerPosition?.x,
-                                scrollPointerY: batch.pointerPosition?.y, scrollPointerMods: batch.pointerPosition?.mods))), sessionID: sessionID,
-                    socketPath: socketPath, requestSender: requestSender)
-                if shouldRefreshAfterControl { Task { @MainActor [weak self] in self?.requestDirectStateRefresh(reason: "scroll") } }
-            }
+            let inputFailureHandler = self.inputFailureHandler
+            let queue = inputQueue
+            queue.enqueue(
+                priority: .userInitiated,
+                operation: {
+                    defer { Task { @MainActor in onFinished() } }
+                    _ = try Self.sendControlRequest(
+                        TerminalControlRequest(
+                            command: .scroll(
+                                .init(
+                                    clientID: clientID, ownerEpoch: ownerEpoch, scrollHorizontal: batch.horizontal, scrollVertical: batch.vertical,
+                                    scrollMods: batch.scrollMods == 0 ? nil : batch.scrollMods, scrollPointerX: batch.pointerPosition?.x,
+                                    scrollPointerY: batch.pointerPosition?.y, scrollPointerMods: batch.pointerPosition?.mods))),
+                        sessionID: sessionID, socketPath: socketPath, requestSender: requestSender)
+                    if shouldRefreshAfterControl { Task { @MainActor [weak self] in self?.requestDirectStateRefresh(reason: "scroll") } }
+                },
+                onError: { error in await Self.reportInputFailure(error, inputFailureHandler: inputFailureHandler, inputQueue: queue) })
         }
 
         private func sendCurrentViewportResizeIfNeeded(force: Bool) {
@@ -842,6 +874,8 @@
             let currentResizeSerial = resizeSerial
             let ownerEpoch = latestState?.renderOwnerEpoch
             let shouldRefreshAfterControl = requestSender != nil && stateStreamSubscriber == nil
+            let inputFailureHandler = self.inputFailureHandler
+            let queue = inputQueue
             let finishResizeRequest: @MainActor @Sendable (Bool) -> Void = { [weak self, requestedSize] success in
                 guard let self else { return }
                 if let pendingViewportResizeSize = self.pendingViewportResizeSize, pendingViewportResizeSize == requestedSize {
@@ -851,11 +885,21 @@
                 self.pendingViewportResizeTask = nil
             }
             pendingViewportResizeTask = Task.detached(priority: .utility) {
-                let response = try? Self.sendControlRequest(
-                    TerminalControlRequest(
-                        command: .resize(
-                            .init(clientID: clientID, columns: columns, rows: rows, ownerEpoch: ownerEpoch, resizeSerial: currentResizeSerial))),
-                    sessionID: sessionID, socketPath: socketPath, requestSender: requestSender)
+                // Resize runs off `inputQueue` (it must not wait behind buffered typing), so its failure
+                // cannot ride that queue's `onError` and is reported directly here instead. A `try?` here
+                // used to swallow the thrown error entirely; a resize on a dead link deserves the same
+                // prompt lost-link notice as a keystroke, not silence.
+                let response: TerminalControlResponse?
+                do {
+                    response = try Self.sendControlRequest(
+                        TerminalControlRequest(
+                            command: .resize(
+                                .init(clientID: clientID, columns: columns, rows: rows, ownerEpoch: ownerEpoch, resizeSerial: currentResizeSerial))),
+                        sessionID: sessionID, socketPath: socketPath, requestSender: requestSender)
+                } catch {
+                    response = nil
+                    await Self.reportInputFailure(error, inputFailureHandler: inputFailureHandler, inputQueue: queue)
+                }
                 if shouldRefreshAfterControl { Task { @MainActor [weak self] in self?.requestDirectStateRefresh(reason: "resize") } }
                 await finishResizeRequest(response?.ok == true)
             }
@@ -874,6 +918,20 @@
 
         private nonisolated static func remoteTerminalRequestError(_ message: String) -> NSError {
             NSError(domain: "RemoteGhosttySessionHost", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
+        }
+
+        /// Reports one interactive control send's failure to `inputFailureHandler` and, only when the
+        /// failure is itself proof the link is gone, discards this pane's queued input backlog rather than
+        /// letting it drain and deliver late — including any Enter — once the link recovers. Shared by
+        /// every interactive control path: the four still chained on `inputQueue`'s `onError` (input, key,
+        /// clear-screen, scroll), and the resize path, which sends off that queue in its own detached task
+        /// and so calls this directly instead of through `onError`. `self`-free so every call site can
+        /// capture it by value into a closure or task body built off the main actor.
+        private nonisolated static func reportInputFailure(
+            _ error: any Error, inputFailureHandler: RemoteGhosttyInputFailureHandler?, inputQueue: TerminalInputSerialQueue
+        ) async {
+            guard await inputFailureHandler?(error) == true else { return }
+            inputQueue.cancelAll()
         }
 
         nonisolated static func snapshot(_ snapshot: GhosttyTerminalSnapshot, matches runtimeState: TerminalSessionRuntimeState?) -> Bool {

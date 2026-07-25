@@ -590,11 +590,21 @@
         /// only raising the flag, so the claim stays falsifiable: the reconnect either succeeds and clears
         /// the notice, or keeps failing and the notice is right. `scheduleReconnect` owns the rest, which
         /// is also why an ended session (no stream wanted) and a pane with no listeners report nothing.
-        func reportFailedInputSend(_ error: any Error) {
-            guard Self.isTransportFailureEvidenceOfLostLink(error) else { return }
+        ///
+        /// Returns whether this failure proves the link is gone — `isTransportFailureEvidenceOfLostLink`'s
+        /// verdict on `error`, unconditionally — which is also this method's own `RemoteGhosttyInputFailureHandler`
+        /// wiring contract: the render host discards its queued input backlog exactly when this is `true`.
+        /// The two early-return guards below must not change that answer:
+        ///  - a non-transport error (the daemon answered) returns `false` — the link is fine and its input must
+        ///    still be delivered;
+        ///  - an already-disconnected link (a retry is already armed, so there is nothing new to do here)
+        ///    still returns `true` — the link is still gone, so every keystroke of an ongoing outage, not
+        ///    only the first, must keep dropping its queued input rather than buffering.
+        @discardableResult func reportFailedInputSend(_ error: any Error) -> Bool {
+            guard Self.isTransportFailureEvidenceOfLostLink(error) else { return false }
             // Typing produces one of these per keystroke for as long as the outage lasts. A link already
             // reported down has a retry armed, so re-reporting it must add no reconnect and no notice.
-            guard !isStateStreamDisconnected else { return }
+            guard !isStateStreamDisconnected else { return true }
             // Retire this client's generation before stopping it: `stop()` cancels the connection, whose
             // receive loop then delivers one final disconnect callback, and that callback must not arm a
             // second reconnect on top of the one below.
@@ -603,6 +613,7 @@
             streamClient = nil
             deadClient?.stop()
             scheduleReconnect()
+            return true
         }
 
         /// Whether a failed request proves this session's link is gone. True only for a transport failure:
@@ -767,6 +778,43 @@
             } catch { return .failure(error) }
         }
 
+        /// Deadline for the interactive control commands on the hot per-keystroke path (typed input, key,
+        /// scroll, resize, clear-screen), used in place of the Device API's 10s default. Measured healthy
+        /// sends over the tailnet relay run 0.7-1.5s, so 5s keeps well over 3x headroom while halving the
+        /// worst-case stall a keystroke would otherwise wait out on a dead link.
+        ///
+        /// This deadline also gates how fast `reportFailedInputSend` learns the link is gone and drops the
+        /// pane's queued input (see `RemoteGhosttySessionHost.reportInputFailure`) — a keystroke typed into
+        /// a dead pane sits behind this timeout before that verdict lands and the backlog is discarded. Do
+        /// not tighten it toward the healthy-latency range without re-measuring actual send latency first:
+        /// too tight and a merely slow (not dead) link starts misreporting itself as gone and dropping
+        /// input a user is still waiting to land.
+        nonisolated static let interactiveControlRequestTimeoutSeconds: TimeInterval = 5
+
+        /// Whether `request` is one of the interactive control commands that ride the hot per-keystroke
+        /// path and so use `interactiveControlRequestTimeoutSeconds` in place of the default. Attach,
+        /// detach, heartbeat, takeover, and appearance changes are infrequent session-management calls
+        /// made off that path and keep the default deadline.
+        private nonisolated static func isInteractiveControlCommand(_ request: TerminalControlRequest) -> Bool {
+            switch TerminalControlCommand(request: request) {
+            case .send, .key, .clearScreen, .resize, .scroll: true
+            case .attach, .detach, .heartbeat, .takeover, .setAppearance, .unsupported: false
+            }
+        }
+
+        /// The deadline `sendTerminalServiceRequest` uses for a `.control` command's Device API send:
+        /// `interactiveControlRequestTimeoutSeconds` for the hot per-keystroke commands,
+        /// `SpacesDeviceClient`'s own per-command default for everything else. Pulled out as its own pure
+        /// function (not `private`) so `spacesuiTests` can assert the split deterministically — no real
+        /// send, no waiting out either deadline — instead of only through an integration test that would
+        /// have to time out for real to observe which one was used.
+        nonisolated static func controlRequestTimeoutSeconds(for controlRequest: TerminalControlRequest, command: SpacesDeviceAPICommand)
+            -> TimeInterval
+        {
+            isInteractiveControlCommand(controlRequest)
+                ? interactiveControlRequestTimeoutSeconds : SpacesDeviceClient.requestTimeoutSeconds(for: command)
+        }
+
         /// Internal (not `private`) so `spacesuiTests` can drive it directly through
         /// `@testable import spacesui` against a real `SpacesDeviceAPIRequestSessionClient`
         /// pointed at an in-process `SpacesDeviceAPIServer`. `SpacesDeviceAPIRequestSessionClient`
@@ -787,8 +835,9 @@
             case .control(let payload):
                 let deviceRequest = try AppKitController.deviceTerminalControlRequest(
                     sessionID: payload.sessionID, controlRequest: payload.controlRequest)
-                let response = try requestClient.send(
-                    SpacesDeviceAPIRequest(command: .terminalControl(deviceRequest), authToken: authToken, clientApp: clientApp))
+                let controlAPIRequest = SpacesDeviceAPIRequest(command: .terminalControl(deviceRequest), authToken: authToken, clientApp: clientApp)
+                let timeoutSeconds = Self.controlRequestTimeoutSeconds(for: payload.controlRequest, command: controlAPIRequest.command)
+                let response = try requestClient.send(controlAPIRequest, timeoutSeconds: timeoutSeconds)
                 return TerminalServiceResponse(
                     ok: response.ok, message: response.message, sessionState: response.sessionState,
                     controlResponse: TerminalControlResponse(ok: response.ok, message: response.message))
