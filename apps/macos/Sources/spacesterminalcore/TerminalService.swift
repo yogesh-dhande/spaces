@@ -467,21 +467,28 @@ import Foundation
 
         /// Resolves the `spacesd` binary a client of `profile` should launch.
         ///
-        /// Every candidate except the installed links belongs to the build that is asking: it is named
-        /// outright by `SPACESD_EXECUTABLE`, sits beside the running executable, is a resource of the
-        /// running executable's bundle, or is a product of the checkout the process was started from.
-        /// The installed links (`~/.spaces/bin/spacesd`, `/usr/local/bin/spacesd`) are the exception —
-        /// they are location-fixed and always point at whatever `/Applications/Spaces.app` last
-        /// installed, which is an unrelated release from a repo-local build. Starting them for a
-        /// development profile brings up a foreign daemon on that profile's runtime directory and
-        /// socket; it answers, but on a different wire protocol, so the client fails with
-        /// `daemonWireIncompatible` and the real cause — the wrong binary entirely — stays invisible.
-        /// Only the installed profile therefore considers them; every other profile fails loudly with
-        /// `developmentDaemonNotFound` rather than substituting a different build.
+        /// A profile is only ever served by a daemon that belongs to the build asking for it, so the
+        /// candidate list is split by where a candidate comes from:
         ///
-        /// `SPACESD_EXECUTABLE` keeps winning for every profile: it names one binary explicitly, so it
-        /// is a deliberate choice rather than a silent substitution, and the terminal E2E scripts use
-        /// it to pin their daemon.
+        /// - `SPACESD_EXECUTABLE` wins for every profile. It names one binary outright, which makes it a
+        ///   deliberate choice rather than a silent substitution, and the terminal E2E scripts pin their
+        ///   daemon with it.
+        /// - Candidates derived from the running executable — its sibling, its symlink-resolved sibling,
+        ///   and its bundle's resources — apply to every profile, because they necessarily belong to the
+        ///   build that is asking.
+        /// - The installed links (`~/.spaces/bin/spacesd`, `/usr/local/bin/spacesd`) apply only to the
+        ///   installed profile. They are location-fixed and always point at whatever
+        ///   `/Applications/Spaces.app` last installed, which is an unrelated release from a repo-local
+        ///   build's point of view.
+        /// - The checkout-relative build products under the current working directory apply only to a
+        ///   development profile. They describe whichever checkout the process happens to have been
+        ///   started in, which says nothing about the installed profile.
+        ///
+        /// Both halves of that split prevent the same failure in opposite directions: a foreign daemon
+        /// brought up on this profile's runtime directory and socket answers, but on a different wire
+        /// protocol, so the client reports `daemonWireIncompatible` and the real cause — an entirely
+        /// different build serving the profile — stays invisible. A profile with no daemon of its own
+        /// therefore fails with `daemonNotFound` rather than borrowing one.
         ///
         /// - Parameter installedLinkURLs: The installed layout's fixed daemon links. Injectable so a
         ///   test can supply a temporary installed layout instead of the real machine's.
@@ -513,20 +520,19 @@ import Foundation
             appendCandidate(resolvedCurrentExecutableDirectory.appendingPathComponent("spacesd", isDirectory: false).path(percentEncoded: false))
             appendCandidate(Bundle.main.resourceURL?.appendingPathComponent("spacesd", isDirectory: false).path(percentEncoded: false))
             appendCandidate(bundledResourceDirectory.appendingPathComponent("spacesd", isDirectory: false).path(percentEncoded: false))
-            if profile.source == .installedFallback { for linkURL in installedLinkURLs { appendCandidate(linkURL.path) } }
-            for relativePath in [
-                "apps/macos/.build/debug/spacesd", "apps/macos/.build/release/spacesd", ".build/debug/spacesd", ".build/release/spacesd",
-            ] { appendCandidate(currentDirectory.appendingPathComponent(relativePath, isDirectory: false).path(percentEncoded: false)) }
+            switch profile.source {
+            case .installedFallback: for linkURL in installedLinkURLs { appendCandidate(linkURL.path) }
+            case .developmentWorktree, .explicitDatabasePath:
+                for relativePath in [
+                    "apps/macos/.build/debug/spacesd", "apps/macos/.build/release/spacesd", ".build/debug/spacesd", ".build/release/spacesd",
+                ] { appendCandidate(currentDirectory.appendingPathComponent(relativePath, isDirectory: false).path(percentEncoded: false)) }
+            }
 
             for candidate in candidates where fileManager.isExecutableFile(atPath: candidate) {
                 return URL(fileURLWithPath: candidate, isDirectory: false)
             }
 
-            switch profile.source {
-            case .installedFallback: throw TerminalServiceError.executableNotFound
-            case .developmentWorktree, .explicitDatabasePath:
-                throw TerminalServiceError.developmentDaemonNotFound(profileRoot: profile.rootDirectory, searchedPaths: candidates)
-            }
+            throw TerminalServiceError.daemonNotFound(profileSource: profile.source, profileRoot: profile.rootDirectory, searchedPaths: candidates)
         }
 
         private static func isRunningUnderXCTest() -> Bool {
@@ -544,26 +550,40 @@ import Foundation
     }
 
     public enum TerminalServiceError: LocalizedError {
-        case executableNotFound
-        /// A development profile (repo-local worktree, or an explicit `SPACES_DB_PATH`) found no daemon
-        /// of its own. Distinct from `executableNotFound` so the message can name the real cause: the
-        /// installed daemon was deliberately not considered, rather than merely being absent.
-        case developmentDaemonNotFound(profileRoot: String, searchedPaths: [String])
+        /// No `spacesd` belonging to the asking build was found for this profile. One case covers both
+        /// profile kinds because it is one event — a profile with no daemon of its own — and the profile
+        /// only decides which half of the excluded candidates has to be explained: an installed profile
+        /// never starts a development build from the current directory, and a development profile never
+        /// starts the installed daemon.
+        case daemonNotFound(profileSource: SpacesProfileSource, profileRoot: String, searchedPaths: [String])
         case daemonWireIncompatible(TerminalServiceDaemonWireIncompatibility)
         case requestFailed(String)
         case serviceStartupTimedOut(String)
 
         public var errorDescription: String? {
             switch self {
-            case .executableNotFound: "The spacesd executable is required to run built-in terminal sessions."
-            case .developmentDaemonNotFound(let profileRoot, let searchedPaths):
-                "No spacesd was found for the development profile at \(profileRoot). A development profile never starts the installed daemon "
-                    + "(~/.spaces/bin/spacesd, /usr/local/bin/spacesd), which is a different build and would answer this client on a foreign wire "
-                    + "protocol. Build the daemon in this checkout (swift build --product spacesd) or set SPACESD_EXECUTABLE. Searched: "
+            case .daemonNotFound(let profileSource, let profileRoot, let searchedPaths):
+                let described: (kind: String, explanation: String) =
+                    switch profileSource {
+                    case .installedFallback:
+                        (
+                            "installed",
+                            "An installed profile starts only the daemon shipped with the running build or installed beside it, never a development "
+                                + "build from the current directory. Reinstall Spaces or set SPACESD_EXECUTABLE."
+                        )
+                    case .developmentWorktree, .explicitDatabasePath:
+                        (
+                            "development",
+                            "A development profile never starts the installed daemon (~/.spaces/bin/spacesd, /usr/local/bin/spacesd), which is a "
+                                + "different build and would answer this client on a foreign wire protocol. Build the daemon in this checkout "
+                                + "(swift build --product spacesd) or set SPACESD_EXECUTABLE."
+                        )
+                    }
+                return "No spacesd was found for the \(described.kind) profile at \(profileRoot). \(described.explanation) Searched: "
                     + searchedPaths.joined(separator: ", ")
-            case .daemonWireIncompatible(let incompatibility): incompatibility.message
-            case .requestFailed(let message): message
-            case .serviceStartupTimedOut(let path): "Timed out waiting for spacesd to start from \(path)."
+            case .daemonWireIncompatible(let incompatibility): return incompatibility.message
+            case .requestFailed(let message): return message
+            case .serviceStartupTimedOut(let path): return "Timed out waiting for spacesd to start from \(path)."
             }
         }
     }

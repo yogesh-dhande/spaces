@@ -128,9 +128,10 @@ import XCTest
                     environment: ["_": layout.buildCLI.path], fileManager: layout.fileManager, profile: profile,
                     installedLinkURLs: [layout.installedDaemon])
             ) { error in
-                guard case TerminalServiceError.developmentDaemonNotFound(let profileRoot, let searchedPaths) = error else {
-                    return XCTFail("Expected developmentDaemonNotFound, got \(error)")
+                guard case TerminalServiceError.daemonNotFound(let profileSource, let profileRoot, let searchedPaths) = error else {
+                    return XCTFail("Expected daemonNotFound, got \(error)")
                 }
+                XCTAssertEqual(profileSource, .developmentWorktree)
                 XCTAssertEqual(profileRoot, profile.rootDirectory)
                 XCTAssertFalse(searchedPaths.contains(layout.installedDaemon.path))
                 let message = (error as? TerminalServiceError)?.errorDescription ?? ""
@@ -150,9 +151,53 @@ import XCTest
                     environment: ["_": layout.buildCLI.path], fileManager: layout.fileManager, profile: makeProfile(source: .explicitDatabasePath),
                     installedLinkURLs: [layout.installedDaemon])
             ) { error in
-                guard case TerminalServiceError.developmentDaemonNotFound = error else {
-                    return XCTFail("Expected developmentDaemonNotFound, got \(error)")
+                guard case TerminalServiceError.daemonNotFound(let profileSource, _, _) = error else {
+                    return XCTFail("Expected daemonNotFound, got \(error)")
                 }
+                XCTAssertEqual(profileSource, .explicitDatabasePath)
+            }
+        }
+
+        // A development profile is the only one the checkout-relative candidates may serve, and it still
+        // reaches them when nothing beside the running executable matches.
+        func testResolveExecutableURLUsesCheckoutRelativeDaemonForDevelopmentProfile() throws {
+            let layout = try makeDaemonResolutionLayout()
+            defer { try? FileManager.default.removeItem(at: layout.root) }
+            let checkoutDaemon = try makeCheckoutRelativeDaemon(in: layout)
+
+            let resolved = try TerminalService.resolveExecutableURL(
+                environment: ["_": layout.buildCLI.path], fileManager: layout.fileManager, profile: makeProfile(source: .developmentWorktree),
+                installedLinkURLs: [layout.installedDaemon])
+
+            XCTAssertEqual(resolved.path, checkoutDaemon.path)
+        }
+
+        // The mirror of the installed-link rule: the checkout-relative candidates describe whichever
+        // checkout the process happened to be started in, which says nothing about the installed profile.
+        // An installed profile launched from inside a checkout must not be served by that checkout's
+        // development build — the same invisible cross-build failure, in the opposite direction.
+        func testResolveExecutableURLRefusesCheckoutRelativeDaemonForInstalledProfile() throws {
+            let layout = try makeDaemonResolutionLayout()
+            defer { try? FileManager.default.removeItem(at: layout.root) }
+            let checkoutDaemon = try makeCheckoutRelativeDaemon(in: layout)
+            let absentInstalledLink = layout.root.appendingPathComponent("absent-installed-spacesd", isDirectory: false)
+            let profile = makeProfile(source: .installedFallback)
+
+            XCTAssertThrowsError(
+                try TerminalService.resolveExecutableURL(
+                    environment: ["_": layout.buildCLI.path], fileManager: layout.fileManager, profile: profile,
+                    installedLinkURLs: [absentInstalledLink])
+            ) { error in
+                guard case TerminalServiceError.daemonNotFound(let profileSource, let profileRoot, let searchedPaths) = error else {
+                    return XCTFail("Expected daemonNotFound, got \(error)")
+                }
+                XCTAssertEqual(profileSource, .installedFallback)
+                XCTAssertEqual(profileRoot, profile.rootDirectory)
+                XCTAssertFalse(searchedPaths.contains(checkoutDaemon.path))
+                XCTAssertTrue(searchedPaths.contains(absentInstalledLink.path))
+                let message = (error as? TerminalServiceError)?.errorDescription ?? ""
+                XCTAssertTrue(message.contains(profile.rootDirectory))
+                XCTAssertTrue(message.contains("never a development build from the current directory"))
             }
         }
 
@@ -180,6 +225,21 @@ import XCTest
             let resolved = try TerminalService.resolveExecutableURL(
                 environment: ["_": layout.buildCLI.path, "SPACESD_EXECUTABLE": overrideDaemon.path], fileManager: layout.fileManager,
                 profile: makeProfile(source: .developmentWorktree), installedLinkURLs: [layout.installedDaemon])
+
+            XCTAssertEqual(resolved.path, overrideDaemon.path)
+        }
+
+        // The override outranks the installed links for the installed profile too, so an operator can
+        // point the installed profile at a specific daemon without reinstalling.
+        func testResolveExecutableURLHonorsExplicitOverrideForInstalledProfile() throws {
+            let layout = try makeDaemonResolutionLayout()
+            defer { try? FileManager.default.removeItem(at: layout.root) }
+            let overrideDaemon = layout.root.appendingPathComponent("override-spacesd", isDirectory: false)
+            try makeExecutableFile(at: overrideDaemon)
+
+            let resolved = try TerminalService.resolveExecutableURL(
+                environment: ["_": layout.buildCLI.path, "SPACESD_EXECUTABLE": overrideDaemon.path], fileManager: layout.fileManager,
+                profile: makeProfile(source: .installedFallback), installedLinkURLs: [layout.installedDaemon])
 
             XCTAssertEqual(resolved.path, overrideDaemon.path)
         }
@@ -283,6 +343,7 @@ import XCTest
             let root: URL
             let buildCLI: URL
             let installedDaemon: URL
+            let workingDirectory: URL
             let fileManager: FileManager
         }
 
@@ -300,8 +361,18 @@ import XCTest
             let installedDaemon = installedBinDirectory.appendingPathComponent("spacesd", isDirectory: false)
             try makeExecutableFile(at: installedDaemon)
             return DaemonResolutionLayout(
-                root: root, buildCLI: buildCLI, installedDaemon: installedDaemon,
+                root: root, buildCLI: buildCLI, installedDaemon: installedDaemon, workingDirectory: workingDirectory,
                 fileManager: FixedWorkingDirectoryFileManager(workingDirectoryPath: workingDirectory.path))
+        }
+
+        /// Builds the daemon a checkout-relative candidate would find: a `.build/debug/spacesd` under the
+        /// working directory the process was started in, standing in for an unrelated checkout.
+        private func makeCheckoutRelativeDaemon(in layout: DaemonResolutionLayout) throws -> URL {
+            let buildDirectory = layout.workingDirectory.appendingPathComponent("apps/macos/.build/debug", isDirectory: true)
+            try FileManager.default.createDirectory(at: buildDirectory, withIntermediateDirectories: true)
+            let daemon = buildDirectory.appendingPathComponent("spacesd", isDirectory: false)
+            try makeExecutableFile(at: daemon)
+            return daemon
         }
     }
 

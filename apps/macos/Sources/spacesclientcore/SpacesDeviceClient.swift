@@ -163,7 +163,7 @@ public enum SpacesDeviceClient {
             // local bootstrap runs.
             if let terminalError = error as? TerminalServiceError {
                 switch terminalError {
-                case .serviceStartupTimedOut, .executableNotFound, .developmentDaemonNotFound: return true
+                case .serviceStartupTimedOut, .daemonNotFound: return true
                 case .daemonWireIncompatible, .requestFailed: return false
                 }
             }
