@@ -51,15 +51,7 @@ jobs:
           submodules: recursive
 
       - name: Select Xcode
-        uses: maxim-lobanov/setup-xcode@v1
-        with:
-          xcode-version: latest-stable
-
-      - name: Print Swift toolchain
-        run: |
-          xcode-select -p
-          xcrun swift --version
-          swift --version
+        uses: ./.github/actions/select-xcode
 
       - name: Setup terminal build dependencies
         env:

@@ -202,7 +202,16 @@ tar -C "$RELEASE_BUILD_ROOT/kit" -czf "$RELEASE_DIR/GhosttyKit.xcframework.tar.g
 tar -C "$RELEASE_BUILD_ROOT/resources" -czf "$RELEASE_DIR/GhosttyKit-resources.tar.gz" "ghostty" "terminfo"
 tar -C "$RELEASE_BUILD_ROOT/vt" -czf "$RELEASE_DIR/libghostty-vt.tar.gz" "include" "lib"
 
-python3 - "$RELEASE_DIR" "$GHOSTTY_SHA" <<'PY'
+# The fixture's build_script_version comes from the script under test: it is part of the artifact
+# key, so a hardcoded copy would go stale on the next bump and quietly turn this into a
+# build-script-mismatch test instead of the Xcode-mismatch test it is meant to be.
+BUILD_SCRIPT_VERSION="$(sed -n 's/^BUILD_SCRIPT_VERSION="\(.*\)"$/\1/p' "$SOURCE_SETUP_SCRIPT" | head -n 1)"
+[[ -n "$BUILD_SCRIPT_VERSION" ]] || fail "could not read BUILD_SCRIPT_VERSION from setup_ghostty.sh"
+
+# host_arch is the real host architecture for the same reason: it is part of the artifact key, so a
+# placeholder would reject this release on the architecture axis and stop it from being the
+# Xcode-mismatch test it is meant to be.
+python3 - "$RELEASE_DIR" "$GHOSTTY_SHA" "$BUILD_SCRIPT_VERSION" "$(uname -m)" <<'PY'
 import hashlib
 import json
 import pathlib
@@ -210,6 +219,8 @@ import sys
 
 release_dir = pathlib.Path(sys.argv[1])
 ghostty_sha = sys.argv[2]
+build_script_version = int(sys.argv[3])
+host_arch = sys.argv[4]
 assets = [
     "GhosttyKit.xcframework.tar.gz",
     "GhosttyKit-resources.tar.gz",
@@ -224,11 +235,11 @@ manifest = {
     "ghostty_sha": ghostty_sha,
     "source_url": "https://example.invalid/ghostty.git",
     "zig_version": "0.16.0",
-    "build_script_version": 3,
+    "build_script_version": build_script_version,
     "xcode_version": "17.0",
     "xcode_build_version": "17C529",
     "swift_version": "Swift release fixture",
-    "host_arch": "test",
+    "host_arch": host_arch,
     "build_optimize": "ReleaseFast",
     "dirty": False,
     "mode": "build",
@@ -249,6 +260,11 @@ PY
 SETUP_ENV=(
     "PATH=$STUB_BIN:$PATH"
     "SPACES_GHOSTTY_SETUP_SKIP_API_VERIFY=1"
+    # The fixture parent tree is not a Git checkout, so the shared cache has to be
+    # pointed somewhere explicitly; setup_ghostty.sh otherwise derives it from the
+    # primary checkout and refuses to guess. Keeping it under TMP_ROOT also stops
+    # this test from writing into the developer's real cache.
+    "SPACES_GHOSTTY_CACHE_DIR=$TMP_ROOT/ghostty-cache"
     "SPACES_TEST_BUILD_LOG=$BUILD_LOG"
     "SPACES_TEST_RELEASE_DIR=$RELEASE_DIR"
     "SPACES_TEST_ZIG_CACHE_DIR=$ZIG_CACHE_DIR"
