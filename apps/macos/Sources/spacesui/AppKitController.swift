@@ -4174,14 +4174,17 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return container
     }
 
-    func reloadData(forceRemoteRefresh: Bool = false) { sidebar.requestSidebarReload(forceRemoteRefresh: forceRemoteRefresh) }
+    func reloadData(forceRemoteRefresh: Bool = false, bypassesBackoff: Bool? = nil) {
+        sidebar.requestSidebarReload(forceRemoteRefresh: forceRemoteRefresh, bypassesBackoff: bypassesBackoff)
+    }
 
     // MARK: - Sidebar forwarders
     // Thin pass-throughs that keep widely-used sidebar entry points callable from
     // host code without rewiring dozens of call sites. The implementations live on
     // `sidebar` (SidebarController).
-    func requestSidebarReload(failurePlaceholderMessage: String? = nil, forceRemoteRefresh: Bool = false) {
-        sidebar.requestSidebarReload(failurePlaceholderMessage: failurePlaceholderMessage, forceRemoteRefresh: forceRemoteRefresh)
+    func requestSidebarReload(failurePlaceholderMessage: String? = nil, forceRemoteRefresh: Bool = false, bypassesBackoff: Bool? = nil) {
+        sidebar.requestSidebarReload(
+            failurePlaceholderMessage: failurePlaceholderMessage, forceRemoteRefresh: forceRemoteRefresh, bypassesBackoff: bypassesBackoff)
     }
     func findWorkspace(id: String) -> (ProjectSummary, WorkspaceSummary)? { sidebar.findWorkspace(id: id) }
     func deviceRecord(forDeviceID deviceID: String) -> SpacesPairedDeviceRecord? { sidebar.deviceRecord(forDeviceID: deviceID) }
@@ -4731,8 +4734,13 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         }
         // Live setup progress for a remote workspace must bypass the remote overview
         // freshness gate, or its logs/status/completion update only at the metadata
-        // interval. A local setup needs no forced remote fetch.
-        requestSidebarReload(forceRemoteRefresh: deviceID(forWorkspaceID: workspaceID).map(isRemoteDeviceID) == true)
+        // interval. A local setup needs no forced remote fetch. This poll is not the
+        // user asking for any specific device, so it must never clear a device's
+        // failure backoff — it repeats every 0.75s for the whole duration of the setup,
+        // and clearing backoff on every tick would redial every unrelated offline
+        // device that fast, defeating the backoff entirely (see `startRemoteOverviewPull`).
+        requestSidebarReload(
+            forceRemoteRefresh: deviceID(forWorkspaceID: workspaceID).map(isRemoteDeviceID) == true, bypassesBackoff: false)
     }
 
     /// Records which single content the detail pane is showing. The `show*` methods render the pane;

@@ -39,8 +39,9 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         })
         reloadCoordinator = SidebarReloadCoordinator<SidebarDataSnapshot>(
             loadSnapshot: { await AppKitController.initialSidebarDataSnapshot() },
-            applySnapshot: { [weak self] snapshot, forceRemoteRefresh in
-                self?.applySidebarDataSnapshot(snapshot, preserveDetailPane: true, forceRemoteRefresh: forceRemoteRefresh)
+            applySnapshot: { [weak self] snapshot, forceRemoteRefresh, bypassesBackoff in
+                self?.applySidebarDataSnapshot(
+                    snapshot, preserveDetailPane: true, forceRemoteRefresh: forceRemoteRefresh, bypassesBackoff: bypassesBackoff)
             },
             handleFailure: { [weak self] error, failurePlaceholderMessage in
                 guard let self else { return }
@@ -243,11 +244,19 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         }
     }
 
-    func requestSidebarReload(failurePlaceholderMessage: String? = nil, forceRemoteRefresh: Bool = false) {
-        reloadCoordinator.request(failurePlaceholderMessage: failurePlaceholderMessage, forceRemoteRefresh: forceRemoteRefresh)
+    /// `bypassesBackoff` defaults to `forceRemoteRefresh` (nil means "same as forceRemoteRefresh"), so an
+    /// existing caller asking for `forceRemoteRefresh: true` keeps clearing backoff the way it always
+    /// has. Pass `false` explicitly for a forced refresh that must not clear any device's backoff — the
+    /// remote workspace-setup progress poll, which needs live data on every tick but is not a user asking
+    /// for a specific device again. See `startRemoteOverviewPull`.
+    func requestSidebarReload(failurePlaceholderMessage: String? = nil, forceRemoteRefresh: Bool = false, bypassesBackoff: Bool? = nil) {
+        reloadCoordinator.request(
+            failurePlaceholderMessage: failurePlaceholderMessage, forceRemoteRefresh: forceRemoteRefresh, bypassesBackoff: bypassesBackoff)
     }
 
-    func applySidebarDataSnapshot(_ snapshot: SidebarDataSnapshot, preserveDetailPane: Bool = false, forceRemoteRefresh: Bool = false) {
+    func applySidebarDataSnapshot(
+        _ snapshot: SidebarDataSnapshot, preserveDetailPane: Bool = false, forceRemoteRefresh: Bool = false, bypassesBackoff: Bool = false
+    ) {
         host.logStartupProfile("apply_snapshot_start")
         let shouldPreserveDetailPane = preserveDetailPane && canPreserveDetailPaneAfterSidebarReload()
         pendingDatabaseReload = false
@@ -367,7 +376,7 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         host.logStartupProfile("apply_snapshot_alerts_badge_ready", details: "group_count=\(host.alertsGroups.count)")
         if host.showingAlerts { host.showAlertsDetail() }
         host.reopenPersistedPanelWindowsIfPossible()
-        loadRemoteDeviceSections(forceRefresh: forceRemoteRefresh)
+        loadRemoteDeviceSections(forceRefresh: forceRemoteRefresh, bypassesBackoff: bypassesBackoff)
     }
 
     /// Closes browser-session tabs for local-device workspaces that the daemon now reports as no
@@ -410,7 +419,10 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         let compatibility: SpacesWireCompatibility?
     }
 
-    func loadRemoteDeviceSections(forceRefresh: Bool = false) {
+    /// `forceRefresh` and `bypassesBackoff` are independent: see `startRemoteOverviewPull` for what each
+    /// controls. `SidebarReloadCoordinator.request` is the single place that decides one from the other
+    /// for callers that do not say.
+    func loadRemoteDeviceSections(forceRefresh: Bool = false, bypassesBackoff: Bool = false) {
         let remotes = host.macPairedDevices()
         var addedSection = false
         for record in remotes where !host.deviceSections.contains(where: { $0.deviceID == record.id }) {
@@ -458,10 +470,14 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             // instant and refreshes immediately. Forced reloads (explicit refresh,
             // mutations that expect fresh remote data) bypass the gate.
             if !forceRefresh, let last = remoteOverviewFetchInstants[record.id], now - last < freshnessWindow { continue }
-            // A forced reload bypasses the failure backoff for the same reason it bypasses the freshness
-            // gate: it is an explicit request for fresh remote data — the Reload command, or a mutation
-            // whose response the user is waiting on — not the ambient cadence the backoff exists to pace.
-            startRemoteOverviewPull(record: record, clientApp: clientApp, bypassesBackoff: forceRefresh)
+            // `bypassesBackoff` is independent of `forceRefresh`: a forced reload bypasses the freshness
+            // gate for every device regardless of who asked (there is no per-device freshness cost to
+            // that), but only a caller that actually asked for this device — the Reload command, or a
+            // mutation whose response the user is waiting on — also clears its failure backoff. An
+            // ambient poll that forces freshness without asking for any specific device (the remote
+            // workspace-setup progress timer) passes `bypassesBackoff: false` and leaves every device's
+            // backoff alone.
+            startRemoteOverviewPull(record: record, clientApp: clientApp, bypassesBackoff: bypassesBackoff)
         }
         if updatedReconnectSection {
             rebuildFlatSidebarData()
@@ -477,10 +493,17 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     /// The single pull implementation, shared by the freshness-gated path above and the watchdog's
     /// forced refresh of a device that is currently offline.
     ///
-    /// `bypassesBackoff` marks an explicitly requested pull — the per-device Retry, the Reload command,
-    /// or a mutation whose fresh remote data the user is waiting on. Asking for a device outright is a
+    /// `bypassesBackoff` clears the device's failure backoff, distinct from bypassing the freshness
+    /// window (the caller's `forceRefresh`): freshness only paces how often a healthy device is
+    /// re-fetched, while the backoff paces how often a *failing* device is redialed at all, and clearing
+    /// it is only correct for an explicitly requested pull — the per-device Retry, the Reload command, or
+    /// a mutation whose fresh remote data the user is waiting on. Asking for a device outright is a
     /// stronger signal than the schedule its run of failures grew, so those paths clear the backoff
-    /// instead of waiting it out; only the ambient cadence the backoff exists to pace is held back.
+    /// instead of waiting it out. An ambient poll that forces freshness without the user asking for any
+    /// specific device — the remote workspace-setup progress timer, which needs live data on every tick
+    /// for the whole duration of a remote setup — must bypass freshness only: clearing the backoff there
+    /// would redial every unrelated offline device on the same fast cadence, defeating the backoff's
+    /// whole point.
     private func startRemoteOverviewPull(record: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp, bypassesBackoff: Bool) {
         if bypassesBackoff {
             remoteOverviewPullBackoff.clear(deviceID: record.id)
