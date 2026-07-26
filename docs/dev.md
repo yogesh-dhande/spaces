@@ -33,7 +33,7 @@ scripts/coverage.sh
 scripts/verify.sh
 ```
 
-`scripts/format.sh` performs an explicit tree-wide `swift format` pass across the macOS and iOS source and test trees using the repository-root `.swift-format`.
+`scripts/format.sh` performs an explicit tree-wide `swift format` pass across the macOS and iOS source and test trees using the repository-root `.swift-format`, forwarding any arguments to the underlying `swift format format` invocation.
 `scripts/format-staged-swift.sh` formats staged macOS and iOS Swift source and test files with the same configuration and re-stages them.
 `scripts/lint.sh` runs `scripts/format-staged-swift.sh` and then `SwiftLint` when `swiftlint` is available.
 `scripts/coverage.sh` builds coverage-enabled SwiftPM test targets, then runs the already-built tests in parallel. Process-wide environment mutations stay isolated because XCTest cases run in separate processes and the few Swift Testing suites that override `SPACES_DB_PATH` are serialized. Set `SPACES_TEST_PARALLEL=0` to force a serial run when debugging a contention issue; auto-detected workers default to the machine's logical CPU count, overridable with `SPACES_TEST_WORKERS` or cappable with `SPACES_TEST_MAX_AUTO_WORKERS`. When the debug CLI exists, coverage exports that CLI's repo-local profile before tests so profile-sensitive tests do not read the installed database. Coverage also points `XDG_CONFIG_HOME` at an empty build-local directory so Ghostty tests do not load a developer's personal Ghostty config.
