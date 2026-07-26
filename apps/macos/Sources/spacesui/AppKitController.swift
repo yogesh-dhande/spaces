@@ -9388,9 +9388,12 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
         return nil
     }
 
-    nonisolated static func activationSelectionTarget(focusedWorkspaceID: String?) -> SidebarArrowSelectionTarget {
-        if let focusedWorkspaceID { return .workspace(focusedWorkspaceID) }
-        return .alerts
+    /// Which pane a summon should select. A focused tracked workspace window is an explicit signal to
+    /// switch to that workspace; without one the summon carries no view intent, so `nil` means keep
+    /// whatever pane was already visible rather than switching the user's view for them.
+    nonisolated static func activationSelectionTarget(focusedWorkspaceID: String?) -> SidebarArrowSelectionTarget? {
+        guard let focusedWorkspaceID else { return nil }
+        return .workspace(focusedWorkspaceID)
     }
 
     /// The macOS client's app config is just the editor preference (client-local in the client
@@ -10400,27 +10403,24 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
             let refreshStartedAt = Date()
             self.refreshWorkspaceSelectionForActivation(focusedWorkspaceID: focusedWorkspaceID)
             self.logPerfMetric(
-                "toggle_window_selection_refresh", target: "workspace=\(focusedWorkspaceID ?? "alerts")",
+                "toggle_window_selection_refresh", target: "workspace=\(focusedWorkspaceID ?? "keep_current")",
                 elapsedMS: self.windowShortcutElapsedMS(since: refreshStartedAt), success: true, detail: "source=\(source)")
         }
     }
 
     private func refreshWorkspaceSelectionForActivation(focusedWorkspaceID: String?) {
-        switch Self.activationSelectionTarget(focusedWorkspaceID: focusedWorkspaceID) {
-        case .alerts:
-            if showingAlerts, !showingSettings {
-                refreshSelection()
-                return
-            }
-            showAlertsDetail()
-        case .workspace(let targetWorkspaceID):
-            guard let (_, workspace) = findWorkspace(id: targetWorkspaceID) else { return }
-            if selectedWorkspaceID == targetWorkspaceID, !showingAlerts, !showingSettings {
-                refreshSelection()
-                return
-            }
-            selectWorkspace(workspace)
+        guard case .workspace(let targetWorkspaceID)? = Self.activationSelectionTarget(focusedWorkspaceID: focusedWorkspaceID) else {
+            // No tracked focused window: re-render the current pane so its contents are fresh, without
+            // changing which pane is shown.
+            refreshSelection()
+            return
         }
+        guard let (_, workspace) = findWorkspace(id: targetWorkspaceID) else { return }
+        if selectedWorkspaceID == targetWorkspaceID, !showingAlerts, !showingSettings {
+            refreshSelection()
+            return
+        }
+        selectWorkspace(workspace)
     }
 
     @objc func showProjectSettings(_ sender: NSButton) {
