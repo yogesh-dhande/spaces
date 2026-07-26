@@ -148,6 +148,24 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         return errno == EPERM
     }
 
+    /// What actually became of a PTY child. `kill(pid, 0)` cannot tell a zombie from a running process, so
+    /// a child that exited but was never `waitpid`ed looks alive forever — the exact leak the termination
+    /// tests below must catch. `sysctl(KERN_PROC_PID)` reports the zombie state directly and stops
+    /// reporting the pid at all once it has been reaped.
+    private enum ProcessLifecycle: String {
+        case running
+        case zombie
+        case reaped
+    }
+
+    private static func processLifecycle(_ pid: Int32) -> ProcessLifecycle {
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+        var info = kinfo_proc()
+        var size = MemoryLayout<kinfo_proc>.stride
+        guard sysctl(&mib, UInt32(mib.count), &info, &size, nil, 0) == 0, size > 0 else { return .reaped }
+        return Int32(info.kp_proc.p_stat) == SZOMB ? .zombie : .running
+    }
+
     /// Shared by both `python3` READY probes below: reports what the surface actually shows and
     /// whether the child process is still around, so a timeout on "READY never appeared" says why
     /// instead of just that it happened. `.debugDescription` renders control characters (the mouse
@@ -325,11 +343,54 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             guard let markerText = try? String(contentsOf: markerPath, encoding: .utf8) else { return false }
             return markerText.contains("term")
         }
-        try await waitUntil(timeout: 30) { !Self.processIsAlive(childPID) }
+        try await waitUntilChildIsReaped(childPID)
 
         let markerText = try String(contentsOf: markerPath, encoding: .utf8)
         XCTAssertTrue(markerText.contains("hup"))
         XCTAssertTrue(markerText.contains("term"))
+    }
+
+    func testHostManagedPTYTerminateReapsChildThatExitsOnHangup() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let markerPath = root.appendingPathComponent("ready-marker")
+        let driver = HostManagedPTYTerminalSessionDriver(
+            launchConfiguration: TerminalSessionLaunchConfiguration(
+                sessionID: "terminate-reaps-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "terminate-reaps", workingDirectory: root.path,
+                shell: "/bin/zsh", command: "printf 'ready\\n' > \"\(markerPath.path)\"; exec /bin/sleep 120", createdAt: "2026-07-24T00:00:00Z",
+                workspaceID: "workspace-1", kind: .shell))
+        // terminate() is idempotent; this only matters when an assertion below throws before the explicit
+        // call, so a failing run does not leave the sleep behind.
+        defer { driver.terminate() }
+
+        try driver.startIfNeeded()
+        // The marker means the login shell finished starting up and `exec`ed, so the leader is the sleep
+        // itself and SIGHUP alone ends it — no escalation stage involved.
+        try await waitUntil { FileManager.default.fileExists(atPath: markerPath.path) }
+        let childPID = try XCTUnwrap(driver.childPID())
+
+        driver.terminate()
+
+        // The ordinary teardown path: the child dies on the graceful SIGHUP, so the escalation's first
+        // stage observes the read loop finished. That success return is the only reaper during an explicit
+        // terminate(), so the leader must be collected before it returns.
+        try await waitUntilChildIsReaped(childPID)
+    }
+
+    /// Asserts the PTY leader was genuinely collected, not merely killed. The exit itself is waited on
+    /// generously; the reap that follows it is bounded tightly because the escalation task reaps in the
+    /// same poll iteration that observes the read loop's exit. A leaked zombie therefore fails in seconds
+    /// and says so, instead of masquerading as a live process until a liveness poll times out.
+    private func waitUntilChildIsReaped(_ childPID: Int32, file: StaticString = #filePath, line: UInt = #line) async throws {
+        try await waitUntil(file: file, line: line, diagnostics: { "child pid \(childPID) never exited" }) {
+            Self.processLifecycle(childPID) != .running
+        }
+        try await waitUntil(
+            timeout: 5, file: file, line: line,
+            diagnostics: { "child pid \(childPID) is \(Self.processLifecycle(childPID).rawValue): terminate() left it unreaped" }
+        ) { Self.processLifecycle(childPID) == .reaped }
     }
 
     func testHostManagedPTYForegroundPIDFallsBackToLiveChildPID() {

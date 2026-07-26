@@ -520,6 +520,9 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
         if shouldNotify { Task { @TerminalEngineActor in closeHandler?() } }
     }
 
+    /// Non-blocking collection of the PTY leader's exit status. Retries only on EINTR; a leader that has
+    /// not exited yet (`0`) or was already collected (`-1`/ECHILD) both return without waiting, so callers
+    /// can invoke this repeatedly and unconditionally.
     private func reap(childPID: Int32) {
         var status: Int32 = 0
         while waitpid(childPID, &status, WNOHANG) == -1, errno == EINTR {}
@@ -556,17 +559,26 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
     /// Polls until the PTY read loop has exited (`read()` returned and `finishAfterReadLoop` closed the
     /// master fd, setting `readLoopFinished`), reaping the leader `childPID` along the way so it never
     /// zombies. Returns true once the read loop has finished within `timeout`. Only `reapWhenTerminated`
-    /// reaps during termination (the read loop defers to it while `terminating`), so this `waitpid` cannot
-    /// double-reap.
+    /// reaps during termination (the read loop defers to it while `terminating`), so these `waitpid` calls
+    /// cannot double-reap.
     private func escalationWaitForReadLoopExit(reapingLeader childPID: Int32, timeout: TimeInterval) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         while true {
-            var status: Int32 = 0
-            while waitpid(childPID, &status, WNOHANG) == -1, errno == EINTR {}
+            // Reap before the poll so a leader that exits while a descendant still holds the PTY slave
+            // (keeping the read loop blocked) does not sit as a zombie for the whole wait.
+            reap(childPID: childPID)
             lock.lock()
             let finished = readLoopFinished
             lock.unlock()
-            if finished { return true }
+            if finished {
+                // Reap again before returning: the leader can exit between the reap above and this
+                // observation, and this is the last look any reaper takes on a successful return. A set
+                // `readLoopFinished` means `read()` hit EOF, which means every slave holder — the leader
+                // included — has exited, so the leader is reapable here; if the reap above already
+                // collected it this `waitpid` simply fails with ECHILD and reaps nothing.
+                reap(childPID: childPID)
+                return true
+            }
             if Date() >= deadline { return false }
             usleep(50_000)
         }
