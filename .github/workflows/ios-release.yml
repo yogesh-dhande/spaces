@@ -173,12 +173,46 @@ jobs:
           # certificate exported without its private key is the common mistake). Both halves are
           # asserted because a missing one is silent: xcodebuild would ask Apple for whichever
           # identity it could not find and reintroduce the per-run certificate leak these stored
-          # certificates exist to stop, while the run still reported success.
+          # certificates exist to stop, while the run still reported success. -v lists only valid
+          # identities, so an expired certificate fails here too.
           identities="$(security find-identity -v -p codesigning "$keychain_path")"
           echo "$identities"
           for required in "Apple Distribution" "Apple Development"; do
             if ! grep -q "$required" <<<"$identities"; then
-              echo "::error::No $required signing identity in the imported keychain. Export that .p12 with its private key." >&2
+              echo "::error::No valid $required signing identity in the imported keychain. Export that .p12 with its private key." >&2
+              exit 1
+            fi
+          done
+
+          # A usable identity is not necessarily this project's identity: a maintainer on more
+          # than one Apple team can export a perfectly valid certificate belonging to another,
+          # which the check above accepts and Xcode then cannot use, so it asks Apple for one it
+          # can and the leak resumes silently.
+          #
+          # The team is read from the certificate's organizational unit rather than its common
+          # name. A distribution certificate's common name ends in the team id, but a development
+          # certificate's parenthetical is a per-certificate identifier -- "Apple Development:
+          # Name (K32PW8N4HR)" against team BEMDA62NB6 -- so matching the common name would
+          # reject the correct certificate and fail every release. The organizational unit
+          # carries the team for both kinds.
+          team_id="$(/usr/libexec/PlistBuddy -c 'Print :teamID' apps/ios/ExportOptions.plist)"
+          cert_dir="$RUNNER_TEMP/imported-certs"
+          mkdir -p "$cert_dir"
+          security find-certificate -a -p "$keychain_path" > "$cert_dir/all.pem"
+          awk -v d="$cert_dir" '/-----BEGIN CERTIFICATE-----/{n++} n{print > (d "/cert-" n ".pem")}' "$cert_dir/all.pem"
+
+          for required in "Apple Distribution" "Apple Development"; do
+            found=0
+            for certificate in "$cert_dir"/cert-*.pem; do
+              [ -f "$certificate" ] || continue
+              subject="$(openssl x509 -in "$certificate" -noout -subject -nameopt sep_multiline,utf8 2>/dev/null)"
+              if grep -q "CN=$required:" <<<"$subject" && grep -q "OU=$team_id\$" <<<"$subject"; then
+                found=1
+                break
+              fi
+            done
+            if [ "$found" -ne 1 ]; then
+              echo "::error::The imported $required certificate does not belong to team $team_id. Export it from the Spaces team." >&2
               exit 1
             fi
           done
@@ -198,6 +232,9 @@ jobs:
           APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
           APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
         run: |
+          set -o pipefail
+          archive_log="$RUNNER_TEMP/archive.log"
+
           xcodebuild archive \
             -project apps/ios/SpacesMobile.xcodeproj \
             -scheme SpacesMobile \
@@ -207,7 +244,26 @@ jobs:
             -allowProvisioningUpdates \
             -authenticationKeyPath "${{ steps.asc_key.outputs.key_path }}" \
             -authenticationKeyID "$APP_STORE_CONNECT_KEY_ID" \
-            -authenticationKeyIssuerID "$APP_STORE_CONNECT_ISSUER_ID"
+            -authenticationKeyIssuerID "$APP_STORE_CONNECT_ISSUER_ID" \
+            | tee "$archive_log"
+
+          # Apple names a certificate minted through the App Store Connect API "Created via
+          # API", so its appearance as the signing identity means xcodebuild did not use an
+          # imported certificate and asked for a new one. That certificate is orphaned the
+          # moment this runner is destroyed -- its private key never leaves the machine -- and
+          # counts against the per-team cap until revoked, which is what exhausted the cap and
+          # began failing releases.
+          #
+          # The import step cannot catch this. It proves both identities are in the keychain,
+          # not that xcodebuild chose them, and every way it could still mint -- a toolchain
+          # bump changing identity selection, a signing setting added to the project, a profile
+          # the certificate does not match -- produces a green release that leaks. Without this,
+          # such a regression stays invisible until the cap fills a few releases later.
+          if grep -q "Created via API" "$archive_log"; then
+            echo "::error::The archive signed with a certificate Apple minted for this run rather than an imported one, which leaks a certificate against the team cap. Signing identity reported below." >&2
+            grep "Signing Identity" "$archive_log" >&2 || true
+            exit 1
+          fi
 
       - name: Export and upload to App Store Connect
         env:
