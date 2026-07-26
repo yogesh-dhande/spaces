@@ -68,11 +68,13 @@ import Foundation
 
             if let mirror {
                 applyFontSize(fontSize, to: mirror)
+                focusSurface(of: mirror)
                 return mirror
             }
             let mirror = try makeMirror(fontSize: fontSize, scaleFactor: scaleFactor)
             self.mirror = mirror
             appliedFontSize = fontSize
+            focusSurface(of: mirror)
             return mirror
         }
 
@@ -105,6 +107,18 @@ import Foundation
             host.platform = ghostty_platform_u(ios: ghostty_platform_ios_s(uiview: Unmanaged.passUnretained(surfaceHostView).toOpaque()))
             host.scale_factor = scaleFactor
             return host
+        }
+
+        /// Refocuses the surface for its incoming holder. ``park()`` unfocuses the one surface every
+        /// holder shares, and Ghostty draws an unfocused surface with a hollow, non-blinking cursor,
+        /// so without this the second and every later terminal the user opens would show a dead
+        /// cursor. Ghostty builds a surface focused, so this is a no-op on the very first acquire; it
+        /// is stated anyway so the pairing with `park()` is visible here rather than resting on a
+        /// default in Ghostty. The other half of what `park()` clears, occlusion, is restored by the
+        /// holder's geometry pass, which re-runs on acquire.
+        private func focusSurface(of mirror: ghostty_mirror_t) {
+            guard let surface = ghostty_mirror_surface(mirror) else { return }
+            ghostty_surface_set_focus(surface, true)
         }
 
         private func park() {
