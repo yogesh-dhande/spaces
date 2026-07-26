@@ -170,24 +170,53 @@ import spacesterminalcore
     /// The unified open-or-focus behavior behind sidebar clicks, the command palette,
     /// numbered shortcuts, and cycling: focus the session's existing pane wherever it
     /// lives, else open it as a new tab in its workspace's panel.
+    ///
+    /// Those are two different operations where an unreachable device is concerned, and
+    /// `mayActOnTerminalPane` draws the line: focusing an existing pane needs no daemon and stays
+    /// available through an outage, while installing a pane the layout does not have yet is refused
+    /// — before the layout is mutated and persisted — because it can only work by attaching to the
+    /// owning daemon.
     @discardableResult func openOrFocusTerminalPane(_ request: AppKitController.DeviceTerminalOpenRequest) -> Bool {
         // Adopt the workspace's persisted layout first: on a fresh launch a session
         // opened before its panel was ever shown (command palette, focus IPC) is not
         // yet in an in-memory panel, so without this the placement search misses it and
         // openSessionInNewTab would overwrite the saved tabs/splits with a one-tab layout.
-        restoreLayoutIfNeeded(scope: workspaceScope(forWorkspaceID: request.workspaceID))
-        if let placement = placement(forSessionID: request.sessionID) {
-            focus(placement: placement)
+        // It also decides which of the two operations below this is: a persisted pane is an
+        // existing one, so a cold launch focuses it instead of trying to install a second.
+        if let scope = workspaceScope(forWorkspaceID: request.workspaceID) { restoreLayoutIfNeeded(scope: scope) }
+        let existingPlacement = placement(forSessionID: request.sessionID)
+        guard mayActOnTerminalPane(request: request, existingPlacement: existingPlacement) else { return false }
+        if let existingPlacement {
+            focus(placement: existingPlacement)
             return true
         }
         return openSessionInNewTab(request)
+    }
+
+    /// Whether the layout may act on `request`, refusing — with the reason, naming the device — a
+    /// request that would have to install a pane for a daemon that cannot be attached to. Every door a
+    /// user action can install a pane through asks this first: opening it as a tab, moving it into its
+    /// own window, or filling a split. It has to answer before the install rather than during it,
+    /// because installing appends the pane to the layout and persists it before credentials are
+    /// prepared, so an admitted pane is saved as a permanently failed one that no reconnect retries.
+    /// Moving or focusing a pane that already exists is client-side and always allowed.
+    private func mayActOnTerminalPane(request: AppKitController.DeviceTerminalOpenRequest, existingPlacement: PanePlacement?) -> Bool {
+        guard
+            AppKitController.canOpenOrFocusTerminalPane(
+                hasExistingPane: existingPlacement != nil,
+                deviceAcceptsDaemonActions: host.deviceAcceptsDaemonActions(forTerminalOpenRequest: request))
+        else {
+            host.showTerminalOpenRequestDeviceUnavailableError(request)
+            return false
+        }
+        return true
     }
 
     /// Opens the session as a new tab — in its workspace's panel by default (the
     /// cmd+opt+t landing path for a freshly created session), or in an explicit scope
     /// (a global panel window's "+" button).
     @discardableResult func openSessionInNewTab(_ request: AppKitController.DeviceTerminalOpenRequest, in scope: PanelScope? = nil) -> Bool {
-        let resolvedScope = scope ?? workspaceScope(forWorkspaceID: request.workspaceID)
+        guard let resolvedScope = scope ?? workspaceScope(forWorkspaceID: request.workspaceID) else { return false }
         guard let content = ensureContentController(request: request) else { return false }
         let pane = Pane(id: UUID().uuidString, content: content.descriptor)
         mutateLayout(scope: resolvedScope) { PanelLayoutEngine.appendTab(tabID: UUID().uuidString, pane: pane, to: $0) }
@@ -231,7 +260,11 @@ import spacesterminalcore
     /// in the new window. A session already alone in a global window keeps that window
     /// and is brought front instead (a move would only rebuild an identical window).
     func moveSessionToNewPanelWindow(_ request: AppKitController.DeviceTerminalOpenRequest) {
-        if let existing = placement(forSessionID: request.sessionID) {
+        let existingPlacement = placement(forSessionID: request.sessionID)
+        // A session with no pane yet would have one installed here — and persisted as a `panel_windows`
+        // row — for a daemon that cannot be attached to.
+        guard mayActOnTerminalPane(request: request, existingPlacement: existingPlacement) else { return }
+        if let existing = existingPlacement {
             if case .globalWindow = existing.scope, isLonePane(scope: existing.scope) {
                 focus(placement: existing)
                 return
@@ -462,7 +495,11 @@ import spacesterminalcore
         // one-pane-per-session invariant. Picking the source pane's own session is a
         // no-op: removing it first would leave splitPane with no paneID to split,
         // orphaning the session's pane and its content controller.
-        if let existing = placement(forSessionID: request.sessionID) {
+        let existingPlacement = placement(forSessionID: request.sessionID)
+        // A picked target whose session is not open anywhere would have its pane installed here, so the
+        // split obeys the same rule the other install doors do.
+        guard mayActOnTerminalPane(request: request, existingPlacement: existingPlacement) else { return }
+        if let existing = existingPlacement {
             guard existing.paneID != paneID else { return }
             mutateLayout(scope: existing.scope) { PanelLayoutEngine.removePane(paneID: existing.paneID, from: $0) }
         }
@@ -501,8 +538,10 @@ import spacesterminalcore
     private func ensureContentController(request: AppKitController.DeviceTerminalOpenRequest) -> (any TerminalPaneContentHosting)? {
         if let existing = contentControllers[request.sessionID] { return existing }
         if request.preparedCredentials == nil {
-            let content = TerminalPanePlaceholderContentController(
-                request: request, deviceID: request.deviceID ?? host.deviceID(forWorkspaceID: request.workspaceID))
+            // The placeholder holds the device its pane will connect to; with no known owner
+            // there is nothing to connect to, so no pane opens.
+            guard let deviceID = request.deviceID ?? host.deviceID(forWorkspaceID: request.workspaceID) else { return nil }
+            let content = TerminalPanePlaceholderContentController(request: request, deviceID: deviceID)
             installContentController(content, sessionID: request.sessionID)
             scheduleTerminalPaneContentPreparation(request: request)
             return content
@@ -636,8 +675,12 @@ import spacesterminalcore
 
     // MARK: - Rendering / persistence
 
-    private func workspaceScope(forWorkspaceID workspaceID: String) -> PanelScope {
-        .workspace(deviceID: host.deviceID(forWorkspaceID: workspaceID), workspaceID: workspaceID)
+    /// The panel scope for a workspace, or nil when no loaded device owns it. Panel state is
+    /// keyed by (deviceID, workspaceID), so guessing the device would split one workspace's
+    /// panel across two keys and mint a fresh empty panel beside its real one.
+    private func workspaceScope(forWorkspaceID workspaceID: String) -> PanelScope? {
+        guard let deviceID = host.deviceID(forWorkspaceID: workspaceID) else { return nil }
+        return .workspace(deviceID: deviceID, workspaceID: workspaceID)
     }
 
     private func mutateLayout(scope: PanelScope, rerender: Bool = true, _ mutation: (PanelLayout) -> PanelLayout) {

@@ -50,11 +50,13 @@ extension AppKitController {
             // Route by this dialog's workspace, not the sidebar selection: the dialog is
             // free-standing, so the selection may have moved to another device or
             // workspace by the time an auto-save fires.
+            // The dialog itself stays readable while the owning device is unreachable; only the
+            // commit needs the daemon, so it is refused here with the device's own reason.
             do {
                 if deviceForWorkspaceMutation(workspaceID: workspaceID) != nil {
                     try updateDeviceWorkspaceConfig(workspaceID: workspaceID, update: update)
                 } else {
-                    showDeviceNotLoadedError()
+                    showWorkspaceDeviceUnavailableError(workspaceID: workspaceID)
                 }
             } catch { showError(error) }
         }

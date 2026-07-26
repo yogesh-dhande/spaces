@@ -594,7 +594,7 @@ private final class NotificationObserverBag: @unchecked Sendable {
                 updateInputOwnershipUI(isOwner: isOwner, isInteractive: isInteractive && canAttachToRuntime)
                 rendererLabel.stringValue = rendererMode.statusSummary
             }
-            updateEndedBanner(runtimeState: runtimeState)
+            updatePersistentBanner(runtimeState: runtimeState, isStateStreamDisconnected: isStateStreamDisconnected)
             guard visibleRenderer != .ghosttyOwner else {
                 restoreGhosttyOwnerInputFocusIfReady()
                 completeOwnershipTransitionIfNeeded(target: .owner, renderer: "owner_surface")
@@ -748,6 +748,11 @@ private final class NotificationObserverBag: @unchecked Sendable {
             && (visibleRenderer == .ghosttyOwner || visibleRenderer == .ghosttyEndedFinalRender)
     }
 
+    /// True while the provider has lost its live subscription to the owning device and is retrying.
+    /// Read from the provider at use time rather than cached: unlike runtime state, which arrives on
+    /// the stream this describes, it changes precisely when there is no stream to carry it.
+    var isStateStreamDisconnected: Bool { stateProvider.isStateStreamDisconnected }
+
     func isInteractiveRuntimeState(_ runtimeState: TerminalSessionRuntimeState?) -> Bool { runtimeState?.state.isInteractive == true }
 
     func isStartingRuntimeState(_ runtimeState: TerminalSessionRuntimeState?) -> Bool { runtimeState?.state == .starting }
@@ -875,6 +880,26 @@ private final class NotificationObserverBag: @unchecked Sendable {
                 MainActor.assumeIsolated {
                     guard let self, let changedSessionID, changedSessionID == self.sessionID else { return }
                     self.refreshNow()
+                }
+            })
+        // The provider's subscription to the owning device dropped or came back. Nothing else fires
+        // during an outage — the stream that would carry a state change is the thing that is gone —
+        // so this is what puts the pane's disconnected notice up and takes it down again.
+        //
+        // Deliberately the banner alone, not a full `refreshNow()`: the link state is the only thing
+        // that moved (with no stream, nothing else can have), and a full refresh can issue a
+        // synchronous attach against the very device this notification says is unreachable, stalling
+        // the main actor for that request's timeout.
+        notificationObservers.tokens.append(
+            NotificationCenter.default.addObserver(forName: .spacesTerminalStateStreamConnectionDidChange, object: nil, queue: .main) {
+                [weak self] notification in
+                let changedSessionID = TerminalSessionNotification.sessionID(from: notification)
+                MainActor.assumeIsolated {
+                    guard let self, let changedSessionID, changedSessionID == self.sessionID else { return }
+                    self.refreshRuntimeStateFromProvider()
+                    self.updatePersistentBanner(
+                        runtimeState: self.lastObservedRuntimeState, isStateStreamDisconnected: self.isStateStreamDisconnected)
+                    self.clearDisconnectedInputStatusIfResolved()
                 }
             })
         notificationObservers.tokens.append(

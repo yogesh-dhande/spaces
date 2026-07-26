@@ -155,7 +155,7 @@ public enum SpacesDeviceClient {
     public static func isLocalDaemonUnreachableError(_ error: any Error) -> Bool {
         if SpacesDeviceAPIControlClient.isControlEndpointUnavailable(error) { return true }
         // The Device API network transport (used by the overview round-trip) couldn't reach the daemon.
-        if isRetryableLocalDeviceAPIConnectionError(error) { return true }
+        if isDeviceAPITransportFailure(error) { return true }
         #if os(macOS)
             // The terminal service couldn't bring spacesd up at all — it timed out starting, or the
             // executable is missing — so the local daemon is down, the same offline state as an unreachable
@@ -191,7 +191,7 @@ public enum SpacesDeviceClient {
         let database = try providedDatabase ?? SpacesClientDatabase.defaultDatabase()
         let device = try bootstrapLocalDevice(database: database, clientApp: clientApp, profile: profile, bootstrap: bootstrap)
         do { return try overview(device: device, clientApp: clientApp, profile: profile, requestProvider: requestProvider) } catch {
-            guard isRetryableLocalDeviceAPIConnectionError(error) else { throw error }
+            guard isDeviceAPITransportFailure(error) else { throw error }
             let refreshedDevice = try bootstrapLocalDevice(database: database, clientApp: clientApp, profile: profile, bootstrap: bootstrap)
             return try overview(device: refreshedDevice, clientApp: clientApp, profile: profile, requestProvider: requestProvider)
         }
@@ -699,7 +699,16 @@ public enum SpacesDeviceClient {
         -> SpacesDeviceAPIControlResponse
     { try SpacesDeviceAPIControlClient.bootstrapLocalClientEnsuringCurrentTerminalService(clientApp: clientApp, presentedToken: presentedToken) }
 
-    static func isRetryableLocalDeviceAPIConnectionError(_ error: any Error) -> Bool {
+    /// True when a Device API failure is the transport failing to reach the daemon at all, rather than a
+    /// reachable daemon's answer. Device-neutral: the pinned-TLS request path is identical for the local
+    /// daemon and a paired remote, so callers that need to know "did this request even arrive" — the
+    /// local-reachability degrade above, and a pane deciding whether a failed terminal send is evidence
+    /// its link is gone — read the same classification.
+    ///
+    /// A coded rejection is deliberately excluded: the daemon answered, so it is reachable, and callers
+    /// that need to recover a rejection branch on its code. So is a certificate pin mismatch, where the
+    /// daemon is reachable but presents the wrong identity.
+    public static func isDeviceAPITransportFailure(_ error: any Error) -> Bool {
         if let requestError = error as? SpacesDeviceAPIRequestClientError {
             switch requestError {
             case .timeout, .emptyResponse, .connectionFailed: return true

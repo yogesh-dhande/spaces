@@ -90,6 +90,10 @@ extension TerminalSessionPaneViewController {
             if pasteImageFromPasteboardIfPresent() { return }
             let pasted = pasteClipboardAction?() ?? ghosttyRendererHost?.pasteClipboardContents() ?? false
             guard pasted else {
+                // A paste that reached an unreachable device otherwise beeps and says nothing, which
+                // on a pane still showing the device's last frame reads as the paste being ignored.
+                // Cmd+V carries a modifier, so it never triggers the typing pulse below.
+                if isStateStreamDisconnected { reportDisconnectedInputAttempt() }
                 NSSound.beep()
                 return
             }
@@ -211,6 +215,13 @@ extension TerminalSessionPaneViewController {
             banner.flash()
             return false
         }
+        if isTypingIntoDisconnectedSession(event) {
+            // The pane shows the device's last frame, so typing looks like it should work while the
+            // keystrokes go to a device the client cannot reach. Pulse the banner that already says
+            // the connection dropped. Routing is untouched: the key still goes to the render host,
+            // whose send is free to succeed the moment the link is back.
+            reportDisconnectedInputAttempt()
+        }
         guard visibleRenderer == .ghosttyOwner else { return false }
         if isFieldEditorFirstResponder { return false }
         guard isInteractiveRuntimeState(lastObservedRuntimeState) else { return false }
@@ -225,6 +236,36 @@ extension TerminalSessionPaneViewController {
         guard isExplicitlyNonInteractiveRuntimeState(lastObservedRuntimeState) else { return false }
         guard !isFieldEditorFirstResponder else { return false }
         return !event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.command)
+    }
+
+    /// True when this key event is the user typing into a live session whose device the client has
+    /// lost contact with. Mirrors `isTypingIntoEndedSession`'s exclusions: a command-modified key is
+    /// a deliberate action (Cmd+C on the frozen frame still works), not a keystroke going nowhere.
+    private func isTypingIntoDisconnectedSession(_ event: NSEvent) -> Bool {
+        guard isStateStreamDisconnected, !isExplicitlyNonInteractiveRuntimeState(lastObservedRuntimeState) else { return false }
+        guard !isFieldEditorFirstResponder else { return false }
+        return !event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.command)
+    }
+
+    /// Reports an input attempt made while the device is unreachable. The banner already carries the
+    /// notice, so the attempt pulses it rather than raising a second message; the input status row
+    /// records the reason for the debug dump and tests.
+    private func reportDisconnectedInputAttempt() {
+        // Typing repeats this on every keystroke; re-stating an unchanged message would re-run the
+        // header layout pass for nothing.
+        if inputStatusLabel.stringValue != TerminalPaneBannerNotice.disconnected.message {
+            updateInputStatus(message: TerminalPaneBannerNotice.disconnected.message, isError: true)
+        }
+        banner.flash()
+    }
+
+    /// Retires the message `reportDisconnectedInputAttempt` left behind once the link is back. The row
+    /// holds one message at a time and every other writer owns its own, so this clears only its exact
+    /// text: an unrelated status the user is looking at (a send error, an ownership refusal) says
+    /// nothing about the connection and must survive a reconnect it had no part in.
+    func clearDisconnectedInputStatusIfResolved() {
+        guard !isStateStreamDisconnected, inputStatusLabel.stringValue == TerminalPaneBannerNotice.disconnected.message else { return }
+        updateInputStatus(message: "", isError: false)
     }
 
     private func isImagePasteKeyEvent(_ event: NSEvent) -> Bool {

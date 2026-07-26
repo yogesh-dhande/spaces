@@ -164,9 +164,11 @@ extension AppKitController {
     }
 
     /// Reopens persisted global panel windows eagerly once possible. Called after
-    /// every device-section load; each row waits for the devices its panes reference
-    /// (a wire-incompatible or offline device has no overview, so its rows are never
-    /// pruned against an empty catalog and destroyed — they simply stay pending).
+    /// every device-section load; each row waits for the devices its panes reference.
+    /// A device that is not loaded is never ready: a pane needs a live daemon to attach
+    /// its session to, so an unreachable device's panes stay pending for the outage even
+    /// though it keeps its overview — and because the record is only ever deferred, its
+    /// panes are never pruned against a catalog the outage made unavailable.
     func reopenPersistedPanelWindowsIfPossible() {
         if pendingPanelWindowRestores == nil { pendingPanelWindowRestores = (try? clientDatabase().panelWindows()) ?? [] }
         guard let pending = pendingPanelWindowRestores, !pending.isEmpty else { return }

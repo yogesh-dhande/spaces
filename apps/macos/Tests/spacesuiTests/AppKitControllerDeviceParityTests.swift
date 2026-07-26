@@ -52,9 +52,10 @@ import workspacecore
         // A single loaded device stays a flat project list (no header).
         #expect(!AppKitController.sidebarShowsDeviceHeaders(deviceCount: 1, hasUnloadedSection: false))
         // A single device that is not loaded forces a header row so its caption has somewhere to render:
-        // the "offline" reason and its Retry, and the "loading…" that Retry puts the section in —
-        // otherwise it has no project rows, and the header the button was clicked in would vanish
-        // under the click.
+        // the outage and its recovery button, and the "loading…" that button puts the section in. The
+        // device's rows stay listed through the outage, but they are rows, not a caption — nothing else
+        // reports the reason or recovers the device, and a first launch against a daemon that is down
+        // has no rows at all.
         #expect(AppKitController.sidebarShowsDeviceHeaders(deviceCount: 1, hasUnloadedSection: true))
         // More than one device always groups under headers.
         #expect(AppKitController.sidebarShowsDeviceHeaders(deviceCount: 2, hasUnloadedSection: false))
@@ -70,6 +71,94 @@ import workspacecore
         #expect(AppKitController.addProjectDeviceIsSelectable(loadState: .loaded))
         #expect(AppKitController.addProjectDeviceIsSelectable(loadState: .loading))
         #expect(!AppKitController.addProjectDeviceIsSelectable(loadState: .offline("daemon down")))
+    }
+
+    @Test func onlyALoadedDeviceAcceptsDaemonBackedActions() {
+        // Browse, don't act: an unreachable device keeps its projects, workspaces and alerts listed and
+        // readable, but every action that has to reach its daemon is refused up front rather than dialled
+        // and failed. A section that has not finished loading is equally not actionable — its record may
+        // not be installed yet.
+        let remoteID = "device-remote"
+        #expect(AppKitController.deviceAcceptsDaemonActions(deviceID: remoteID, loadState: .loaded))
+        #expect(!AppKitController.deviceAcceptsDaemonActions(deviceID: remoteID, loadState: .offline("Connection refused")))
+        #expect(!AppKitController.deviceAcceptsDaemonActions(deviceID: remoteID, loadState: .loading))
+
+        // The same states decide it for this Mac, so an unreachable local daemon refuses exactly like a
+        // remote one rather than being trusted for being local.
+        let localID = SpacesPairedDeviceRecord.localDeviceID
+        #expect(AppKitController.deviceAcceptsDaemonActions(deviceID: localID, loadState: .loaded))
+        #expect(!AppKitController.deviceAcceptsDaemonActions(deviceID: localID, loadState: .offline("Connection refused")))
+        #expect(!AppKitController.deviceAcceptsDaemonActions(deviceID: localID, loadState: .loading))
+    }
+
+    @Test func thisMacIsActionableBeforeTheFirstSidebarSnapshotButAnUnknownDeviceIsNot() {
+        // No section yet is not the same fact as offline. An openTerminalSessionWindow/focus IPC arrives
+        // on a cold launch before the first sidebar load, and the pane it opens is on this Mac — whose
+        // record comes from the local-device bootstrap, not from a sidebar section. Refusing then would
+        // fail that open with "Spaces has not finished loading".
+        #expect(AppKitController.deviceAcceptsDaemonActions(deviceID: SpacesPairedDeviceRecord.localDeviceID, loadState: nil))
+        // A remote id no section claims is genuinely unknown: nothing has told the app that device exists,
+        // so it must stay refused rather than falling through to this Mac's daemon.
+        #expect(!AppKitController.deviceAcceptsDaemonActions(deviceID: "device-never-seen", loadState: nil))
+    }
+
+    @Test func aRetainedWorkspaceDetailIsRebuiltOnlyWhenItsDeviceCrossesTheActionableLine() {
+        typealias LoadState = AppKitController.SidebarDeviceLoadState
+        let deviceID = "device-remote"
+        let offline = LoadState.offline("Connection refused")
+        func rebuilds(detailDevice: String?, from: LoadState, to: LoadState) -> Bool {
+            AppKitController.shouldRebuildWorkspaceDetailForDeviceLoadStateChange(
+                visibleDetailWorkspaceDeviceID: detailDevice, deviceID: deviceID, previousLoadState: from, newLoadState: to)
+        }
+
+        // Going offline under the selection: the pane's footer/setup controls were built enabled and
+        // would keep offering actions the device now refuses. Coming back: they were built disabled and
+        // would stay that way until the user reselected the row.
+        #expect(rebuilds(detailDevice: deviceID, from: .loaded, to: offline))
+        #expect(rebuilds(detailDevice: deviceID, from: offline, to: .loaded))
+
+        // A device that stays down is re-reported on every probe for the whole outage; rebuilding then
+        // would throw away the user's scroll and focus repeatedly for a state that did not move. A newer
+        // failure reason changes the caption, not what any control can do.
+        #expect(!rebuilds(detailDevice: deviceID, from: offline, to: offline))
+        #expect(!rebuilds(detailDevice: deviceID, from: offline, to: .offline("Stream closed")))
+
+        // Another device's outage leaves this pane alone, and a detail showing something other than a
+        // workspace (alerts, a compatibility block) has no controls keyed to this device.
+        #expect(!rebuilds(detailDevice: "device-other", from: .loaded, to: offline))
+        #expect(!rebuilds(detailDevice: nil, from: .loaded, to: offline))
+    }
+
+    @Test func anOpenTerminalPaneStaysFocusableWhileOfflineButANewOneIsRefused() {
+        // The two operations behind one sidebar click part ways during an outage. Focusing a pane that is
+        // already open is client-side — it owns its state model and renders the disconnected notice — so
+        // an unreachable device never withholds it.
+        #expect(AppKitController.canOpenOrFocusTerminalPane(hasExistingPane: true, deviceAcceptsDaemonActions: false))
+        #expect(AppKitController.canOpenOrFocusTerminalPane(hasExistingPane: true, deviceAcceptsDaemonActions: true))
+
+        // Opening a pane the layout does not have yet can only work by attaching to the owning daemon, so
+        // it is refused while the device cannot act — and refused before the install, because installing
+        // adds the pane to the layout and persists it before credentials are prepared: a pane admitted
+        // here is saved as permanently failed and never retries when the device returns.
+        #expect(!AppKitController.canOpenOrFocusTerminalPane(hasExistingPane: false, deviceAcceptsDaemonActions: false))
+        #expect(AppKitController.canOpenOrFocusTerminalPane(hasExistingPane: false, deviceAcceptsDaemonActions: true))
+    }
+
+    @Test func actionsRefusedByAnOutageNameTheDeviceInsteadOfClaimingSpacesIsLoading() {
+        // The refusal a user reads has to match what they can see: the device's rows are on screen, so
+        // "Spaces has not finished loading" would be plainly wrong. It names the device and says offline,
+        // matching the add-project device step's refusal.
+        let error = AppKitController.deviceUnreachableError(deviceName: "workshop", isLocal: false)
+        #expect(error.localizedDescription == "workshop is offline.")
+        #expect(error.localizedRecoverySuggestion == "Reconnect it and try again.")
+    }
+
+    @Test func theLocalMacIsToldToRestartItsDaemonRatherThanReconnectToItself() {
+        // "Reconnect it" sends the user looking for a control that cannot exist for their own Mac; the
+        // action that resolves this one is the daemon relaunch in Devices settings.
+        let error = AppKitController.deviceUnreachableError(deviceName: "Local", isLocal: true)
+        #expect(error.localizedDescription == "Local is offline.")
+        #expect(error.localizedRecoverySuggestion == "Restart the local daemon and try again.")
     }
 
     @Test func localDaemonRestartActionIsOfferedOnlyForRelaunchResolvableFailures() {
@@ -358,31 +447,58 @@ import workspacecore
                 == .runProcess(workspaceID: "workspace-1", processKey: "web", processTemplateID: "process-web"))
     }
 
-    @Test func offlineTransitionDetectsSelectionOwnedByTheDevice() {
-        // When a device goes offline its rows drop from the merged sidebar data; a selection under it
-        // must be detected so the detail pane can fall back to the alerts view instead of misrouting
-        // follow-up actions to the local daemon.
-        let section = AppKitController.DeviceSection(
-            deviceID: "remote", deviceName: "Remote", isLocal: false, loadState: .loaded, device: nil,
-            projects: [ProjectSummary(id: "proj-r", name: "R", dir: "/r", isGitRepo: true, defaultBranch: "main", deviceID: "remote")],
-            workspacesByProject: [
-                "proj-r": [
-                    WorkspaceSummary(
-                        id: "ws-r", branch: "feature", dir: "/r/feature", isRunning: true, isArchived: false, isDefault: false, deviceID: "remote")
-                ]
-            ])
+    @Test func anUnreachableDeviceKeepsItsRowsInTheMergedSidebarData() {
+        // An outage must not erase the device's subtree: its projects, workspaces, runtime state, and
+        // alerts stay merged for the whole outage, so the user keeps browsing them, the selection under
+        // the device stays valid, and every id-based lookup that reads this merged data still resolves
+        // its rows. A device mid-retry (`.loading` after an outage) keeps them for the same reason.
+        let offline = deviceSection(deviceID: "remote", loadState: .offline("Connection refused"))
+        let retrying = deviceSection(deviceID: "retrying", loadState: .loading)
+        let loaded = deviceSection(deviceID: "local", loadState: .loaded)
 
-        // A workspace selection under the device is detected.
-        #expect(AppKitController.sidebarSelectionBelongsToDeviceSection(selectedWorkspaceID: "ws-r", selectedProjectID: "proj-r", section: section))
-        // A selection on another device is left alone.
-        #expect(
-            !AppKitController.sidebarSelectionBelongsToDeviceSection(
-                selectedWorkspaceID: "ws-local", selectedProjectID: "proj-local", section: section))
-        // A project (header) selection with no workspace selected is detected by project id.
-        #expect(AppKitController.sidebarSelectionBelongsToDeviceSection(selectedWorkspaceID: nil, selectedProjectID: "proj-r", section: section))
-        #expect(!AppKitController.sidebarSelectionBelongsToDeviceSection(selectedWorkspaceID: nil, selectedProjectID: "proj-local", section: section))
-        // No selection never triggers reconciliation.
-        #expect(!AppKitController.sidebarSelectionBelongsToDeviceSection(selectedWorkspaceID: nil, selectedProjectID: nil, section: section))
+        let merged = AppKitController.mergedSidebarData(sections: [loaded, offline, retrying])
+
+        #expect(merged.projects.map(\.id) == ["proj-local", "proj-remote", "proj-retrying"])
+        #expect(merged.workspacesByProject["proj-remote"]?.map(\.id) == ["ws-remote"])
+        #expect(merged.workspaceRuntimeStatusByID["ws-remote"] != nil)
+        #expect(merged.alertsGroups.map(\.workspaceID) == ["ws-local", "ws-remote", "ws-retrying"])
+    }
+
+    @Test func anUnreachableDevicesRowsAreDimmed() {
+        // The rows stay listed but read as not actionable. Dimming plus the section caption is the whole
+        // treatment — no per-row icon — and a device mid-retry stays dimmed until its load lands.
+        #expect(AppKitController.sidebarRowAlpha(loadState: .loaded) == 1)
+        #expect(AppKitController.sidebarRowAlpha(loadState: .offline("Connection refused")) == AppKitController.unreachableDeviceAlpha)
+        #expect(AppKitController.sidebarRowAlpha(loadState: .loading) == AppKitController.unreachableDeviceAlpha)
+    }
+
+    /// One device section carrying a project, its workspace, that workspace's runtime status, and one
+    /// alerts group — enough for the merge to be observable per device.
+    private func deviceSection(deviceID: String, loadState: AppKitController.SidebarDeviceLoadState) -> AppKitController.DeviceSection {
+        let projectID = "proj-\(deviceID)"
+        let workspaceID = "ws-\(deviceID)"
+        return AppKitController.DeviceSection(
+            deviceID: deviceID, deviceName: deviceID, isLocal: deviceID == "local", loadState: loadState, device: nil,
+            projects: [
+                ProjectSummary(id: projectID, name: deviceID, dir: "/\(deviceID)", isGitRepo: true, defaultBranch: "main", deviceID: deviceID)
+            ],
+            workspacesByProject: [
+                projectID: [
+                    WorkspaceSummary(
+                        id: workspaceID, branch: "feature", dir: "/\(deviceID)/feature", isRunning: true, isArchived: false, isDefault: false,
+                        deviceID: deviceID)
+                ]
+            ],
+            workspaceRuntimeStatusByID: [
+                workspaceID: WorkspaceRuntimeStatus(
+                    workspaceID: workspaceID, lifecycleState: .running, runtimeHealth: .healthy, hasTrackedRuntimeIndicators: false,
+                    runningProcessCount: 1, exitedProcessCount: 0, waitingAgentWindowCount: 0, missingConfiguredProcessCount: 0,
+                    missingConfiguredBrowserSessionCount: 0)
+            ],
+            alertsGroups: [
+                AppKitController.AlertsGroup(
+                    projectName: deviceID, workspaceID: workspaceID, workspaceName: "feature", workspaceBranch: "feature", items: [])
+            ])
     }
 
     @Test func deviceSectionDisplayNameRendersLocalDeviceAsLocalRegardlessOfStoredName() {
