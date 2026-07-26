@@ -64,6 +64,8 @@ apps/macos/.build/debug/spaces terminal list
 
 Override `SPACES_DB_PATH` when you need a one-off isolated profile root. Override `SPACES_RUNTIME_DIR` only when the runtime files themselves also need to move with that profile.
 
+That binding is for running the app, CLI, and E2E helpers — not tests. A test process cannot resolve a live profile at all: under XCTest, profile resolution refuses any database under `~/.spaces/` or `~/.spaces-dev/profiles/`, including one named by an explicit `SPACES_DB_PATH`, so a bound shell that runs bare `swift test` fails loudly instead of writing fixture sessions into the profile its debug app is serving. Run tests through `scripts/swiftpm.sh test` (directly or via `scripts/coverage.sh` / `scripts/impacted_tests.sh`), which rebinds the run to a throwaway profile regardless of what the shell exported.
+
 ### Keeping the Chrome Automation grant across rebuilds
 
 Ad-hoc signed SwiftPM debug builds get a fresh cdhash on every rebuild, and the cdhash is the app's TCC identity. So the macOS Automation grant that lets Spaces control Chrome — and any other TCC permission — is lost each rebuild, and the first-run setup screen reappears. Set `SPACES_DEV_CODESIGN_IDENTITY` in the gitignored repo-root `.env` to a stable signing identity (an "Apple Development: …" line from `security find-identity -v -p codesigning`); `dev-build-and-launch.sh` re-signs the built app with it after SwiftPM, keeping the TCC identity constant so the grant survives rebuilds. For a build whose stale record is already blocking the consent prompt, clear it once with `tccutil reset AppleEvents dev.usespaces.spaces`, then click Recheck (or relaunch).
