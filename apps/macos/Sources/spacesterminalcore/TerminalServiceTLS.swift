@@ -984,7 +984,7 @@ public enum TerminalServiceTLSError: LocalizedError, Equatable {
                     }
                     complete(true)
                 }, DispatchQueue.global(qos: .userInitiated))
-            return NWParameters(tls: tlsOptions, tcp: NWProtocolTCP.Options())
+            return NWParameters(tls: tlsOptions, tcp: SpacesTCPKeepalive.makeTCPOptions())
         }
     }
 

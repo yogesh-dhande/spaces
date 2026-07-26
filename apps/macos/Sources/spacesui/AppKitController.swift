@@ -2476,10 +2476,11 @@ public final class AppKitController: NSObject, NSApplicationDelegate, NSSplitVie
     }
 
     /// The sidebar groups projects under per-device header rows when more than one device is paired, or
-    /// when any section is offline so its "offline" caption (the only surface for an unreachable daemon's
-    /// reason) still has a header row to render in. A single loaded device stays a flat project list.
-    /// Pure so the single-offline-device rule is directly testable.
-    nonisolated static func sidebarShowsDeviceHeaders(deviceCount: Int, hasOfflineSection: Bool) -> Bool { deviceCount > 1 || hasOfflineSection }
+    /// when any section is not loaded so its caption — the only surface for an unreachable daemon's
+    /// reason, its Retry, and the "loading…" that retry puts it in — still has a header row to render
+    /// in. A single loaded device stays a flat project list. Pure so the single-unloaded-device rule is
+    /// directly testable.
+    nonisolated static func sidebarShowsDeviceHeaders(deviceCount: Int, hasUnloadedSection: Bool) -> Bool { deviceCount > 1 || hasUnloadedSection }
 
     /// Maps the local device's snapshot reachability to a sidebar load state. A non-nil offline message
     /// (the local daemon could not be reached) renders the local device as offline, exactly like a remote

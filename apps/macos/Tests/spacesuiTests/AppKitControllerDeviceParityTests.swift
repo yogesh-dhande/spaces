@@ -50,12 +50,14 @@ import workspacecore
 
     @Test func singleOfflineLocalDeviceStillRendersADeviceHeaderRow() {
         // A single loaded device stays a flat project list (no header).
-        #expect(!AppKitController.sidebarShowsDeviceHeaders(deviceCount: 1, hasOfflineSection: false))
-        // A single offline device forces a header row so its "offline" caption/tooltip has somewhere to
-        // render — otherwise it has no project rows and the sidebar would show nothing.
-        #expect(AppKitController.sidebarShowsDeviceHeaders(deviceCount: 1, hasOfflineSection: true))
+        #expect(!AppKitController.sidebarShowsDeviceHeaders(deviceCount: 1, hasUnloadedSection: false))
+        // A single device that is not loaded forces a header row so its caption has somewhere to render:
+        // the "offline" reason and its Retry, and the "loading…" that Retry puts the section in —
+        // otherwise it has no project rows, and the header the button was clicked in would vanish
+        // under the click.
+        #expect(AppKitController.sidebarShowsDeviceHeaders(deviceCount: 1, hasUnloadedSection: true))
         // More than one device always groups under headers.
-        #expect(AppKitController.sidebarShowsDeviceHeaders(deviceCount: 2, hasOfflineSection: false))
+        #expect(AppKitController.sidebarShowsDeviceHeaders(deviceCount: 2, hasUnloadedSection: false))
 
         #expect(AppKitController.SidebarDeviceLoadState.offline("daemon down").isOffline)
         #expect(!AppKitController.SidebarDeviceLoadState.loaded.isOffline)
