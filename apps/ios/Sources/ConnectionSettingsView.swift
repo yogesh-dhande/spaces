@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import spacesdevicecore
 import spacesterminalcore
 
@@ -85,7 +86,12 @@ struct ConnectionSettingsView: View {
             }
             Button("Cancel", role: .cancel) { pendingPairingLink = nil }
         } message: {
-            if let pendingPairingLink { Text("\(pendingPairingLink.host):\(pendingPairingLink.port)") }
+            if let pendingPairingLink {
+                Text(
+                    pendingPairingLink.hosts.map { "\(SpacesDeviceHostAddressKind(host: $0).label) · \($0):\(pendingPairingLink.port)" }.joined(
+                        separator: "\n")
+                ).font(.caption.monospaced())
+            }
         }.confirmationDialog(
             isDemoDevicePendingRemoval ? "Turn Off Demo Mode?" : devicePendingRemoval.map { "Remove \($0.name)?" } ?? "Remove Device?",
             isPresented: removalConfirmationBinding, titleVisibility: .visible, presenting: devicePendingRemoval
@@ -109,7 +115,7 @@ struct ConnectionSettingsView: View {
         } else {
             HStack(spacing: 10) {
                 Button {
-                    settings.host = device.host
+                    settings.hosts = device.hosts
                     settings.port = device.port
                     settings.certificateFingerprint = device.certificateFingerprint
                     onSelectDevice(device.id)
@@ -119,8 +125,15 @@ struct ConnectionSettingsView: View {
                             Text(device.name).foregroundStyle(.primary)
                             if device.id == SpacesMobileDemoDevice.id { demoTag }
                         }
-                        Text("\(device.host):\(device.port)").font(.caption.monospaced()).foregroundStyle(.secondary).lineLimit(1).truncationMode(
-                            .middle)
+                        // Show the address actually in use, not necessarily the most-preferred
+                        // candidate: `activeHost` is the one that most recently connected. Labeled by
+                        // kind ("Local network" / "Tailscale") rather than shown as a bare host:port —
+                        // which network path a device is reachable over is the useful signal here, not
+                        // its literal port (every device uses the same default port, so it was only ever
+                        // incidental detail). Not monospaced: `docs/design.md` reserves that treatment
+                        // for path-like content (paths, commands, branches, ports), not this row's
+                        // now-prose label.
+                        Text(activeHostLabel(for: device)).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                     }
                 }
                 Spacer(minLength: 0)
@@ -142,6 +155,15 @@ struct ConnectionSettingsView: View {
                 }
             }
         }
+    }
+
+    /// "Tailscale · 100.86.197.104" / "Local network · 192.168.50.5" for the device's in-use address —
+    /// matching the labeling `SpacesDeviceHostAddressKind` already gives the Mac pairing pane. Empty
+    /// when the device has no known address at all (should not happen for a paired device, but a blank
+    /// row is the honest degenerate case rather than a fabricated label).
+    private func activeHostLabel(for device: SpacesMobilePairedDeviceRecord) -> String {
+        guard let host = device.activeHost ?? device.hosts.first else { return "" }
+        return "\(SpacesDeviceHostAddressKind(host: host).label) · \(host)"
     }
 
     /// Compact chip marking the synthetic Demo Mac in the device list.
@@ -200,10 +222,10 @@ struct ConnectionSettingsView: View {
         defer { isPairing = false }
         do {
             var pairedSettings = settings
-            pairedSettings.host = pairingLink.host
+            pairedSettings.hosts = pairingLink.hosts
             pairedSettings.port = pairingLink.port
             pairedSettings.certificateFingerprint = pairingLink.certificateFingerprint
-            let bridgeClient = SpacesDeviceAPIClient(settings: pairedSettings)
+            let bridgeClient = SpacesDeviceAPIClient(settings: pairedSettings, deviceName: UIDevice.current.name)
             let commandChannel = bridgeClient.makeCommandChannel()
             let issuedAuthToken: String
             do { issuedAuthToken = try await bridgeClient.pair(pairingLink: pairingLink, commandChannel: commandChannel) } catch {

@@ -664,6 +664,19 @@ public struct TerminalServiceDaemonStatus: Codable, Sendable, Equatable {
     /// Daemon host OS: `"macOS"` or `"Linux"`. Lets clients tailor restart guidance — e.g. a remote
     /// Linux daemon must be updated from the Mac app.
     public let operatingSystem: String
+    /// The addresses this daemon is currently reachable at, ordered exactly like a pairing link's
+    /// `hosts` (LAN first, then Tailscale) — derived from the same
+    /// `SpacesDeviceAPINetworkInterfaces.pairingLinkHosts(boundHost:)` call so the two can never
+    /// disagree.
+    ///
+    /// `[]` means **"this daemon reported nothing"**, never "this daemon has no addresses": every
+    /// construction site that cannot legitimately enumerate the daemon's live interfaces (e.g. a
+    /// synthetic placeholder status for an offline device) also reports `[]`, and a peer built before
+    /// this field existed omits it entirely, which decodes to `[]` too. Clients must treat an empty
+    /// list as absence of information and leave any previously stored addresses alone rather than
+    /// concluding the daemon has become unreachable everywhere — see
+    /// `SpacesMobileDeviceStore.mergeAdvertisedHosts`.
+    public let deviceAPIAddresses: [String]
 
     /// Protocol version reported when a peer's status omits the field entirely — i.e. a daemon old
     /// enough to predate wire-version negotiation. It must compare as incompatible against any real
@@ -674,7 +687,7 @@ public struct TerminalServiceDaemonStatus: Codable, Sendable, Equatable {
     public init(
         version: String, installedVersion: String?, certificateFingerprint: String?, activeSessionCount: Int,
         protocolVersion: Int = SpacesWireProtocol.version, runningProcesses: Int = 0, activeAgents: Int = 0, waitingAgents: Int = 0,
-        operatingSystem: String = TerminalServiceDaemonStatus.currentOperatingSystem
+        operatingSystem: String = TerminalServiceDaemonStatus.currentOperatingSystem, deviceAPIAddresses: [String] = []
     ) {
         self.version = version
         self.installedVersion = installedVersion
@@ -685,6 +698,7 @@ public struct TerminalServiceDaemonStatus: Codable, Sendable, Equatable {
         self.activeAgents = activeAgents
         self.waitingAgents = waitingAgents
         self.operatingSystem = operatingSystem
+        self.deviceAPIAddresses = deviceAPIAddresses
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -697,6 +711,7 @@ public struct TerminalServiceDaemonStatus: Codable, Sendable, Equatable {
         case activeAgents
         case waitingAgents
         case operatingSystem
+        case deviceAPIAddresses
     }
 
     /// This is the frozen core's contract: its decode must tolerate version skew so an incompatible
@@ -716,6 +731,7 @@ public struct TerminalServiceDaemonStatus: Codable, Sendable, Equatable {
         activeAgents = try container.decodeIfPresent(Int.self, forKey: .activeAgents) ?? 0
         waitingAgents = try container.decodeIfPresent(Int.self, forKey: .waitingAgents) ?? 0
         operatingSystem = try container.decodeIfPresent(String.self, forKey: .operatingSystem) ?? Self.currentOperatingSystem
+        deviceAPIAddresses = try container.decodeIfPresent([String].self, forKey: .deviceAPIAddresses) ?? []
     }
 
     /// The OS of the process building this status (the daemon's own host).
@@ -729,17 +745,25 @@ public struct TerminalServiceDaemonStatus: Codable, Sendable, Equatable {
 
     public var isLinuxDaemon: Bool { operatingSystem == "Linux" }
 
-    /// A newer Spaces is installed on the daemon's device than the build the daemon is running, so an
-    /// update is staged and applies on its next restart.
+    /// The build installed on the daemon's device when it is newer than the build the daemon is
+    /// running — i.e. the version a restart would apply — and nil when nothing is staged.
     ///
     /// This is a fact about one device, answered by that device, so every client — Mac, iPhone, CLI —
     /// reads the same value. A client must never derive it by comparing the daemon's version against
     /// its *own* build: the iPhone app and the Linux daemon ship on unrelated release trains, so that
     /// comparison says nothing about whether an update is waiting on the other end.
-    public var isUpdatePending: Bool {
-        guard let installedVersion else { return false }
-        return SpacesWireProtocol.isVersion(version, olderThan: installedVersion)
+    ///
+    /// Returning the version rather than just a flag lets `DaemonUpdateRemedy` carry it, so a client
+    /// that has decided an update is staged never has to re-derive which one it is.
+    public var stagedVersion: String? {
+        guard let installedVersion, SpacesWireProtocol.isVersion(version, olderThan: installedVersion) else { return nil }
+        return installedVersion
     }
+
+    /// Whether a newer Spaces is installed on the daemon's device than the build it is running, so an
+    /// update is staged and applies on its next restart. Defined in terms of `stagedVersion` so the two
+    /// can never disagree about what counts as staged.
+    public var isUpdatePending: Bool { stagedVersion != nil }
 }
 
 public struct TerminalServiceResponse: Codable, Sendable, Equatable {
@@ -871,8 +895,7 @@ public final class TerminalServiceServer {
     private var acceptSource: DispatchSourceRead?
 
     public init(
-        socketPath: String, queue: DispatchQueue,
-        livenessResponder: (@Sendable () -> TerminalServiceResponse)? = nil,
+        socketPath: String, queue: DispatchQueue, livenessResponder: (@Sendable () -> TerminalServiceResponse)? = nil,
         handleRequest: @escaping @Sendable (TerminalServiceRequest) throws -> TerminalServiceResponse
     ) {
         self.socketPath = socketPath

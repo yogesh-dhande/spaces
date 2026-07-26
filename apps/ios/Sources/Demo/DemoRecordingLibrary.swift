@@ -73,9 +73,7 @@ struct DemoRecordingLibrary: Sendable {
     static func load(bundle: Bundle = .main, now: Date = Date()) throws -> DemoRecordingLibrary {
         let manifestData = try resourceData("manifest", "json", in: bundle)
         let manifest: DemoRecordingManifest
-        do {
-            manifest = try JSONDecoder().decode(DemoRecordingManifest.self, from: manifestData)
-        } catch {
+        do { manifest = try JSONDecoder().decode(DemoRecordingManifest.self, from: manifestData) } catch {
             throw DemoRecordingLibraryError.decodeFailed(resource: "manifest.json", underlying: String(describing: error))
         }
         guard manifest.schemaVersion == supportedSchemaVersion else {
@@ -116,17 +114,15 @@ struct DemoRecordingLibrary: Sendable {
         let rebased = try rebasedJSONData(
             data, resource: "overview.json", now: now, timestamp: TerminalSessionTimestamp.string(from:), patchProtocolVersion: true)
         let response: SpacesDeviceAPIResponse
-        do {
-            response = try SpacesDeviceAPICodec.decodeResponse(rebased)
-        } catch {
+        do { response = try SpacesDeviceAPICodec.decodeResponse(rebased) } catch {
             throw DemoRecordingLibraryError.decodeFailed(resource: "overview.json", underlying: String(describing: error))
         }
         guard let overview = response.overview else { throw DemoRecordingLibraryError.overviewMissing }
         return overview
     }
 
-    private static func loadRecordings(manifest: DemoRecordingManifest, bundle: Bundle, now: Date) throws
-        -> [DemoRecordingGrid: [String: GhosttyRemoteSessionStatePayload]]
+    private static func loadRecordings(manifest: DemoRecordingManifest, bundle: Bundle, now: Date) throws -> [DemoRecordingGrid: [String:
+        GhosttyRemoteSessionStatePayload]]
     {
         var recordings: [DemoRecordingGrid: [String: GhosttyRemoteSessionStatePayload]] = [:]
         for grid in manifest.grids {
@@ -143,9 +139,7 @@ struct DemoRecordingLibrary: Sendable {
                 let rebased = try rebasedJSONData(
                     line, resource: "\(session.stableID).ndjson", now: now, timestamp: GhosttyRemoteSessionStateTimestamp.string(from:),
                     patchProtocolVersion: false)
-                do {
-                    frames[session.stableID] = try GhosttyRemoteSessionStateCodec.decodeLine(rebased)
-                } catch {
+                do { frames[session.stableID] = try GhosttyRemoteSessionStateCodec.decodeLine(rebased) } catch {
                     throw DemoRecordingLibraryError.decodeFailed(resource: "\(session.stableID).ndjson", underlying: String(describing: error))
                 }
             }
@@ -173,35 +167,28 @@ struct DemoRecordingLibrary: Sendable {
     /// from `now`, optionally patching `result.overview.daemonStatus.protocolVersion`. The recorder wrote
     /// only timestamp fields as integer offsets, so any pure-integer string is one; all other strings
     /// (ids, commands, the base64 render blob) pass through untouched.
-    private static func rebasedJSONData(
-        _ data: Data, resource: String, now: Date, timestamp: (Date) -> String, patchProtocolVersion: Bool
-    ) throws -> Data {
+    private static func rebasedJSONData(_ data: Data, resource: String, now: Date, timestamp: (Date) -> String, patchProtocolVersion: Bool) throws
+        -> Data
+    {
         let object: Any
-        do {
-            object = try JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])
-        } catch {
+        do { object = try JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) } catch {
             throw DemoRecordingLibraryError.decodeFailed(resource: resource, underlying: String(describing: error))
         }
         var rebased = rebase(object, now: now, timestamp: timestamp)
         if patchProtocolVersion { rebased = patchedProtocolVersion(rebased) }
-        do {
-            return try JSONSerialization.data(withJSONObject: rebased, options: [.fragmentsAllowed])
-        } catch {
+        do { return try JSONSerialization.data(withJSONObject: rebased, options: [.fragmentsAllowed]) } catch {
             throw DemoRecordingLibraryError.decodeFailed(resource: resource, underlying: String(describing: error))
         }
     }
 
     private static func rebase(_ value: Any, now: Date, timestamp: (Date) -> String) -> Any {
         switch value {
-        case let dictionary as [String: Any]:
-            return dictionary.mapValues { rebase($0, now: now, timestamp: timestamp) }
-        case let array as [Any]:
-            return array.map { rebase($0, now: now, timestamp: timestamp) }
+        case let dictionary as [String: Any]: return dictionary.mapValues { rebase($0, now: now, timestamp: timestamp) }
+        case let array as [Any]: return array.map { rebase($0, now: now, timestamp: timestamp) }
         case let string as String:
             guard let offset = offsetSeconds(from: string) else { return string }
             return timestamp(now.addingTimeInterval(TimeInterval(offset)))
-        default:
-            return value
+        default: return value
         }
     }
 
@@ -216,11 +203,9 @@ struct DemoRecordingLibrary: Sendable {
     }
 
     private static func patchedProtocolVersion(_ value: Any) -> Any {
-        guard var root = value as? [String: Any], var result = root["result"] as? [String: Any],
-            var overview = result["overview"] as? [String: Any], var status = overview["daemonStatus"] as? [String: Any]
-        else {
-            return value
-        }
+        guard var root = value as? [String: Any], var result = root["result"] as? [String: Any], var overview = result["overview"] as? [String: Any],
+            var status = overview["daemonStatus"] as? [String: Any]
+        else { return value }
         status["protocolVersion"] = SpacesWireProtocol.version
         overview["daemonStatus"] = status
         result["overview"] = overview

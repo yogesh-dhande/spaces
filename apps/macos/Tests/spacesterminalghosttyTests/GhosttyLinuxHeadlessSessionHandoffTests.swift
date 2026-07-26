@@ -2,7 +2,7 @@
     import Dispatch
     import Foundation
     import Glibc
-    import XCTest
+    import Testing
     import spacesterminalcore
 
     @testable import spacesterminalghostty
@@ -12,23 +12,45 @@
     /// on the staged image, including `recreateVTRenderer`'s replay of `output.log` at
     /// the persisted grid.
     ///
-    /// A single test process cannot actually `execv`, so the resume tests reconstruct
-    /// the two halves of the handoff in process. The transcript and the handoff record
-    /// come from a real `quiesceForHandoff()` on a first core. The resuming core is then
-    /// handed a descriptor for a fresh, test-owned PTY plus a live "liveness" child (a
-    /// bare `sleep`), standing in for the master fd and child that `execv` preserves —
-    /// the resume code path adopts whatever descriptor it is given, so this faithfully
-    /// drives replay + live-fd I/O. Injecting bytes on the test-owned PTY slave (rather
-    /// than re-driving the original child) avoids the in-process artifact where two cores
-    /// would fight over one PTY: `execv` destroys the old reader atomically, but a test
-    /// cannot, and closing a PTY master out from under a blocked read hangs.
-    final class GhosttyLinuxHeadlessSessionHandoffTests: XCTestCase {
-        private var originalDatabasePath: String?
-        private var originalRuntimeDirectory: String?
-        private var databaseRoot: URL?
+    /// The headless core runs on `TerminalEngineActor`, so the test body stays nonisolated and
+    /// hops onto the engine for every core call: cores are created inside a
+    /// `TerminalEngineActor.run` block, carried back out through a `Box`, and used only via
+    /// `runSynchronously`/`run` bridges (or a direct `await` for the core's async handoff
+    /// methods).
+    ///
+    /// A single test process cannot actually `execv`, so the resume tests reconstruct the
+    /// two halves of the handoff in process. The transcript and the handoff record come
+    /// from a real `quiesceForHandoff()` on a first core. The resuming core is then handed
+    /// a descriptor for a fresh, test-owned PTY plus a live "liveness" child (a bare
+    /// `sleep`), standing in for the master fd and child that `execv` preserves — the
+    /// resume code path adopts whatever descriptor it is given, so this faithfully drives
+    /// replay + live-fd I/O. Injecting bytes on the test-owned PTY slave (rather than
+    /// re-driving the original child) avoids the in-process artifact where two cores would
+    /// fight over one PTY: `execv` destroys the old reader atomically, but a test cannot,
+    /// and closing a PTY master out from under a blocked read hangs.
+    ///
+    /// Swift Testing (not XCTest) on purpose: the swift-testing runner executes tests from an
+    /// async main, so async tests actually make progress on Linux. Under corelibs-xctest an
+    /// async test deadlocks before its first line regardless of isolation — the test job is
+    /// queued to run while XCTest's blocked main thread polls in a loop that never drains it.
+    /// Test bodies stay nonisolated (not `@MainActor`) because the headless core is isolated
+    /// to `TerminalEngineActor`, a distinct global actor from `MainActor`: a nonisolated body
+    /// can legally bridge onto the engine with the synchronous `TerminalEngineActor.runSynchronously`,
+    /// whereas the one-way rule forbids calling that bridge from the main actor. `.serialized`
+    /// because each test mutates the process-wide SPACES_* environment and owns a real PTY child.
+    @Suite(.serialized) final class GhosttyLinuxHeadlessSessionHandoffTests {
+        private let originalDatabasePath: String?
+        private let originalRuntimeDirectory: String?
+        private let databaseRoot: URL
 
-        override func setUpWithError() throws {
-            try super.setUpWithError()
+        /// Carries an engine-isolated reference (created inside a `TerminalEngineActor.run` block) back out
+        /// to the nonisolated test body; the value is only ever *used* on the engine actor via a later bridge.
+        private final class Box<Value>: @unchecked Sendable {
+            let value: Value
+            init(_ value: Value) { self.value = value }
+        }
+
+        init() throws {
             originalDatabasePath = ProcessInfo.processInfo.environment["SPACES_DB_PATH"]
             originalRuntimeDirectory = ProcessInfo.processInfo.environment["SPACES_RUNTIME_DIR"]
             let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -38,14 +60,10 @@
             setenv("SPACES_RUNTIME_DIR", root.appendingPathComponent("runtime", isDirectory: true).path, 1)
         }
 
-        override func tearDownWithError() throws {
+        deinit {
             if let originalDatabasePath { setenv("SPACES_DB_PATH", originalDatabasePath, 1) } else { unsetenv("SPACES_DB_PATH") }
             if let originalRuntimeDirectory { setenv("SPACES_RUNTIME_DIR", originalRuntimeDirectory, 1) } else { unsetenv("SPACES_RUNTIME_DIR") }
-            if let databaseRoot { try? FileManager.default.removeItem(at: databaseRoot) }
-            databaseRoot = nil
-            originalDatabasePath = nil
-            originalRuntimeDirectory = nil
-            try super.tearDownWithError()
+            try? FileManager.default.removeItem(at: databaseRoot)
         }
 
         // MARK: - Fixtures
@@ -81,16 +99,16 @@
             // call that returns both descriptors of a fresh PTY.
             var master: Int32 = 0
             var slave: Int32 = 0
-            XCTAssertEqual(openpty(&master, &slave, nil, nil, nil), 0, "openpty failed")
-            XCTAssertGreaterThanOrEqual(master, 0)
-            XCTAssertGreaterThanOrEqual(slave, 0)
+            #expect(openpty(&master, &slave, nil, nil, nil) == 0, "openpty failed")
+            #expect(master >= 0)
+            #expect(slave >= 0)
 
             var childPID: pid_t = 0
             let path = "/bin/sh"
             let arguments = [path, "-c", "sleep 120"]
             var argv: [UnsafeMutablePointer<CChar>?] = arguments.map { strdup($0) } + [nil]
             defer { for argument in argv where argument != nil { free(argument) } }
-            XCTAssertEqual(posix_spawn(&childPID, path, nil, nil, &argv, environ), 0, "posix_spawn of the liveness child failed")
+            #expect(posix_spawn(&childPID, path, nil, nil, &argv, environ) == 0, "posix_spawn of the liveness child failed")
 
             return AdoptablePTY(master: master, slave: slave, childPID: childPID)
         }
@@ -110,38 +128,49 @@
                 ownerEpoch: record.ownerEpoch, screenStateRevision: record.screenStateRevision, appearance: record.appearance)
         }
 
-        // MARK: - Helpers
-
-        /// Awaits `condition`, sleeping between polls so queued main-actor `handleOutput`
-        /// Tasks run. libghostty-vt writes are synchronous, so unlike the macOS core's
-        /// tick-pumped harness no renderer tick is needed here.
-        @MainActor private func waitAsync(
-            timeout: TimeInterval = 15, file: StaticString = #filePath, line: UInt = #line, _ condition: @MainActor () -> Bool
-        ) async throws {
-            let deadline = Date().addingTimeInterval(timeout)
-            while Date() < deadline {
-                if condition() { return }
-                try? await Task.sleep(for: .milliseconds(30))
-            }
-            XCTAssertTrue(condition(), "waitAsync timed out", file: file, line: line)
-        }
-
-        /// Attaches a remote-viewer owner so the core includes screen state in exported
-        /// payloads (the state policy gates screen frames on an attached local/remote
-        /// owner). Returns the attached client.
-        @MainActor @discardableResult private func attachRemoteOwner(to core: GhosttyEmbeddedSessionCore, id: String) throws -> TerminalClient {
-            let client = TerminalClient(
+        private static func remoteOwnerClient(id: String) -> TerminalClient {
+            TerminalClient(
                 id: id, kind: .remoteViewer, identity: TerminalClientIdentity(label: "iPhone", deviceName: "iPhone"),
                 connectedAt: "2026-07-12T00:00:00Z")
+        }
+
+        // MARK: - Engine-isolated helpers (call from inside a run/runSynchronously bridge)
+
+        /// Attaches a remote-viewer owner so the core includes screen state in exported
+        /// payloads (the state policy gates screen frames on an attached local/remote owner).
+        @TerminalEngineActor private static func attachRemoteOwner(to core: GhosttyEmbeddedSessionCore, client: TerminalClient) {
             let response = core.handleControlRequest(TerminalControlRequest(command: "attach", client: client, attachmentMode: .owner))
-            XCTAssertTrue(response.ok, "attaching a remote owner must succeed: \(response.message)")
-            return client
+            #expect(response.ok, "attaching a remote owner must succeed: \(response.message)")
+        }
+
+        /// Drives the trusted (client-less) resize command so the recorded grid is a known
+        /// non-default size the resume path must restore before replay.
+        @TerminalEngineActor private static func resize(_ core: GhosttyEmbeddedSessionCore, columns: Int, rows: Int) {
+            let response = core.handleControlRequest(TerminalControlRequest(command: "resize", columns: columns, rows: rows))
+            #expect(response.ok, "resize must succeed: \(response.message)")
         }
 
         /// Reconstructs the visible screen text from a self-contained full-frame export.
-        @MainActor private func renderedScreenText(of core: GhosttyEmbeddedSessionCore) -> String? {
+        @TerminalEngineActor private static func renderedScreenText(of core: GhosttyEmbeddedSessionCore) -> String? {
             guard let snapshot = core.currentRemoteStatePayload(reason: TerminalRemoteSessionStateReason.initial)?.renderSnapshot else { return nil }
-            return Self.screenText(of: snapshot)
+            return screenText(of: snapshot)
+        }
+
+        // MARK: - Nonisolated helpers
+
+        /// Nonisolated poller so its `Task.sleep` suspensions don't hold the engine's queue while the
+        /// engine runs the queued `handleOutput` tasks the condition is waiting on. Each poll hops onto
+        /// the engine synchronously to evaluate the (engine-isolated) condition. libghostty-vt writes are
+        /// synchronous, so unlike the macOS harness no renderer tick is needed here.
+        private func waitAsync(
+            timeout: TimeInterval = 30, sourceLocation: SourceLocation = #_sourceLocation, _ condition: @escaping @TerminalEngineActor () -> Bool
+        ) async throws {
+            let deadline = Date().addingTimeInterval(timeout)
+            while Date() < deadline {
+                if TerminalEngineActor.runSynchronously({ condition() }) { return }
+                try? await Task.sleep(for: .milliseconds(30))
+            }
+            #expect(TerminalEngineActor.runSynchronously { condition() }, "waitAsync timed out", sourceLocation: sourceLocation)
         }
 
         private static func screenText(of snapshot: GhosttyTerminalSnapshot) -> String {
@@ -176,7 +205,9 @@
             }.filter { !$0.isEmpty }
         }
 
-        func testTranscriptReplayUsesBoundedChunksWithoutLosingBytes() throws {
+        // MARK: - Replay unit coverage (nonisolated statics)
+
+        @Test func transcriptReplayUsesBoundedChunksWithoutLosingBytes() throws {
             let path = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
             defer { try? FileManager.default.removeItem(atPath: path) }
             var expected = Data(repeating: 0xA5, count: GhosttyEmbeddedSessionCore.outputReplayChunkByteCount * 2)
@@ -190,13 +221,13 @@
                 replayed.append(chunk)
             }
 
-            XCTAssertTrue(replayedOutput)
-            XCTAssertGreaterThan(chunkSizes.count, 2)
-            XCTAssertLessThanOrEqual(chunkSizes.max() ?? 0, GhosttyEmbeddedSessionCore.outputReplayChunkByteCount)
-            XCTAssertEqual(replayed, expected)
+            #expect(replayedOutput)
+            #expect(chunkSizes.count > 2)
+            #expect((chunkSizes.max() ?? 0) <= GhosttyEmbeddedSessionCore.outputReplayChunkByteCount)
+            #expect(replayed == expected)
         }
 
-        func testTranscriptReplayCanStreamOnlyTheHandoffSuffix() throws {
+        @Test func transcriptReplayCanStreamOnlyTheHandoffSuffix() throws {
             let path = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
             defer { try? FileManager.default.removeItem(atPath: path) }
             let prefix = Data("already-rendered\n".utf8)
@@ -210,12 +241,12 @@
                 replayed.append(chunk)
             }
 
-            XCTAssertTrue(replayedOutput)
-            XCTAssertEqual(replayed, suffix)
-            XCTAssertLessThanOrEqual(chunkSizes.max() ?? 0, GhosttyEmbeddedSessionCore.outputReplayChunkByteCount)
+            #expect(replayedOutput)
+            #expect(replayed == suffix)
+            #expect((chunkSizes.max() ?? 0) <= GhosttyEmbeddedSessionCore.outputReplayChunkByteCount)
         }
 
-        func testOutputDeliveryFenceWaitsForScheduledPersistence() {
+        @Test func outputDeliveryFenceWaitsForScheduledPersistence() {
             let fence = GhosttyLinuxHandoffOutputDeliveryFence()
             fence.beginDelivery()
 
@@ -224,96 +255,111 @@
                 await fence.waitUntilDrained()
                 completed.signal()
             }
-            XCTAssertEqual(completed.wait(timeout: .now() + .milliseconds(50)), .timedOut)
+            #expect(completed.wait(timeout: .now() + .milliseconds(50)) == .timedOut)
 
             fence.finishDelivery()
-            XCTAssertEqual(completed.wait(timeout: .now() + .seconds(1)), .success)
-        }
-
-        /// Drives the trusted (client-less) resize command so the recorded grid is a known
-        /// non-default size the resume path must restore before replay.
-        @MainActor private func resize(_ core: GhosttyEmbeddedSessionCore, columns: Int, rows: Int) {
-            let response = core.handleControlRequest(TerminalControlRequest(command: "resize", columns: columns, rows: rows))
-            XCTAssertTrue(response.ok, "resize must succeed: \(response.message)")
+            #expect(completed.wait(timeout: .now() + .seconds(1)) == .success)
         }
 
         // MARK: - 1. Replay fidelity + live continuity
 
-        @MainActor func testResumeReplaysTranscriptAndKeepsPTYLive() async throws {
+        @Test func resumeReplaysTranscriptAndKeepsPTYLive() async throws {
             let paths = try makeTemporaryPaths()
             defer { try? FileManager.default.removeItem(atPath: paths.rootDirectory) }
 
             let marker = "HANDOFF_MARKER_ALPHA"
             let configuration = makeConfiguration(
                 sessionID: "handoff-replay-\(UUID().uuidString)", command: "stty -echo; printf '%s\\n' '\(marker)'; cat")
-            let sourceCore = GhosttyEmbeddedSessionCore(launchConfiguration: configuration, paths: paths)
-            try sourceCore.startIfNeeded()
-            resize(sourceCore, columns: 100, rows: 30)
+            let sourceCoreBox = try await TerminalEngineActor.run { () -> Box<GhosttyEmbeddedSessionCore> in
+                let sourceCore = GhosttyEmbeddedSessionCore(launchConfiguration: configuration, paths: paths)
+                try sourceCore.startIfNeeded()
+                Self.resize(sourceCore, columns: 100, rows: 30)
+                return Box(sourceCore)
+            }
+            let sourceCore = sourceCoreBox.value
             try await waitAsync { (try? String(contentsOfFile: paths.outputPath))?.contains(marker) == true }
 
             guard let record = try await sourceCore.quiesceForHandoff() else {
-                return XCTFail("quiesce produced no handoff record for a live session")
+                Issue.record("quiesce produced no handoff record for a live session")
+                return
             }
-            XCTAssertEqual(record.columns, 100)
-            XCTAssertEqual(record.rows, 30)
-            XCTAssertEqual(
-                occurrences(of: marker, in: try String(contentsOfFile: paths.outputPath)), 1, "transcript must hold the marker exactly once")
-            sourceCore.terminate()
+            #expect(record.columns == 100)
+            #expect(record.rows == 30)
+            #expect(
+                occurrences(of: marker, in: try String(contentsOfFile: paths.outputPath)) == 1, "transcript must hold the marker exactly once")
+            TerminalEngineActor.runSynchronously { sourceCore.terminate() }
 
             let pty = try makeAdoptablePTY()
-            let resumedCore = GhosttyEmbeddedSessionCore(launchConfiguration: configuration, paths: paths)
+            let resumedCoreBox = try await TerminalEngineActor.run { () -> Box<GhosttyEmbeddedSessionCore> in
+                Box(GhosttyEmbeddedSessionCore(launchConfiguration: configuration, paths: paths))
+            }
+            let resumedCore = resumedCoreBox.value
             defer {
                 // Close the slave FIRST so the adopted master's blocked read hits EOF, then
                 // terminate: closing a PTY master out from under a still-blocked read hangs.
                 tearDown(pty)
-                resumedCore.terminate()
+                TerminalEngineActor.runSynchronously { resumedCore.terminate() }
             }
             try await resumedCore.resumeFromHandoff(handoffRecord(from: record, adopting: pty))
 
             // Scrollback/screen rebuilt from the replayed output.log.
-            try attachRemoteOwner(to: resumedCore, id: "remote-owner")
-            try await waitAsync { self.renderedScreenText(of: resumedCore)?.contains(marker) == true }
+            let owner = Self.remoteOwnerClient(id: "remote-owner")
+            try await TerminalEngineActor.run { Self.attachRemoteOwner(to: resumedCore, client: owner) }
+            try await waitAsync { Self.renderedScreenText(of: resumedCore)?.contains(marker) == true }
 
             // PTY I/O is live through the adopted fd: bytes injected on the slave land in
             // output.log on the resumed core exactly once.
             let secondMarker = "HANDOFF_MARKER_BETA"
-            XCTAssertGreaterThan(write(pty.slave, "\(secondMarker)\n", secondMarker.utf8.count + 1), 0)
+            #expect(write(pty.slave, "\(secondMarker)\n", secondMarker.utf8.count + 1) > 0)
             try await waitAsync { (try? String(contentsOfFile: paths.outputPath))?.contains(secondMarker) == true }
 
             let transcript = try String(contentsOfFile: paths.outputPath)
-            XCTAssertEqual(occurrences(of: marker, in: transcript), 1, "replay must not re-append the original transcript to output.log")
-            XCTAssertEqual(occurrences(of: secondMarker, in: transcript), 1, "post-handoff output must land in output.log exactly once")
+            #expect(occurrences(of: marker, in: transcript) == 1, "replay must not re-append the original transcript to output.log")
+            #expect(occurrences(of: secondMarker, in: transcript) == 1, "post-handoff output must land in output.log exactly once")
         }
 
-        @MainActor func testResumeDoesNotRestoreClearedScreenOrScrollback() async throws {
+        @Test func resumeDoesNotRestoreClearedScreenOrScrollback() async throws {
             let paths = try makeTemporaryPaths()
             defer { try? FileManager.default.removeItem(atPath: paths.rootDirectory) }
 
             let clearedMarker = "HANDOFF_CLEARED_MARKER"
             let configuration = makeConfiguration(
                 sessionID: "handoff-cleared-\(UUID().uuidString)", command: "stty -echo; printf '%s\\n' '\(clearedMarker)'; cat")
-            let sourceCore = GhosttyEmbeddedSessionCore(launchConfiguration: configuration, paths: paths)
-            try sourceCore.startIfNeeded()
+            let sourceCoreBox = try await TerminalEngineActor.run { () -> Box<GhosttyEmbeddedSessionCore> in
+                let sourceCore = GhosttyEmbeddedSessionCore(launchConfiguration: configuration, paths: paths)
+                try sourceCore.startIfNeeded()
+                return Box(sourceCore)
+            }
+            let sourceCore = sourceCoreBox.value
             try await waitAsync { (try? String(contentsOfFile: paths.outputPath))?.contains(clearedMarker) == true }
-            let clearResponse = sourceCore.handleControlRequest(TerminalControlRequest(command: "clearScreen"))
-            XCTAssertTrue(clearResponse.ok, "clear must succeed: \(clearResponse.message)")
+            let clearResponse = TerminalEngineActor.runSynchronously {
+                sourceCore.handleControlRequest(TerminalControlRequest(command: "clearScreen"))
+            }
+            #expect(clearResponse.ok, "clear must succeed: \(clearResponse.message)")
 
-            guard let record = try await sourceCore.quiesceForHandoff() else { return XCTFail("quiesce produced no handoff record") }
-            sourceCore.terminate()
+            guard let record = try await sourceCore.quiesceForHandoff() else {
+                Issue.record("quiesce produced no handoff record")
+                return
+            }
+            TerminalEngineActor.runSynchronously { sourceCore.terminate() }
 
             let pty = try makeAdoptablePTY()
-            let resumedCore = GhosttyEmbeddedSessionCore(launchConfiguration: configuration, paths: paths)
+            let resumedCoreBox = try await TerminalEngineActor.run { () -> Box<GhosttyEmbeddedSessionCore> in
+                Box(GhosttyEmbeddedSessionCore(launchConfiguration: configuration, paths: paths))
+            }
+            let resumedCore = resumedCoreBox.value
             defer {
                 tearDown(pty)
-                resumedCore.terminate()
+                TerminalEngineActor.runSynchronously { resumedCore.terminate() }
             }
             try await resumedCore.resumeFromHandoff(handoffRecord(from: record, adopting: pty))
-            try attachRemoteOwner(to: resumedCore, id: "remote-owner")
-            let screen = try XCTUnwrap(renderedScreenText(of: resumedCore))
-            XCTAssertFalse(screen.contains(clearedMarker), "handoff replay must preserve the cleared screen and scrollback")
+            let owner = Self.remoteOwnerClient(id: "remote-owner")
+            try await TerminalEngineActor.run { Self.attachRemoteOwner(to: resumedCore, client: owner) }
+            let screen = try #require(TerminalEngineActor.runSynchronously { Self.renderedScreenText(of: resumedCore) })
+            #expect(!screen.contains(clearedMarker), "handoff replay must preserve the cleared screen and scrollback")
         }
 
-        @MainActor func testResumePreservesVTParserStateAcrossReplayChunkBoundary() async throws {
+        @Test func resumePreservesVTParserStateAcrossReplayChunkBoundary() async throws {
             let paths = try makeTemporaryPaths()
             defer { try? FileManager.default.removeItem(atPath: paths.rootDirectory) }
 
@@ -327,25 +373,29 @@
 
             let configuration = makeConfiguration(sessionID: "handoff-chunk-boundary-\(UUID().uuidString)", command: "cat")
             let pty = try makeAdoptablePTY()
-            let resumedCore = GhosttyEmbeddedSessionCore(launchConfiguration: configuration, paths: paths)
+            let resumedCoreBox = try await TerminalEngineActor.run { () -> Box<GhosttyEmbeddedSessionCore> in
+                Box(GhosttyEmbeddedSessionCore(launchConfiguration: configuration, paths: paths))
+            }
+            let resumedCore = resumedCoreBox.value
             defer {
                 tearDown(pty)
-                resumedCore.terminate()
+                TerminalEngineActor.runSynchronously { resumedCore.terminate() }
             }
             let record = DaemonHandoffSessionRecord(
                 sessionID: configuration.sessionID, masterFD: pty.master, childPID: pty.childPID, columns: 80, rows: 24, ownerEpoch: 0,
                 screenStateRevision: 0, appearance: ThemeAppearance.dark.rawValue)
 
             try await resumedCore.resumeFromHandoff(record)
-            try attachRemoteOwner(to: resumedCore, id: "remote-owner")
-            let screen = try XCTUnwrap(renderedScreenText(of: resumedCore))
-            XCTAssertTrue(screen.contains(liveMarker), "output after the split escape sequence must render")
-            XCTAssertFalse(screen.contains(staleMarker), "the clear-screen sequence split across chunks must retain parser state")
+            let owner = Self.remoteOwnerClient(id: "remote-owner")
+            try await TerminalEngineActor.run { Self.attachRemoteOwner(to: resumedCore, client: owner) }
+            let screen = try #require(TerminalEngineActor.runSynchronously { Self.renderedScreenText(of: resumedCore) })
+            #expect(screen.contains(liveMarker), "output after the split escape sequence must render")
+            #expect(!screen.contains(staleMarker), "the clear-screen sequence split across chunks must retain parser state")
         }
 
         // MARK: - 2. Reflow invariant (persisted grid before new output)
 
-        @MainActor func testResumeRestoresPersistedGridBeforeNewOutput() async throws {
+        @Test func resumeRestoresPersistedGridBeforeNewOutput() async throws {
             let paths = try makeTemporaryPaths()
             defer { try? FileManager.default.removeItem(atPath: paths.rootDirectory) }
 
@@ -353,138 +403,186 @@
             let wideLine = String(repeating: "A", count: 150) + "DONE"
             let configuration = makeConfiguration(
                 sessionID: "handoff-reflow-\(UUID().uuidString)", command: "stty -echo; printf '%s\\n' '\(wideLine)'; cat")
-            let sourceCore = GhosttyEmbeddedSessionCore(launchConfiguration: configuration, paths: paths)
+            let owner = Self.remoteOwnerClient(id: "remote-owner")
+            let sourceCoreBox = try await TerminalEngineActor.run { () -> Box<GhosttyEmbeddedSessionCore> in
+                let sourceCore = GhosttyEmbeddedSessionCore(launchConfiguration: configuration, paths: paths)
+                try sourceCore.startIfNeeded()
+                Self.resize(sourceCore, columns: 100, rows: 30)
+                Self.attachRemoteOwner(to: sourceCore, client: owner)
+                return Box(sourceCore)
+            }
+            let sourceCore = sourceCoreBox.value
             // Keep the source alive so its owner attachment persists into the resumed core:
             // terminate() detaches clients, and the render-state export needs an owner.
-            defer { sourceCore.terminate() }
-            try sourceCore.startIfNeeded()
-            resize(sourceCore, columns: 100, rows: 30)
-            try attachRemoteOwner(to: sourceCore, id: "remote-owner")
-            try await waitAsync { self.renderedScreenText(of: sourceCore)?.contains("DONE") == true }
-            let preHandoffLines = nonEmptyTrimmedLines(renderedScreenText(of: sourceCore))
-            XCTAssertGreaterThanOrEqual(preHandoffLines.count, 2, "a 154-column line must wrap at grid width 100")
+            defer { TerminalEngineActor.runSynchronously { sourceCore.terminate() } }
+            try await waitAsync { Self.renderedScreenText(of: sourceCore)?.contains("DONE") == true }
+            let preHandoffLines = nonEmptyTrimmedLines(TerminalEngineActor.runSynchronously { Self.renderedScreenText(of: sourceCore) })
+            #expect(preHandoffLines.count >= 2, "a 154-column line must wrap at grid width 100")
 
-            guard let record = try await sourceCore.quiesceForHandoff() else { return XCTFail("quiesce produced no handoff record") }
+            guard let record = try await sourceCore.quiesceForHandoff() else {
+                Issue.record("quiesce produced no handoff record")
+                return
+            }
 
             let pty = try makeAdoptablePTY()
-            let resumedCore = GhosttyEmbeddedSessionCore(launchConfiguration: configuration, paths: paths)
+            let resumedCoreBox = try await TerminalEngineActor.run { () -> Box<GhosttyEmbeddedSessionCore> in
+                Box(GhosttyEmbeddedSessionCore(launchConfiguration: configuration, paths: paths))
+            }
+            let resumedCore = resumedCoreBox.value
             defer {
                 // Close the slave FIRST so the adopted master's blocked read hits EOF, then
                 // terminate: closing a PTY master out from under a still-blocked read hangs.
                 tearDown(pty)
-                resumedCore.terminate()
+                TerminalEngineActor.runSynchronously { resumedCore.terminate() }
             }
             try await resumedCore.resumeFromHandoff(handoffRecord(from: record, adopting: pty))
 
             // The grid is the persisted size BEFORE any new output arrives (the liveness
             // child is a silent sleep).
-            let snapshot = try XCTUnwrap(resumedCore.currentRemoteStatePayload(reason: TerminalRemoteSessionStateReason.initial)?.renderSnapshot)
-            XCTAssertEqual(snapshot.columns, 100)
-            XCTAssertEqual(snapshot.rows, 30)
+            let snapshot = try #require(
+                TerminalEngineActor.runSynchronously {
+                    resumedCore.currentRemoteStatePayload(reason: TerminalRemoteSessionStateReason.initial)?.renderSnapshot
+                })
+            #expect(snapshot.columns == 100)
+            #expect(snapshot.rows == 30)
 
-            let postHandoffLines = nonEmptyTrimmedLines(renderedScreenText(of: resumedCore))
-            XCTAssertEqual(postHandoffLines, preHandoffLines, "the wide line must wrap identically after replay at the persisted width")
+            let postHandoffLines = nonEmptyTrimmedLines(TerminalEngineActor.runSynchronously { Self.renderedScreenText(of: resumedCore) })
+            #expect(postHandoffLines == preHandoffLines, "the wide line must wrap identically after replay at the persisted width")
         }
 
         // MARK: - 3. Epoch + revision carry
 
-        @MainActor func testResumeCarriesOwnerEpochAndAdvancesRevision() async throws {
+        @Test func resumeCarriesOwnerEpochAndAdvancesRevision() async throws {
             let paths = try makeTemporaryPaths()
             defer { try? FileManager.default.removeItem(atPath: paths.rootDirectory) }
 
             let marker = "EPOCH_MARKER"
             let configuration = makeConfiguration(
                 sessionID: "handoff-epoch-\(UUID().uuidString)", command: "stty -echo; printf '%s\\n' '\(marker)'; cat")
-            let sourceCore = GhosttyEmbeddedSessionCore(launchConfiguration: configuration, paths: paths)
-            try sourceCore.startIfNeeded()
-            let owner = try attachRemoteOwner(to: sourceCore, id: "remote-owner")
-            XCTAssertGreaterThan(sourceCore.debugOwnerEpoch, 0, "attaching an owner must advance the owner epoch")
-            try await waitAsync { self.renderedScreenText(of: sourceCore)?.contains(marker) == true }
+            let owner = Self.remoteOwnerClient(id: "remote-owner")
+            let sourceCoreBox = try await TerminalEngineActor.run { () -> Box<GhosttyEmbeddedSessionCore> in
+                let sourceCore = GhosttyEmbeddedSessionCore(launchConfiguration: configuration, paths: paths)
+                try sourceCore.startIfNeeded()
+                Self.attachRemoteOwner(to: sourceCore, client: owner)
+                #expect(sourceCore.debugOwnerEpoch > 0, "attaching an owner must advance the owner epoch")
+                return Box(sourceCore)
+            }
+            let sourceCore = sourceCoreBox.value
+            try await waitAsync { Self.renderedScreenText(of: sourceCore)?.contains(marker) == true }
 
-            guard let record = try await sourceCore.quiesceForHandoff() else { return XCTFail("quiesce produced no handoff record") }
-            XCTAssertEqual(record.ownerEpoch, sourceCore.debugOwnerEpoch, "the record must carry the live owner epoch")
+            guard let record = try await sourceCore.quiesceForHandoff() else {
+                Issue.record("quiesce produced no handoff record")
+                return
+            }
+            #expect(
+                record.ownerEpoch == TerminalEngineActor.runSynchronously { sourceCore.debugOwnerEpoch },
+                "the record must carry the live owner epoch")
             let recordedEpoch = record.ownerEpoch
-            // Do NOT terminate the source core: terminate() detaches active clients, and this
-            // test relies on the owner attachment persisting across the handoff (quiesce
+            // Do NOT terminate the source core here: terminate() detaches active clients, and
+            // this test relies on the owner attachment persisting across the handoff (quiesce
             // never detaches). The quiesced source core is cleaned up when it deinits.
-            defer { sourceCore.terminate() }
+            defer { TerminalEngineActor.runSynchronously { sourceCore.terminate() } }
 
             let pty = try makeAdoptablePTY()
-            let resumedCore = GhosttyEmbeddedSessionCore(launchConfiguration: configuration, paths: paths)
+            let resumedCoreBox = try await TerminalEngineActor.run { () -> Box<GhosttyEmbeddedSessionCore> in
+                Box(GhosttyEmbeddedSessionCore(launchConfiguration: configuration, paths: paths))
+            }
+            let resumedCore = resumedCoreBox.value
             defer {
                 // Close the slave FIRST so the adopted master's blocked read hits EOF, then
                 // terminate: closing a PTY master out from under a still-blocked read hangs.
                 tearDown(pty)
-                resumedCore.terminate()
+                TerminalEngineActor.runSynchronously { resumedCore.terminate() }
             }
             try await resumedCore.resumeFromHandoff(handoffRecord(from: record, adopting: pty))
 
             // The resumed core enforces the carried epoch: a stale epoch is rejected, the
             // current one is accepted (the owner attachment persisted across the handoff).
-            let staleResponse = resumedCore.handleControlRequest(
-                TerminalControlRequest(command: "send", text: "x\n", clientID: owner.id, ownerEpoch: recordedEpoch - 1))
-            XCTAssertFalse(staleResponse.ok, "a stale owner epoch must be rejected")
-            XCTAssertEqual(staleResponse.errorCode, .ownershipRejected)
-            let currentResponse = resumedCore.handleControlRequest(
-                TerminalControlRequest(command: "send", text: "x\n", clientID: owner.id, ownerEpoch: recordedEpoch))
-            XCTAssertTrue(currentResponse.ok, "the current owner epoch must be accepted: \(currentResponse.message)")
+            await TerminalEngineActor.run {
+                let staleResponse = resumedCore.handleControlRequest(
+                    TerminalControlRequest(command: "send", text: "x\n", clientID: owner.id, ownerEpoch: recordedEpoch - 1))
+                #expect(!staleResponse.ok, "a stale owner epoch must be rejected")
+                #expect(staleResponse.errorCode == .ownershipRejected)
+                let currentResponse = resumedCore.handleControlRequest(
+                    TerminalControlRequest(command: "send", text: "x\n", clientID: owner.id, ownerEpoch: recordedEpoch))
+                #expect(currentResponse.ok, "the current owner epoch must be accepted: \(currentResponse.message)")
+            }
 
             // The first post-resume payload advances past the recorded revision and is a
             // self-contained full render update (the replayed marker must be on screen for
             // a render frame to be produced).
-            try await waitAsync { self.renderedScreenText(of: resumedCore)?.contains(marker) == true }
-            let payload = try XCTUnwrap(resumedCore.currentRemoteStatePayload(reason: TerminalRemoteSessionStateReason.initial))
-            let resumedRevision = try XCTUnwrap(payload.screenStateRevision)
-            XCTAssertGreaterThan(resumedRevision, record.screenStateRevision, "the resumed revision must be strictly greater than the recorded one")
-            let update = try XCTUnwrap(payload.decodedRenderUpdate)
-            XCTAssertEqual(update.kind, .full, "the first post-resume frame must be a full render update")
+            try await waitAsync { Self.renderedScreenText(of: resumedCore)?.contains(marker) == true }
+            try await TerminalEngineActor.run {
+                let payload = try #require(resumedCore.currentRemoteStatePayload(reason: TerminalRemoteSessionStateReason.initial))
+                let resumedRevision = try #require(payload.screenStateRevision)
+                #expect(
+                    resumedRevision > record.screenStateRevision, "the resumed revision must be strictly greater than the recorded one")
+                let update = try #require(payload.decodedRenderUpdate)
+                #expect(update.kind == .full, "the first post-resume frame must be a full render update")
+            }
         }
 
         // MARK: - 4. Dead child yields no record
 
-        @MainActor func testQuiesceReturnsNilWhenChildAlreadyExited() async throws {
+        @Test func quiesceReturnsNilWhenChildAlreadyExited() async throws {
             let paths = try makeTemporaryPaths()
             defer { try? FileManager.default.removeItem(atPath: paths.rootDirectory) }
 
             let configuration = makeConfiguration(sessionID: "handoff-dead-\(UUID().uuidString)", command: "true")
-            let core = GhosttyEmbeddedSessionCore(launchConfiguration: configuration, paths: paths)
-            defer { core.terminate() }
-            try core.startIfNeeded()
+            let coreBox = try await TerminalEngineActor.run { () -> Box<GhosttyEmbeddedSessionCore> in
+                let core = GhosttyEmbeddedSessionCore(launchConfiguration: configuration, paths: paths)
+                try core.startIfNeeded()
+                return Box(core)
+            }
+            let core = coreBox.value
+            defer { TerminalEngineActor.runSynchronously { core.terminate() } }
 
             // Wait for the short-lived child to exit and drive the session-closed path
             // (which flips the session out of its started state).
             try await waitAsync { !core.isStarted }
 
             let record = try await core.quiesceForHandoff()
-            XCTAssertNil(record, "a session whose child already exited must not produce a handoff record")
+            #expect(record == nil, "a session whose child already exited must not produce a handoff record")
         }
 
         // MARK: - 5. Failed-exec rebind
 
-        @MainActor func testResumeInPlaceAfterFailedExecRestoresOutputAndSockets() async throws {
+        @Test func resumeInPlaceAfterFailedExecRestoresOutputAndSockets() async throws {
             let paths = try makeTemporaryPaths()
             defer { try? FileManager.default.removeItem(atPath: paths.rootDirectory) }
 
             let marker = "REBIND_MARKER"
             let configuration = makeConfiguration(
                 sessionID: "handoff-rebind-\(UUID().uuidString)", command: "stty -echo; printf '%s\\n' '\(marker)'; cat")
-            let core = GhosttyEmbeddedSessionCore(launchConfiguration: configuration, paths: paths)
-            defer { core.terminate() }
-            try core.startIfNeeded()
-            try attachRemoteOwner(to: core, id: "remote-owner")
+            let owner = Self.remoteOwnerClient(id: "remote-owner")
+            let coreBox = try await TerminalEngineActor.run { () -> Box<GhosttyEmbeddedSessionCore> in
+                let core = GhosttyEmbeddedSessionCore(launchConfiguration: configuration, paths: paths)
+                try core.startIfNeeded()
+                Self.attachRemoteOwner(to: core, client: owner)
+                return Box(core)
+            }
+            let core = coreBox.value
+            defer { TerminalEngineActor.runSynchronously { core.terminate() } }
             try await waitAsync { (try? String(contentsOfFile: paths.outputPath))?.contains(marker) == true }
 
             // Quiesce as if about to exec, then take the failed-exec fallback on the SAME core.
-            guard let record = try await core.quiesceForHandoff() else { return XCTFail("quiesce produced no handoff record") }
-            XCTAssertGreaterThan(record.childPID, 0)
+            guard let record = try await core.quiesceForHandoff() else {
+                Issue.record("quiesce produced no handoff record")
+                return
+            }
+            #expect(record.childPID > 0)
             let duringHandoffMarker = "DURING_FAILED_HANDOFF"
-            let duringHandoffResponse = core.handleControlRequest(TerminalControlRequest(command: "send", text: "\(duringHandoffMarker)\n"))
-            XCTAssertTrue(duringHandoffResponse.ok, "handoff-window input must reach the live child")
+            let duringHandoffResponse = TerminalEngineActor.runSynchronously {
+                core.handleControlRequest(TerminalControlRequest(command: "send", text: "\(duringHandoffMarker)\n"))
+            }
+            #expect(duringHandoffResponse.ok, "handoff-window input must reach the live child")
             try await waitAsync { (try? String(contentsOfFile: paths.outputPath))?.contains(duringHandoffMarker) == true }
-            XCTAssertFalse(self.renderedScreenText(of: core)?.contains(duringHandoffMarker) == true, "quiesced output must bypass the renderer")
+            #expect(
+                TerminalEngineActor.runSynchronously { Self.renderedScreenText(of: core) }?.contains(duringHandoffMarker) != true,
+                "quiesced output must bypass the renderer")
 
             await core.resumeInPlaceAfterFailedExec()
-            try await waitAsync { self.renderedScreenText(of: core)?.contains(duringHandoffMarker) == true }
+            try await waitAsync { Self.renderedScreenText(of: core)?.contains(duringHandoffMarker) == true }
 
             // The state-stream socket answers again: a fresh subscriber gets an initial payload.
             let received = InitialPayloadCollector()
@@ -496,14 +594,16 @@
             // Output flows again through the rebound (never rebuilt) session and lands in
             // output.log: `cat` echoes the sent line back through the still-live child.
             let afterMarker = "AFTER_REBIND"
-            let sendResponse = core.handleControlRequest(TerminalControlRequest(command: "send", text: "\(afterMarker)\n"))
-            XCTAssertTrue(sendResponse.ok, "post-rebind send must succeed: \(sendResponse.message)")
+            let sendResponse = TerminalEngineActor.runSynchronously {
+                core.handleControlRequest(TerminalControlRequest(command: "send", text: "\(afterMarker)\n"))
+            }
+            #expect(sendResponse.ok, "post-rebind send must succeed: \(sendResponse.message)")
             try await waitAsync { (try? String(contentsOfFile: paths.outputPath))?.contains(afterMarker) == true }
 
             let transcript = try String(contentsOfFile: paths.outputPath)
-            XCTAssertEqual(occurrences(of: marker, in: transcript), 1)
-            XCTAssertEqual(occurrences(of: duringHandoffMarker, in: transcript), 1)
-            XCTAssertEqual(occurrences(of: afterMarker, in: transcript), 1)
+            #expect(occurrences(of: marker, in: transcript) == 1)
+            #expect(occurrences(of: duringHandoffMarker, in: transcript) == 1)
+            #expect(occurrences(of: afterMarker, in: transcript) == 1)
         }
 
         // MARK: - 6. Exit identity consistency
@@ -513,27 +613,34 @@
         /// payload and the transcript endpoint reports the identity from the persisted runtime state,
         /// so a mismatch makes the client reject the ended run's transcript (scrollback unavailable).
         /// `runIdentity` embeds a sub-second exit timestamp, so stamping the exit twice would diverge.
-        @MainActor func testTerminateStampsSingleExitIdentityForRuntimeStateAndFinalPayload() async throws {
+        @Test func terminateStampsSingleExitIdentityForRuntimeStateAndFinalPayload() async throws {
             let paths = try makeTemporaryPaths()
             defer { try? FileManager.default.removeItem(atPath: paths.rootDirectory) }
 
             let marker = "EXIT_IDENTITY_MARKER"
             let configuration = makeConfiguration(
                 sessionID: "exit-identity-\(UUID().uuidString)", command: "stty -echo; printf '%s\\n' '\(marker)'; cat")
-            let core = GhosttyEmbeddedSessionCore(launchConfiguration: configuration, paths: paths)
-            try core.startIfNeeded()
+            let coreBox = try await TerminalEngineActor.run { () -> Box<GhosttyEmbeddedSessionCore> in
+                let core = GhosttyEmbeddedSessionCore(launchConfiguration: configuration, paths: paths)
+                try core.startIfNeeded()
+                return Box(core)
+            }
+            let core = coreBox.value
             try await waitAsync { (try? String(contentsOfFile: paths.outputPath))?.contains(marker) == true }
 
-            core.terminate()
+            TerminalEngineActor.runSynchronously { core.terminate() }
+            // terminate() enqueues its exited-state write off the engine; block on the persistence
+            // queue before reading the durable mirror or this read races the async commit.
+            await core.drainPersistenceForShutdown()
 
             let persistedRuntimeState = try TerminalSessionPersistence.readRuntimeState(paths: paths)
             let finalPayload = try TerminalSessionPersistence.readRemoteSessionState(paths: paths)
-            let payloadRuntimeState = try XCTUnwrap(finalPayload.runtimeState, "the terminated payload must embed a runtime state")
+            let payloadRuntimeState = try #require(finalPayload.runtimeState, "the terminated payload must embed a runtime state")
 
-            XCTAssertEqual(persistedRuntimeState.state, .exited, "the persisted runtime state must be exited")
-            XCTAssertEqual(payloadRuntimeState.state, .exited, "the final payload's runtime state must be exited")
-            XCTAssertEqual(
-                persistedRuntimeState.runIdentity, payloadRuntimeState.runIdentity,
+            #expect(persistedRuntimeState.state == .exited, "the persisted runtime state must be exited")
+            #expect(payloadRuntimeState.state == .exited, "the final payload's runtime state must be exited")
+            #expect(
+                persistedRuntimeState.runIdentity == payloadRuntimeState.runIdentity,
                 "the persisted runtime state and the final payload must share one exit identity so the client accepts the ended run's transcript")
         }
     }

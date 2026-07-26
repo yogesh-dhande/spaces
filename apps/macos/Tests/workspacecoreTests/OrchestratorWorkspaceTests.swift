@@ -12,7 +12,7 @@ extension OrchestratorTests {
         let reposRoot = root.appendingPathComponent("repos", isDirectory: true)
         let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store, projectsRootDirectory: reposRoot, workspacesRootDirectory: workspacesRoot)
+        let orchestrator = makeTestOrchestrator(store: store, projectsRootDirectory: reposRoot, workspacesRootDirectory: workspacesRoot)
         let managedDirname = managedProjectStorageDirname(
             namespace: "git", source: "12345678-1234-1234-1234-123456789ABC", preferredName: "sample-repo")
 
@@ -46,7 +46,7 @@ extension OrchestratorTests {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
 
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id)
@@ -82,7 +82,7 @@ extension OrchestratorTests {
                 terminalTrackingID: "session-shell", role: .terminal, orderIndex: 300, lastSeenAt: "2026-07-01T00:00:03Z"))
         let closed = TerminalCloseCapture()
         let terminated = TerminalTerminateCapture()
-        let orchestrator = WorkspaceOrchestrator(
+        let orchestrator = makeTestOrchestrator(
             store: store, builtInTerminalWindowCloser: { closed.sessionIDs.append($0) },
             builtInTerminalSessionTerminator: { terminated.sessionIDs.append($0) })
 
@@ -102,7 +102,7 @@ extension OrchestratorTests {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
 
         let project = try orchestrator.addProject(dir: projectDir.path)
         XCTAssertThrowsError(try orchestrator.createWorkspace(projectID: project.id, directoryName: "feature_dir")) { error in
@@ -116,7 +116,7 @@ extension OrchestratorTests {
         let root = try makeTempDirectory()
         let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+        let orchestrator = makeTestOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
 
         let project = try orchestrator.addProject(dir: repo.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id, branch: "feature-branch", directoryName: "feature_branch_1")
@@ -131,7 +131,7 @@ extension OrchestratorTests {
         let root = try makeTempDirectory()
         let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+        let orchestrator = makeTestOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
 
         let project = try orchestrator.addProject(dir: repo.path)
         XCTAssertThrowsError(try orchestrator.createWorkspace(projectID: project.id, branch: "feature-branch", directoryName: "feature/branch")) {
@@ -145,7 +145,7 @@ extension OrchestratorTests {
         let root = try makeTempDirectory()
         let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+        let orchestrator = makeTestOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
 
         let project = try orchestrator.addProject(dir: repo.path)
         XCTAssertThrowsError(try orchestrator.createWorkspace(projectID: project.id, branch: "feature-branch", directoryName: "feature branch")) {
@@ -165,7 +165,7 @@ extension OrchestratorTests {
         let root = try makeTempDirectory()
         let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+        let orchestrator = makeTestOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
 
         let project = try orchestrator.addProject(dir: repo.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id, branch: "feature-branch", baseBranch: "develop")
@@ -180,7 +180,7 @@ extension OrchestratorTests {
         let root = try makeTempDirectory()
         let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+        let orchestrator = makeTestOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
 
         let project = try orchestrator.addProject(dir: repo.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id, branch: "feature")
@@ -196,7 +196,7 @@ extension OrchestratorTests {
         let root = try makeTempDirectory()
         let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+        let orchestrator = makeTestOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
 
         let project = try orchestrator.addProject(dir: repo.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id, branch: "feature-archive")
@@ -220,7 +220,7 @@ extension OrchestratorTests {
         let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
         let marker = root.appendingPathComponent("archive-stop-script-marker.txt")
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+        let orchestrator = makeTestOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
 
         let project = try orchestrator.addProject(dir: repo.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id, branch: "feature-missing")
@@ -258,7 +258,7 @@ extension OrchestratorTests {
 
         let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+        let orchestrator = makeTestOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
         let client = GitClient()
 
         let project = try orchestrator.addProject(dir: clone.path)
@@ -280,7 +280,7 @@ extension OrchestratorTests {
         let root = try makeTempDirectory()
         let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+        let orchestrator = makeTestOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
 
         let project = try orchestrator.addProject(dir: repo.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id, branch: "feature")
@@ -307,7 +307,7 @@ extension OrchestratorTests {
         let root = try makeTempDirectory()
         let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
         let store = try makeTemporaryStore()
-        let createOrchestrator = WorkspaceOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+        let createOrchestrator = makeTestOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
         let project = try createOrchestrator.addProject(dir: fixture.clone.path)
         let workspace = try createOrchestrator.createWorkspace(projectID: project.id, branch: "remote-archive", allowExistingBranchReuse: true)
 
@@ -326,7 +326,7 @@ extension OrchestratorTests {
     // Tests create workspace throws for unknown project by arranging representative inputs and asserting the expected result.
     func testCreateWorkspaceThrowsForUnknownProject() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
 
         XCTAssertThrowsError(try orchestrator.createWorkspace(projectID: "missing"))
     }
@@ -337,7 +337,7 @@ extension OrchestratorTests {
         let root = try makeTempDirectory()
         let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+        let orchestrator = makeTestOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
         let project = try orchestrator.addProject(dir: repo.path)
 
         XCTAssertThrowsError(try orchestrator.createWorkspace(projectID: project.id)) { error in
@@ -351,7 +351,7 @@ extension OrchestratorTests {
         let reposRoot = root.appendingPathComponent("repos", isDirectory: true)
         let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store, projectsRootDirectory: reposRoot, workspacesRootDirectory: workspacesRoot)
+        let orchestrator = makeTestOrchestrator(store: store, projectsRootDirectory: reposRoot, workspacesRootDirectory: workspacesRoot)
         let prepared = try orchestrator.prepareGitProject(gitURL: fixture.path)
 
         XCTAssertTrue(FileManager.default.fileExists(atPath: prepared.project.dir))
@@ -374,7 +374,7 @@ extension OrchestratorTests {
     func testCreateWorkspaceFromWorktreeInfersProjectAndBranch() throws {
         let repo = try makeTempGitRepo(name: "test-repo")
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let project = try orchestrator.addProject(dir: repo.path)
         let root = repo.deletingLastPathComponent()
         let worktree = root.appendingPathComponent("feature-branch", isDirectory: true)
@@ -400,7 +400,7 @@ extension OrchestratorTests {
         let client = GitClient()
         try client.createWorktree(path: repo.path, worktreePath: worktree.path, branch: "feature")
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         XCTAssertThrowsError(try orchestrator.createWorkspaceFromWorktree(worktreePath: worktree.path)) { error in
             let nsError = error as NSError
             XCTAssertTrue(nsError.localizedDescription.contains("Project not found"))
@@ -413,7 +413,7 @@ extension OrchestratorTests {
         let repo = try makeTempGitRepo(name: "test-repo")
         let root = repo.deletingLastPathComponent()
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         _ = try orchestrator.addProject(dir: repo.path)
         let worktree = root.appendingPathComponent("feature", isDirectory: true)
         let client = GitClient()
@@ -430,7 +430,7 @@ extension OrchestratorTests {
         let repo = try makeTempGitRepo(name: "test-repo")
         let root = repo.deletingLastPathComponent()
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let project = try orchestrator.addProject(dir: repo.path)
         let client = GitClient()
         let worktree1 = root.appendingPathComponent("feature-1", isDirectory: true)
@@ -451,7 +451,7 @@ extension OrchestratorTests {
         let repo = try makeTempGitRepo(name: "test-repo")
         let root = repo.deletingLastPathComponent()
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let project = try orchestrator.addProject(dir: repo.path)
         let client = GitClient()
         let worktree1 = root.appendingPathComponent("feature-1", isDirectory: true)
@@ -473,7 +473,7 @@ extension OrchestratorTests {
         let root = repo.deletingLastPathComponent()
 
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let project = try orchestrator.addProject(dir: repo.path)
 
         try orchestrator.updateProjectConfig(projectID: project.id) { config in
@@ -499,7 +499,7 @@ extension OrchestratorTests {
         let root = repo.deletingLastPathComponent()
 
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         _ = try orchestrator.addProject(dir: repo.path)
 
         let client = GitClient()
@@ -521,7 +521,7 @@ extension OrchestratorTests {
         let root = repo.deletingLastPathComponent()
 
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let project = try orchestrator.addProject(dir: repo.path)
 
         let client = GitClient()
@@ -540,7 +540,7 @@ extension OrchestratorTests {
         let root = repo.deletingLastPathComponent()
 
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let project = try orchestrator.addProject(dir: repo.path)
 
         let client = GitClient()
@@ -557,13 +557,78 @@ extension OrchestratorTests {
         XCTAssertEqual(archivedWorkspace?.isArchived, true)
     }
 
+    // A daemon-side orchestrator built without an explicit handoff predicate — exactly how
+    // `WorktreeDiscoveryService.scan` constructs one — must honor the process-wide
+    // `daemonHandoffInProgress` override and refuse the removed-worktree archive during an exec-in-place
+    // handoff. This guards the bug where every non-profile daemon orchestrator (discovery scans,
+    // reconcilers, Device API handlers) got the `{ false }` default, letting the scan delete a still-live
+    // session's workspace rows mid-handoff. The negative half asserts the pre-existing archive behavior is
+    // untouched once the override is cleared.
+    func testScanHonorsProcessWideDaemonHandoffOverrideAndRefusesArchive() throws {
+        let repo = try makeTempGitRepo(name: "handoff-scan-repo")
+        let root = repo.deletingLastPathComponent()
+
+        let store = try makeTemporaryStore()
+        // Fixture is built with the override unset, so setup calls behave normally.
+        let setupOrchestrator = makeTestOrchestrator(store: store)
+        let project = try setupOrchestrator.addProject(dir: repo.path)
+
+        let client = GitClient()
+        let removedWorktree = root.appendingPathComponent("feature-removed", isDirectory: true)
+        try client.createWorktree(path: repo.path, worktreePath: removedWorktree.path, branch: "feature-removed")
+        let workspace = try setupOrchestrator.createWorkspaceFromWorktree(worktreePath: removedWorktree.path)
+        try client.removeWorktree(path: repo.path, worktreePath: removedWorktree.path)
+
+        // Rows `stopWorkspaceUnlocked` would delete if it archived the now-invalid workspace.
+        try store.upsert(
+            runningProcess: RunningProcessRecord(
+                id: "handoff-process", workspaceID: workspace.id, templateName: "web", command: "npm run dev",
+                terminalApp: TerminalHost.spaces.appName, terminalTrackingID: "handoff-session", pid: nil, status: .running, logPath: nil,
+                lastOutputAt: nil, startedAt: "2026-07-01T00:00:00Z", exitedAt: nil))
+        try store.upsert(
+            window: WindowRecord(
+                id: "handoff-window", workspaceID: workspace.id, app: TerminalHost.spaces.appName, name: "Shell",
+                terminalTrackingID: "handoff-session", role: .terminal, orderIndex: 100, lastSeenAt: "2026-07-01T00:00:00Z"))
+
+        // Positive: install the process-wide override BEFORE constructing the scan orchestrator — the daemon
+        // installs the hook at startup and builds a fresh orchestrator per scan (WorktreeDiscoveryService.scan),
+        // and the init resolves the predicate at construction. A scan orchestrator built without an explicit
+        // predicate must therefore pick up the override and abort at `stopWorkspaceUnlocked`'s entry guard:
+        // nothing archived, no rows deleted, no session terminated, `daemonHandoffInProgress` surfaced. The
+        // terminator is injected only to keep the negative archive path off the real TerminalService; it does
+        // not affect which handoff predicate the init resolves.
+        WorkspaceOrchestrator.setProcessWideDaemonHandoffInProgress { true }
+        defer { WorkspaceOrchestrator.setProcessWideDaemonHandoffInProgress(nil) }
+        let terminated = TerminalTerminateCapture()
+        let handoffScanOrchestrator = makeTestOrchestrator(store: store, builtInTerminalSessionTerminator: { terminated.sessionIDs.append($0) })
+
+        XCTAssertThrowsError(try handoffScanOrchestrator.scanAndCreateWorkspacesFromWorktrees(projectID: project.id)) { error in
+            guard case WorkspaceError.daemonHandoffInProgress = error else { return XCTFail("Expected daemonHandoffInProgress, got \(error)") }
+        }
+        XCTAssertEqual(try store.workspace(id: workspace.id)?.isArchived, false)
+        XCTAssertEqual(try store.runningProcesses(workspaceID: workspace.id).count, 1)
+        XCTAssertEqual(try store.windows(workspaceID: workspace.id).count, 1)
+        XCTAssertTrue(terminated.sessionIDs.isEmpty)
+
+        // Negative: clear the override, then build a fresh scan orchestrator (again mirroring the per-scan
+        // construction) so it resolves the `{ false }` default. The same scan now archives the workspace and
+        // deletes its rows — the behavior this fix must leave intact when no handoff is active.
+        WorkspaceOrchestrator.setProcessWideDaemonHandoffInProgress(nil)
+        let normalScanOrchestrator = makeTestOrchestrator(store: store, builtInTerminalSessionTerminator: { terminated.sessionIDs.append($0) })
+        let created = try normalScanOrchestrator.scanAndCreateWorkspacesFromWorktrees(projectID: project.id)
+        XCTAssertTrue(created.isEmpty)
+        XCTAssertEqual(try store.workspace(id: workspace.id)?.isArchived, true)
+        XCTAssertTrue(try store.runningProcesses(workspaceID: workspace.id).isEmpty)
+        XCTAssertTrue(try store.windows(workspaceID: workspace.id).isEmpty)
+    }
+
     // Tests scan and create workspaces from worktrees refreshes stored branch names by arranging representative inputs and asserting the expected result.
     func testScanAndCreateWorkspacesFromWorktreesRefreshesBranchNamesFromDisk() throws {
         let repo = try makeTempGitRepo(name: "test-repo")
         let root = repo.deletingLastPathComponent()
 
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let project = try orchestrator.addProject(dir: repo.path)
 
         let client = GitClient()
@@ -584,7 +649,7 @@ extension OrchestratorTests {
         let repo2 = try makeTempGitRepo(name: "repo2")
         let root = repo1.deletingLastPathComponent()
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let project1 = try orchestrator.addProject(dir: repo1.path)
         let project2 = try orchestrator.addProject(dir: repo2.path)
         let client = GitClient()
@@ -606,7 +671,7 @@ extension OrchestratorTests {
         let root = try makeTempDirectory()
         let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+        let orchestrator = makeTestOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
 
         let project = try orchestrator.addProject(dir: repo.path) { config in
             config.processes = [.init(name: "frontend", command: "npm run dev"), .init(name: "backend", command: "npm run api")]
@@ -629,7 +694,7 @@ extension OrchestratorTests {
         let reposRoot = root.appendingPathComponent("repos", isDirectory: true)
         let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store, projectsRootDirectory: reposRoot, workspacesRootDirectory: workspacesRoot)
+        let orchestrator = makeTestOrchestrator(store: store, projectsRootDirectory: reposRoot, workspacesRootDirectory: workspacesRoot)
         let project = try orchestrator.addProject(gitURL: fixture.path)
         let defaultWorkspace = try XCTUnwrap(try orchestrator.listWorkspaces(projectID: project.id).first(where: \.isDefault))
         let workspaceRoot = URL(fileURLWithPath: defaultWorkspace.dir, isDirectory: true).deletingLastPathComponent()
@@ -657,7 +722,7 @@ extension OrchestratorTests {
         let reposRoot = root.appendingPathComponent("repos", isDirectory: true)
         let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store, projectsRootDirectory: reposRoot, workspacesRootDirectory: workspacesRoot)
+        let orchestrator = makeTestOrchestrator(store: store, projectsRootDirectory: reposRoot, workspacesRootDirectory: workspacesRoot)
         let project = try orchestrator.addProject(gitURL: fixture.path)
         let defaultWorkspace = try XCTUnwrap(try orchestrator.listWorkspaces(projectID: project.id).first(where: \.isDefault))
         let workspaceRoot = URL(fileURLWithPath: defaultWorkspace.dir, isDirectory: true).deletingLastPathComponent()
@@ -688,7 +753,7 @@ extension OrchestratorTests {
         let reposRoot = root.appendingPathComponent("repos", isDirectory: true)
         let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store, projectsRootDirectory: reposRoot, workspacesRootDirectory: workspacesRoot)
+        let orchestrator = makeTestOrchestrator(store: store, projectsRootDirectory: reposRoot, workspacesRootDirectory: workspacesRoot)
         let project = try orchestrator.addProject(gitURL: fixture.path)
         let defaultWorkspace = try XCTUnwrap(try orchestrator.listWorkspaces(projectID: project.id).first(where: \.isDefault))
         let workspaceRoot = URL(fileURLWithPath: defaultWorkspace.dir, isDirectory: true).deletingLastPathComponent()
@@ -718,7 +783,7 @@ extension OrchestratorTests {
         let root = try makeTempDirectory()
         let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+        let orchestrator = makeTestOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
 
         let project = try orchestrator.addProject(dir: repo.path)
         let original = try orchestrator.createWorkspace(projectID: project.id, branch: "feature-branch")
@@ -739,7 +804,7 @@ extension OrchestratorTests {
         let root = try makeTempDirectory()
         let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+        let orchestrator = makeTestOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
 
         let project = try orchestrator.addProject(dir: repo.path)
         let original = try orchestrator.createWorkspace(projectID: project.id, branch: "docs-old", directoryName: "docs")
@@ -755,7 +820,7 @@ extension OrchestratorTests {
         let root = try makeTempDirectory()
         let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+        let orchestrator = makeTestOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
 
         let project = try orchestrator.addProject(dir: repo.path)
         let archived = try orchestrator.createWorkspace(projectID: project.id, branch: "docs-old", directoryName: "docs")
@@ -773,7 +838,7 @@ extension OrchestratorTests {
         let root = try makeTempDirectory()
         let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+        let orchestrator = makeTestOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
 
         let project = try orchestrator.addProject(dir: repo.path)
         let archived = try orchestrator.createWorkspace(projectID: project.id, branch: "feature-revive-replace", directoryName: "old-feature-dir")
@@ -804,7 +869,7 @@ extension OrchestratorTests {
         let root = try makeTempDirectory()
         let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+        let orchestrator = makeTestOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
 
         let project = try orchestrator.addProject(dir: repo.path)
         XCTAssertThrowsError(try orchestrator.createWorkspace(projectID: project.id, branch: "existing-branch", allowExistingBranchReuse: false)) {
@@ -819,7 +884,7 @@ extension OrchestratorTests {
         let root = try makeTempDirectory()
         let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+        let orchestrator = makeTestOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
 
         let project = try orchestrator.addProject(dir: repo.path)
         XCTAssertThrowsError(try orchestrator.createWorkspace(projectID: project.id, branch: "missing-branch", allowExistingBranchReuse: true)) {
@@ -879,7 +944,7 @@ extension OrchestratorTests {
     // Tests createWorkspaceFromWorktree throws when the path does not exist by arranging representative inputs and asserting the expected result.
     func testCreateWorkspaceFromWorktreeThrowsWhenPathMissing() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         XCTAssertThrowsError(try orchestrator.createWorkspaceFromWorktree(worktreePath: "/nonexistent/path/\(UUID().uuidString)")) { error in
             guard case WorkspaceError.invalidArgument = error else { return XCTFail("Expected invalidArgument, got \(error)") }
         }
@@ -889,7 +954,7 @@ extension OrchestratorTests {
     func testCreateWorkspaceFromWorktreeThrowsWhenNotGitRepo() throws {
         let dir = try makeTempDirectory()
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         XCTAssertThrowsError(try orchestrator.createWorkspaceFromWorktree(worktreePath: dir.path)) { error in
             guard case WorkspaceError.invalidArgument = error else { return XCTFail("Expected invalidArgument, got \(error)") }
         }
@@ -904,7 +969,7 @@ extension OrchestratorTests {
         let projectRecord = ProjectRecord(id: repo.path, name: "test", dir: repo.path, isGitRepo: true, defaultBranch: nil)
         try store.upsert(project: projectRecord)
 
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         // Without baseBranch, resolveWorkspaceBaseBranch should check for main/master, find neither, and throw
         XCTAssertThrowsError(try orchestrator.createWorkspace(projectID: projectRecord.id, branch: "feature-branch")) { error in
             guard case WorkspaceError.invalidArgument = error else { return XCTFail("Expected invalidArgument, got \(error)") }
@@ -916,7 +981,7 @@ extension OrchestratorTests {
     func testCreateWorkspaceFromWorktreeThrowsWhenAlreadyArchivedWorkspaceExists() throws {
         let repo = try makeTempGitRepo(name: "archived-worktree-repo")
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let project = try orchestrator.addProject(dir: repo.path)
 
         // The default workspace has dir=repo.path; archive it so the next createWorkspaceFromWorktree finds it archived.
@@ -939,7 +1004,7 @@ extension OrchestratorTests {
         let root = try makeTempDirectory()
         let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+        let orchestrator = makeTestOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
         let project = try orchestrator.addProject(dir: repo.path)
 
         // Pass a non-ASCII directory name (é is non-ASCII) to trigger the guard scalar.isASCII path.
@@ -954,7 +1019,7 @@ extension OrchestratorTests {
         let root = try makeTempDirectory()
         let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+        let orchestrator = makeTestOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
         let project = try orchestrator.addProject(dir: repo.path)
 
         // Create a workspace record pointing to a path that is NOT a registered git worktree.
@@ -975,7 +1040,7 @@ extension OrchestratorTests {
     // Tests scanAndCreateWorkspacesFromWorktrees throws missingProject when a specific projectID is not found.
     func testScanAndCreateWorkspacesFromWorktreesThrowsForMissingProjectID() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
 
         XCTAssertThrowsError(try orchestrator.scanAndCreateWorkspacesFromWorktrees(projectID: "/nonexistent/project/\(UUID().uuidString)")) { error in
             guard case WorkspaceError.missingProject = error else { return XCTFail("Expected missingProject, got \(error)") }
@@ -988,7 +1053,7 @@ extension OrchestratorTests {
         let root = try makeTempDirectory()
         let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+        let orchestrator = makeTestOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
 
         let project = try orchestrator.addProject(dir: repo.path)
         _ = try orchestrator.createWorkspace(projectID: project.id, branch: "feature-a", directoryName: "apple", runSetupScript: false)
@@ -1005,7 +1070,7 @@ extension OrchestratorTests {
         let marker = projectDir.appendingPathComponent("marker.txt")
         try "marker".write(to: marker, atomically: true, encoding: .utf8)
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
 
         let project = try orchestrator.addProject(dir: projectDir.path)
         // A non-git project owns exactly one workspace, the default, which cannot be archived;
@@ -1026,7 +1091,7 @@ extension OrchestratorTests {
         let repo = try makeTempGitRepo(name: "test-repo")
         let root = repo.deletingLastPathComponent()
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         _ = try orchestrator.addProject(dir: repo.path)
         let worktree = root.appendingPathComponent("fix-bug", isDirectory: true)
         let client = GitClient()
@@ -1042,7 +1107,7 @@ extension OrchestratorTests {
         let root = try makeTempDirectory()
         let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+        let orchestrator = makeTestOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
         _ = try orchestrator.addProject(dir: repo.path)
 
         let worktree1 = root.appendingPathComponent("worktree1", isDirectory: true)
@@ -1064,7 +1129,7 @@ extension OrchestratorTests {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
 
         let project = try orchestrator.addProject(dir: projectDir.path)
         let existing = try XCTUnwrap(orchestrator.listWorkspaces(projectID: project.id).first)

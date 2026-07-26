@@ -11,23 +11,19 @@ GHOSTTY_SOURCE_ROOT="$REPO_ROOT/$SUBMODULE_PATH"
 DEFAULT_GHOSTTY_REPO="https://github.com/yogesh-dhande/ghostty.git"
 ARTIFACT_REPO="${SPACES_GHOSTTY_ARTIFACT_REPO:-${GITHUB_REPOSITORY:-yogesh-dhande/spaces}}"
 ARTIFACT_RELEASE_PREFIX="ghostty-artifacts-"
-BUILD_SCRIPT_VERSION="2"
+# Bump whenever the Ghostty build flags below change. The manifest records no
+# build flags and the artifact release is keyed on the Ghostty SHA alone, so
+# this is the only thing that invalidates artifacts built with older flags.
+BUILD_SCRIPT_VERSION="3"
 MANIFEST_SCHEMA_VERSION="1"
 VALIDATION_XCODE_BUILD_MISMATCH=42
 VALIDATION_OPTIMIZE_MISMATCH=43
+VALIDATION_HOST_ARCH_MISMATCH=44
 
 LOCAL_ROOT="$APP_ROOT/.local"
 ARTIFACT_STATE_ROOT="$LOCAL_ROOT/ghostty-artifacts"
 LOCAL_MANIFEST="$ARTIFACT_STATE_ROOT/manifest.json"
 LOCAL_SHA256SUMS="$ARTIFACT_STATE_ROOT/SHA256SUMS"
-
-# Shared, content-addressed artifact cache. Worktrees live outside the main
-# checkout, so their worktree-local .local starts empty; pointing
-# SPACES_GHOSTTY_CACHE_DIR at the main checkout lets a new worktree restore a
-# matching, already-built SHA with a local copy instead of redownloading or
-# rebuilding. spaces.yaml sets the override to "$SPACES_PROJECT_DIR/apps/macos/.local/ghostty-cache".
-# The default keeps manual runs in the main checkout self-seeding.
-GHOSTTY_CACHE_ROOT="${SPACES_GHOSTTY_CACHE_DIR:-$LOCAL_ROOT/ghostty-cache}"
 
 GHOSTTYKIT_ROOT="$LOCAL_ROOT/ghosttykit"
 XCFRAMEWORK_ROOT="$GHOSTTYKIT_ROOT/GhosttyKit.xcframework"
@@ -38,7 +34,7 @@ GHOSTTYVT_INCLUDE_ROOT="$GHOSTTYVT_ROOT/include"
 GHOSTTYVT_LIB_ROOT="$GHOSTTYVT_ROOT/lib"
 TOOLCHAIN_ROOT="$GHOSTTYVT_ROOT/toolchain"
 
-ZIG_VERSION="0.15.2"
+ZIG_VERSION="0.16.0"
 GHOSTTY_BUILD_OPTIMIZE="${SPACES_GHOSTTY_BUILD_OPTIMIZE:-ReleaseFast}"
 
 MODE="default"
@@ -131,6 +127,25 @@ resolve_ghostty_sha() {
     git -C "$REPO_ROOT" ls-files -s -- "$SUBMODULE_PATH" | awk '$1 == "160000" { print $2; exit }'
 }
 
+# The checkout that owns this repository's Git directory. For a git worktree that
+# is the primary checkout, and for a plain clone it is the clone itself. The
+# shared artifact cache is rooted there so every worktree on a machine reads and
+# writes one store.
+#
+# Dies rather than picking a per-tree location when the derivation fails: this
+# script already requires a Git checkout to resolve the pinned Ghostty commit
+# from the submodule gitlink, and a silent per-tree cache is exactly the bug this
+# derivation exists to prevent -- it would look like a working cache while every
+# worktree rebuilt and stored its own multi-gigabyte copy.
+primary_checkout_dir() {
+    local common_git_dir
+    common_git_dir="$(git -C "$REPO_ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" \
+        || die "unable to locate the primary checkout for the shared Ghostty artifact cache: $REPO_ROOT is not a Git checkout"
+    [[ "$(basename "$common_git_dir")" == ".git" ]] \
+        || die "unable to locate the primary checkout for the shared Ghostty artifact cache: unexpected Git common directory $common_git_dir"
+    (cd "$common_git_dir/.." && pwd)
+}
+
 ensure_ghostty_submodule() {
     if submodule_is_initialized; then
         return
@@ -172,6 +187,16 @@ current_swift_version() {
     xcrun swift --version 2>/dev/null | head -n 1
 }
 
+# The host architecture the artifacts are built for. libghostty-vt is a
+# host-native dynamic library, so an artifact built on another architecture
+# cannot be loaded here. Every producer and consumer of the architecture -- the
+# manifest writer, the cache key, and both reuse-key checks -- goes through this
+# one function so a recorded architecture and a checked architecture can never
+# be derived differently.
+current_host_arch() {
+    uname -m
+}
+
 require_metal_toolchain() {
     [[ "$(uname -s)" == "Darwin" ]] || return 0
     command_exists xcrun || die "Xcode command-line tool 'xcrun' is required to build Ghostty artifacts"
@@ -203,11 +228,21 @@ manifest_matches_current_sha() {
         "$BUILD_SCRIPT_VERSION" \
         "$ZIG_VERSION" \
         "$(current_xcode_build_version)" \
-        "$GHOSTTY_BUILD_OPTIMIZE" <<'PY'
+        "$GHOSTTY_BUILD_OPTIMIZE" \
+        "$(current_host_arch)" <<'PY'
 import json
 import sys
 
-manifest_path, expected_sha, expected_schema, expected_script, expected_zig, expected_xcode_build, expected_optimize = sys.argv[1:8]
+(
+    manifest_path,
+    expected_sha,
+    expected_schema,
+    expected_script,
+    expected_zig,
+    expected_xcode_build,
+    expected_optimize,
+    expected_host_arch,
+) = sys.argv[1:9]
 try:
     with open(manifest_path, "r", encoding="utf-8") as handle:
         manifest = json.load(handle)
@@ -225,6 +260,8 @@ if manifest.get("zig_version") != expected_zig:
 if expected_xcode_build and manifest.get("xcode_build_version") != expected_xcode_build:
     sys.exit(1)
 if manifest.get("build_optimize") != expected_optimize:
+    sys.exit(1)
+if manifest.get("host_arch") != expected_host_arch:
     sys.exit(1)
 if manifest.get("dirty") is not False:
     sys.exit(1)
@@ -340,7 +377,7 @@ reuse_local_artifacts_if_valid() {
 cache_entry_dir() {
     local xcode_build arch
     xcode_build="$(current_xcode_build_version)"
-    arch="$(uname -m)"
+    arch="$(current_host_arch)"
     printf "%s/%s/%s-%s-%s\n" "$GHOSTTY_CACHE_ROOT" "$GHOSTTY_SHA" "${xcode_build:-unknown}" "$arch" "$GHOSTTY_BUILD_OPTIMIZE"
 }
 
@@ -450,39 +487,6 @@ save_to_cache() {
     fi
 }
 
-patch_libxev_for_ios_simulator() {
-    local zig_bin="$1"
-    local zon_file="$GHOSTTY_SOURCE_ROOT/build.zig.zon"
-    [[ -f "$zon_file" ]] || return 0
-
-    local global_cache_dir
-    global_cache_dir="$("$zig_bin" env | awk -F'"' '/global_cache_dir/ { print $2; exit }')"
-    [[ -n "$global_cache_dir" ]] || return 0
-
-    local libxev_hash
-    libxev_hash="$(
-        awk '
-            /\.libxev = \{/ { in_dep = 1; next }
-            in_dep && /hash = / {
-                if (match($0, /"[^"]+"/)) {
-                    print substr($0, RSTART + 1, RLENGTH - 2)
-                    exit
-                }
-            }
-            in_dep && /\},/ { in_dep = 0 }
-        ' "$zon_file"
-    )"
-    [[ -n "$libxev_hash" ]] || return 0
-
-    local backend_file="$global_cache_dir/p/$libxev_hash/src/backend/kqueue.zig"
-    [[ -f "$backend_file" ]] || return 0
-
-    if grep -q 'builtin\.os\.tag != \.macos' "$backend_file"; then
-        echo "==> Patching libxev Mach-port kqueue registration for iOS builds"
-        perl -0pi -e 's/builtin\.os\.tag != \.macos/!builtin.os.tag.isDarwin()/g' "$backend_file"
-    fi
-}
-
 zig_archive_name() {
     case "$(uname -m)" in
         arm64)
@@ -548,7 +552,7 @@ write_manifest() {
         "$(current_xcode_version)" \
         "$(current_xcode_build_version)" \
         "$(current_swift_version)" \
-        "$(uname -m)" \
+        "$(current_host_arch)" \
         "$GHOSTTY_BUILD_OPTIMIZE" \
         "$dirty" \
         "$mode" \
@@ -655,10 +659,19 @@ build_from_source() {
     app_version="$(ghostty_app_version)"
 
     echo "==> Building Ghostty artifacts from $GHOSTTY_SOURCE_ROOT ($GHOSTTY_SHA, optimize=$GHOSTTY_BUILD_OPTIMIZE)"
-    patch_libxev_for_ios_simulator "$zig_bin"
     (
         cd "$GHOSTTY_SOURCE_ROOT"
-        "$zig_bin" build -Doptimize="$GHOSTTY_BUILD_OPTIMIZE" -Demit-xcframework=true -Demit-macos-app=false -Di18n=false -Dversion-string="$app_version"
+        # Ghostty's vendored translate_c build helper shells out to a bare
+        # `zig env`, so the pinned toolchain must be first on PATH.
+        export PATH="$(dirname "$zig_bin"):$PATH"
+        # -Dsentry=false: sentry-native's init thread reads a (ptr, len) snapshot of
+        # environ while ghostty_init's locale setup calls setenv("LANG", ...) on this
+        # thread, reallocating and freeing that array — a use-after-free that segfaults
+        # spacesd and the iOS app. Spaces configures no DSN and never reads the local
+        # envelopes sentry writes, so disable it rather than race it. The lib-vt build
+        # below never reaches Ghostty's SharedDeps sentry block, so libghostty-vt has no
+        # sentry symbols regardless and needs no flag.
+        "$zig_bin" build -Doptimize="$GHOSTTY_BUILD_OPTIMIZE" -Demit-xcframework=true -Demit-macos-app=false -Di18n=false -Dsentry=false -Dversion-string="$app_version"
         "$zig_bin" build -Doptimize="$GHOSTTY_BUILD_OPTIMIZE" -Demit-lib-vt=true -Dversion-string="$app_version"
     )
 
@@ -687,7 +700,9 @@ validate_download_manifest() {
         "$(current_xcode_build_version)" \
         "$VALIDATION_XCODE_BUILD_MISMATCH" \
         "$GHOSTTY_BUILD_OPTIMIZE" \
-        "$VALIDATION_OPTIMIZE_MISMATCH" <<'PY'
+        "$VALIDATION_OPTIMIZE_MISMATCH" \
+        "$(current_host_arch)" \
+        "$VALIDATION_HOST_ARCH_MISMATCH" <<'PY'
 import hashlib
 import json
 import pathlib
@@ -704,6 +719,8 @@ expected_xcode_build = sys.argv[8]
 xcode_build_mismatch_status = int(sys.argv[9])
 expected_optimize = sys.argv[10]
 optimize_mismatch_status = int(sys.argv[11])
+expected_host_arch = sys.argv[12]
+host_arch_mismatch_status = int(sys.argv[13])
 assets = [
     "GhosttyKit.xcframework.tar.gz",
     "GhosttyKit-resources.tar.gz",
@@ -764,6 +781,15 @@ if manifest.get("build_optimize") != expected_optimize:
     )
     optimize_mismatch = True
 
+host_arch_mismatch = False
+if manifest.get("host_arch") != expected_host_arch:
+    print(
+        f"Ghostty artifact manifest host architecture {manifest.get('host_arch')} does not match current host "
+        f"architecture {expected_host_arch}; rebuild locally with --build or publish artifacts built on this architecture.",
+        file=sys.stderr,
+    )
+    host_arch_mismatch = True
+
 if strict and manifest.get("dirty") is not False:
     print("strict Ghostty artifact setup refuses dirty artifact manifests", file=sys.stderr)
     sys.exit(1)
@@ -794,6 +820,8 @@ if xcode_build_mismatch:
     sys.exit(xcode_build_mismatch_status)
 if optimize_mismatch:
     sys.exit(optimize_mismatch_status)
+if host_arch_mismatch:
+    sys.exit(host_arch_mismatch_status)
 PY
 }
 
@@ -832,11 +860,15 @@ download_release_artifacts() {
     fi
 
     if [[ "$MODE" == "default" ]] \
-        && { [[ "$validation_status" -eq "$VALIDATION_XCODE_BUILD_MISMATCH" ]] || [[ "$validation_status" -eq "$VALIDATION_OPTIMIZE_MISMATCH" ]]; }; then
+        && { [[ "$validation_status" -eq "$VALIDATION_XCODE_BUILD_MISMATCH" ]] \
+            || [[ "$validation_status" -eq "$VALIDATION_OPTIMIZE_MISMATCH" ]] \
+            || [[ "$validation_status" -eq "$VALIDATION_HOST_ARCH_MISMATCH" ]]; }; then
         rm -rf "$tmp_dir"
         trap - EXIT
         if [[ "$validation_status" -eq "$VALIDATION_OPTIMIZE_MISMATCH" ]]; then
             echo "==> Downloaded Ghostty artifacts use a different build-optimize mode; building locally instead"
+        elif [[ "$validation_status" -eq "$VALIDATION_HOST_ARCH_MISMATCH" ]]; then
+            echo "==> Downloaded Ghostty artifacts were built for a different host architecture; building locally instead"
         else
             echo "==> Downloaded Ghostty artifacts were built with a different Xcode build; building locally instead"
         fi
@@ -912,6 +944,19 @@ package_installed_artifacts() {
 
 GHOSTTY_SHA="$(resolve_ghostty_sha)"
 [[ -n "$GHOSTTY_SHA" ]] || die "unable to resolve Ghostty submodule SHA at $SUBMODULE_PATH"
+
+# Shared, content-addressed artifact cache, rooted in the primary checkout so a
+# worktree restores a SHA the primary checkout already built with a local copy
+# instead of redownloading or rebuilding its own multi-gigabyte copy. Resolved
+# here rather than by each caller: when callers derived it, any entry point that
+# forgot to (scripts/verify.sh, through verify-prep.sh) silently seeded a private
+# per-worktree store. SPACES_GHOSTTY_CACHE_DIR relocates the cache for the
+# hermetic setup tests, which run against fixture checkouts.
+if [[ -n "${SPACES_GHOSTTY_CACHE_DIR:-}" ]]; then
+    GHOSTTY_CACHE_ROOT="$SPACES_GHOSTTY_CACHE_DIR"
+else
+    GHOSTTY_CACHE_ROOT="$(primary_checkout_dir)/apps/macos/.local/ghostty-cache"
+fi
 
 case "$MODE" in
     default)

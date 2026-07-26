@@ -129,6 +129,13 @@
           "name" : "lantern-api"
         }
       ],
+      "retainedTerminalSessionIDs" : [
+        "demo-harbor-agent",
+        "demo-harbor-backend",
+        "demo-harbor-frontend",
+        "demo-lantern-backend",
+        "demo-lantern-frontend"
+      ],
       "sessions" : [
         {
           "attachmentSnapshot" : {

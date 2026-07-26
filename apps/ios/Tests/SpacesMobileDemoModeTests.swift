@@ -63,17 +63,15 @@
             let model = SpacesMobileAppModel()
             model.setDemoMode(true)
 
-            XCTAssertEqual(UserDefaults.standard.data(forKey: devicesKey), blobBefore, "enabling Demo Mode must not rewrite the paired-device records")
-            for device in seeded {
-                XCTAssertEqual(SpacesMobileDeviceStore.authToken(deviceID: device.id), expectedToken(for: device))
-            }
+            XCTAssertEqual(
+                UserDefaults.standard.data(forKey: devicesKey), blobBefore, "enabling Demo Mode must not rewrite the paired-device records")
+            for device in seeded { XCTAssertEqual(SpacesMobileDeviceStore.authToken(deviceID: device.id), expectedToken(for: device)) }
 
             model.setDemoMode(false)
 
-            XCTAssertEqual(UserDefaults.standard.data(forKey: devicesKey), blobBefore, "the paired-device records must be byte-identical across the cycle")
-            for device in seeded {
-                XCTAssertEqual(SpacesMobileDeviceStore.authToken(deviceID: device.id), expectedToken(for: device))
-            }
+            XCTAssertEqual(
+                UserDefaults.standard.data(forKey: devicesKey), blobBefore, "the paired-device records must be byte-identical across the cycle")
+            for device in seeded { XCTAssertEqual(SpacesMobileDeviceStore.authToken(deviceID: device.id), expectedToken(for: device)) }
         }
 
         // MARK: - Persistence across launches
@@ -107,14 +105,14 @@
             XCTAssertEqual(model.pairedDevices.map(\.id), [SpacesMobileDemoDevice.id])
 
             model.connectionNotice = nil
-            model.preparePairingLink(URL(string: "spaces://pair?v=3")!)
+            model.preparePairingLink(URL(string: "spaces://pair?v=4")!)
             XCTAssertEqual(model.connectionNotice, "Turn off Demo Mode to pair or switch devices.")
             XCTAssertNil(model.pendingPairingLink)
             XCTAssertFalse(model.isShowingConnectionSettings)
 
             model.connectionNotice = nil
             var paired = SpacesMobileConnectionSettings()
-            paired.host = "10.0.0.42"
+            paired.hosts = ["10.0.0.42"]
             paired.certificateFingerprint = "SHA256:new"
             paired.authToken = "token-new"
             model.applyConnectionSettings(paired)
@@ -143,26 +141,73 @@
             XCTAssertGreaterThan(model.undismissedAlertCount, 0)
         }
 
+        // MARK: - Gating unsupported controls
+
+        func testCanRenameIsFalseInDemoModeForOtherwiseRenamableRow() async throws {
+            let model = SpacesMobileAppModel()
+            model.setDemoMode(true)
+            await model.refresh()
+
+            let capturedOverview = try XCTUnwrap(model.overview)
+            let row = try XCTUnwrap(
+                model.workspaceGroups.flatMap(\.rows).first { $0.type == .processes }, "The demo bundle should surface a configured process row.")
+            XCTAssertFalse(model.canRename(row: row), "Demo Mode must offer no Rename; its backend rejects config edits.")
+
+            // The same row is renamable once Demo Mode is off, so only the demo guard flips it to false.
+            model.setDemoMode(false)
+            model.overview = capturedOverview
+            XCTAssertTrue(model.canRename(row: row), "A configured process row is renamable outside Demo Mode.")
+        }
+
+        // MARK: - Mutation identity guard across a Demo Mode toggle
+
+        func testMutationInFlightAcrossDemoToggleDoesNotPublishStaleOverview() async throws {
+            let staleOverview = try DemoRecordingLibrary.load(bundle: .main).overview
+            let workspace = try XCTUnwrap(staleOverview.workspaces.first)
+            var connectionSettings = SpacesMobileConnectionSettings()
+            connectionSettings.hosts = ["127.0.0.1"]
+            connectionSettings.port = 12_345
+            connectionSettings.authToken = "token"
+            connectionSettings.certificateFingerprint = "SHA256:test"
+
+            // A backend that only answers after the caller has had a chance to toggle Demo Mode, returning
+            // the previous backend's overview — which the model must drop because the identity moved on.
+            let client = SpacesDeviceAPIClient(settings: connectionSettings) { _ in
+                try? await Task.sleep(for: .milliseconds(100))
+                return SpacesDeviceAPIResponse(
+                    ok: true, message: "ok", result: .mutation(SpacesDeviceMutationResult(overview: staleOverview, workspaceID: workspace.id)))
+            }
+            let model = SpacesMobileAppModel(settings: connectionSettings, bridgeClient: client)
+
+            let mutation = Task { await model.launchWorkspace(workspace) }
+            try await Task.sleep(for: .milliseconds(20))
+            model.setDemoMode(true)
+            await mutation.value
+
+            XCTAssertTrue(model.isDemoModeEnabled)
+            XCTAssertNil(model.overview, "A mutation that lands after the Demo Mode toggle must not publish the previous backend's overview.")
+        }
+
         // MARK: - Helpers
 
         private func seedRealDevices() -> [SpacesMobilePairedDeviceRecord] {
-            _ = SpacesMobileDeviceStore.upsert(settings: realSettings(host: "10.0.0.10", fingerprint: "SHA256:studio", token: "token-studio"), name: "Studio")
-            let state = SpacesMobileDeviceStore.upsert(settings: realSettings(host: "10.0.0.11", fingerprint: "SHA256:air", token: "token-air"), name: "Air")
+            _ = SpacesMobileDeviceStore.upsert(
+                settings: realSettings(host: "10.0.0.10", fingerprint: "SHA256:studio", token: "token-studio"), name: "Studio")
+            let state = SpacesMobileDeviceStore.upsert(
+                settings: realSettings(host: "10.0.0.11", fingerprint: "SHA256:air", token: "token-air"), name: "Air")
             return state.devices
         }
 
         private func realSettings(host: String, fingerprint: String, token: String) -> SpacesMobileConnectionSettings {
             var settings = SpacesMobileConnectionSettings()
-            settings.host = host
+            settings.hosts = [host]
             settings.port = 47_900
             settings.certificateFingerprint = fingerprint
             settings.authToken = token
             return settings
         }
 
-        private func expectedToken(for device: SpacesMobilePairedDeviceRecord) -> String {
-            device.name == "Studio" ? "token-studio" : "token-air"
-        }
+        private func expectedToken(for device: SpacesMobilePairedDeviceRecord) -> String { device.name == "Studio" ? "token-studio" : "token-air" }
 
         private func resetPersistedState() {
             for device in SpacesMobileDeviceStore.load(fallbackSettings: SpacesMobileConnectionSettings()).devices {

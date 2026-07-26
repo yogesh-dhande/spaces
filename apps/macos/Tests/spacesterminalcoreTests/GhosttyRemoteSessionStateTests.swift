@@ -72,6 +72,95 @@ final class GhosttyRemoteSessionStateTests: XCTestCase {
         XCTAssertEqual(inputReduction.storedPayload.outputByteCount, 5)
     }
 
+    func testReducerYieldsFullFrameWithoutDrop() throws {
+        var reducer = TerminalRemoteStateReducer()
+        let payload = GhosttyRemoteSessionStatePayload(
+            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.output, emittedAt: "2026-05-20T00:00:00Z", sessionStateRevision: 1,
+            sessionStateFlags: 1, screenStateRevision: 1, runtimeState: nil, attachmentSnapshot: nil, title: "alpha", workingDirectory: "/tmp/alpha",
+            outputByteCount: nil, renderUpdate: try renderUpdateData(text: "alpha", sessionRevision: 1, ownerEpoch: 4))
+
+        let reduction = reducer.reduce(incomingPayload: payload, previousPayload: nil)
+
+        XCTAssertEqual(reduction.frameToApply?.snapshot, snapshot(text: "alpha"))
+        XCTAssertEqual(reduction.frameToApply?.ownerEpoch, 4)
+        XCTAssertNil(reduction.dropReason)
+        XCTAssertFalse(reduction.didRequestResync)
+        XCTAssertEqual(reduction.storedPayload.renderText, "alpha")
+        XCTAssertEqual(reduction.storedPayload.renderOwnerEpoch, 4)
+    }
+
+    func testReducerAppliesDeltaOntoEstablishedBaseline() throws {
+        let firstFrame = GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 4, snapshot: snapshot(text: "alpha"))
+        let secondFrame = GhosttyRenderFrame(sessionRevision: 2, ownerEpoch: 4, snapshot: snapshot(text: "bravo"))
+        let delta = GhosttyRenderUpdateFactory.makeUpdate(target: secondFrame, baseline: GhosttyRenderUpdateBaseline(frame: firstFrame))
+        XCTAssertEqual(delta.kind, .delta)
+
+        var reducer = TerminalRemoteStateReducer()
+        let full = GhosttyRemoteSessionStatePayload(
+            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.output, emittedAt: "2026-05-20T00:00:00Z", sessionStateRevision: 1,
+            sessionStateFlags: 1, screenStateRevision: 1, runtimeState: nil, attachmentSnapshot: nil, title: "alpha", workingDirectory: "/tmp/alpha",
+            outputByteCount: nil, renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(.full(firstFrame)))
+        _ = reducer.reduce(incomingPayload: full, previousPayload: nil)
+
+        let deltaPayload = GhosttyRemoteSessionStatePayload(
+            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.output, emittedAt: "2026-05-20T00:00:01Z", sessionStateRevision: 2,
+            sessionStateFlags: 1, screenStateRevision: 2, runtimeState: nil, attachmentSnapshot: nil, title: "alpha", workingDirectory: "/tmp/alpha",
+            outputByteCount: nil, renderUpdate: try GhosttyRenderUpdateBinaryCodec.encode(delta))
+        let reduction = reducer.reduce(incomingPayload: deltaPayload, previousPayload: full)
+
+        XCTAssertEqual(reduction.frameToApply?.snapshot, snapshot(text: "bravo"))
+        XCTAssertNil(reduction.dropReason)
+        XCTAssertFalse(reduction.didRequestResync)
+        XCTAssertEqual(reduction.storedPayload.renderText, "bravo")
+    }
+
+    func testReducerDropsFrameRejectedByShouldUseFrame() throws {
+        var reducer = TerminalRemoteStateReducer()
+        let payload = GhosttyRemoteSessionStatePayload(
+            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.resize, emittedAt: "2026-05-20T00:00:00Z", sessionStateRevision: 1,
+            sessionStateFlags: 1, screenStateRevision: 1, runtimeState: nil, attachmentSnapshot: nil, title: "alpha", workingDirectory: "/tmp/alpha",
+            outputByteCount: nil, renderUpdate: try renderUpdateData(text: "alpha", sessionRevision: 1, ownerEpoch: 4))
+
+        let reduction = reducer.reduce(incomingPayload: payload, previousPayload: nil, shouldUseFrame: { _, _ in false })
+
+        XCTAssertNil(reduction.frameToApply)
+        XCTAssertEqual(reduction.dropReason, "stale_resize_grid")
+        XCTAssertNil(reduction.storedPayload.renderSnapshot)
+    }
+
+    func testReducerReportsDecodeFailureForCorruptRenderUpdate() {
+        var reducer = TerminalRemoteStateReducer()
+        let payload = GhosttyRemoteSessionStatePayload(
+            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.output, emittedAt: "2026-05-20T00:00:00Z", sessionStateRevision: 1,
+            sessionStateFlags: 1, screenStateRevision: 1, runtimeState: nil, attachmentSnapshot: nil, title: "alpha", workingDirectory: "/tmp/alpha",
+            outputByteCount: nil, renderUpdate: Data([0x00, 0x01, 0x02, 0x03]))
+
+        let reduction = reducer.reduce(incomingPayload: payload, previousPayload: nil, requestResyncOnApplyFailure: true)
+
+        XCTAssertNil(reduction.frameToApply)
+        XCTAssertEqual(reduction.dropReason, "render_update_decode_failed")
+        XCTAssertTrue(reduction.didRequestResync)
+        XCTAssertNil(reduction.storedPayload.renderSnapshot)
+    }
+
+    func testDecodedRenderUpdateReturnsEqualValueAcrossRepeatedAndSeededAccess() throws {
+        let data = try renderUpdateData(text: "alpha", sessionRevision: 1, ownerEpoch: 4)
+        let payload = GhosttyRemoteSessionStatePayload(
+            sessionID: "session-1", reason: TerminalRemoteSessionStateReason.output, emittedAt: "2026-05-20T00:00:00Z", sessionStateRevision: 1,
+            sessionStateFlags: 1, screenStateRevision: 1, runtimeState: nil, attachmentSnapshot: nil, title: "alpha", workingDirectory: "/tmp/alpha",
+            outputByteCount: nil, renderUpdate: data)
+
+        XCTAssertEqual(payload.decodedRenderUpdate, payload.decodedRenderUpdate)
+        XCTAssertEqual(payload.decodedRenderUpdate?.fullFrame?.snapshot, snapshot(text: "alpha"))
+
+        // A materialized full frame stored back into a payload resolves to the seeded value.
+        var reducer = TerminalRemoteStateReducer()
+        let reduction = reducer.reduce(incomingPayload: payload, previousPayload: nil)
+        let stored = reduction.storedPayload
+        XCTAssertEqual(stored.decodedRenderUpdate, stored.decodedRenderUpdate)
+        XCTAssertEqual(stored.decodedRenderUpdate?.fullFrame?.snapshot, snapshot(text: "alpha"))
+    }
+
     func testReducerRequestsResyncForDeltaWithoutBaseline() throws {
         let firstFrame = GhosttyRenderFrame(sessionRevision: 1, ownerEpoch: 4, snapshot: snapshot(text: "alpha"))
         let secondFrame = GhosttyRenderFrame(sessionRevision: 2, ownerEpoch: 4, snapshot: snapshot(text: "bravo"))
@@ -108,15 +197,13 @@ final class GhosttyRemoteSessionStateTests: XCTestCase {
         let snapshot = snapshot(text: "frame")
         let frame = GhosttyRenderFrame(sessionRevision: 12, ownerEpoch: 34, snapshot: snapshot)
         let attributes = GhosttyRenderFrameMetrics.attributes(
-            reason: "output", frame: frame, frameByteCount: 256, frameEncodeMS: 3, payloadByteCount: 384, payloadEncodeMS: 4, decodeMS: 5,
+            reason: "output", frame: frame, frameByteCount: 256, frameEncodeMS: 3, decodeMS: 5,
             outputByteCount: 6, screenStateRevision: 7, dropped: false, renderMode: "ghostty-mirror")
 
         XCTAssertEqual(attributes["reason"], "output")
         XCTAssertEqual(attributes["render_frame"], "1")
         XCTAssertEqual(attributes["frame_bytes"], "256")
         XCTAssertEqual(attributes["frame_encode_ms"], "3")
-        XCTAssertEqual(attributes["payload_bytes"], "384")
-        XCTAssertEqual(attributes["payload_encode_ms"], "4")
         XCTAssertEqual(attributes["decode_ms"], "5")
         XCTAssertEqual(attributes["output_bytes"], "6")
         XCTAssertEqual(attributes["screen_revision"], "7")

@@ -55,14 +55,15 @@ actor SpacesMobileBrowserProxy {
     /// - Parameters:
     ///   - port: listener port (defaults to `fixedPort`; injectable so tests avoid a real 47898 collision).
     ///   - installationID: this app installation's paired identity, used to build the real dialer's tunnel requests.
+    ///   - deviceName: this device's display name, forwarded to the real dialer's tunnel requests.
     ///   - dialer: tunnel opener; defaults to the production pinned-TLS dialer. Injected as a fake in tests.
     ///   - runtimeState: observable status object; defaults to a fresh one.
     init(
-        port: UInt16 = SpacesMobileBrowserProxy.fixedPort, installationID: String, dialer: (any BrowserTunnelDialing)? = nil,
-        runtimeState: BrowserProxyRuntimeState = BrowserProxyRuntimeState()
+        port: UInt16 = SpacesMobileBrowserProxy.fixedPort, installationID: String, deviceName: String = "iOS Device",
+        dialer: (any BrowserTunnelDialing)? = nil, runtimeState: BrowserProxyRuntimeState = BrowserProxyRuntimeState()
     ) {
         self.port = port
-        self.dialer = dialer ?? SpacesMobileBrowserTunnelDialer(installationID: installationID)
+        self.dialer = dialer ?? SpacesMobileBrowserTunnelDialer(installationID: installationID, deviceName: deviceName)
         self.runtimeState = runtimeState
     }
 

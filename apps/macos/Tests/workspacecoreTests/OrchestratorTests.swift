@@ -80,7 +80,7 @@ final class OrchestratorTests: XCTestCase {
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let dbPath = root.appendingPathComponent("spaces-test.db").path
         let store = try SQLiteStore(path: dbPath)
-        let orchestrator = WorkspaceOrchestrator(
+        let orchestrator = makeTestOrchestrator(
             store: store,
             builtInTerminalWindowOpener: { sessionID, _ in
                 try! withSpacesProfileEnvironment(dbPath: dbPath) {
@@ -391,6 +391,17 @@ final class OrchestratorTests: XCTestCase {
         return (root, source, remote, clone)
     }
 
+    /// A `GitClient` whose `ls-remote` always fails deterministically (exit 128, fixed stderr), used to
+    /// simulate a remote-lookup failure without depending on network conditions. The 30s
+    /// `metadataCommandTimeout` matches `makeTestOrchestrator`'s: the injected failure itself is
+    /// instantaneous (the wrapper script exits immediately), but every *other* git command this client
+    /// issues along the way — notably `branchExistsForNewWorkspace`'s `hasRemote` check, a real
+    /// `git remote get-url` shelled through this same wrapper — still runs through the product's default
+    /// 2s budget otherwise. On a saturated CI runner that unrelated call can itself exceed 2s, and
+    /// `hasRemote` swallows the resulting timeout as "no remote", which short-circuits the lookup to
+    /// `.missing` before the deterministic `ls-remote` failure is ever reached — the exact mechanism
+    /// behind the observed "did not throw an error" flake. A generous timeout here removes that spurious
+    /// path without weakening the intentional failure injection.
     func makeLsRemoteFailingGitClient() throws -> GitClient {
         let toolsRoot = try makeExecutableTestToolsDirectory()
         let script = toolsRoot.appendingPathComponent("git")
@@ -425,7 +436,7 @@ final class OrchestratorTests: XCTestCase {
             """
         try contents.write(to: script, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
-        return GitClient(gitExecutable: script.path)
+        return GitClient(gitExecutable: script.path, metadataCommandTimeout: 30)
     }
 
     func makeExecutableTestToolsDirectory() throws -> URL {

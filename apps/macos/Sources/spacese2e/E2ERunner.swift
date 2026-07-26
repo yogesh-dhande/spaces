@@ -20,6 +20,11 @@ struct E2ECommand: ParsableCommand {
 
     @Flag(name: .long, help: "Preserve the runner root and scenario roots where supported.") var keepRoot = false
 
+    @Flag(
+        name: .long,
+        help: "mobile-demo only: bring up a local-only stack, skipping the remote Linux daemon build, install, and pairing.")
+    var local = false
+
     func run() throws {
         try validateOptions()
         if list {
@@ -35,6 +40,7 @@ struct E2ECommand: ParsableCommand {
         if let samples, samples <= 0 { throw ValidationError("--samples must be a positive integer.") }
         if let durationSeconds, durationSeconds <= 0 { throw ValidationError("--duration-seconds must be a positive integer.") }
         if lane != .deviceAPI, deviceAPITarget != nil { throw ValidationError("Only the device-api lane accepts a positional target.") }
+        if local, lane != .mobileDemo { throw ValidationError("--local is only valid for the mobile-demo lane.") }
 
         let allowed = lane.scenarios
         for requested in scenario where !allowed.contains(requested) { throw ValidationError("Unknown \(lane.rawValue) scenario: \(requested)") }
@@ -134,6 +140,9 @@ private struct E2EScenarioDescriptor: Sendable {
         E2EScenarioDescriptor(
             name: "mouse-reporting-scroll",
             kind: .script(scriptName: "e2e_terminal_mouse_reporting_scroll.sh", arguments: [], environment: { $0.remoteEnvironment(enabled: false) })),
+        E2EScenarioDescriptor(
+            name: "ended-session-scroll",
+            kind: .script(scriptName: "e2e_terminal_ended_session_scroll.sh", arguments: [], environment: { $0.remoteEnvironment(enabled: false) })),
         E2EScenarioDescriptor(
             name: "agent-orchestration",
             kind: .script(scriptName: "e2e_agent_orchestration.sh", arguments: [], environment: { $0.remoteEnvironment(enabled: false) })),
@@ -415,8 +424,16 @@ private struct E2ERunner {
         return environment
     }
 
+    /// The mobile-demo lane pairs a remote Linux daemon by default because its remote mobile-UI
+    /// scenarios need one to exercise. `--local` trades that away for a fast local-only stack (no
+    /// Linux artifact build, no remote install, no remote pairing), which is what iOS-only changes
+    /// need to iterate quickly. Built on `sharedEnvironment` directly rather than
+    /// `remoteEnvironment(enabled:)` because that helper also injects
+    /// `SPACES_MOBILE_LATENCY_TERMINAL_TARGETS`, which only `e2e_mobile_latency.sh` reads and which
+    /// is meaningless here.
     fileprivate func mobileDemoEnvironment() -> [String: String] {
-        var environment = remoteEnvironment(enabled: true)
+        var environment = sharedEnvironment
+        environment["SPACES_E2E_RUN_REMOTE"] = command.local ? "0" : "1"
         environment["SPACES_MOBILE_DEMO_BUILD_MACOS"] = "0"
         let inheritedPort = ProcessInfo.processInfo.environment["SPACES_MOBILE_DEMO_PORT"]?.trimmingCharacters(in: .whitespacesAndNewlines)
         if inheritedPort?.isEmpty ?? true { environment["SPACES_MOBILE_DEMO_PORT"] = "0" }

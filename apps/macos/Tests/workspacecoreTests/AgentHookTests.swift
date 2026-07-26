@@ -10,7 +10,7 @@ private final class AgentHookTerminalTerminateCapture: @unchecked Sendable { var
 final class AgentHookTests: XCTestCase {
     func testRegisterAgentWindowCreatesDedicatedWindowRecord() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         try seedTerminalSessionWindow(store: store, workspaceID: workspace.id, sessionID: "workspace-session")
 
@@ -26,7 +26,7 @@ final class AgentHookTests: XCTestCase {
 
     func testRegisterAgentWindowKeepsSeparateDedicatedWindowsDistinct() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
 
         let first = try orchestrator.registerAgentWindow(
@@ -42,7 +42,7 @@ final class AgentHookTests: XCTestCase {
 
     func testRegisterAgentWindowAutoRenamesDuplicateAdHocAgentLabels() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         try seedTerminalSessionWindow(store: store, workspaceID: workspace.id, sessionID: "workspace-session-1")
         try seedTerminalSessionWindow(store: store, workspaceID: workspace.id, sessionID: "workspace-session-2")
@@ -61,7 +61,7 @@ final class AgentHookTests: XCTestCase {
 
     func testRegisterAgentWindowReservesConfiguredLauncherNamesForLauncherOwnedAgent() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         try orchestrator.updateWorkspaceSettings(workspaceID: workspace.id) { settings in
             settings.agentLaunchers = [AgentLauncher(name: "Codex", command: "codex")]
@@ -83,7 +83,7 @@ final class AgentHookTests: XCTestCase {
 
     func testUpdateAgentWindowStatusDoesNotMatchConfiguredLauncherByLabel() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         try store.setWorkspaceAgentLaunchers(workspaceID: workspace.id, launchers: [AgentLauncher(name: "Codex", command: "codex")])
         try seedTerminalSessionWindow(store: store, workspaceID: workspace.id, sessionID: "configured-session")
@@ -109,7 +109,7 @@ final class AgentHookTests: XCTestCase {
 
     func testUpdateAgentWindowStatusMatchesExistingSession() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
 
         try orchestrator.registerAgentWindow(
@@ -127,7 +127,7 @@ final class AgentHookTests: XCTestCase {
 
     func testUpdateAgentWindowStatusKeepsExistingLabelStable() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
 
         let existing = try orchestrator.registerAgentWindow(
@@ -146,7 +146,7 @@ final class AgentHookTests: XCTestCase {
 
     func testUpdateAgentWindowStatusFallsBackToCodexThreadMatch() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
 
         try orchestrator.registerAgentWindow(
@@ -163,7 +163,7 @@ final class AgentHookTests: XCTestCase {
 
     func testAgentWindowsReturnsOnlyWorkspaceRecords() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         let (_, workspace2) = try makeProjectAndWorkspace(store: store, projectName: "proj2", workspaceName: "ws2")
 
@@ -180,7 +180,7 @@ final class AgentHookTests: XCTestCase {
 
     func testRegisterAgentWindowPreservesSpacesProvider() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
 
         let record = try orchestrator.registerAgentWindow(
@@ -193,7 +193,7 @@ final class AgentHookTests: XCTestCase {
 
     func testRegisterAgentWindowCreatesTrackedTerminalRowForAdHocAgent() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
 
         _ = try orchestrator.registerAgentWindow(
@@ -208,7 +208,7 @@ final class AgentHookTests: XCTestCase {
 
     func testHandleAgentExitDeletesClosedAdHocAgentRow() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
 
         let agent = try orchestrator.registerAgentWindow(
@@ -228,7 +228,7 @@ final class AgentHookTests: XCTestCase {
         let store = try SQLiteStore(path: dbPath)
         let closeCapture = AgentHookTerminalCloseCapture()
         let terminateCapture = AgentHookTerminalTerminateCapture()
-        let orchestrator = WorkspaceOrchestrator(
+        let orchestrator = makeTestOrchestrator(
             store: store, builtInTerminalWindowCloser: { closeCapture.sessionIDs.append($0) },
             builtInTerminalSessionTerminator: { terminateCapture.sessionIDs.append($0) })
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
@@ -260,7 +260,7 @@ final class AgentHookTests: XCTestCase {
     /// (the shared chokepoint for both the daemon and remote init paths) resets `.exited` to `.idle`.
     func testRegisterAgentWindowResetsExitedRowToIdleOnInit() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
 
         let agent = try orchestrator.registerAgentWindow(
@@ -286,7 +286,7 @@ final class AgentHookTests: XCTestCase {
     /// agent. Paired with the exited→idle reset test, this pins both arms of the resulting-status gate.
     func testRegisterAgentWindowInitPreservesSpinningStatusSoSubscriberStaysBusy() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
 
         _ = try orchestrator.registerAgentWindow(
@@ -316,7 +316,7 @@ final class AgentHookTests: XCTestCase {
         let store = try makeTemporaryStore()
         let closeCapture = AgentHookTerminalCloseCapture()
         let terminateCapture = AgentHookTerminalTerminateCapture()
-        let orchestrator = WorkspaceOrchestrator(
+        let orchestrator = makeTestOrchestrator(
             store: store, builtInTerminalWindowCloser: { closeCapture.sessionIDs.append($0) },
             builtInTerminalSessionTerminator: { terminateCapture.sessionIDs.append($0) })
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
@@ -342,7 +342,7 @@ final class AgentHookTests: XCTestCase {
 
     func testRecordRemoteAgentSignalUpdatesConfiguredAgentRow() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         try store.setWorkspaceAgentLaunchers(workspaceID: workspace.id, launchers: [AgentLauncher(name: "Mock Agent", command: "mock-agent")])
         _ = try orchestrator.registerAgentWindow(
@@ -371,7 +371,7 @@ final class AgentHookTests: XCTestCase {
 
     func testRefreshWorkspaceWindowsDeletesClosedSpacesAdHocAgentRow() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
 
         _ = try orchestrator.registerAgentWindow(
@@ -387,7 +387,7 @@ final class AgentHookTests: XCTestCase {
 
     func testRefreshWorkspaceWindowsKeepsClosedConfiguredSpacesAgentRow() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         try store.setWorkspaceAgentLaunchers(
             workspaceID: workspace.id, launchers: [AgentLauncher(name: "Configured Agent", command: "configured-agent")])

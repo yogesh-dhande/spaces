@@ -27,6 +27,10 @@ final class DeviceOverviewStreamServer: @unchecked Sendable {
     private var listenSocketFD: Int32 = -1
     private var acceptSource: DispatchSourceRead?
     private var clientSources: [Int32: DispatchSourceRead] = [:]
+    /// Filesystem identity of the socket file this server bound. The socket path is profile-global,
+    /// so a replacement server can already be listening on a freshly bound file by the time this
+    /// server's teardown runs; the identity is what keeps that teardown from unlinking it.
+    private var listenSocketFileIdentity: SocketFileIdentity?
 
     init(socketPath: String, queue: DispatchQueue, lineProvider: @escaping @Sendable () -> Data?) {
         self.socketPath = socketPath
@@ -58,6 +62,7 @@ final class DeviceOverviewStreamServer: @unchecked Sendable {
         }
         try Self.setNonBlocking(socketFD)
         listenSocketFD = socketFD
+        listenSocketFileIdentity = Self.socketFileIdentity(at: socketPath)
         let source = DispatchSource.makeReadSource(fileDescriptor: socketFD, queue: queue)
         source.setEventHandler { [weak self] in self?.acceptReadyConnections() }
         source.setCancelHandler { [weak self] in self?.handleAcceptSourceCancel() }
@@ -122,7 +127,22 @@ final class DeviceOverviewStreamServer: @unchecked Sendable {
     private func handleAcceptSourceCancel() {
         if listenSocketFD >= 0 { close(listenSocketFD) }
         listenSocketFD = -1
+        let boundIdentity = listenSocketFileIdentity
+        listenSocketFileIdentity = nil
+        guard boundIdentity != nil, boundIdentity == Self.socketFileIdentity(at: socketPath) else { return }
         try? Self.removeSocketFile(at: socketPath)
+    }
+
+    /// Device and inode of the socket file at `path`, or nil when nothing is there.
+    private static func socketFileIdentity(at path: String) -> SocketFileIdentity? {
+        var status = stat()
+        guard lstat(path, &status) == 0 else { return nil }
+        return SocketFileIdentity(device: status.st_dev, inode: status.st_ino)
+    }
+
+    private struct SocketFileIdentity: Equatable {
+        let device: dev_t
+        let inode: ino_t
     }
 
     private static func removeSocketFile(at path: String) throws {

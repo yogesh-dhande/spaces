@@ -10,11 +10,13 @@ public struct SpacesRemoteDevicePairingRequest: Sendable {
     public let clientBundleID: String
     public let clientDeviceName: String
     public let clientAppVersion: String?
+    /// Optional user-chosen display name for the paired device. When nil, the daemon-reported name is used.
+    public let customName: String?
     public let profile: SpacesProfile?
 
     public init(
         sshHost: String, sshUser: String? = nil, sshPort: Int? = nil, clientInstallationID: String, clientBundleID: String, clientDeviceName: String,
-        clientAppVersion: String?, profile: SpacesProfile? = nil
+        clientAppVersion: String?, customName: String? = nil, profile: SpacesProfile? = nil
     ) {
         self.sshHost = sshHost
         self.sshUser = sshUser
@@ -23,6 +25,7 @@ public struct SpacesRemoteDevicePairingRequest: Sendable {
         self.clientBundleID = clientBundleID
         self.clientDeviceName = clientDeviceName
         self.clientAppVersion = clientAppVersion
+        self.customName = customName
         self.profile = profile
     }
 }
@@ -159,15 +162,17 @@ public enum SpacesDevicePairingClient {
         guard response.ok else { throw SpacesRemoteDevicePairingError.pairingRejected(response.message) }
         guard let authToken = normalized(response.issuedAuthToken) else { throw SpacesRemoteDevicePairingError.missingAuthToken }
 
+        // Prefer the user's name when they typed one at connect time, else the daemon-reported name.
+        let displayName = normalized(request.customName) ?? metadata.name
         let now = ISO8601DateFormatter().string(from: Date())
         let database = try SpacesClientDatabase.defaultDatabase()
         try database.upsert(
             device: SpacesPairedDeviceRecord(
-                id: deviceID, name: metadata.name, platform: "remote", host: deviceAPIHost, port: metadata.port,
+                id: deviceID, name: displayName, platform: "remote", host: deviceAPIHost, port: metadata.port,
                 certificateFingerprint: metadata.certificateFingerprint, sshHost: sshHost, sshUser: sshUser, sshPort: request.sshPort, createdAt: now,
                 updatedAt: now, lastSelectedAt: now))
         try SpacesDeviceCredentialStore.saveToken(authToken, deviceID: deviceID, profile: request.profile)
-        return SpacesRemoteDevicePairingResult(deviceID: deviceID, name: metadata.name, host: deviceAPIHost, port: metadata.port)
+        return SpacesRemoteDevicePairingResult(deviceID: deviceID, name: displayName, host: deviceAPIHost, port: metadata.port)
     }
 
     /// Runs the Linux installer one-liner on the remote host over SSH, pinned to this client's app
@@ -207,9 +212,12 @@ public enum SpacesDevicePairingClient {
         link: SpacesDevicePairingLink, clientInstallationID: String, clientBundleID: String, clientDeviceName: String, clientAppVersion: String?,
         profile: SpacesProfile? = nil
     ) throws -> SpacesRemoteDevicePairingResult {
+        guard let host = link.hosts.first else {
+            throw SpacesRemoteDevicePairingError.invalidRemotePairingOutput("Pairing link is missing a Device API host.")
+        }
         try assertPairingCompatible(deviceProtocolVersion: link.protocolVersion, deviceAppVersion: link.appVersion, deviceName: link.name)
-        let deviceID = stablePairedDeviceID(certificateFingerprint: link.certificateFingerprint, host: link.host, port: link.port)
-        let client = try SpacesDeviceAPIRequestClient(host: link.host, port: link.port, certificateFingerprint: link.certificateFingerprint)
+        let deviceID = stablePairedDeviceID(certificateFingerprint: link.certificateFingerprint, host: host, port: link.port)
+        let client = try SpacesDeviceAPIRequestClient(host: host, port: link.port, certificateFingerprint: link.certificateFingerprint)
         let response: SpacesDeviceAPIResponse
         do {
             response = try client.request(
@@ -218,7 +226,7 @@ public enum SpacesDevicePairingClient {
                     clientApp: SpacesDeviceClientApp(
                         installationID: clientInstallationID, bundleID: clientBundleID, platform: clientPlatform, deviceName: clientDeviceName,
                         appVersion: clientAppVersion)))
-        } catch { throw SpacesRemoteDevicePairingError.deviceAPIUnreachable(host: link.host, port: link.port, message: error.localizedDescription) }
+        } catch { throw SpacesRemoteDevicePairingError.deviceAPIUnreachable(host: host, port: link.port, message: error.localizedDescription) }
         guard response.ok else { throw SpacesRemoteDevicePairingError.pairingRejected(response.message) }
         guard let authToken = normalized(response.issuedAuthToken) else { throw SpacesRemoteDevicePairingError.missingAuthToken }
 
@@ -226,11 +234,11 @@ public enum SpacesDevicePairingClient {
         let database = try SpacesClientDatabase.defaultDatabase()
         try database.upsert(
             device: SpacesPairedDeviceRecord(
-                id: deviceID, name: link.name, platform: "remote", host: link.host, port: link.port,
+                id: deviceID, name: link.name, platform: "remote", host: host, port: link.port,
                 certificateFingerprint: link.certificateFingerprint, sshHost: nil, sshUser: nil, sshPort: nil, createdAt: now, updatedAt: now,
                 lastSelectedAt: now))
         try SpacesDeviceCredentialStore.saveToken(authToken, deviceID: deviceID, profile: profile)
-        return SpacesRemoteDevicePairingResult(deviceID: deviceID, name: link.name, host: link.host, port: link.port)
+        return SpacesRemoteDevicePairingResult(deviceID: deviceID, name: link.name, host: host, port: link.port)
     }
 
     private static var clientPlatform: String {
@@ -273,11 +281,27 @@ public enum SpacesDevicePairingClient {
         let metadata = try loadRemotePairingMetadata(
             destination: destination, port: device.sshPort, probe: probe, appVersion: appVersion, profile: profile)
         let link = SpacesDevicePairingLink(
-            host: deviceAPIHost, port: metadata.port, nonce: metadata.pairingNonce, code: metadata.pairingCode,
-            certificateFingerprint: metadata.certificateFingerprint, name: metadata.name, protocolVersion: metadata.protocolVersion,
-            appVersion: metadata.appVersion)
+            hosts: relayedPairingHosts(deviceAPIHost: deviceAPIHost, advertisedHosts: metadata.hosts), port: metadata.port,
+            nonce: metadata.pairingNonce, code: metadata.pairingCode, certificateFingerprint: metadata.certificateFingerprint, name: metadata.name,
+            protocolVersion: metadata.protocolVersion, appVersion: metadata.appVersion)
         return SpacesRemoteDevicePairingWindowResult(
             name: metadata.name, host: deviceAPIHost, port: metadata.port, linkString: link.absoluteString, expiresAt: metadata.expiresAt)
+    }
+
+    /// Builds the host list for a relayed pairing link (`openRemotePairingWindow`, the "Pair iPhone or
+    /// iPad with a remote device" QR shown for an already-connected remote Mac): `deviceAPIHost` — the
+    /// SSH-resolved effective OpenSSH `HostName` — leads, because it is the one address *this* Mac has
+    /// actually proven routable right now. The remote daemon's own advertised `hosts` (its pairing
+    /// metadata's view of its own LAN/tailnet addresses) follow rather than get discarded: the phone
+    /// scanning the code is a different device from this Mac, so a route that works from here (an SSH
+    /// alias, a jump host, a LAN this Mac happens to share with the target) is not guaranteed to work
+    /// from the phone, while the daemon's own tailnet address usually is. De-duplicated, order otherwise
+    /// preserved, so a daemon that happens to advertise its own SSH-resolved address back is not listed
+    /// twice.
+    static func relayedPairingHosts(deviceAPIHost: String, advertisedHosts: [String]) -> [String] {
+        var hosts = [deviceAPIHost]
+        for host in advertisedHosts where !hosts.contains(host) { hosts.append(host) }
+        return hosts
     }
 
     public static func localMacClientInstallationID(profile: SpacesProfile? = nil) -> String {
@@ -759,9 +783,17 @@ struct RemoteInstallProbe: Equatable, Sendable {
     let linuxVersionID: String?
 }
 
-private struct RemotePairingMetadata: Decodable, Sendable {
+// Kept internal (not `private`) rather than `private` to this file: the JSON round-trip test in
+// spacescliTests decodes real production output through this exact type — see
+// `SpacesCommandTests.testPairingWindowPayloadRoundTripsThroughRemotePairingMetadata` — so the
+// producer (`PairingWindowPayload` in spacescli) and this consumer can never again drift apart
+// silently the way `host` (singular) vs `hosts` (plural) once did.
+struct RemotePairingMetadata: Decodable, Sendable {
     let name: String
-    let host: String
+    /// Ordered candidate daemon addresses the remote daemon's own pairing link advertised (its LAN
+    /// IPv4, then its Tailscale address). Decoded from the JSON `spaces device pair --json` prints —
+    /// see `PairingWindowPayload` in spacescli, the producer of this exact shape.
+    let hosts: [String]
     let port: Int
     let pairingNonce: String
     let pairingCode: String
@@ -776,7 +808,7 @@ private struct RemotePairingMetadata: Decodable, Sendable {
         guard trimmed(name) != nil else {
             throw SpacesRemoteDevicePairingError.invalidRemotePairingOutput("Remote pairing JSON is missing a device name.")
         }
-        guard trimmed(host) != nil else {
+        guard !hosts.isEmpty else {
             throw SpacesRemoteDevicePairingError.invalidRemotePairingOutput("Remote pairing JSON is missing a Device API host.")
         }
         guard (1...65_535).contains(port) else {

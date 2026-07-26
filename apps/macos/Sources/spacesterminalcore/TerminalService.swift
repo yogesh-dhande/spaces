@@ -93,8 +93,8 @@ import Foundation
                 if response.ok {
                     if requireWireCompatibility { try assertDaemonWireCompatible(response) }
                     TerminalPerformance.logMetric(
-                        "terminal_service_ensure_running", target: "socket=\(socketPath)",
-                        elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true, detail: "launched=0")
+                        "terminal_service_ensure_running", target: "socket=\(socketPath)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
+                        success: true, detail: "launched=0")
                     return false
                 }
                 // The daemon answered but is mid exec-handoff, not dead: wait for the replacement image to
@@ -104,8 +104,8 @@ import Foundation
                 if isTransitionalHandoffPing(response), let liveResponse = Self.waitForLivePongThroughTransition(socketPath: socketPath) {
                     if requireWireCompatibility { try assertDaemonWireCompatible(liveResponse) }
                     TerminalPerformance.logMetric(
-                        "terminal_service_ensure_running", target: "socket=\(socketPath)",
-                        elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true, detail: "launched=0 transitioned=1")
+                        "terminal_service_ensure_running", target: "socket=\(socketPath)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
+                        success: true, detail: "launched=0 transitioned=1")
                     return false
                 }
             }
@@ -134,8 +134,8 @@ import Foundation
                 if response.ok {
                     if requireWireCompatibility { try assertDaemonWireCompatible(response) }
                     TerminalPerformance.logMetric(
-                        "terminal_service_ensure_running", target: "socket=\(socketPath)",
-                        elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true, detail: "launched=0 adopted=1")
+                        "terminal_service_ensure_running", target: "socket=\(socketPath)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
+                        success: true, detail: "launched=0 adopted=1")
                     return false
                 }
                 // Same transitional wait as the pre-lock check above: the winner may be looking at a
@@ -143,13 +143,13 @@ import Foundation
                 if isTransitionalHandoffPing(response), let liveResponse = Self.waitForLivePongThroughTransition(socketPath: socketPath) {
                     if requireWireCompatibility { try assertDaemonWireCompatible(liveResponse) }
                     TerminalPerformance.logMetric(
-                        "terminal_service_ensure_running", target: "socket=\(socketPath)",
-                        elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true, detail: "launched=0 adopted=1 transitioned=1")
+                        "terminal_service_ensure_running", target: "socket=\(socketPath)", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt),
+                        success: true, detail: "launched=0 adopted=1 transitioned=1")
                     return false
                 }
             }
 
-            let executableURL = try resolveExecutableURL()
+            let executableURL = try resolveExecutableURL(profile: SpacesProfile.current())
             let process = Process()
             process.executableURL = executableURL
             process.environment = ProcessInfo.processInfo.environment
@@ -232,9 +232,7 @@ import Foundation
         /// own liveness probe rather than timing out or refusing to connect. Any other failure (a different
         /// error code, or no response at all) is an ordinary "daemon looks dead" signal and must not pause
         /// here waiting for a handoff that isn't happening.
-        static func isTransitionalHandoffPing(_ response: TerminalServiceResponse) -> Bool {
-            !response.ok && response.errorCode == .shuttingDown
-        }
+        static func isTransitionalHandoffPing(_ response: TerminalServiceResponse) -> Bool { !response.ok && response.errorCode == .shuttingDown }
 
         /// Polls liveness until the daemon that reported a transitional `.shuttingDown` ping answers a live
         /// pong again, or `handoffTransitionTimeout` elapses. Returns the live response, or `nil` on timeout
@@ -247,8 +245,8 @@ import Foundation
         static func waitForLivePongThroughTransition(socketPath: String) -> TerminalServiceResponse? {
             let deadline = Date().addingTimeInterval(handoffTransitionTimeout)
             while Date() < deadline {
-                if let response = try? TerminalServiceClient.send(request: TerminalServiceRequest(command: .ping), socketPath: socketPath, timeout: 1),
-                    response.ok
+                if let response = try? TerminalServiceClient.send(
+                    request: TerminalServiceRequest(command: .ping), socketPath: socketPath, timeout: 1), response.ok
                 {
                     return response
                 }
@@ -270,7 +268,7 @@ import Foundation
                 if response.ok, waitForServiceExit(socketPath: socketPath, candidatePIDs: candidatePIDs, timeout: timeout) { return }
             }
 
-            if candidatePIDs.isEmpty { candidatePIDs.formUnion(serviceProcessIDsOwningSocket(socketPath)) }
+            if candidatePIDs.isEmpty { candidatePIDs.formUnion(serviceProcessIDsOwningSocket(socketPath, timeout: timeout) ?? []) }
             terminateServiceProcesses(candidatePIDs, timeout: timeout)
         }
 
@@ -298,20 +296,28 @@ import Foundation
             return false
         }
 
-        static func serviceProcessIDsOwningSocket(_ socketPath: String) -> Set<pid_t> {
+        /// Returns nil when the sweep never produced a trustworthy answer (lsof hit the deadline,
+        /// failed to launch, or exited nonzero): an indeterminate probe, not proof the socket is
+        /// unowned. Callers that destroy state on "no owner" must treat nil as "owner unknown". Only
+        /// a clean, completed sweep returns a real (possibly empty) confirmed-unowned set.
+        static func serviceProcessIDsOwningSocket(_ socketPath: String, timeout: TimeInterval) -> Set<pid_t>? {
             let candidates = ["/usr/sbin/lsof", "/usr/bin/lsof"]
             guard let executablePath = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else { return [] }
-            guard let result = capturedStandardOutput(executableURL: URL(fileURLWithPath: executablePath), arguments: ["-nP", "-U"]),
+            guard
+                let result = capturedStandardOutput(executableURL: URL(fileURLWithPath: executablePath), arguments: ["-nP", "-U"], timeout: timeout),
                 result.terminationStatus == 0
-            else { return [] }
+            else { return nil }
             return parseSocketOwnerProcessIDs(String(decoding: result.output, as: UTF8.self), socketPath: socketPath)
         }
 
         /// Runs a short-lived process and captures its stdout. The pipe must be drained BEFORE
         /// waiting for exit: a child that writes more than the kernel's pipe buffer (64KB) blocks
         /// until someone reads, so waiting first deadlocks both processes. `lsof -nP -U` output
-        /// routinely exceeds that buffer on a busy desktop.
-        static func capturedStandardOutput(executableURL: URL, arguments: [String]) -> (terminationStatus: Int32, output: Data)? {
+        /// routinely exceeds that buffer on a busy desktop. A watchdog SIGKILLs the child if it
+        /// outlives `timeout`, so callers with a bounded shutdown budget never block indefinitely.
+        static func capturedStandardOutput(executableURL: URL, arguments: [String], timeout: TimeInterval) -> (
+            terminationStatus: Int32, output: Data
+        )? {
             let process = Process()
             process.executableURL = executableURL
             process.arguments = arguments
@@ -319,8 +325,26 @@ import Foundation
             process.standardOutput = output
             process.standardError = FileHandle.nullDevice
             do { try process.run() } catch { return nil }
+
+            let timedOutLock = NSLock()
+            var timedOut = false
+            let watchdog = DispatchWorkItem {
+                guard process.isRunning else { return }
+                timedOutLock.lock()
+                timedOut = true
+                timedOutLock.unlock()
+                kill(process.processIdentifier, SIGKILL)
+            }
+            DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: watchdog)
+
             let data = output.fileHandleForReading.readDataToEndOfFile()
             process.waitUntilExit()
+            watchdog.cancel()
+
+            timedOutLock.lock()
+            let didTimeOut = timedOut
+            timedOutLock.unlock()
+            if didTimeOut { return nil }
             return (process.terminationStatus, data)
         }
 
@@ -441,9 +465,38 @@ import Foundation
             }
         }
 
-        static func resolveExecutableURL(environment: [String: String] = ProcessInfo.processInfo.environment, fileManager: FileManager = .default)
-            throws -> URL
-        {
+        /// Resolves the `spacesd` binary a client of `profile` should launch.
+        ///
+        /// A profile is only ever served by a daemon that belongs to the build asking for it, so the
+        /// candidate list is split by where a candidate comes from:
+        ///
+        /// - `SPACESD_EXECUTABLE` wins for every profile. It names one binary outright, which makes it a
+        ///   deliberate choice rather than a silent substitution, and the terminal E2E scripts pin their
+        ///   daemon with it.
+        /// - Candidates derived from the running executable — its sibling, its symlink-resolved sibling,
+        ///   and its bundle's resources — apply to every profile, because they necessarily belong to the
+        ///   build that is asking.
+        /// - The installed links (`~/.spaces/bin/spacesd`, `/usr/local/bin/spacesd`) apply only to the
+        ///   installed profile. They are location-fixed and always point at whatever
+        ///   `/Applications/Spaces.app` last installed, which is an unrelated release from a repo-local
+        ///   build's point of view.
+        /// - The checkout-relative build products under the current working directory apply only to a
+        ///   development profile. They describe whichever checkout the process happens to have been
+        ///   started in, which says nothing about the installed profile.
+        ///
+        /// Both halves of that split prevent the same failure in opposite directions: a foreign daemon
+        /// brought up on this profile's runtime directory and socket answers, but on a different wire
+        /// protocol, so the client reports `daemonWireIncompatible` and the real cause — an entirely
+        /// different build serving the profile — stays invisible. A profile with no daemon of its own
+        /// therefore fails with `daemonNotFound` rather than borrowing one.
+        ///
+        /// - Parameter installedLinkURLs: The installed layout's fixed daemon links. Injectable so a
+        ///   test can supply a temporary installed layout instead of the real machine's.
+        static func resolveExecutableURL(
+            environment: [String: String] = ProcessInfo.processInfo.environment, fileManager: FileManager = .default, profile: SpacesProfile,
+            installedLinkURLs: [URL] = [SpacesBinaryLayout.userHelperLinkURL(for: .spacesd), SpacesBinaryLayout.systemLinkURL(for: .spacesd)]
+                .compactMap { $0 }
+        ) throws -> URL {
             let currentExecutablePath = environment["_"] ?? Bundle.main.executableURL?.path ?? CommandLine.arguments.first ?? ""
             let currentExecutableURL = URL(fileURLWithPath: currentExecutablePath)
             let currentExecutableDirectory = currentExecutableURL.deletingLastPathComponent()
@@ -451,24 +504,35 @@ import Foundation
             let currentDirectory = URL(fileURLWithPath: fileManager.currentDirectoryPath, isDirectory: true)
             let bundledResourceDirectory = currentExecutableDirectory.deletingLastPathComponent().appendingPathComponent(
                 "Resources", isDirectory: true)
-            let candidates = [
-                environment["SPACESD_EXECUTABLE"],
-                currentExecutableDirectory.appendingPathComponent("spacesd", isDirectory: false).path(percentEncoded: false),
-                resolvedCurrentExecutableDirectory.appendingPathComponent("spacesd", isDirectory: false).path(percentEncoded: false),
-                Bundle.main.resourceURL?.appendingPathComponent("spacesd", isDirectory: false).path(percentEncoded: false),
-                bundledResourceDirectory.appendingPathComponent("spacesd", isDirectory: false).path(percentEncoded: false),
-                SpacesBinaryLayout.userHelperLinkURL(for: .spacesd)?.path, SpacesBinaryLayout.systemLinkURL(for: .spacesd).path,
-                currentDirectory.appendingPathComponent("apps/macos/.build/debug/spacesd", isDirectory: false).path(percentEncoded: false),
-                currentDirectory.appendingPathComponent("apps/macos/.build/release/spacesd", isDirectory: false).path(percentEncoded: false),
-                currentDirectory.appendingPathComponent(".build/debug/spacesd", isDirectory: false).path(percentEncoded: false),
-                currentDirectory.appendingPathComponent(".build/release/spacesd", isDirectory: false).path(percentEncoded: false),
-            ].compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+
+            // Candidates repeat routinely — an unresolved symlink, or an executable whose directory is
+            // also the bundle's resource directory — and the list is reported verbatim when nothing
+            // matches, so keep it deduplicated.
+            var candidates: [String] = []
+            func appendCandidate(_ path: String?) {
+                guard let trimmed = path?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else { return }
+                guard !candidates.contains(trimmed) else { return }
+                candidates.append(trimmed)
+            }
+
+            appendCandidate(environment["SPACESD_EXECUTABLE"])
+            appendCandidate(currentExecutableDirectory.appendingPathComponent("spacesd", isDirectory: false).path(percentEncoded: false))
+            appendCandidate(resolvedCurrentExecutableDirectory.appendingPathComponent("spacesd", isDirectory: false).path(percentEncoded: false))
+            appendCandidate(Bundle.main.resourceURL?.appendingPathComponent("spacesd", isDirectory: false).path(percentEncoded: false))
+            appendCandidate(bundledResourceDirectory.appendingPathComponent("spacesd", isDirectory: false).path(percentEncoded: false))
+            switch profile.source {
+            case .installedFallback: for linkURL in installedLinkURLs { appendCandidate(linkURL.path) }
+            case .developmentWorktree, .explicitDatabasePath:
+                for relativePath in [
+                    "apps/macos/.build/debug/spacesd", "apps/macos/.build/release/spacesd", ".build/debug/spacesd", ".build/release/spacesd",
+                ] { appendCandidate(currentDirectory.appendingPathComponent(relativePath, isDirectory: false).path(percentEncoded: false)) }
+            }
 
             for candidate in candidates where fileManager.isExecutableFile(atPath: candidate) {
                 return URL(fileURLWithPath: candidate, isDirectory: false)
             }
 
-            throw TerminalServiceError.executableNotFound
+            throw TerminalServiceError.daemonNotFound(profileSource: profile.source, profileRoot: profile.rootDirectory, searchedPaths: candidates)
         }
 
         private static func isRunningUnderXCTest() -> Bool {
@@ -486,17 +550,40 @@ import Foundation
     }
 
     public enum TerminalServiceError: LocalizedError {
-        case executableNotFound
+        /// No `spacesd` belonging to the asking build was found for this profile. One case covers both
+        /// profile kinds because it is one event — a profile with no daemon of its own — and the profile
+        /// only decides which half of the excluded candidates has to be explained: an installed profile
+        /// never starts a development build from the current directory, and a development profile never
+        /// starts the installed daemon.
+        case daemonNotFound(profileSource: SpacesProfileSource, profileRoot: String, searchedPaths: [String])
         case daemonWireIncompatible(TerminalServiceDaemonWireIncompatibility)
         case requestFailed(String)
         case serviceStartupTimedOut(String)
 
         public var errorDescription: String? {
             switch self {
-            case .executableNotFound: "The spacesd executable is required to run built-in terminal sessions."
-            case .daemonWireIncompatible(let incompatibility): incompatibility.message
-            case .requestFailed(let message): message
-            case .serviceStartupTimedOut(let path): "Timed out waiting for spacesd to start from \(path)."
+            case .daemonNotFound(let profileSource, let profileRoot, let searchedPaths):
+                let described: (kind: String, explanation: String) =
+                    switch profileSource {
+                    case .installedFallback:
+                        (
+                            "installed",
+                            "An installed profile starts only the daemon shipped with the running build or installed beside it, never a development "
+                                + "build from the current directory. Reinstall Spaces or set SPACESD_EXECUTABLE."
+                        )
+                    case .developmentWorktree, .explicitDatabasePath:
+                        (
+                            "development",
+                            "A development profile never starts the installed daemon (~/.spaces/bin/spacesd, /usr/local/bin/spacesd), which is a "
+                                + "different build and would answer this client on a foreign wire protocol. Build the daemon in this checkout "
+                                + "(swift build --product spacesd) or set SPACESD_EXECUTABLE."
+                        )
+                    }
+                return "No spacesd was found for the \(described.kind) profile at \(profileRoot). \(described.explanation) Searched: "
+                    + searchedPaths.joined(separator: ", ")
+            case .daemonWireIncompatible(let incompatibility): return incompatibility.message
+            case .requestFailed(let message): return message
+            case .serviceStartupTimedOut(let path): return "Timed out waiting for spacesd to start from \(path)."
             }
         }
     }

@@ -6,6 +6,11 @@ public enum SpacesDeviceAPIRequestClientError: LocalizedError {
     case emptyResponse
     case connectionFailed(String)
     case timeout(String)
+    /// A reachable daemon answered with a coded rejection rather than failing to connect. Carries the
+    /// daemon's `errorCode` so callers can branch on the category (e.g. re-authenticate on
+    /// `.unauthorized`) instead of collapsing the rejection into an opaque `.connectionFailed`, which
+    /// would look like a reachability failure and drop the code.
+    case requestRejected(message: String, code: SpacesDeviceErrorCode?)
 
     public var errorDescription: String? {
         switch self {
@@ -13,6 +18,7 @@ public enum SpacesDeviceAPIRequestClientError: LocalizedError {
         case .emptyResponse: "The Device API connection closed before returning a response."
         case .connectionFailed(let message): message
         case .timeout(let message): message
+        case .requestRejected(let message, _): message
         }
     }
 }
@@ -182,6 +188,11 @@ public final class SpacesDeviceAPIStateStreamClient: TerminalRemoteStateStreamCl
         self.onDisconnect = onDisconnect
     }
 
+    /// The receive loop holds this client weakly, so dropping the last reference to a live stream
+    /// leaves its pinned-TLS connection running until something cancels it. Cancelling here makes the
+    /// reference-drop path safe by construction, matching `SpacesDeviceAPIRequestSessionClient`.
+    deinit { stop() }
+
     public func start(timeoutSeconds: TimeInterval = 10) throws {
         let createdConnection = try SpacesPinnedTLSConnector.connect(
             host: host, port: port, certificateFingerprint: certificateFingerprint, timeout: timeoutSeconds)
@@ -210,7 +221,10 @@ public final class SpacesDeviceAPIStateStreamClient: TerminalRemoteStateStreamCl
 
     private static func streamDecodeError(for line: Data, fallback: any Error) -> any Error {
         guard let response = try? SpacesDeviceAPICodec.decodeResponse(line) else { return fallback }
-        return SpacesDeviceAPIRequestClientError.connectionFailed(response.message)
+        // Preserve the daemon's error code: a subscribe the daemon rejects (notably `.unauthorized` for a
+        // revoked token) arrives as a response line here, and the disconnect handler branches on the code
+        // to decide whether to re-authenticate before reconnecting.
+        return SpacesDeviceAPIRequestClientError.requestRejected(message: response.message, code: response.errorCode)
     }
 }
 
@@ -240,6 +254,11 @@ public final class SpacesDeviceAPIOverviewStreamClient: @unchecked Sendable {
         self.onOverview = onOverview
         self.onDisconnect = onDisconnect
     }
+
+    /// The receive loop holds this client weakly, so dropping the last reference to a live stream
+    /// leaves its pinned-TLS connection running until something cancels it. Cancelling here makes the
+    /// reference-drop path safe by construction, matching `SpacesDeviceAPIRequestSessionClient`.
+    deinit { stop() }
 
     public func start(timeoutSeconds: TimeInterval = 10) throws {
         let createdConnection = try SpacesPinnedTLSConnector.connect(

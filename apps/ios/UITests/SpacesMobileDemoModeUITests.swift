@@ -123,11 +123,13 @@ final class SpacesMobileDemoModeUITests: XCTestCase {
 
     /// Overrides the persistence keys through the argument domain so init-time reads see a clean,
     /// not-paired, Demo-off slate regardless of what a shared simulator left on disk. The Data-typed
-    /// device/settings keys are shadowed with a non-Data string so `UserDefaults.data(forKey:)`
-    /// returns nil (empty devices, default unpaired settings); the Bool flag is shadowed to 0.
+    /// device/settings keys are shadowed with the non-Data string "unset" so
+    /// `UserDefaults.data(forKey:)` returns nil (empty devices, default unpaired settings); the Bool
+    /// flag is shadowed to 0. The shadow value must not start with "-" or `NSArgumentDomain` parses
+    /// it as the next option key and the shadow silently never registers.
     private func applyCleanSlateLaunchArguments(to app: XCUIApplication) {
         app.launchArguments += [
-            "-spaces.mobile.demo-mode-enabled", "0", "-spaces.mobile.paired-devices", "-", "-spaces.mobile.connection-settings", "-",
+            "-spaces.mobile.demo-mode-enabled", "0", "-spaces.mobile.paired-devices", "unset", "-spaces.mobile.connection-settings", "unset",
         ]
     }
 

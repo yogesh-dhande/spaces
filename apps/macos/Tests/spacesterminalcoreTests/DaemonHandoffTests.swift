@@ -177,9 +177,16 @@ final class DaemonHandoffTests: XCTestCase {
     }
 
     func testDescriptorLooksLikePTYMasterDistinguishesPTYFromPipeAndClosedFD() throws {
-        let master = posix_openpt(O_RDWR)
+        // Swift's Linux Glibc overlay does not surface posix_openpt, so allocate the pair
+        // with openpty (exposed on both platforms) and discard the slave.
+        var master: Int32 = -1
+        var slave: Int32 = -1
+        XCTAssertEqual(openpty(&master, &slave, nil, nil, nil), 0, "openpty failed")
         XCTAssertGreaterThanOrEqual(master, 0)
-        defer { if master >= 0 { close(master) } }
+        defer {
+            if master >= 0 { close(master) }
+            if slave >= 0 { close(slave) }
+        }
         XCTAssertTrue(DaemonHandoffStore.descriptorLooksLikePTYMaster(master))
 
         var fds: [Int32] = [0, 0]

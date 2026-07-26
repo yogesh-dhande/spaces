@@ -15,7 +15,7 @@ unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX
 
 fail() {
     echo "setup_ghostty cache restore test failed: $*" >&2
-    for log in seed.out empty-submodule.out restore.out dirty-build.out; do
+    for log in seed.out empty-submodule.out restore.out dirty-build.out foreign-arch.out foreign-arch-reuse.out; do
         if [[ -f "$TMP_ROOT/$log" ]]; then
             echo "--- $log ---" >&2
             cat "$TMP_ROOT/$log" >&2
@@ -152,10 +152,10 @@ chmod +x "$STUB_BIN/gh" "$STUB_BIN/xcodebuild" "$STUB_BIN/xcrun" "$STUB_BIN/zig"
 ARCH="$(uname -m)"
 case "$ARCH" in
     arm64)
-        ZIG_ARCHIVE_NAME="zig-aarch64-macos-0.15.2"
+        ZIG_ARCHIVE_NAME="zig-aarch64-macos-0.16.0"
         ;;
     x86_64)
-        ZIG_ARCHIVE_NAME="zig-x86_64-macos-0.15.2"
+        ZIG_ARCHIVE_NAME="zig-x86_64-macos-0.16.0"
         ;;
     *)
         fail "unsupported test architecture: $ARCH"
@@ -204,7 +204,15 @@ tar -C "$RELEASE_BUILD_ROOT/kit" -czf "$RELEASE_DIR/GhosttyKit.xcframework.tar.g
 tar -C "$RELEASE_BUILD_ROOT/resources" -czf "$RELEASE_DIR/GhosttyKit-resources.tar.gz" "ghostty" "terminfo"
 tar -C "$RELEASE_BUILD_ROOT/vt" -czf "$RELEASE_DIR/libghostty-vt.tar.gz" "include" "lib"
 
-python3 - "$RELEASE_DIR" "$GHOSTTY_SHA" <<'PY'
+# The fixture's build_script_version comes from the script under test: it is part of the artifact
+# key, so a hardcoded copy would go stale on the next bump and stop the release fixture from
+# validating at all.
+BUILD_SCRIPT_VERSION="$(sed -n 's/^BUILD_SCRIPT_VERSION="\(.*\)"$/\1/p' "$SOURCE_SETUP_SCRIPT" | head -n 1)"
+[[ -n "$BUILD_SCRIPT_VERSION" ]] || fail "could not read BUILD_SCRIPT_VERSION from setup_ghostty.sh"
+
+# host_arch is the real host architecture for the same reason: it is part of the artifact key, so a
+# placeholder would make this release fail validation on every run instead of installing cleanly.
+python3 - "$RELEASE_DIR" "$GHOSTTY_SHA" "$BUILD_SCRIPT_VERSION" "$ARCH" <<'PY'
 import hashlib
 import json
 import pathlib
@@ -212,6 +220,8 @@ import sys
 
 release_dir = pathlib.Path(sys.argv[1])
 ghostty_sha = sys.argv[2]
+build_script_version = int(sys.argv[3])
+host_arch = sys.argv[4]
 assets = [
     "GhosttyKit.xcframework.tar.gz",
     "GhosttyKit-resources.tar.gz",
@@ -225,12 +235,12 @@ manifest = {
     "schema_version": 1,
     "ghostty_sha": ghostty_sha,
     "source_url": "https://example.invalid/ghostty.git",
-    "zig_version": "0.15.2",
-    "build_script_version": 2,
+    "zig_version": "0.16.0",
+    "build_script_version": build_script_version,
     "xcode_version": "17.0",
     "xcode_build_version": "17C52",
     "swift_version": "Swift release fixture",
-    "host_arch": "test",
+    "host_arch": host_arch,
     "build_optimize": "ReleaseFast",
     "dirty": False,
     "mode": "build",
@@ -366,7 +376,7 @@ fi
 grep -q "Replacing stale Ghostty cache entry" "$TMP_ROOT/stale.out" || fail "stale entry was not reported as replaced"
 [[ -s "$GH_LOG" ]] || fail "stale-entry run should have downloaded fresh artifacts"
 STALE_VERSION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["build_script_version"])' "$CACHE_ENTRY/ghostty-artifacts/manifest.json")"
-[[ "$STALE_VERSION" == "2" ]] || fail "stale cache entry was not replaced with current artifacts (build_script_version=$STALE_VERSION)"
+[[ "$STALE_VERSION" == "$BUILD_SCRIPT_VERSION" ]] || fail "stale cache entry was not replaced with current artifacts (build_script_version=$STALE_VERSION)"
 
 # --- 4. Dirty builds stay local and never reach the shared cache. ---
 DIRTY_CACHE_DIR="$TMP_ROOT/cache-dirty"
@@ -428,5 +438,164 @@ grep -q "different build-optimize mode; building locally instead" "$TMP_ROOT/opt
 [[ -s "$BUILD_LOG" ]] || fail "Debug setup did not invoke the local build"
 DEBUG_OPTIMIZE="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["build_optimize"])' "$TEMP_APP_ROOT/.local/ghostty-artifacts/manifest.json")"
 [[ "$DEBUG_OPTIMIZE" == "Debug" ]] || fail "Debug build manifest optimize mode is $DEBUG_OPTIMIZE"
+
+# --- 7. With no override, the cache root is the primary checkout, shared by every worktree. ---
+# The scenarios above all pin SPACES_GHOSTTY_CACHE_DIR. This one exercises the derivation itself,
+# which is what keeps `scripts/verify.sh` inside a worktree from seeding a private multi-gigabyte
+# store: a run from a git worktree must read and write the primary checkout's cache.
+PRIMARY_REPO="$TMP_ROOT/primary"
+PRIMARY_APP_ROOT="$PRIMARY_REPO/apps/macos"
+PRIMARY_WORKTREE="$TMP_ROOT/primary-worktree"
+mkdir -p "$PRIMARY_APP_ROOT/scripts"
+cp "$SOURCE_SETUP_SCRIPT" "$PRIMARY_APP_ROOT/scripts/setup_ghostty.sh"
+chmod +x "$PRIMARY_APP_ROOT/scripts/setup_ghostty.sh"
+
+git -C "$PRIMARY_REPO" init -q
+git -C "$PRIMARY_REPO" config user.email "spaces-test@example.com"
+git -C "$PRIMARY_REPO" config user.name "Spaces Test"
+git -C "$PRIMARY_REPO" config commit.gpgsign false
+git -C "$PRIMARY_REPO" add apps/macos/scripts/setup_ghostty.sh
+git -C "$PRIMARY_REPO" update-index --add --cacheinfo 160000 "$GHOSTTY_SHA" apps/macos/vendor/ghostty
+git -C "$PRIMARY_REPO" -c commit.gpgsign=false commit -q -m "Create primary checkout fixture"
+git -C "$PRIMARY_REPO" worktree add -q -b fixture-worktree "$PRIMARY_WORKTREE"
+
+DERIVED_ENV=(
+    "PATH=$STUB_BIN:$PATH"
+    "SPACES_GHOSTTY_SETUP_SKIP_API_VERIFY=1"
+    "SPACES_TEST_BUILD_LOG=$BUILD_LOG"
+    "SPACES_TEST_RELEASE_DIR=$RELEASE_DIR"
+    "SPACES_TEST_ZIG_CACHE_DIR=$ZIG_CACHE_DIR"
+    "SPACES_TEST_GH_LOG=$GH_LOG"
+    "SPACES_TEST_FAKE_VT_LIB=$FAKE_VT_LIB"
+    "SPACES_TEST_FAKE_VT_LIB_NAME=$FAKE_VT_LIB_NAME"
+)
+
+: > "$GH_LOG"
+if ! env "${DERIVED_ENV[@]}" \
+    "$PRIMARY_WORKTREE/apps/macos/scripts/setup_ghostty.sh" --download-only > "$TMP_ROOT/derived-cache.out" 2>&1; then
+    fail "worktree setup with a derived cache root failed"
+fi
+
+DERIVED_ENTRY="$PRIMARY_APP_ROOT/.local/ghostty-cache/$GHOSTTY_SHA/17C52-$ARCH-ReleaseFast"
+[[ -f "$DERIVED_ENTRY/ghostty-artifacts/manifest.json" ]] \
+    || fail "worktree run did not seed the primary checkout's cache"
+[[ ! -d "$PRIMARY_WORKTREE/apps/macos/.local/ghostty-cache" ]] \
+    || fail "worktree run seeded a private per-worktree cache"
+# Artifacts still install into the running tree; only the cache is shared.
+[[ -d "$PRIMARY_WORKTREE/apps/macos/.local/ghosttykit/GhosttyKit.xcframework" ]] \
+    || fail "worktree run did not install artifacts into its own .local"
+
+# A second worktree restores that entry instead of going back to the network.
+SECOND_WORKTREE="$TMP_ROOT/primary-worktree-2"
+git -C "$PRIMARY_REPO" worktree add -q -b fixture-worktree-2 "$SECOND_WORKTREE"
+: > "$GH_LOG"
+if ! env "${DERIVED_ENV[@]}" "SPACES_TEST_GH_FAIL=1" \
+    "$SECOND_WORKTREE/apps/macos/scripts/setup_ghostty.sh" > "$TMP_ROOT/derived-restore.out" 2>&1; then
+    fail "second worktree did not restore from the shared cache"
+fi
+grep -q "Restoring Ghostty artifacts from cache" "$TMP_ROOT/derived-restore.out" \
+    || fail "second worktree did not report a cache restore"
+
+# A plain checkout with no worktrees -- the shape CI runs -- resolves to itself. The forced gh
+# failure means the only way this can succeed is by finding the entry the worktree seeded.
+: > "$GH_LOG"
+if ! env "${DERIVED_ENV[@]}" "SPACES_TEST_GH_FAIL=1" \
+    "$PRIMARY_APP_ROOT/scripts/setup_ghostty.sh" > "$TMP_ROOT/derived-primary.out" 2>&1; then
+    fail "primary checkout did not restore from its own cache"
+fi
+grep -q "Restoring Ghostty artifacts from cache" "$TMP_ROOT/derived-primary.out" \
+    || fail "primary checkout did not resolve the cache to itself"
+[[ -d "$PRIMARY_APP_ROOT/.local/ghosttykit/GhosttyKit.xcframework" ]] \
+    || fail "primary checkout restore did not install GhosttyKit"
+
+# --- 8. Outside a Git checkout the derivation fails loudly instead of guessing. ---
+# A silent per-tree cache would look like a working cache while every tree stored its own copy,
+# so the missing checkout has to surface as an error.
+rm -rf "$TEMP_APP_ROOT/.local"
+set +e
+env "${DERIVED_ENV[@]}" "$TEMP_APP_ROOT/scripts/setup_ghostty.sh" --download-only \
+    > "$TMP_ROOT/no-checkout.out" 2>&1
+NO_CHECKOUT_STATUS=$?
+set -e
+
+[[ "$NO_CHECKOUT_STATUS" -ne 0 ]] || fail "setup outside a Git checkout should not succeed"
+grep -q "unable to locate the primary checkout for the shared Ghostty artifact cache" "$TMP_ROOT/no-checkout.out" \
+    || fail "setup outside a Git checkout did not explain the missing primary checkout"
+
+# --- 9. Artifacts recorded for another architecture are rejected on every reuse path. ---
+# libghostty-vt is a host-native dynamic library, so artifacts built on another architecture would
+# unpack, pass the Mach-O presence check, and only fail when something loaded the library. The
+# architecture is part of the artifact key for that reason, and both key checks have to enforce it:
+# the download validation below, and the installed-manifest reuse check after it.
+if [[ "$ARCH" == "arm64" ]]; then
+    FOREIGN_ARCH="x86_64"
+else
+    FOREIGN_ARCH="arm64"
+fi
+
+FOREIGN_RELEASE_DIR="$TMP_ROOT/release-foreign-arch"
+FOREIGN_CACHE_DIR="$TMP_ROOT/cache-foreign-arch"
+mkdir -p "$FOREIGN_RELEASE_DIR" "$FOREIGN_CACHE_DIR"
+cp "$RELEASE_DIR"/*.tar.gz "$FOREIGN_RELEASE_DIR"/
+
+rewrite_manifest_host_arch() {
+    python3 - "$1" "$2" "$3" <<'PY'
+import json
+import pathlib
+import sys
+
+source, dest, host_arch = sys.argv[1:4]
+manifest = json.loads(pathlib.Path(source).read_text(encoding="utf-8"))
+manifest["host_arch"] = host_arch
+pathlib.Path(dest).write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+}
+
+rewrite_manifest_host_arch "$RELEASE_DIR/manifest.json" "$FOREIGN_RELEASE_DIR/manifest.json" "$FOREIGN_ARCH"
+(
+    cd "$FOREIGN_RELEASE_DIR"
+    shasum -a 256 \
+        "GhosttyKit.xcframework.tar.gz" \
+        "GhosttyKit-resources.tar.gz" \
+        "libghostty-vt.tar.gz" \
+        "manifest.json" > "SHA256SUMS"
+)
+
+git -C "$TEMP_GHOSTTY_ROOT" clean -fdx >/dev/null 2>&1
+rm -rf "$TEMP_APP_ROOT/.local"
+place_fake_zig
+: > "$GH_LOG"
+: > "$BUILD_LOG"
+if ! env "${SETUP_ENV[@]}" \
+    "SPACES_TEST_RELEASE_DIR=$FOREIGN_RELEASE_DIR" \
+    "SPACES_GHOSTTY_CACHE_DIR=$FOREIGN_CACHE_DIR" \
+    "$TEMP_APP_ROOT/scripts/setup_ghostty.sh" > "$TMP_ROOT/foreign-arch.out" 2>&1; then
+    fail "foreign-architecture setup failed"
+fi
+
+grep -q "different host architecture; building locally instead" "$TMP_ROOT/foreign-arch.out" \
+    || fail "foreign-architecture download was not rejected in favour of a local build"
+[[ -s "$BUILD_LOG" ]] || fail "foreign-architecture setup did not invoke the local build"
+INSTALLED_ARCH="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["host_arch"])' \
+    "$TEMP_APP_ROOT/.local/ghostty-artifacts/manifest.json")"
+[[ "$INSTALLED_ARCH" == "$ARCH" ]] || fail "installed manifest records host_arch $INSTALLED_ARCH, not $ARCH"
+
+# Installed artifacts recorded for another architecture are not reused either. With the network
+# stubbed to fail and an empty cache, the only way this run can succeed is by reusing them.
+EMPTY_CACHE_DIR="$TMP_ROOT/cache-foreign-arch-reuse"
+rewrite_manifest_host_arch \
+    "$TEMP_APP_ROOT/.local/ghostty-artifacts/manifest.json" \
+    "$TEMP_APP_ROOT/.local/ghostty-artifacts/manifest.json" \
+    "$FOREIGN_ARCH"
+: > "$GH_LOG"
+set +e
+env "${SETUP_ENV[@]}" "SPACES_TEST_GH_FAIL=1" "SPACES_GHOSTTY_CACHE_DIR=$EMPTY_CACHE_DIR" \
+    "$TEMP_APP_ROOT/scripts/setup_ghostty.sh" > "$TMP_ROOT/foreign-arch-reuse.out" 2>&1
+FOREIGN_REUSE_STATUS=$?
+set -e
+
+[[ "$FOREIGN_REUSE_STATUS" -ne 0 ]] || fail "setup reused installed artifacts recorded for another architecture"
+grep -q "Local Ghostty artifact manifest does not match current Ghostty setup inputs" \
+    "$TMP_ROOT/foreign-arch-reuse.out" || fail "foreign-architecture local artifacts were not rejected by the manifest check"
 
 echo "setup_ghostty cache restore test passed"

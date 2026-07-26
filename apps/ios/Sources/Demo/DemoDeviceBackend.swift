@@ -11,6 +11,12 @@ import spacesterminalcore
 /// notice, and the mutations the UI actually offers (workspace/process/agent run-stop-restart) flip
 /// in-memory row state and return the refreshed overview the daemon returns. All mutations are
 /// session-lifetime only; relaunching reloads the pristine bundle.
+///
+/// Starting a row that has no recorded session of its own (a `notStarted` row, whether started directly
+/// or by a workspace launch) synthesizes consistent state: the row is given a deterministic synthetic
+/// session and process/agent id, and a matching session summary is published, so the launched row opens
+/// a real terminal. The synthetic session replays the recording of a same-kind, same-name recorded slug,
+/// resolved through `syntheticSessionAlias` on every stream/state path.
 actor DemoDeviceBackend: SpacesDeviceAPIBackend {
     /// Shown when a viewer tries to type into a demo terminal.
     static let terminalInputRejection = "Terminal input requires a paired Mac (Demo Mode)."
@@ -24,6 +30,9 @@ actor DemoDeviceBackend: SpacesDeviceAPIBackend {
     /// The last viewport each session was resized to. The recorded snapshot stays at its captured grid;
     /// this only patches `runtimeState.columns/rows` so the viewer sees its own size acknowledged.
     private var requestedGridBySession: [String: DemoRecordingGrid] = [:]
+    /// Synthetic session ids minted for started `notStarted` rows, mapped to the recorded slug they
+    /// replay. Resolved on every stream/state path so the synthesized session serves a real recording.
+    private var syntheticSessionAlias: [String: String] = [:]
 
     init(library: DemoRecordingLibrary) {
         self.library = library
@@ -42,10 +51,8 @@ actor DemoDeviceBackend: SpacesDeviceAPIBackend {
     nonisolated func openSessionStream(
         request: SpacesDeviceAPIRequest, onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
         onDisconnect: @escaping @MainActor (Error?) -> Void
-    ) throws -> SpacesDeviceAPIStreamHandle {
-        guard case .subscribe(let subscription) = request.command else {
-            throw DemoRecordingLibraryError.recordingMissing(sessionID: "unknown")
-        }
+    ) async throws -> SpacesDeviceAPIStreamHandle {
+        guard case .subscribe(let subscription) = request.command else { throw DemoRecordingLibraryError.recordingMissing(sessionID: "unknown") }
         let sessionID = subscription.sessionID
         let lifecycle = DemoStreamLifecycle(onDisconnect: onDisconnect)
         let task = Task {
@@ -74,8 +81,10 @@ actor DemoDeviceBackend: SpacesDeviceAPIBackend {
         case .terminalControl(let request): return serveTerminalControl(request)
         case .terminalPasteImage: return reject(Self.terminalInputRejection)
 
-        case .launchWorkspace(let request): return serveWorkspaceLifecycle(workspaceID: request.workspaceID, running: true, message: "Started workspace.")
-        case .stopWorkspace(let request): return serveWorkspaceLifecycle(workspaceID: request.workspaceID, running: false, message: "Stopped workspace.")
+        case .launchWorkspace(let request):
+            return serveWorkspaceLifecycle(workspaceID: request.workspaceID, running: true, message: "Started workspace.")
+        case .stopWorkspace(let request):
+            return serveWorkspaceLifecycle(workspaceID: request.workspaceID, running: false, message: "Stopped workspace.")
         case .restartWorkspace(let request):
             return serveWorkspaceLifecycle(workspaceID: request.workspaceID, running: true, message: "Restarted workspace.")
 
@@ -113,8 +122,7 @@ actor DemoDeviceBackend: SpacesDeviceAPIBackend {
             .readTerminalLinkChunk:
             return reject(Self.unavailableInDemo)
 
-        default:
-            return reject(Self.unsupportedInDemo)
+        default: return reject(Self.unsupportedInDemo)
         }
     }
 
@@ -130,23 +138,23 @@ actor DemoDeviceBackend: SpacesDeviceAPIBackend {
     /// write to the pty (send/key/takeover) is refused with the demo-input notice.
     private func serveTerminalControl(_ request: SpacesDeviceTerminalControlRequest) -> SpacesDeviceAPIResponse {
         switch request.action {
-        case .attach, .detach, .heartbeat, .scroll, .clearScreen, .setAppearance:
-            return ok()
+        case .attach, .detach, .heartbeat, .scroll, .clearScreen, .setAppearance: return ok()
         case .resize:
             if let columns = request.columns, let rows = request.rows {
                 requestedGridBySession[request.sessionID] = DemoRecordingGrid(columns: columns, rows: rows)
             }
             return ok()
-        case .send, .key, .takeover:
-            return reject(Self.terminalInputRejection)
+        case .send, .key, .takeover: return reject(Self.terminalInputRejection)
         }
     }
 
     // MARK: - Stream support
 
     private func recordedPayload(forSessionID sessionID: String) -> GhosttyRemoteSessionStatePayload? {
+        // A synthesized session aliases to a recorded slug; a recorded session aliases to itself.
+        let slug = syntheticSessionAlias[sessionID] ?? sessionID
         let requested = requestedGridBySession[sessionID]
-        guard let payload = library.payload(forSessionSlug: sessionID, requested: requested) else { return nil }
+        guard let payload = library.payload(forSessionSlug: slug, requested: requested) else { return nil }
         guard let requested, let runtimeState = payload.runtimeState else { return payload }
         // The recorded snapshot stays at its captured grid; only the runtime dimensions follow the
         // viewer's resize, mirroring how a real daemon acks a resize before the next render lands.
@@ -157,47 +165,171 @@ actor DemoDeviceBackend: SpacesDeviceAPIBackend {
     // MARK: - Mutations
 
     private func serveWorkspaceLifecycle(workspaceID: String, running: Bool, message: String) -> SpacesDeviceAPIResponse {
-        guard overview.workspaces.contains(where: { $0.id == workspaceID }) else { return notFound("workspace") }
-        overview = overview.demoReplacingWorkspace(id: workspaceID) { workspace in
-            let processRows = workspace.processRows.map { running ? $0.demoRunning() : $0.demoStopped(at: Self.nowTimestamp()) }
-            let agentRows = workspace.codingAgentRows.map { running ? $0.demoRunning() : $0.demoStopped(at: Self.nowTimestamp()) }
-            return workspace.demoWith(processRows: processRows, codingAgentRows: agentRows)
+        guard let workspace = overview.workspaces.first(where: { $0.id == workspaceID }) else { return notFound("workspace") }
+        var declined = false
+        var syntheses: [SynthesizedSession] = []
+        let processRows = workspace.processRows.map { row -> SpacesDeviceWorkspaceProcessRow in
+            guard running else { return row.demoStopped(at: Self.nowTimestamp()) }
+            guard let started = startedProcessRow(row) else {
+                declined = true
+                return row
+            }
+            if let synthesis = started.synthesis { syntheses.append(synthesis) }
+            return started.row
         }
+        let agentRows = workspace.codingAgentRows.map { row -> SpacesDeviceWorkspaceCodingAgentRow in
+            guard running else { return row.demoStopped(at: Self.nowTimestamp()) }
+            guard let started = startedAgentRow(row) else {
+                declined = true
+                return row
+            }
+            if let synthesis = started.synthesis { syntheses.append(synthesis) }
+            return started.row
+        }
+        guard !declined else { return reject(Self.unsupportedInDemo) }
+        commitMutation(workspaceID: workspaceID, processRows: processRows, codingAgentRows: agentRows, syntheses: syntheses)
         return mutationResponse(message: message, workspaceID: workspaceID)
     }
 
-    private func serveProcessMutation(
-        workspaceID: String, running: Bool, message: String, matches: (SpacesDeviceWorkspaceProcessRow) -> Bool
-    ) -> SpacesDeviceAPIResponse {
-        guard overview.workspaces.contains(where: { $0.id == workspaceID }) else { return notFound("workspace") }
+    private func serveProcessMutation(workspaceID: String, running: Bool, message: String, matches: (SpacesDeviceWorkspaceProcessRow) -> Bool)
+        -> SpacesDeviceAPIResponse
+    {
+        guard let workspace = overview.workspaces.first(where: { $0.id == workspaceID }) else { return notFound("workspace") }
         var didMatch = false
-        overview = overview.demoReplacingWorkspace(id: workspaceID) { workspace in
-            let processRows = workspace.processRows.map { row -> SpacesDeviceWorkspaceProcessRow in
-                guard matches(row) else { return row }
-                didMatch = true
-                return running ? row.demoRunning() : row.demoStopped(at: Self.nowTimestamp())
+        var declined = false
+        var syntheses: [SynthesizedSession] = []
+        let processRows = workspace.processRows.map { row -> SpacesDeviceWorkspaceProcessRow in
+            guard matches(row) else { return row }
+            didMatch = true
+            guard running else { return row.demoStopped(at: Self.nowTimestamp()) }
+            guard let started = startedProcessRow(row) else {
+                declined = true
+                return row
             }
-            return workspace.demoWith(processRows: processRows, codingAgentRows: workspace.codingAgentRows)
+            if let synthesis = started.synthesis { syntheses.append(synthesis) }
+            return started.row
         }
         guard didMatch else { return notFound("process") }
+        guard !declined else { return reject(Self.unsupportedInDemo) }
+        commitMutation(workspaceID: workspaceID, processRows: processRows, codingAgentRows: workspace.codingAgentRows, syntheses: syntheses)
         return mutationResponse(message: message, workspaceID: workspaceID)
     }
 
-    private func serveAgentMutation(
-        workspaceID: String, running: Bool, message: String, matches: (SpacesDeviceWorkspaceCodingAgentRow) -> Bool
-    ) -> SpacesDeviceAPIResponse {
-        guard overview.workspaces.contains(where: { $0.id == workspaceID }) else { return notFound("workspace") }
+    private func serveAgentMutation(workspaceID: String, running: Bool, message: String, matches: (SpacesDeviceWorkspaceCodingAgentRow) -> Bool)
+        -> SpacesDeviceAPIResponse
+    {
+        guard let workspace = overview.workspaces.first(where: { $0.id == workspaceID }) else { return notFound("workspace") }
         var didMatch = false
-        overview = overview.demoReplacingWorkspace(id: workspaceID) { workspace in
-            let agentRows = workspace.codingAgentRows.map { row -> SpacesDeviceWorkspaceCodingAgentRow in
-                guard matches(row) else { return row }
-                didMatch = true
-                return running ? row.demoRunning() : row.demoStopped(at: Self.nowTimestamp())
+        var declined = false
+        var syntheses: [SynthesizedSession] = []
+        let agentRows = workspace.codingAgentRows.map { row -> SpacesDeviceWorkspaceCodingAgentRow in
+            guard matches(row) else { return row }
+            didMatch = true
+            guard running else { return row.demoStopped(at: Self.nowTimestamp()) }
+            guard let started = startedAgentRow(row) else {
+                declined = true
+                return row
             }
-            return workspace.demoWith(processRows: workspace.processRows, codingAgentRows: agentRows)
+            if let synthesis = started.synthesis { syntheses.append(synthesis) }
+            return started.row
         }
         guard didMatch else { return notFound("agent") }
+        guard !declined else { return reject(Self.unsupportedInDemo) }
+        commitMutation(workspaceID: workspaceID, processRows: workspace.processRows, codingAgentRows: agentRows, syntheses: syntheses)
         return mutationResponse(message: message, workspaceID: workspaceID)
+    }
+
+    // MARK: - Session synthesis
+
+    /// A session synthesized for a started `notStarted` row: the alias to register and the summary to
+    /// publish, committed together only once the whole mutation is confirmed to proceed.
+    private struct SynthesizedSession {
+        let sessionID: String
+        let slug: String
+        let summary: SpacesDeviceTerminalSessionSummary
+    }
+
+    /// A started process row plus the session synthesized for it, if any (`nil` for rows that already
+    /// own a recorded session).
+    private func startedProcessRow(_ row: SpacesDeviceWorkspaceProcessRow) -> (row: SpacesDeviceWorkspaceProcessRow, synthesis: SynthesizedSession?)?
+    {
+        guard row.sessionID == nil else { return (row.demoRunning(), nil) }
+        guard let synthesis = synthesizeSession(kind: "process", workspaceID: row.workspaceID, rowID: row.id, title: row.name) else { return nil }
+        let running = SpacesDeviceWorkspaceProcessRow(
+            id: row.id, workspaceID: row.workspaceID, name: row.name, command: row.command, templateID: row.templateID,
+            processID: synthesis.runtimeID, sessionID: synthesis.session.sessionID, runState: .running, exitedAt: nil, canRun: false, canStop: true,
+            canRestart: true)
+        return (running, synthesis.session)
+    }
+
+    private func startedAgentRow(_ row: SpacesDeviceWorkspaceCodingAgentRow) -> (
+        row: SpacesDeviceWorkspaceCodingAgentRow, synthesis: SynthesizedSession?
+    )? {
+        guard row.sessionID == nil else { return (row.demoRunning(), nil) }
+        guard let synthesis = synthesizeSession(kind: "agent", workspaceID: row.workspaceID, rowID: row.id, title: row.name) else { return nil }
+        let running = SpacesDeviceWorkspaceCodingAgentRow(
+            id: row.id, workspaceID: row.workspaceID, name: row.name, command: row.command, launcherID: row.launcherID, agentID: synthesis.runtimeID,
+            sessionID: synthesis.session.sessionID, isConfigured: row.isConfigured, runState: .running, activityState: .spinning,
+            updatedAt: Self.nowTimestamp(), canRun: false, canStop: true, canRestart: true)
+        return (running, synthesis.session)
+    }
+
+    /// Builds the synthetic ids and session summary for a started `notStarted` row, replaying a same-kind,
+    /// same-name recorded slug. Returns `nil` when no recorded slug matches the row's name, so the caller
+    /// declines the mutation rather than publishing a session with no recording behind it.
+    private func synthesizeSession(kind: String, workspaceID: String, rowID: String, title: String) -> (
+        runtimeID: String, session: SynthesizedSession
+    )? {
+        guard let slug = matchedRecordedSlug(kind: kind, title: title), let template = library.overview.sessions.first(where: { $0.id == slug })
+        else { return nil }
+        // Deterministic per row so repeated mutations in the same backend lifetime reuse one identity.
+        let sessionID = "demo-synth-session:\(workspaceID):\(rowID)"
+        let runtimeID = "demo-synth-runtime:\(workspaceID):\(rowID)"
+        let summary = syntheticSummary(from: template, id: sessionID, workspaceID: workspaceID, title: title, rowSourceID: runtimeID)
+        return (runtimeID, SynthesizedSession(sessionID: sessionID, slug: slug, summary: summary))
+    }
+
+    /// The deterministic recorded slug a started row of `kind` named `title` replays: the alphabetically
+    /// first matching recorded session, so a name shared across workspaces (e.g. "backend") resolves the
+    /// same way every time.
+    private func matchedRecordedSlug(kind: String, title: String) -> String? {
+        library.manifest.sessions.filter { $0.kind == kind && $0.title == title }.map(\.stableID).min()
+    }
+
+    /// A session summary for a synthesized session: the matched slug's summary with a fresh identity,
+    /// workspace, title, running state, and load-time timestamps.
+    private func syntheticSummary(
+        from template: SpacesDeviceTerminalSessionSummary, id: String, workspaceID: String, title: String, rowSourceID: String
+    ) -> SpacesDeviceTerminalSessionSummary {
+        let timestamp = Self.nowTimestamp()
+        return SpacesDeviceTerminalSessionSummary(
+            id: id, title: title, workingDirectory: template.workingDirectory, shell: template.shell, command: template.command, state: .running,
+            backend: template.backend, lifetimePolicy: template.lifetimePolicy, servicePID: template.servicePID, childPID: template.childPID,
+            workspaceID: workspaceID, workspaceTitle: template.workspaceTitle, projectID: template.projectID, projectName: template.projectName,
+            createdAt: timestamp, updatedAt: timestamp, isControlAvailable: template.isControlAvailable,
+            isSubscriptionAvailable: template.isSubscriptionAvailable, attachmentSnapshot: template.attachmentSnapshot, rowKind: template.rowKind,
+            rowSourceID: rowSourceID, hasFinalRender: template.hasFinalRender, foregroundDetectedAgentKind: template.foregroundDetectedAgentKind)
+    }
+
+    /// Registers the synthesized aliases and publishes their summaries, then replaces the workspace's rows
+    /// — the single commit point every mutation reaches once it is confirmed to proceed.
+    private func commitMutation(
+        workspaceID: String, processRows: [SpacesDeviceWorkspaceProcessRow], codingAgentRows: [SpacesDeviceWorkspaceCodingAgentRow],
+        syntheses: [SynthesizedSession]
+    ) {
+        var sessions = overview.sessions
+        for synthesis in syntheses {
+            syntheticSessionAlias[synthesis.sessionID] = synthesis.slug
+            if let index = sessions.firstIndex(where: { $0.id == synthesis.sessionID }) {
+                sessions[index] = synthesis.summary
+            } else {
+                sessions.append(synthesis.summary)
+            }
+        }
+        let workspace = overview.workspaces.first { $0.id == workspaceID }
+        guard let workspace else { return }
+        let updated = workspace.demoWith(processRows: processRows, codingAgentRows: codingAgentRows)
+        overview = overview.demoReplacing(workspaceID: workspaceID, workspace: updated, sessions: sessions)
     }
 
     // MARK: - Response builders
@@ -213,16 +345,15 @@ actor DemoDeviceBackend: SpacesDeviceAPIBackend {
     }
 
     private func mutationResponse(message: String, workspaceID: String?) -> SpacesDeviceAPIResponse {
-        SpacesDeviceAPIResponse(ok: true, message: message, result: .mutation(SpacesDeviceMutationResult(overview: overview, workspaceID: workspaceID)))
+        SpacesDeviceAPIResponse(
+            ok: true, message: message, result: .mutation(SpacesDeviceMutationResult(overview: overview, workspaceID: workspaceID)))
     }
 
     private static func nowTimestamp() -> String { TerminalSessionTimestamp.string(from: Date()) }
 }
 
 /// Matches a process row against whatever identifier the request carried (id, template, or key).
-private func matchesProcess(
-    _ row: SpacesDeviceWorkspaceProcessRow, processID: String?, processKey: String?, processTemplateID: String?
-) -> Bool {
+private func matchesProcess(_ row: SpacesDeviceWorkspaceProcessRow, processID: String?, processKey: String?, processTemplateID: String?) -> Bool {
     if let processID, processID == row.processID || processID == row.id { return true }
     if let processTemplateID, processTemplateID == row.templateID { return true }
     if let processKey, processKey == row.name { return true }
@@ -267,22 +398,27 @@ private final class DemoStreamLifecycle: @unchecked Sendable {
 // MARK: - In-memory row edits
 
 extension SpacesDeviceOverviewPayload {
-    /// Returns a copy with one workspace replaced by `transform`. Other workspaces, projects, sessions,
-    /// and daemon status are carried through unchanged.
-    fileprivate func demoReplacingWorkspace(
-        id: String, _ transform: (SpacesDeviceWorkspaceSummary) -> SpacesDeviceWorkspaceSummary
-    ) -> SpacesDeviceOverviewPayload {
-        let workspaces = workspaces.map { $0.id == id ? transform($0) : $0 }
-        return SpacesDeviceOverviewPayload(projects: projects, workspaces: workspaces, sessions: sessions, daemonStatus: daemonStatus)
+    /// Returns a copy with one workspace and the session list replaced. Projects and daemon status carry
+    /// through unchanged. Sessions are replaced wholesale so a mutation can publish synthesized session
+    /// summaries alongside the mutated workspace in one step.
+    fileprivate func demoReplacing(workspaceID: String, workspace: SpacesDeviceWorkspaceSummary, sessions: [SpacesDeviceTerminalSessionSummary])
+        -> SpacesDeviceOverviewPayload
+    {
+        let workspaces = workspaces.map { $0.id == workspaceID ? workspace : $0 }
+        // The demo daemon retains exactly the sessions it publishes: every demo session is either a
+        // recorded replay or a synthesized row-backed session, so the keep-set is the session ids.
+        return SpacesDeviceOverviewPayload(
+            projects: projects, workspaces: workspaces, sessions: sessions, retainedTerminalSessionIDs: sessions.map(\.id).sorted(),
+            daemonStatus: daemonStatus)
     }
 }
 
 extension SpacesDeviceWorkspaceSummary {
     /// Rebuilds the workspace with new process/agent rows, recomputing `isRunning` from them so the
     /// summary stays internally consistent after a mutation.
-    fileprivate func demoWith(
-        processRows: [SpacesDeviceWorkspaceProcessRow], codingAgentRows: [SpacesDeviceWorkspaceCodingAgentRow]
-    ) -> SpacesDeviceWorkspaceSummary {
+    fileprivate func demoWith(processRows: [SpacesDeviceWorkspaceProcessRow], codingAgentRows: [SpacesDeviceWorkspaceCodingAgentRow])
+        -> SpacesDeviceWorkspaceSummary
+    {
         let running = processRows.contains { $0.runState == .running } || codingAgentRows.contains { $0.runState == .running }
         return SpacesDeviceWorkspaceSummary(
             id: id, projectID: projectID, projectName: projectName, branch: branch, baseBranch: baseBranch, dir: dir, isRunning: running,
@@ -317,7 +453,8 @@ extension SpacesDeviceWorkspaceCodingAgentRow {
     fileprivate func demoStopped(at updatedAt: String) -> SpacesDeviceWorkspaceCodingAgentRow {
         SpacesDeviceWorkspaceCodingAgentRow(
             id: id, workspaceID: workspaceID, name: name, command: command, launcherID: launcherID, agentID: agentID, sessionID: sessionID,
-            isConfigured: isConfigured, runState: .exited, activityState: .exited, updatedAt: updatedAt, canRun: true, canStop: false, canRestart: true)
+            isConfigured: isConfigured, runState: .exited, activityState: .exited, updatedAt: updatedAt, canRun: true, canStop: false,
+            canRestart: true)
     }
 }
 

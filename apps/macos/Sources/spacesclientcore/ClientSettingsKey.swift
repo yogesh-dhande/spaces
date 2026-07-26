@@ -18,6 +18,8 @@ public enum ClientSettingsKey {
     public static let defaultGUIOpenEditorShortcut = "e"
     public static let guiOpenTerminalShortcut = "gui_open_terminal_shortcut"
     public static let defaultGUIOpenTerminalShortcut = "t"
+    public static let guiNewTabShortcut = "gui_new_tab_shortcut"
+    public static let defaultGUINewTabShortcut = "cmd+t"
     public static let guiOpenFinderShortcut = "gui_open_finder_shortcut"
     public static let defaultGUIOpenFinderShortcut = "f"
     public static let guiOpenSettingsShortcut = "gui_open_settings_shortcut"

@@ -49,11 +49,19 @@ public struct SpacesProfile: Sendable, Equatable {
         self.worktreeHash = worktreeHash
     }
 
+    /// The process's resolved profile, cached behind a fingerprint of every input that can change
+    /// while the process runs: the two profile environment overrides, `HOME`, and the working
+    /// directory (which resolves relative overrides and a relative `argv[0]`). The fingerprint is
+    /// built from `getenv` and a single `getcwd` because `current()` is on hot paths — every
+    /// terminal-session path lookup goes through it — and reading the whole process environment
+    /// dictionary cost more than the `resolve()` work the cache exists to avoid.
     public static func current() throws -> SpacesProfile {
-        let environment = currentProcessEnvironment()
+        let currentDirectoryPath = FileManager.default.currentDirectoryPath
         let fingerprint = cacheFingerprint(
-            environment: environment, currentDirectoryPath: FileManager.default.currentDirectoryPath,
-            executablePath: currentExecutablePath(currentDirectoryPath: FileManager.default.currentDirectoryPath))
+            databasePathOverride: currentEnvironmentValue(for: databasePathEnvironmentVariable),
+            runtimeDirectoryOverride: currentEnvironmentValue(for: runtimeDirectoryEnvironmentVariable),
+            homeDirectory: currentEnvironmentValue(for: homeEnvironmentVariable), currentDirectoryPath: currentDirectoryPath,
+            executablePath: processExecutablePath)
 
         cachedProfileLock.lock()
         if let cachedProfile, cachedProfileFingerprint == fingerprint {
@@ -62,9 +70,11 @@ public struct SpacesProfile: Sendable, Equatable {
         }
         cachedProfileLock.unlock()
 
+        // Miss path only: `resolve` takes a full environment dictionary, so hand it the real one
+        // rather than a subset the fingerprint happens to cover today.
+        let environment = currentProcessEnvironment()
         let resolved = try resolve(
-            environment: environment, homeDirectoryURL: currentHomeDirectoryURL(environment: environment),
-            currentDirectoryPath: FileManager.default.currentDirectoryPath)
+            environment: environment, homeDirectoryURL: currentHomeDirectoryURL(environment: environment), currentDirectoryPath: currentDirectoryPath)
 
         cachedProfileLock.lock()
         cachedProfile = resolved
@@ -196,27 +206,39 @@ public struct SpacesProfile: Sendable, Equatable {
         return absoluteFileURL(path: argument0, currentDirectoryPath: currentDirectoryPath).path
     }
 
+    private static let homeEnvironmentVariable = "HOME"
+
     private static let cachedProfileLock = NSLock()
     private nonisolated(unsafe) static var cachedProfile: SpacesProfile?
     private nonisolated(unsafe) static var cachedProfileFingerprint: String?
 
-    private static func cacheFingerprint(environment: [String: String], currentDirectoryPath: String, executablePath: String?) -> String {
-        [
-            environment[databasePathEnvironmentVariable] ?? "", environment[runtimeDirectoryEnvironmentVariable] ?? "", environment["HOME"] ?? "",
-            currentDirectoryPath, executablePath ?? "",
-        ].joined(separator: "\u{1f}")
+    /// Resolved once per process: the executable backing a running process cannot be swapped under
+    /// it, and resolving it costs a symlink resolution that `current()` would otherwise repeat on
+    /// every call. Swift initializes a `static let` lazily and exactly once, so concurrent callers
+    /// share the single resolution.
+    private static let processExecutablePath: String? = currentExecutablePath(currentDirectoryPath: FileManager.default.currentDirectoryPath)
+
+    private static func cacheFingerprint(
+        databasePathOverride: String?, runtimeDirectoryOverride: String?, homeDirectory: String?, currentDirectoryPath: String,
+        executablePath: String?
+    ) -> String {
+        [databasePathOverride ?? "", runtimeDirectoryOverride ?? "", homeDirectory ?? "", currentDirectoryPath, executablePath ?? ""].joined(
+            separator: "\u{1f}")
     }
 
+    /// The process environment with every key the cache fingerprint watches re-read from the C-level
+    /// environment, so a `setenv` made after process start resolves the same way it fingerprints —
+    /// the fingerprint reads those keys with `getenv`, and resolution must not disagree with it.
     private static func currentProcessEnvironment() -> [String: String] {
         var environment = ProcessInfo.processInfo.environment
-        for key in [databasePathEnvironmentVariable, runtimeDirectoryEnvironmentVariable] {
+        for key in [databasePathEnvironmentVariable, runtimeDirectoryEnvironmentVariable, homeEnvironmentVariable] {
             if let value = currentEnvironmentValue(for: key) { environment[key] = value } else { environment.removeValue(forKey: key) }
         }
         return environment
     }
 
     private static func currentHomeDirectoryURL(environment: [String: String]) -> URL {
-        if let home = trimmed(environment["HOME"]), !home.isEmpty { return URL(fileURLWithPath: home, isDirectory: true) }
+        if let home = trimmed(environment[homeEnvironmentVariable]), !home.isEmpty { return URL(fileURLWithPath: home, isDirectory: true) }
         #if os(macOS)
             return FileManager.default.homeDirectoryForCurrentUser
         #else
@@ -235,7 +257,21 @@ public struct SpacesProfile: Sendable, Equatable {
         #if os(macOS)
             guard let executablePath = executablePath ?? currentExecutablePath(currentDirectoryPath: currentDirectoryPath) else { return nil }
             guard let repoRoot = detectRepoRoot(executablePath: executablePath, fileManager: fileManager) else { return nil }
-            return try? gitProbe.resolveDevelopmentContext(repoRootPath: repoRoot)
+            // The executable lives inside a Spaces checkout, so it is a repo-built binary and must derive
+            // its profile from the worktree. Falling back to the installed profile (~/.spaces) would open the
+            // user's production database with a development build and, on a schema mismatch, crash-loop the
+            // installed daemon. A git probe that throws or returns nothing is therefore fatal here — never a
+            // silent fallback. Explicit SPACES_DB_PATH overrides are handled earlier in `resolve`, so this
+            // path only governs binaries that reached automatic profile detection.
+            do {
+                guard let context = try gitProbe.resolveDevelopmentContext(repoRootPath: repoRoot) else {
+                    throw SpacesProfileResolutionError.repoBuiltGitProbeFailed(
+                        executablePath: executablePath, repoRoot: repoRoot, underlyingError: nil)
+                }
+                return context
+            } catch let error as SpacesProfileResolutionError { throw error } catch {
+                throw SpacesProfileResolutionError.repoBuiltGitProbeFailed(executablePath: executablePath, repoRoot: repoRoot, underlyingError: error)
+            }
         #else
             return nil
         #endif
@@ -275,6 +311,29 @@ public struct SpacesProfile: Sendable, Equatable {
     }
 
     private static func trimmed(_ value: String?) -> String? { value?.trimmingCharacters(in: .whitespacesAndNewlines) }
+}
+
+/// Raised while resolving `SpacesProfile` for a binary that was built inside a Spaces checkout.
+/// Such a binary must never fall back to the installed profile, so a failed git probe surfaces
+/// loudly instead of silently pointing a development build at the installed daemon's database.
+public enum SpacesProfileResolutionError: Error, CustomStringConvertible, LocalizedError {
+    /// The git probe for a repo-built executable threw or returned no development context. Carries the
+    /// executable path, the detected repo root, and the underlying git failure (when there was one).
+    case repoBuiltGitProbeFailed(executablePath: String, repoRoot: String, underlyingError: (any Error)?)
+
+    public var description: String {
+        switch self {
+        case .repoBuiltGitProbeFailed(let executablePath, let repoRoot, let underlyingError):
+            let reason = underlyingError.map { String(describing: $0) } ?? "git probe returned no development context"
+            return "repo-built executable \(executablePath) could not resolve its development profile from repo root \(repoRoot): "
+                + "\(reason). Refusing to fall back to the installed profile (~/.spaces) so a development build cannot open the "
+                + "installed daemon's database."
+        }
+    }
+
+    /// The app's top-level launch catch prints `localizedDescription`; without this conformance that
+    /// renders as a generic NSError stub and drops the diagnostics this error exists to carry.
+    public var errorDescription: String? { description }
 }
 
 public protocol SpacesGitProfileProbe { func resolveDevelopmentContext(repoRootPath: String) throws -> SpacesDevelopmentContext? }

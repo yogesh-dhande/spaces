@@ -15,24 +15,24 @@ import Testing
         layout = PanelLayoutEngine.appendTab(tabID: "tab-2", pane: pane("b", deviceID: "remote"), to: layout)
         let json = try layoutJSON(layout)
         #expect(
-            AppKitController.panelWindowRestoreDecision(layoutJSON: json, loadedDeviceIDs: ["local"], liveSessionIDs: ["sess-a", "sess-b"])
+            AppKitController.panelWindowRestoreDecision(layoutJSON: json, loadedDeviceIDs: ["local"], retainedSessionIDs: ["sess-a", "sess-b"])
                 == .waitForDevices)
         #expect(
             AppKitController.panelWindowRestoreDecision(
-                layoutJSON: json, loadedDeviceIDs: ["local", "remote"], liveSessionIDs: ["sess-a", "sess-b"]) == .open(layout))
+                layoutJSON: json, loadedDeviceIDs: ["local", "remote"], retainedSessionIDs: ["sess-a", "sess-b"]) == .open(layout))
     }
 
     @Test func skipsUnreadableAndFutureVersionRows() {
-        #expect(AppKitController.panelWindowRestoreDecision(layoutJSON: "not json", loadedDeviceIDs: ["local"], liveSessionIDs: []) == .skip)
+        #expect(AppKitController.panelWindowRestoreDecision(layoutJSON: "not json", loadedDeviceIDs: ["local"], retainedSessionIDs: []) == .skip)
         #expect(
-            AppKitController.panelWindowRestoreDecision(layoutJSON: #"{"version":999,"tabs":[]}"#, loadedDeviceIDs: ["local"], liveSessionIDs: [])
+            AppKitController.panelWindowRestoreDecision(layoutJSON: #"{"version":999,"tabs":[]}"#, loadedDeviceIDs: ["local"], retainedSessionIDs: [])
                 == .skip)
     }
 
     @Test func discardsWhenNoSessionSurvivesPruning() throws {
         let layout = PanelLayoutEngine.appendTab(tabID: "tab-1", pane: pane("a"), to: PanelLayout())
         #expect(
-            AppKitController.panelWindowRestoreDecision(layoutJSON: try layoutJSON(layout), loadedDeviceIDs: ["device"], liveSessionIDs: [])
+            AppKitController.panelWindowRestoreDecision(layoutJSON: try layoutJSON(layout), loadedDeviceIDs: ["device"], retainedSessionIDs: [])
                 == .discard)
     }
 
@@ -40,7 +40,7 @@ import Testing
         var layout = PanelLayoutEngine.appendTab(tabID: "tab-1", pane: pane("a"), to: PanelLayout())
         layout = PanelLayoutEngine.appendTab(tabID: "tab-2", pane: pane("b"), to: layout)
         let decision = AppKitController.panelWindowRestoreDecision(
-            layoutJSON: try layoutJSON(layout), loadedDeviceIDs: ["device"], liveSessionIDs: ["sess-b"])
+            layoutJSON: try layoutJSON(layout), loadedDeviceIDs: ["device"], retainedSessionIDs: ["sess-b"])
         guard case .open(let restored) = decision else {
             Issue.record("expected open, got \(decision)")
             return

@@ -28,9 +28,9 @@
 # the iOS app/simulator). The iOS viewer (GhosttyRemoteTerminalView) reports a grid
 # of floor((width - 16) / cellW) x floor((height - 12) / cellH), where the 16/12 are
 # the 8pt/6pt content insets and the cell metrics come from
-# UIFont.monospacedSystemFont(ofSize: 11):
+# UIFont.monospacedSystemFont(ofSize:) at the configured terminal font size (default 11):
 #     cellW = ceil("W".size.width) = ceil(6.7998) = 7 pt
-#     cellH = ceil(font.lineHeight) = ceil(13.127) = 14 pt   (measured on iOS 26 sim)
+#     cellH = ceil(font.lineHeight) = ceil(13.127) = 14 pt   (measured on iOS 26 sim at the default size)
 # For a read-only demo terminal there is no keyboard/accessory occlusion, so the
 # render bounds fill the terminal surface below the ~36pt custom header and inside the
 # device safe area:

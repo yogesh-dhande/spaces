@@ -5,12 +5,12 @@ import spacesdevicecore
 @testable import spacesdeviceapi
 
 final class SpacesDeviceAPISettingsStoreTests: XCTestCase {
-    func testLoadOrCreatePersistsStableDefaultEndpoint() throws {
+    func testLoadOrCreatePersistsStableDefaultEndpointForInstalledProfile() throws {
         try withTemporaryProfile { _ in
-            let store = SpacesDeviceAPISettingsStore()
+            let store = SpacesDeviceAPISettingsStore(profileSource: { .installedFallback })
 
             let created = try store.loadOrCreate()
-            let reloaded = try SpacesDeviceAPISettingsStore().loadOrCreate()
+            let reloaded = try SpacesDeviceAPISettingsStore(profileSource: { .installedFallback }).loadOrCreate()
 
             XCTAssertEqual(created.host, SpacesDeviceAPIDefaults.host)
             XCTAssertEqual(created.port, SpacesDeviceAPIDefaults.port)
@@ -23,8 +23,8 @@ final class SpacesDeviceAPISettingsStoreTests: XCTestCase {
             let environment = [
                 SpacesDeviceAPIDefaults.hostEnvironmentVariable: "127.0.0.1", SpacesDeviceAPIDefaults.portEnvironmentVariable: "51234",
             ]
-            let overridden = try SpacesDeviceAPISettingsStore(environment: environment).loadOrCreate()
-            let stored = try SpacesDeviceAPISettingsStore().loadOrCreate()
+            let overridden = try SpacesDeviceAPISettingsStore(environment: environment, profileSource: { .installedFallback }).loadOrCreate()
+            let stored = try SpacesDeviceAPISettingsStore(profileSource: { .installedFallback }).loadOrCreate()
 
             XCTAssertEqual(overridden.host, "127.0.0.1")
             XCTAssertEqual(overridden.port, 51_234)
@@ -67,10 +67,68 @@ final class SpacesDeviceAPISettingsStoreTests: XCTestCase {
     func testEnvironmentPortOverrideAllowsEphemeralPortWithoutChangingStoredDefaults() throws {
         try withTemporaryProfile { _ in
             let environment = [SpacesDeviceAPIDefaults.portEnvironmentVariable: "0"]
-            let overridden = try SpacesDeviceAPISettingsStore(environment: environment).loadOrCreate()
-            let stored = try SpacesDeviceAPISettingsStore().loadOrCreate()
+            let overridden = try SpacesDeviceAPISettingsStore(environment: environment, profileSource: { .installedFallback }).loadOrCreate()
+            let stored = try SpacesDeviceAPISettingsStore(profileSource: { .installedFallback }).loadOrCreate()
 
             XCTAssertEqual(overridden.port, 0)
+            XCTAssertEqual(stored.port, SpacesDeviceAPIDefaults.port)
+        }
+    }
+
+    func testCanonicalPortNormalizesToEphemeralForDevelopmentProfile() throws {
+        try withTemporaryProfile { _ in
+            let settings = try SpacesDeviceAPISettingsStore(profileSource: { .developmentWorktree }).loadOrCreate()
+
+            XCTAssertEqual(settings.port, 0)
+            XCTAssertEqual(settings.host, SpacesDeviceAPIDefaults.host)
+        }
+    }
+
+    func testCanonicalPortKeptForInstalledProfile() throws {
+        try withTemporaryProfile { _ in
+            let settings = try SpacesDeviceAPISettingsStore(profileSource: { .installedFallback }).loadOrCreate()
+
+            XCTAssertEqual(settings.port, SpacesDeviceAPIDefaults.port)
+        }
+    }
+
+    func testNonCanonicalStoredPortKeptForDevelopmentProfile() throws {
+        try withTemporaryProfile { root in
+            let settingsURL = root.appendingPathComponent("runtime/terminal/device-api.json")
+            try FileManager.default.createDirectory(at: settingsURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data(#"{"host": "0.0.0.0", "port": 51999}"#.utf8).write(to: settingsURL)
+
+            let settings = try SpacesDeviceAPISettingsStore(profileSource: { .developmentWorktree }).loadOrCreate()
+
+            XCTAssertEqual(settings.port, 51_999)
+        }
+    }
+
+    func testEnvironmentPortOverrideWinsOverCanonicalNormalizationForDevelopmentProfile() throws {
+        try withTemporaryProfile { _ in
+            // Env override to a specific port wins even though the profile would otherwise bind ephemerally.
+            let specific = try SpacesDeviceAPISettingsStore(
+                environment: [SpacesDeviceAPIDefaults.portEnvironmentVariable: "51234"], profileSource: { .developmentWorktree }
+            ).loadOrCreate()
+            XCTAssertEqual(specific.port, 51_234)
+
+            // Env override to the canonical port also wins — this is how the Linux systemd install binds it.
+            let canonical = try SpacesDeviceAPISettingsStore(
+                environment: [SpacesDeviceAPIDefaults.portEnvironmentVariable: String(SpacesDeviceAPIDefaults.port)],
+                profileSource: { .developmentWorktree }
+            ).loadOrCreate()
+            XCTAssertEqual(canonical.port, SpacesDeviceAPIDefaults.port)
+        }
+    }
+
+    func testFreshCreateNormalizesEffectivePortButStoredFileKeepsCanonicalDefault() throws {
+        try withTemporaryProfile { root in
+            let settings = try SpacesDeviceAPISettingsStore(profileSource: { .developmentWorktree }).loadOrCreate()
+            XCTAssertEqual(settings.port, 0)
+
+            let settingsURL = root.appendingPathComponent("runtime/terminal/device-api.json")
+            let storedData = try Data(contentsOf: settingsURL)
+            let stored = try JSONDecoder().decode(SpacesDeviceAPISettings.self, from: storedData)
             XCTAssertEqual(stored.port, SpacesDeviceAPIDefaults.port)
         }
     }

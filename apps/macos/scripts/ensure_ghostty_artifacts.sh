@@ -227,6 +227,11 @@ RELEASE_TAG="$(artifact_release_tag)"
 
 if release_exists; then
     echo "==> Found Ghostty artifact release $RELEASE_TAG in $ARTIFACT_REPO"
+    # A release counts as usable only when a strict download accepts it, so "invalid or incomplete"
+    # below deliberately covers manifest key drift (a BUILD_SCRIPT_VERSION, Zig, or Xcode build
+    # version that no longer matches this checkout and toolchain) as well as damaged assets. That
+    # is what stops a release from sitting at an old key forever: the first publishing run after a
+    # key moves rebuilds and republishes at the new key, restoring reuse for everyone on it.
     if "$SETUP_SCRIPT" --download-only --strict; then
         exit 0
     fi

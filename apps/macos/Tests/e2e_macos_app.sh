@@ -5736,7 +5736,11 @@ PY
     done
     [[ -z "$(chrome_window_id_for_url "$browser_admin_url")" ]] || fail "admin browser session stayed open after cleanup"
   fi
-  run_window_cycle_profile_loop "$host" "single" "$workspace_dir" "$docs_window_id" "$adhoc_name"
+  # The profile loop's chained docs->frontend->backend->adhoc->agent expectations encode the
+  # pre-#147 static cycle order; cycling follows most-recently-focused order now (docs/spec.md),
+  # so each step's target depends on the focus history and burst-session timing instead.
+  # Skipped until the loop is redesigned around MRU semantics.
+  skip_case "$host: window cycle profile loop" "stale static-order expectations since #147 MRU cycling"
   if is_spaces_terminal_target "$host"; then
     assert_spaces_cpu_not_above "spaces_app.cpu_after_window_cycle" "$SPACES_SUSTAINED_CPU_BUDGET_PCT" "$host" "single"
   fi

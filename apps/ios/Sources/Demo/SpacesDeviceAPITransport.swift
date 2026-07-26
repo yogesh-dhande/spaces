@@ -31,5 +31,21 @@ protocol SpacesDeviceAPIBackend: Sendable {
     func openSessionStream(
         request: SpacesDeviceAPIRequest, onEvent: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void,
         onDisconnect: @escaping @MainActor (Error?) -> Void
-    ) throws -> SpacesDeviceAPIStreamHandle
+    ) async throws -> SpacesDeviceAPIStreamHandle
+
+    /// The candidate address this backend's endpoint resolution most recently proved reachable, if it has
+    /// one. Lets a caller (e.g. the browser proxy's route table) ask for the address the command channel
+    /// actually validated rather than trusting a possibly-stale persisted record. Defaults to `nil` for a
+    /// backend with no such concept.
+    func currentResolvedHost() async -> String?
+
+    /// Clears any endpoint this backend has already resolved, so the next request or stream re-races
+    /// every candidate instead of continuing to use whichever one most recently answered. Defaults to a
+    /// no-op for a backend with no such concept.
+    func resetEndpointResolution() async
+}
+
+extension SpacesDeviceAPIBackend {
+    func currentResolvedHost() async -> String? { nil }
+    func resetEndpointResolution() async {}
 }

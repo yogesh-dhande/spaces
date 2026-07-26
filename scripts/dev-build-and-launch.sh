@@ -25,25 +25,6 @@ CRASH_DIR="$HOME/Library/Logs/DiagnosticReports"
 POST_LAUNCH_MONITOR_SECONDS="${SPACES_POST_LAUNCH_MONITOR_SECONDS:-45}"
 source "$repo_root/scripts/spaces-profile-helpers.sh"
 
-primary_worktree_dir() {
-  local common_git_dir
-  common_git_dir="$(git -C "$repo_root" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || return 1
-  [[ "$(basename "$common_git_dir")" == ".git" ]] || return 1
-  cd "$common_git_dir/.." && pwd
-}
-
-configure_ghostty_cache() {
-  if [[ -n "${SPACES_GHOSTTY_CACHE_DIR:-}" ]]; then
-    return
-  fi
-
-  local project_dir
-  if project_dir="$(primary_worktree_dir)"; then
-    export SPACES_PROJECT_DIR="${SPACES_PROJECT_DIR:-$project_dir}"
-    export SPACES_GHOSTTY_CACHE_DIR="$project_dir/apps/macos/.local/ghostty-cache"
-  fi
-}
-
 remote_shell_quote() {
   python3 - "$1" <<'PY'
 import shlex
@@ -184,9 +165,24 @@ PY
   echo "Using remote runtime root: $remote_runtime_dir"
 )
 
-configure_ghostty_cache
 "$repo_root/apps/macos/scripts/setup_ghostty.sh"
 "$repo_root/scripts/swiftpm.sh" build
+
+# Ad-hoc signed SwiftPM debug builds get a fresh cdhash on every rebuild, and the cdhash is the
+# app's TCC identity — so the macOS Automation grant for Chrome is lost each build. Re-signing with a
+# stable identity keeps that identity constant so the grant survives rebuilds. Opt in by setting
+# SPACES_DEV_CODESIGN_IDENTITY in the gitignored .env (e.g. an "Apple Development: …" identity).
+# The .env is read in a subshell so its e2e host variables never leak into the launched app.
+dev_codesign_identity="$(
+  set -euo pipefail
+  source "$repo_root/scripts/spaces-e2e-env.sh"
+  spaces_e2e_load_env "$repo_root"
+  printf '%s' "${SPACES_DEV_CODESIGN_IDENTITY:-}"
+)"
+if [[ -n "$dev_codesign_identity" ]]; then
+  codesign --force --preserve-metadata=entitlements --sign "$dev_codesign_identity" "$APP"
+fi
+
 spaces_profile_eval_shell_env "$CLI"
 if [[ -n "${SPACES_DEV_DB_PATH:-}" ]]; then
   export SPACES_DB_PATH="$SPACES_DEV_DB_PATH"

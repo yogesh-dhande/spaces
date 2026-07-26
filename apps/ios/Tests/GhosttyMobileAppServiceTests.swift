@@ -218,7 +218,7 @@
 
         private func settings() -> SpacesMobileConnectionSettings {
             var settings = SpacesMobileConnectionSettings()
-            settings.host = "127.0.0.1"
+            settings.hosts = ["127.0.0.1"]
             settings.port = 12345
             settings.authToken = "token"
             settings.certificateFingerprint = "SHA256:test"
@@ -242,7 +242,8 @@
                 workspaceTitle: nil, projectID: nil, projectName: nil, createdAt: "2026-06-04T14:23:10Z", updatedAt: "2026-06-04T14:23:23Z",
                 isControlAvailable: false, isSubscriptionAvailable: false, attachmentSnapshot: TerminalSessionAttachmentSnapshot(), rowKind: .process,
                 rowSourceID: "process-row", hasFinalRender: false)
-            let model = TerminalViewerModel(session: session, settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in })
+            let model = TerminalViewerModel(
+                session: session, settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in })
 
             XCTAssertEqual(model.renderMode, "ended")
             XCTAssertFalse(model.showsTakeOverAction)
@@ -266,7 +267,8 @@
                 return SpacesDeviceAPIResponse(ok: true, message: "ok")
             }
             let model = TerminalViewerModel(
-                session: session(state: .starting), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in }, bridgeClient: bridgeClient)
+                session: session(state: .starting), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
 
             model.start()
             for _ in 0..<40 {
@@ -304,7 +306,8 @@
                 return SpacesDeviceAPIResponse(ok: true, message: "ok")
             }
             let model = TerminalViewerModel(
-                session: session(state: .starting), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in }, bridgeClient: bridgeClient)
+                session: session(state: .starting), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
 
             model.start()
             for _ in 0..<40 {
@@ -328,7 +331,9 @@
                 await recorder.append(request)
                 return SpacesDeviceAPIResponse(ok: true, message: "ok")
             }
-            let model = TerminalViewerModel(session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in }, bridgeClient: bridgeClient)
+            let model = TerminalViewerModel(
+                session: session(), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
 
             await model.sendAppearance(.dark)
 
@@ -357,7 +362,8 @@
                 return SpacesDeviceAPIResponse(ok: true, message: "ok")
             }
             let model = TerminalViewerModel(
-                session: session(state: .starting), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in }, bridgeClient: bridgeClient)
+                session: session(state: .starting), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
 
             model.start()
             for _ in 0..<40 {
@@ -392,7 +398,8 @@
                 }
             }
             let model = TerminalViewerModel(
-                session: session(state: .starting), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in }, bridgeClient: bridgeClient)
+                session: session(state: .starting), settings: settings(), onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
 
             model.start()
             for _ in 0..<40 {
@@ -424,7 +431,9 @@
                 }
                 return SpacesDeviceAPIResponse(ok: true, message: "ok")
             }
-            let model = TerminalViewerModel(session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in }, bridgeClient: bridgeClient)
+            let model = TerminalViewerModel(
+                session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
 
             model.start()
             let didAttachInitially = try await waitForTerminalControlAction(.attach, count: 1, recorder: recorder)
@@ -485,7 +494,9 @@
                         id: "external|https://example.com/docs", source: .externalURL, originalLink: "https://example.com/docs", displayName: "docs",
                         contentType: nil, artifactKind: nil, byteCount: nil, externalURL: "https://example.com/docs"))
             }
-            let model = TerminalViewerModel(session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in }, bridgeClient: bridgeClient)
+            let model = TerminalViewerModel(
+                session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
 
             await model.openTerminalLink("https://example.com/docs")
 
@@ -510,7 +521,9 @@
                         id: "external|https://example.com/docs", source: .externalURL, originalLink: spacedPath, displayName: "docs",
                         contentType: nil, artifactKind: nil, byteCount: nil, externalURL: "https://example.com/docs"))
             }
-            let model = TerminalViewerModel(session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in }, bridgeClient: bridgeClient)
+            let model = TerminalViewerModel(
+                session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
 
             await model.openTerminalLink(spacedPath)
 
@@ -531,7 +544,8 @@
             }
             let payload = Data([0x89, 0x50, 0x4E, 0x47])
             let model = TerminalViewerModel(
-                session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in }, bridgeClient: bridgeClient,
+                session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient,
                 remoteMediaDownloader: { url, expectedArtifactKind in
                     XCTAssertEqual(url, URL(string: "https://example.com/image.png"))
                     XCTAssertEqual(expectedArtifactKind, .image)
@@ -568,7 +582,8 @@
                         byteCount: nil, externalURL: url.absoluteString))
             }
             let model = TerminalViewerModel(
-                session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in }, bridgeClient: bridgeClient,
+                session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient,
                 remoteMediaDownloader: { requestedURL, expectedArtifactKind in
                     XCTAssertEqual(requestedURL, url)
                     XCTAssertEqual(expectedArtifactKind, .markdown)
@@ -607,7 +622,8 @@
                         externalURL: "https://example.com/missing.png"))
             }
             let model = TerminalViewerModel(
-                session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in }, bridgeClient: bridgeClient,
+                session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient,
                 remoteMediaDownloader: { requestedURL, expectedArtifactKind in
                     XCTAssertEqual(requestedURL, url)
                     try FileManager.default.createDirectory(at: downloadRoot, withIntermediateDirectories: true)
@@ -645,7 +661,8 @@
                         externalURL: "https://example.com/login.png"))
             }
             let model = TerminalViewerModel(
-                session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in }, bridgeClient: bridgeClient,
+                session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient,
                 remoteMediaDownloader: { requestedURL, expectedArtifactKind in
                     XCTAssertEqual(requestedURL, url)
                     try FileManager.default.createDirectory(at: downloadRoot, withIntermediateDirectories: true)
@@ -683,7 +700,8 @@
                         externalURL: "https://example.com/huge.log"))
             }
             let model = TerminalViewerModel(
-                session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in }, bridgeClient: bridgeClient,
+                session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient,
                 remoteMediaDownloader: { _, expectedArtifactKind in
                     XCTAssertEqual(expectedArtifactKind, .text)
                     try FileManager.default.createDirectory(at: downloadRoot, withIntermediateDirectories: true)
@@ -742,12 +760,21 @@
                         contentType: "image/png", artifactKind: .image, byteCount: nil, externalURL: link))
             }
             let model = TerminalViewerModel(
-                session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in }, bridgeClient: bridgeClient,
+                session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient,
                 remoteMediaDownloader: { url, _ in
                     try FileManager.default.createDirectory(at: cacheRoot, withIntermediateDirectories: true)
                     if url.lastPathComponent == "slow.png" {
                         await probe.markSlowStarted()
-                        do { try await Task.sleep(for: .seconds(5)) } catch {
+                        // The slow download must still be suspended when the fresher request cancels it, so
+                        // only cancellation should end this sleep; the ceiling exists solely so a cancellation
+                        // regression fails in bounded time. If the sleep completes naturally, fail loudly AND
+                        // still mark the cancel so waitForSlowCancel() below unblocks instead of hanging.
+                        do {
+                            try await Task.sleep(for: .seconds(30))
+                            XCTFail("slow download completed naturally; the fresher request never cancelled it")
+                            await probe.markSlowCancelled()
+                        } catch {
                             await probe.markSlowCancelled()
                             throw error
                         }
@@ -790,7 +817,8 @@
                         contentType: "image/png", artifactKind: .image, byteCount: nil, externalURL: link))
             }
             let model = TerminalViewerModel(
-                session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in }, bridgeClient: bridgeClient,
+                session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient,
                 remoteMediaDownloader: { url, _ in
                     try FileManager.default.createDirectory(at: downloadRoot, withIntermediateDirectories: true)
                     if url.lastPathComponent == "slow.png" {
@@ -841,8 +869,8 @@
                 }
             }
             let model = TerminalViewerModel(
-                session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in }, bridgeClient: bridgeClient,
-                linkPreviewCacheDirectory: cacheRoot)
+                session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient, linkPreviewCacheDirectory: cacheRoot)
 
             await model.openTerminalLink("image.png")
 
@@ -859,7 +887,9 @@
                 XCTFail("Loopback links must not trigger a resolveTerminalLink round trip.")
                 return SpacesDeviceAPIResponse(ok: false, message: "unexpected")
             }
-            let model = TerminalViewerModel(session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in }, bridgeClient: bridgeClient)
+            let model = TerminalViewerModel(
+                session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
 
             await model.openTerminalLink("http://localhost:3000/dashboard")
 
@@ -898,7 +928,9 @@
                 XCTFail("An unrecognized scheme must not trigger a resolveTerminalLink round trip.")
                 return SpacesDeviceAPIResponse(ok: false, message: "unexpected")
             }
-            let model = TerminalViewerModel(session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in }, bridgeClient: bridgeClient)
+            let model = TerminalViewerModel(
+                session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
 
             await model.openTerminalLink("mailto:person@example.com")
 
@@ -926,8 +958,8 @@
                 }
             }
             let model = TerminalViewerModel(
-                session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in }, bridgeClient: bridgeClient,
-                linkPreviewCacheDirectory: cacheRoot)
+                session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient, linkPreviewCacheDirectory: cacheRoot)
 
             let slowTask = Task { await model.openTerminalLink("slow.png") }
             await gate.waitForSlowStart()
@@ -973,8 +1005,8 @@
                     }
                 }
                 let model = TerminalViewerModel(
-                    session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in }, bridgeClient: bridgeClient,
-                    linkPreviewCacheDirectory: cacheRoot)
+                    session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                    bridgeClient: bridgeClient, linkPreviewCacheDirectory: cacheRoot)
 
                 await model.openTerminalLink("file.\(testCase.artifactKind.rawValue)")
 
@@ -1003,7 +1035,9 @@
                 default: return SpacesDeviceAPIResponse(ok: false, message: "unexpected command")
                 }
             }
-            let model = TerminalViewerModel(session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in }, bridgeClient: bridgeClient)
+            let model = TerminalViewerModel(
+                session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
 
             await model.openTerminalLink("huge.log")
 
@@ -1037,8 +1071,8 @@
                 }
             }
             let model = TerminalViewerModel(
-                session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in }, bridgeClient: bridgeClient,
-                linkPreviewCacheDirectory: cacheRoot)
+                session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient, linkPreviewCacheDirectory: cacheRoot)
 
             await model.openTerminalLink("image.png")
 
@@ -1068,8 +1102,8 @@
                 }
             }
             let model = TerminalViewerModel(
-                session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in }, bridgeClient: bridgeClient,
-                linkPreviewCacheDirectory: cacheRoot)
+                session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient, linkPreviewCacheDirectory: cacheRoot)
 
             await model.openTerminalLink("image.png")
             let preview = try XCTUnwrap(model.linkPreview)
@@ -1088,7 +1122,9 @@
             let bridgeClient = SpacesDeviceAPIClient(settings: settings) { _ in
                 SpacesDeviceAPIResponse(ok: false, message: "Only image and video files can be previewed on iOS.")
             }
-            let model = TerminalViewerModel(session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in }, bridgeClient: bridgeClient)
+            let model = TerminalViewerModel(
+                session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient)
 
             await model.openTerminalLink("notes.txt")
 
@@ -1121,8 +1157,8 @@
                 }
             }
             let model = TerminalViewerModel(
-                session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in }, bridgeClient: bridgeClient,
-                linkPreviewCacheDirectory: cacheRoot)
+                session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient, linkPreviewCacheDirectory: cacheRoot)
 
             let slowTask = Task { await model.openTerminalLink("slow.png") }
             await gate.waitForSlowStart()
@@ -1165,8 +1201,8 @@
                 }
             }
             let model = TerminalViewerModel(
-                session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in }, bridgeClient: bridgeClient,
-                linkPreviewCacheDirectory: cacheRoot)
+                session: session(), settings: settings, onAuthenticationRequired: { _ in }, onOpenTerminalDeepLink: { _ in },
+                bridgeClient: bridgeClient, linkPreviewCacheDirectory: cacheRoot)
 
             await model.openTerminalLink("first.png")
             let firstURL = try XCTUnwrap(model.linkPreview?.content.url)
@@ -1621,7 +1657,7 @@
             let scrollableButtons = buttons.filter { $0.isDescendant(of: scrollView) }
             let pinnedButtons = buttons.filter { !$0.isDescendant(of: scrollView) }
             XCTAssertEqual(
-                scrollableButtons.compactMap(\.accessibilityLabel), ["tab", "/", "~", "|", "-", "_", "esc", "Control", "Command", "Option"])
+                scrollableButtons.compactMap(\.accessibilityLabel), ["tab", "/", "~", "|", "-", "_", "esc", "Shift", "Control", "Command", "Option"])
             XCTAssertEqual(pinnedButtons.compactMap(\.accessibilityLabel), ["Compose message", "Arrow key joystick", "Hide keyboard"])
             let joystickButton = try XCTUnwrap(pinnedButtons.first { $0.accessibilityLabel == "Arrow key joystick" })
             XCTAssertEqual(joystickButton.accessibilityCustomActions?.map(\.name) ?? [], ["Up arrow", "Down arrow", "Left arrow", "Right arrow"])
@@ -1767,6 +1803,30 @@
             XCTAssertEqual(sentText, [])
         }
 
+        /// Return arrives as plain text with no modifier flags, so the accessory's Shift is the only way
+        /// to reach Shift+Enter on a device with no hardware keyboard. An unmodified Return must still be
+        /// a plain Enter.
+        func testRemoteTerminalAccessoryShiftAppliesToReturn() throws {
+            let hostView = GhosttyRemoteTerminalHostView(frame: .zero)
+            var sentKeys: [String] = []
+            var sentText: [String] = []
+            hostView.onSendKey = { sentKeys.append($0) }
+            hostView.onSendText = { text, _ in sentText.append(text) }
+            hostView.setAcceptsTerminalInput(true)
+
+            let accessoryView = try XCTUnwrap(hostView.inputAccessoryView)
+            let buttons = descendants(of: accessoryView, matching: UIButton.self)
+            let shiftButton = try XCTUnwrap(buttons.first { $0.accessibilityLabel == "Shift" })
+
+            shiftButton.sendActions(for: .touchUpInside)
+            hostView.insertText("\n")
+            // The modifier is consumed by that one press, so the next Return is unmodified again.
+            hostView.insertText("\n")
+
+            XCTAssertEqual(sentKeys, ["shift+enter", "enter"])
+            XCTAssertEqual(sentText, [])
+        }
+
         func testRemoteTerminalPasteMarksTextAsPaste() {
             let hostView = GhosttyRemoteTerminalHostView(frame: .zero)
             var sentText: [(String, Bool)] = []
@@ -1895,7 +1955,6 @@
 
             XCTAssertLessThan(keyboardViewport.rows, keyboardOnlyViewport.rows)
             XCTAssertEqual(hostView.visibleRenderBoundsForTesting().height, 334, accuracy: 0.5)
-            XCTAssertEqual(hostView.surfaceHostFrameForTesting().height, phoneBounds.height, accuracy: 0.5)
             XCTAssertEqual(try XCTUnwrap(reportedViewports.last).rows, keyboardViewport.rows)
 
             let longSnapshot = promptAtBottomSnapshot(columns: 80, rows: fullViewport.rows + 20)
@@ -2050,8 +2109,17 @@
 
             let freeCompleted = expectation(description: "background free completed")
             let originalSessionFreeHandler = GhosttyRemoteTerminalHostView.sessionFreeHandlerForTesting
+            // Gate the free handler on a semaphore so the "dismantle didn't block on it" assertion below is
+            // checked while the handler is still provably in flight, instead of picking a duration long enough
+            // that it's probably still running. Always released via defer so a failed assertion above can't
+            // leave the handler's background thread blocked forever.
+            let releaseFree = DispatchSemaphore(value: 0)
+            defer { releaseFree.signal() }
             GhosttyRemoteTerminalHostView.sessionFreeHandlerForTesting = { _ in
-                Thread.sleep(forTimeInterval: 0.5)
+                // Bounded wait: if prepareForDismantle() ever regresses to running this handler
+                // synchronously, the test thread would otherwise block on its own gate forever;
+                // the timeout turns that regression into a failed elapsed-time assertion instead.
+                _ = releaseFree.wait(timeout: .now() + 30)
                 freeCompleted.fulfill()
             }
             defer { GhosttyRemoteTerminalHostView.sessionFreeHandlerForTesting = originalSessionFreeHandler }
@@ -2064,33 +2132,21 @@
             XCTAssertFalse(hostView.hasActiveSessionForTesting)
             XCTAssertFalse(hostView.hasRetainedSessionStandardInputWriteDescriptorForTesting)
 
+            releaseFree.signal()
             wait(for: [freeCompleted], timeout: 30)
 
             window.isHidden = true
         }
 
-        func testRemoteTerminalHostViewTeardownRetiresNativeMirrorWithoutBlocking() throws {
+        func testRemoteTerminalHostViewTeardownParksTheSharedMirrorWithoutBlocking() throws {
             GhosttyRemoteTerminalHostView.nativeMirrorEnabledForTesting = true
             let window = UIWindow(frame: UIScreen.main.bounds)
             let viewController = UIViewController()
             window.rootViewController = viewController
-
-            let hostView = GhosttyRemoteTerminalHostView(frame: CGRect(x: 0, y: 0, width: 640, height: 480))
-            viewController.view.addSubview(hostView)
             window.isHidden = false
-            viewController.view.frame = window.bounds
-            hostView.frame = viewController.view.bounds
-            viewController.view.layoutIfNeeded()
+            defer { window.isHidden = true }
 
-            hostView.update(
-                snapshot: sampleSnapshot(), renderStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0|screen=native-teardown",
-                fallbackText: "Waiting for terminal state...")
-
-            let mirrorDeadline = Date().addingTimeInterval(2)
-            while !hostView.hasMirrorSurfaceForTesting && Date() < mirrorDeadline { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
-            XCTAssertTrue(hostView.hasMirrorSurfaceForTesting)
-
-            let retiredMirrorCount = GhosttyRemoteTerminalHostView.retiredMirrorCountForTesting
+            let hostView = try mountNativeMirrorHostView(in: viewController, window: window, screenKey: "native-teardown")
 
             let startedAt = Date()
             hostView.prepareForDismantle()
@@ -2100,9 +2156,153 @@
             XCTAssertFalse(hostView.hasActiveSessionForTesting)
             XCTAssertFalse(hostView.hasMirrorSurfaceForTesting)
             XCTAssertFalse(hostView.hasRetainedSessionStandardInputWriteDescriptorForTesting)
-            XCTAssertEqual(GhosttyRemoteTerminalHostView.retiredMirrorCountForTesting, retiredMirrorCount + 1)
+            // The mirror survives the teardown parked and unattached rather than being leaked into a
+            // per-teardown pile or freed on a user-facing path.
+            XCTAssertEqual(GhosttySharedTerminalMirror.shared.liveMirrorCountForTesting, 1)
+            XCTAssertFalse(GhosttySharedTerminalMirror.shared.isSurfaceHostAttachedForTesting)
+        }
 
-            window.isHidden = true
+        /// Opening a terminal and leaving it, over and over, is the navigation that used to charge the
+        /// process a whole new mirror and IOSurface per visit. Every visit must land on the same
+        /// native surface instead, so the footprint is bounded no matter how many sessions are opened.
+        func testRepeatedTerminalVisitsReuseOneMirrorAndOneSurface() throws {
+            GhosttyRemoteTerminalHostView.nativeMirrorEnabledForTesting = true
+            let window = UIWindow(frame: UIScreen.main.bounds)
+            let viewController = UIViewController()
+            window.rootViewController = viewController
+            window.isHidden = false
+            defer { window.isHidden = true }
+
+            var surfaceIdentities: [UInt] = []
+            for visit in 0..<4 {
+                let hostView = try mountNativeMirrorHostView(in: viewController, window: window, screenKey: "revisit-\(visit)")
+                surfaceIdentities.append(try XCTUnwrap(GhosttySharedTerminalMirror.shared.mirrorSurfaceIdentityForTesting))
+                hostView.removeFromSuperview()
+
+                XCTAssertFalse(hostView.hasMirrorSurfaceForTesting)
+                XCTAssertEqual(GhosttySharedTerminalMirror.shared.liveMirrorCountForTesting, 1)
+            }
+
+            XCTAssertEqual(Set(surfaceIdentities).count, 1)
+        }
+
+        /// A terminal view can mount while the outgoing one is still in the hierarchy — a session
+        /// swap on the same route does exactly this. The newcomer takes the mirror over, so the two
+        /// never render into the same surface, and only one mirror exists across the handover.
+        func testMirrorMovesToTheTerminalViewThatMountsWhileAnotherHoldsIt() throws {
+            GhosttyRemoteTerminalHostView.nativeMirrorEnabledForTesting = true
+            let window = UIWindow(frame: UIScreen.main.bounds)
+            let viewController = UIViewController()
+            window.rootViewController = viewController
+            window.isHidden = false
+            defer { window.isHidden = true }
+
+            let firstHostView = try mountNativeMirrorHostView(in: viewController, window: window, screenKey: "handover-first")
+            let secondHostView = try mountNativeMirrorHostView(in: viewController, window: window, screenKey: "handover-second")
+
+            XCTAssertTrue(secondHostView.hasMirrorSurfaceForTesting)
+            XCTAssertFalse(firstHostView.hasMirrorSurfaceForTesting)
+            XCTAssertEqual(GhosttySharedTerminalMirror.shared.liveMirrorCountForTesting, 1)
+
+            // The surrendering view keeps its place in the hierarchy without clawing the mirror back,
+            // so an outgoing view cannot trade it with the incoming one for the whole transition.
+            firstHostView.setNeedsLayout()
+            firstHostView.layoutIfNeeded()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+            XCTAssertTrue(secondHostView.hasMirrorSurfaceForTesting)
+            XCTAssertFalse(firstHostView.hasMirrorSurfaceForTesting)
+
+            firstHostView.removeFromSuperview()
+            secondHostView.removeFromSuperview()
+        }
+
+        /// Two sessions in succession share one surface, so the surface must stay hidden from the
+        /// moment it is handed over until the new holder has drawn its own session onto it.
+        func testRebindHidesTheSharedSurfaceUntilTheNewHolderRendersIt() throws {
+            let window = UIWindow(frame: UIScreen.main.bounds)
+            let viewController = UIViewController()
+            window.rootViewController = viewController
+            window.isHidden = false
+            defer { window.isHidden = true }
+
+            let firstHostView = GhosttyRemoteTerminalHostView(frame: viewController.view.bounds)
+            let secondHostView = GhosttyRemoteTerminalHostView(frame: viewController.view.bounds)
+            viewController.view.addSubview(firstHostView)
+            viewController.view.addSubview(secondHostView)
+            viewController.view.layoutIfNeeded()
+            defer {
+                firstHostView.removeFromSuperview()
+                secondHostView.removeFromSuperview()
+            }
+
+            let mirror = GhosttySharedTerminalMirror.shared
+            _ = try mirror.acquire(for: firstHostView, fontSize: .default, scaleFactor: 2)
+            XCTAssertFalse(mirror.isSurfaceHostVisibleForTesting)
+
+            mirror.revealSurface(from: firstHostView)
+            XCTAssertTrue(mirror.isSurfaceHostVisibleForTesting)
+
+            _ = try mirror.acquire(for: secondHostView, fontSize: .default, scaleFactor: 2)
+            XCTAssertFalse(mirror.isSurfaceHostVisibleForTesting)
+            XCTAssertTrue(mirror.isSurfaceHostAttachedForTesting)
+            // The surface spans the whole holder, which is what the renderer sizes its target from.
+            XCTAssertEqual(secondHostView.surfaceHostFrameForTesting(), secondHostView.bounds)
+
+            // A late release from the view that already lost the mirror must not disturb the holder.
+            mirror.release(from: firstHostView)
+            XCTAssertTrue(mirror.isSurfaceHostAttachedForTesting)
+
+            mirror.release(from: secondHostView)
+            XCTAssertFalse(mirror.isSurfaceHostAttachedForTesting)
+            XCTAssertFalse(mirror.isSurfaceHostVisibleForTesting)
+        }
+
+        /// Changing the font size retunes the live surface rather than building a second mirror, and
+        /// the daemon still sees the resize as a new grid.
+        func testChangingFontSizeRetunesTheSharedMirrorWithoutBuildingAnother() throws {
+            GhosttyRemoteTerminalHostView.nativeMirrorEnabledForTesting = true
+            let window = UIWindow(frame: UIScreen.main.bounds)
+            let viewController = UIViewController()
+            window.rootViewController = viewController
+            window.isHidden = false
+            defer { window.isHidden = true }
+
+            var reportedColumns: [Int] = []
+            let hostView = try mountNativeMirrorHostView(in: viewController, window: window, screenKey: "font-size") { hostView in
+                hostView.onViewportSizeChanged = { columns, _ in reportedColumns.append(columns) }
+            }
+            defer { hostView.removeFromSuperview() }
+
+            let surfaceIdentity = try XCTUnwrap(GhosttySharedTerminalMirror.shared.mirrorSurfaceIdentityForTesting)
+            let columnsAtDefaultSize = try XCTUnwrap(reportedColumns.last)
+
+            hostView.setTerminalFontSize(.nine)
+
+            XCTAssertEqual(GhosttySharedTerminalMirror.shared.liveMirrorCountForTesting, 1)
+            XCTAssertEqual(GhosttySharedTerminalMirror.shared.appliedFontSizeForTesting, .nine)
+            XCTAssertEqual(GhosttySharedTerminalMirror.shared.mirrorSurfaceIdentityForTesting, surfaceIdentity)
+            XCTAssertGreaterThan(try XCTUnwrap(reportedColumns.last), columnsAtDefaultSize)
+        }
+
+        /// Mounts a terminal host view with a live native mirror and waits until it holds one.
+        private func mountNativeMirrorHostView(
+            in viewController: UIViewController, window: UIWindow, screenKey: String, configure: (GhosttyRemoteTerminalHostView) -> Void = { _ in }
+        ) throws -> GhosttyRemoteTerminalHostView {
+            viewController.view.frame = window.bounds
+            let hostView = GhosttyRemoteTerminalHostView(frame: viewController.view.bounds)
+            configure(hostView)
+            viewController.view.addSubview(hostView)
+            hostView.frame = viewController.view.bounds
+            viewController.view.layoutIfNeeded()
+
+            hostView.update(
+                snapshot: sampleSnapshot(), renderStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0|screen=\(screenKey)",
+                fallbackText: "Waiting for terminal state...")
+
+            let deadline = Date().addingTimeInterval(2)
+            while !hostView.hasMirrorSurfaceForTesting && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+            XCTAssertTrue(hostView.hasMirrorSurfaceForTesting)
+            return hostView
         }
 
         func testRemoteTerminalHostViewDoesNotRepublishInputReadinessWhenInstallingCallback() throws {

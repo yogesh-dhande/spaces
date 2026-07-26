@@ -89,6 +89,24 @@ extension SQLiteStore {
         return Dictionary(grouping: rows.compactMap { decodeRunningProcess(row: $0) }, by: { $0.workspaceID })
     }
 
+    /// Every running-process row (across all workspaces) whose `terminal_session_id` references a given
+    /// terminal session. The session-retention release path (`WorkspaceOrchestrator
+    /// .releaseEndedTerminalSessionReferences`) uses this to find the process rows pinning a long-ended
+    /// terminal session so it can drop them without the live-termination side effects of
+    /// `stopRunningProcess`.
+    public func runningProcessesByTerminalSession(terminalSessionID: String) throws -> [RunningProcessRecord] {
+        let rows = try queryRows(
+            sql: """
+                SELECT
+                  \(Self.runningProcessColumns)
+                FROM running_processes rp
+                LEFT JOIN runtime_targets rt ON rt.id = rp.runtime_target_id
+                WHERE rp.terminal_session_id = ?
+                ORDER BY started_at
+                """, bindings: [terminalSessionID])
+        return rows.compactMap { decodeRunningProcess(row: $0) }
+    }
+
     public func deleteRunningProcess(id: String) throws {
         try withImmediateTransaction { try execute(sql: "DELETE FROM running_processes WHERE id = ?", bindings: [id]) }
     }

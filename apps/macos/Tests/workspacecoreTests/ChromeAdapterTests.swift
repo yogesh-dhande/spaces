@@ -3,6 +3,10 @@ import XCTest
 import systembridge
 
 final class ChromeAdapterTests: XCTestCase {
+    // Mocked-osascript tests aren't exercising the AppleScript timeout itself; widen it so
+    // process-spawn latency on a loaded machine can't trip the production 10s default (#196).
+    private func makeAdapter() -> ChromeAdapter { ChromeAdapter(appleScriptTimeoutSeconds: 30) }
+
     func testTabsInWindowIDsParsesRowsAndScopesAppleScriptToRequestedWindows() throws {
         let scriptLog = FileManager.default.temporaryDirectory.appendingPathComponent("chrome-adapter-\(UUID().uuidString).applescript")
         let mock = """
@@ -13,7 +17,7 @@ final class ChromeAdapterTests: XCTestCase {
             """
 
         try withMockCommands(["osascript": mock]) {
-            let tabs = try ChromeAdapter().tabs(inWindowIDs: [202, 101, 101, -1, 0])
+            let tabs = try makeAdapter().tabs(inWindowIDs: [202, 101, 101, -1, 0])
 
             XCTAssertEqual(tabs.map(\.windowID), [101, 202])
             XCTAssertEqual(tabs.map(\.tabIndex), [1, 2])
@@ -31,7 +35,7 @@ final class ChromeAdapterTests: XCTestCase {
             exit 99
             """
 
-        try withMockCommands(["osascript": mock]) { XCTAssertTrue(try ChromeAdapter().tabs(inWindowIDs: []).isEmpty) }
+        try withMockCommands(["osascript": mock]) { XCTAssertTrue(try makeAdapter().tabs(inWindowIDs: []).isEmpty) }
     }
 
     func testTabSnapshotInWindowIDsParsesFrontmostURLAndScopedRows() throws {
@@ -46,7 +50,7 @@ final class ChromeAdapterTests: XCTestCase {
             """
 
         try withMockCommands(["osascript": mock]) {
-            let snapshot = try ChromeAdapter().tabSnapshot(inWindowIDs: [202, 101, 101, -1, 0])
+            let snapshot = try makeAdapter().tabSnapshot(inWindowIDs: [202, 101, 101, -1, 0])
 
             XCTAssertEqual(snapshot.frontmostActiveTabURL, "https://front.example/current")
             XCTAssertEqual(snapshot.tabs.map(\.windowID), [101, 202])
@@ -69,7 +73,7 @@ final class ChromeAdapterTests: XCTestCase {
             """
 
         try withMockCommands(["osascript": mock]) {
-            let snapshot = try ChromeAdapter().tabSnapshot(inWindowIDs: [101])
+            let snapshot = try makeAdapter().tabSnapshot(inWindowIDs: [101])
 
             XCTAssertNil(snapshot.frontmostActiveTabURL)
             XCTAssertEqual(snapshot.tabs.map(\.windowID), [101])
@@ -85,7 +89,7 @@ final class ChromeAdapterTests: XCTestCase {
             """
 
         try withMockCommands(["osascript": mock]) {
-            let snapshot = try ChromeAdapter().tabSnapshot(inWindowIDs: [])
+            let snapshot = try makeAdapter().tabSnapshot(inWindowIDs: [])
 
             XCTAssertTrue(snapshot.tabs.isEmpty)
             XCTAssertNil(snapshot.frontmostActiveTabURL)
@@ -101,7 +105,7 @@ final class ChromeAdapterTests: XCTestCase {
             """
 
         try withMockCommands(["osascript": mock]) {
-            let match = try ChromeAdapter().focusFirstMatchingTabMatch(
+            let match = try makeAdapter().focusFirstMatchingTabMatch(
                 urlPrefix: "http://localhost:3000", excludingURLPrefixes: ["http://localhost:3000/admin"])
 
             XCTAssertEqual(match?.windowID, 303)
@@ -133,7 +137,7 @@ final class ChromeAdapterTests: XCTestCase {
 
         try withMockCommands(["osascript": mock]) {
             XCTAssertTrue(
-                try ChromeAdapter().focusMatchingTabInWindow(
+                try makeAdapter().focusMatchingTabInWindow(
                     windowID: 202, urlPrefix: "http://localhost:3000", excludingURLPrefixes: ["http://localhost:3000/admin"]))
 
             let script = try String(contentsOf: scriptLog, encoding: .utf8)
@@ -158,7 +162,7 @@ final class ChromeAdapterTests: XCTestCase {
 
         try withMockCommands(["osascript": mock]) {
             XCTAssertTrue(
-                try ChromeAdapter().closeMatchingTabsInWindow(
+                try makeAdapter().closeMatchingTabsInWindow(
                     windowID: 202, urlPrefix: "http://localhost:3000", excludingURLPrefixes: ["http://localhost:3000/admin"]))
 
             let script = try String(contentsOf: scriptLog, encoding: .utf8)
@@ -178,7 +182,7 @@ final class ChromeAdapterTests: XCTestCase {
             """
 
         try withMockCommands(["osascript": mock]) {
-            let windowID = try ChromeAdapter().openTabInFirstAvailableWindow(
+            let windowID = try makeAdapter().openTabInFirstAvailableWindow(
                 windowIDs: [202, 101, 202, -1, 0], containingAnyURLPrefix: ["http://localhost:3000", "http://localhost:3000"],
                 url: "http://localhost:4000/admin")
 
@@ -201,10 +205,10 @@ final class ChromeAdapterTests: XCTestCase {
 
         try withMockCommands(["osascript": mock]) {
             XCTAssertNil(
-                try ChromeAdapter().openTabInFirstAvailableWindow(
+                try makeAdapter().openTabInFirstAvailableWindow(
                     windowIDs: [], containingAnyURLPrefix: ["http://localhost:3000"], url: "http://localhost:4000/admin"))
             XCTAssertNil(
-                try ChromeAdapter().openTabInFirstAvailableWindow(windowIDs: [202], containingAnyURLPrefix: [], url: "http://localhost:4000/admin"))
+                try makeAdapter().openTabInFirstAvailableWindow(windowIDs: [202], containingAnyURLPrefix: [], url: "http://localhost:4000/admin"))
         }
     }
 }

@@ -153,6 +153,11 @@ import workspacecore
             var shortcutCounter = 1
 
             for group in groups {
+                // An unreachable device keeps its alerts listed and attributed to the workspace that
+                // raised them, marked stale by the same dimming its sidebar rows carry: they report what
+                // the device last said, and nothing can be done about them until it answers again.
+                let offlineDeviceName = unreachableDeviceName(workspaceID: group.workspaceID)
+
                 // Workspace group header
                 let groupHeaderStack = NSStackView()
                 groupHeaderStack.orientation = .horizontal
@@ -179,6 +184,10 @@ import workspacecore
                 groupHeaderStack.addArrangedSubview(projectLabel)
                 groupHeaderStack.addArrangedSubview(slashLabel)
                 groupHeaderStack.addArrangedSubview(workspaceLabel)
+                if let offlineDeviceName {
+                    groupHeaderStack.alphaValue = AppKitController.unreachableDeviceAlpha
+                    groupHeaderStack.toolTip = "\(offlineDeviceName) is offline"
+                }
                 stack.addArrangedSubview(groupHeaderStack)
                 host.constrainFormFieldToFillWidth(groupHeaderStack, in: stack)
 
@@ -201,6 +210,10 @@ import workspacecore
                         cardAction = nil
                     }
                     let card = alertsWindowCard(entry: entry, shortcut: shortcut, action: cardAction)
+                    if let offlineDeviceName {
+                        card.alphaValue = AppKitController.unreachableDeviceAlpha
+                        card.toolTip = "\(offlineDeviceName) is offline"
+                    }
                     itemsStack.addArrangedSubview(card)
                     host.constrainFormFieldToFillWidth(card, in: itemsStack)
                 }
@@ -211,6 +224,16 @@ import workspacecore
         }
 
         host.showScrollableDetailStack(stack)
+    }
+
+    /// The display name of the device that raised this workspace's alerts when that device is
+    /// unreachable, and nil while it is loaded — the alerts pane's only piece of device context, shown
+    /// because a stale alert is otherwise indistinguishable from a live one.
+    private func unreachableDeviceName(workspaceID: String) -> String? {
+        guard let deviceID = host.deviceID(forWorkspaceID: workspaceID), let section = host.deviceSection(id: deviceID),
+            section.loadState.isOffline
+        else { return nil }
+        return section.displayName
     }
 
     /// Builds an alerts card with focus and dismiss affordances while preserving the workspace Run tab rows.

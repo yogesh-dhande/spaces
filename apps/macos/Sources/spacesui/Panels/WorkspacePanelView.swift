@@ -143,5 +143,9 @@ import AppKit
         let paneID = pane.id
         paneView.onFocusRequest = { [weak self] in self?.onFocusPane?(paneID) }
         if let content = paneContentProvider?(pane) { paneView.attachContent(content) }
+        // Only mark focus when the selected tab is split — a lone pane needs no disambiguation.
+        let selectedTab = renderedLayout.tabs.first { $0.id == renderedLayout.selectedTabID }
+        let paneCount = selectedTab.map { PanelLayoutEngine.panes(in: $0).count } ?? 0
+        paneView.setPaneFocused(paneCount > 1 && renderedLayout.focusedPaneID == paneID)
     }
 }

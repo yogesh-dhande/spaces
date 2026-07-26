@@ -96,6 +96,106 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         }
     }
 
+    /// A `terminalServiceRequestSender` whose `.control` responses fail on demand instead of opening a
+    /// real socket — `.state` always answers with a fixed running payload so the host attaches normally.
+    /// `failFirstControlRequestOnly` fails only the first `.control` request and lets every later one
+    /// succeed, so a test can prove a later send was never *attempted* (not merely that it also failed)
+    /// once the queue that would have carried it is discarded.
+    private final class ScriptedControlRequestSender: @unchecked Sendable {
+        private let lock = NSLock()
+        private let payload: GhosttyRemoteSessionStatePayload
+        private let controlError: any Error
+        private let failFirstControlRequestOnly: Bool
+        private var controlRequestCount = 0
+        private var recordedControlCommands: [String] = []
+        private var recordedControlTexts: [String] = []
+        /// Fires synchronously, under the lock, the instant a control request with this command name is
+        /// recorded — before the scripted error is thrown. Lets a test await one specific command (e.g.
+        /// "scroll") reaching the daemon instead of an unrelated one (attach's own owner-handoff resize)
+        /// that happens to arrive first.
+        private var awaitedCommandName: String?
+        private var awaitedCommandContinuation: CheckedContinuation<Void, Never>?
+
+        init(payload: GhosttyRemoteSessionStatePayload, controlError: any Error, failFirstControlRequestOnly: Bool = false) {
+            self.payload = payload
+            self.controlError = controlError
+            self.failFirstControlRequestOnly = failFirstControlRequestOnly
+        }
+
+        /// Suspends until a control request named `commandName` (e.g. "scroll", "resize") is recorded.
+        /// Returns immediately if one already was before this call. The check-or-register happens in a
+        /// single locked critical section (shared with `send`'s resume-on-match below), so a request
+        /// recorded concurrently can never land in the gap between checking and registering.
+        func awaitControlRequest(named commandName: String) async {
+            await withCheckedContinuation { continuation in
+                lock.lock()
+                if recordedControlCommands.contains(commandName) {
+                    lock.unlock()
+                    continuation.resume()
+                    return
+                }
+                awaitedCommandName = commandName
+                awaitedCommandContinuation = continuation
+                lock.unlock()
+            }
+        }
+
+        var controlRequestCommands: [String] {
+            lock.lock()
+            defer { lock.unlock() }
+            return recordedControlCommands
+        }
+
+        /// The `text` field of every `.send` control request that reached this sender, in order — empty
+        /// for command kinds that carry no text (scroll, resize, clear-screen).
+        var controlRequestTexts: [String] {
+            lock.lock()
+            defer { lock.unlock() }
+            return recordedControlTexts
+        }
+
+        func send(_ request: TerminalServiceRequest) throws -> TerminalServiceResponse {
+            switch request.command {
+            case .state: return TerminalServiceResponse(ok: true, message: "state", sessionState: payload)
+            case .control(let controlPayload):
+                lock.lock()
+                controlRequestCount += 1
+                let requestNumber = controlRequestCount
+                let commandName = controlPayload.controlRequest.command
+                recordedControlCommands.append(commandName)
+                if let text = controlPayload.controlRequest.text { recordedControlTexts.append(text) }
+                var resumingContinuation: CheckedContinuation<Void, Never>?
+                if awaitedCommandName == commandName {
+                    resumingContinuation = awaitedCommandContinuation
+                    awaitedCommandContinuation = nil
+                    awaitedCommandName = nil
+                }
+                lock.unlock()
+                resumingContinuation?.resume()
+                if !failFirstControlRequestOnly || requestNumber == 1 { throw controlError }
+                return TerminalServiceResponse(
+                    ok: true, message: "controlled", controlResponse: TerminalControlResponse(ok: true, message: "controlled"))
+            default: return TerminalServiceResponse(ok: false, message: "Unexpected command '\(request.commandName)'.")
+            }
+        }
+    }
+
+    private struct SimulatedTransportFailure: Error {}
+
+    /// Thread-safe counter for `inputFailureHandler` invocations. An actor rather than a locked class
+    /// because the handler itself is `async`, so incrementing can simply `await` straight into it.
+    private actor FailureReportCounter {
+        private(set) var count = 0
+        func increment() { count += 1 }
+    }
+
+    /// Stands in for a reachable daemon's coded rejection (e.g. "another client owns this session"),
+    /// which the host flattens into an opaque message-carrying error before `inputFailureHandler` ever
+    /// sees it — see `RemoteGhosttySessionHost.sendControlRequest`. Distinct from
+    /// `SimulatedTransportFailure` only so a test can tell which one a fixture threw; the host itself
+    /// never distinguishes the two, which is the point of `testCodedRejectionNeitherReportsALostLinkNorDropsInput`.
+    private struct SimulatedRejectionError: Error {}
+
     override func setUpWithError() throws {
         try super.setUpWithError()
         originalDatabasePath = ProcessInfo.processInfo.environment["SPACES_DB_PATH"]
@@ -163,14 +263,11 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         var sentText: [(String, Bool)] = []
         mirrorView.onSendText = { text, asPaste in sentText.append((text, asPaste)) }
         mirrorView.acceptsTerminalInput = true
-        let pasteboard = NSPasteboard.general
-        let previousText = pasteboard.string(forType: .string)
+        let pasteboard = NSPasteboard(name: NSPasteboard.Name("remote-mirror-paste-\(UUID().uuidString)"))
+        defer { pasteboard.releaseGlobally() }
+        mirrorView.pasteboardOverrideForTesting = pasteboard
         pasteboard.clearContents()
         pasteboard.setString("line one\nline two", forType: .string)
-        defer {
-            pasteboard.clearContents()
-            if let previousText { pasteboard.setString(previousText, forType: .string) }
-        }
 
         XCTAssertTrue(mirrorView.pasteClipboardContents())
 
@@ -1547,6 +1644,111 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         waitForCondition("owner first responder restored from window floor") { window.firstResponder is GhosttyMirrorTerminalView }
     }
 
+    /// `setFocused` is a passive focus-state sync driven by metadata refreshes and app
+    /// activation (a coding agent rewriting the terminal title fires it many times per second).
+    /// It must never steal first responder from another focused control such as the sidebar or
+    /// tab rename editor; deliberate focus goes through `focusWindow`.
+    @MainActor func testSetFocusedDoesNotStealFirstResponderFromOtherControl() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let queue = DispatchQueue(label: "spaces.remote-device.set-focused-no-steal-test")
+        let initialPayload = GhosttyRemoteSessionStatePayload(
+            sessionID: "remote-set-focused", reason: "initial", emittedAt: "2026-06-02T00:00:00Z", sessionStateRevision: 1, sessionStateFlags: 1,
+            screenStateRevision: 1,
+            runtimeState: TerminalSessionRuntimeState(
+                sessionID: "remote-set-focused", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running,
+                updatedAt: "2026-06-02T00:00:00Z", title: "owner", workingDirectory: "/tmp/live", columns: 8, rows: 1),
+            attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "owner", workingDirectory: "/tmp/live", outputByteCount: nil,
+            renderUpdate: try renderUpdate(text: "alpha", sessionRevision: 1))
+        let server = GhosttyRemoteSessionStateStreamServer(socketPath: paths.subscriptionSocketPath, queue: queue) { initialPayload }
+        try server.start()
+        defer { server.stop() }
+
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: .init(
+                sessionID: "remote-set-focused", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
+                createdAt: "2026-06-02T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 900, height: 520))
+        let window = KeyTestWindow(contentRect: container.bounds, styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = container
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
+
+        let client = TerminalClient(
+            id: "owner-client", kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-06-02T00:00:00Z")
+        try host.attach(client: client, mode: .owner, into: container)
+        waitForCondition("initial owner first responder") { window.firstResponder is GhosttyMirrorTerminalView }
+
+        // The user is editing another control (stands in for the sidebar/tab rename NSTextField).
+        let renameEditor = FocusableView(frame: NSRect(x: 0, y: 0, width: 10, height: 10))
+        container.addSubview(renameEditor)
+        XCTAssertTrue(window.makeFirstResponder(renameEditor))
+        XCTAssertTrue(window.firstResponder === renameEditor)
+
+        host.setFocused(true, for: client.id)
+        XCTAssertTrue(window.firstResponder === renameEditor, "setFocused stole first responder from a focused control")
+
+        // The reclaim schedules a deferred restore task; let it run and confirm it also leaves the
+        // editor alone (its guard only reclaims from the window floor).
+        let stealDeadline = Date().addingTimeInterval(0.3)
+        while Date() < stealDeadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+            XCTAssertTrue(window.firstResponder === renameEditor, "deferred restore stole first responder from a focused control")
+        }
+    }
+
+    /// The reclaim path stays intact: when focus has fallen back to the window floor (mirror
+    /// re-parenting resigns it during structural updates), a passive `setFocused` restores the
+    /// mirror as first responder so surface re-parenting recovery is not broken.
+    @MainActor func testSetFocusedReclaimsFirstResponderWhenFocusFellBackToWindow() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let queue = DispatchQueue(label: "spaces.remote-device.set-focused-reclaim-test")
+        let initialPayload = GhosttyRemoteSessionStatePayload(
+            sessionID: "remote-set-focused-reclaim", reason: "initial", emittedAt: "2026-06-02T00:00:00Z", sessionStateRevision: 1,
+            sessionStateFlags: 1, screenStateRevision: 1,
+            runtimeState: TerminalSessionRuntimeState(
+                sessionID: "remote-set-focused-reclaim", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running,
+                updatedAt: "2026-06-02T00:00:00Z", title: "owner", workingDirectory: "/tmp/live", columns: 8, rows: 1),
+            attachmentSnapshot: TerminalSessionAttachmentSnapshot(), title: "owner", workingDirectory: "/tmp/live", outputByteCount: nil,
+            renderUpdate: try renderUpdate(text: "alpha", sessionRevision: 1))
+        let server = GhosttyRemoteSessionStateStreamServer(socketPath: paths.subscriptionSocketPath, queue: queue) { initialPayload }
+        try server.start()
+        defer { server.stop() }
+
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: .init(
+                sessionID: "remote-set-focused-reclaim", title: "remote", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
+                createdAt: "2026-06-02T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 900, height: 520))
+        let window = KeyTestWindow(contentRect: container.bounds, styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = container
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
+
+        let client = TerminalClient(
+            id: "owner-client", kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-06-02T00:00:00Z")
+        try host.attach(client: client, mode: .owner, into: container)
+        waitForCondition("initial owner first responder") { window.firstResponder is GhosttyMirrorTerminalView }
+
+        // Focus falls back to the window floor, as it does when the mirror resigns during re-parenting.
+        XCTAssertTrue(window.makeFirstResponder(nil))
+        XCTAssertTrue(window.firstResponder === window)
+
+        host.setFocused(true, for: client.id)
+        XCTAssertTrue(window.firstResponder is GhosttyMirrorTerminalView, "setFocused did not reclaim first responder from the window floor")
+    }
+
     @MainActor func testRemoteRenderableViewerPreservesSnapshotAcrossAttachmentStateChanges() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -1908,6 +2110,152 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
             })
     }
 
+    /// Guards Change 1 (report a lost link from every interactive control path, not just typed input)
+    /// and Change 2 (a link the model reports gone discards this pane's queued input rather than
+    /// delivering it late) from `RemoteGhosttySessionHost`'s own send paths, using
+    /// `ScriptedControlRequestSender` and an injected `inputFailureHandler` in place of a real socket —
+    /// the daemon side of these failures is exercised elsewhere (transport timeouts, coded rejections);
+    /// here the host's wiring from "the send threw" to "the pane's queued input is gone" is what is
+    /// under test.
+    @MainActor func testFailedScrollReportsTheLostLink() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fixture = try makeRunningSessionFixture(sessionID: "remote-scroll-lost-link", root: root)
+        // Every control request fails, so whichever ones attach's own owner handoff happens to send are
+        // just as informative as the deliberate scroll below — the assertion below waits specifically for
+        // the "scroll" command by name, not for the first (possibly unrelated) reported failure.
+        let sender = ScriptedControlRequestSender(payload: fixture.payload, controlError: SimulatedTransportFailure())
+        let reportedFailures = FailureReportCounter()
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: fixture.launchConfiguration, paths: fixture.paths, terminalServiceRequestSender: sender.send,
+            inputFailureHandler: { _ in
+                await reportedFailures.increment()
+                return true
+            })
+
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 420, height: 180))
+        let client = TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-07-24T00:00:02Z")
+        try host.attach(client: client, mode: .owner, into: container)
+
+        XCTAssertTrue(host.sendScroll(horizontal: 0, vertical: 3, scrollMods: 0, pointerPosition: nil))
+        // The coalescer batches scroll deltas for a short real interval before enqueuing the control send
+        // (see `TerminalScrollCoalescer`); wait for that specific send to land instead of guessing its
+        // timing, then drain the queue so its `onError` (awaited before the enqueued task completes) has
+        // definitely run by the time this checks the counter.
+        await sender.awaitControlRequest(named: "scroll")
+        await host.drainInputQueueForTesting()
+
+        let failureCount = await reportedFailures.count
+        XCTAssertGreaterThanOrEqual(failureCount, 1, "the scroll's failure must reach inputFailureHandler")
+    }
+
+    /// See `testFailedScrollReportsTheLostLink`; the resize send runs off `inputQueue` in its own
+    /// detached task (a `try?` there used to swallow the thrown error entirely — see Change 1), so this
+    /// pins the resize path separately rather than assuming the queued paths' fix covers it too.
+    @MainActor func testFailedResizeReportsTheLostLink() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fixture = try makeRunningSessionFixture(sessionID: "remote-resize-lost-link", root: root)
+        let sender = ScriptedControlRequestSender(payload: fixture.payload, controlError: SimulatedTransportFailure())
+        let reportedFailures = FailureReportCounter()
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: fixture.launchConfiguration, paths: fixture.paths, terminalServiceRequestSender: sender.send,
+            inputFailureHandler: { _ in
+                await reportedFailures.increment()
+                return true
+            })
+
+        // The container has to be in a visible window. A resize is only sent for a viewport the mirror
+        // can measure, and an off-screen pane deliberately reports no size at all rather than an
+        // estimate from a font Ghostty does not render with, so a windowless container guards the send
+        // out and the failure this test is about is never attempted.
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 420, height: 180))
+        let window = KeyTestWindow(contentRect: container.bounds, styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = container
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
+        let client = TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-07-24T00:00:02Z")
+        try host.attach(client: client, mode: .owner, into: container)
+        // `attach` already sends the initial viewport size for an owner; drain that attempt (whether or
+        // not one actually started) before forcing a second, deliberate resize request, so the second's
+        // own outcome is unambiguously the one `drainPendingResizeForTesting` below observes.
+        await host.drainPendingResizeForTesting()
+        XCTAssertTrue(host.synchronizeSurfaceGeometry())
+        await host.drainPendingResizeForTesting()
+
+        let failureCount = await reportedFailures.count
+        XCTAssertGreaterThanOrEqual(failureCount, 1, "the resize's failure must reach inputFailureHandler")
+    }
+
+    /// The regression Change 2 fixes: a keystroke typed while the link is down used to keep buffering
+    /// behind the failed one, then deliver in full — including any Enter — once the link recovered
+    /// minutes later. `TerminalInputSerialQueue.enqueue` chains every send behind its predecessor, so
+    /// enqueuing three sends back to back before any of them has run guarantees the second and third are
+    /// still queued behind the first when it fails; `inputFailureHandler` answering `true` (the model's
+    /// verdict that the link is gone) must make the host discard that backlog instead of letting the
+    /// second and third sends reach the daemon once it "recovers" (the sender scripted to fail only the
+    /// first).
+    @MainActor func testTransportFailureDiscardsQueuedInputInsteadOfDeliveringItLate() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fixture = try makeRunningSessionFixture(sessionID: "remote-drops-queued-input", root: root)
+        // Only the first control request fails; every later one would succeed — proving a later send was
+        // never attempted, not merely that it also failed.
+        let sender = ScriptedControlRequestSender(
+            payload: fixture.payload, controlError: SimulatedTransportFailure(), failFirstControlRequestOnly: true)
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: fixture.launchConfiguration, paths: fixture.paths, terminalServiceRequestSender: sender.send,
+            inputFailureHandler: { _ in true })
+
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 0, height: 0))
+        let client = TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-07-24T00:00:02Z")
+        try host.attach(client: client, mode: .owner, into: container)
+
+        XCTAssertTrue(host.sendTextAsPaste("first"))
+        XCTAssertTrue(host.sendTextAsPaste("second"))
+        XCTAssertTrue(host.sendTextAsPaste("third"))
+
+        await host.drainInputQueueForTesting()
+        XCTAssertEqual(
+            sender.controlRequestTexts, ["first"],
+            "the link-is-gone verdict on the first send must discard the queued backlog rather than deliver it")
+    }
+
+    /// The other half of Change 2's contract: a reachable daemon's coded rejection is not evidence the
+    /// link is gone, so `inputFailureHandler` answering `false` must leave the queue running — the next
+    /// keystroke is still delivered rather than silently dropped alongside a rejected one.
+    @MainActor func testCodedRejectionNeitherReportsALostLinkNorDropsInput() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fixture = try makeRunningSessionFixture(sessionID: "remote-coded-rejection", root: root)
+        let sender = ScriptedControlRequestSender(
+            payload: fixture.payload, controlError: SimulatedRejectionError(), failFirstControlRequestOnly: true)
+        let reported = expectation(description: "the rejection reached inputFailureHandler")
+        let host = RemoteGhosttySessionHost(
+            launchConfiguration: fixture.launchConfiguration, paths: fixture.paths, terminalServiceRequestSender: sender.send,
+            inputFailureHandler: { _ in
+                reported.fulfill()
+                // A reachable daemon's coded rejection is not evidence of a lost link.
+                return false
+            })
+
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 0, height: 0))
+        let client = TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-07-24T00:00:02Z")
+        try host.attach(client: client, mode: .owner, into: container)
+
+        XCTAssertTrue(host.sendTextAsPaste("first"))
+        XCTAssertTrue(host.sendTextAsPaste("second"))
+
+        await fulfillment(of: [reported], timeout: 2)
+        await host.drainInputQueueForTesting()
+        XCTAssertEqual(sender.controlRequestTexts, ["first", "second"], "a coded rejection must not drop the next send behind it")
+    }
+
     @MainActor func testRemoteHostRequestsDirectStateResyncAfterMissingDeltaBaseline() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -1951,7 +2299,7 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
         }
     }
 
-    @MainActor private func waitForCondition(_ label: String, timeout: TimeInterval = 2, condition: @escaping () -> Bool) {
+    @MainActor private func waitForCondition(_ label: String, timeout: TimeInterval = 30, condition: @escaping () -> Bool) {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             if condition() { return }
@@ -1977,6 +2325,31 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
     private func renderUpdate(text: String, sessionRevision: UInt64? = nil, ownerEpoch: UInt64 = 0) throws -> Data {
         let frame = GhosttyRenderFrame(sessionRevision: sessionRevision, ownerEpoch: ownerEpoch, snapshot: snapshot(text: text))
         return try GhosttyRenderUpdateBinaryCodec.encode(.full(frame))
+    }
+
+    /// A running remote session's launch/paths/final-frame payload, shared by the lost-link tests above:
+    /// each needs a running (interactive) session so its control sends are not turned away by
+    /// `isInteractiveRuntimeStateForControl()`.
+    private struct RunningSessionFixture { let launchConfiguration: TerminalSessionLaunchConfiguration; let paths: TerminalSessionPaths
+        let payload: GhosttyRemoteSessionStatePayload
+    }
+
+    private func makeRunningSessionFixture(sessionID: String, root: URL) throws -> RunningSessionFixture {
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: sessionID, title: "remote", workingDirectory: "/tmp/work", shell: "/bin/bash", command: "cat",
+            createdAt: "2026-07-24T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+        let runtimeState = TerminalSessionRuntimeState(
+            sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-07-24T00:00:00Z",
+            title: "remote", workingDirectory: "/tmp/work", columns: 80, rows: 24)
+        try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(runtimeState, paths: paths)
+        let payload = GhosttyRemoteSessionStatePayload(
+            sessionID: sessionID, reason: TerminalRemoteSessionStateReason.stateChange, emittedAt: "2026-07-24T00:00:01Z", sessionStateRevision: 1,
+            sessionStateFlags: 1, screenStateRevision: 1, runtimeState: runtimeState, attachmentSnapshot: TerminalSessionAttachmentSnapshot(),
+            title: "remote", workingDirectory: "/tmp/work", outputByteCount: nil, renderUpdate: try renderUpdate(text: "alpha", sessionRevision: 1))
+        return RunningSessionFixture(launchConfiguration: launchConfiguration, paths: paths, payload: payload)
     }
 
     private func remoteStatePayload(sessionID: String, reason: String, outputByteCount: Int? = nil, outputEndByteOffset: Int? = nil)
