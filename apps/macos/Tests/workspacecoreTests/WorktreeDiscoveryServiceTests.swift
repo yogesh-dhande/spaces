@@ -133,9 +133,7 @@ import Testing
         private let continuation: AsyncStream<Int>.Continuation
         let parkedCounts: AsyncStream<Int>
 
-        init() {
-            (parkedCounts, continuation) = AsyncStream<Int>.makeStream()
-        }
+        init() { (parkedCounts, continuation) = AsyncStream<Int>.makeStream() }
 
         func recordParked() {
             lock.lock()
@@ -268,5 +266,139 @@ import Testing
         let afterSecondStorm = counter.snapshot
         #expect(afterSecondStorm.created == projectCount)
         #expect(afterSecondStorm.live == projectCount)
+    }
+
+    /// Records its construction and (single) teardown in a shared `WatcherCounter` and either
+    /// starts cleanly or fails the way a real watcher does when the OS refuses its event stream.
+    /// The injected factory is the seam these quarantine tests observe: the service builds exactly
+    /// one watcher per real install attempt, so the counter reports install attempts without the
+    /// service carrying a counter of its own.
+    final class StubWatcher: FileSystemWatching, @unchecked Sendable {
+        private let counter: WatcherCounter
+        private let startError: (any Error)?
+        private let lock = NSLock()
+        private var stopped = false
+
+        init(counter: WatcherCounter, startError: (any Error)?) {
+            self.counter = counter
+            self.startError = startError
+            counter.onCreate()
+        }
+
+        func start() async throws { if let startError { throw startError } }
+
+        func stop() {
+            lock.lock()
+            let alreadyStopped = stopped
+            stopped = true
+            lock.unlock()
+            if !alreadyStopped { counter.onStop() }
+        }
+    }
+
+    /// Counts the watcher-stream failures the service reports through `onError`, ignoring any other
+    /// error (e.g. a scan failure) so the tally measures exactly the log line the storm produced.
+    final class StreamFailureTally: @unchecked Sendable {
+        private let lock = NSLock()
+        private var count = 0
+
+        func record(_ error: any Error) {
+            guard let watchError = error as? FileSystemWatcher.WatchError, case .streamUnavailable = watchError else { return }
+            lock.lock()
+            count += 1
+            lock.unlock()
+        }
+
+        var reported: Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return count
+        }
+    }
+
+    /// The retry storm: a project whose watcher stream cannot be created used to be re-attempted by
+    /// every `databaseDidChange`-driven refresh pass — a git spawn, a watcher create, and an error
+    /// report each time, forever. One failure must cost one attempt and one report, and the failure
+    /// must not disturb the projects that watch fine.
+    ///
+    /// The unwatchable project's directory exists throughout (this is the FSEvents
+    /// capacity-exhaustion shape), so a reachability probe keeps answering "reachable" — the case
+    /// that must specifically not re-arm, or the storm returns.
+    @MainActor @Test func unwatchableProjectIsAttemptedOnceAndLeavesOtherProjectsWatched() async throws {
+        let healthyRepo = try makeTempGitRepo(name: "healthy")
+        let unwatchableRepo = try makeTempGitRepo(name: "unwatchable")
+        let databaseDirectory = try makeTempDirectory()
+        let databasePath = databaseDirectory.appendingPathComponent("spaces.db").path
+        let store = try SQLiteStore(path: databasePath)
+        try store.upsert(project: ProjectRecord(id: "healthy", name: "healthy", dir: healthyRepo.path, isGitRepo: true, defaultBranch: "main"))
+        try store.upsert(
+            project: ProjectRecord(id: "unwatchable", name: "unwatchable", dir: unwatchableRepo.path, isGitRepo: true, defaultBranch: "main"))
+
+        let healthyCounter = WatcherCounter()
+        let unwatchableCounter = WatcherCounter()
+        let failures = StreamFailureTally()
+        // The factory only sees the watched directories, so the project is identified by its git
+        // common dir living under the repo (symlink-resolved, since the service standardizes it).
+        let unwatchablePrefix = unwatchableRepo.resolvingSymlinksInPath().path + "/"
+        let service = WorktreeDiscoveryService(
+            databasePath: databasePath, onError: { failures.record($0) },
+            watcherFactory: { paths, _, _ in
+                let isUnwatchable = paths.contains { $0.hasPrefix(unwatchablePrefix) }
+                return StubWatcher(
+                    counter: isUnwatchable ? unwatchableCounter : healthyCounter,
+                    startError: isUnwatchable ? FileSystemWatcher.WatchError.streamUnavailable : nil)
+            })
+
+        service.start()
+        defer { service.stop() }
+        await service.drainInFlightWorkForTesting()
+
+        #expect(unwatchableCounter.snapshot.created == 1)
+        #expect(healthyCounter.snapshot.live == 1)
+        #expect(failures.reported == 1)
+
+        for _ in 0..<20 {
+            service.refreshWatchers()
+            await service.drainInFlightWorkForTesting()
+        }
+
+        #expect(unwatchableCounter.snapshot.created == 1)
+        #expect(failures.reported == 1)
+        #expect(healthyCounter.snapshot.created == 1)
+        #expect(healthyCounter.snapshot.live == 1)
+    }
+
+    /// The recovery half of the quarantine: a registered project whose directory is gone (deleted,
+    /// or on an unmounted volume) cannot be watched, but must start being watched again on its own
+    /// once the directory is back — no user action and no daemon restart. Recovery lands on the
+    /// first refresh pass after the directory returns, which is why the quarantine re-arms on a
+    /// cheap reachability check rather than waiting for a restart.
+    @MainActor @Test func projectIsWatchedAgainWhenItsDirectoryReturns() async throws {
+        let repo = try makeTempGitRepo(name: "repo")
+        let databaseDirectory = try makeTempDirectory()
+        let databasePath = databaseDirectory.appendingPathComponent("spaces.db").path
+        let store = try SQLiteStore(path: databasePath)
+        try store.upsert(project: ProjectRecord(id: "p1", name: "repo", dir: repo.path, isGitRepo: true, defaultBranch: "main"))
+        try FileManager.default.removeItem(at: repo)
+
+        let counter = WatcherCounter()
+        let service = WorktreeDiscoveryService(
+            databasePath: databasePath, watcherFactory: { _, _, _ in StubWatcher(counter: counter, startError: nil) })
+
+        service.start()
+        defer { service.stop() }
+        await service.drainInFlightWorkForTesting()
+        for _ in 0..<10 {
+            service.refreshWatchers()
+            await service.drainInFlightWorkForTesting()
+        }
+        #expect(counter.snapshot.created == 0)
+
+        try initializeGitRepository(at: repo)
+        service.refreshWatchers()
+        await service.drainInFlightWorkForTesting()
+
+        #expect(counter.snapshot.created == 1)
+        #expect(counter.snapshot.live == 1)
     }
 }
