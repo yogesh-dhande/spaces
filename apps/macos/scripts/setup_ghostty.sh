@@ -218,51 +218,72 @@ artifact_release_tag() {
     printf "%s%s\n" "$ARTIFACT_RELEASE_PREFIX" "$GHOSTTY_SHA"
 }
 
+# The single definition of what an artifact set must agree on to be reusable in
+# this checkout. Both consumers derive from this one list:
+#
+#   * manifest_matches_current_sha  -- validates an installed or cached manifest
+#   * cache_entry_dir               -- builds the shared cache path
+#
+# Deriving both from one definition is the point. When the cache key covered
+# fewer fields than the validity check, two checkouts that differed only in an
+# unkeyed field (a BUILD_SCRIPT_VERSION bump, say) resolved to the same entry
+# path, each judged the other's artifacts stale, and they evicted and re-seeded
+# that key in a loop -- both rebuilding or redownloading multi-gigabyte artifacts
+# while appearing to share a cache. Adding a field here keys it and checks it
+# together, so the two can never drift apart again.
+#
+# Each line is "<manifest field>|<json type>|<key label>|<value>":
+#   json type - how the value compares against the parsed manifest; write_manifest
+#               records the two version counters as JSON numbers and the rest as
+#               strings.
+#   key label - short name this field carries in the cache entry directory. The
+#               one empty label (ghostty_sha) is keyed as the parent directory of
+#               the entry instead, so a cache stays browsable by Ghostty SHA.
+#   value     - an empty value means "not determinable here": the manifest check
+#               skips the field and the key records "unknown". Only
+#               xcode_build_version can be empty, on a host without xcodebuild.
+artifact_validity_fields() {
+    cat <<EOF
+ghostty_sha|str||$GHOSTTY_SHA
+schema_version|int|schema|$MANIFEST_SCHEMA_VERSION
+build_script_version|int|script|$BUILD_SCRIPT_VERSION
+zig_version|str|zig|$ZIG_VERSION
+xcode_build_version|str|xcode|$(current_xcode_build_version)
+build_optimize|str|opt|$GHOSTTY_BUILD_OPTIMIZE
+host_arch|str|arch|$(current_host_arch)
+EOF
+}
+
 manifest_matches_current_sha() {
     local manifest_path="$1"
     [[ -f "$manifest_path" ]] || return 1
 
-    python3 - "$manifest_path" \
-        "$GHOSTTY_SHA" \
-        "$MANIFEST_SCHEMA_VERSION" \
-        "$BUILD_SCRIPT_VERSION" \
-        "$ZIG_VERSION" \
-        "$(current_xcode_build_version)" \
-        "$GHOSTTY_BUILD_OPTIMIZE" \
-        "$(current_host_arch)" <<'PY'
+    local -a fields=()
+    local line
+    while IFS= read -r line; do
+        [[ -n "$line" ]] || continue
+        fields+=("$line")
+    done < <(artifact_validity_fields)
+
+    python3 - "$manifest_path" "${fields[@]}" <<'PY'
 import json
 import sys
 
-(
-    manifest_path,
-    expected_sha,
-    expected_schema,
-    expected_script,
-    expected_zig,
-    expected_xcode_build,
-    expected_optimize,
-    expected_host_arch,
-) = sys.argv[1:9]
+manifest_path = sys.argv[1]
 try:
     with open(manifest_path, "r", encoding="utf-8") as handle:
         manifest = json.load(handle)
 except Exception:
     sys.exit(1)
 
-if manifest.get("schema_version") != int(expected_schema):
-    sys.exit(1)
-if manifest.get("ghostty_sha") != expected_sha:
-    sys.exit(1)
-if manifest.get("build_script_version") != int(expected_script):
-    sys.exit(1)
-if manifest.get("zig_version") != expected_zig:
-    sys.exit(1)
-if expected_xcode_build and manifest.get("xcode_build_version") != expected_xcode_build:
-    sys.exit(1)
-if manifest.get("build_optimize") != expected_optimize:
-    sys.exit(1)
-if manifest.get("host_arch") != expected_host_arch:
-    sys.exit(1)
+for spec in sys.argv[2:]:
+    field, json_type, _label, value = spec.split("|", 3)
+    if not value:
+        continue
+    expected = int(value) if json_type == "int" else value
+    if manifest.get(field) != expected:
+        sys.exit(1)
+
 if manifest.get("dirty") is not False:
     sys.exit(1)
 sys.exit(0)
@@ -368,17 +389,37 @@ reuse_local_artifacts_if_valid() {
     return 1
 }
 
-# Keyed cache entry directory. The key includes the Xcode build version, host
-# architecture, and build-optimize mode alongside the Ghostty SHA so artifacts
-# built against different Xcode toolchains, arches, or optimize modes (e.g.
-# Debug vs ReleaseFast) coexist instead of clobbering each other. The extra
-# fields the manifest tracks (Zig, build-script version, schema) move in lockstep
-# with these, and restore re-validates the cached manifest regardless.
+# Keyed cache entry directory: "<root>/<ghostty sha>/<label=value>-...", built
+# from every field in artifact_validity_fields. Because the key carries the whole
+# validity key, an entry that resolves for this checkout can only be judged stale
+# by a checkout that would key somewhere else -- so checkouts on different Xcode
+# toolchains, arches, optimize modes, Zig versions, build-script versions, or
+# manifest schemas each occupy their own entry and coexist.
+#
+# Each component is reduced to a single filesystem-safe path segment. Reserving
+# "=" for the label boundary means a value can never forge one. The components
+# are short by construction (two counters, a Zig version, an Xcode build id, a
+# Zig optimize mode, and uname -m), so the entry name stays well inside the
+# filesystem's per-component limit; an absurd SPACES_GHOSTTY_BUILD_OPTIMIZE would
+# fail the publish's mkdir and surface as the usual cache warning.
+cache_key_component() {
+    printf '%s' "${1:-unknown}" | tr -c 'A-Za-z0-9._-' '_'
+}
+
 cache_entry_dir() {
-    local xcode_build arch
-    xcode_build="$(current_xcode_build_version)"
-    arch="$(current_host_arch)"
-    printf "%s/%s/%s-%s-%s\n" "$GHOSTTY_CACHE_ROOT" "$GHOSTTY_SHA" "${xcode_build:-unknown}" "$arch" "$GHOSTTY_BUILD_OPTIMIZE"
+    local sha="" leaf="" field label value
+    # The JSON type column only matters to the manifest comparison; the key uses
+    # the raw value, so it is read into the throwaway "_".
+    while IFS='|' read -r field _ label value; do
+        [[ -n "$field" ]] || continue
+        if [[ -z "$label" ]]; then
+            sha="$(cache_key_component "$value")"
+            continue
+        fi
+        leaf+="${leaf:+-}$label=$(cache_key_component "$value")"
+    done < <(artifact_validity_fields)
+
+    printf "%s/%s/%s\n" "$GHOSTTY_CACHE_ROOT" "$sha" "$leaf"
 }
 
 restore_from_cache_if_valid() {
@@ -435,10 +476,11 @@ save_to_cache() {
     local entry
     entry="$(cache_entry_dir)"
     if [[ -d "$entry" ]]; then
-        # Keep a still-valid entry (idempotent), but replace one that has gone
-        # stale for this key (e.g. a setup-script, Zig, or schema bump on the
-        # same Ghostty SHA/Xcode/arch) so worktrees stop falling back to
-        # download/build until the cache is manually cleared.
+        # Keep a still-valid entry (idempotent), but replace one that fails the
+        # validity check. The key covers every field that check compares, so a
+        # mismatch here is a damaged or hand-edited entry rather than another
+        # checkout's valid artifacts -- replacing it repairs the key instead of
+        # taking it away from a peer that still wants it.
         if manifest_matches_current_sha "$entry/ghostty-artifacts/manifest.json"; then
             return 0
         fi

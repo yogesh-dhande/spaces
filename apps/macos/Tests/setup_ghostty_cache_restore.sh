@@ -15,7 +15,8 @@ unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX
 
 fail() {
     echo "setup_ghostty cache restore test failed: $*" >&2
-    for log in seed.out empty-submodule.out restore.out dirty-build.out foreign-arch.out foreign-arch-reuse.out; do
+    for log in seed.out empty-submodule.out restore.out dirty-build.out foreign-arch.out foreign-arch-reuse.out \
+        coexist-current-seed.out coexist-bumped-seed.out coexist-current-restore.out coexist-bumped-restore.out; do
         if [[ -f "$TMP_ROOT/$log" ]]; then
             echo "--- $log ---" >&2
             cat "$TMP_ROOT/$log" >&2
@@ -270,7 +271,17 @@ SETUP_ENV=(
     "SPACES_TEST_FAKE_VT_LIB_NAME=$FAKE_VT_LIB_NAME"
 )
 
-CACHE_ENTRY="$CACHE_DIR/$GHOSTTY_SHA/17C52-$ARCH-ReleaseFast"
+# The cache entry directory carries the whole validity key, so two checkouts that disagree on any
+# of it occupy different entries instead of evicting each other (scenario 10). The version fields
+# come from the script under test for the same reason the release fixture reads them: a hardcoded
+# copy would go stale on the next bump.
+MANIFEST_SCHEMA_VERSION="$(sed -n 's/^MANIFEST_SCHEMA_VERSION="\(.*\)"$/\1/p' "$SOURCE_SETUP_SCRIPT" | head -n 1)"
+[[ -n "$MANIFEST_SCHEMA_VERSION" ]] || fail "could not read MANIFEST_SCHEMA_VERSION from setup_ghostty.sh"
+ZIG_VERSION="$(sed -n 's/^ZIG_VERSION="\(.*\)"$/\1/p' "$SOURCE_SETUP_SCRIPT" | head -n 1)"
+[[ -n "$ZIG_VERSION" ]] || fail "could not read ZIG_VERSION from setup_ghostty.sh"
+
+CACHE_KEY_LEAF="schema=$MANIFEST_SCHEMA_VERSION-script=$BUILD_SCRIPT_VERSION-zig=$ZIG_VERSION-xcode=17C52-opt=ReleaseFast-arch=$ARCH"
+CACHE_ENTRY="$CACHE_DIR/$GHOSTTY_SHA/$CACHE_KEY_LEAF"
 
 # --- 1. Seed: a download installs artifacts and populates the shared cache. ---
 : > "$GH_LOG"
@@ -476,7 +487,7 @@ if ! env "${DERIVED_ENV[@]}" \
     fail "worktree setup with a derived cache root failed"
 fi
 
-DERIVED_ENTRY="$PRIMARY_APP_ROOT/.local/ghostty-cache/$GHOSTTY_SHA/17C52-$ARCH-ReleaseFast"
+DERIVED_ENTRY="$PRIMARY_APP_ROOT/.local/ghostty-cache/$GHOSTTY_SHA/$CACHE_KEY_LEAF"
 [[ -f "$DERIVED_ENTRY/ghostty-artifacts/manifest.json" ]] \
     || fail "worktree run did not seed the primary checkout's cache"
 [[ ! -d "$PRIMARY_WORKTREE/apps/macos/.local/ghostty-cache" ]] \
@@ -597,5 +608,129 @@ set -e
 [[ "$FOREIGN_REUSE_STATUS" -ne 0 ]] || fail "setup reused installed artifacts recorded for another architecture"
 grep -q "Local Ghostty artifact manifest does not match current Ghostty setup inputs" \
     "$TMP_ROOT/foreign-arch-reuse.out" || fail "foreign-architecture local artifacts were not rejected by the manifest check"
+
+# --- 10. Checkouts that agree on SHA/Xcode/arch/optimize but differ in a manifest-only input
+#         keep separate cache entries instead of evicting each other. ---
+# Several worktrees are checked out at once here, and a branch that bumps BUILD_SCRIPT_VERSION (or
+# the pinned Zig, or the manifest schema) is ordinary. Every input the manifest check compares has
+# to be part of the cache key: when it was not, both checkouts resolved to one entry path, each
+# judged the other's artifacts stale, and they evicted and re-seeded the same key forever -- both
+# rebuilding or redownloading multi-gigabyte artifacts while appearing to share a cache.
+COEXIST_CACHE_DIR="$TMP_ROOT/cache-coexist"
+CURRENT_CHECKOUT="$TMP_ROOT/coexist-current"
+BUMPED_CHECKOUT="$TMP_ROOT/coexist-bumped"
+BUMPED_BUILD_SCRIPT_VERSION="$((BUILD_SCRIPT_VERSION + 1))"
+mkdir -p "$COEXIST_CACHE_DIR"
+
+# A fixture checkout running setup_ghostty.sh with the given BUILD_SCRIPT_VERSION. The Ghostty
+# submodule is left empty so the pinned SHA comes from the gitlink, which keeps both checkouts on
+# the same Ghostty SHA without a second submodule clone.
+make_coexist_checkout() {
+    local root="$1"
+    local build_script_version="$2"
+    local app_root="$root/apps/macos"
+
+    mkdir -p "$app_root/scripts" "$app_root/vendor/ghostty"
+    sed "s/^BUILD_SCRIPT_VERSION=\".*\"\$/BUILD_SCRIPT_VERSION=\"$build_script_version\"/" \
+        "$SOURCE_SETUP_SCRIPT" > "$app_root/scripts/setup_ghostty.sh"
+    chmod +x "$app_root/scripts/setup_ghostty.sh"
+    grep -q "^BUILD_SCRIPT_VERSION=\"$build_script_version\"\$" "$app_root/scripts/setup_ghostty.sh" \
+        || fail "could not pin BUILD_SCRIPT_VERSION=$build_script_version in the fixture checkout"
+
+    git -C "$root" init -q
+    git -C "$root" config user.email "spaces-test@example.com"
+    git -C "$root" config user.name "Spaces Test"
+    git -C "$root" config commit.gpgsign false
+    git -C "$root" add apps/macos/scripts/setup_ghostty.sh
+    git -C "$root" update-index --add --cacheinfo 160000 "$GHOSTTY_SHA" apps/macos/vendor/ghostty
+    git -C "$root" -c commit.gpgsign=false commit -q -m "Create coexisting checkout fixture"
+}
+
+make_coexist_checkout "$CURRENT_CHECKOUT" "$BUILD_SCRIPT_VERSION"
+make_coexist_checkout "$BUMPED_CHECKOUT" "$BUMPED_BUILD_SCRIPT_VERSION"
+
+# The bumped checkout needs a release built by its own setup script; the shared fixture release
+# carries the current version and would be rejected before it ever reached the cache.
+BUMPED_RELEASE_DIR="$TMP_ROOT/release-bumped-script"
+mkdir -p "$BUMPED_RELEASE_DIR"
+cp "$RELEASE_DIR"/*.tar.gz "$BUMPED_RELEASE_DIR"/
+python3 - "$RELEASE_DIR/manifest.json" "$BUMPED_RELEASE_DIR/manifest.json" "$BUMPED_BUILD_SCRIPT_VERSION" <<'PY'
+import json
+import pathlib
+import sys
+
+source, dest, build_script_version = sys.argv[1:4]
+manifest = json.loads(pathlib.Path(source).read_text(encoding="utf-8"))
+manifest["build_script_version"] = int(build_script_version)
+pathlib.Path(dest).write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+(
+    cd "$BUMPED_RELEASE_DIR"
+    shasum -a 256 \
+        "GhosttyKit.xcframework.tar.gz" \
+        "GhosttyKit-resources.tar.gz" \
+        "libghostty-vt.tar.gz" \
+        "manifest.json" > "SHA256SUMS"
+)
+
+: > "$GH_LOG"
+if ! env "${SETUP_ENV[@]}" "SPACES_GHOSTTY_CACHE_DIR=$COEXIST_CACHE_DIR" \
+    "$CURRENT_CHECKOUT/apps/macos/scripts/setup_ghostty.sh" --download-only \
+    > "$TMP_ROOT/coexist-current-seed.out" 2>&1; then
+    fail "current-version checkout failed to seed the shared cache"
+fi
+
+if ! env "${SETUP_ENV[@]}" "SPACES_GHOSTTY_CACHE_DIR=$COEXIST_CACHE_DIR" \
+    "SPACES_TEST_RELEASE_DIR=$BUMPED_RELEASE_DIR" \
+    "$BUMPED_CHECKOUT/apps/macos/scripts/setup_ghostty.sh" --download-only \
+    > "$TMP_ROOT/coexist-bumped-seed.out" 2>&1; then
+    fail "bumped-version checkout failed to seed the shared cache"
+fi
+
+if grep -q "Replacing stale Ghostty cache entry" "$TMP_ROOT/coexist-bumped-seed.out"; then
+    fail "bumped-version checkout evicted the current-version checkout's cache entry"
+fi
+
+COEXIST_ENTRIES="$(find "$COEXIST_CACHE_DIR/$GHOSTTY_SHA" -mindepth 1 -maxdepth 1 -type d -not -name '.*' | sort)"
+COEXIST_ENTRY_COUNT="$(printf '%s\n' "$COEXIST_ENTRIES" | grep -c . || true)"
+[[ "$COEXIST_ENTRY_COUNT" == "2" ]] \
+    || fail "expected 2 coexisting cache entries, found $COEXIST_ENTRY_COUNT: $COEXIST_ENTRIES"
+
+COEXIST_VERSIONS="$(
+    while IFS= read -r entry; do
+        python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["build_script_version"])' \
+            "$entry/ghostty-artifacts/manifest.json"
+    done <<< "$COEXIST_ENTRIES" | sort -n | tr '\n' ' '
+)"
+[[ "$COEXIST_VERSIONS" == "$BUILD_SCRIPT_VERSION $BUMPED_BUILD_SCRIPT_VERSION " ]] \
+    || fail "cache entries do not cover both build script versions: $COEXIST_VERSIONS"
+
+# Both checkouts must restore their own entry from the shared cache. The forced gh failure means a
+# run that lost its entry cannot recover by downloading.
+rm -rf "$CURRENT_CHECKOUT/apps/macos/.local" "$BUMPED_CHECKOUT/apps/macos/.local"
+: > "$GH_LOG"
+if ! env "${SETUP_ENV[@]}" "SPACES_GHOSTTY_CACHE_DIR=$COEXIST_CACHE_DIR" "SPACES_TEST_GH_FAIL=1" \
+    "$CURRENT_CHECKOUT/apps/macos/scripts/setup_ghostty.sh" \
+    > "$TMP_ROOT/coexist-current-restore.out" 2>&1; then
+    fail "current-version checkout could not restore its cache entry"
+fi
+grep -q "Restoring Ghostty artifacts from cache" "$TMP_ROOT/coexist-current-restore.out" \
+    || fail "current-version checkout did not report a cache restore"
+RESTORED_VERSION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["build_script_version"])' \
+    "$CURRENT_CHECKOUT/apps/macos/.local/ghostty-artifacts/manifest.json")"
+[[ "$RESTORED_VERSION" == "$BUILD_SCRIPT_VERSION" ]] \
+    || fail "current-version checkout restored artifacts built by script version $RESTORED_VERSION"
+
+if ! env "${SETUP_ENV[@]}" "SPACES_GHOSTTY_CACHE_DIR=$COEXIST_CACHE_DIR" "SPACES_TEST_GH_FAIL=1" \
+    "$BUMPED_CHECKOUT/apps/macos/scripts/setup_ghostty.sh" \
+    > "$TMP_ROOT/coexist-bumped-restore.out" 2>&1; then
+    fail "bumped-version checkout could not restore its cache entry"
+fi
+grep -q "Restoring Ghostty artifacts from cache" "$TMP_ROOT/coexist-bumped-restore.out" \
+    || fail "bumped-version checkout did not report a cache restore"
+RESTORED_VERSION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["build_script_version"])' \
+    "$BUMPED_CHECKOUT/apps/macos/.local/ghostty-artifacts/manifest.json")"
+[[ "$RESTORED_VERSION" == "$BUMPED_BUILD_SCRIPT_VERSION" ]] \
+    || fail "bumped-version checkout restored artifacts built by script version $RESTORED_VERSION"
 
 echo "setup_ghostty cache restore test passed"
