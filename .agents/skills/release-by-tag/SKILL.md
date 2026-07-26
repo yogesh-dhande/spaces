@@ -7,7 +7,7 @@ description: Prepare and publish a Spaces release through the repository's tag-t
 
 ## Inspect release state
 
-1. Read `AGENTS.md`, `docs/dev.md`, `.github/workflows/release.yml` (a thin caller of the shared `.github/workflows/release-build.yml`), and the Version Metadata Rules before acting.
+1. Read `AGENTS.md`, `docs/dev.md`, `.github/workflows/release.yml` (a thin caller of the shared `.github/workflows/release-build.yml`), `.github/workflows/ios-release.yml`, and the Version Metadata Rules before acting.
 2. Confirm `gh` authentication and inspect the current branch, worktree, remote default branch, open PRs, existing releases, and local and remote tags.
 3. Require the release commit to be on `main`, with a clean worktree and all required GitHub checks passing. Do not tag an unmerged branch or bypass a failed check.
 4. Treat `apps/macos/AppVersion.plist` as the authored version source. Never hand-edit generated version files.
@@ -37,11 +37,13 @@ Present the complete proposed notes alongside the tag confirmation. Apply the ap
 ## Publish and verify
 
 1. Fetch the remote and re-confirm that the selected commit is still the verified `main` tip.
-2. Create an annotated tag and push only that tag. The `Release` workflow is triggered by tags matching `v*`.
-3. Monitor every job in the resulting workflow until completion. Do not report success while jobs are queued, running, skipped because a dependency failed, or failed.
-4. If the workflow succeeds, apply the approved user-facing notes and read the release back.
+2. Create an annotated tag and push only that tag. A tag matching `v*`, excluding the 4-component nightly form, triggers two independent workflows: `Release` (`release.yml`) builds and publishes the macOS and Linux artifacts, and `iOS Release` (`ios-release.yml`) archives the iOS app and uploads it to TestFlight. Neither workflow's result implies the other's, and neither reports the other's failure.
+3. Monitor every job in both workflows until completion. Do not report success while jobs are queued, running, skipped because a dependency failed, or failed. Enumerate the tag's workflow runs rather than watching only the one that was expected.
+4. If the `Release` workflow succeeds, apply the approved user-facing notes and read the release back.
 5. Verify that the release has the expected macOS assets (DMG, Sparkle zip, `appcast.xml`) and both Linux architecture assets, is marked latest, and that the published appcast serves the released version. The website build stages its copy of the feed from `releases/latest/download`, so a release missing `appcast.xml` or the Sparkle zip breaks the next website deploy.
-6. If any step fails, preserve the tag and report the exact failure. Do not move or retry the tag workflow through destructive tag operations without explicit user approval.
+6. Verify that the iOS build reached TestFlight. `iOS Release` signs against Apple Developer account state — a stored distribution certificate that expires yearly, an App Store Connect API key, a provisioning profile Apple issues — so it fails with nothing wrong in the repository and no failing check on the release commit. Read the workflow's run history across the preceding release tags as well: a signing failure persists until the account is repaired, so a first failure and a standing outage are indistinguishable from a single run.
+7. Report a macOS release that publishes while the iOS upload fails as a partial release, naming the last version that reached TestFlight. Do not describe the release as published on the strength of the `Release` workflow alone.
+8. If any step fails, preserve the tag and report the exact failure. Do not move or retry the tag workflow through destructive tag operations without explicit user approval. Re-running a failed `iOS Release` after the account is repaired needs no new tag.
 
 ## Existing failed releases
 
