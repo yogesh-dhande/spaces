@@ -320,7 +320,7 @@
             guard let self else { return }
             self.requestSurfaceRefreshAction()
             GhosttyEmbeddedAppService.shared.tick()
-            self.broadcastCurrentState(reason: "input_output")
+            self.broadcastCurrentState(reason: TerminalRemoteSessionStateReason.inputOutput)
         }
         private let interactiveOutputGate = InteractiveOutputGate()
         /// In-memory cache of this session's attachment snapshot (`terminal_clients` + `terminal_attachments`
@@ -431,7 +431,7 @@
                 refreshRuntimeState(force: true)
                 sessionStartedAt = startedAt
                 didLogFirstOutput = false
-                broadcastCurrentState(reason: "initial")
+                broadcastCurrentState(reason: TerminalRemoteSessionStateReason.initial)
                 TerminalPerformance.logMetric(
                     "terminal_session_start", target: "session=\(launchConfiguration.sessionID) backend=\(launchConfiguration.backend.rawValue)",
                     elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: true)
@@ -1371,7 +1371,7 @@
                 elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), success: resized, detail: "columns=\(columns) rows=\(rows)")
             if resized {
                 recordAcceptedResizeSerial(from: request)
-                broadcastCurrentState(reason: "resize")
+                broadcastCurrentState(reason: TerminalRemoteSessionStateReason.resize)
             }
             return TerminalControlResponse(ok: resized, message: resized ? "Resized terminal." : "Unable to match the requested terminal size.")
         }
@@ -1764,25 +1764,26 @@
         private func postAttachmentStateDidChange(invalidateCache: Bool = true) {
             if invalidateCache { invalidateAttachmentSnapshotCache() }
             TerminalSessionNotification.post(.spacesTerminalAttachmentStateDidChange, sessionID: launchConfiguration.sessionID)
-            broadcastCurrentState(reason: "attachment_state")
+            broadcastCurrentState(reason: TerminalRemoteSessionStateReason.attachmentState)
         }
 
         private func postSessionMetadataDidChange() {
             TerminalSessionNotification.post(.spacesTerminalSessionMetadataDidChange, sessionID: launchConfiguration.sessionID)
-            broadcastCurrentState(reason: "session_metadata")
+            broadcastCurrentState(reason: TerminalRemoteSessionStateReason.sessionMetadata)
         }
 
         private func postRuntimeStateDidChange() {
             TerminalSessionNotification.post(.spacesTerminalRuntimeStateDidChange, sessionID: launchConfiguration.sessionID)
             TerminalOverviewSignal.post()
-            broadcastCurrentState(reason: "runtime_state")
+            broadcastCurrentState(reason: TerminalRemoteSessionStateReason.runtimeState)
         }
 
         private func postOutputDidChange(data: Data, outputEndByteOffset: Int?, interactiveResync: Bool = false, shouldBroadcastState: Bool = true) {
             TerminalSessionNotification.post(.spacesTerminalOutputDidChange, sessionID: launchConfiguration.sessionID)
             inputOutputResyncScheduler.handleOutputDidChange(interactive: interactiveResync)
             guard shouldBroadcastState else { return }
-            broadcastCurrentState(reason: "output", outputByteCount: data.count, outputEndByteOffset: outputEndByteOffset)
+            broadcastCurrentState(
+                reason: TerminalRemoteSessionStateReason.output, outputByteCount: data.count, outputEndByteOffset: outputEndByteOffset)
         }
 
         private func handleOwnerInputActivity(byteCount: Int) {
@@ -1809,7 +1810,7 @@
                 guard let self else { return }
                 self.requestSurfaceRefreshAction()
                 GhosttyEmbeddedAppService.shared.tick()
-                self.broadcastCurrentState(reason: "input")
+                self.broadcastCurrentState(reason: TerminalRemoteSessionStateReason.input)
             }
         }
 

@@ -491,11 +491,11 @@
             if attachedMode == .owner { sendCurrentViewportResizeIfNeeded(force: false) }
             let emittedAt = GhosttyRemoteSessionStateTimestamp.date(from: payload.emittedAt) ?? Date()
             var renderUpdateAttributes = GhosttyRenderFrameMetrics.attributes(
-                reason: payload.reason, frame: decodedFrame, frameByteCount: incomingPayload.renderUpdate?.count,
-                decodeMS: decodeMS, outputByteCount: payload.outputByteCount,
-                screenStateRevision: payload.screenStateRevision, dropped: incomingPayload.renderUpdate == nil ? nil : dropReason != nil,
-                dropReason: dropReason, renderMode: "ghostty-mirror", frameKind: decodedUpdate?.frameKindMetricValue,
-                baseRevision: decodedUpdate?.baseRevision, targetRevision: decodedUpdate?.targetRevision ?? payload.screenStateRevision,
+                reason: payload.reason, frame: decodedFrame, frameByteCount: incomingPayload.renderUpdate?.count, decodeMS: decodeMS,
+                outputByteCount: payload.outputByteCount, screenStateRevision: payload.screenStateRevision,
+                dropped: incomingPayload.renderUpdate == nil ? nil : dropReason != nil, dropReason: dropReason, renderMode: "ghostty-mirror",
+                frameKind: decodedUpdate?.frameKindMetricValue, baseRevision: decodedUpdate?.baseRevision,
+                targetRevision: decodedUpdate?.targetRevision ?? payload.screenStateRevision,
                 appliedRevision: frameForUpdate == nil ? nil : (payload.screenStateRevision ?? frameForUpdate?.sessionRevision), applyMS: applyMS,
                 operationCount: decodedUpdate?.operationCount, changedCellCount: decodedUpdate?.changedCellCount,
                 scrollOperationCount: decodedUpdate?.scrollOperationCount, fullFrameFallbackReason: decodedUpdate?.fallbackReason,
@@ -522,18 +522,8 @@
         }
 
         private func postLocalNotifications(for payload: GhosttyRemoteSessionStatePayload) {
-            let sessionID = payload.sessionID
-            switch payload.reason {
-            case "attachment_state":
-                TerminalSessionNotification.post(.spacesTerminalAttachmentStateDidChange, sessionID: sessionID)
-                TerminalSessionNotification.post(.spacesTerminalRuntimeStateDidChange, sessionID: sessionID)
-            case "session_metadata":
-                TerminalSessionNotification.post(.spacesTerminalSessionMetadataDidChange, sessionID: sessionID)
-                TerminalSessionNotification.post(.spacesTerminalRuntimeStateDidChange, sessionID: sessionID)
-            case "output": TerminalSessionNotification.post(.spacesTerminalOutputDidChange, sessionID: sessionID)
-            case "initial", "runtime_state", "terminated":
-                TerminalSessionNotification.post(.spacesTerminalRuntimeStateDidChange, sessionID: sessionID)
-            default: TerminalSessionNotification.post(.spacesTerminalRuntimeStateDidChange, sessionID: sessionID)
+            for name in TerminalRemoteSessionStateNotificationRouting.notifications(forReason: payload.reason) {
+                TerminalSessionNotification.post(name, sessionID: payload.sessionID)
             }
         }
 
