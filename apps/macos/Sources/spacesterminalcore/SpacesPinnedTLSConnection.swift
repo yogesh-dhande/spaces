@@ -480,6 +480,7 @@ public enum SpacesPinnedTLSConnector {
                 do {
                     try connectWithTimeout(fd: fd, address: info.pointee.ai_addr, addressLength: info.pointee.ai_addrlen, timeout: timeout)
                     try setCloseOnExec(fd)
+                    SpacesTCPKeepalive.apply(to: fd)
                     return fd
                 } catch {
                     lastError = error

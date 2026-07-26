@@ -8,6 +8,7 @@ import spacesterminalcore
 import spacesterminalghostty
 
 @testable import spacescli
+@testable import spacesclientcore
 
 final class SpacesCommandTests: XCTestCase {
     func testProjectListParses() throws { XCTAssertNoThrow(try ProjectListCommand.parse([])) }
@@ -327,7 +328,7 @@ final class SpacesCommandTests: XCTestCase {
     func testPairCommandLinesUseSpacesScheme() throws {
         let window = SpacesDevicePairingWindowSnapshot(
             window: SpacesDevicePairingCoordinator().openWindow(
-                host: "studio.local", port: 7443, certificateFingerprint: "SHA256:abc", name: "Studio", protocolVersion: 5, appVersion: "0.1.0",
+                hosts: ["studio.local"], port: 7443, certificateFingerprint: "SHA256:abc", name: "Studio", protocolVersion: 5, appVersion: "0.1.0",
                 now: Date(timeIntervalSince1970: 1_782_000_000), duration: 300, code: "12345678", nonce: "N"))
         let lines = try pairCommandLines {
             SpacesDeviceAPIControlResponse(ok: true, message: "ok", result: .pairingWindow(.init(pairingWindow: window)))
@@ -343,7 +344,7 @@ final class SpacesCommandTests: XCTestCase {
     func testPairCommandJSONPayloadUsesDeviceMetadata() throws {
         let window = SpacesDevicePairingWindowSnapshot(
             window: SpacesDevicePairingCoordinator().openWindow(
-                host: "studio.local", port: 7443, certificateFingerprint: "SHA256:abc", name: "Studio", protocolVersion: 5, appVersion: "0.1.0",
+                hosts: ["studio.local"], port: 7443, certificateFingerprint: "SHA256:abc", name: "Studio", protocolVersion: 5, appVersion: "0.1.0",
                 now: Date(timeIntervalSince1970: 1_782_000_000), duration: 300, code: "12345678", nonce: "N"))
 
         let payload = try pairCommandPayload {
@@ -351,7 +352,7 @@ final class SpacesCommandTests: XCTestCase {
         }
 
         XCTAssertEqual(payload.name, "Studio")
-        XCTAssertEqual(payload.host, "studio.local")
+        XCTAssertEqual(payload.hosts, ["studio.local"])
         XCTAssertEqual(payload.port, 7443)
         XCTAssertEqual(payload.pairingCode, "12345678")
         XCTAssertEqual(payload.pairingNonce, "N")
@@ -360,6 +361,36 @@ final class SpacesCommandTests: XCTestCase {
         // The SSH pairing path reads these from the JSON to run the compatibility gate.
         XCTAssertEqual(payload.protocolVersion, 5)
         XCTAssertEqual(payload.appVersion, "0.1.0")
+    }
+
+    /// Guards the SSH pairing path's producer/consumer contract directly: `spaces device pair --json`
+    /// (spacescli's `PairingWindowPayload`) and `SpacesDevicePairingClient`'s SSH-metadata decoder
+    /// (`RemotePairingMetadata`, spacesclientcore) must decode the exact same JSON shape. A prior
+    /// version of this test hand-built the JSON with a stale `host` key while the real producer had
+    /// already moved to `hosts`, so the decoder's `keyNotFound` break went unnoticed. Encoding a real
+    /// `PairingWindowPayload` and feeding the bytes straight into the real decoder means the two types
+    /// can never again drift apart silently — this failed to compile, then failed to decode, exactly as
+    /// it should have the first time `hosts` was introduced.
+    func testPairingWindowPayloadRoundTripsThroughRemotePairingMetadata() throws {
+        let window = SpacesDevicePairingWindowSnapshot(
+            window: SpacesDevicePairingCoordinator().openWindow(
+                hosts: ["10.0.0.5", "100.64.12.34"], port: 7443, certificateFingerprint: "SHA256:abc", name: "Studio", protocolVersion: 5,
+                appVersion: "0.1.0", now: Date(timeIntervalSince1970: 1_782_000_000), duration: 300, code: "12345678", nonce: "N"))
+        let payload = try pairCommandPayload {
+            SpacesDeviceAPIControlResponse(ok: true, message: "ok", result: .pairingWindow(.init(pairingWindow: window)))
+        }
+
+        let data = try JSONEncoder().encode(payload)
+        let metadata = try JSONDecoder().decode(RemotePairingMetadata.self, from: data).validated()
+
+        XCTAssertEqual(metadata.name, "Studio")
+        XCTAssertEqual(metadata.hosts, ["10.0.0.5", "100.64.12.34"])
+        XCTAssertEqual(metadata.port, 7443)
+        XCTAssertEqual(metadata.pairingNonce, "N")
+        XCTAssertEqual(metadata.pairingCode, "12345678")
+        XCTAssertEqual(metadata.certificateFingerprint, "SHA256:abc")
+        XCTAssertEqual(metadata.protocolVersion, 5)
+        XCTAssertEqual(metadata.appVersion, "0.1.0")
     }
 
     func testSpacesCommandListsGroupedPublicVerbs() {

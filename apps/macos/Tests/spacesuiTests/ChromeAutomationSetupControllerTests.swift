@@ -25,10 +25,7 @@ import systembridge
 
     private func makeController(_ fixture: Fixture) -> (ChromeAutomationSetupController, granted: Box<Bool>) {
         let granted = Box(false)
-        let controller = ChromeAutomationSetupController(
-            statusProvider: { fixture.status },
-            askProvider: { fixture.askOutcome }
-        )
+        let controller = ChromeAutomationSetupController(statusProvider: { fixture.status }, askProvider: { fixture.askOutcome })
         controller.onGranted = { granted.value = true }
         return (controller, granted)
     }
@@ -45,9 +42,7 @@ import systembridge
         return buttons.first { $0.keyEquivalent == "\r" }?.title ?? ""
     }
 
-    private func allSubviews(of view: NSView) -> [NSView] {
-        view.subviews + view.subviews.flatMap { allSubviews(of: $0) }
-    }
+    private func allSubviews(of view: NSView) -> [NSView] { view.subviews + view.subviews.flatMap { allSubviews(of: $0) } }
 
     @Test func beginWithNotDeterminedEntersNeedsGrant() {
         let fixture = Fixture(status: .notDetermined)

@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Harbor Admin</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --paper: #f3f8fa;
+      --panel: #ffffff;
+      --ink: #0e1726;
+      --ink-2: #384456;
+      --muted: #64748b;
+      --line: #e6ecf0;
+      --line-2: #d4dde2;
+      --accent: #0891b2;
+      --accent-ink: #0e7490;
+      --accent-wash: rgba(8, 145, 178, 0.10);
+      --ok: #0ea371;
+      --warn: #c2740a;
+      --warn-wash: rgba(217, 138, 5, 0.12);
+      --down: #dc2f36;
+      --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    }
+    * { box-sizing: border-box; }
+    html { -webkit-text-size-adjust: 100%; }
+    body {
+      margin: 0; font-family: var(--sans); color: var(--ink);
+      background: var(--paper); -webkit-font-smoothing: antialiased;
+    }
+    .shell { max-width: 1240px; margin: 0 auto; padding: 22px 26px 40px; }
+
+    .rail { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-bottom: 14px; }
+    .brand { display: flex; align-items: baseline; gap: 11px; }
+    .brand .glyph { width: 14px; height: 14px; position: relative; align-self: center; }
+    .brand .glyph::before {
+      content: ""; position: absolute; inset: 2px; border-radius: 50%;
+      background: var(--accent); box-shadow: 0 0 0 3px var(--accent-wash);
+    }
+    .wordmark { font-weight: 700; font-size: 15px; letter-spacing: -0.01em; }
+    .brand .sep { color: var(--line-2); }
+    .brand .product {
+      font-family: var(--mono); font-size: 12px; font-weight: 600;
+      letter-spacing: 0.14em; text-transform: uppercase; color: var(--accent-ink);
+    }
+    .brand .role {
+      font-family: var(--mono); font-size: 11px; letter-spacing: 0.1em;
+      text-transform: uppercase; color: var(--muted);
+    }
+    .rail-right { display: flex; align-items: center; gap: 12px; }
+    .live {
+      font-family: var(--mono); font-size: 11px; letter-spacing: 0.12em;
+      text-transform: uppercase; font-weight: 600; color: var(--warn);
+      display: inline-flex; align-items: center; gap: 7px;
+      padding: 6px 11px; border-radius: 7px; background: var(--warn-wash);
+    }
+    .live .led {
+      width: 7px; height: 7px; border-radius: 50%; background: var(--warn);
+      animation: pulse 2s infinite;
+    }
+    @keyframes pulse {
+      0% { box-shadow: 0 0 0 0 rgba(194, 116, 10, 0.45); }
+      70% { box-shadow: 0 0 0 6px rgba(194, 116, 10, 0); }
+      100% { box-shadow: 0 0 0 0 rgba(194, 116, 10, 0); }
+    }
+    @media (prefers-reduced-motion: reduce) { .live .led { animation: none; } }
+    .tag {
+      font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.06em;
+      color: var(--muted); border: 1px solid var(--line-2);
+      border-radius: 6px; padding: 5px 9px; background: var(--panel);
+    }
+
+    .beam {
+      height: 2px; border-radius: 2px; margin-bottom: 18px;
+      background: linear-gradient(90deg, var(--warn) 0%, var(--warn) 18%, var(--accent) 40%, rgba(8,145,178,0) 78%);
+    }
+
+    .incident {
+      display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+      padding: 13px 18px; margin-bottom: 20px; border-radius: 12px;
+      background: var(--warn-wash); border: 1px solid rgba(217, 138, 5, 0.28);
+      color: #8a5406; font-size: 14px;
+    }
+    .incident .code {
+      font-family: var(--mono); font-size: 11px; font-weight: 700; letter-spacing: 0.06em;
+      color: #8a5406; background: rgba(217, 138, 5, 0.16);
+      padding: 4px 9px; border-radius: 6px;
+    }
+    .incident strong { color: #6b3f04; }
+    .incident code { font-family: var(--mono); font-size: 12.5px; }
+
+    .console { display: grid; grid-template-columns: 1.3fr 0.7fr; gap: 20px; }
+    .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; }
+    .panel-head {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 16px 20px; border-bottom: 1px solid var(--line);
+    }
+    .panel-head h2 {
+      margin: 0; font-family: var(--mono); font-size: 12px; letter-spacing: 0.12em;
+      text-transform: uppercase; color: var(--muted); font-weight: 600;
+    }
+    .spark { display: block; }
+
+    .readout { display: grid; grid-template-columns: repeat(3, 1fr); border-bottom: 1px solid var(--line); }
+    .metric { padding: 18px 20px; border-right: 1px solid var(--line); }
+    .metric:last-child { border-right: 0; }
+    .metric span {
+      display: block; font-family: var(--mono); font-size: 10.5px;
+      letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); margin-bottom: 8px;
+    }
+    .metric b { font-size: 28px; letter-spacing: -0.03em; font-weight: 680; }
+    .metric.warn b { color: var(--warn); }
+
+    .board { padding: 6px 20px 12px; }
+    table { width: 100%; border-collapse: collapse; }
+    thead th {
+      font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.08em;
+      text-transform: uppercase; color: var(--muted); font-weight: 600;
+      text-align: left; padding: 14px 0 12px;
+    }
+    tbody td { padding: 13px 0; border-top: 1px solid var(--line); font-size: 14px; }
+    td:first-child { font-weight: 560; }
+    .layer { font-family: var(--mono); font-size: 12.5px; color: var(--ink-2); }
+    th:last-child, td:last-child { text-align: right; }
+    .status {
+      display: inline-flex; align-items: center; gap: 7px;
+      font-family: var(--mono); font-size: 11px; font-weight: 600;
+      letter-spacing: 0.04em; text-transform: uppercase;
+    }
+    .status::before { content: ""; width: 8px; height: 8px; border-radius: 50%; }
+    .status.up { color: var(--ok); } .status.up::before { background: var(--ok); }
+    .status.deg { color: var(--warn); } .status.deg::before { background: var(--warn); }
+
+    .telemetry-card {
+      margin: 4px 20px 20px; padding: 14px 16px; border-radius: 12px;
+      background: #0e1726; border: 1px solid #1c2637;
+    }
+    .telemetry-card .th {
+      font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.1em;
+      text-transform: uppercase; color: #7c8aa0; margin-bottom: 10px;
+      display: flex; align-items: center; gap: 7px;
+    }
+    .telemetry-card .th::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+    .telemetry-card code {
+      display: block; font-family: var(--mono); font-size: 12.5px; line-height: 1.65;
+      color: #c9d4e3; white-space: pre-wrap; word-break: break-word;
+    }
+
+    .side { padding: 6px 20px 18px; }
+    .side .sh {
+      margin: 12px 0 4px; font-family: var(--mono); font-size: 12px;
+      letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); font-weight: 600;
+    }
+    .note { padding: 16px 0; border-top: 1px solid var(--line); }
+    .note:first-of-type { border-top: 0; }
+    .note b { display: flex; align-items: center; gap: 8px; margin-bottom: 7px; font-size: 14px; }
+    .note b::before { content: ""; width: 5px; height: 16px; border-radius: 2px; background: var(--accent); }
+    .note.hot b::before { background: var(--warn); }
+    .note p { margin: 0; color: var(--ink-2); font-size: 13.5px; line-height: 1.55; }
+    .note code { font-family: var(--mono); font-size: 12.5px; color: var(--accent-ink); }
+
+    @media (max-width: 900px) { .console { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header class="rail">
+      <div class="brand">
+        <span class="glyph"></span>
+        <span class="wordmark">Lighthouse</span>
+        <span class="sep">/</span>
+        <span class="product">Harbor</span>
+        <span class="role">Control room</span>
+      </div>
+      <div class="rail-right">
+        <span class="live"><span class="led"></span>Degraded</span>
+        <span class="tag">Harbor redesign-hero admin sentinel</span>
+      </div>
+    </header>
+    <div class="beam"></div>
+
+    <div class="incident">
+      <span class="code">INC-4192</span>
+      <span><strong>Checkout returning 500s</strong> for a subset of sessions — investigating. Orders are queued and retried, so no charges are lost. ~340 affected users.</span>
+    </div>
+
+    <div class="console">
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Service status</h2>
+          <svg class="spark" width="96" height="22" viewBox="0 0 96 22" fill="none" aria-hidden="true">
+            <polyline points="0,15 12,13 24,16 36,8 48,11 60,4 72,14 84,6 96,10" stroke="#0891b2" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"/>
+          </svg>
+        </div>
+        <div class="readout">
+          <div class="metric"><span>Uptime · 30d</span><b>99.98%</b></div>
+          <div class="metric warn"><span>Degraded</span><b>1</b></div>
+          <div class="metric"><span>Affected</span><b>~340</b></div>
+        </div>
+        <div class="board">
+          <table>
+            <thead>
+              <tr><th>Service</th><th>Layer</th><th>Status</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>Storefront</td><td class="layer">frontend</td><td><span class="status up">Operational</span></td></tr>
+              <tr><td>Customer accounts</td><td class="layer">frontend</td><td><span class="status up">Operational</span></td></tr>
+              <tr><td>Checkout</td><td class="layer">payments</td><td><span class="status deg">Degraded</span></td></tr>
+              <tr><td>Auth</td><td class="layer">core</td><td><span class="status up">Operational</span></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="telemetry-card">
+          <div class="th">Backend health · /api/launch-status</div>
+          <code id="api-status">connecting…</code>
+        </div>
+      </section>
+
+      <aside class="panel side">
+        <div class="sh">On-call notes</div>
+        <div class="note hot">
+          <b>Current incident</b>
+          <p>Checkout requests fail intermittently at the payment step. Orders are queued and retried, so no charges are lost, but conversion is down while the route is unstable.</p>
+        </div>
+        <div class="note">
+          <b>Next step</b>
+          <p>Trace the 500 spike on the <code>/api/checkout</code> route in Lantern. Open a Lantern workspace to triage the API service.</p>
+        </div>
+      </aside>
+    </div>
+  </div>
+  <script>
+    fetch("/api/launch-status")
+      .then((response) => response.json())
+      .then((payload) => {
+        document.getElementById("api-status").textContent = JSON.stringify(payload, null, 2);
+      })
+      .catch((error) => {
+        document.getElementById("api-status").textContent = "Backend unavailable: " + error;
+      });
+  </script>
+</body>
+</html>

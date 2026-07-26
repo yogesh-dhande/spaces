@@ -16,6 +16,9 @@ import spacesterminalcore
     var currentRuntimeState: TerminalSessionRuntimeState? { try? TerminalSessionPersistence.readRuntimeState(paths: paths) }
     var currentAttachmentSnapshot: TerminalSessionAttachmentSnapshot? { try? TerminalSessionPersistence.readAttachmentSnapshot(paths: paths) }
     var latestRemoteStatePayload: GhosttyRemoteSessionStatePayload? { try? TerminalSessionPersistence.readRemoteSessionState(paths: paths) }
+    /// Settable so a test can put the pane's link down without a device: the on-disk store this reads
+    /// has no notion of a subscription, and the production model owns the flag.
+    var isStateStreamDisconnected = false
     func refreshState() {}
     func startStateStream(
         onUpdate _: @escaping @MainActor (GhosttyRemoteSessionStatePayload) -> Void, onDisconnect _: @escaping @MainActor ((any Error)?) -> Void
@@ -30,6 +33,7 @@ import spacesterminalcore
     var currentRuntimeState: TerminalSessionRuntimeState?
     var currentAttachmentSnapshot: TerminalSessionAttachmentSnapshot?
     var latestRemoteStatePayload: GhosttyRemoteSessionStatePayload?
+    var isStateStreamDisconnected = false
     private(set) var refreshStateCallCount = 0
     private(set) var startStateStreamCallCount = 0
 
@@ -1551,6 +1555,9 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         let controller = makeGhosttyController(
             sessionID: "session-viewer-final-output", paths: paths, preferredAttachmentMode: .viewer, host: fakeHost, attachClientAction: { _, _ in },
             detachClientAction: { _ in })
+        let pasteboard = NSPasteboard(name: NSPasteboard.Name("pane-copy-\(UUID().uuidString)"))
+        defer { pasteboard.releaseGlobally() }
+        controller.pasteboardOverrideForTesting = pasteboard
 
         XCTAssertTrue(controller.debugShowsTerminalSurface)
         XCTAssertFalse(controller.debugShowsTextRenderer)
@@ -1560,10 +1567,10 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         XCTAssertTrue(normalizedRenderedOutput(controller.debugStateDump().renderedOutput).contains("command failed"))
         XCTAssertFalse(normalizedRenderedOutput(controller.debugStateDump().renderedOutput).contains("output log tail should not render"))
         XCTAssertEqual(normalizedRenderedOutput(controller.debugRenderedOutput), "command failed")
-        NSPasteboard.general.clearContents()
+        pasteboard.clearContents()
         controller.selectAll(nil)
         controller.copy(nil)
-        XCTAssertEqual(NSPasteboard.general.string(forType: .string), "command failed")
+        XCTAssertEqual(pasteboard.string(forType: .string), "command failed")
         XCTAssertEqual(controller.debugRendererSummary, "Renderer: final Ghostty render")
     }
 
@@ -2453,12 +2460,15 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
                 createdAt: "2026-05-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             .init(sessionID: "session-fallback", servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-05-09T00:00:01Z"), paths: paths)
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString("paste-from-test", forType: .string)
 
         let controller = TerminalSessionPaneViewController(
             sessionID: "session-fallback", paths: paths, stateProvider: PersistenceBackedTerminalSessionStateProvider(paths: paths),
             attachClientAction: persistenceBackedAttachAction(paths), detachClientAction: persistenceBackedDetachAction(paths))
+        let pasteboard = NSPasteboard(name: NSPasteboard.Name("owner-status-paste-\(UUID().uuidString)"))
+        defer { pasteboard.releaseGlobally() }
+        controller.pasteboardOverrideForTesting = pasteboard
+        pasteboard.clearContents()
+        pasteboard.setString("paste-from-test", forType: .string)
 
         controller.paste(nil)
 
@@ -3032,6 +3042,123 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         XCTAssertFalse(controller.debugBannerVisible)
     }
 
+    // MARK: - Disconnected-device banner
+
+    /// The case this exists for: the device hosting a running session goes away. The pane keeps the
+    /// device's last frame — pruning is gated on an authoritative overview — so without the notice the
+    /// user is looking at a normal-looking terminal that silently does nothing.
+    @MainActor func testRunningSessionOnAnUnreachableDeviceShowsTheDisconnectedNotice() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let controller = try makeBannerController(sessionID: "session-banner-offline", state: .running, root: root)
+        XCTAssertFalse(controller.debugBannerVisible)
+
+        let provider = try XCTUnwrap(controller.stateProvider as? PersistenceBackedTerminalSessionStateProvider)
+        provider.isStateStreamDisconnected = true
+        controller.debugSimulateStateStreamConnectionDidChange()
+
+        XCTAssertTrue(controller.debugBannerVisible)
+        XCTAssertEqual(controller.debugBannerMessage, TerminalPaneBannerNotice.disconnected.message)
+    }
+
+    /// The outage ends and the pane goes back to saying nothing: an outage that self-heals in seconds
+    /// must not leave a notice behind claiming otherwise.
+    @MainActor func testDisconnectedNoticeClearsWhenTheDeviceComesBack() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let controller = try makeBannerController(sessionID: "session-banner-recovered", state: .running, root: root)
+        let provider = try XCTUnwrap(controller.stateProvider as? PersistenceBackedTerminalSessionStateProvider)
+        provider.isStateStreamDisconnected = true
+        controller.debugSimulateStateStreamConnectionDidChange()
+        XCTAssertTrue(controller.debugBannerVisible)
+
+        provider.isStateStreamDisconnected = false
+        controller.debugSimulateStateStreamConnectionDidChange()
+
+        XCTAssertFalse(controller.debugBannerVisible)
+        XCTAssertFalse(controller.debugBannerHasPersistentNotice)
+    }
+
+    /// A session that ended keeps saying so even while the link to its device is down: the process is
+    /// gone whatever the connection does, and the drop is the daemon's expected refusal to stream an
+    /// ended session rather than an outage worth reporting.
+    @MainActor func testEndedSessionKeepsItsNoticeWhileTheDeviceIsUnreachable() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let controller = try makeBannerController(sessionID: "session-banner-ended-offline", state: .exited, root: root)
+
+        let provider = try XCTUnwrap(controller.stateProvider as? PersistenceBackedTerminalSessionStateProvider)
+        provider.isStateStreamDisconnected = true
+        controller.debugSimulateStateStreamConnectionDidChange()
+
+        XCTAssertEqual(controller.debugBannerMessage, TerminalPaneBannerNotice.sessionEnded.message)
+    }
+
+    /// Typing into a pane whose device is unreachable reports the reason instead of the keystrokes
+    /// vanishing without a word.
+    @MainActor func testTypingIntoADisconnectedSessionReportsTheDroppedConnection() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let controller = try makeBannerController(sessionID: "session-banner-typing-offline", state: .running, root: root)
+        let provider = try XCTUnwrap(controller.stateProvider as? PersistenceBackedTerminalSessionStateProvider)
+        provider.isStateStreamDisconnected = true
+        controller.debugSimulateStateStreamConnectionDidChange()
+
+        _ = controller.handleKeyEvent(try keyEvent(keyCode: kVK_ANSI_A, characters: "a", modifiers: []))
+
+        XCTAssertEqual(controller.debugInputStatus, TerminalPaneBannerNotice.disconnected.message)
+    }
+
+    /// The reason left on the input status row is retired when the link returns. The row is what the
+    /// debug dump reports the pane's input state from, so a stale "connection lost" there describes a
+    /// pane that is working again.
+    @MainActor func testDisconnectedInputStatusIsRetiredWhenTheLinkReturns() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let controller = try makeBannerController(sessionID: "session-input-status-recovered", state: .running, root: root)
+        let provider = try XCTUnwrap(controller.stateProvider as? PersistenceBackedTerminalSessionStateProvider)
+        provider.isStateStreamDisconnected = true
+        controller.debugSimulateStateStreamConnectionDidChange()
+        _ = controller.handleKeyEvent(try keyEvent(keyCode: kVK_ANSI_A, characters: "a", modifiers: []))
+        XCTAssertEqual(controller.debugInputStatus, TerminalPaneBannerNotice.disconnected.message)
+
+        provider.isStateStreamDisconnected = false
+        controller.debugSimulateStateStreamConnectionDidChange()
+
+        XCTAssertEqual(controller.debugInputStatus, "")
+        XCTAssertFalse(controller.debugShowsInputStatus)
+    }
+
+    /// The row holds one message at a time, so the reconnect clears only its own: a status the user is
+    /// looking at for an unrelated reason says nothing about the connection and must survive.
+    @MainActor func testReconnectingLeavesAnUnrelatedInputStatusAlone() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let controller = try makeBannerController(sessionID: "session-input-status-unrelated", state: .running, root: root)
+        let provider = try XCTUnwrap(controller.stateProvider as? PersistenceBackedTerminalSessionStateProvider)
+        provider.isStateStreamDisconnected = true
+        controller.debugSimulateStateStreamConnectionDidChange()
+        controller.updateInputStatus(message: "Take over ownership before sending terminal input.", isError: true)
+
+        provider.isStateStreamDisconnected = false
+        controller.debugSimulateStateStreamConnectionDidChange()
+
+        XCTAssertEqual(controller.debugInputStatus, "Take over ownership before sending terminal input.")
+    }
+
+    /// Precedence between the two facts a pane's persistent notice reports, as a pure rule.
+    @MainActor func testPersistentNoticeSelection() {
+        XCTAssertNil(TerminalPaneBannerNotice.resolve(runtimeState: .running, isStateStreamDisconnected: false))
+        XCTAssertNil(TerminalPaneBannerNotice.resolve(runtimeState: .starting, isStateStreamDisconnected: false))
+        XCTAssertNil(TerminalPaneBannerNotice.resolve(runtimeState: nil, isStateStreamDisconnected: false))
+        XCTAssertEqual(TerminalPaneBannerNotice.resolve(runtimeState: .running, isStateStreamDisconnected: true), .disconnected)
+        // An unreachable device is exactly the case where the session's state is unknown.
+        XCTAssertEqual(TerminalPaneBannerNotice.resolve(runtimeState: nil, isStateStreamDisconnected: true), .disconnected)
+        // A stopped session wins: the process is gone whatever the link is doing.
+        XCTAssertEqual(TerminalPaneBannerNotice.resolve(runtimeState: .exited, isStateStreamDisconnected: true), .sessionEnded)
+        XCTAssertEqual(TerminalPaneBannerNotice.resolve(runtimeState: .failed, isStateStreamDisconnected: true), .sessionFailed)
+    }
+
     /// Typing into a dead pane stays unconsumed — the pulse is emphasis only and must not start
     /// swallowing keys that previously fell through.
     @MainActor func testTypingIntoEndedSessionIsNotConsumed() throws {
@@ -3041,6 +3168,138 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
 
         XCTAssertFalse(controller.handleKeyEvent(try keyEvent(keyCode: kVK_ANSI_A, characters: "a", modifiers: [])))
         XCTAssertTrue(controller.debugBannerVisible)
+    }
+
+    /// The pane's last reference can be dropped by a background task (e.g. a finished detached
+    /// takeover task holding the final reference), so its deinit must not deallocate its AppKit
+    /// members off the main thread. The box makes the off-main last release deterministic; draining
+    /// the main queue afterward proves the shipped `mainThreadReleaseBag` release actually runs.
+    @MainActor func testControllerLastReleaseOffMainDoesNotTrap() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        final class Box: @unchecked Sendable { var controller: TerminalSessionPaneViewController? }
+        let box = Box()
+        box.controller = TerminalSessionPaneViewController(
+            sessionID: "session-1", paths: .init(rootDirectory: root.path),
+            stateProvider: PersistenceBackedTerminalSessionStateProvider(paths: .init(rootDirectory: root.path)),
+            attachClientAction: persistenceBackedAttachAction(.init(rootDirectory: root.path)),
+            detachClientAction: persistenceBackedDetachAction(.init(rootDirectory: root.path)))
+
+        await Task.detached { box.controller = nil }.value
+        await Task { @MainActor in }.value
+    }
+
+    /// Thread-safe box `DeinitTrackingGhosttySessionHost.deinit` reports into, since deinit for a
+    /// `@MainActor` protocol conformer still runs on whatever thread drops the object's last reference.
+    private final class HostDeinitThreadRecorder: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _wasMainThread: Bool?
+        var wasMainThread: Bool? {
+            lock.lock()
+            defer { lock.unlock() }
+            return _wasMainThread
+        }
+        func record(_ value: Bool) {
+            lock.lock()
+            defer { lock.unlock() }
+            _wasMainThread = value
+        }
+    }
+
+    /// Minimal `TerminalGhosttySessionHosting` fake whose only job is to report which thread tore it
+    /// down. Its `attach` is a no-op — unlike `FakeGhosttySessionHost` it never adds anything to
+    /// `terminalContainer` — so this test proves the controller's *stored reference* to the host
+    /// (`activeGhosttySessionHost`/`clientGhosttySessionHost`) is released on the main thread on its
+    /// own merit, independent of whatever the view hierarchy happens to retain.
+    @MainActor private final class DeinitTrackingGhosttySessionHost: TerminalGhosttySessionHosting {
+        var activeOwnerClientIDValue: String?
+        private let recorder: HostDeinitThreadRecorder
+        init(recorder: HostDeinitThreadRecorder) { self.recorder = recorder }
+        deinit { recorder.record(Thread.isMainThread) }
+        func attach(client: TerminalClient, mode: TerminalAttachmentMode, into container: NSView?) throws {
+            if mode == .owner { activeOwnerClientIDValue = client.id }
+        }
+        func releaseRendererSurface() {}
+        func setFocused(_ focused: Bool, for clientID: String) {}
+        func focusWindow(_ window: NSWindow?) {}
+        @discardableResult func handleKeyEvent(_ event: NSEvent, for clientID: String) -> Bool { false }
+        @discardableResult func synchronizeSurfaceGeometry() -> Bool { true }
+        func activeOwnerClientID() -> String? { activeOwnerClientIDValue }
+        var effectiveTitle: String { "ghostty" }
+        var effectiveWorkingDirectory: String { "/tmp/work" }
+        func hasRenderableSurface() -> Bool { true }
+        func requestSurfaceRefresh() {}
+        func prepareRenderStateExport() {}
+        func snapshot() -> GhosttyTerminalSnapshot? { nil }
+        func snapshotText() -> String? { nil }
+        func sessionSnapshot() -> GhosttyTerminalSnapshot? { nil }
+        func sessionSnapshotText() -> String? { nil }
+        func copySelectionToPasteboard() -> Bool { false }
+        func pasteClipboardContents() -> Bool { false }
+        @discardableResult func sendTextAsPaste(_ text: String) -> Bool { false }
+        @discardableResult func performBindingAction(_ action: String) -> Bool { false }
+        @discardableResult func sendScroll(horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32, pointerPosition: TerminalScrollPointerPosition?)
+            -> Bool { false }
+        @discardableResult func clearScreenAndScrollback() -> Bool { false }
+        var debugSearchState: GhosttyTerminalSearchDebugState {
+            GhosttyTerminalSearchDebugState(isVisible: false, query: "", total: nil, selected: nil)
+        }
+        var debugSurfaceRefreshRequestCount: Int { 0 }
+        func debugVisibleSurfaceText() -> String? { nil }
+    }
+
+    /// Builds an owner-mode pane whose Ghostty host resolution actually runs — mirroring
+    /// `testRuntimeNotificationDuringOwnerHostCreationDoesNotReenterAttachResolution`'s persisted
+    /// launch/runtime state plus an owner attachment record, then `debugForceRefresh()` to drive
+    /// `ensureGhosttyHostAttached` → `switchGhosttySessionHostIfNeeded`, the only place that stores the
+    /// host. `host` is local to this helper so the sole surviving strong references once it returns are
+    /// the controller's own (`activeGhosttySessionHost`, `clientGhosttySessionHost`, and the new
+    /// `activeGhosttySessionHostForMainThreadRelease` release-bag entry) — nothing in the test body
+    /// itself keeps the host alive.
+    @MainActor private func makeOwnerControllerWithAttachedTrackedHost(
+        sessionID: String, paths: TerminalSessionPaths, recorder: HostDeinitThreadRecorder
+    ) throws -> TerminalSessionPaneViewController {
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: sessionID, backend: .ghosttyEmbedded, title: "host-release", workingDirectory: "/tmp/host-release", shell: "/bin/zsh",
+                command: nil, createdAt: "2026-07-23T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-07-23T00:00:01Z"),
+            paths: paths)
+        let host = DeinitTrackingGhosttySessionHost(recorder: recorder)
+        let controller = makeGhosttyController(
+            sessionID: sessionID, paths: paths, preferredAttachmentMode: .owner, performInitialRefresh: false,
+            sessionHostProvider: { _, _ in host })
+        let owner = TerminalClient(
+            id: controller.clientID, kind: .localWindow, identity: .init(label: "Spaces window"), connectedAt: "2026-07-23T00:00:00Z")
+        try TerminalSessionPersistence.attachClient(sessionID: sessionID, client: owner, mode: .owner, paths: paths, attachedAt: "2026-07-23T00:00:00Z")
+        controller.debugForceRefresh()
+        return controller
+    }
+
+    /// `switchGhosttySessionHostIfNeeded` resolves a renderer host whose `GhosttyMirrorTerminalView`
+    /// is not always inside `view`'s hierarchy (a viewer pane never attaches it, and
+    /// `releaseGhosttySurfaceIfNeeded`/this same switch strip `terminalContainer`'s subviews). So the
+    /// view-root retain `mainThreadReleaseBag` alone cannot guarantee the host tears down on the main
+    /// thread — this proves the controller's dedicated host retain covers it: dropping the controller's
+    /// last reference from a detached task must still deallocate the tracked host on the main thread.
+    @MainActor func testControllerLastReleaseOffMainReleasesActiveSessionHostOnMainThread() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+
+        let recorder = HostDeinitThreadRecorder()
+        final class Box: @unchecked Sendable { var controller: TerminalSessionPaneViewController? }
+        let box = Box()
+        box.controller = try makeOwnerControllerWithAttachedTrackedHost(sessionID: "session-host-release", paths: paths, recorder: recorder)
+
+        await Task.detached { box.controller = nil }.value
+        await Task { @MainActor in }.value
+
+        XCTAssertEqual(recorder.wasMainThread, true)
     }
 }
 
@@ -3054,13 +3313,25 @@ final class TerminalPaneBannerTests: XCTestCase {
         return (TerminalPaneBanner(hostView: host), host)
     }
 
+    /// A banner's last reference can be dropped by a background task (any async caller that
+    /// captured its owning pane controller), so deinit must not assert main-actor isolation.
+    /// `MainActor.assumeIsolated` in deinit trapped exactly here — a CI-only SIGTRAP, because the
+    /// off-main last release needs a slow-scheduled background holder to lose the race. The box
+    /// makes that ordering deterministic: the detached task provably performs the final release.
+    @MainActor func testLastReleaseOffMainDoesNotTrap() async {
+        final class Box: @unchecked Sendable { var banner: TerminalPaneBanner? }
+        let box = Box()
+        box.banner = TerminalPaneBanner(hostView: NSView())
+        await Task.detached { box.banner = nil }.value
+    }
+
     @MainActor func testPersistentNoticeShowsUntilCleared() {
         let (banner, _) = makeBanner()
         XCTAssertFalse(banner.debugIsVisible)
 
-        banner.showPersistent(message: "Session ended.")
+        banner.showPersistent(.sessionEnded)
         XCTAssertTrue(banner.debugIsVisible)
-        XCTAssertEqual(banner.debugMessage, "Session ended.")
+        XCTAssertEqual(banner.debugMessage, TerminalPaneBannerNotice.sessionEnded.message)
 
         banner.clearPersistent()
         XCTAssertFalse(banner.debugIsVisible)
@@ -3068,14 +3339,14 @@ final class TerminalPaneBannerTests: XCTestCase {
 
     @MainActor func testTransientBannerOverridesPersistentNoticeAndRestoresItOnDismiss() {
         let (banner, _) = makeBanner()
-        banner.showPersistent(message: "Session ended.")
+        banner.showPersistent(.sessionEnded)
 
         banner.showProgress(message: "Fetching link…") {}
         XCTAssertEqual(banner.debugMessage, "Fetching link…")
 
         banner.dismiss()
         XCTAssertTrue(banner.debugIsVisible)
-        XCTAssertEqual(banner.debugMessage, "Session ended.")
+        XCTAssertEqual(banner.debugMessage, TerminalPaneBannerNotice.sessionEnded.message)
     }
 
     @MainActor func testDismissHidesBannerWhenNoPersistentNoticeIsSet() {
@@ -3091,7 +3362,7 @@ final class TerminalPaneBannerTests: XCTestCase {
     /// banner out from under it.
     @MainActor func testClearingPersistentNoticeLeavesActiveTransientBannerUp() {
         let (banner, _) = makeBanner()
-        banner.showPersistent(message: "Session ended.")
+        banner.showPersistent(.sessionEnded)
         banner.showProgress(message: "Fetching link…") {}
 
         banner.clearPersistent()

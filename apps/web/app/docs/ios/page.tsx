@@ -74,6 +74,14 @@ export default function IOSDocsPage() {
       </article>
 
       <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Try Spaces without a Mac</h2>
+        <ul className="mt-3 space-y-2 text-sm leading-7 text-foreground-soft">
+          <li>• Not set up yet? Turn on <strong>Demo Mode</strong> from Settings, or tap <strong>Try Demo Mode</strong> on the Spaces tab, to tour the whole app with sample data — workspaces, coding agents, alerts, and terminals — before you pair a single device.</li>
+          <li>• Demo terminals are read-only: you can watch and scroll a session, and typing into a terminal starts once you pair your own Mac. A banner keeps the sample-data context clear, and one tap turns it off.</li>
+        </ul>
+      </article>
+
+      <article className="border-t border-line/70 pt-8 first:border-t-0 first:pt-0">
         <div className="flex flex-wrap items-center gap-3">
           <h2 className="text-2xl font-semibold tracking-tight">Pairing</h2>
           <span className="inline-flex rounded-full border border-accent-2/50 px-2 py-0.5 font-mono text-[0.62rem] uppercase tracking-[0.18em] text-accent-2">
@@ -85,6 +93,7 @@ export default function IOSDocsPage() {
           <li>• Show the QR code for the device you want your phone to reach, scan it with the Spaces iOS app, and you&apos;re paired. Repeat for as many devices as you like; the app switches between them and shows one at a time.</li>
           <li>• Pairing your phone to a Linux box works the same way, from the same Mac screen. The Mac only hands over the credential — once paired, your phone talks to that Linux daemon directly and the Mac is no longer involved.</li>
           <li>• If you&apos;d rather not go through a Mac at all, <code>spaces device pair</code> on any device prints a <code>spaces://pair</code> link you can open on your phone.</li>
+          <li>• Once paired, your phone reconnects from the local network or over Tailscale — if you&apos;re away from home, keep Tailscale connected on your phone and the paired device and Spaces finds it automatically.</li>
           <li>• The iOS app is $29/year, with a 7-day free trial. Spaces on Mac and Linux is free.</li>
         </ul>
       </article>

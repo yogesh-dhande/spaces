@@ -84,6 +84,7 @@ import Foundation
         public let isVisible: Bool
         public let acceptsInput: Bool
         public let isBusy: Bool
+        public let fontSize: TerminalFontSize
         public let onInputReadinessChanged: @MainActor (Bool) -> Void
         public let onScrollGestureApplied: (@MainActor () -> Void)?
         public let onRenderedTextChanged: (@MainActor (String) -> Void)?
@@ -96,10 +97,10 @@ import Foundation
 
         public init(
             ownerEpoch: GhosttyRemoteTerminalOwnerEpoch? = nil, endedRender: GhosttyRemoteTerminalEndedRender? = nil, fallbackText: String,
-            isVisible: Bool, acceptsInput: Bool, isBusy: Bool, onInputReadinessChanged: @escaping @MainActor (Bool) -> Void = { _ in },
-            onScrollGestureApplied: (@MainActor () -> Void)? = nil, onRenderedTextChanged: (@MainActor (String) -> Void)? = nil,
-            onViewportSizeChanged: @escaping @MainActor (Int, Int) -> Void, onSendText: @escaping @MainActor (String, Bool) -> Void,
-            onSendKey: @escaping @MainActor (String) -> Void,
+            isVisible: Bool, acceptsInput: Bool, isBusy: Bool, fontSize: TerminalFontSize,
+            onInputReadinessChanged: @escaping @MainActor (Bool) -> Void = { _ in }, onScrollGestureApplied: (@MainActor () -> Void)? = nil,
+            onRenderedTextChanged: (@MainActor (String) -> Void)? = nil, onViewportSizeChanged: @escaping @MainActor (Int, Int) -> Void,
+            onSendText: @escaping @MainActor (String, Bool) -> Void, onSendKey: @escaping @MainActor (String) -> Void,
             onSendScroll: @escaping @MainActor (Double, Double, Int32, TerminalScrollPointerPosition?) -> Void = { _, _, _, _ in },
             onOpenLink: @escaping @MainActor (String) -> Void = { _ in }, onOpenComposer: (@MainActor () -> Void)? = nil
         ) {
@@ -109,6 +110,7 @@ import Foundation
             self.isVisible = isVisible
             self.acceptsInput = acceptsInput
             self.isBusy = isBusy
+            self.fontSize = fontSize
             self.onInputReadinessChanged = onInputReadinessChanged
             self.onScrollGestureApplied = onScrollGestureApplied
             self.onRenderedTextChanged = onRenderedTextChanged
@@ -136,6 +138,7 @@ import Foundation
             hostView.onRenderedTextChanged = onRenderedTextChanged.map { callback in { text in _ = Task { @MainActor in callback(text) } } }
             hostView.setTerminalVisible(isVisible)
             hostView.setAcceptsTerminalInput(acceptsInput && !isBusy)
+            hostView.setTerminalFontSize(fontSize)
             hostView.update(ownerEpoch: ownerEpoch, endedRender: endedRender, fallbackText: fallbackText)
         }
 
@@ -154,18 +157,15 @@ import Foundation
             let scale: Double
         }
 
-        private struct RetiredMirror: @unchecked Sendable {
-            let mirror: ghostty_mirror_t
-            let retainedHostView: UIView
-        }
-
         private enum AccessoryModifier: String, CaseIterable {
+            case shift
             case control = "ctrl"
             case command = "cmd"
             case option = "opt"
 
             var accessibilityLabel: String {
                 switch self {
+                case .shift: return "Shift"
                 case .control: return "Control"
                 case .command: return "Command"
                 case .option: return "Option"
@@ -196,16 +196,14 @@ import Foundation
             let pinned: [CGFloat]
         }
 
-        private static let defaultFontSize: CGFloat = 11
         private static let contentInsets = GhosttyRemoteTerminalViewport.contentInsets
         private static let accessoryToolbarHeight: CGFloat = 46
 
         nonisolated(unsafe) static var sessionFreeHandlerForTesting: @Sendable (UnsafeRawPointer?) -> Void = { _ in }
         nonisolated(unsafe) static var nativeMirrorEnabledForTesting = true
-        nonisolated(unsafe) private static var retiredMirrors: [RetiredMirror] = []
 
-        private let surfaceHostView = UIView(frame: .zero)
         private var mirror: ghostty_mirror_t?
+        private var fontSize: TerminalFontSize = .default
         private var activeOwnerEpoch: GhosttyRemoteTerminalOwnerEpoch?
         private var activeEndedRender: GhosttyRemoteTerminalEndedRender?
         private var latestRenderFrame: GhosttyRenderFrame?
@@ -217,7 +215,8 @@ import Foundation
         private var lastRenderedText = ""
         private var lastReportedInputReadiness = false
         private var emittedHostRenderEvents = Set<String>()
-        private var mirrorCreationTask: Task<Void, Never>?
+        private var mirrorAcquisitionTask: Task<Void, Never>?
+        private var didSurrenderSharedMirror = false
         private var isTerminalVisible = true
         private var fallbackText = ""
         private var lastScrollTranslation = CGPoint.zero
@@ -321,14 +320,6 @@ import Foundation
             super.init(frame: frame)
             isOpaque = true
             backgroundColor = .black
-            surfaceHostView.translatesAutoresizingMaskIntoConstraints = false
-            surfaceHostView.backgroundColor = .black
-            surfaceHostView.isUserInteractionEnabled = false
-            insertSubview(surfaceHostView, at: 0)
-            NSLayoutConstraint.activate([
-                surfaceHostView.topAnchor.constraint(equalTo: topAnchor), surfaceHostView.leadingAnchor.constraint(equalTo: leadingAnchor),
-                surfaceHostView.trailingAnchor.constraint(equalTo: trailingAnchor), surfaceHostView.bottomAnchor.constraint(equalTo: bottomAnchor),
-            ])
             inputAssistantItem.leadingBarButtonGroups = []
             inputAssistantItem.trailingBarButtonGroups = []
             addGestureRecognizer(activateInputRecognizer)
@@ -338,18 +329,19 @@ import Foundation
 
         @available(*, unavailable) required init?(coder: NSCoder) { nil }
 
-        deinit {
-            MainActor.assumeIsolated {
-                momentumDisplayLink?.invalidate()
-                if let mirror { retireMirror(mirror) }
-            }
-        }
+        // The shared mirror needs nothing here: leaving the window and SwiftUI's dismantle both run
+        // `prepareForDismantle()`, and a holder that somehow deallocates without releasing is parked
+        // by the next view's acquisition, which never touches the deallocated one.
+        deinit { MainActor.assumeIsolated { momentumDisplayLink?.invalidate() } }
 
         public override func didMoveToWindow() {
             super.didMoveToWindow()
             if window == nil {
                 prepareForDismantle()
             } else {
+                // Entering a window is what makes this view the terminal on screen, so it is also
+                // what re-entitles it to the shared mirror after a newer view took it over.
+                didSurrenderSharedMirror = false
                 reportViewportSizeIfNeeded()
                 renderLatestSnapshot()
             }
@@ -362,17 +354,13 @@ import Foundation
             resignFirstResponder()
             activeOwnerEpoch = nil
             activeEndedRender = nil
-            mirrorCreationTask?.cancel()
-            mirrorCreationTask = nil
+            mirrorAcquisitionTask?.cancel()
+            mirrorAcquisitionTask = nil
             latestRenderFrame = nil
             latestSnapshot = nil
             currentRenderedSnapshot = nil
             lastSurfaceGeometry = nil
-            if let mirror {
-                if let surface = ghostty_mirror_surface(mirror) { GhosttyMobileAppService.shared.unregisterActionHandler(for: surface) }
-                retireMirror(mirror)
-                self.mirror = nil
-            }
+            releaseSharedMirror()
             reportInputReadinessIfNeeded(force: true)
             if hadRenderedSnapshot {
                 let handler = Self.sessionFreeHandlerForTesting
@@ -380,17 +368,36 @@ import Foundation
             }
         }
 
-        private func retireMirror(_ mirror: ghostty_mirror_t) {
-            if let surface = ghostty_mirror_surface(mirror) {
-                GhosttyMobileAppService.shared.unregisterActionHandler(for: surface)
-                ghostty_surface_set_focus(surface, false)
-                ghostty_surface_set_occlusion(surface, false)
-            }
-            // GhosttyKit can block indefinitely while freeing iOS mirror
-            // surfaces because free rebinds the renderer host during teardown.
-            // Retiring keeps navigation responsive and lets process exit reclaim
-            // the native mirror resources.
-            Self.retiredMirrors.append(RetiredMirror(mirror: mirror, retainedHostView: surfaceHostView))
+        /// Gives the shared mirror back when this view stops rendering. The mirror itself stays
+        /// alive and parked for the next terminal view; freeing it here is the blocking call
+        /// ``GhosttySharedTerminalMirror`` exists to keep off navigation paths.
+        private func releaseSharedMirror() {
+            mirror = nil
+            lastSurfaceGeometry = nil
+            GhosttySharedTerminalMirror.shared.release(from: self)
+        }
+
+        /// Called when another terminal view takes the shared mirror over. This view drops back to
+        /// its own black background and stops asking for the mirror until it re-enters a window,
+        /// so an outgoing view still in the hierarchy during a navigation transition cannot trade
+        /// the mirror back and forth with the incoming one.
+        ///
+        /// Re-entering a window is the *only* thing that lifts this latch, which is safe because a
+        /// view can only surrender while some other view is in the window, and every way to present
+        /// a terminal takes the previous one out of the window in the same update: the terminal is a
+        /// single `navigationDestination(item:)` per stack, so one can never be pushed over another,
+        /// and a switch between sessions replaces that destination outright. A presentation that
+        /// instead left the surrendering view parented — a terminal in a sheet or a non-fullscreen
+        /// cover over another terminal, or two terminals side by side in a split layout — would
+        /// leave this view latched and permanently black once the newcomer went away, since nothing
+        /// re-offers a parked mirror to the view that gave it up. Adding one means giving the latch
+        /// a second release edge here, not just adding the new screen.
+        func surrenderSharedMirror() {
+            mirror = nil
+            lastSurfaceGeometry = nil
+            didSurrenderSharedMirror = true
+            setNeedsDisplay()
+            reportInputReadinessIfNeeded()
         }
 
         public func setTerminalVisible(_ visible: Bool) {
@@ -416,6 +423,21 @@ import Foundation
             }
             reloadInputViews()
             reportInputReadinessIfNeeded(force: true)
+        }
+
+        /// Applies a new terminal font size, retuning the live mirror in place. The render state
+        /// (`latestSnapshot`, `latestRenderFrame`, owner epoch) is deliberately kept — unlike
+        /// `prepareForDismantle()` — so the terminal re-renders its current content at the new size
+        /// instead of blanking until the daemon sends the next frame. The new grid is reported after
+        /// the re-render so the daemon resizes to the surface's own cell metrics rather than the
+        /// `cellMetrics()` estimate a mirror-less viewport would produce.
+        public func setTerminalFontSize(_ newFontSize: TerminalFontSize) {
+            guard fontSize != newFontSize else { return }
+            fontSize = newFontSize
+            guard mirror != nil else { return }
+            GhosttySharedTerminalMirror.shared.setFontSize(newFontSize, from: self)
+            renderLatestSnapshot()
+            reportViewportSizeIfNeeded()
         }
 
         public func setSoftwareKeyboardVisible(_ visible: Bool) {
@@ -457,8 +479,15 @@ import Foundation
 
         public func insertText(_ text: String) {
             guard acceptsTerminalInput, !text.isEmpty else { return }
+            // Return reaches `insertText` as plain text with no modifier information, so a pending
+            // accessory modifier is the only way to reach Shift+Enter without a hardware keyboard. It has
+            // to be applied here, before the text path below clears the pending modifiers.
+            if text == "\n" || text == "\r" {
+                sendAccessoryKey("enter")
+                return
+            }
             if sendPendingAccessoryModifiersIfNeeded(for: text) { return }
-            if text == "\n" || text == "\r" { onSendKey?("enter") } else { onSendText?(text, false) }
+            onSendText?(text, false)
         }
 
         public override func paste(_ sender: Any?) {
@@ -490,7 +519,13 @@ import Foundation
                 UIKeyCommand(input: UIKeyCommand.inputLeftArrow, modifierFlags: .alternate, action: #selector(sendOptionArrowLeft)),
                 UIKeyCommand(input: UIKeyCommand.inputRightArrow, modifierFlags: .alternate, action: #selector(sendOptionArrowRight)),
                 UIKeyCommand(input: "k", modifierFlags: .command, action: #selector(sendCommandK)),
+                // Modified Return has to be claimed explicitly: an unmodified Return arrives through
+                // `insertText`, which cannot see modifier flags at all.
+                UIKeyCommand(input: "\r", modifierFlags: .shift, action: #selector(sendShiftEnter)),
+                UIKeyCommand(input: "\r", modifierFlags: .control, action: #selector(sendControlEnter)),
+                UIKeyCommand(input: "\r", modifierFlags: .alternate, action: #selector(sendOptionEnter)),
                 UIKeyCommand(input: "\t", modifierFlags: [], action: #selector(sendTab)),
+                UIKeyCommand(input: "\t", modifierFlags: .shift, action: #selector(sendShiftTab)),
                 UIKeyCommand(input: UIKeyCommand.inputEscape, modifierFlags: [], action: #selector(sendEscape)),
             ]
         }
@@ -498,7 +533,6 @@ import Foundation
         public func capturedSnapshotForTesting() -> GhosttyTerminalSnapshot? { currentRenderedSnapshot }
         public var hasActiveSessionForTesting: Bool { currentRenderedSnapshot != nil }
         public var hasMirrorSurfaceForTesting: Bool { mirrorSurface() != nil }
-        public static var retiredMirrorCountForTesting: Int { retiredMirrors.count }
         public var hasRetainedSessionStandardInputWriteDescriptorForTesting: Bool { false }
 
         @discardableResult public func debugSendScrollForTesting(
@@ -639,7 +673,11 @@ import Foundation
         @objc private func sendOptionArrowLeft() { sendAccessoryKey("opt+left") }
         @objc private func sendOptionArrowRight() { sendAccessoryKey("opt+right") }
         @objc private func sendCommandK() { sendAccessoryKey("cmd+k") }
+        @objc private func sendShiftEnter() { sendAccessoryKey("shift+enter") }
+        @objc private func sendControlEnter() { sendAccessoryKey("ctrl+enter") }
+        @objc private func sendOptionEnter() { sendAccessoryKey("opt+enter") }
         @objc private func sendTab() { sendAccessoryKey("tab") }
+        @objc private func sendShiftTab() { sendAccessoryKey("shift+tab") }
         @objc private func sendEscape() { sendAccessoryKey("esc") }
 
         private func scheduleFirstResponderRequest() {
@@ -693,7 +731,7 @@ import Foundation
                 return
             }
             emitHostRenderEvent("host_view_render_begin", dedupeKey: lastRenderKey)
-            scheduleMirrorCreationIfNeeded()
+            scheduleMirrorAcquisitionIfNeeded()
             let window = viewportWindow(for: latestSnapshot)
             let cropped = GhosttyTerminalSnapshotViewport.crop(latestSnapshot, window: window)
             currentRenderedSnapshot = cropped
@@ -712,57 +750,49 @@ import Foundation
             emitHostRenderEvent("host_view_render_end", dedupeKey: lastRenderKey)
         }
 
-        private func scheduleMirrorCreationIfNeeded() {
-            guard mirror == nil, mirrorCreationTask == nil, window != nil else { return }
+        private func scheduleMirrorAcquisitionIfNeeded() {
+            guard mirror == nil, mirrorAcquisitionTask == nil, window != nil, !didSurrenderSharedMirror else { return }
             let renderBounds = visibleRenderBounds()
             guard renderBounds.width > 0, renderBounds.height > 0 else { return }
             guard Self.nativeMirrorEnabledForTesting else { return }
-            emitHostRenderEvent("host_view_mirror_create_scheduled", dedupeKey: lastRenderKey)
-            mirrorCreationTask = Task { @MainActor [weak self] in
+            emitHostRenderEvent("host_view_mirror_acquire_scheduled", dedupeKey: lastRenderKey)
+            mirrorAcquisitionTask = Task { @MainActor [weak self] in
                 await Task.yield()
                 guard let self, !Task.isCancelled else { return }
-                self.mirrorCreationTask = nil
-                self.createMirrorIfNeeded()
+                self.acquireMirrorIfNeeded()
+                // Cleared after acquisition, not before, so the layout pass the acquisition itself
+                // triggers cannot schedule a second, redundant acquisition task.
+                self.mirrorAcquisitionTask = nil
                 self.renderLatestSnapshot()
+                // A live surface measures the grid with its own font, which the pre-mirror
+                // `cellMetrics()` estimate only approximates, so re-report now that it exists. The
+                // report dedupes, so this is a no-op when the estimate already matched.
+                self.reportViewportSizeIfNeeded()
             }
         }
 
-        private func createMirrorIfNeeded() {
-            guard mirror == nil, window != nil else { return }
+        private func acquireMirrorIfNeeded() {
+            guard mirror == nil, window != nil, !didSurrenderSharedMirror else { return }
             guard Self.nativeMirrorEnabledForTesting else { return }
             do {
-                emitHostRenderEvent("host_view_mirror_service_start_begin", dedupeKey: lastRenderKey)
-                try GhosttyMobileAppService.shared.startIfNeeded()
-                emitHostRenderEvent("host_view_mirror_service_start_end", dedupeKey: lastRenderKey)
-                guard let app = GhosttyMobileAppService.shared.app else { throw GhosttyMobileAppServiceError.configuration("ghostty app missing") }
-                var host = makeSurfaceHost()
-                var config = ghostty_session_config_new()
-                config.surface.platform_tag = host.platform_tag
-                config.surface.platform = host.platform
-                config.surface.scale_factor = host.scale_factor
-                config.surface.context = GHOSTTY_SURFACE_CONTEXT_WINDOW
-                config.surface.backend = GHOSTTY_SURFACE_IO_BACKEND_HOST_MANAGED
-                config.surface.font_size = Float(Self.defaultFontSize)
-                config.parked_host = host
-                emitHostRenderEvent("host_view_mirror_new_begin", dedupeKey: lastRenderKey)
-                mirror = ghostty_mirror_new(app, &host, &config)
-                emitHostRenderEvent("host_view_mirror_new_end", dedupeKey: lastRenderKey)
-                guard mirror != nil else { throw GhosttyMobileAppServiceError.configuration("ghostty_mirror_new failed") }
+                emitHostRenderEvent("host_view_mirror_acquire_begin", dedupeKey: lastRenderKey)
+                let acquired = try GhosttySharedTerminalMirror.shared.acquire(
+                    for: self, fontSize: fontSize, scaleFactor: Double(window?.screen.scale ?? UIScreen.main.scale))
+                mirror = acquired
+                // A rebind reuses a surface that is already sized and occluded from its previous
+                // holder, so the cached geometry has to be dropped for `updateSurfaceGeometry()` to
+                // re-apply this view's size, scale, and occlusion rather than skip as unchanged.
                 lastSurfaceGeometry = nil
                 updateSurfaceGeometry()
                 if let surface = mirrorSurface() {
                     GhosttyMobileAppService.shared.registerActionHandler(for: surface) { [weak self] event in self?.handleActionEvent(event) }
                 }
-                emitHostRenderEvent("host_view_mirror_create_end", dedupeKey: lastRenderKey)
-            } catch { ghosttyRemoteTerminalTrace("mirror_create_failed error=\(error)") }
+                emitHostRenderEvent("host_view_mirror_acquire_end", dedupeKey: lastRenderKey)
+            } catch { ghosttyRemoteTerminalTrace("mirror_acquire_failed error=\(error)") }
         }
 
         private func makeSurfaceHost() -> ghostty_surface_host_s {
-            var host = ghostty_surface_host_s()
-            host.platform_tag = GHOSTTY_PLATFORM_IOS
-            host.platform = ghostty_platform_u(ios: ghostty_platform_ios_s(uiview: Unmanaged.passUnretained(surfaceHostView).toOpaque()))
-            host.scale_factor = Double(window?.screen.scale ?? UIScreen.main.scale)
-            return host
+            GhosttySharedTerminalMirror.shared.makeSurfaceHost(scaleFactor: Double(window?.screen.scale ?? UIScreen.main.scale))
         }
 
         private func mirrorSurface() -> ghostty_surface_t? {
@@ -861,6 +891,10 @@ import Foundation
             }
             if applied {
                 if let surface = mirrorSurface() { ghostty_surface_refresh(surface) }
+                // The shared surface stays hidden from the moment it is handed over until a frame of
+                // this view's own session has landed on it, so a rebind never shows the previous
+                // session's pixels inside this view.
+                GhosttySharedTerminalMirror.shared.revealSurface(from: self)
             } else {
                 ghosttyRemoteTerminalTrace("mirror_apply_failed")
                 setNeedsDisplay()
@@ -966,7 +1000,7 @@ import Foundation
         }
 
         private func cellMetrics() -> CellMetrics {
-            let font = UIFont.monospacedSystemFont(ofSize: Self.defaultFontSize, weight: .regular)
+            let font = UIFont.monospacedSystemFont(ofSize: CGFloat(fontSize.points), weight: .regular)
             let width = ceil(("W" as NSString).size(withAttributes: [.font: font]).width)
             let height = ceil(font.lineHeight)
             return CellMetrics(width: max(width, 1), height: max(height, 1))
@@ -1104,7 +1138,7 @@ import Foundation
 
         private var terminalUserInterfaceIdiom: UIUserInterfaceIdiom { userInterfaceIdiomOverrideForTesting ?? traitCollection.userInterfaceIdiom }
 
-        func surfaceHostFrameForTesting() -> CGRect { surfaceHostView.frame }
+        func surfaceHostFrameForTesting() -> CGRect { GhosttySharedTerminalMirror.shared.surfaceHostView.frame }
 
         func debugTapToActivateInputForTesting(at location: CGPoint = CGPoint(x: 1, y: 1)) -> TapActivationResult {
             handleTapToActivateInput(at: location)
@@ -1249,6 +1283,7 @@ import Foundation
                 addTextButton("-") { [weak self] in self?.onText("-") }
                 addTextButton("_") { [weak self] in self?.onText("_") }
                 addTextButton("esc") { [weak self] in self?.onKey("esc") }
+                addModifierButton(.shift)
                 addModifierButton(.control)
                 addModifierButton(.command)
                 addModifierButton(.option)

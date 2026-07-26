@@ -16,7 +16,7 @@ final class AgentSubscribeWatchTests: XCTestCase {
     /// loud error.
     func testSubscribeAgentWatchToOwnAgentByTerminalIDThrowsSelfEdge() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         _ = try orchestrator.registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, label: "Claude", terminalTrackingID: "term-A", status: .idle)
@@ -33,7 +33,7 @@ final class AgentSubscribeWatchTests: XCTestCase {
     /// let injected notifications chase each other around the cycle.
     func testSubscribeAgentWatchClosingCycleByTerminalIDThrows() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         _ = try orchestrator.registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, label: "Agent A", terminalTrackingID: "term-A", status: .idle)
@@ -56,7 +56,7 @@ final class AgentSubscribeWatchTests: XCTestCase {
     /// local edge keyed on the resolved row id (visible through the store).
     func testSubscribeAgentWatchByTerminalIDRecordsLocalEdge() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         let child = try orchestrator.registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, label: "Child", terminalTrackingID: "term-child", status: .idle)
@@ -72,7 +72,7 @@ final class AgentSubscribeWatchTests: XCTestCase {
     /// Subscribing to a terminal that has no agent session yet is a loud error — there is no row to watch.
     func testSubscribeAgentWatchUnknownTerminalThrows() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         _ = try makeProjectAndWorkspace(store: store)
 
         XCTAssertThrowsError(
@@ -85,7 +85,7 @@ final class AgentSubscribeWatchTests: XCTestCase {
     /// Unsubscribe by terminal session id resolves the child's agent row and drops only the matching edge.
     func testUnsubscribeAgentWatchByTerminalIDRemovesEdge() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         let child = try orchestrator.registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, label: "Child", terminalTrackingID: "term-child", status: .idle)
@@ -100,7 +100,7 @@ final class AgentSubscribeWatchTests: XCTestCase {
     /// agent row, so there is nothing left to delete.
     func testUnsubscribeAgentWatchUnknownTerminalSucceedsQuietly() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         _ = try makeProjectAndWorkspace(store: store)
 
         XCTAssertNoThrow(

@@ -25,25 +25,6 @@ CRASH_DIR="$HOME/Library/Logs/DiagnosticReports"
 POST_LAUNCH_MONITOR_SECONDS="${SPACES_POST_LAUNCH_MONITOR_SECONDS:-45}"
 source "$repo_root/scripts/spaces-profile-helpers.sh"
 
-primary_worktree_dir() {
-  local common_git_dir
-  common_git_dir="$(git -C "$repo_root" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || return 1
-  [[ "$(basename "$common_git_dir")" == ".git" ]] || return 1
-  cd "$common_git_dir/.." && pwd
-}
-
-configure_ghostty_cache() {
-  if [[ -n "${SPACES_GHOSTTY_CACHE_DIR:-}" ]]; then
-    return
-  fi
-
-  local project_dir
-  if project_dir="$(primary_worktree_dir)"; then
-    export SPACES_PROJECT_DIR="${SPACES_PROJECT_DIR:-$project_dir}"
-    export SPACES_GHOSTTY_CACHE_DIR="$project_dir/apps/macos/.local/ghostty-cache"
-  fi
-}
-
 remote_shell_quote() {
   python3 - "$1" <<'PY'
 import shlex
@@ -184,7 +165,6 @@ PY
   echo "Using remote runtime root: $remote_runtime_dir"
 )
 
-configure_ghostty_cache
 "$repo_root/apps/macos/scripts/setup_ghostty.sh"
 "$repo_root/scripts/swiftpm.sh" build
 

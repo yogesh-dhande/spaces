@@ -27,7 +27,7 @@ extension OrchestratorTests {
                 claimedLauncherName: "Codex", status: .idle, createdAt: "now", updatedAt: "now"))
         let closed = TerminalCloseCapture()
         let terminated = TerminalTerminateCapture()
-        let orchestrator = WorkspaceOrchestrator(
+        let orchestrator = makeTestOrchestrator(
             store: store, builtInTerminalWindowCloser: { closed.sessionIDs.append($0) },
             builtInTerminalSessionTerminator: { terminated.sessionIDs.append($0) })
 
@@ -55,7 +55,7 @@ extension OrchestratorTests {
                 status: .idle, createdAt: "now", updatedAt: "now"))
         let launches = TerminalLaunchConfigurationCapture()
         let terminated = TerminalTerminateCapture()
-        let orchestrator = WorkspaceOrchestrator(
+        let orchestrator = makeTestOrchestrator(
             store: store, builtInTerminalWindowOpener: { _, _ in }, builtInTerminalWindowCloser: { _ in },
             builtInTerminalSessionTerminator: { terminated.sessionIDs.append($0) },
             builtInTerminalSessionLauncher: { configuration in
@@ -85,7 +85,7 @@ extension OrchestratorTests {
             AgentWindowRecord(
                 id: "agent-review", workspaceID: workspace.id, provider: .spaces, label: "reviewer", terminalTrackingID: "session-review",
                 sessionKey: nil, status: .idle, createdAt: "now", updatedAt: "now"))
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
 
         XCTAssertThrowsError(try orchestrator.restartCodingAgent(workspaceID: workspace.id, agentID: "agent-review")) { error in
             XCTAssertEqual(error.localizedDescription, "Invalid argument: Unconfigured live coding agents cannot be restarted from Spaces.")
@@ -112,7 +112,7 @@ extension OrchestratorTests {
                 terminalTarget: TerminalTargetRecord(trackingID: "old-session"), claimedLauncherID: "launcher-codex", claimedLauncherName: "Codex",
                 status: .idle, createdAt: "now", updatedAt: "now"))
         let terminated = TerminalTerminateCapture()
-        let orchestrator = WorkspaceOrchestrator(
+        let orchestrator = makeTestOrchestrator(
             store: store, builtInTerminalWindowCloser: { _ in }, builtInTerminalSessionTerminator: { terminated.sessionIDs.append($0) })
 
         XCTAssertThrowsError(try orchestrator.restartCodingAgent(workspaceID: workspace.id, agentID: "agent-codex")) { error in
@@ -138,8 +138,7 @@ extension OrchestratorTests {
         WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter { try recorder.submit($0, $1) }
         defer { WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter(nil) }
 
-        let orchestrator = WorkspaceOrchestrator(
-            store: store, builtInTerminalWindowCloser: { _ in }, builtInTerminalSessionTerminator: { _ in })
+        let orchestrator = makeTestOrchestrator(store: store, builtInTerminalWindowCloser: { _ in }, builtInTerminalSessionTerminator: { _ in })
 
         let child = try orchestrator.registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "child-session", status: .spinning)
@@ -189,9 +188,8 @@ extension OrchestratorTests {
         WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter { try recorder.submit($0, $1) }
         defer { WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter(nil) }
 
-        let orchestrator = WorkspaceOrchestrator(
-            store: store, builtInTerminalWindowOpener: { _, _ in }, builtInTerminalWindowCloser: { _ in },
-            builtInTerminalSessionTerminator: { _ in },
+        let orchestrator = makeTestOrchestrator(
+            store: store, builtInTerminalWindowOpener: { _, _ in }, builtInTerminalWindowCloser: { _ in }, builtInTerminalSessionTerminator: { _ in },
             builtInTerminalSessionLauncher: { configuration in
                 TerminalServiceSessionSummary(
                     id: configuration.sessionID, title: configuration.title, workingDirectory: configuration.workingDirectory,
@@ -259,7 +257,7 @@ extension OrchestratorTests {
                 outputPath: paths.outputPath)
         }
         defer { WorkspaceOrchestrator.setProcessWideBuiltInTerminalSessionLauncher(nil) }
-        let orchestrator = WorkspaceOrchestrator(
+        let orchestrator = makeTestOrchestrator(
             store: store,
             builtInTerminalWindowOpener: { sessionID, mode in
                 openCapture.sessionIDs.append(sessionID)
@@ -311,7 +309,7 @@ extension OrchestratorTests {
         let openCapture = TerminalOpenCapture()
         let closeCapture = TerminalCloseCapture()
         let terminateCapture = TerminalTerminateCapture()
-        let orchestrator = WorkspaceOrchestrator(
+        let orchestrator = makeTestOrchestrator(
             store: store,
             builtInTerminalWindowOpener: { sessionID, mode in
                 openCapture.sessionIDs.append(sessionID)
@@ -359,7 +357,7 @@ extension OrchestratorTests {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id)
         try store.setWorkspaceAgentLaunchers(workspaceID: workspace.id, launchers: [AgentLauncher(name: "Mock Agent", command: "mock-agent")])
@@ -392,7 +390,7 @@ extension OrchestratorTests {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db")
         let store = try SQLiteStore(path: dbPath.path)
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
@@ -455,7 +453,7 @@ extension OrchestratorTests {
         let store = try makeTemporaryStore()
         let launches = TerminalLaunchConfigurationCapture()
         let terminated = TerminalTerminateCapture()
-        let orchestrator = WorkspaceOrchestrator(
+        let orchestrator = makeTestOrchestrator(
             store: store, builtInTerminalWindowOpener: { _, _ in }, builtInTerminalWindowCloser: { _ in },
             builtInTerminalSessionTerminator: { terminated.sessionIDs.append($0) },
             builtInTerminalSessionLauncher: { configuration in
@@ -496,7 +494,7 @@ extension OrchestratorTests {
         let store = try SQLiteStore(path: dbPath)
         let closeCapture = TerminalCloseCapture()
         let terminateCapture = TerminalTerminateCapture()
-        let orchestrator = WorkspaceOrchestrator(
+        let orchestrator = makeTestOrchestrator(
             store: store, builtInTerminalWindowCloser: { sessionID in closeCapture.sessionIDs.append(sessionID) },
             builtInTerminalSessionTerminator: { sessionID in terminateCapture.sessionIDs.append(sessionID) })
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
@@ -535,7 +533,7 @@ extension OrchestratorTests {
         let dbPath = root.appendingPathComponent("spaces.db").path
         let store = try SQLiteStore(path: dbPath)
         let terminateCapture = TerminalTerminateCapture()
-        let orchestrator = WorkspaceOrchestrator(
+        let orchestrator = makeTestOrchestrator(
             store: store, builtInTerminalSessionTerminator: { sessionID in terminateCapture.sessionIDs.append(sessionID) })
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
@@ -577,7 +575,7 @@ extension OrchestratorTests {
         try FileManager.default.createDirectory(at: childDir, withIntermediateDirectories: true)
         let store = try SQLiteStore(path: dbPath)
         let terminateCapture = TerminalTerminateCapture()
-        let orchestrator = WorkspaceOrchestrator(
+        let orchestrator = makeTestOrchestrator(
             store: store, builtInTerminalSessionTerminator: { sessionID in terminateCapture.sessionIDs.append(sessionID) })
         let project = makeProjectRecord(dir: parentDir.path)
         let parentWorkspace = makeWorkspaceRecord(projectID: project.id, dir: parentDir.path)
@@ -614,7 +612,7 @@ extension OrchestratorTests {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
         let store = try SQLiteStore(path: dbPath)
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
@@ -666,7 +664,7 @@ extension OrchestratorTests {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
         let store = try SQLiteStore(path: dbPath)
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
@@ -724,7 +722,7 @@ extension OrchestratorTests {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
         let store = try SQLiteStore(path: dbPath)
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
@@ -784,8 +782,7 @@ extension OrchestratorTests {
             XCTAssertTrue(try orchestrator.reconcileTerminalForegroundAgentClassifications())
 
             XCTAssertEqual(
-                try store.agentWindow(id: promoted.id)?.status, .exited,
-                "A signaled detection row is recorded `.exited`, not silently deleted.")
+                try store.agentWindow(id: promoted.id)?.status, .exited, "A signaled detection row is recorded `.exited`, not silently deleted.")
             XCTAssertEqual(recorder.delivered.map(\.sessionID), [subscriberSessionID])
             XCTAssertTrue(
                 recorder.delivered.first?.line.contains("is exited") == true,
@@ -825,7 +822,7 @@ extension OrchestratorTests {
         let recorder = AgentNotificationSubmitterRecorder()
         WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter { try recorder.submit($0, $1) }
         defer { WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter(nil) }
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
 
         let child = try orchestrator.registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, label: "Codex CLI", terminalTrackingID: "child-session", status: .spinning)
@@ -857,7 +854,7 @@ extension OrchestratorTests {
         let recorder = AgentNotificationSubmitterRecorder()
         WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter { try recorder.submit($0, $1) }
         defer { WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter(nil) }
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
 
         let child = try orchestrator.registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, label: "Mock Agent", terminalTrackingID: "remote-session", status: .spinning)
@@ -883,7 +880,7 @@ extension OrchestratorTests {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
         let store = try SQLiteStore(path: dbPath)
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
@@ -932,7 +929,7 @@ extension OrchestratorTests {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
         let store = try SQLiteStore(path: dbPath)
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
@@ -978,7 +975,7 @@ extension OrchestratorTests {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
         let store = try SQLiteStore(path: dbPath)
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
@@ -1030,7 +1027,7 @@ extension OrchestratorTests {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
         let store = try SQLiteStore(path: dbPath)
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
@@ -1073,7 +1070,7 @@ extension OrchestratorTests {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
         let store = try SQLiteStore(path: dbPath)
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
@@ -1122,7 +1119,7 @@ extension OrchestratorTests {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
         let store = try SQLiteStore(path: dbPath)
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
@@ -1160,7 +1157,7 @@ extension OrchestratorTests {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
         let store = try SQLiteStore(path: dbPath)
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
@@ -1218,7 +1215,7 @@ extension OrchestratorTests {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
         let store = try SQLiteStore(path: dbPath)
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
@@ -1258,7 +1255,7 @@ extension OrchestratorTests {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
         let store = try SQLiteStore(path: dbPath)
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
@@ -1293,7 +1290,7 @@ extension OrchestratorTests {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
         let store = try SQLiteStore(path: dbPath)
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
@@ -1325,11 +1322,129 @@ extension OrchestratorTests {
         }
     }
 
+    /// Regression for a live rename bug: `TerminalForegroundAgentReconciler` and
+    /// `ProcessExitMonitorService` both run `reconcileTerminalForegroundAgentClassifications` detached, so
+    /// two overlapping passes can each read `existingRow == nil` for the same session and both call
+    /// `insertAdHocDetectedAgent`. The row id is deterministic, so the second call upserts the SAME row —
+    /// but must not treat the first call's own already-inserted row as a name conflict with itself and
+    /// suffix it "-2".
+    func testInsertAdHocDetectedAgentIsIdempotentAcrossOverlappingReconcilePasses() throws {
+        let store = try makeTemporaryStore()
+        let projectDir = try makeTempDirectory().path
+        let project = makeProjectRecord(dir: projectDir)
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: projectDir)
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace)
+        let orchestrator = makeTestOrchestrator(store: store)
+        let sessionID = "ad-hoc-overlapping-agent"
+        let detectedAgent = (label: "claude", displayCommand: "claude")
+
+        try orchestrator.insertAdHocDetectedAgent(detectedAgent: detectedAgent, workspace: workspace, sessionID: sessionID)
+        try orchestrator.insertAdHocDetectedAgent(detectedAgent: detectedAgent, workspace: workspace, sessionID: sessionID)
+
+        let agents = try store.agentWindows(workspaceID: workspace.id)
+        XCTAssertEqual(agents.count, 1)
+        XCTAssertEqual(agents.first?.label, "claude")
+
+        // A genuinely different session detecting the same label is a real collision and still suffixes.
+        let otherSessionID = "ad-hoc-overlapping-agent-other"
+        try orchestrator.insertAdHocDetectedAgent(detectedAgent: detectedAgent, workspace: workspace, sessionID: otherSessionID)
+        let labelsAfterDistinctSession = try store.agentWindows(workspaceID: workspace.id).compactMap(\.label)
+        XCTAssertEqual(Set(labelsAfterDistinctSession), Set(["claude", "claude-2"]))
+    }
+
+    /// Regression: the SAME overlapping-reconcile-pass race as
+    /// `testInsertAdHocDetectedAgentIsIdempotentAcrossOverlappingReconcilePasses`, but with a hook landing
+    /// in the window between the two passes' `insertAdHocDetectedAgent` calls. Pass A inserts the
+    /// detection row; a hook then advances it to `.spinning` with a session key; the delayed pass B (which
+    /// also read `existingRow == nil` before A's insert) must merge into that live state rather than
+    /// re-upserting its stale `.idle`/`sessionKey: nil` detection defaults over it.
+    func testInsertAdHocDetectedAgentPreservesHookStateFromDelayedOverlappingPass() throws {
+        let store = try makeTemporaryStore()
+        let projectDir = try makeTempDirectory().path
+        let project = makeProjectRecord(dir: projectDir)
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: projectDir)
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace)
+        let orchestrator = makeTestOrchestrator(store: store)
+        let sessionID = "ad-hoc-stale-detection-agent"
+        let detectedAgent = (label: "claude", displayCommand: "claude")
+
+        // Pass A's insert.
+        try orchestrator.insertAdHocDetectedAgent(detectedAgent: detectedAgent, workspace: workspace, sessionID: sessionID)
+        let agentID = orchestrator.adHocDetectedAgentID(sessionID: sessionID)
+        guard let inserted = try store.agentWindow(id: agentID) else { return XCTFail("expected inserted detection row") }
+
+        // A hook fires between the two passes, moving the row to spinning with a session key — real
+        // lifecycle state pass B must not clobber.
+        try store.upsertAgentWindow(
+            AgentWindowRecord(
+                id: inserted.id, workspaceID: inserted.workspaceID, provider: inserted.provider, label: inserted.label,
+                runtimeTargetID: inserted.runtimeTargetID, terminalTarget: inserted.terminalTarget, sessionKey: "session-key-from-hook",
+                claimedLauncherID: inserted.claimedLauncherID, claimedLauncherName: inserted.claimedLauncherName, status: .spinning,
+                note: inserted.note, createdAt: inserted.createdAt, updatedAt: "2026-01-01T00:00:01Z"))
+
+        // Pass B: the delayed second reconcile pass re-runs the same detection.
+        try orchestrator.insertAdHocDetectedAgent(detectedAgent: detectedAgent, workspace: workspace, sessionID: sessionID)
+
+        let agents = try store.agentWindows(workspaceID: workspace.id)
+        XCTAssertEqual(agents.count, 1)
+        XCTAssertEqual(agents.first?.label, "claude")
+        XCTAssertEqual(agents.first?.status, .spinning)
+        XCTAssertEqual(agents.first?.sessionKey, "session-key-from-hook")
+        XCTAssertEqual(agents.first?.createdAt, inserted.createdAt)
+    }
+
+    /// Pins the SQL contract that closes the detection read-modify-upsert race: the product invariant that
+    /// a detection refresh never regresses an agent's lifecycle state. `upsertDetectedAgentWindow` merges a
+    /// fresh label/binding onto a row while preserving whatever `status`, `session_key`, and `created_at`
+    /// the stored row already holds — enforced in the ON CONFLICT clause, so it holds even against a stale
+    /// caller snapshot with no injection seam between the read and the write.
+    func testUpsertDetectedAgentWindowPreservesLifecycleStateAgainstStaleRefresh() throws {
+        let store = try makeTemporaryStore()
+        let projectDir = try makeTempDirectory().path
+        let project = makeProjectRecord(dir: projectDir)
+        let workspace = makeWorkspaceRecord(projectID: project.id, dir: projectDir)
+        try store.upsert(project: project)
+        try store.upsert(workspace: workspace)
+
+        let agentID = "terminal-agent-detected-session"
+        let terminalTarget = TerminalTargetRecord(trackingID: "detected-session")
+
+        // Detection creates the row with fresh idle defaults.
+        try store.upsertDetectedAgentWindow(
+            AgentWindowRecord(
+                id: agentID, workspaceID: workspace.id, provider: .spaces, label: "claude", terminalTarget: terminalTarget, sessionKey: nil,
+                status: .idle, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z"))
+
+        // A hook advances the row to spinning with a session key through the lifecycle-owning upsert.
+        try store.upsertAgentWindow(
+            AgentWindowRecord(
+                id: agentID, workspaceID: workspace.id, provider: .spaces, label: "claude", terminalTarget: terminalTarget,
+                sessionKey: "session-key-from-hook", status: .spinning, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:01Z"))
+
+        // A delayed detection refresh carrying a stale idle/nil-session-key snapshot with a bogus creation
+        // time must not regress the live lifecycle state; its label binding still applies, but updated_at
+        // (the lifecycle-state-entered timestamp) must stay with the stored status rather than jump to
+        // this refresh's value.
+        try store.upsertDetectedAgentWindow(
+            AgentWindowRecord(
+                id: agentID, workspaceID: workspace.id, provider: .spaces, label: "claude-renamed", terminalTarget: terminalTarget, sessionKey: nil,
+                status: .idle, createdAt: "2099-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:02Z"))
+
+        guard let refreshed = try store.agentWindow(id: agentID) else { return XCTFail("expected agent row") }
+        XCTAssertEqual(refreshed.status, .spinning)
+        XCTAssertEqual(refreshed.sessionKey, "session-key-from-hook")
+        XCTAssertEqual(refreshed.createdAt, "2026-01-01T00:00:00Z")
+        XCTAssertEqual(refreshed.label, "claude-renamed")
+        XCTAssertEqual(refreshed.updatedAt, "2026-01-01T00:00:01Z")
+    }
+
     func testReconcileTerminalForegroundAgentClassificationsReservesConfiguredLauncherNames() throws {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
         let store = try SQLiteStore(path: dbPath)
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
@@ -1362,7 +1477,7 @@ extension OrchestratorTests {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
         let store = try SQLiteStore(path: dbPath)
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
@@ -1393,7 +1508,7 @@ extension OrchestratorTests {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
         let store = try SQLiteStore(path: dbPath)
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
@@ -1488,7 +1603,7 @@ extension OrchestratorTests {
         let recorder = AgentNotificationSubmitterRecorder()
         WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter { try recorder.submit($0, $1) }
         defer { WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter(nil) }
-        let orchestrator = WorkspaceOrchestrator(store: store, builtInTerminalWindowCloser: { _ in }, builtInTerminalSessionTerminator: { _ in })
+        let orchestrator = makeTestOrchestrator(store: store, builtInTerminalWindowCloser: { _ in }, builtInTerminalSessionTerminator: { _ in })
 
         // A live agent that finished a turn: `.done`, with no recorded exit event.
         let child = try orchestrator.registerAgentWindow(
@@ -1522,7 +1637,7 @@ extension OrchestratorTests {
         let recorder = AgentNotificationSubmitterRecorder()
         WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter { try recorder.submit($0, $1) }
         defer { WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter(nil) }
-        let orchestrator = WorkspaceOrchestrator(store: store, builtInTerminalWindowCloser: { _ in }, builtInTerminalSessionTerminator: { _ in })
+        let orchestrator = makeTestOrchestrator(store: store, builtInTerminalWindowCloser: { _ in }, builtInTerminalSessionTerminator: { _ in })
 
         let child = try orchestrator.registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "launcher-session", status: .spinning,
@@ -1560,7 +1675,7 @@ extension OrchestratorTests {
         let recorder = AgentNotificationSubmitterRecorder()
         WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter { try recorder.submit($0, $1) }
         defer { WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter(nil) }
-        let orchestrator = WorkspaceOrchestrator(store: store, builtInTerminalWindowCloser: { _ in }, builtInTerminalSessionTerminator: { _ in })
+        let orchestrator = makeTestOrchestrator(store: store, builtInTerminalWindowCloser: { _ in }, builtInTerminalSessionTerminator: { _ in })
 
         // Life 1: a configured launcher exits — the row is kept `.done` with a recorded exit event, and the
         // watcher (edge retained on a kept row) receives the first exited notice.
@@ -1610,7 +1725,7 @@ extension OrchestratorTests {
         let recorder = AgentNotificationSubmitterRecorder()
         WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter { try recorder.submit($0, $1) }
         defer { WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter(nil) }
-        let orchestrator = WorkspaceOrchestrator(store: store, builtInTerminalWindowCloser: { _ in }, builtInTerminalSessionTerminator: { _ in })
+        let orchestrator = makeTestOrchestrator(store: store, builtInTerminalWindowCloser: { _ in }, builtInTerminalSessionTerminator: { _ in })
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try XCTUnwrap(try store.workspaces(projectID: project.id).first)
 
@@ -1621,7 +1736,8 @@ extension OrchestratorTests {
 
         // Failing-first: the store's bulk `agent_sessions` delete throws under RESTRICT while the watched row
         // still holds its inbound edge. The transaction rolls back, so the project remains intact.
-        XCTAssertThrowsError(try store.deleteProject(id: project.id), "the bulk delete must fail loudly while a watched agent retains an inbound edge")
+        XCTAssertThrowsError(
+            try store.deleteProject(id: project.id), "the bulk delete must fail loudly while a watched agent retains an inbound edge")
         XCTAssertNotNil(try store.project(id: project.id), "the failed bulk delete rolled back, leaving the project intact")
 
         try orchestrator.removeProject(dir: projectDir.path)
@@ -1651,7 +1767,7 @@ extension OrchestratorTests {
         let recorder = AgentNotificationSubmitterRecorder()
         WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter { try recorder.submit($0, $1) }
         defer { WorkspaceOrchestrator.setProcessWideAgentNotificationLineSubmitter(nil) }
-        let orchestrator = WorkspaceOrchestrator(store: store, builtInTerminalWindowCloser: { _ in }, builtInTerminalSessionTerminator: { _ in })
+        let orchestrator = makeTestOrchestrator(store: store, builtInTerminalWindowCloser: { _ in }, builtInTerminalSessionTerminator: { _ in })
 
         let child = try orchestrator.registerAgentWindow(
             workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "child-session", status: .waiting)
@@ -1682,7 +1798,7 @@ extension OrchestratorTests {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
         let store = try SQLiteStore(path: dbPath)
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)

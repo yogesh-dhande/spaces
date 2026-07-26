@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Harbor Docs</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --paper: #f3f8fa;
+      --panel: #ffffff;
+      --ink: #0e1726;
+      --ink-2: #384456;
+      --muted: #64748b;
+      --line: #e6ecf0;
+      --line-2: #d4dde2;
+      --accent: #0891b2;
+      --accent-ink: #0e7490;
+      --accent-wash: rgba(8, 145, 178, 0.10);
+      --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    }
+    * { box-sizing: border-box; }
+    html { -webkit-text-size-adjust: 100%; }
+    body {
+      margin: 0; font-family: var(--sans); color: var(--ink);
+      background: var(--paper); -webkit-font-smoothing: antialiased;
+    }
+    .shell { max-width: 1120px; margin: 0 auto; padding: 26px 34px 60px; }
+
+    .rail { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-bottom: 16px; }
+    .brand { display: flex; align-items: center; gap: 11px; }
+    .glyph { width: 16px; height: 16px; flex: none; position: relative; }
+    .glyph::before {
+      content: ""; position: absolute; inset: 3px; border-radius: 50%;
+      background: var(--accent); box-shadow: 0 0 0 3px var(--accent-wash);
+    }
+    .wordmark { font-weight: 700; letter-spacing: -0.01em; font-size: 15px; color: var(--ink); }
+    .brand .sep { color: var(--line-2); font-weight: 400; }
+    .brand .product {
+      font-family: var(--mono); font-size: 12.5px; font-weight: 600;
+      letter-spacing: 0.14em; text-transform: uppercase; color: var(--accent-ink);
+    }
+    .rail-right { display: flex; align-items: center; gap: 12px; }
+    .branch {
+      font-family: var(--mono); font-size: 11px; letter-spacing: 0.1em;
+      text-transform: uppercase; font-weight: 600; color: var(--accent-ink);
+      display: inline-flex; align-items: center; gap: 7px;
+      padding: 6px 11px; border-radius: 7px; background: var(--accent-wash);
+    }
+    .branch::before {
+      content: ""; width: 7px; height: 7px; border-radius: 2px; background: var(--accent);
+      transform: rotate(45deg);
+    }
+    .tag {
+      font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.06em;
+      color: var(--muted); border: 1px solid var(--line-2);
+      border-radius: 6px; padding: 5px 9px; background: var(--panel);
+    }
+
+    /* Redesigned hero — dark full-bleed instrument band (branch: redesign-hero) */
+    .hero-dark {
+      position: relative; overflow: hidden;
+      border-radius: 22px; background: #071319;
+      padding: 46px 44px 40px; margin-bottom: 40px;
+    }
+    .hero-dark::before {
+      content: ""; position: absolute; inset: 0;
+      background: radial-gradient(120% 140% at 8% -10%, rgba(8,145,178,0.32), transparent 55%);
+    }
+    .hero-dark > * { position: relative; }
+    .hero-eyebrow {
+      display: flex; align-items: center; gap: 12px; margin: 0 0 22px;
+      font-family: var(--mono); font-size: 11px; letter-spacing: 0.18em;
+      text-transform: uppercase; color: #67d3e8;
+    }
+    .hero-eyebrow .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+    .hero-eyebrow .rev {
+      color: #9fb0c3; letter-spacing: 0.1em; padding-left: 12px;
+      border-left: 1px solid rgba(255,255,255,0.16);
+    }
+    .hero-dark h1 {
+      margin: 0 0 26px; font-size: 54px; line-height: 0.98;
+      letter-spacing: -0.04em; font-weight: 780; color: #ffffff;
+    }
+    .hero-dark h1 .accent { color: #22d3ee; }
+    .metrics-bar {
+      display: flex; flex-wrap: wrap; gap: 0;
+      border-top: 1px solid rgba(255,255,255,0.12); padding-top: 22px;
+    }
+    .metrics-bar div { padding-right: 30px; margin-right: 30px; border-right: 1px solid rgba(255,255,255,0.12); }
+    .metrics-bar div:last-child { border-right: 0; margin-right: 0; padding-right: 0; }
+    .metrics-bar span {
+      display: block; font-family: var(--mono); font-size: 10.5px;
+      letter-spacing: 0.09em; text-transform: uppercase; color: #8aa0b8; margin-bottom: 7px;
+    }
+    .metrics-bar b { font-size: 26px; letter-spacing: -0.03em; font-weight: 680; color: #eef4fb; }
+
+    .features {
+      display: grid; grid-template-columns: repeat(3, 1fr);
+      gap: 1px; background: var(--line); border: 1px solid var(--line);
+      border-radius: 16px; overflow: hidden; margin-bottom: 40px;
+    }
+    .feature { background: var(--panel); padding: 26px 24px; }
+    .feature .k {
+      font-family: var(--mono); font-size: 11px; letter-spacing: 0.12em;
+      text-transform: uppercase; color: var(--accent-ink); font-weight: 600;
+      display: flex; align-items: center; gap: 8px; margin-bottom: 14px;
+    }
+    .feature .k::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+    .feature p { margin: 0; font-size: 14.5px; line-height: 1.55; color: var(--ink-2); }
+
+    .guides { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 8px 26px; }
+    .guides h2 {
+      margin: 20px 0 6px; font-size: 13px; font-family: var(--mono);
+      letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted); font-weight: 600;
+    }
+    .row {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 20px; padding: 18px 0; border-top: 1px solid var(--line);
+    }
+    .row:first-of-type { border-top: 0; }
+    .row b { display: block; margin-bottom: 5px; font-size: 15.5px; font-weight: 620; }
+    .row small { color: var(--muted); font-size: 13.5px; line-height: 1.5; }
+    .row small code {
+      font-family: var(--mono); font-size: 12.5px; color: var(--accent-ink);
+      background: var(--accent-wash); padding: 1px 5px; border-radius: 5px;
+    }
+    .row .meta {
+      font-family: var(--mono); font-size: 12px; color: var(--ink-2);
+      white-space: nowrap; padding: 5px 10px; border: 1px solid var(--line-2); border-radius: 999px;
+    }
+
+    @media (max-width: 820px) {
+      .hero-dark h1 { font-size: 38px; }
+      .features { grid-template-columns: 1fr; }
+      .metrics-bar div { padding-right: 22px; margin-right: 22px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header class="rail">
+      <div class="brand">
+        <span class="glyph"></span>
+        <span class="wordmark">Lighthouse</span>
+        <span class="sep">/</span>
+        <span class="product">Harbor</span>
+      </div>
+      <div class="rail-right">
+        <span class="branch">redesign-hero</span>
+        <span class="tag">Harbor redesign-hero docs sentinel</span>
+      </div>
+    </header>
+
+    <section class="hero-dark">
+      <p class="hero-eyebrow"><span class="dot"></span>Customer web app <span class="rev">Hero redesign — in review</span></p>
+      <h1>Every visit.<br><span class="accent">One step to checkout.</span></h1>
+      <div class="metrics-bar">
+        <div><span>Uptime · 30 days</span><b>99.98%</b></div>
+        <div><span>Active incidents</span><b>0</b></div>
+        <div><span>Deploys this week</span><b>18</b></div>
+      </div>
+    </section>
+
+    <section class="features">
+      <div class="feature">
+        <div class="k">Storefront</div>
+        <p>Compose product and landing pages from typed components, with an instant preview on every branch.</p>
+      </div>
+      <div class="feature">
+        <div class="k">Checkout</div>
+        <p>Drive the full cart-to-payment flow through the Lantern API with retries and idempotent orders.</p>
+      </div>
+      <div class="feature">
+        <div class="k">Accounts</div>
+        <p>Sign-in, profiles, and saved carts backed by the shared Lighthouse auth service.</p>
+      </div>
+    </section>
+
+    <section class="guides">
+      <h2>Popular guides</h2>
+      <div class="row">
+        <div><b>Local dev environment setup</b><small>Run the Harbor storefront against a mocked Lantern API and seed demo products in under five minutes.</small></div>
+        <span class="meta">5 min</span>
+      </div>
+      <div class="row">
+        <div><b>Checkout integration walkthrough</b><small>Wire the cart to the Lantern <code>/api/checkout</code> endpoint and handle payment retries safely.</small></div>
+        <span class="meta">8 min</span>
+      </div>
+      <div class="row">
+        <div><b>Branch preview deploys</b><small>Give every pull request its own preview URL so reviewers can click through the real flow before merge.</small></div>
+        <span class="meta">6 min</span>
+      </div>
+    </section>
+  </div>
+</body>
+</html>

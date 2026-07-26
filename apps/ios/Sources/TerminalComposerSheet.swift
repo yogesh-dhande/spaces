@@ -11,6 +11,7 @@ struct TerminalComposerSheet: View {
 
     @State private var hasPasteableImage = false
     @State private var didStartSending = false
+    @FocusState private var isMessageFieldFocused: Bool
 
     private static let thumbnailSize: CGFloat = 56
 
@@ -22,19 +23,21 @@ struct TerminalComposerSheet: View {
                 model.isSendingComposedMessage
             ).allowsHitTesting(!model.isSendingComposedMessage).textInputAutocapitalization(.never).autocorrectionDisabled().foregroundStyle(
                 Theme.text
-            ).tint(Theme.accent).accessibilityIdentifier("composer.message-field")
-
-            Spacer(minLength: 0)
+            ).tint(Theme.accent).focused($isMessageFieldFocused).accessibilityIdentifier("composer.message-field")
 
             if let errorMessage = model.composerErrorMessage {
                 Text(errorMessage).font(.footnote).foregroundStyle(Theme.red).fixedSize(horizontal: false, vertical: true).accessibilityIdentifier(
                     "composer.error")
             }
-
-            bottomBar
-        }.padding(16).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top).background(Theme.bg).presentationDetents([
-            .height(260), .medium,
-        ]).presentationBackground(Theme.bg).accessibilityIdentifier("composer.sheet").onAppear { refreshPasteState() }.onReceive(
+        }.padding(16).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top).background(Theme.bg).safeAreaInset(edge: .bottom) {
+            // Pin the paste/send controls to the bottom safe area so keyboard avoidance keeps them above
+            // the keyboard. A bottom-anchored Spacer put them at the sheet's edge, where the keyboard —
+            // especially as it first rises — drew over them.
+            bottomBar.padding(.horizontal, 16).padding(.top, 4).padding(.bottom, 12).background(Theme.bg)
+        }.presentationDetents([.medium, .large]).presentationBackground(Theme.bg).accessibilityIdentifier("composer.sheet").onAppear {
+            refreshPasteState()
+            focusMessageField()
+        }.onReceive(
             NotificationCenter.default.publisher(for: UIPasteboard.changedNotification)
         ) { _ in refreshPasteState() }.onChange(of: model.isSendingComposedMessage) { _, isSending in
             if isSending {
@@ -46,6 +49,12 @@ struct TerminalComposerSheet: View {
                 if model.composerErrorMessage == nil { dismiss() }
             }
         }
+    }
+
+    /// Focuses the message field just after the sheet settles so the keyboard rises on open. Deferring a
+    /// hair avoids the first-present case where claiming first responder mid-transition drops the keyboard.
+    private func focusMessageField() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { isMessageFieldFocused = true }
     }
 
     private var attachmentStrip: some View {

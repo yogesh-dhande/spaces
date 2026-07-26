@@ -131,6 +131,9 @@ extension TerminalSessionPaneViewController {
     func debugSimulateAttachmentStateDidChange() { TerminalSessionNotification.post(.spacesTerminalAttachmentStateDidChange, sessionID: sessionID) }
     func debugSimulateSessionMetadataDidChange() { TerminalSessionNotification.post(.spacesTerminalSessionMetadataDidChange, sessionID: sessionID) }
     func debugSimulateRuntimeStateDidChange() { TerminalSessionNotification.post(.spacesTerminalRuntimeStateDidChange, sessionID: sessionID) }
+    func debugSimulateStateStreamConnectionDidChange() {
+        TerminalSessionNotification.post(.spacesTerminalStateStreamConnectionDidChange, sessionID: sessionID)
+    }
     func debugSimulateOutputDidChange() {
         TerminalSessionNotification.post(.spacesTerminalOutputDidChange, sessionID: sessionID)
         refreshNow()

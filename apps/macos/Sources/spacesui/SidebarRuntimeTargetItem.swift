@@ -190,7 +190,7 @@ extension AppKitController {
         workspaceID: String, _ mutation: @escaping @Sendable (SpacesPairedDeviceRecord, SpacesDeviceClientApp) throws -> SpacesDeviceAPIResponse
     ) {
         guard let device = deviceForWorkspaceMutation(workspaceID: workspaceID) else {
-            showDeviceNotLoadedError()
+            showWorkspaceDeviceUnavailableError(workspaceID: workspaceID)
             return
         }
         Task { @MainActor [weak self] in
@@ -199,7 +199,7 @@ extension AppKitController {
                 try mutation(device, SpacesDeviceClient.macOSClientApp(appVersion: AppVersion.short))
             }
             switch result {
-            case .success(let response): self.applyDeviceMutationResponse(response, selectedWorkspaceID: workspaceID)
+            case .success(let response): self.applyDeviceMutationResponse(response, deviceID: device.id, selectedWorkspaceID: workspaceID)
             case .failure(let error): self.showError(error)
             }
         }

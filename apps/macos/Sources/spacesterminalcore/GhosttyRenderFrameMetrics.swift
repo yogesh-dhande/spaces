@@ -2,8 +2,8 @@ import Foundation
 
 public enum GhosttyRenderFrameMetrics {
     public static func attributes(
-        reason: String? = nil, frame: GhosttyRenderFrame?, frameByteCount: Int? = nil, frameEncodeMS: Int? = nil, payloadByteCount: Int? = nil,
-        payloadEncodeMS: Int? = nil, decodeMS: Int? = nil, outputByteCount: Int? = nil, screenStateRevision: UInt64? = nil, dropped: Bool? = nil,
+        reason: String? = nil, frame: GhosttyRenderFrame?, frameByteCount: Int? = nil, frameEncodeMS: Int? = nil,
+        decodeMS: Int? = nil, outputByteCount: Int? = nil, screenStateRevision: UInt64? = nil, dropped: Bool? = nil,
         dropReason: String? = nil, renderMode: String? = nil, frameKind: String? = nil, baseRevision: UInt64? = nil, targetRevision: UInt64? = nil,
         appliedRevision: UInt64? = nil, applyMS: Int? = nil, operationCount: Int? = nil, changedCellCount: Int? = nil,
         scrollOperationCount: Int? = nil, fullFrameFallbackReason: String? = nil, coalescedFrameCount: Int? = nil, droppedDeltaCount: Int? = nil,
@@ -21,8 +21,6 @@ public enum GhosttyRenderFrameMetrics {
         if let reason { attributes["reason"] = reason }
         if let frameByteCount { attributes["frame_bytes"] = String(frameByteCount) } else if frame == nil { attributes["frame_bytes"] = "0" }
         if let frameEncodeMS { attributes["frame_encode_ms"] = String(frameEncodeMS) }
-        if let payloadByteCount { attributes["payload_bytes"] = String(payloadByteCount) }
-        if let payloadEncodeMS { attributes["payload_encode_ms"] = String(payloadEncodeMS) }
         if let decodeMS { attributes["decode_ms"] = String(decodeMS) }
         if let outputByteCount { attributes["output_bytes"] = String(outputByteCount) }
         if let screenStateRevision { attributes["screen_revision"] = String(screenStateRevision) }

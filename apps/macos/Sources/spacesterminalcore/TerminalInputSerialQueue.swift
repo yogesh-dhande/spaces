@@ -10,8 +10,13 @@ public final class TerminalInputSerialQueue: @unchecked Sendable {
 
     public init() {}
 
+    /// `onError` is `async` (not just `Sendable`) so a caller whose failure classification lives behind
+    /// an actor — e.g. the render host's link-state model — can `await` straight into it instead of
+    /// firing a detached, unobservable hop. This queue's own detached task is already in an `async`
+    /// context, so awaiting the callback costs nothing extra here.
     public func enqueue(
-        priority: TaskPriority? = nil, operation: @escaping @Sendable () async throws -> Void, onError: (@Sendable (Error) -> Void)? = nil
+        priority: TaskPriority? = nil, operation: @escaping @Sendable () async throws -> Void,
+        onError: (@Sendable (Error) async -> Void)? = nil
     ) {
         lock.lock()
         let previousTask = pendingTask
@@ -28,7 +33,7 @@ public final class TerminalInputSerialQueue: @unchecked Sendable {
                 try await operation()
             } catch is CancellationError { return } catch {
                 guard self?.isCurrentGeneration(taskGeneration) == true else { return }
-                onError?(error)
+                await onError?(error)
             }
         }
         pendingTask = nextTask
@@ -43,6 +48,17 @@ public final class TerminalInputSerialQueue: @unchecked Sendable {
         let tasks = Array(queuedTasks.values)
         lock.unlock()
         for task in tasks { task.cancel() }
+    }
+
+    /// Suspends until the task chain enqueued so far has finished. Because each task awaits its
+    /// predecessor, awaiting the current tail awaits the whole outstanding chain. Tasks enqueued after
+    /// this call began are not awaited. Used by handoff quiesce to flush pending input before `execv`.
+    public func drain() async { await currentTail()?.value }
+
+    private func currentTail() -> Task<Void, Never>? {
+        lock.lock()
+        defer { lock.unlock() }
+        return pendingTask
     }
 
     private func isCurrentGeneration(_ taskGeneration: UInt64) -> Bool {

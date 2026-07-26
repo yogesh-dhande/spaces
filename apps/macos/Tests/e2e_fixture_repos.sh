@@ -41,39 +41,39 @@ spaces_e2e_install_demo_fixture_branch() {
   )
 }
 
-spaces_e2e_create_beacon_fixture_repo() {
+spaces_e2e_create_harbor_fixture_repo() {
   local template_dir="$1"
   local repo_dir="$2"
 
   mkdir -p "$repo_dir"
-  spaces_e2e_install_demo_fixture "$template_dir" "beacon" "$repo_dir" "# Beacon Status"
-  spaces_e2e_install_demo_fixture_branch "$template_dir" "beacon-redesign-hero" "$repo_dir" "redesign-hero"
+  spaces_e2e_install_demo_fixture "$template_dir" "harbor" "$repo_dir" "# Harbor Web"
+  spaces_e2e_install_demo_fixture_branch "$template_dir" "harbor-redesign-hero" "$repo_dir" "redesign-hero"
 }
 
-spaces_e2e_create_scout_fixture_repo() {
+spaces_e2e_create_lantern_fixture_repo() {
   local template_dir="$1"
   local repo_dir="$2"
 
   mkdir -p "$repo_dir"
-  spaces_e2e_install_demo_fixture "$template_dir" "scout" "$repo_dir" "# Scout Errors"
-  spaces_e2e_install_demo_fixture_branch "$template_dir" "scout-redesign-hero" "$repo_dir" "redesign-hero"
+  spaces_e2e_install_demo_fixture "$template_dir" "lantern" "$repo_dir" "# Lantern API"
+  spaces_e2e_install_demo_fixture_branch "$template_dir" "lantern-redesign-hero" "$repo_dir" "redesign-hero"
 }
 
-spaces_e2e_create_prism_fixture_repo() {
+spaces_e2e_create_atlas_fixture_repo() {
   local template_dir="$1"
   local repo_dir="$2"
 
   mkdir -p "$repo_dir"
-  spaces_e2e_install_demo_fixture "$template_dir" "prism" "$repo_dir" "# Prism Analytics"
+  spaces_e2e_install_demo_fixture "$template_dir" "atlas" "$repo_dir" "# Atlas Docs"
 }
 
 spaces_e2e_create_standard_fixture_repos() {
   local template_dir="$1"
-  local beacon_repo="$2"
-  local scout_repo="$3"
-  local prism_repo="$4"
+  local harbor_repo="$2"
+  local lantern_repo="$3"
+  local atlas_repo="$4"
 
-  spaces_e2e_create_beacon_fixture_repo "$template_dir" "$beacon_repo"
-  spaces_e2e_create_scout_fixture_repo "$template_dir" "$scout_repo"
-  spaces_e2e_create_prism_fixture_repo "$template_dir" "$prism_repo"
+  spaces_e2e_create_harbor_fixture_repo "$template_dir" "$harbor_repo"
+  spaces_e2e_create_lantern_fixture_repo "$template_dir" "$lantern_repo"
+  spaces_e2e_create_atlas_fixture_repo "$template_dir" "$atlas_repo"
 }

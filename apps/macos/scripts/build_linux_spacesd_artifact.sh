@@ -18,7 +18,7 @@ GHOSTTYVT_ROOT="$APP_ROOT/.local/ghosttyvt"
 GHOSTTYVT_INCLUDE_ROOT="$GHOSTTYVT_ROOT/include"
 GHOSTTYVT_LINUX_LIB_ROOT="$GHOSTTYVT_ROOT/lib-linux"
 
-ZIG_VERSION="0.15.2"
+ZIG_VERSION="0.16.0"
 GHOSTTY_BUILD_OPTIMIZE="${SPACES_GHOSTTY_BUILD_OPTIMIZE:-ReleaseFast}"
 host_arch="$(uname -m)"
 case "$host_arch" in
@@ -219,6 +219,9 @@ build_ghostty_vt() {
     echo "==> Building Linux libghostty-vt from $GHOSTTY_SOURCE_ROOT"
     (
         cd "$GHOSTTY_SOURCE_ROOT"
+        # Ghostty's vendored translate_c build helper shells out to a bare
+        # `zig env`, so the pinned toolchain must be first on PATH.
+        export PATH="$(dirname "$zig_bin"):$PATH"
         "$zig_bin" build -Doptimize="$GHOSTTY_BUILD_OPTIMIZE" -Demit-lib-vt=true -Dversion-string="$app_version"
     )
 }
@@ -814,7 +817,13 @@ import ssl
 import sys
 
 pairing = json.load(open(sys.argv[1]))
-host = pairing["host"]
+# A pairing window advertises an ordered candidate address list. This smoke run binds the
+# Device API to a concrete host, which must collapse to exactly that one candidate — a
+# wildcard bind is what produces LAN-then-tailnet fallbacks, and there is none here.
+hosts = pairing["hosts"]
+if hosts != ["127.0.0.1"]:
+    raise SystemExit(f"expected the bound host as the only pairing candidate, got {hosts!r}")
+host = hosts[0]
 port = int(pairing["port"])
 fingerprint = pairing["certificateFingerprint"]
 if not fingerprint.startswith("SHA256:"):

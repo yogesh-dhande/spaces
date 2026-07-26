@@ -78,9 +78,9 @@ import Foundation
                 guard let newConfig = ghostty_config_new() else { throw GhosttyMobileAppServiceError.configuration("ghostty_config_new failed") }
                 // Embedded terminals load ONLY the Spaces-generated config — never ambient
                 // Ghostty config files — so the look is owned by the active Spaces theme.
-                try GhosttyThemeConfigGenerator.writeConfiguration(theme: ActiveTheme.descriptor).withCString { path in
-                    ghostty_config_load_file(newConfig, path)
-                }
+                try GhosttyThemeConfigGenerator.writeConfiguration(
+                    theme: ActiveTheme.descriptor, configRootDirectory: Self.themeConfigRootDirectory()
+                ).withCString { path in ghostty_config_load_file(newConfig, path) }
                 ghostty_config_finalize(newConfig)
                 self.config = newConfig
                 try startApp(config: newConfig)
@@ -148,6 +148,18 @@ import Foundation
         }
 
         private func surfaceKey(_ surface: ghostty_surface_t) -> UInt { UInt(bitPattern: surface) }
+
+        /// The generated theme config lives inside the app's Application Support scope. The desktop
+        /// generator root (`<profile-root>/ghostty`, i.e. `~/.spaces/ghostty`) is unusable here: an
+        /// iOS app container's home root is not writable on a physical device, so creating `.spaces`
+        /// there fails with EPERM and the terminal surface never comes up.
+        static func themeConfigRootDirectory(
+            applicationSupportDirectory: URL? = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first,
+            homeDirectory: URL = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+        ) -> URL {
+            let supportRoot = applicationSupportDirectory ?? homeDirectory.appendingPathComponent("Library/Application Support", isDirectory: true)
+            return supportRoot.appendingPathComponent("ghostty/spaces", isDirectory: true)
+        }
 
         public static func resolveResourcesPath(
             environment: [String: String] = ProcessInfo.processInfo.environment, bundleResourceURL: URL?, fileManager: FileManager = .default,

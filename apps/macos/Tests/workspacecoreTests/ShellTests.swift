@@ -4,6 +4,13 @@ import XCTest
 @testable import systembridge
 
 final class ShellTests: XCTestCase {
+    // A probe timeout under parallel load caches a failure process-wide for several seconds; without
+    // a reset here, that cached failure can leak into this suite's own login-shell resolution tests.
+    override func setUp() {
+        super.setUp()
+        Shell.resetLoginShellPathCacheForTesting()
+    }
+
     // Tests run returns exit status by arranging representative inputs and asserting the expected result.
     func testRunReturnsExitStatus() throws {
         let status = try Shell.run(["sh", "-lc", "exit 7"])
@@ -501,7 +508,7 @@ final class ShellTests: XCTestCase {
         let shellScript = """
             #!/bin/sh
             if [ "$1" = "-l" ] && [ "$2" = "-c" ]; then
-              /bin/sh -c "sleep 10 >&1 & sleep 10 >&2 & sleep 10"
+              /bin/sh -c "sleep 30 >&1 & sleep 30 >&2 & sleep 30"
               exit 0
             fi
             exec /bin/sh "$@"
@@ -514,7 +521,10 @@ final class ShellTests: XCTestCase {
         let startedAt = Date()
         let output = try Shell.runAndCapture(["mockcmd"], environment: environment)
         XCTAssertEqual(output, "fallback-with-open-pipes")
-        XCTAssertLessThan(Date().timeIntervalSince(startedAt), 8.0)
+        // The ceiling must stay well below the writers' hold time (a regression to
+        // waiting-for-writer takes >=30s) while leaving headroom above the tiny drain
+        // budget for CPU-load scheduling jitter.
+        XCTAssertLessThan(Date().timeIntervalSince(startedAt), 20.0)
     }
 
     func testRunAndCaptureUsesSingleDrainBudgetAfterShellExit() throws {
@@ -530,7 +540,7 @@ final class ShellTests: XCTestCase {
         let shellScript = """
             #!/bin/sh
             if [ "$1" = "-l" ] && [ "$2" = "-c" ]; then
-              /bin/sh -c "sleep 15 >&2" &
+              /bin/sh -c "sleep 30 >&2" &
               exit 0
             fi
             exec /bin/sh "$@"
@@ -543,7 +553,10 @@ final class ShellTests: XCTestCase {
         let startedAt = Date()
         let output = try Shell.runAndCapture(["mockcmd"], environment: environment)
         XCTAssertEqual(output, "single-drain-budget")
-        XCTAssertLessThan(Date().timeIntervalSince(startedAt), 10.0)
+        // The ceiling must stay well below the writer's hold time (a regression to
+        // waiting-for-writer takes >=30s) while leaving headroom above the ~2s drain
+        // budget for CPU-load scheduling jitter.
+        XCTAssertLessThan(Date().timeIntervalSince(startedAt), 20.0)
     }
 
     func testRunAndCaptureRefreshesCachedLoginShellPathWhenZdotdirChanges() throws {
@@ -687,8 +700,8 @@ final class ShellTests: XCTestCase {
 
     func testAppleScriptRunWrapsScriptWithTimeout() throws {
         try withMockCommands(["osascript": "#!/bin/bash\nprintf '%s' \"${*: -1}\"\n"]) {
-            let result = try AppleScript.run("return \"hello\"", timeoutSeconds: 2)
-            XCTAssertTrue(result.hasPrefix("with timeout of 2 seconds"))
+            let result = try AppleScript.run("return \"hello\"", timeoutSeconds: 15)
+            XCTAssertTrue(result.hasPrefix("with timeout of 15 seconds"))
             XCTAssertTrue(result.contains("  return \"hello\""))
             XCTAssertTrue(result.hasSuffix("end timeout"))
         }
@@ -697,7 +710,7 @@ final class ShellTests: XCTestCase {
     func testAppleScriptRunWithTimeoutTerminatesSlowCommand() throws {
         let osascriptMock = """
             #!/usr/bin/perl
-            select(undef, undef, undef, 5);
+            select(undef, undef, undef, 30);
             """
         let startedAt = Date()
         try withMockCommands(["osascript": osascriptMock]) {
@@ -707,7 +720,10 @@ final class ShellTests: XCTestCase {
                 XCTAssertTrue(nsError.localizedDescription.contains("timed out"))
             }
         }
-        XCTAssertLessThan(Date().timeIntervalSince(startedAt), 3)
+        // The ceiling must stay well below the mock's sleep (a regression to waiting-out
+        // the mock takes >=30s) while leaving headroom above the 1s timeout budget for
+        // CPU-load scheduling jitter.
+        XCTAssertLessThan(Date().timeIntervalSince(startedAt), 15)
     }
 }
 

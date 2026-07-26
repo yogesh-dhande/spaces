@@ -30,6 +30,16 @@ import Foundation
     /// Most recent remote state payload (render update, revisions, metadata).
     var latestRemoteStatePayload: GhosttyRemoteSessionStatePayload? { get }
 
+    /// True while the provider wants a live subscription for this session but does not have one — the
+    /// stream dropped or a connect failed and a retry is armed.
+    ///
+    /// Deliberately separate from `currentRuntimeState`: the `current*` reads stay exactly as the
+    /// device last reported them, so a session that is running on an unreachable device is
+    /// representable as running-but-unreachable instead of being forced into an invented state. Read
+    /// synchronously, and re-read on `.spacesTerminalStateStreamConnectionDidChange`, which the
+    /// provider posts for this session id whenever the value flips.
+    var isStateStreamDisconnected: Bool { get }
+
     /// Requests a catch-up state fetch so `current*` converge on the device's
     /// current view. The fetch is performed out of band; this call does not block
     /// and applied results surface through the `current*` reads and any active

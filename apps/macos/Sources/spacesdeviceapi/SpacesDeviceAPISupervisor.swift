@@ -84,6 +84,10 @@ import workspacecore
         if let existingServer = server, !existingServer.isRunning {
             advertiser?.stop()
             advertiser = nil
+            // Tear the dead server down before dropping the reference: its connections, stream
+            // relays, and observers stay alive otherwise, so every restart would leak another set
+            // of sockets and timers into the daemon.
+            existingServer.stop()
             server = nil
             log("Device API listener stopped; scheduling restart")
         }
@@ -160,7 +164,7 @@ import workspacecore
                         ok: false, message: SpacesDeviceAPIControlClient.deviceAPINotRunningMessage, result: .status(.init(status: try status())))
                 }
                 let currentStatus = try status()
-                let window = server.openPairingWindow(host: pairingLinkHost(for: currentStatus), name: currentStatus.bonjourServiceName)
+                let window = server.openPairingWindow(hosts: pairingLinkHosts(for: currentStatus), name: currentStatus.bonjourServiceName)
                 return SpacesDeviceAPIControlResponse(
                     ok: true, message: "Opened device pairing window.",
                     result: .pairingWindow(
@@ -216,8 +220,8 @@ import workspacecore
         server = nil
     }
 
-    private func pairingLinkHost(for status: SpacesDeviceAPIStatus) -> String {
-        SpacesDeviceAPINetworkInterfaces.pairingLinkHost(boundHost: status.host, networkAddresses: status.networkAddresses)
+    private func pairingLinkHosts(for status: SpacesDeviceAPIStatus) -> [String] {
+        SpacesDeviceAPINetworkInterfaces.pairingLinkHosts(boundHost: status.host)
     }
 
     private func log(_ message: String) { FileHandle.standardError.write(Data("spacesd: \(message)\n".utf8)) }

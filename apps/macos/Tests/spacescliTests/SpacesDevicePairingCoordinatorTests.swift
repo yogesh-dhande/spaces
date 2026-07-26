@@ -8,9 +8,9 @@ final class SpacesDevicePairingCoordinatorTests: XCTestCase {
     func testOpenWindowGeneratesFreshEightDigitCodes() {
         let coordinator = SpacesDevicePairingCoordinator()
         let first = coordinator.openWindow(
-            host: "127.0.0.1", port: 47_847, certificateFingerprint: "SHA256:test", name: "Mac", protocolVersion: 5, appVersion: "0.1.0")
+            hosts: ["127.0.0.1"], port: 47_847, certificateFingerprint: "SHA256:test", name: "Mac", protocolVersion: 5, appVersion: "0.1.0")
         let second = coordinator.openWindow(
-            host: "127.0.0.1", port: 47_847, certificateFingerprint: "SHA256:test", name: "Mac", protocolVersion: 5, appVersion: "0.1.0")
+            hosts: ["127.0.0.1"], port: 47_847, certificateFingerprint: "SHA256:test", name: "Mac", protocolVersion: 5, appVersion: "0.1.0")
 
         XCTAssertEqual(first.code.count, 8)
         XCTAssertEqual(second.code.count, 8)
@@ -26,14 +26,14 @@ final class SpacesDevicePairingCoordinatorTests: XCTestCase {
 
         let now = Date()
         let window = coordinator.openWindow(
-            host: "127.0.0.1", port: 47_847, certificateFingerprint: "SHA256:test", name: "Mac", protocolVersion: 5, appVersion: "0.1.0", now: now,
-            duration: 10, code: "12345678", nonce: "nonce")
+            hosts: ["127.0.0.1"], port: 47_847, certificateFingerprint: "SHA256:test", name: "Mac", protocolVersion: 5, appVersion: "0.1.0",
+            now: now, duration: 10, code: "12345678", nonce: "nonce")
 
         XCTAssertThrowsError(try coordinator.validate(code: window.code, nonce: window.nonce, peerID: "peer", now: now.addingTimeInterval(11)))
 
         let fresh = coordinator.openWindow(
-            host: "127.0.0.1", port: 47_847, certificateFingerprint: "SHA256:test", name: "Mac", protocolVersion: 5, appVersion: "0.1.0", now: now,
-            duration: 10, code: "87654321", nonce: "fresh")
+            hosts: ["127.0.0.1"], port: 47_847, certificateFingerprint: "SHA256:test", name: "Mac", protocolVersion: 5, appVersion: "0.1.0",
+            now: now, duration: 10, code: "87654321", nonce: "fresh")
         XCTAssertNoThrow(try coordinator.validate(code: fresh.code, nonce: fresh.nonce, peerID: "peer", now: now))
         XCTAssertThrowsError(try coordinator.validate(code: fresh.code, nonce: fresh.nonce, peerID: "peer", now: now))
     }
@@ -41,7 +41,7 @@ final class SpacesDevicePairingCoordinatorTests: XCTestCase {
     func testFailedAttemptLockoutUsesGenericError() {
         let coordinator = SpacesDevicePairingCoordinator()
         let window = coordinator.openWindow(
-            host: "127.0.0.1", port: 47_847, certificateFingerprint: "SHA256:test", name: "Mac", protocolVersion: 5, appVersion: "0.1.0",
+            hosts: ["127.0.0.1"], port: 47_847, certificateFingerprint: "SHA256:test", name: "Mac", protocolVersion: 5, appVersion: "0.1.0",
             code: "12345678", nonce: "nonce")
 
         for _ in 0..<SpacesDevicePairingCoordinator.maxFailedAttempts {
@@ -54,7 +54,7 @@ final class SpacesDevicePairingCoordinatorTests: XCTestCase {
 
     func testPairingLinkBuildAndParseRoundTrips() throws {
         let link = SpacesDevicePairingLink(
-            host: "mac.local", port: 47_847, nonce: "NONCE", code: "12345678", certificateFingerprint: "SHA256:test", name: "Spaces Mac",
+            hosts: ["mac.local"], port: 47_847, nonce: "NONCE", code: "12345678", certificateFingerprint: "SHA256:test", name: "Spaces Mac",
             protocolVersion: 5, appVersion: "0.1.0")
 
         let parsed = try SpacesDevicePairingLink.parse(link.absoluteString)
@@ -64,22 +64,53 @@ final class SpacesDevicePairingCoordinatorTests: XCTestCase {
         XCTAssertTrue(link.absoluteString.hasPrefix("spaces://pair?"))
     }
 
-    func testPairingLinkParseRejectsDuplicateQueryKeys() {
-        let link = "spaces://pair?v=3&host=mac.local&host=other.local&port=47847&nonce=NONCE&code=12345678&fp=SHA256:test&name=Mac&pv=5&av=0.1.0"
+    func testPairingLinkBuildAndParseRoundTripsMultipleHostsInOrder() throws {
+        let link = SpacesDevicePairingLink(
+            hosts: ["192.168.1.24", "100.86.197.104"], port: 47_847, nonce: "NONCE", code: "12345678", certificateFingerprint: "SHA256:test",
+            name: "Spaces Mac", protocolVersion: 5, appVersion: "0.1.0")
+
+        let parsed = try SpacesDevicePairingLink.parse(link.absoluteString)
+        XCTAssertEqual(parsed, link)
+        XCTAssertEqual(parsed.hosts, ["192.168.1.24", "100.86.197.104"])
+        XCTAssertEqual(parsed.port, 47_847)
+        XCTAssertEqual(parsed.nonce, "NONCE")
+        XCTAssertEqual(parsed.code, "12345678")
+        XCTAssertEqual(parsed.certificateFingerprint, "SHA256:test")
+        XCTAssertEqual(parsed.name, "Spaces Mac")
+        XCTAssertEqual(parsed.protocolVersion, 5)
+        XCTAssertEqual(parsed.appVersion, "0.1.0")
+    }
+
+    func testPairingLinkParseCollectsRepeatedHostsInOrder() throws {
+        let link = "spaces://pair?v=4&host=mac.local&host=other.local&port=47847&nonce=NONCE&code=12345678&fp=SHA256:test&name=Mac&pv=5&av=0.1.0"
+
+        let parsed = try SpacesDevicePairingLink.parse(link)
+        XCTAssertEqual(parsed.hosts, ["mac.local", "other.local"])
+    }
+
+    func testPairingLinkParseAcceptsSingleHost() throws {
+        let link = "spaces://pair?v=4&host=mac.local&port=47847&nonce=NONCE&code=12345678&fp=SHA256:test&name=Mac&pv=5&av=0.1.0"
+
+        let parsed = try SpacesDevicePairingLink.parse(link)
+        XCTAssertEqual(parsed.hosts, ["mac.local"])
+    }
+
+    func testPairingLinkParseRejectsDuplicateNonHostQueryKeys() {
+        let link = "spaces://pair?v=4&host=mac.local&port=47847&port=47848&nonce=NONCE&code=12345678&fp=SHA256:test&name=Mac&pv=5&av=0.1.0"
 
         XCTAssertThrowsError(try SpacesDevicePairingLink.parse(link)) { error in XCTAssertEqual(error as? SpacesDevicePairingLinkError, .invalidLink)
         }
     }
 
     func testPairingLinkRejectsUnsupportedScheme() {
-        let link = "spaceswrong://pair?v=3&host=mac.local&port=47847&nonce=NONCE&code=12345678&fp=SHA256:test&name=Mac&pv=5&av=0.1.0"
+        let link = "spaceswrong://pair?v=4&host=mac.local&port=47847&nonce=NONCE&code=12345678&fp=SHA256:test&name=Mac&pv=5&av=0.1.0"
 
         XCTAssertThrowsError(try SpacesDevicePairingLink.parse(link)) { error in XCTAssertEqual(error as? SpacesDevicePairingLinkError, .invalidLink)
         }
     }
 
     func testPairingLinkRejectsLegacyVersions() {
-        for legacy in ["1", "2"] {
+        for legacy in ["1", "2", "3"] {
             let link = "spaces://pair?v=\(legacy)&host=mac.local&port=47847&nonce=NONCE&code=12345678&psk=transport&fp=SHA256:test&name=Mac"
             XCTAssertThrowsError(try SpacesDevicePairingLink.parse(link)) { error in
                 XCTAssertEqual(error as? SpacesDevicePairingLinkError, .unsupportedVersion)
@@ -87,8 +118,16 @@ final class SpacesDevicePairingCoordinatorTests: XCTestCase {
         }
     }
 
+    func testPairingLinkRequiresAtLeastOneHost() {
+        let link = "spaces://pair?v=4&port=47847&nonce=NONCE&code=12345678&fp=SHA256:test&name=Mac&pv=5&av=0.1.0"
+
+        XCTAssertThrowsError(try SpacesDevicePairingLink.parse(link)) { error in
+            XCTAssertEqual(error as? SpacesDevicePairingLinkError, .missingField("host"))
+        }
+    }
+
     func testPairingLinkRequiresCertificateFingerprint() {
-        let link = "spaces://pair?v=3&host=mac.local&port=47847&nonce=NONCE&code=12345678&name=Mac&pv=5&av=0.1.0"
+        let link = "spaces://pair?v=4&host=mac.local&port=47847&nonce=NONCE&code=12345678&name=Mac&pv=5&av=0.1.0"
 
         XCTAssertThrowsError(try SpacesDevicePairingLink.parse(link)) { error in
             XCTAssertEqual(error as? SpacesDevicePairingLinkError, .missingField("fp"))
@@ -96,12 +135,12 @@ final class SpacesDevicePairingCoordinatorTests: XCTestCase {
     }
 
     func testPairingLinkRequiresProtocolAndAppVersion() {
-        let missingProtocol = "spaces://pair?v=3&host=mac.local&port=47847&nonce=NONCE&code=12345678&fp=SHA256:test&name=Mac&av=0.1.0"
+        let missingProtocol = "spaces://pair?v=4&host=mac.local&port=47847&nonce=NONCE&code=12345678&fp=SHA256:test&name=Mac&av=0.1.0"
         XCTAssertThrowsError(try SpacesDevicePairingLink.parse(missingProtocol)) { error in
             XCTAssertEqual(error as? SpacesDevicePairingLinkError, .missingField("pv"))
         }
 
-        let missingAppVersion = "spaces://pair?v=3&host=mac.local&port=47847&nonce=NONCE&code=12345678&fp=SHA256:test&name=Mac&pv=5"
+        let missingAppVersion = "spaces://pair?v=4&host=mac.local&port=47847&nonce=NONCE&code=12345678&fp=SHA256:test&name=Mac&pv=5"
         XCTAssertThrowsError(try SpacesDevicePairingLink.parse(missingAppVersion)) { error in
             XCTAssertEqual(error as? SpacesDevicePairingLinkError, .missingField("av"))
         }

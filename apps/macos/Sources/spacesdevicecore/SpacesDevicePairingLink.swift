@@ -1,16 +1,20 @@
 import Foundation
 
-/// One-time pairing link (`spaces://pair?...`). Version 3: trust is delivered as the daemon's
-/// pinned TLS certificate fingerprint (`fp`); there is no transport key — the pairing code and
-/// nonce authorize a single token issuance over the pinned channel. The link also advertises the
-/// daemon's wire-protocol version (`pv`) and app version (`av`) so the redeeming client can refuse
-/// an incompatible pairing before it burns the one-time window.
+/// One-time pairing link (`spaces://pair?...`). Version 4: the link carries an ordered list of
+/// candidate endpoints for the daemon (typically its LAN address followed by its Tailscale
+/// address), most-preferred first, and the redeeming client tries them in order until one
+/// connects. Trust is delivered as the daemon's pinned TLS certificate fingerprint (`fp`); there
+/// is no transport key — the pairing code and nonce authorize a single token issuance over the
+/// pinned channel. The link also advertises the daemon's wire-protocol version (`pv`) and app
+/// version (`av`) so the redeeming client can refuse an incompatible pairing before it burns the
+/// one-time window.
 public struct SpacesDevicePairingLink: Codable, Sendable, Equatable {
     public static let scheme = "spaces"
     public static let host = "pair"
-    public static let version = "3"
+    public static let version = "4"
 
-    public let host: String
+    /// Ordered candidate addresses for the daemon, most-preferred first.
+    public let hosts: [String]
     public let port: Int
     public let nonce: String
     public let code: String
@@ -22,9 +26,10 @@ public struct SpacesDevicePairingLink: Codable, Sendable, Equatable {
     public let appVersion: String
 
     public init(
-        host: String, port: Int, nonce: String, code: String, certificateFingerprint: String, name: String, protocolVersion: Int, appVersion: String
+        hosts: [String], port: Int, nonce: String, code: String, certificateFingerprint: String, name: String, protocolVersion: Int,
+        appVersion: String
     ) {
-        self.host = host
+        self.hosts = hosts
         self.port = port
         self.nonce = nonce
         self.code = code
@@ -39,7 +44,9 @@ public struct SpacesDevicePairingLink: Codable, Sendable, Equatable {
         components.scheme = Self.scheme
         components.host = Self.host
         components.queryItems = [
-            URLQueryItem(name: "v", value: Self.version), URLQueryItem(name: "host", value: host), URLQueryItem(name: "port", value: String(port)),
+            URLQueryItem(name: "v", value: Self.version)
+        ] + hosts.map { URLQueryItem(name: "host", value: $0) } + [
+            URLQueryItem(name: "port", value: String(port)),
             URLQueryItem(name: "nonce", value: nonce), URLQueryItem(name: "code", value: code),
             URLQueryItem(name: "fp", value: certificateFingerprint), URLQueryItem(name: "name", value: name),
             URLQueryItem(name: "pv", value: String(protocolVersion)), URLQueryItem(name: "av", value: appVersion),
@@ -59,13 +66,18 @@ public struct SpacesDevicePairingLink: Codable, Sendable, Equatable {
         guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { throw SpacesDevicePairingLinkError.invalidLink }
         var values: [String: String] = [:]
         var seenNames = Set<String>()
+        var hosts: [String] = []
         for item in components.queryItems ?? [] {
+            if item.name == "host" {
+                if let host = trimmed(item.value) { hosts.append(host) }
+                continue
+            }
             guard seenNames.insert(item.name).inserted else { throw SpacesDevicePairingLinkError.invalidLink }
             guard let value = item.value else { continue }
             values[item.name] = value
         }
         guard values["v"] == Self.version else { throw SpacesDevicePairingLinkError.unsupportedVersion }
-        guard let host = trimmed(values["host"]) else { throw SpacesDevicePairingLinkError.missingField("host") }
+        guard !hosts.isEmpty else { throw SpacesDevicePairingLinkError.missingField("host") }
         guard let portValue = trimmed(values["port"]), let port = Int(portValue), (1...65_535).contains(port) else {
             throw SpacesDevicePairingLinkError.missingField("port")
         }
@@ -78,7 +90,7 @@ public struct SpacesDevicePairingLink: Codable, Sendable, Equatable {
         guard let appVersion = trimmed(values["av"]) else { throw SpacesDevicePairingLinkError.missingField("av") }
         let name = trimmed(values["name"]) ?? "Spaces"
         return Self(
-            host: host, port: port, nonce: nonce, code: code, certificateFingerprint: certificateFingerprint, name: name,
+            hosts: hosts, port: port, nonce: nonce, code: code, certificateFingerprint: certificateFingerprint, name: name,
             protocolVersion: protocolVersion, appVersion: appVersion)
     }
 

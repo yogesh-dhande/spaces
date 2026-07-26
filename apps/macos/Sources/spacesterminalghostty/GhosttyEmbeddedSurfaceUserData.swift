@@ -1,12 +1,13 @@
 #if canImport(GhosttyKit)
     import Foundation
     import GhosttyKit
+    import spacesterminalcore
 
-    @MainActor final class GhosttyEmbeddedSurfaceUserData {
-        private let closeHandler: @MainActor () -> Void
-        private let surfaceProvider: @MainActor () -> ghostty_surface_t?
+    @TerminalEngineActor final class GhosttyEmbeddedSurfaceUserData {
+        private let closeHandler: @TerminalEngineActor () -> Void
+        private let surfaceProvider: @TerminalEngineActor () -> ghostty_surface_t?
 
-        init(closeHandler: @escaping @MainActor () -> Void, surfaceProvider: @escaping @MainActor () -> ghostty_surface_t?) {
+        init(closeHandler: @escaping @TerminalEngineActor () -> Void, surfaceProvider: @escaping @TerminalEngineActor () -> ghostty_surface_t?) {
             self.closeHandler = closeHandler
             self.surfaceProvider = surfaceProvider
         }

@@ -130,6 +130,9 @@ private final class NotificationObserverBag: @unchecked Sendable {
     let defersInitialOwnerClientAttach: Bool
     let copySelectionAction: (@MainActor () -> Bool)?
     let pasteClipboardAction: (@MainActor () -> Bool)?
+    /// Unit tests inject a uniquely-named pasteboard here so copy/paste tests never touch the user's
+    /// real clipboard. Nil in the app, where copy/paste keep using `NSPasteboard.general`.
+    public var pasteboardOverrideForTesting: NSPasteboard?
     private let ownerWindowFocusAction: (@MainActor (NSWindow?) -> Void)?
     private let ownerSurfaceFocusAction: (@MainActor (Bool) -> Void)?
     let onWindowFocus: (@MainActor (String) -> Void)?
@@ -166,6 +169,17 @@ private final class NotificationObserverBag: @unchecked Sendable {
     /// Set by the host while it defers the pane's initial owner presentation; the
     /// layout collapses to a full-bleed blank surface until presentation completes.
     var isDeferringInitialOwnerPresentation = false
+    // An extra retain on the pane's view-hierarchy root, dropped on the main queue by deinit so an
+    // off-main last release of the pane cannot deallocate AppKit objects on a background thread.
+    // The root suffices — every UI member below is one of its descendants, so releasing the stored
+    // properties off-main drops none of them to zero, and views added later are covered without
+    // touching this.
+    private nonisolated(unsafe) var mainThreadReleaseBag: [AnyObject] = []
+    // The view root above does not cover the session host: a viewer pane never attaches the host's
+    // Ghostty terminal view, and releasing the surface strips `terminalContainer`'s subviews, so the
+    // host and its C-backed view can outlive the hierarchy. Replaced rather than appended in step
+    // with `activeGhosttySessionHost` — appending would pin every past host's mirror alive.
+    private nonisolated(unsafe) var activeGhosttySessionHostForMainThreadRelease: AnyObject?
 
     /// Title the host should display for this pane (window title today, tab title
     /// later). Updated on every refresh together with `representedWorkingDirectoryURL`,
@@ -250,6 +264,11 @@ private final class NotificationObserverBag: @unchecked Sendable {
         startObservingApplicationActivation()
         buildUI()
         if performInitialRefresh { refreshNow() }
+        mainThreadReleaseBag = [view]
+    }
+
+    deinit {
+        MainThreadRelease.release(mainThreadReleaseBag + [activeGhosttySessionHostForMainThreadRelease].compactMap { $0 })
     }
 
     public func requestOwnershipIfNeeded() {
@@ -575,7 +594,7 @@ private final class NotificationObserverBag: @unchecked Sendable {
                 updateInputOwnershipUI(isOwner: isOwner, isInteractive: isInteractive && canAttachToRuntime)
                 rendererLabel.stringValue = rendererMode.statusSummary
             }
-            updateEndedBanner(runtimeState: runtimeState)
+            updatePersistentBanner(runtimeState: runtimeState, isStateStreamDisconnected: isStateStreamDisconnected)
             guard visibleRenderer != .ghosttyOwner else {
                 restoreGhosttyOwnerInputFocusIfReady()
                 completeOwnershipTransitionIfNeeded(target: .owner, renderer: "owner_surface")
@@ -677,6 +696,10 @@ private final class NotificationObserverBag: @unchecked Sendable {
     /// `Theme.primaryButtonFill` / `Theme.primaryButtonText` and are appearance-independent.
     static func applyBrandPrimaryStyle(to button: NSButton, title: String) {
         button.isBordered = false
+        // A borderless NSButton has no bezel for AppKit's default focus ring to hug, so the ring
+        // draws around the title cell instead — a rectangle mismatched with the rounded teal fill.
+        // Suppress it; the teal layer is the button's own affordance.
+        button.focusRingType = .none
         button.wantsLayer = true
         // Same fill/ink in both appearances (see the theme's primary-button tokens).
         button.layer?.backgroundColor = NSColor(themeColor: ActiveTheme.descriptor.dark.primaryButtonFill).cgColor
@@ -724,6 +747,11 @@ private final class NotificationObserverBag: @unchecked Sendable {
         backend == .ghosttyEmbedded && preferredAttachmentMode == .owner
             && (visibleRenderer == .ghosttyOwner || visibleRenderer == .ghosttyEndedFinalRender)
     }
+
+    /// True while the provider has lost its live subscription to the owning device and is retrying.
+    /// Read from the provider at use time rather than cached: unlike runtime state, which arrives on
+    /// the stream this describes, it changes precisely when there is no stream to carry it.
+    var isStateStreamDisconnected: Bool { stateProvider.isStateStreamDisconnected }
 
     func isInteractiveRuntimeState(_ runtimeState: TerminalSessionRuntimeState?) -> Bool { runtimeState?.state.isInteractive == true }
 
@@ -775,6 +803,7 @@ private final class NotificationObserverBag: @unchecked Sendable {
         ghosttyRendererHost?.releaseRendererSurface()
         terminalContainer.subviews.forEach { $0.removeFromSuperview() }
         activeGhosttySessionHost = host
+        activeGhosttySessionHostForMainThreadRelease = hostObject
         let resolvedHostComponents = Self.resolveGhosttyHostComponents(host)
         ghosttyRendererHost = resolvedHostComponents.rendererHost
         ghosttySessionInfoProvider = resolvedHostComponents.sessionInfoProvider
@@ -851,6 +880,26 @@ private final class NotificationObserverBag: @unchecked Sendable {
                 MainActor.assumeIsolated {
                     guard let self, let changedSessionID, changedSessionID == self.sessionID else { return }
                     self.refreshNow()
+                }
+            })
+        // The provider's subscription to the owning device dropped or came back. Nothing else fires
+        // during an outage — the stream that would carry a state change is the thing that is gone —
+        // so this is what puts the pane's disconnected notice up and takes it down again.
+        //
+        // Deliberately the banner alone, not a full `refreshNow()`: the link state is the only thing
+        // that moved (with no stream, nothing else can have), and a full refresh can issue a
+        // synchronous attach against the very device this notification says is unreachable, stalling
+        // the main actor for that request's timeout.
+        notificationObservers.tokens.append(
+            NotificationCenter.default.addObserver(forName: .spacesTerminalStateStreamConnectionDidChange, object: nil, queue: .main) {
+                [weak self] notification in
+                let changedSessionID = TerminalSessionNotification.sessionID(from: notification)
+                MainActor.assumeIsolated {
+                    guard let self, let changedSessionID, changedSessionID == self.sessionID else { return }
+                    self.refreshRuntimeStateFromProvider()
+                    self.updatePersistentBanner(
+                        runtimeState: self.lastObservedRuntimeState, isStateStreamDisconnected: self.isStateStreamDisconnected)
+                    self.clearDisconnectedInputStatusIfResolved()
                 }
             })
         notificationObservers.tokens.append(

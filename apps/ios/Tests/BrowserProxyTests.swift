@@ -269,7 +269,7 @@
                 overview: makeOverview(serviceName: "web", url: "http://web.feature.localhost:47847", branch: "feature", workspaceID: "ws-1"))
             let authToken = try XCTUnwrap(table.target(forHost: "web.feature.localhost")?.proxyAuthToken)
 
-            let proxyPort = UInt16.random(in: 49_152...65_500)
+            let proxyPort = try freeLocalTCPPort()
             let proxy = SpacesMobileBrowserProxy(port: proxyPort, installationID: "install-1", dialer: dialer)
             await proxy.updateRoutes(table)
             await proxy.start()
@@ -308,7 +308,7 @@
                 overview: makeOverview(serviceName: "web", url: "http://web.feature.localhost:47847", branch: "feature", workspaceID: "ws-1"))
             let authToken = try XCTUnwrap(table.target(forHost: "web.feature.localhost")?.proxyAuthToken)
 
-            let proxyPort = UInt16.random(in: 49_152...65_500)
+            let proxyPort = try freeLocalTCPPort()
             let proxy = SpacesMobileBrowserProxy(port: proxyPort, installationID: "install-1", dialer: dialer)
             await proxy.updateRoutes(table)
             await proxy.start()
@@ -342,7 +342,7 @@
                 overview: makeOverview(serviceName: "web", url: "http://web.feature.localhost:47847", branch: "feature", workspaceID: "ws-1"))
             let authToken = try XCTUnwrap(table.target(forHost: "web.feature.localhost")?.proxyAuthToken)
 
-            let proxyPort = UInt16.random(in: 49_152...65_500)
+            let proxyPort = try freeLocalTCPPort()
             let proxy = SpacesMobileBrowserProxy(port: proxyPort, installationID: "install-1", dialer: dialer)
             await proxy.updateRoutes(table)
             await proxy.start()
@@ -370,7 +370,7 @@
 
         func testProxyStartupIsSingleFlightAcrossConcurrentCalls() async throws {
             let dialer = FakeTunnelDialer(behavior: .fail(BrowserTunnelError(code: nil, message: "unused")))
-            let proxyPort = UInt16.random(in: 49_152...65_500)
+            let proxyPort = try freeLocalTCPPort()
             let proxy = SpacesMobileBrowserProxy(port: proxyPort, installationID: "install-1", dialer: dialer)
 
             await withTaskGroup(of: Void.self) { group in for _ in 0..<8 { group.addTask { await proxy.start() } } }
@@ -384,7 +384,7 @@
 
         func testProxyUnknownHostReturns502NamingHost() async throws {
             let dialer = FakeTunnelDialer(behavior: .fail(BrowserTunnelError(code: nil, message: "unused")))
-            let proxyPort = UInt16.random(in: 49_152...65_500)
+            let proxyPort = try freeLocalTCPPort()
             let proxy = SpacesMobileBrowserProxy(port: proxyPort, installationID: "install-1", dialer: dialer)
             await proxy.start()
             defer { Task { await proxy.stop() } }
@@ -404,7 +404,7 @@
                 overview: makeOverview(serviceName: "web", url: "http://web.feature.localhost:47847", branch: "feature", workspaceID: "ws-1"))
             let authToken = try XCTUnwrap(table.target(forHost: "web.feature.localhost")?.proxyAuthToken)
 
-            let proxyPort = UInt16.random(in: 49_152...65_500)
+            let proxyPort = try freeLocalTCPPort()
             let proxy = SpacesMobileBrowserProxy(port: proxyPort, installationID: "install-1", dialer: dialer)
             await proxy.updateRoutes(table)
             await proxy.start()
@@ -426,7 +426,7 @@
                 deviceID: "device-1", deviceName: "Studio", host: "127.0.0.1", port: 47_847, certificateFingerprint: "fp-1",
                 overview: makeOverview(serviceName: "web", url: "http://web.feature.localhost:47847", branch: "feature", workspaceID: "ws-1"))
 
-            let proxyPort = UInt16.random(in: 49_152...65_500)
+            let proxyPort = try freeLocalTCPPort()
             let proxy = SpacesMobileBrowserProxy(port: proxyPort, installationID: "install-1", dialer: dialer)
             await proxy.updateRoutes(table)
             await proxy.start()
@@ -636,5 +636,31 @@
             lock.unlock()
             connection?.cancel()
         }
+    }
+
+    /// Reserves an ephemeral TCP port by binding port 0 on loopback and reading back the kernel's
+    /// assignment. Closing the socket before returning leaves a tiny reuse window, but unlike a
+    /// blind random pick from the ephemeral range this can never land on a port a real service is
+    /// already listening on (tailscaled et al. answered such picks with their own responses and
+    /// failed the proxy assertions).
+    func freeLocalTCPPort() throws -> UInt16 {
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { throw POSIXError(.EMFILE) }
+        defer { close(fd) }
+        var address = sockaddr_in()
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_addr = in_addr(s_addr: in_addr_t(INADDR_LOOPBACK).bigEndian)
+        address.sin_port = 0
+        let bound = withUnsafePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
+        }
+        guard bound == 0 else { throw POSIXError(.EADDRINUSE) }
+        var assigned = sockaddr_in()
+        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let named = withUnsafeMutablePointer(to: &assigned) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(fd, $0, &length) }
+        }
+        guard named == 0 else { throw POSIXError(.EINVAL) }
+        return UInt16(bigEndian: assigned.sin_port)
     }
 #endif

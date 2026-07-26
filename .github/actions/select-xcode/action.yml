@@ -1,0 +1,32 @@
+name: Select Xcode
+description: Selects the Xcode toolchain every Spaces macOS job builds with.
+
+# The single place the Xcode version is pinned.
+#
+# Why pinned rather than latest-stable: prebuilt Ghostty artifacts are keyed on the exact Xcode
+# build version that produced them (apps/macos/scripts/setup_ghostty.sh records
+# xcode_build_version in the artifact manifest and requires an exact match before reusing a
+# download). Toolchain skew in this dependency has produced a silent miscompile before, so the
+# match stays exact. With latest-stable the runner image jumps to a new Xcode the moment GitHub
+# ships it, republishes the artifacts under that build id, and every developer machine that has
+# not upgraded yet is locked out of reuse forever. A pin keeps CI and developers on one baseline.
+#
+# When Xcode moves: bump the xcode-version below (the only place it is authored), confirm the
+# macos-15 runner image ships that version, and tell developers to install the same Xcode --
+# docs/dev.md documents the bump. The first publishing workflow run after the bump rebuilds and
+# republishes the Ghostty artifacts under the new build id; nothing else needs editing.
+
+runs:
+  using: composite
+  steps:
+    - name: Select Xcode
+      uses: maxim-lobanov/setup-xcode@v1
+      with:
+        xcode-version: '26.3'
+
+    - name: Print Swift toolchain
+      shell: bash
+      run: |
+        xcode-select -p
+        xcodebuild -version
+        xcrun swift --version

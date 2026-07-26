@@ -73,6 +73,7 @@
         private var pendingFirstResponderRestoreTask: Task<Void, Never>?
         private var pendingSearchQueryTask: Task<Void, Never>?
         private var mouseTrackingArea: NSTrackingArea?
+        private var windowVisibilityObservation: NSKeyValueObservation?
         private var searchTotal: Int?
         private var searchSelected: Int?
         private var submittedSearchQuery: String?
@@ -120,22 +121,66 @@
                 pendingFirstResponderRestoreTask?.cancel()
                 pendingSearchQueryTask?.cancel()
                 pendingSurfacePresentationTask?.cancel()
-                if let surface = mirrorSurface() { GhosttyEmbeddedAppService.shared.unregisterActionHandler(for: surface) }
+                if let surface = mirrorSurface() { GhosttyMirrorAppService.shared.unregisterActionHandler(for: surface) }
                 if let mirror { ghostty_mirror_free(mirror) }
             }
         }
 
         override var acceptsFirstResponder: Bool { acceptsTerminalInput }
         override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
-        var hasRenderedContent: Bool { latestFrame != nil && mirror != nil }
+        /// Whether this pane has terminal content to show. A pane holds a mirror only while it is on
+        /// screen, so holding none is no evidence of having nothing to render: an off-screen pane keeps
+        /// its frame and builds or rebuilds the surface the moment it is displayed. Reporting otherwise
+        /// would strand it, because the two conditions depend on each other — the pane controller
+        /// unhides the terminal container only for a pane that reports content, and the pane builds its
+        /// surface only once that container is unhidden. A pane that is on screen and still holds no
+        /// mirror is the one genuine failure: surface creation did not succeed and there is nothing to
+        /// render.
+        var hasRenderedContent: Bool { latestFrame != nil && (mirror != nil || !isDisplayed) }
+
+        /// Whether this pane is on screen. Two things take a pane off screen without changing its window
+        /// membership, and both leave its surface rendering to nobody at full cost. A miniaturized,
+        /// ordered-out, or app-hidden window leaves every one of its views with the same non-nil
+        /// `window`. And the pane controller switches a pane to its status or text renderer by hiding
+        /// the container above this view inside a window that stays perfectly visible — a viewer pane,
+        /// which only ever shows a takeover prompt, sits there for as long as another client owns the
+        /// session.
+        var isDisplayed: Bool { window?.isVisible == true && !isHiddenOrHasHiddenAncestor }
 
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
-            if window == nil {
+            observeWindowVisibility()
+            applyDisplayState()
+        }
+
+        /// AppKit sends these whether this view or any ancestor of it was hidden, which is how the pane
+        /// notices the renderer switch hiding the container above it. They say nothing about a window
+        /// leaving the screen; `windowVisibilityObservation` covers that.
+        override func viewDidHide() {
+            super.viewDidHide()
+            applyDisplayState()
+        }
+
+        override func viewDidUnhide() {
+            super.viewDidUnhide()
+            applyDisplayState()
+        }
+
+        /// A window's visibility changes with no view-hierarchy event of any kind — it is miniaturized,
+        /// ordered out, or hidden along with the app while its views keep the same `window` — so the
+        /// pane watches the window itself to notice becoming hidden and coming back.
+        private func observeWindowVisibility() {
+            windowVisibilityObservation = window?.observe(\.isVisible) { [weak self] _, _ in MainActor.assumeIsolated { self?.applyDisplayState() } }
+        }
+
+        private func applyDisplayState() {
+            guard isDisplayed else {
                 lastGeometry = nil
                 updateSurfaceFocus()
+                GhosttyMirrorSurfaceMRU.shared.noteHidden()
                 return
             }
+            GhosttyMirrorSurfaceMRU.shared.noteDisplayed(self)
             ensureMirrorIfNeeded()
             updateSurfaceGeometry()
             reportViewportSizeIfNeeded()
@@ -245,11 +290,22 @@
         }
 
         @discardableResult func handleTerminalKeyEvent(_ event: NSEvent, requireFirstResponder: Bool = true) -> Bool {
-            guard event.type == .keyDown, acceptsTerminalInput, window?.isKeyWindow == true else { return false }
+            guard event.type == .keyDown, acceptsTerminalInput, window?.isKeyWindow == true else {
+                TerminalPerformance.logLine(
+                    "spaces: input_trace point=mirror_guard keycode=\(event.keyCode) accepts=\(acceptsTerminalInput ? 1 : 0) "
+                        + "key_window=\(window?.isKeyWindow == true ? 1 : 0)\n")
+                return false
+            }
             if GhosttyTerminalInputTranslator.shouldDeferToSystemShortcut(keyCode: event.keyCode, modifierFlags: event.modifierFlags) { return false }
             if !requireFirstResponder, window?.firstResponder !== self { window?.makeFirstResponder(self) }
-            guard !requireFirstResponder || canProcessTerminalInput else { return false }
-            guard canProcessTerminalInput else { return false }
+            guard !requireFirstResponder || canProcessTerminalInput else {
+                TerminalPerformance.logLine("spaces: input_trace point=mirror_can_process keycode=\(event.keyCode) drop=1\n")
+                return false
+            }
+            guard canProcessTerminalInput else {
+                TerminalPerformance.logLine("spaces: input_trace point=mirror_can_process2 keycode=\(event.keyCode) drop=1\n")
+                return false
+            }
             if let keySpec = Self.remoteKeySpecifier(for: event) {
                 onSendKey?(keySpec)
                 return true
@@ -300,6 +356,11 @@
                 let size = ghostty_surface_size(surface)
                 if size.columns > 0, size.rows > 0 { return (Int(size.columns), Int(size.rows)) }
             }
+            // An off-screen pane has not changed size and holds no surface to measure. The estimate
+            // below measures a different font from the one Ghostty renders with, so reporting it would
+            // resize the session to a grid it never rendered at; the real grid returns with the surface
+            // that is built when the pane is displayed again.
+            guard isDisplayed else { return nil }
             let metrics = cellMetrics()
             guard bounds.width > 0, bounds.height > 0, metrics.width > 0, metrics.height > 0 else { return nil }
             return (max(Int(floor(bounds.width / metrics.width)), 1), max(Int(floor(bounds.height / metrics.height)), 1))
@@ -307,9 +368,13 @@
 
         func copySelectionToPasteboard() -> Bool { GhosttyClipboardBridge.copySelection(from: mirrorSurface()) }
 
+        /// Unit tests inject a uniquely-named pasteboard here so paste tests never touch the user's
+        /// real clipboard. Nil in the app, where paste keeps using `NSPasteboard.general`.
+        var pasteboardOverrideForTesting: NSPasteboard?
+
         func pasteClipboardContents() -> Bool {
             guard acceptsTerminalInput else { return false }
-            guard let text = NSPasteboard.general.string(forType: .string), !text.isEmpty else { return false }
+            guard let text = (pasteboardOverrideForTesting ?? .general).string(forType: .string), !text.isEmpty else { return false }
             onSendText?(text, true)
             return true
         }
@@ -379,20 +444,35 @@
             updateSurfaceFocus()
         }
 
+        /// Tears the pane's rendering down for good: the mirror is freed, the render state is dropped,
+        /// and the view leaves its container. Driven by ownership and attachment transitions, never by
+        /// visibility — a pane that is merely hidden goes through `evictMirrorSurface` instead.
         func releaseSurface() {
+            freeMirror()
+            latestFrame = nil
+            renderedText = ""
+            GhosttyMirrorSurfaceMRU.shared.forget(self)
+            removeFromSuperview()
+        }
+
+        /// Frees the mirror and its IOSurface buffers when this pane falls past the warm-surface cap,
+        /// while keeping the view able to rebuild itself. The retained frame is a full grid, so becoming
+        /// displayed again recreates the mirror and repaints it from that frame without needing a
+        /// resync from the session host.
+        func evictMirrorSurface() { freeMirror() }
+
+        private func freeMirror() {
+            // The find overlay's matches live in the surface, so its state cannot outlive the mirror.
             resetSearchOverlay(restoreFocus: false)
             pendingSurfacePresentationTask?.cancel()
             pendingSurfacePresentationTask = nil
-            if let surface = mirrorSurface() { GhosttyEmbeddedAppService.shared.unregisterActionHandler(for: surface) }
+            if let surface = mirrorSurface() { GhosttyMirrorAppService.shared.unregisterActionHandler(for: surface) }
             if let mirror {
                 ghostty_mirror_free(mirror)
                 self.mirror = nil
             }
-            latestFrame = nil
-            renderedText = ""
             lastGeometry = nil
             lastAppliedRenderFrameIdentity = nil
-            removeFromSuperview()
         }
 
         private var canProcessTerminalInput: Bool { acceptsTerminalInput && window?.isKeyWindow == true && window?.firstResponder === self }
@@ -409,7 +489,7 @@
 
         private func focusWindow() { focusWindow(window) }
 
-        private func restoreFirstResponderIfWindowReady(deferIfNeeded: Bool = true) {
+        func restoreFirstResponderIfWindowReady(deferIfNeeded: Bool = true) {
             guard acceptsTerminalInput, let window, window.isKeyWindow else {
                 updateSurfaceFocus()
                 return
@@ -530,12 +610,10 @@
         }
 
         private func ensureMirrorIfNeeded() {
-            guard mirror == nil, window != nil else { return }
+            guard mirror == nil, isDisplayed else { return }
             do {
-                try GhosttyEmbeddedAppService.shared.startIfNeeded()
-                guard let app = GhosttyEmbeddedAppService.shared.app else {
-                    throw GhosttyEmbeddedAppServiceError.configuration("ghostty app missing")
-                }
+                try GhosttyMirrorAppService.shared.startIfNeeded()
+                guard let app = GhosttyMirrorAppService.shared.app else { throw GhosttyEmbeddedAppServiceError.configuration("ghostty app missing") }
                 var host = makeSurfaceHost()
                 var config = ghostty_session_config_new()
                 config.surface.platform_tag = host.platform_tag
@@ -551,7 +629,7 @@
                 updateSurfaceGeometry()
                 updateSurfaceFocus()
                 if let surface = mirrorSurface() {
-                    GhosttyEmbeddedAppService.shared.registerActionHandler(for: surface) { [weak self] event in self?.applyActionEvent(event) }
+                    GhosttyMirrorAppService.shared.registerActionHandler(for: surface) { [weak self] event in self?.applyActionEvent(event) }
                 }
             } catch { fputs("spaces: ghostty mirror creation failed for session \(launchConfiguration.sessionID): \(error)\n", stderr) }
         }
@@ -679,9 +757,9 @@
                 return
             }
             lastAppliedRenderFrameIdentity = identity
-            GhosttyEmbeddedAppService.shared.tick()
+            GhosttyMirrorAppService.shared.tick()
             presentSurfaceNow()
-            GhosttyEmbeddedAppService.shared.tick()
+            GhosttyMirrorAppService.shared.tick()
             surfaceHostView.needsDisplay = true
             surfaceHostView.displayIfNeeded()
             window?.displayIfNeeded()
@@ -697,7 +775,7 @@
                 guard let surface = self.mirrorSurface() else { return }
                 ghostty_surface_refresh(surface)
                 ghostty_surface_draw(surface)
-                GhosttyEmbeddedAppService.shared.tick()
+                GhosttyMirrorAppService.shared.tick()
                 self.surfaceHostView.needsDisplay = true
                 self.surfaceHostView.displayIfNeeded()
                 self.window?.displayIfNeeded()
@@ -905,6 +983,14 @@
 
         static func remoteKeySpecifier(for event: NSEvent) -> String? { GhosttyTerminalInputTranslator.keySpecifier(for: event) }
 
+        var debugHasLiveMirrorSurface: Bool { mirror != nil }
+        /// Text read back from the live mirror surface, ignoring the retained frame and text cache, so
+        /// a test can tell an actually repainted surface from a remembered one. Nil with no mirror.
+        var debugMirrorSurfaceText: String? { GhosttyTerminalSnapshotCapture.captureText(from: mirrorSurface()) }
+        /// Whether the live surface holds a selection. Selection lives in the surface and cannot
+        /// outlive it, so a test can tell a pane that kept its surface from one whose surface was
+        /// freed and rebuilt underneath it.
+        var debugHasSurfaceSelection: Bool { mirrorSurface().map { ghostty_surface_has_selection($0) } ?? false }
         var debugSearchFieldHasFocus: Bool { searchFieldHasFocus }
         var debugSearchStatusVisible: Bool { !searchStatusLabel.isHidden }
         var debugSearchUpBindingAction: String { Self.searchUpBindingAction }

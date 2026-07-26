@@ -16,6 +16,7 @@ extension AppKitController {
         case guiSidebarPreviousShortcut
         case guiOpenEditorShortcut
         case guiOpenTerminalShortcut
+        case guiNewTabShortcut
         case guiOpenFinderShortcut
         case guiOpenSettingsShortcut
         case guiWindowShortcut
@@ -34,6 +35,7 @@ extension AppKitController {
             case .guiSidebarPreviousShortcut: return "Previous workspace"
             case .guiOpenEditorShortcut: return "Open editor"
             case .guiOpenTerminalShortcut: return "New terminal"
+            case .guiNewTabShortcut: return "New tab (session picker)"
             case .guiOpenFinderShortcut: return "Open Finder"
             case .guiOpenSettingsShortcut: return "Open settings"
             case .guiWindowShortcut: return "Focus window 1-0"
@@ -43,7 +45,7 @@ extension AppKitController {
         static let settingsPanelCases: [ShortcutSetting] = [
             .guiLeaderHotkey, .guiHotkey, .guiCommandPaletteHotkey, .guiNextShortcut, .guiPreviousShortcut, .guiSidebarNextShortcut,
             .guiSidebarPreviousShortcut, .guiOpenEditorShortcut, .guiAlertsShortcut, .guiAddWorkspaceShortcut, .guiReloadShortcut,
-            .guiOpenTerminalShortcut, .guiOpenFinderShortcut, .guiOpenSettingsShortcut, .guiWindowShortcut,
+            .guiOpenTerminalShortcut, .guiNewTabShortcut, .guiOpenFinderShortcut, .guiOpenSettingsShortcut, .guiWindowShortcut,
         ]
 
         var usesLeader: Bool {
@@ -83,6 +85,7 @@ extension AppKitController {
             case .guiSidebarPreviousShortcut: return ClientSettingsKey.guiSidebarPreviousShortcut
             case .guiOpenEditorShortcut: return ClientSettingsKey.guiOpenEditorShortcut
             case .guiOpenTerminalShortcut: return ClientSettingsKey.guiOpenTerminalShortcut
+            case .guiNewTabShortcut: return ClientSettingsKey.guiNewTabShortcut
             case .guiOpenFinderShortcut: return ClientSettingsKey.guiOpenFinderShortcut
             case .guiOpenSettingsShortcut: return ClientSettingsKey.guiOpenSettingsShortcut
             case .guiWindowShortcut: return ClientSettingsKey.guiWindowShortcut
@@ -103,6 +106,7 @@ extension AppKitController {
             case .guiSidebarPreviousShortcut: return ClientSettingsKey.defaultGUISidebarPreviousShortcut
             case .guiOpenEditorShortcut: return ClientSettingsKey.defaultGUIOpenEditorShortcut
             case .guiOpenTerminalShortcut: return ClientSettingsKey.defaultGUIOpenTerminalShortcut
+            case .guiNewTabShortcut: return ClientSettingsKey.defaultGUINewTabShortcut
             case .guiOpenFinderShortcut: return ClientSettingsKey.defaultGUIOpenFinderShortcut
             case .guiOpenSettingsShortcut: return ClientSettingsKey.defaultGUIOpenSettingsShortcut
             case .guiWindowShortcut: return ClientSettingsKey.defaultGUIWindowShortcut
@@ -123,6 +127,7 @@ extension AppKitController {
             case ClientSettingsKey.guiSidebarPreviousShortcut: self = .guiSidebarPreviousShortcut
             case ClientSettingsKey.guiOpenEditorShortcut: self = .guiOpenEditorShortcut
             case ClientSettingsKey.guiOpenTerminalShortcut: self = .guiOpenTerminalShortcut
+            case ClientSettingsKey.guiNewTabShortcut: self = .guiNewTabShortcut
             case ClientSettingsKey.guiOpenFinderShortcut: self = .guiOpenFinderShortcut
             case ClientSettingsKey.guiOpenSettingsShortcut: self = .guiOpenSettingsShortcut
             case ClientSettingsKey.guiWindowShortcut: self = .guiWindowShortcut

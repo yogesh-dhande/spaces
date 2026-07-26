@@ -7,6 +7,31 @@ import workspacecore
 @testable import spacesdeviceapi
 
 final class SpacesDeviceOverviewBuilderTests: XCTestCase {
+    func testWorkspacesSortDefaultFirstThenByNameSoEveryClientMatches() {
+        // The overview payload is the single ordering source every client renders. macOS pins each
+        // project's default workspace to the top; iOS uses the payload order verbatim. Making the
+        // builder sort default-first (then name) keeps the two clients from diverging.
+        let alpha = ProjectRecord(id: "project-alpha", name: "Alpha", dir: "/alpha", isGitRepo: true, defaultBranch: "main")
+        let beta = ProjectRecord(id: "project-beta", name: "Beta", dir: "/beta", isGitRepo: true, defaultBranch: "main")
+        func workspace(id: String, project: ProjectRecord, branch: String, isDefault: Bool) -> SpacesDeviceOverviewBuilder.WorkspaceDescriptor {
+            .init(
+                project: project,
+                workspace: WorkspaceRecord(
+                    id: id, projectID: project.id, dir: "/\(project.name)/\(branch)", dirname: nil, branch: branch, isDefault: isDefault,
+                    isArchived: false, isRunning: false, lastLaunchedAt: nil))
+        }
+        // Default branch name ("zzz-main") deliberately sorts last alphabetically to prove default-first wins.
+        let alphaFeature = workspace(id: "alpha-feature", project: alpha, branch: "aaa-feature", isDefault: false)
+        let alphaDefault = workspace(id: "alpha-default", project: alpha, branch: "zzz-main", isDefault: true)
+        let betaDefault = workspace(id: "beta-default", project: beta, branch: "main", isDefault: true)
+
+        let overview = SpacesDeviceOverviewBuilder.build(
+            workspaces: [alphaFeature, betaDefault, alphaDefault], sessions: [])
+
+        // Project order by name (Alpha before Beta); within Alpha the default sorts ahead of the earlier-named feature.
+        XCTAssertEqual(overview.workspaces.map(\.id), ["alpha-default", "alpha-feature", "beta-default"])
+    }
+
     func testMetadataWorkspaceMatchAssignsSessionToStampedWorkspace() {
         let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
         let rootWorkspace = WorkspaceRecord(
@@ -484,6 +509,67 @@ final class SpacesDeviceOverviewBuilderTests: XCTestCase {
         XCTAssertEqual(overview.sessions.first(where: { $0.id == "agent-orphan" })?.rowKind, .liveSession)
         XCTAssertEqual(overview.sessions.first(where: { $0.id == "agent-orphan" })?.workspaceID, workspace.id)
         XCTAssertEqual(overview.workspaces.first?.sessionCount, 2)
+    }
+
+    // MARK: - retainedTerminalSessionIDs (the daemon-published pane keep-set)
+
+    /// A live interactive session is retained (it also feeds `sessions`).
+    func testRetainedIncludesLiveAdHocSession() {
+        let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
+        let workspace = WorkspaceRecord(
+            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false, isArchived: false,
+            isRunning: true, lastLaunchedAt: nil)
+        let liveSession = makeSessionCatalogEntry(
+            sessionID: "session-live", title: "Shell", workingDirectory: workspace.dir, workspaceID: workspace.id, attachmentSnapshot: .init())
+
+        let overview = SpacesDeviceOverviewBuilder.build(
+            projects: [project], workspaces: [.init(project: project, workspace: workspace)], sessions: [liveSession])
+
+        XCTAssertTrue(overview.retainedTerminalSessionIDs.contains("session-live"))
+    }
+
+    /// The regression: an ended ad hoc shell is not live and has no process/agent row, but its
+    /// `runtime_targets` (terminal window) row still holds its transcript, so the daemon must keep
+    /// retaining it — even though the builder's live-map strips its id out of `sessions`. This is the
+    /// failing-first case: against the pre-fix payload the id survived on no surface.
+    func testRetainedIncludesEndedSessionReferencedOnlyByRuntimeTargetRow() {
+        let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
+        let workspace = WorkspaceRecord(
+            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false, isArchived: false,
+            isRunning: true, lastLaunchedAt: nil)
+        let endedShellWindow = WindowRecord(
+            id: "window-shell", workspaceID: workspace.id, app: "Spaces", name: "Shell", terminalTrackingID: "session-ended-shell",
+            role: "terminal", orderIndex: 0, lastSeenAt: "now")
+
+        let overview = SpacesDeviceOverviewBuilder.build(
+            projects: [project], workspaces: [.init(project: project, workspace: workspace, windows: [endedShellWindow])], sessions: [])
+
+        // The session left `sessions` the moment it exited, but the daemon still retains it.
+        XCTAssertFalse(overview.sessions.contains { $0.id == "session-ended-shell" })
+        XCTAssertTrue(overview.retainedTerminalSessionIDs.contains("session-ended-shell"))
+    }
+
+    /// An exited process/agent row keeps its session retained too, matching the collector's rule; a
+    /// session with no live core and no product row is not retained.
+    func testRetainedIncludesExitedProductRowsAndExcludesUnreferencedSession() {
+        let project = ProjectRecord(id: "project-1", name: "Project", dir: "/repo", isGitRepo: true, defaultBranch: "main")
+        let workspace = WorkspaceRecord(
+            id: "workspace-1", projectID: project.id, dir: "/repo/feature", dirname: nil, branch: "feature", isDefault: false, isArchived: false,
+            isRunning: true, lastLaunchedAt: nil)
+        let exitedProcess = RunningProcessRecord(
+            id: "process-api", workspaceID: workspace.id, templateName: "api", command: "npm run dev", terminalApp: "Spaces",
+            terminalTrackingID: "session-process", pid: nil, status: .exited, logPath: nil, lastOutputAt: nil, startedAt: "now", exitedAt: "later")
+        let exitedAgent = AgentWindowRecord(
+            id: "agent-review", workspaceID: workspace.id, provider: .spaces, label: "reviewer", terminalTrackingID: "session-agent",
+            sessionKey: nil, status: .exited, createdAt: "now", updatedAt: "now")
+
+        let overview = SpacesDeviceOverviewBuilder.build(
+            projects: [project],
+            workspaces: [.init(project: project, workspace: workspace, runningProcesses: [exitedProcess], agentWindows: [exitedAgent])],
+            sessions: [])
+
+        XCTAssertEqual(overview.retainedTerminalSessionIDs, ["session-agent", "session-process"])
+        XCTAssertFalse(overview.retainedTerminalSessionIDs.contains("session-never-existed"))
     }
 
     private func makeSessionCatalogEntry(

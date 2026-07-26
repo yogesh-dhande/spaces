@@ -198,20 +198,17 @@ extension TerminalSessionPaneViewController {
         updateRendererVisibility()
     }
 
-    /// Mirrors the session's runtime state into the banner's persistent notice. An exited or failed
-    /// session leaves a frozen final Ghostty render on screen that is otherwise indistinguishable
-    /// from a live terminal, so the banner is the only thing telling the user why their keystrokes
-    /// go nowhere.
-    func updateEndedBanner(runtimeState: TerminalSessionRuntimeState?) {
-        guard let runtimeState else {
+    /// Mirrors the pane's own state into the banner's persistent notice. Both facts it reports leave
+    /// a frozen Ghostty render on screen that is otherwise indistinguishable from a live terminal —
+    /// an exited or failed session, and a dropped state subscription to the owning device — so the
+    /// banner is the only thing telling the user why their keystrokes go nowhere.
+    func updatePersistentBanner(runtimeState: TerminalSessionRuntimeState?, isStateStreamDisconnected: Bool) {
+        guard let notice = TerminalPaneBannerNotice.resolve(runtimeState: runtimeState?.state, isStateStreamDisconnected: isStateStreamDisconnected)
+        else {
             banner.clearPersistent()
             return
         }
-        switch runtimeState.state {
-        case .starting, .running: banner.clearPersistent()
-        case .exited: banner.showPersistent(message: "Session ended. This pane is read-only.")
-        case .failed: banner.showPersistent(message: "Session failed. The process stopped unexpectedly.")
-        }
+        banner.showPersistent(notice)
     }
 
     func updateInputStatus(message: String, isError: Bool) {
