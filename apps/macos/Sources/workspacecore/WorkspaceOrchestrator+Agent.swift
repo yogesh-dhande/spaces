@@ -662,38 +662,79 @@ extension WorkspaceOrchestrator {
         // state transitions, not tool calls) and no row rewrite — `updated_at` deliberately stays the
         // time the agent *entered* working, so it reads as the transition time, not tool-call recency.
         if let existing, status == .spinning, existing.status == .spinning { return existing }
-        let now = nowISO8601()
-        let allAgentWindows = try store.agentWindows(workspaceID: workspaceID)
-        let trackedWindow = try ensureTrackedWindowExistsForAgent(
-            workspaceID: workspaceID, provider: provider, label: label, terminalTrackingID: terminalTrackingID)
         if let existing {
-            let resolvedClaimedLauncherName = claimedLauncherName ?? existing.claimedLauncherName
-            let resolvedLabel = try uniqueAgentFocusLabel(
-                workspaceID: workspaceID, preferredLabel: label ?? existing.label, excludingAgentWindowID: existing.id,
-                claimedLauncherName: resolvedClaimedLauncherName)
-            let updated = AgentWindowRecord(
-                id: existing.id, workspaceID: existing.workspaceID, provider: existing.provider, label: resolvedLabel,
-                runtimeTargetID: existing.runtimeTargetID ?? trackedWindow?.id,
-                terminalTarget: TerminalTargetRecord(
-                    runtimeTargetID: existing.runtimeTargetID ?? trackedWindow?.id, trackingID: terminalTrackingID ?? existing.terminalTrackingID),
-                sessionKey: sessionKey ?? existing.sessionKey, claimedLauncherID: existing.claimedLauncherID,
-                claimedLauncherName: resolvedClaimedLauncherName, status: status, note: existing.note, createdAt: existing.createdAt, updatedAt: now)
-            try validateWorkspaceFocusNames(
-                workspaceID: workspaceID, processes: try store.workspaceProcesses(workspaceID: workspaceID),
-                browserSessions: try store.workspaceBrowserSessions(workspaceID: workspaceID),
-                agentWindows: allAgentWindows.map { $0.id == existing.id ? updated : $0 })
-            try store.upsertAgentWindow(updated)
-            appendAgentSessionEvent(
-                agentSessionID: updated.id, eventType: eventType ?? status.rawValue, source: eventSource,
-                message: agentSessionEventMessage(
-                    provider: updated.provider, label: updated.label, terminalTrackingID: updated.terminalTrackingID, sessionKey: updated.sessionKey,
-                    environmentKeys: environmentKeys), createdAt: now)
-            return updated
+            return try rewriteAgentWindowStatus(
+                existing, provider: provider, terminalTrackingID: terminalTrackingID, sessionKey: sessionKey, label: label, status: status,
+                claimedLauncherName: claimedLauncherName, eventType: eventType, eventSource: eventSource, environmentKeys: environmentKeys)
         }
         return try registerAgentWindow(
             workspaceID: workspaceID, provider: provider, label: label, terminalTrackingID: terminalTrackingID, sessionKey: sessionKey,
             status: status, claimedLauncherName: claimedLauncherName, eventType: eventType ?? status.rawValue, eventSource: eventSource,
             environmentKeys: environmentKeys)
+    }
+
+    /// Transitions an existing agent row to `status` only while its current status is one of
+    /// `whenCurrentStatusIs`, deciding and writing from a single read of the row inside one write
+    /// transaction. Returns `nil` when the row is gone or its status no longer qualifies.
+    ///
+    /// This is the variant a caller uses when the transition is only correct for certain current states.
+    /// The condition cannot be a pre-check by the caller: between a caller's read and the write, a hook
+    /// signal can move the row (its transition would be silently overwritten) or an `exit` can finalize
+    /// and delete it (the plain update would then re-create a finalized row through
+    /// `registerAgentWindow`, bypassing the termination chokepoint). Gating inside the same read the write
+    /// is built from, under `BEGIN IMMEDIATE`, removes both: a racing writer on another connection either
+    /// commits before this transaction takes the write lock — and is then seen by the gate — or waits for
+    /// it and lands after, which is what makes "the last write wins" true for concurrent hook signals.
+    /// Never creating a row is structural here: the no-row case returns `nil` instead of registering one.
+    @discardableResult public func updateAgentWindowStatus(
+        workspaceID: String, provider: AgentProvider, terminalTrackingID: String, status: AgentWindowStatus,
+        whenCurrentStatusIs qualifyingStatuses: Set<AgentWindowStatus>, eventType: String, eventSource: String
+    ) throws -> AgentWindowRecord? {
+        try store.withTransaction {
+            guard let existing = try matchingAgentWindow(workspaceID: workspaceID, terminalTrackingID: terminalTrackingID),
+                qualifyingStatuses.contains(existing.status)
+            else { return nil }
+            return try rewriteAgentWindowStatus(
+                existing, provider: provider, terminalTrackingID: terminalTrackingID, sessionKey: nil, label: nil, status: status,
+                claimedLauncherName: nil, eventType: eventType, eventSource: eventSource, environmentKeys: nil)
+        }
+    }
+
+    /// Rewrites an already-resolved agent row with a new status, re-resolving the fields a status write
+    /// may carry (label uniqueness, tracked window, session key) and appending the lifecycle event. The
+    /// shared write half of both `updateAgentWindowStatus` entry points, so a gated transition and a plain
+    /// one produce identical rows and event log entries.
+    private func rewriteAgentWindowStatus(
+        _ existing: AgentWindowRecord, provider: AgentProvider, terminalTrackingID: String?, sessionKey: String?, label: String?,
+        status: AgentWindowStatus, claimedLauncherName: String?, eventType: String?, eventSource: String, environmentKeys: [String]?
+    ) throws -> AgentWindowRecord {
+        let workspaceID = existing.workspaceID
+        let now = nowISO8601()
+        let allAgentWindows = try store.agentWindows(workspaceID: workspaceID)
+        let trackedWindow = try ensureTrackedWindowExistsForAgent(
+            workspaceID: workspaceID, provider: provider, label: label, terminalTrackingID: terminalTrackingID)
+        let resolvedClaimedLauncherName = claimedLauncherName ?? existing.claimedLauncherName
+        let resolvedLabel = try uniqueAgentFocusLabel(
+            workspaceID: workspaceID, preferredLabel: label ?? existing.label, excludingAgentWindowID: existing.id,
+            claimedLauncherName: resolvedClaimedLauncherName)
+        let updated = AgentWindowRecord(
+            id: existing.id, workspaceID: existing.workspaceID, provider: existing.provider, label: resolvedLabel,
+            runtimeTargetID: existing.runtimeTargetID ?? trackedWindow?.id,
+            terminalTarget: TerminalTargetRecord(
+                runtimeTargetID: existing.runtimeTargetID ?? trackedWindow?.id, trackingID: terminalTrackingID ?? existing.terminalTrackingID),
+            sessionKey: sessionKey ?? existing.sessionKey, claimedLauncherID: existing.claimedLauncherID,
+            claimedLauncherName: resolvedClaimedLauncherName, status: status, note: existing.note, createdAt: existing.createdAt, updatedAt: now)
+        try validateWorkspaceFocusNames(
+            workspaceID: workspaceID, processes: try store.workspaceProcesses(workspaceID: workspaceID),
+            browserSessions: try store.workspaceBrowserSessions(workspaceID: workspaceID),
+            agentWindows: allAgentWindows.map { $0.id == existing.id ? updated : $0 })
+        try store.upsertAgentWindow(updated)
+        appendAgentSessionEvent(
+            agentSessionID: updated.id, eventType: eventType ?? status.rawValue, source: eventSource,
+            message: agentSessionEventMessage(
+                provider: updated.provider, label: updated.label, terminalTrackingID: updated.terminalTrackingID, sessionKey: updated.sessionKey,
+                environmentKeys: environmentKeys), createdAt: now)
+        return updated
     }
 
     @discardableResult public func handleAgentExit(
@@ -807,6 +848,10 @@ extension WorkspaceOrchestrator {
     /// Only a busy row (`spinning`/`waiting`) transitions, because those are the states an interrupt
     /// cancels: `done` is left alone so an interrupt cannot silently clear a completed turn's Alerts
     /// attention, `exited` so it cannot resurrect a dead agent's row, and `idle` is already the outcome.
+    /// That condition is handed to the chokepoint rather than pre-checked here, so it is evaluated and
+    /// applied as one transaction: a hook signal (or an `exit` that finalizes and deletes the row) landing
+    /// between a read and the write cannot be overwritten by a decision made against the older row.
+    ///
     /// Returns the updated row, or `nil` when the terminal has no busy Spaces agent row — including the
     /// pre-first-signal case, since an interrupt is no evidence an agent is running and must never
     /// establish a row.
@@ -814,18 +859,16 @@ extension WorkspaceOrchestrator {
         -> AgentWindowRecord?
     {
         guard let match = try resolveSpacesAgentSession(terminalSessionID: terminalSessionID) else { return nil }
-        switch match.record.status {
-        case .spinning, .waiting: break
-        case .idle, .done, .exited: return nil
-        }
-        let wasBlocked = match.record.status == .waiting
-        let updated = try updateAgentWindowStatus(
-            workspaceID: match.workspaceID, provider: .spaces, terminalTrackingID: terminalSessionID, status: .idle, eventType: "interrupt",
-            eventSource: "spaces_agent_interrupt")
-        // An interrupted agent is no longer waiting on its permission prompt, so a still-held "is blocked"
+        guard
+            let updated = try updateAgentWindowStatus(
+                workspaceID: match.workspaceID, provider: .spaces, terminalTrackingID: terminalSessionID, status: .idle,
+                whenCurrentStatusIs: [.spinning, .waiting], eventType: "interrupt", eventSource: "spaces_agent_interrupt")
+        else { return nil }
+        // An interrupted agent is no longer waiting on a permission prompt, so a still-held "is blocked"
         // line for it would be misinformation by the time it lands — the same withdrawal a blocked→working
-        // resume performs.
-        if wasBlocked { try engine.childDidResumeWorking(agentSessionID: updated.id) }
+        // resume performs. Unconditional: it is a keyed delete that no-ops when nothing is held, which
+        // beats deciding from a pre-read of the status the transaction above already owns.
+        try engine.childDidResumeWorking(agentSessionID: updated.id)
         // The interrupted terminal is back at an idle composer, so it is ready for the child events held
         // while it was busy — the same flush a signal that leaves the row idle/done performs.
         try engine.subscriberDidBecomeIdle(subscriberTerminalSessionID: terminalSessionID)

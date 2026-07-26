@@ -131,6 +131,52 @@ final class AgentInterruptTests: XCTestCase {
         XCTAssertTrue(try store.agentWindows(workspaceID: workspace.id).isEmpty)
     }
 
+    /// The interrupt hands its busy-state condition to the status chokepoint instead of pre-checking it,
+    /// so the condition is evaluated against the same row read the write is built from. This drives that
+    /// chokepoint with the row state a hook signal committing in the gap would leave behind: the newer
+    /// status stands and the interrupt writes nothing, rather than the interrupt overwriting a transition
+    /// it never saw. (The concurrency window itself is not reproduced here — that would need a thread
+    /// race; this pins the decision the chokepoint makes when it sees the raced-in state.)
+    func testGatedStatusUpdateLeavesANewerStatusIntact() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = makeTestOrchestrator(store: store)
+        let workspace = try makeWorkspace(store: store)
+        let agent = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "child-session", status: .spinning)
+        // The hook signal that lands first: the agent finished its turn on its own.
+        _ = try orchestrator.updateAgentWindowStatus(
+            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "child-session", status: .done, eventType: "done",
+            eventSource: "spaces_agent_signal")
+
+        let applied = try orchestrator.updateAgentWindowStatus(
+            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "child-session", status: .idle,
+            whenCurrentStatusIs: [.spinning, .waiting], eventType: "interrupt", eventSource: "spaces_agent_interrupt")
+
+        XCTAssertNil(applied, "A transition whose condition no longer holds must not be applied.")
+        XCTAssertEqual(try store.agentWindow(id: agent.id)?.status, .done, "The hook signal's status must survive.")
+        XCTAssertEqual(try interruptEventCount(store: store, agentID: agent.id), 0, "A skipped transition must log no lifecycle event.")
+    }
+
+    /// The same chokepoint, driven with the state an `exit` that finalized and deleted the row leaves
+    /// behind: the interrupt records nothing and — the point of gating inside the chokepoint — creates no
+    /// row. Agent rows are created by hook signals and destroyed through the termination chokepoint; an
+    /// interrupt writing a status must never be able to bring a finalized row back.
+    func testGatedStatusUpdateNeverRecreatesAFinalizedRow() throws {
+        let store = try makeTemporaryStore()
+        let orchestrator = makeTestOrchestrator(store: store)
+        let workspace = try makeWorkspace(store: store)
+        let agent = try orchestrator.registerAgentWindow(
+            workspaceID: workspace.id, provider: .spaces, label: "Codex", terminalTrackingID: "child-session", status: .spinning)
+        try store.deleteAgentWindow(id: agent.id)
+
+        let applied = try orchestrator.updateAgentWindowStatus(
+            workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "child-session", status: .idle,
+            whenCurrentStatusIs: [.spinning, .waiting], eventType: "interrupt", eventSource: "spaces_agent_interrupt")
+
+        XCTAssertNil(applied)
+        XCTAssertTrue(try store.agentWindows(workspaceID: workspace.id).isEmpty, "A gated transition must never register a row.")
+    }
+
     // MARK: - Fixtures
 
     private func interruptEventCount(store: SQLiteStore, agentID: String) throws -> Int {
