@@ -191,10 +191,10 @@ jobs:
           #
           # The team is read from the certificate's organizational unit rather than its common
           # name. A distribution certificate's common name ends in the team id, but a development
-          # certificate's parenthetical is a per-certificate identifier -- "Apple Development:
-          # Name (K32PW8N4HR)" against team BEMDA62NB6 -- so matching the common name would
-          # reject the correct certificate and fail every release. The organizational unit
-          # carries the team for both kinds.
+          # certificate's carries a per-member identifier shared by every development certificate
+          # that member holds -- "Apple Development: Name (K32PW8N4HR)" against team BEMDA62NB6 --
+          # so matching the common name would reject the correct certificate and fail every
+          # release. The organizational unit carries the team for both kinds.
           team_id="$(/usr/libexec/PlistBuddy -c 'Print :teamID' apps/ios/ExportOptions.plist)"
           cert_dir="$RUNNER_TEMP/imported-certs"
           mkdir -p "$cert_dir"
