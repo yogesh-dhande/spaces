@@ -2206,14 +2206,93 @@
 
             // The surrendering view keeps its place in the hierarchy without clawing the mirror back,
             // so an outgoing view cannot trade it with the incoming one for the whole transition.
-            firstHostView.setNeedsLayout()
-            firstHostView.layoutIfNeeded()
-            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
-            XCTAssertTrue(secondHostView.hasMirrorSurfaceForTesting)
-            XCTAssertFalse(firstHostView.hasMirrorSurfaceForTesting)
+            // Both views are laid out repeatedly, which is what a navigation transition does to a
+            // pair of terminals that are briefly on screen together.
+            for _ in 0..<4 {
+                firstHostView.setNeedsLayout()
+                firstHostView.layoutIfNeeded()
+                secondHostView.setNeedsLayout()
+                secondHostView.layoutIfNeeded()
+                RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+                XCTAssertTrue(secondHostView.hasMirrorSurfaceForTesting)
+                XCTAssertFalse(firstHostView.hasMirrorSurfaceForTesting)
+            }
 
             firstHostView.removeFromSuperview()
             secondHostView.removeFromSuperview()
+        }
+
+        /// A terminal presented over another — a sheet, a non-fullscreen cover, or a split layout —
+        /// leaves the view it covers parented, so window re-entry never happens for it. When the
+        /// newcomer goes away the mirror is parked and unheld, and it has to go back to the view that
+        /// surrendered it instead of leaving that view permanently black.
+        func testMirrorReturnsToTheSurrenderingViewWhenTheNewcomerGoesAwayWhileItStaysInTheWindow() throws {
+            GhosttyRemoteTerminalHostView.nativeMirrorEnabledForTesting = true
+            let window = UIWindow(frame: UIScreen.main.bounds)
+            let viewController = UIViewController()
+            window.rootViewController = viewController
+            window.isHidden = false
+            defer { window.isHidden = true }
+
+            let coveredHostView = try mountNativeMirrorHostView(in: viewController, window: window, screenKey: "reclaim-covered")
+            let coveringHostView = try mountNativeMirrorHostView(in: viewController, window: window, screenKey: "reclaim-covering")
+            defer { coveredHostView.removeFromSuperview() }
+
+            XCTAssertTrue(coveringHostView.hasMirrorSurfaceForTesting)
+            XCTAssertFalse(coveredHostView.hasMirrorSurfaceForTesting)
+
+            coveringHostView.removeFromSuperview()
+
+            let deadline = Date().addingTimeInterval(2)
+            while !coveredHostView.hasMirrorSurfaceForTesting && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+            XCTAssertTrue(coveredHostView.hasMirrorSurfaceForTesting)
+            XCTAssertEqual(GhosttySharedTerminalMirror.shared.liveMirrorCountForTesting, 1)
+            XCTAssertTrue(GhosttySharedTerminalMirror.shared.isSurfaceHostAttachedForTesting)
+        }
+
+        /// One update can both dismiss the terminal that covered another and mount a different one —
+        /// closing a sheet while routing to another session does exactly this. The covered view is
+        /// offered the parked mirror at the moment of that release, but the terminal that mounted in
+        /// the same update is the one the user ends up looking at, so the hand-back must never end
+        /// with the mirror taken off it.
+        func testHandbackLeavesTheMirrorWithATerminalThatMountedDuringTheRelease() throws {
+            GhosttyRemoteTerminalHostView.nativeMirrorEnabledForTesting = true
+            let window = UIWindow(frame: UIScreen.main.bounds)
+            let viewController = UIViewController()
+            window.rootViewController = viewController
+            window.isHidden = false
+            defer { window.isHidden = true }
+
+            let coveredHostView = try mountNativeMirrorHostView(in: viewController, window: window, screenKey: "handback-covered")
+            let coveringHostView = try mountNativeMirrorHostView(in: viewController, window: window, screenKey: "handback-covering")
+            XCTAssertTrue(coveringHostView.hasMirrorSurfaceForTesting)
+            XCTAssertFalse(coveredHostView.hasMirrorSurfaceForTesting)
+
+            // The incoming terminal is mounted and the covering one is torn down in the same
+            // uninterrupted run, so the incoming view is already asking for the mirror when the
+            // release offers it back to the view underneath.
+            let incomingHostView = GhosttyRemoteTerminalHostView(frame: viewController.view.bounds)
+            viewController.view.addSubview(incomingHostView)
+            incomingHostView.frame = viewController.view.bounds
+            viewController.view.layoutIfNeeded()
+            incomingHostView.update(
+                snapshot: sampleSnapshot(), renderStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0|screen=handback-incoming",
+                fallbackText: "Waiting for terminal state...")
+            coveringHostView.removeFromSuperview()
+            defer {
+                coveredHostView.removeFromSuperview()
+                incomingHostView.removeFromSuperview()
+            }
+
+            let deadline = Date().addingTimeInterval(2)
+            while !incomingHostView.hasMirrorSurfaceForTesting && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+            // Settling past the acquisition is the point of the test: a hand-back that was decided
+            // before the incoming view acquired would strip it a turn later.
+            RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+
+            XCTAssertTrue(incomingHostView.hasMirrorSurfaceForTesting)
+            XCTAssertFalse(coveredHostView.hasMirrorSurfaceForTesting)
+            XCTAssertEqual(GhosttySharedTerminalMirror.shared.liveMirrorCountForTesting, 1)
         }
 
         /// Two sessions in succession share one surface, so the surface must stay hidden from the
