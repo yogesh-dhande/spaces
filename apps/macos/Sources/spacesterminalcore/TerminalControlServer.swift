@@ -11,7 +11,6 @@ public final class TerminalControlServer {
     private let socketPath: String
     private let queue: DispatchQueue
     private let handleRequest: @Sendable (TerminalControlRequest) throws -> TerminalControlResponse
-    private var listenSocketFD: Int32 = -1
     private var acceptSource: DispatchSourceRead?
 
     public init(
@@ -51,14 +50,21 @@ public final class TerminalControlServer {
         }
         try setNonBlocking(socketFD)
 
-        listenSocketFD = socketFD
         let source = DispatchSource.makeReadSource(fileDescriptor: socketFD, queue: queue)
-        source.setEventHandler { [weak self] in self?.acceptReadyConnections() }
-        source.setCancelHandler { [weak self] in
-            guard let self else { return }
-            if self.listenSocketFD >= 0 { close(self.listenSocketFD) }
-            try? self.removeSocketIfPresent()
-        }
+        source.setEventHandler { [weak self] in self?.acceptReadyConnections(listenSocketFD: socketFD) }
+        // The listening descriptor belongs to the dispatch source, not to this object: every caller
+        // stops a server and drops its last reference in the same breath, so a cancel handler that
+        // reached back through `self` would find it deallocated and never close the descriptor —
+        // leaking one per session for the daemon's lifetime. Dispatch runs this handler after every
+        // pending event handler on `queue`, so the captured descriptor stays valid for each accept
+        // and is closed exactly once here.
+        //
+        // The socket PATH is deliberately not touched here; removing it is the caller's job, which
+        // every stop site already does inline. This handler runs asynchronously on `queue`, so a caller
+        // that stops a server and immediately rebinds the same path (the resume-in-place path after a
+        // failed exec) could otherwise have this stale handler unlink the *new* server's socket file,
+        // leaving it bound to a path no client can reach.
+        source.setCancelHandler { close(socketFD) }
         acceptSource = source
         source.resume()
     }
@@ -68,7 +74,7 @@ public final class TerminalControlServer {
         acceptSource = nil
     }
 
-    private func acceptReadyConnections() {
+    private func acceptReadyConnections(listenSocketFD: Int32) {
         while true {
             let clientFD = accept(listenSocketFD, nil, nil)
             if clientFD < 0 {
