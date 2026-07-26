@@ -98,6 +98,16 @@ final class SpacesDeviceAPIProtocolTests: XCTestCase {
         XCTAssertEqual(try SpacesDeviceAPICodec.decodeRequest(SpacesDeviceAPICodec.encodeRequest(request)), request)
     }
 
+    func testInterruptAgentSessionRequestRoundTripsAndIsNotReplaySafe() throws {
+        let request = SpacesDeviceAPIRequest(command: .interruptAgentSession(.init(sessionID: "agent-session")), authToken: "SECRET")
+
+        XCTAssertEqual(request.commandName, "interruptAgentSession")
+        // Interrupting records a lifecycle transition, so a replay after an ambiguous failure could cancel
+        // a turn the agent started in the meantime.
+        XCTAssertFalse(request.isSafeToReplayAfterConnectionFailure)
+        XCTAssertEqual(try SpacesDeviceAPICodec.decodeRequest(SpacesDeviceAPICodec.encodeRequest(request)), request)
+    }
+
     func testKillAgentSessionRequestRoundTripsAndIsNotReplaySafe() throws {
         let request = SpacesDeviceAPIRequest(command: .killAgentSession(.init(sessionID: "agent-session")), authToken: "SECRET")
 

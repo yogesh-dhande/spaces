@@ -154,9 +154,10 @@ enum SpacesDaemonProfileCommandRouting {
     static func requiresOffMainExecution(_ command: TerminalServiceProfileCommand) -> Bool {
         switch command {
         // Launcher-reaching: session create/send and workspace start/restart (`upWorkspace` launches
-        // and tears down workspace terminals). Terminator-reaching: agent kill's stop chokepoint, and an
-        // agent-signal `exit` whose `finalizeAgentRow`/`handleAgentExit` terminates the backing terminal.
-        case .terminalSend, .terminalCommand, .agentSpawn, .workspaceStart, .workspaceRestart, .agentKill, .agentSignal: true
+        // and tears down workspace terminals), plus agent interrupt, whose ESC takes the same send path.
+        // Terminator-reaching: agent kill's stop chokepoint, and an agent-signal `exit` whose
+        // `finalizeAgentRow`/`handleAgentExit` terminates the backing terminal.
+        case .terminalSend, .terminalCommand, .agentSpawn, .workspaceStart, .workspaceRestart, .agentInterrupt, .agentKill, .agentSignal: true
         // Engine-free: pure store/disk reads and metadata writes with no launcher/terminator reach.
         case .terminalList, .terminalTail, .projectList, .workspaceList, .workspaceCreate, .agentList, .agentAnnotate, .agentSubscribe,
             .agentUnsubscribe, .agentConsumePendingEvents:
@@ -289,7 +290,9 @@ enum SpacesDaemonProfileCommandRouting {
         // the engine hop is deadlock-safe here (main stays free) and the subscriber notification the
         // chokepoint enqueues takes `submitAgentNotificationLine`'s direct off-main send path. Hopping onto
         // the main actor instead would trip `runSynchronously`'s `!isMainThread` precondition and abort the
-        // daemon (see `TerminalEngineActor`'s one-way rule).
+        // daemon (see `TerminalEngineActor`'s one-way rule). The interrupter below runs on that same
+        // connection-handling queue for the same reason: its ESC takes the terminal-send path, whose
+        // engine hop is only deadlock-safe off main.
         agentSessionKiller: { [weak self] sessionID in
             guard let self else { throw Self.requestFailedError("spacesd is shutting down.") }
             // Admit against handoff before the kill runs its stop chokepoint (which deletes the agent row and
@@ -298,6 +301,15 @@ enum SpacesDaemonProfileCommandRouting {
             guard !self.handoffInProgress else { throw WorkspaceError.daemonHandoffInProgress }
             let orchestrator = try self.makeProfileOrchestrator()
             return try orchestrator.killAgentSession(terminalSessionID: sessionID)
+        },
+        // Routes the remote `interruptAgentSession` Device API command through the same flow as the local
+        // `.agentInterrupt` (`interruptProfileAgentSession`): ESC into the child's terminal, then the
+        // lifecycle transition the cancel produces.
+        agentSessionInterrupter: { [weak self] sessionID in
+            guard let self else { throw Self.requestFailedError("spacesd is shutting down.") }
+            guard !self.handoffInProgress else { throw WorkspaceError.daemonHandoffInProgress }
+            let orchestrator = try self.makeProfileOrchestrator()
+            _ = try self.interruptProfileAgentSession(sessionID, orchestrator: orchestrator)
         }, onRestartRequested: { [weak self] in Task { @MainActor in self?.requestDaemonRestart() } })
     /// `nonisolated` so the off-main request handlers can drive git subprocesses from the transport
     /// thread. `RemoteWorkspaceGitClient` is `Sendable` (immutable, subprocess-per-call), so sharing the
@@ -591,6 +603,7 @@ enum SpacesDaemonProfileCommandRouting {
         // is the single source of truth for this classification; `profileCommandOffMain` asserts against it.
         case .profileCommand(.workspaceStart(let workspaceID)): return workspaceStartOffMain(workspaceID: workspaceID, restartIfRunning: false)
         case .profileCommand(.workspaceRestart(let workspaceID)): return workspaceStartOffMain(workspaceID: workspaceID, restartIfRunning: true)
+        case .profileCommand(.agentInterrupt(let payload)): return agentInterruptOffMain(payload)
         case .profileCommand(.agentKill(let payload)): return agentKillOffMain(payload)
         case .profileCommand(.agentSignal(let payload)): return agentSignalOffMain(payload)
         // Every remaining profile command (listings, workspace/agent metadata, subscriptions) touches no
@@ -1293,6 +1306,7 @@ enum SpacesDaemonProfileCommandRouting {
             let orchestrator = try makeProfileOrchestrator()
             return try annotateProfileAgentSession(payload, orchestrator: orchestrator)
         case .agentSpawn: preconditionFailure("`.agentSpawn` is peeled off main by dispatch(_:); it must not reach runProfileCommand")
+        case .agentInterrupt: preconditionFailure("`.agentInterrupt` is peeled off main by dispatch(_:); it must not reach runProfileCommand")
         case .agentKill: preconditionFailure("`.agentKill` is peeled off main by dispatch(_:); it must not reach runProfileCommand")
         case .agentSubscribe(let payload):
             let orchestrator = try makeProfileOrchestrator()
@@ -1410,6 +1424,40 @@ enum SpacesDaemonProfileCommandRouting {
             let profile = try killProfileAgentSession(payload.sessionID, orchestrator: orchestrator)
             return TerminalServiceResponse(ok: true, message: profile.message, sessions: profile.terminalSessions, profile: profile)
         } catch { return Self.failureResponse(error) }
+    }
+
+    /// RPC `.profileCommand(.agentInterrupt)` handler. Runs off main because the ESC takes the same
+    /// terminal-send path a `.terminalSend` does (a live core is reached through the engine actor).
+    private nonisolated func agentInterruptOffMain(_ payload: TerminalServiceAgentInterruptPayload) -> TerminalServiceResponse {
+        guard !livenessState.snapshot().handoffInProgress else { return Self.handoffInProgressResponse() }
+        do {
+            let orchestrator = try makeProfileOrchestrator()
+            let profile = try interruptProfileAgentSession(payload.sessionID, orchestrator: orchestrator)
+            return TerminalServiceResponse(ok: true, message: profile.message, sessions: profile.terminalSessions, profile: profile)
+        } catch { return Self.failureResponse(error) }
+    }
+
+    /// Interrupts a coding-agent session addressed by its terminal session id — the shared local
+    /// implementation of `spaces agent interrupt` (`.agentInterrupt`), and the flow the Device API's
+    /// `interruptAgentSession` runs for a remote caller.
+    ///
+    /// ESC goes out first, then the lifecycle transition is recorded (`recordAgentInterrupt`). That order
+    /// is deliberate: recording first would leave the whole cancel latency open for an in-flight
+    /// `PreToolUse` → `working` hook to re-mark the row spinning after the interrupt, which is the stuck
+    /// state this exists to prevent. Recording last means any hook the agent fires in response to the
+    /// cancel lands after and wins by last write, so an agent that does report the cancel is never fought.
+    /// A send failure (session gone or not running) throws before anything is recorded.
+    private nonisolated func interruptProfileAgentSession(_ sessionID: String, orchestrator: WorkspaceOrchestrator) throws
+        -> TerminalServiceProfileCommandResponse
+    {
+        let request = TerminalControlRequest(
+            command: .send(TerminalControlSendPayload(text: nil, bytes: Data([27]), clientID: nil, ownerEpoch: nil, appendNewline: false)))
+        let controlResponse = try sendProfileTerminalControlOffMain(sessionID: sessionID, request: request)
+        guard controlResponse.ok else { throw SpacesRuntimeError.invalidArgument(message: controlResponse.message) }
+        let recorded = try orchestrator.recordAgentInterrupt(
+            terminalSessionID: sessionID, notifications: makeAgentNotificationEngine(orchestrator: orchestrator))
+        if recorded != nil { postAgentEventNotification() }
+        return TerminalServiceProfileCommandResponse(message: "Interrupted agent session \(sessionID).")
     }
 
     /// RPC `.profileCommand(.agentSignal)` handler. An `exit` signal can finalize the agent row, whose
@@ -2444,12 +2492,13 @@ private final class MainActorSyncBox<T>: @unchecked Sendable { var value: T? }
     init(
         builtInTerminalSessionTerminator: WorkspaceOrchestrator.BuiltInTerminalSessionTerminator? = nil,
         builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher? = nil,
-        agentSessionKiller: (@Sendable (String) throws -> Bool)? = nil, onRestartRequested: (@Sendable () -> Void)? = nil
+        agentSessionKiller: (@Sendable (String) throws -> Bool)? = nil, agentSessionInterrupter: (@Sendable (String) throws -> Void)? = nil,
+        onRestartRequested: (@Sendable () -> Void)? = nil
     ) {
         #if canImport(spacesdeviceapi)
             supervisor = SpacesDeviceAPISupervisor(
                 builtInTerminalSessionTerminator: builtInTerminalSessionTerminator, builtInTerminalSessionLauncher: builtInTerminalSessionLauncher,
-                agentSessionKiller: agentSessionKiller, onRestartRequested: onRestartRequested)
+                agentSessionKiller: agentSessionKiller, agentSessionInterrupter: agentSessionInterrupter, onRestartRequested: onRestartRequested)
         #endif
     }
 

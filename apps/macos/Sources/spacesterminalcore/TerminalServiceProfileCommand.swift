@@ -205,6 +205,24 @@ public struct TerminalServiceAgentSpawnPayload: Codable, Sendable, Equatable {
     }
 }
 
+/// Interrupts a coding-agent session: the daemon sends ESC into its terminal and records the lifecycle
+/// transition the cancel produces. Carries only the child's terminal session id — the daemon resolves the
+/// owning workspace and agent row itself, which is also why the interrupt cannot be expressed as a plain
+/// `.terminalSend` from a caller that knows no workspace.
+public struct TerminalServiceAgentInterruptPayload: Codable, Sendable, Equatable {
+    /// Terminal session / tracking id of the agent to interrupt.
+    public let sessionID: String
+
+    public init(sessionID: String) { self.sessionID = sessionID }
+
+    private enum CodingKeys: String, CodingKey { case sessionID }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        sessionID = try container.decodeRequiredNonEmpty(forKey: .sessionID)
+    }
+}
+
 public struct TerminalServiceAgentKillPayload: Codable, Sendable, Equatable {
     /// Terminal session / tracking id of the agent to terminate.
     public let sessionID: String
@@ -346,6 +364,7 @@ public enum TerminalServiceProfileCommand: Sendable, Equatable {
     case agentList(TerminalServiceAgentListPayload)
     case agentAnnotate(TerminalServiceAgentAnnotatePayload)
     case agentSpawn(TerminalServiceAgentSpawnPayload)
+    case agentInterrupt(TerminalServiceAgentInterruptPayload)
     case agentKill(TerminalServiceAgentKillPayload)
     case agentSubscribe(TerminalServiceAgentSubscriptionPayload)
     case agentUnsubscribe(TerminalServiceAgentSubscriptionPayload)
@@ -371,6 +390,7 @@ extension TerminalServiceProfileCommand: Codable {
         case agentList
         case agentAnnotate
         case agentSpawn
+        case agentInterrupt
         case agentKill
         case agentSubscribe
         case agentUnsubscribe
@@ -401,6 +421,7 @@ extension TerminalServiceProfileCommand: Codable {
         case .agentList: self = .agentList(try container.decode(TerminalServiceAgentListPayload.self, forKey: key))
         case .agentAnnotate: self = .agentAnnotate(try container.decode(TerminalServiceAgentAnnotatePayload.self, forKey: key))
         case .agentSpawn: self = .agentSpawn(try container.decode(TerminalServiceAgentSpawnPayload.self, forKey: key))
+        case .agentInterrupt: self = .agentInterrupt(try container.decode(TerminalServiceAgentInterruptPayload.self, forKey: key))
         case .agentKill: self = .agentKill(try container.decode(TerminalServiceAgentKillPayload.self, forKey: key))
         case .agentSubscribe: self = .agentSubscribe(try container.decode(TerminalServiceAgentSubscriptionPayload.self, forKey: key))
         case .agentUnsubscribe: self = .agentUnsubscribe(try container.decode(TerminalServiceAgentSubscriptionPayload.self, forKey: key))
@@ -425,6 +446,7 @@ extension TerminalServiceProfileCommand: Codable {
         case .agentList(let payload): try container.encode(payload, forKey: .agentList)
         case .agentAnnotate(let payload): try container.encode(payload, forKey: .agentAnnotate)
         case .agentSpawn(let payload): try container.encode(payload, forKey: .agentSpawn)
+        case .agentInterrupt(let payload): try container.encode(payload, forKey: .agentInterrupt)
         case .agentKill(let payload): try container.encode(payload, forKey: .agentKill)
         case .agentSubscribe(let payload): try container.encode(payload, forKey: .agentSubscribe)
         case .agentUnsubscribe(let payload): try container.encode(payload, forKey: .agentUnsubscribe)

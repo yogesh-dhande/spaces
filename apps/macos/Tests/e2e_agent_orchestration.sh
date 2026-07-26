@@ -238,12 +238,19 @@ part_a() {
   printf '%s' "$cycle_err" | grep -Fqi "cycle" || fail "cycle rejection lacked a cycle message: $cycle_err"
   pass "step 4: cycle-closing subscribe was rejected"
 
-  # Step 5: interrupt succeeds; kill notifies watchers and removes the row; a bogus session id is a
-  # loud error. C is sitting `.done` (turn-complete, still live) from step 3 — the most common kill
-  # scenario — so the kill must still deliver O exactly one exited notice: `.done` is a live resting
-  # state, not a finalized one.
+  # Step 5: interrupt succeeds and records the cancelled turn; kill notifies watchers and removes the
+  # row; a bogus session id is a loud error.
+  #
+  # The interrupt is checked against a working agent, because that is the state it cancels: no agent
+  # reports the cancel itself, so the row must leave `spinning` on the interrupt alone. C is put back to
+  # `.done` afterwards, since the kill below is deliberately exercised against a turn-complete (still
+  # live) child — the most common kill scenario — which must still deliver O exactly one exited notice.
+  signal "$C" working
   "$SPACES_CLI" agent interrupt "$C" >/dev/null || fail "interrupt C failed"
-  pass "step 5a: interrupt C succeeded"
+  status="$(json_field "$("$SPACES_CLI" agent status --session "$C" --json)" 'd.get("status") or ""')"
+  [[ "$status" == "idle" ]] || fail "expected status idle after interrupting a working agent, got: $status"
+  pass "step 5a: interrupt C cancelled its turn and recorded it idle"
+  signal "$C" "done"
   "$SPACES_CLI" agent kill "$C" >/dev/null || fail "kill C failed"
   wait_for_notification "$O" exited "$C" || fail "exited notification never reached O after killing turn-complete C"
   pass "step 5b-exit: killing turn-complete (.done) C delivered the exited notice to O"

@@ -9,6 +9,7 @@ import workspacecore
     private let restartInterval: TimeInterval
     private let builtInTerminalSessionTerminator: WorkspaceOrchestrator.BuiltInTerminalSessionTerminator?
     private let builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher?
+    private let agentSessionInterrupter: (@Sendable (String) throws -> Void)?
     private let agentSessionKiller: (@Sendable (String) throws -> Bool)?
     private let onRestartRequested: (@Sendable () -> Void)?
 
@@ -24,13 +25,15 @@ import workspacecore
         environment: [String: String] = ProcessInfo.processInfo.environment, restartInterval: TimeInterval = 5,
         builtInTerminalSessionTerminator: WorkspaceOrchestrator.BuiltInTerminalSessionTerminator? = nil,
         builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher? = nil,
-        agentSessionKiller: (@Sendable (String) throws -> Bool)? = nil, onRestartRequested: (@Sendable () -> Void)? = nil
+        agentSessionKiller: (@Sendable (String) throws -> Bool)? = nil, agentSessionInterrupter: (@Sendable (String) throws -> Void)? = nil,
+        onRestartRequested: (@Sendable () -> Void)? = nil
     ) {
         self.settingsStore = settingsStore
         self.environment = environment
         self.restartInterval = restartInterval
         self.builtInTerminalSessionTerminator = builtInTerminalSessionTerminator
         self.builtInTerminalSessionLauncher = builtInTerminalSessionLauncher
+        self.agentSessionInterrupter = agentSessionInterrupter
         self.agentSessionKiller = agentSessionKiller
         self.onRestartRequested = onRestartRequested
     }
@@ -118,7 +121,7 @@ import workspacecore
         let createdServer = SpacesDeviceAPIServer(
             host: settings.host, port: settings.port, identity: identity, pairingStoreProtocol: try SpacesDevicePairingStore(),
             builtInTerminalSessionTerminator: builtInTerminalSessionTerminator, builtInTerminalSessionLauncher: builtInTerminalSessionLauncher,
-            agentSessionKiller: agentSessionKiller, onRestartRequested: onRestartRequested)
+            agentSessionKiller: agentSessionKiller, agentSessionInterrupter: agentSessionInterrupter, onRestartRequested: onRestartRequested)
         do {
             try createdServer.start()
             return createdServer

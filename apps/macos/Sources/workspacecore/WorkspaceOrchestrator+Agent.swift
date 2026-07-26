@@ -790,6 +790,48 @@ extension WorkspaceOrchestrator {
         return try terminateSpawnedAgentTerminalSession(sessionID: terminalSessionID)
     }
 
+    /// Records the lifecycle transition an explicit `spaces agent interrupt` produces on the interrupted
+    /// agent's row — the lifecycle half of the `.agentInterrupt` command, whose other half is the ESC the
+    /// daemon sends into the terminal.
+    ///
+    /// Spaces records this itself because no supported agent reports a cancelled turn: Codex fires no
+    /// `Stop` hook on ESC, so without this the row would keep claiming the agent is working until its
+    /// next completed turn — which for an abandoned agent never comes. This is not lifecycle inferred
+    /// from observation (which stays hook-owned); it is the transition Spaces just caused.
+    ///
+    /// The status is written through `updateAgentWindowStatus`, the same chokepoint every hook-signal
+    /// branch writes through, rather than by touching the row: the transition lands in
+    /// `agent_session_events` like any signal, and a hook arriving right after this simply wins by last
+    /// write, so an agent that *does* report the cancel is never fought.
+    ///
+    /// Only a busy row (`spinning`/`waiting`) transitions, because those are the states an interrupt
+    /// cancels: `done` is left alone so an interrupt cannot silently clear a completed turn's Alerts
+    /// attention, `exited` so it cannot resurrect a dead agent's row, and `idle` is already the outcome.
+    /// Returns the updated row, or `nil` when the terminal has no busy Spaces agent row — including the
+    /// pre-first-signal case, since an interrupt is no evidence an agent is running and must never
+    /// establish a row.
+    @discardableResult public func recordAgentInterrupt(terminalSessionID: String, notifications engine: AgentNotificationEngine) throws
+        -> AgentWindowRecord?
+    {
+        guard let match = try resolveSpacesAgentSession(terminalSessionID: terminalSessionID) else { return nil }
+        switch match.record.status {
+        case .spinning, .waiting: break
+        case .idle, .done, .exited: return nil
+        }
+        let wasBlocked = match.record.status == .waiting
+        let updated = try updateAgentWindowStatus(
+            workspaceID: match.workspaceID, provider: .spaces, terminalTrackingID: terminalSessionID, status: .idle, eventType: "interrupt",
+            eventSource: "spaces_agent_interrupt")
+        // An interrupted agent is no longer waiting on its permission prompt, so a still-held "is blocked"
+        // line for it would be misinformation by the time it lands — the same withdrawal a blocked→working
+        // resume performs.
+        if wasBlocked { try engine.childDidResumeWorking(agentSessionID: updated.id) }
+        // The interrupted terminal is back at an idle composer, so it is ready for the child events held
+        // while it was busy — the same flush a signal that leaves the row idle/done performs.
+        try engine.subscriberDidBecomeIdle(subscriberTerminalSessionID: terminalSessionID)
+        return updated
+    }
+
     @discardableResult public func restartCodingAgent(workspaceID: String, agentID: String) throws -> AgentWindowRecord {
         try withWorkspaceLifecycleLock(workspaceID: workspaceID) {
             try requireWorkspaceSetupSucceeded(workspaceID: workspaceID)

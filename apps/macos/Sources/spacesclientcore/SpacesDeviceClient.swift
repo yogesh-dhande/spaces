@@ -618,6 +618,16 @@ public enum SpacesDeviceClient {
         return response.agentSessions ?? []
     }
 
+    /// Interrupts a coding-agent session on a paired device by its child terminal session id (`spaces
+    /// agent interrupt --device`). The daemon sends the ESC and records the cancel's lifecycle transition
+    /// on the child's agent row, exactly as a local interrupt does — a bare terminal-input send would
+    /// leave that row claiming the agent is still working.
+    @discardableResult public static func interruptAgentSession(
+        sessionID: String, device: SpacesPairedDeviceRecord, clientApp: SpacesDeviceClientApp = macOSClientApp(), profile: SpacesProfile? = nil
+    ) throws -> SpacesDeviceAPIResponse {
+        try request(.init(command: .interruptAgentSession(.init(sessionID: sessionID))), device: device, clientApp: clientApp, profile: profile)
+    }
+
     /// Kills a coding-agent session on a paired device by its child terminal session id (`spaces agent
     /// kill --device`). The daemon routes through its `killAgentSession` flow, which handles both a
     /// hook-signaled child (its subscribers told it exited before the row is deleted) and a
@@ -764,7 +774,7 @@ public enum SpacesDeviceClient {
         case .pair, .ping, .daemonStatus, .requestDaemonRestart, .overview, .previewProject, .listDirectories, .workspaceCreateOptions,
             .updateProjectConfig, .updateWorkspaceConfig, .updateWorkspaceMetadata, .renameTerminalSession, .state, .terminalControl,
             .terminalPasteImage, .sendTerminalInput, .tailTerminalOutput, .resolveTerminalLink, .readTerminalLinkChunk, .subscribe,
-            .subscribeDeviceOverview, .openServiceTunnel, .listAgentSessions, .annotateAgentSession:
+            .subscribeDeviceOverview, .openServiceTunnel, .listAgentSessions, .annotateAgentSession, .interruptAgentSession:
             defaultRequestTimeoutSeconds
         }
     }

@@ -769,6 +769,12 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     private let onPairingSucceeded: (@Sendable (SpacesDeviceClientApp) -> Void)?
     private let builtInTerminalSessionTerminator: WorkspaceOrchestrator.BuiltInTerminalSessionTerminator?
     private let builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher?
+    /// Interrupts a coding-agent session by its child terminal session id: ESC into the child's terminal
+    /// plus the lifecycle transition the cancel produces. Injected for the same reason the killer is —
+    /// the flow runs on the daemon's terminal-send path and notification engine, which the server cannot
+    /// build itself. Nil only in tests or a misconfigured daemon; the handler then reports the endpoint
+    /// unavailable rather than sending a bare ESC that records nothing.
+    private let agentSessionInterrupter: (@Sendable (String) throws -> Void)?
     /// Kills a coding-agent session by its child terminal session id, returning false when the id names
     /// no agent session. Injected because the notify-then-stop flow it performs (`killAgentSession`)
     /// delivers the exited notice through the daemon-owned terminal-send path, which the server cannot
@@ -836,7 +842,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         onPairingSucceeded: (@Sendable (SpacesDeviceClientApp) -> Void)? = nil,
         builtInTerminalSessionTerminator: WorkspaceOrchestrator.BuiltInTerminalSessionTerminator? = nil,
         builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher? = nil,
-        agentSessionKiller: (@Sendable (String) throws -> Bool)? = nil, onRestartRequested: (@Sendable () -> Void)? = nil
+        agentSessionKiller: (@Sendable (String) throws -> Bool)? = nil, agentSessionInterrupter: (@Sendable (String) throws -> Void)? = nil,
+        onRestartRequested: (@Sendable () -> Void)? = nil
     ) throws {
         self.host = host
         self.port = port
@@ -845,6 +852,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         self.onPairingSucceeded = onPairingSucceeded
         self.builtInTerminalSessionTerminator = builtInTerminalSessionTerminator
         self.builtInTerminalSessionLauncher = builtInTerminalSessionLauncher
+        self.agentSessionInterrupter = agentSessionInterrupter
         self.agentSessionKiller = agentSessionKiller
         self.onRestartRequested = onRestartRequested
         overviewLoaderForTesting = nil
@@ -866,7 +874,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         networkEnvironment: [String: String] = ProcessInfo.processInfo.environment,
         builtInTerminalSessionTerminator: WorkspaceOrchestrator.BuiltInTerminalSessionTerminator? = nil,
         builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher? = nil,
-        agentSessionKiller: (@Sendable (String) throws -> Bool)? = nil, onRestartRequested: (@Sendable () -> Void)? = nil,
+        agentSessionKiller: (@Sendable (String) throws -> Bool)? = nil, agentSessionInterrupter: (@Sendable (String) throws -> Void)? = nil,
+        onRestartRequested: (@Sendable () -> Void)? = nil,
         terminalLinkTransferAuthorizationTTL: TimeInterval = SpacesDeviceAPIServer.defaultTerminalLinkTransferAuthorizationTTL,
         overviewLoaderForTesting: (@Sendable (SpacesDeviceClientApp?) throws -> SpacesDeviceOverviewPayload)? = nil,
         agentHookStatusLoader: @escaping AgentHookStatusLoader = { AgentHookInstaller.status() },
@@ -880,6 +889,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         self.onPairingSucceeded = onPairingSucceeded
         self.builtInTerminalSessionTerminator = builtInTerminalSessionTerminator
         self.builtInTerminalSessionLauncher = builtInTerminalSessionLauncher
+        self.agentSessionInterrupter = agentSessionInterrupter
         self.agentSessionKiller = agentSessionKiller
         self.onRestartRequested = onRestartRequested
         self.overviewLoaderForTesting = overviewLoaderForTesting
@@ -1224,6 +1234,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         case .spawnAgentSession(let payload): return try handleSpawnAgentSessionRequest(payload, context: context)
         case .listAgentSessions(let payload): return try handleListAgentSessionsRequest(payload, context: context)
         case .annotateAgentSession(let payload): return try handleAnnotateAgentSessionRequest(payload, context: context)
+        case .interruptAgentSession(let payload): return try handleInterruptAgentSessionRequest(payload, context: context)
         case .killAgentSession(let payload): return try handleKillAgentSessionRequest(payload, context: context)
         case .openServiceTunnel:
             // Hijacks the connection into a raw byte pipe after this response, like a subscription;
@@ -2314,6 +2325,24 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             return SpacesDeviceAPIResponse(ok: false, message: "No agent session for terminal \(sessionID).", errorCode: .invalidArgument)
         }
         return try refreshedMutationResponse(context: context, message: "Killed agent session \(sessionID).")
+    }
+
+    /// Interrupts a coding-agent session by its child terminal session id. Delegates to the injected
+    /// `agentSessionInterrupter`, which runs the daemon's local interrupt flow: ESC into the child's
+    /// terminal, then the lifecycle transition the cancel produces recorded on its agent row. A nil
+    /// interrupter means the daemon never wired the flow, so the endpoint is unavailable — reporting that
+    /// beats sending a bare ESC that leaves the row claiming the agent is still working.
+    private func handleInterruptAgentSessionRequest(_ request: SpacesDeviceInterruptAgentSessionRequest, context: RequestContext) throws
+        -> SpacesDeviceAPIResponse
+    {
+        guard let sessionID = normalizedString(request.sessionID) else {
+            return SpacesDeviceAPIResponse(ok: false, message: "sessionID is required.", errorCode: .invalidArgument)
+        }
+        guard let agentSessionInterrupter else {
+            return SpacesDeviceAPIResponse(ok: false, message: "Agent interrupt is unavailable on this daemon.", errorCode: .internalError)
+        }
+        try agentSessionInterrupter(sessionID)
+        return try refreshedMutationResponse(context: context, message: "Interrupted agent session \(sessionID).")
     }
 
     /// Maps the neutral orchestration row the daemon builds to its Device API wire shape.

@@ -1311,6 +1311,17 @@ public struct SpacesDeviceAnnotateAgentSessionRequest: Codable, Sendable, Equata
     }
 }
 
+/// Interrupts a coding-agent session on a paired device by its child terminal session id (`spaces agent
+/// interrupt --device`). Routes through the daemon's own interrupt flow, which mirrors the local
+/// `.agentInterrupt` path exactly: ESC goes into the child's terminal and the lifecycle transition the
+/// cancel produces is recorded on the child's agent row. Carries no `workspaceID` — the daemon resolves
+/// the owning workspace itself, and a caller holding only a session id could not supply one.
+public struct SpacesDeviceInterruptAgentSessionRequest: Codable, Sendable, Equatable {
+    public let sessionID: String
+
+    public init(sessionID: String) { self.sessionID = sessionID }
+}
+
 /// Kills a coding-agent session on a paired device by its child terminal session id (`spaces agent kill
 /// --device`). Routes through the daemon's `killAgentSession` flow, which mirrors the local `.agentKill`
 /// path exactly: a hook-signaled child is told it exited (its subscribers notified) before the stop
@@ -1437,6 +1448,10 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
     case listAgentSessions(SpacesDeviceListAgentSessionsRequest)
     /// Sets or clears a coding-agent session's explicit note on the daemon host.
     case annotateAgentSession(SpacesDeviceAnnotateAgentSessionRequest)
+    /// Interrupts a coding-agent session on the daemon host by its child terminal session id, the remote
+    /// counterpart of the local `.agentInterrupt` command: the daemon sends ESC into the child's terminal
+    /// and records the lifecycle transition the cancel produces.
+    case interruptAgentSession(SpacesDeviceInterruptAgentSessionRequest)
     /// Kills a coding-agent session on the daemon host by its child terminal session id, the remote
     /// counterpart of the local `.agentKill` command. Routes through the daemon's `killAgentSession`
     /// flow so a hook-signaled child's subscribers are told it exited before its row is deleted.
@@ -1492,6 +1507,7 @@ public enum SpacesDeviceAPICommand: Sendable, Equatable {
         case .spawnAgentSession: "spawnAgentSession"
         case .listAgentSessions: "listAgentSessions"
         case .annotateAgentSession: "annotateAgentSession"
+        case .interruptAgentSession: "interruptAgentSession"
         case .killAgentSession: "killAgentSession"
         case .openServiceTunnel: "openServiceTunnel"
         }
@@ -1611,6 +1627,7 @@ extension SpacesDeviceAPICommand: Codable {
         case spawnAgentSession
         case listAgentSessions
         case annotateAgentSession
+        case interruptAgentSession
         case killAgentSession
         case openServiceTunnel
     }
@@ -1683,6 +1700,7 @@ extension SpacesDeviceAPICommand: Codable {
         case .spawnAgentSession: self = .spawnAgentSession(try container.decode(SpacesDeviceSpawnAgentSessionRequest.self, forKey: key))
         case .listAgentSessions: self = .listAgentSessions(try container.decode(SpacesDeviceListAgentSessionsRequest.self, forKey: key))
         case .annotateAgentSession: self = .annotateAgentSession(try container.decode(SpacesDeviceAnnotateAgentSessionRequest.self, forKey: key))
+        case .interruptAgentSession: self = .interruptAgentSession(try container.decode(SpacesDeviceInterruptAgentSessionRequest.self, forKey: key))
         case .killAgentSession: self = .killAgentSession(try container.decode(SpacesDeviceKillAgentSessionRequest.self, forKey: key))
         case .openServiceTunnel: self = .openServiceTunnel(try container.decode(SpacesDeviceServiceTunnelRequest.self, forKey: key))
         }
@@ -1737,6 +1755,7 @@ extension SpacesDeviceAPICommand: Codable {
         case .spawnAgentSession(let payload): try container.encode(payload, forKey: .spawnAgentSession)
         case .listAgentSessions(let payload): try container.encode(payload, forKey: .listAgentSessions)
         case .annotateAgentSession(let payload): try container.encode(payload, forKey: .annotateAgentSession)
+        case .interruptAgentSession(let payload): try container.encode(payload, forKey: .interruptAgentSession)
         case .killAgentSession(let payload): try container.encode(payload, forKey: .killAgentSession)
         case .openServiceTunnel(let payload): try container.encode(payload, forKey: .openServiceTunnel)
         }

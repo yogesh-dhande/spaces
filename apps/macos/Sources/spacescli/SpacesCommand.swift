@@ -22,7 +22,7 @@ public struct SpacesCommand: ParsableCommand {
               - `workspace restart` forces a full stop and relaunch for a workspace.
               - Agent events stay explicit. Workspace runtime commands do not imply agent lifecycle. `agent signal <event>` records those lifecycle transitions for the current Spaces terminal session, or no-ops outside one.
               - `agent list`/`agent status` report coding-agent sessions with status, note, project/workspace context, and a spaces://terminal deep link. `agent annotate` sets an explicit note (empty clears it). `status`/`annotate` default the session to SPACES_TERMINAL_TRACKING_ID.
-              - `agent spawn --command <cmd>` starts a supported coding agent (claude, codex, opencode) in a new terminal and blocks until the daemon's foreground classifier detects it running (not until a hook signal — a promptless Codex never signals). It delivers no prompt — the orchestrator sends the prompt with `terminal send` and confirms work with `terminal tail`/`agent status`. It auto-subscribes the current terminal once the child has an agent row. `agent interrupt <session>` sends ESC, `agent kill <session>` terminates the session, and `agent subscribe`/`unsubscribe <session>` record a watch edge (subscriber defaults to SPACES_TERMINAL_TRACKING_ID).
+              - `agent spawn --command <cmd>` starts a supported coding agent (claude, codex, opencode) in a new terminal and blocks until the daemon's foreground classifier detects it running (not until a hook signal — a promptless Codex never signals). It delivers no prompt — the orchestrator sends the prompt with `terminal send` and confirms work with `terminal tail`/`agent status`. It auto-subscribes the current terminal once the child has an agent row. `agent interrupt <session>` sends ESC and records the interrupted agent idle, `agent kill <session>` terminates the session, and `agent subscribe`/`unsubscribe <session>` record a watch edge (subscriber defaults to SPACES_TERMINAL_TRACKING_ID).
               - `agent spawn`/`list`/`status`/`annotate`/`interrupt`/`kill`/`subscribe`/`unsubscribe` accept `--device <name-or-id>` to act on a paired device; remote `spawn` requires `--workspace`, auto-subscribes the current terminal to the remote child, and remote `kill` works before the child signals (it terminates the session directly when no agent row exists yet). `agent subscribe --device` records a cross-device watch: the current terminal receives the same blocked/done/exited notification lines for the remote child, delivered by this machine's daemon (device-qualified deep links). A `--device` naming this machine is validated like a local watch (self-edges and subscription cycles are rejected); cross-device cycles to a remote device cannot be detected (the remote's own subscriptions are not queryable locally).
             """, version: AppVersion.current,
         subcommands: [
@@ -584,7 +584,7 @@ func agentSpawnResultLine(_ result: AgentSpawnResult) -> String {
 
 struct AgentInterruptCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
-        commandName: "interrupt", abstract: "Interrupt a coding-agent session by sending ESC to its terminal.")
+        commandName: "interrupt", abstract: "Interrupt a coding-agent session by sending ESC to its terminal and record it idle.")
 
     @Argument(help: "Child terminal session ID to interrupt.") var session: String
     @Option(name: .long, help: "Paired device name or ID. Defaults to this machine's local sessions.") var device: String?
@@ -593,13 +593,14 @@ struct AgentInterruptCommand: ParsableCommand {
         let context = CLIContext()
         if let device {
             let record = try SpacesPairedDeviceSelection.resolve(device)
-            _ = try SpacesDeviceClient.sendTerminalInput(
-                sessionID: session, bytes: Data([27]), appendNewline: false, device: record, clientApp: cliDeviceClientApp())
+            _ = try SpacesDeviceClient.interruptAgentSession(sessionID: session, device: record, clientApp: cliDeviceClientApp())
             context.output.emit("Interrupted agent session \(session) on \(record.name).")
             return
         }
-        _ = try TerminalService.sendProfileCommand(
-            .terminalSend(.init(sessionID: session, input: .bytes(Data([27])), appendNewline: false)), timeout: 5)
+        // One daemon command rather than a bare ESC send: the daemon also records the lifecycle
+        // transition the cancel produces, which needs the agent row and owning workspace the CLI has no
+        // way to resolve from a terminal session id.
+        _ = try TerminalService.sendProfileCommand(.agentInterrupt(.init(sessionID: session)), timeout: 5)
         context.output.emit("Interrupted agent session \(session).")
     }
 }

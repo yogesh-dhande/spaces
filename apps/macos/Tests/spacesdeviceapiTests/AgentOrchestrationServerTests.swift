@@ -77,6 +77,49 @@
             }
         }
 
+        /// An `interruptAgentSession` request invokes the injected interrupter (the daemon's local
+        /// interrupt flow: ESC plus the recorded lifecycle transition) with the child session id. The
+        /// server does not re-implement the interrupt; the transition it records is covered at the
+        /// orchestrator level by AgentInterruptTests.
+        func testInterruptAgentSessionInvokesInterrupterAndReportsSuccess() throws {
+            try withTemporaryProfile { _ in
+                let interrupter = AgentSessionInterrupterRecorder()
+                let (server, client, clientApp, token) = try startServerAndClient(agentSessionInterrupter: { interrupter.record($0) })
+                defer {
+                    client.cancel()
+                    server.stop()
+                }
+
+                let response = try client.send(
+                    SpacesDeviceAPIRequest(command: .interruptAgentSession(.init(sessionID: "child-session")), authToken: token, clientApp: clientApp)
+                )
+
+                XCTAssertTrue(response.ok, response.message)
+                XCTAssertTrue(response.message.contains("Interrupted agent session"), response.message)
+                XCTAssertEqual(interrupter.sessionIDs(), ["child-session"])
+            }
+        }
+
+        /// With no interrupter wired (a misconfigured daemon), the endpoint reports itself unavailable
+        /// rather than sending a bare ESC that records no lifecycle transition.
+        func testInterruptAgentSessionReportsUnavailableWhenNoInterrupterWired() throws {
+            try withTemporaryProfile { _ in
+                let (server, client, clientApp, token) = try startServerAndClient()
+                defer {
+                    client.cancel()
+                    server.stop()
+                }
+
+                let response = try client.send(
+                    SpacesDeviceAPIRequest(command: .interruptAgentSession(.init(sessionID: "child-session")), authToken: token, clientApp: clientApp)
+                )
+
+                XCTAssertFalse(response.ok)
+                XCTAssertEqual(response.errorCode, .internalError)
+                XCTAssertTrue(response.message.contains("unavailable"), response.message)
+            }
+        }
+
         /// A `killAgentSession` request invokes the injected killer (the daemon's notify-then-stop
         /// `killAgentSession` flow) with the child session id and, on a true return, reports success. The
         /// server does not re-implement the kill; the notify-before-delete ordering it depends on is
@@ -165,13 +208,14 @@
             return agent
         }
 
-        private func startServerAndClient(agentSessionKiller: (@Sendable (String) throws -> Bool)? = nil) throws -> (
-            server: SpacesDeviceAPIServer, client: SpacesDeviceAPIRequestSessionClient, clientApp: SpacesDeviceClientApp, token: String
-        ) {
+        private func startServerAndClient(
+            agentSessionKiller: (@Sendable (String) throws -> Bool)? = nil, agentSessionInterrupter: (@Sendable (String) throws -> Void)? = nil
+        ) throws -> (server: SpacesDeviceAPIServer, client: SpacesDeviceAPIRequestSessionClient, clientApp: SpacesDeviceClientApp, token: String) {
             let identity = try agentOrchestrationTestTLSIdentity()
             let pairingStore = AlwaysAuthorizedAgentOrchestrationPairingStore()
             let server = SpacesDeviceAPIServer(
-                host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore, agentSessionKiller: agentSessionKiller)
+                host: "127.0.0.1", port: 0, identity: identity, pairingStoreProtocol: pairingStore, agentSessionKiller: agentSessionKiller,
+                agentSessionInterrupter: agentSessionInterrupter)
             try server.start()
             let client = try SpacesDeviceAPIRequestSessionClient(
                 host: "127.0.0.1", port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint)
@@ -209,6 +253,26 @@
 
         private func agentOrchestrationTestTLSIdentity() throws -> TerminalServiceTLSIdentity {
             try TerminalServiceTLSIdentityStore.loadOrCreate(root: agentOrchestrationTestTLSRoot)
+        }
+    }
+
+    /// Records the session ids the server's injected agent-session interrupter is invoked with, standing
+    /// in for the daemon's ESC-then-record interrupt flow. The closure is `@Sendable` and runs on the
+    /// server queue, so access is lock-guarded.
+    private final class AgentSessionInterrupterRecorder: @unchecked Sendable {
+        private let lock = NSLock()
+        private var ids: [String] = []
+
+        func record(_ sessionID: String) {
+            lock.lock()
+            defer { lock.unlock() }
+            ids.append(sessionID)
+        }
+
+        func sessionIDs() -> [String] {
+            lock.lock()
+            defer { lock.unlock() }
+            return ids
         }
     }
 

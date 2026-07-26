@@ -344,7 +344,9 @@ final class SpacesMCPStdioServer {
                             deviceID: result.deviceID, subscribed: result.subscribed, open: result.open)))
             },
             MCPToolDescriptor(
-                name: "spaces_agent_interrupt", description: "Interrupt a coding-agent session by sending ESC to its terminal.",
+                name: "spaces_agent_interrupt",
+                description:
+                    "Interrupt a coding-agent session by sending ESC to its terminal. The cancelled turn leaves the agent at an idle prompt, which Spaces records as its status, so a following spaces_agent_status reports it idle rather than still working.",
                 properties: [
                     "session": stringSchema("Child terminal session ID to interrupt."),
                     "device": stringSchema("Paired device name or ID. Defaults to this machine."),
@@ -352,13 +354,12 @@ final class SpacesMCPStdioServer {
             ) { server, arguments in
                 let sessionID = try server.requiredString(arguments["session"], field: "session")
                 if let device = try server.resolvedDevice(arguments) {
-                    let response = try SpacesDeviceClient.sendTerminalInput(
-                        sessionID: sessionID, bytes: Data([27]), appendNewline: false, device: device, clientApp: cliDeviceClientApp())
+                    let response = try SpacesDeviceClient.interruptAgentSession(sessionID: sessionID, device: device, clientApp: cliDeviceClientApp())
                     return .profile(TerminalServiceProfileCommandResponse(message: response.message))
                 }
-                return .profile(
-                    try TerminalService.sendProfileCommand(
-                        .terminalSend(.init(sessionID: sessionID, input: .bytes(Data([27])), appendNewline: false)), timeout: 5))
+                // The daemon command sends the ESC and records the cancel's lifecycle transition; a bare
+                // terminal send would leave the row claiming the agent is still working.
+                return .profile(try TerminalService.sendProfileCommand(.agentInterrupt(.init(sessionID: sessionID)), timeout: 5))
             },
             MCPToolDescriptor(
                 name: "spaces_agent_kill", description: "Terminate a coding-agent session and its terminal.",
