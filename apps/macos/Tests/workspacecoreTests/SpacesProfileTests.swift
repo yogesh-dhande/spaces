@@ -153,6 +153,32 @@ final class SpacesProfileTests: XCTestCase {
         XCTAssertTrue(sessionPaths.rootDirectory.hasPrefix(runtimePath + "/terminal/sessions/"))
     }
 
+    /// `HOME` decides where every non-explicit profile's root lives, so it is one of the inputs the
+    /// cached profile is keyed on. A cache that missed a `HOME` change would keep handing out paths
+    /// under the previous home for the rest of the process's life.
+    func testCurrentProfileFollowsHomeChangeAfterCacheWarmup() throws {
+        _ = installHermeticGitEnvironment
+        let firstHome = tempHomeURL.appendingPathComponent("home-a", isDirectory: true)
+        let secondHome = tempHomeURL.appendingPathComponent("home-b", isDirectory: true)
+        try FileManager.default.createDirectory(at: firstHome, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: secondHome, withIntermediateDirectories: true)
+
+        try withEnvironmentValues([
+            SpacesProfile.databasePathEnvironmentVariable: nil, SpacesProfile.runtimeDirectoryEnvironmentVariable: nil, "HOME": firstHome.path,
+        ]) {
+            SpacesProfile.resetCacheForTesting()
+            defer { SpacesProfile.resetCacheForTesting() }
+
+            let warmed = try SpacesProfile.current()
+            XCTAssertTrue(warmed.rootDirectory.hasPrefix(firstHome.path), "Expected \(warmed.rootDirectory) under \(firstHome.path).")
+
+            setenv("HOME", secondHome.path, 1)
+            let updated = try SpacesProfile.current()
+            XCTAssertTrue(updated.rootDirectory.hasPrefix(secondHome.path), "Expected \(updated.rootDirectory) under \(secondHome.path).")
+            XCTAssertEqual(try DatabaseLocator.defaultPath(), updated.databasePath)
+        }
+    }
+
     func testProfileAppOwnerLeaseRejectsDuplicateLaunches() throws {
         let profile = try explicitProfile(named: "duplicate")
         let first = try SpacesLeaseCoordinator.acquireProfileAppOwnerLease(profile: profile)
