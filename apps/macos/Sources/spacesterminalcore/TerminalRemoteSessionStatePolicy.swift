@@ -1,8 +1,11 @@
 import Foundation
 
+/// Every `reason` a session core stamps on a broadcast remote-state payload. Subscribers
+/// route on these, so a core must never broadcast a reason that is not declared here.
 public enum TerminalRemoteSessionStateReason {
     public static let initial = "initial"
     public static let attachmentState = "attachment_state"
+    public static let sessionMetadata = "session_metadata"
     public static let input = "input"
     public static let inputOutput = "input_output"
     public static let output = "output"

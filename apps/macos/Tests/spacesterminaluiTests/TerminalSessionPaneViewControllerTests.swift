@@ -2817,6 +2817,303 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         XCTAssertEqual(controller.debugState, "state: running    child: 2222")
     }
 
+    /// Posts the local notifications a state-stream payload with `reason` fans out to.
+    @MainActor private func postStateStreamNotifications(reason: String, sessionID: String) {
+        for name in TerminalRemoteSessionStateNotificationRouting.notifications(forReason: reason) {
+            TerminalSessionNotification.post(name, sessionID: sessionID)
+        }
+    }
+
+    /// Reasons the daemon broadcasts for screen content, at interaction frequency.
+    private static let screenContentStateReasons = [
+        TerminalRemoteSessionStateReason.output, TerminalRemoteSessionStateReason.input, TerminalRemoteSessionStateReason.inputOutput,
+        TerminalRemoteSessionStateReason.stateChange, TerminalRemoteSessionStateReason.scroll, TerminalRemoteSessionStateReason.clearScreen,
+        TerminalRemoteSessionStateReason.resize,
+    ]
+
+    /// A pane showing a live Ghostty mirror has already painted whatever a screen-content payload
+    /// describes, so those payloads must not re-derive the pane's state — only a state-shaped
+    /// reason does. Typing, scrolling, and resizing all emit the screen-content reasons.
+    @MainActor func testLiveGhosttyMirrorPaneSkipsRefreshForScreenContentStateReasons() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let sessionID = "session-screen-content-live"
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: sessionID, backend: .ghosttyEmbedded, title: "mirror", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
+                createdAt: "2026-05-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 1111, state: .running, updatedAt: "2026-05-09T00:00:01Z"),
+            paths: paths)
+
+        let controller = makeGhosttyController(sessionID: sessionID, paths: paths)
+        let owner = TerminalClient(
+            id: controller.clientID, kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
+            connectedAt: "2026-05-09T00:00:00Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: sessionID, client: owner, mode: .owner, paths: paths, attachedAt: "2026-05-09T00:00:00Z")
+        controller.debugForceRefresh()
+        XCTAssertEqual(controller.visibleRenderer, .ghosttyOwner)
+        XCTAssertEqual(controller.debugState, "state: running    child: 1111")
+
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 2222, state: .running, updatedAt: "2026-05-09T00:00:02Z"),
+            paths: paths)
+        for reason in Self.screenContentStateReasons { postStateStreamNotifications(reason: reason, sessionID: sessionID) }
+
+        XCTAssertEqual(controller.debugState, "state: running    child: 1111")
+
+        // The state-shaped reason still refreshes, so the assertion above cannot pass by the
+        // notifications simply never being delivered.
+        postStateStreamNotifications(reason: TerminalRemoteSessionStateReason.runtimeState, sessionID: sessionID)
+
+        XCTAssertEqual(controller.debugState, "state: running    child: 2222")
+    }
+
+    /// A pane with no live mirror — an ended session's frozen final render — has no other way to
+    /// pick a payload up, so it keeps refreshing on the screen-content reasons.
+    @MainActor func testEndedFinalRenderPaneRefreshesOnScreenContentStateReasons() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sessionID = "session-screen-content-ended"
+        let controller = try makeBannerController(sessionID: sessionID, state: .exited, root: root)
+        XCTAssertEqual(controller.visibleRenderer, .ghosttyEndedFinalRender)
+        XCTAssertTrue(controller.debugState.contains("child: 22"))
+
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 33, state: .exited, updatedAt: "2026-05-09T00:00:05Z"),
+            paths: paths)
+        postStateStreamNotifications(reason: TerminalRemoteSessionStateReason.output, sessionID: sessionID)
+
+        XCTAssertTrue(controller.debugState.contains("child: 33"))
+    }
+
+    /// A pane preparing its owner surface is waiting for a first frame. That frame arrives under a
+    /// screen-content reason — the catch-up `.state` response a live session stamps `state_change` —
+    /// and only a refresh re-resolves the renderer onto the mirror, so the pane must not skip it or
+    /// it sits on the preparing UI with the frame painted into a hidden view.
+    @MainActor func testPreparingOwnerPanePresentsMirrorWhenFirstFrameArrivesUnderStateChange() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let sessionID = "session-first-frame-preparing"
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: sessionID, backend: .ghosttyEmbedded, title: "mirror", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
+                createdAt: "2026-05-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 1111, state: .running, updatedAt: "2026-05-09T00:00:01Z"),
+            paths: paths)
+
+        let host = FakeGhosttySessionHost()
+        host.hasSurface = false
+        let controller = makeGhosttyController(sessionID: sessionID, paths: paths, host: host)
+        let owner = TerminalClient(
+            id: controller.clientID, kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
+            connectedAt: "2026-05-09T00:00:00Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: sessionID, client: owner, mode: .owner, paths: paths, attachedAt: "2026-05-09T00:00:00Z")
+        controller.debugForceRefresh()
+        XCTAssertEqual(controller.visibleRenderer, .ghosttyTakeoverStatus)
+        XCTAssertFalse(controller.debugShowsTerminalSurface)
+
+        // The mirror applied the catch-up frame, so the host now has a renderable surface.
+        host.hasSurface = true
+        host.snapshotValue = ghosttySnapshot()
+        postStateStreamNotifications(reason: TerminalRemoteSessionStateReason.stateChange, sessionID: sessionID)
+
+        XCTAssertEqual(controller.visibleRenderer, .ghosttyOwner)
+        XCTAssertTrue(controller.debugShowsTerminalSurface)
+    }
+
+    /// A pane that found no render state for an ended session shows "render unavailable" until the
+    /// final frame reaches it, which is the same screen-content-reason payload — so it must refresh
+    /// on that reason too rather than stay on the unavailable message.
+    @MainActor func testUnavailablePanePresentsFinalRenderWhenFrameArrivesUnderStateChange() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let sessionID = "session-first-frame-unavailable"
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: sessionID, backend: .ghosttyEmbedded, title: "mirror", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
+                createdAt: "2026-05-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(
+                sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 1111, state: .exited, updatedAt: "2026-05-09T00:00:01Z",
+                exitedAt: "2026-05-09T00:00:01Z"), paths: paths)
+
+        let host = FakeGhosttySessionHost()
+        host.hasSurface = false
+        let controller = makeGhosttyController(sessionID: sessionID, paths: paths, host: host)
+        controller.debugForceRefresh()
+        XCTAssertEqual(controller.visibleRenderer, .unavailable)
+        XCTAssertEqual(controller.debugRenderedOutput, "Terminal render unavailable.")
+
+        // The catch-up payload delivers the session's final render as a host snapshot. The pane
+        // holds no renderable surface of its own at this point — it has never mounted the mirror for
+        // this ended session — so the snapshot, not surface availability, is what promotes it.
+        host.snapshotValue = ghosttySnapshot(text: "final output")
+        postStateStreamNotifications(reason: TerminalRemoteSessionStateReason.stateChange, sessionID: sessionID)
+
+        XCTAssertEqual(controller.visibleRenderer, .ghosttyEndedFinalRender)
+        XCTAssertTrue(controller.debugShowsTerminalSurface)
+    }
+
+    /// A viewer pane watching a session another client owns presents no session content: a mostly
+    /// blank pane behind a Take Over button. A chatty session's payloads therefore have nothing for
+    /// it to re-present, and each refresh they would cost re-resolves attachment and ownership and
+    /// re-derives every title in the panel.
+    @MainActor func testViewerPaneDoesNotRefreshForScreenContentWhileSurfaceAvailabilityIsUnchanged() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let sessionID = "session-screen-content-viewer"
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: sessionID, backend: .ghosttyEmbedded, title: "viewer", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
+                createdAt: "2026-05-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 22, state: .running, updatedAt: "2026-05-09T00:00:01Z"),
+            paths: paths)
+        let owner = TerminalClient(
+            id: "owner-client", kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
+            connectedAt: "2026-05-09T00:00:00Z")
+        try TerminalSessionPersistence.upsertClient(owner, paths: paths)
+        try TerminalSessionPersistence.attachClient(
+            sessionID: sessionID, client: owner, mode: .owner, paths: paths, attachedAt: "2026-05-09T00:00:00Z")
+
+        let controller = makeGhosttyController(
+            sessionID: sessionID, paths: paths, preferredAttachmentMode: .viewer, attachClientAction: { _, _ in }, detachClientAction: { _ in })
+        XCTAssertEqual(controller.visibleRenderer, .ghosttyTakeoverStatus)
+
+        // Every refresh re-derives the pane's display title, so counting that callback counts
+        // refreshes.
+        var refreshCount = 0
+        controller.onDisplayTitleChanged = { _, _ in refreshCount += 1 }
+        for _ in 0..<3 { for reason in Self.screenContentStateReasons { postStateStreamNotifications(reason: reason, sessionID: sessionID) } }
+
+        XCTAssertEqual(refreshCount, 0)
+
+        // The notifications are delivered — a state-shaped reason still refreshes the pane.
+        postStateStreamNotifications(reason: TerminalRemoteSessionStateReason.runtimeState, sessionID: sessionID)
+
+        XCTAssertEqual(refreshCount, 1)
+    }
+
+    /// The one screen-content change a pane on the takeover screen can present is its surface
+    /// becoming renderable, which promotes it to the live mirror. It refreshes once on that flip and
+    /// then goes quiet again behind the live-mirror guard, however many payloads follow.
+    @MainActor func testTakeoverStatusPaneRefreshesOnceWhenSurfaceBecomesRenderable() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let sessionID = "session-screen-content-flip"
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: sessionID, backend: .ghosttyEmbedded, title: "mirror", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
+                createdAt: "2026-05-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 1111, state: .running, updatedAt: "2026-05-09T00:00:01Z"),
+            paths: paths)
+
+        let host = FakeGhosttySessionHost()
+        host.hasSurface = false
+        let controller = makeGhosttyController(sessionID: sessionID, paths: paths, host: host)
+        let owner = TerminalClient(
+            id: controller.clientID, kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
+            connectedAt: "2026-05-09T00:00:00Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: sessionID, client: owner, mode: .owner, paths: paths, attachedAt: "2026-05-09T00:00:00Z")
+        controller.debugForceRefresh()
+        XCTAssertEqual(controller.visibleRenderer, .ghosttyTakeoverStatus)
+
+        var refreshCount = 0
+        controller.onDisplayTitleChanged = { _, _ in refreshCount += 1 }
+        for reason in Self.screenContentStateReasons { postStateStreamNotifications(reason: reason, sessionID: sessionID) }
+        XCTAssertEqual(refreshCount, 0)
+
+        host.hasSurface = true
+        host.snapshotValue = ghosttySnapshot()
+        for reason in Self.screenContentStateReasons { postStateStreamNotifications(reason: reason, sessionID: sessionID) }
+
+        XCTAssertEqual(controller.visibleRenderer, .ghosttyOwner)
+        XCTAssertTrue(controller.debugShowsTerminalSurface)
+        XCTAssertEqual(refreshCount, 1)
+    }
+
+    /// The surface availability a skip is measured against is recorded by every refresh, so it
+    /// follows the pane through ownership changes instead of describing a renderer the pane left.
+    /// A pane demoted from the live mirror goes quiet on the takeover screen, and when it wins
+    /// ownership back its first frame still promotes it — which it would not if the availability it
+    /// compares against were the one it recorded while it held the mirror.
+    @MainActor func testDemotedPaneGoesQuietThenPresentsMirrorAgainWhenOwnershipReturns() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let sessionID = "session-screen-content-demotion"
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            .init(
+                sessionID: sessionID, backend: .ghosttyEmbedded, title: "mirror", workingDirectory: "/tmp/work", shell: "/bin/zsh", command: "cat",
+                createdAt: "2026-05-09T00:00:00Z", workspaceID: "workspace-1", kind: .shell), paths: paths)
+        try TerminalSessionPersistence.writeRuntimeState(
+            .init(sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 1, childPID: 1111, state: .running, updatedAt: "2026-05-09T00:00:01Z"),
+            paths: paths)
+
+        let host = FakeGhosttySessionHost()
+        host.snapshotValue = ghosttySnapshot()
+        let controller = makeGhosttyController(sessionID: sessionID, paths: paths, host: host)
+        let owner = TerminalClient(
+            id: controller.clientID, kind: .localWindow, identity: .init(label: "Spaces window", hostName: "mac", deviceName: "Owner Mac"),
+            connectedAt: "2026-05-09T00:00:00Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: sessionID, client: owner, mode: .owner, paths: paths, attachedAt: "2026-05-09T00:00:00Z")
+        controller.debugForceRefresh()
+        XCTAssertEqual(controller.visibleRenderer, .ghosttyOwner)
+
+        // Another client takes the session over. Demotion releases the pane's renderer surface.
+        let otherClient = TerminalClient(id: "other-owner", kind: .remoteViewer, identity: .init(label: "iPad"), connectedAt: "2026-05-09T00:00:02Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: sessionID, client: otherClient, mode: .viewer, paths: paths, attachedAt: "2026-05-09T00:00:02Z")
+        try TerminalSessionPersistence.transferOwnership(
+            sessionID: sessionID, newOwnerClientID: otherClient.id, paths: paths, transferredAt: "2026-05-09T00:00:03Z")
+        host.hasSurface = false
+        controller.debugForceRefresh()
+        XCTAssertEqual(controller.visibleRenderer, .ghosttyTakeoverStatus)
+
+        var refreshCount = 0
+        controller.onDisplayTitleChanged = { _, _ in refreshCount += 1 }
+        for reason in Self.screenContentStateReasons { postStateStreamNotifications(reason: reason, sessionID: sessionID) }
+        XCTAssertEqual(refreshCount, 0)
+
+        // Ownership comes back and the mirror repaints its first frame.
+        try TerminalSessionPersistence.transferOwnership(
+            sessionID: sessionID, newOwnerClientID: controller.clientID, paths: paths, transferredAt: "2026-05-09T00:00:04Z")
+        controller.debugForceRefresh()
+        XCTAssertEqual(controller.visibleRenderer, .ghosttyTakeoverStatus)
+
+        refreshCount = 0
+        host.hasSurface = true
+        postStateStreamNotifications(reason: TerminalRemoteSessionStateReason.stateChange, sessionID: sessionID)
+
+        XCTAssertEqual(controller.visibleRenderer, .ghosttyOwner)
+        XCTAssertEqual(refreshCount, 1)
+    }
+
     @MainActor func testGhosttyViewerTakeoverStatusIgnoresOutputNotificationsWithoutOwnership() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -3241,7 +3538,8 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
         @discardableResult func sendTextAsPaste(_ text: String) -> Bool { false }
         @discardableResult func performBindingAction(_ action: String) -> Bool { false }
         @discardableResult func sendScroll(horizontal: CGFloat, vertical: CGFloat, scrollMods: Int32, pointerPosition: TerminalScrollPointerPosition?)
-            -> Bool { false }
+            -> Bool
+        { false }
         @discardableResult func clearScreenAndScrollback() -> Bool { false }
         var debugSearchState: GhosttyTerminalSearchDebugState {
             GhosttyTerminalSearchDebugState(isVisible: false, query: "", total: nil, selected: nil)
@@ -3270,11 +3568,11 @@ final class TerminalSessionPaneViewControllerTests: XCTestCase {
             paths: paths)
         let host = DeinitTrackingGhosttySessionHost(recorder: recorder)
         let controller = makeGhosttyController(
-            sessionID: sessionID, paths: paths, preferredAttachmentMode: .owner, performInitialRefresh: false,
-            sessionHostProvider: { _, _ in host })
+            sessionID: sessionID, paths: paths, preferredAttachmentMode: .owner, performInitialRefresh: false, sessionHostProvider: { _, _ in host })
         let owner = TerminalClient(
             id: controller.clientID, kind: .localWindow, identity: .init(label: "Spaces window"), connectedAt: "2026-07-23T00:00:00Z")
-        try TerminalSessionPersistence.attachClient(sessionID: sessionID, client: owner, mode: .owner, paths: paths, attachedAt: "2026-07-23T00:00:00Z")
+        try TerminalSessionPersistence.attachClient(
+            sessionID: sessionID, client: owner, mode: .owner, paths: paths, attachedAt: "2026-07-23T00:00:00Z")
         controller.debugForceRefresh()
         return controller
     }

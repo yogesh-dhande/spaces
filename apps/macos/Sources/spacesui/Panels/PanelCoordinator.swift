@@ -28,6 +28,10 @@ import spacesterminalcore
     private var contentPreparationTasks: [String: Task<Void, Never>] = [:]
     /// Window shells for materialized global panels, keyed by panel window id.
     private var panelWindows: [String: PanelWindowController] = [:]
+    /// Runtime-target titles resolved during the current title pass (see
+    /// `withRuntimeTargetTitlePass`), keyed by workspace id then session id. Empty outside a pass.
+    private var runtimeTargetTitlesByWorkspaceID: [String: [String: String]] = [:]
+    private var runtimeTargetTitlePassDepth = 0
     /// Persistence hook, wired to the client database; called after every layout change.
     var onLayoutChanged: ((PanelScope, PanelLayout) -> Void)?
 
@@ -604,19 +608,23 @@ import spacesterminalcore
     /// fast path calls this on overview ticks: those can rename runtime targets without
     /// mutating the layout, so nothing else would re-derive the tab strip titles.
     func refreshTabTitles(scope: PanelScope) {
-        guard let state = panels[scope], let view = state.view else { return }
-        for tab in state.layout.tabs { view.updateTabTitle(tabTitle(forTabID: tab.id, in: state.layout), forTabID: tab.id) }
-        syncPaneAccessibilityTitles(scope: scope)
-        syncPanelWindowTitle(scope: scope)
-        syncFocusedPaneFooter(scope: scope)
+        withRuntimeTargetTitlePass {
+            guard let state = panels[scope], let view = state.view else { return }
+            for tab in state.layout.tabs { view.updateTabTitle(tabTitle(forTabID: tab.id, in: state.layout), forTabID: tab.id) }
+            syncPaneAccessibilityTitles(scope: scope)
+            syncPanelWindowTitle(scope: scope)
+            syncFocusedPaneFooter(scope: scope)
+        }
     }
 
     private func refreshTabTitles(forSessionID sessionID: String?) {
-        guard let sessionID, let placement = placement(forSessionID: sessionID), let view = panels[placement.scope]?.view else { return }
-        view.updateTabTitle(tabTitle(forTabID: placement.tabID, in: layout(for: placement.scope)), forTabID: placement.tabID)
-        syncPaneAccessibilityTitles(scope: placement.scope)
-        syncPanelWindowTitle(scope: placement.scope)
-        syncFocusedPaneFooter(scope: placement.scope)
+        withRuntimeTargetTitlePass {
+            guard let sessionID, let placement = placement(forSessionID: sessionID), let view = panels[placement.scope]?.view else { return }
+            view.updateTabTitle(tabTitle(forTabID: placement.tabID, in: layout(for: placement.scope)), forTabID: placement.tabID)
+            syncPaneAccessibilityTitles(scope: placement.scope)
+            syncPanelWindowTitle(scope: placement.scope)
+            syncFocusedPaneFooter(scope: placement.scope)
+        }
     }
 
     /// Publishes each pane's resolved title onto its content view's accessibility label
@@ -640,11 +648,13 @@ import spacesterminalcore
 
     /// The focused pane's identity for a workspace panel (footer display).
     func focusedPaneInfo(deviceID: String, workspaceID: String) -> (paneID: String, title: String)? {
-        let layout = layout(for: .workspace(deviceID: deviceID, workspaceID: workspaceID))
-        guard let paneID = layout.focusedPaneID, let pane = PanelLayoutEngine.pane(withID: paneID, in: layout),
-            let sessionID = pane.content.terminalSessionID
-        else { return nil }
-        return (paneID, contentTitle(forSessionID: sessionID))
+        withRuntimeTargetTitlePass {
+            let layout = layout(for: .workspace(deviceID: deviceID, workspaceID: workspaceID))
+            guard let paneID = layout.focusedPaneID, let pane = PanelLayoutEngine.pane(withID: paneID, in: layout),
+                let sessionID = pane.content.terminalSessionID
+            else { return nil }
+            return (paneID, contentTitle(forSessionID: sessionID))
+        }
     }
 
     /// Closes a panel's focused pane (the ⌘W behavior — the last pane of a tab takes
@@ -670,7 +680,31 @@ import spacesterminalcore
     /// title.
     private func contentTitle(forSessionID sessionID: String) -> String {
         guard let content = contentControllers[sessionID] else { return "Terminal" }
-        return host.runtimeTargetTitle(forSessionID: sessionID, workspaceID: content.workspaceID) ?? content.displayTitle
+        return runtimeTargetTitle(forSessionID: sessionID, workspaceID: content.workspaceID) ?? content.displayTitle
+    }
+
+    /// Runs one title pass with a shared runtime-target title lookup. Resolving a workspace's
+    /// runtime-target titles rebuilds its whole ordered target list, and a single pass resolves a
+    /// title for every tab, every pane's accessibility label, and the focused-pane footer — so
+    /// without sharing, one pass rebuilds that list once per session in the panel. Passes nest (the
+    /// footer sync re-enters through the host), and the lookup is dropped when the outermost pass
+    /// ends: a pass is synchronous, so it cannot straddle an overview update and serve a stale title.
+    private func withRuntimeTargetTitlePass<T>(_ body: () -> T) -> T {
+        runtimeTargetTitlePassDepth += 1
+        defer {
+            runtimeTargetTitlePassDepth -= 1
+            if runtimeTargetTitlePassDepth == 0 { runtimeTargetTitlesByWorkspaceID.removeAll() }
+        }
+        return body()
+    }
+
+    private func runtimeTargetTitle(forSessionID sessionID: String, workspaceID: String) -> String? {
+        if let titles = runtimeTargetTitlesByWorkspaceID[workspaceID] { return titles[sessionID] }
+        let titles = host.runtimeTargetTitlesBySessionID(workspaceID: workspaceID)
+        // Only a pass may retain a lookup: outside one nothing would ever drop it, and the next
+        // read would answer from a map built before an overview update.
+        if runtimeTargetTitlePassDepth > 0 { runtimeTargetTitlesByWorkspaceID[workspaceID] = titles }
+        return titles[sessionID]
     }
 
     // MARK: - Rendering / persistence
@@ -699,12 +733,14 @@ import spacesterminalcore
     }
 
     private func render(scope: PanelScope) {
-        guard let state = panels[scope], let view = state.view else { return }
-        var titles: [String: String] = [:]
-        for tab in state.layout.tabs { titles[tab.id] = tabTitle(forTabID: tab.id, in: state.layout) }
-        view.apply(layout: state.layout, titlesByTabID: titles, newTabShortcutHint: host.footerShortcutHint(for: .guiOpenTerminalShortcut))
-        syncPaneAccessibilityTitles(scope: scope)
-        syncPanelWindowTitle(scope: scope)
-        syncFocusedPaneFooter(scope: scope)
+        withRuntimeTargetTitlePass {
+            guard let state = panels[scope], let view = state.view else { return }
+            var titles: [String: String] = [:]
+            for tab in state.layout.tabs { titles[tab.id] = tabTitle(forTabID: tab.id, in: state.layout) }
+            view.apply(layout: state.layout, titlesByTabID: titles, newTabShortcutHint: host.footerShortcutHint(for: .guiOpenTerminalShortcut))
+            syncPaneAccessibilityTitles(scope: scope)
+            syncPanelWindowTitle(scope: scope)
+            syncFocusedPaneFooter(scope: scope)
+        }
     }
 }
