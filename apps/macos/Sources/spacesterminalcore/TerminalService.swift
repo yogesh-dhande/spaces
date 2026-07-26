@@ -149,7 +149,7 @@ import Foundation
                 }
             }
 
-            let executableURL = try resolveExecutableURL()
+            let executableURL = try resolveExecutableURL(profile: SpacesProfile.current())
             let process = Process()
             process.executableURL = executableURL
             process.environment = ProcessInfo.processInfo.environment
@@ -304,8 +304,7 @@ import Foundation
             let candidates = ["/usr/sbin/lsof", "/usr/bin/lsof"]
             guard let executablePath = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else { return [] }
             guard
-                let result = capturedStandardOutput(
-                    executableURL: URL(fileURLWithPath: executablePath), arguments: ["-nP", "-U"], timeout: timeout),
+                let result = capturedStandardOutput(executableURL: URL(fileURLWithPath: executablePath), arguments: ["-nP", "-U"], timeout: timeout),
                 result.terminationStatus == 0
             else { return nil }
             return parseSocketOwnerProcessIDs(String(decoding: result.output, as: UTF8.self), socketPath: socketPath)
@@ -466,9 +465,38 @@ import Foundation
             }
         }
 
-        static func resolveExecutableURL(environment: [String: String] = ProcessInfo.processInfo.environment, fileManager: FileManager = .default)
-            throws -> URL
-        {
+        /// Resolves the `spacesd` binary a client of `profile` should launch.
+        ///
+        /// A profile is only ever served by a daemon that belongs to the build asking for it, so the
+        /// candidate list is split by where a candidate comes from:
+        ///
+        /// - `SPACESD_EXECUTABLE` wins for every profile. It names one binary outright, which makes it a
+        ///   deliberate choice rather than a silent substitution, and the terminal E2E scripts pin their
+        ///   daemon with it.
+        /// - Candidates derived from the running executable — its sibling, its symlink-resolved sibling,
+        ///   and its bundle's resources — apply to every profile, because they necessarily belong to the
+        ///   build that is asking.
+        /// - The installed links (`~/.spaces/bin/spacesd`, `/usr/local/bin/spacesd`) apply only to the
+        ///   installed profile. They are location-fixed and always point at whatever
+        ///   `/Applications/Spaces.app` last installed, which is an unrelated release from a repo-local
+        ///   build's point of view.
+        /// - The checkout-relative build products under the current working directory apply only to a
+        ///   development profile. They describe whichever checkout the process happens to have been
+        ///   started in, which says nothing about the installed profile.
+        ///
+        /// Both halves of that split prevent the same failure in opposite directions: a foreign daemon
+        /// brought up on this profile's runtime directory and socket answers, but on a different wire
+        /// protocol, so the client reports `daemonWireIncompatible` and the real cause — an entirely
+        /// different build serving the profile — stays invisible. A profile with no daemon of its own
+        /// therefore fails with `daemonNotFound` rather than borrowing one.
+        ///
+        /// - Parameter installedLinkURLs: The installed layout's fixed daemon links. Injectable so a
+        ///   test can supply a temporary installed layout instead of the real machine's.
+        static func resolveExecutableURL(
+            environment: [String: String] = ProcessInfo.processInfo.environment, fileManager: FileManager = .default, profile: SpacesProfile,
+            installedLinkURLs: [URL] = [SpacesBinaryLayout.userHelperLinkURL(for: .spacesd), SpacesBinaryLayout.systemLinkURL(for: .spacesd)]
+                .compactMap { $0 }
+        ) throws -> URL {
             let currentExecutablePath = environment["_"] ?? Bundle.main.executableURL?.path ?? CommandLine.arguments.first ?? ""
             let currentExecutableURL = URL(fileURLWithPath: currentExecutablePath)
             let currentExecutableDirectory = currentExecutableURL.deletingLastPathComponent()
@@ -476,24 +504,35 @@ import Foundation
             let currentDirectory = URL(fileURLWithPath: fileManager.currentDirectoryPath, isDirectory: true)
             let bundledResourceDirectory = currentExecutableDirectory.deletingLastPathComponent().appendingPathComponent(
                 "Resources", isDirectory: true)
-            let candidates = [
-                environment["SPACESD_EXECUTABLE"],
-                currentExecutableDirectory.appendingPathComponent("spacesd", isDirectory: false).path(percentEncoded: false),
-                resolvedCurrentExecutableDirectory.appendingPathComponent("spacesd", isDirectory: false).path(percentEncoded: false),
-                Bundle.main.resourceURL?.appendingPathComponent("spacesd", isDirectory: false).path(percentEncoded: false),
-                bundledResourceDirectory.appendingPathComponent("spacesd", isDirectory: false).path(percentEncoded: false),
-                SpacesBinaryLayout.userHelperLinkURL(for: .spacesd)?.path, SpacesBinaryLayout.systemLinkURL(for: .spacesd).path,
-                currentDirectory.appendingPathComponent("apps/macos/.build/debug/spacesd", isDirectory: false).path(percentEncoded: false),
-                currentDirectory.appendingPathComponent("apps/macos/.build/release/spacesd", isDirectory: false).path(percentEncoded: false),
-                currentDirectory.appendingPathComponent(".build/debug/spacesd", isDirectory: false).path(percentEncoded: false),
-                currentDirectory.appendingPathComponent(".build/release/spacesd", isDirectory: false).path(percentEncoded: false),
-            ].compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+
+            // Candidates repeat routinely — an unresolved symlink, or an executable whose directory is
+            // also the bundle's resource directory — and the list is reported verbatim when nothing
+            // matches, so keep it deduplicated.
+            var candidates: [String] = []
+            func appendCandidate(_ path: String?) {
+                guard let trimmed = path?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else { return }
+                guard !candidates.contains(trimmed) else { return }
+                candidates.append(trimmed)
+            }
+
+            appendCandidate(environment["SPACESD_EXECUTABLE"])
+            appendCandidate(currentExecutableDirectory.appendingPathComponent("spacesd", isDirectory: false).path(percentEncoded: false))
+            appendCandidate(resolvedCurrentExecutableDirectory.appendingPathComponent("spacesd", isDirectory: false).path(percentEncoded: false))
+            appendCandidate(Bundle.main.resourceURL?.appendingPathComponent("spacesd", isDirectory: false).path(percentEncoded: false))
+            appendCandidate(bundledResourceDirectory.appendingPathComponent("spacesd", isDirectory: false).path(percentEncoded: false))
+            switch profile.source {
+            case .installedFallback: for linkURL in installedLinkURLs { appendCandidate(linkURL.path) }
+            case .developmentWorktree, .explicitDatabasePath:
+                for relativePath in [
+                    "apps/macos/.build/debug/spacesd", "apps/macos/.build/release/spacesd", ".build/debug/spacesd", ".build/release/spacesd",
+                ] { appendCandidate(currentDirectory.appendingPathComponent(relativePath, isDirectory: false).path(percentEncoded: false)) }
+            }
 
             for candidate in candidates where fileManager.isExecutableFile(atPath: candidate) {
                 return URL(fileURLWithPath: candidate, isDirectory: false)
             }
 
-            throw TerminalServiceError.executableNotFound
+            throw TerminalServiceError.daemonNotFound(profileSource: profile.source, profileRoot: profile.rootDirectory, searchedPaths: candidates)
         }
 
         private static func isRunningUnderXCTest() -> Bool {
@@ -511,17 +550,40 @@ import Foundation
     }
 
     public enum TerminalServiceError: LocalizedError {
-        case executableNotFound
+        /// No `spacesd` belonging to the asking build was found for this profile. One case covers both
+        /// profile kinds because it is one event — a profile with no daemon of its own — and the profile
+        /// only decides which half of the excluded candidates has to be explained: an installed profile
+        /// never starts a development build from the current directory, and a development profile never
+        /// starts the installed daemon.
+        case daemonNotFound(profileSource: SpacesProfileSource, profileRoot: String, searchedPaths: [String])
         case daemonWireIncompatible(TerminalServiceDaemonWireIncompatibility)
         case requestFailed(String)
         case serviceStartupTimedOut(String)
 
         public var errorDescription: String? {
             switch self {
-            case .executableNotFound: "The spacesd executable is required to run built-in terminal sessions."
-            case .daemonWireIncompatible(let incompatibility): incompatibility.message
-            case .requestFailed(let message): message
-            case .serviceStartupTimedOut(let path): "Timed out waiting for spacesd to start from \(path)."
+            case .daemonNotFound(let profileSource, let profileRoot, let searchedPaths):
+                let described: (kind: String, explanation: String) =
+                    switch profileSource {
+                    case .installedFallback:
+                        (
+                            "installed",
+                            "An installed profile starts only the daemon shipped with the running build or installed beside it, never a development "
+                                + "build from the current directory. Reinstall Spaces or set SPACESD_EXECUTABLE."
+                        )
+                    case .developmentWorktree, .explicitDatabasePath:
+                        (
+                            "development",
+                            "A development profile never starts the installed daemon (~/.spaces/bin/spacesd, /usr/local/bin/spacesd), which is a "
+                                + "different build and would answer this client on a foreign wire protocol. Build the daemon in this checkout "
+                                + "(swift build --product spacesd) or set SPACESD_EXECUTABLE."
+                        )
+                    }
+                return "No spacesd was found for the \(described.kind) profile at \(profileRoot). \(described.explanation) Searched: "
+                    + searchedPaths.joined(separator: ", ")
+            case .daemonWireIncompatible(let incompatibility): return incompatibility.message
+            case .requestFailed(let message): return message
+            case .serviceStartupTimedOut(let path): return "Timed out waiting for spacesd to start from \(path)."
             }
         }
     }

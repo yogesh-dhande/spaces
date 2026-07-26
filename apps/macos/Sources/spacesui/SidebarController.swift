@@ -103,6 +103,9 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
     /// Repeating reconciliation of device reachability while subscriptions are enabled; see
     /// `runDeviceReachabilityWatchdogTick`.
     private var deviceReachabilityWatchdogTimer: Timer?
+    /// Detection for the one device that cannot report its own death: this Mac's daemon. Ticked by the
+    /// watchdog while the local section claims to be loaded; see `LocalDaemonReachabilityProbe`.
+    private let localDaemonReachabilityProbe = LocalDaemonReachabilityProbe()
     /// State of the live device-overview subscriptions, one per paired remote device. The remote
     /// daemon pushes a fresh overview on every database change, so remote sidebar state stays
     /// current without polling (remote state has no local event). This controller performs the
@@ -278,6 +281,13 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         if case .offline(let reason) = localLoadState, previousLocalSection?.loadState != localLoadState {
             DeviceLinkTrace.log(deviceID: snapshot.localDeviceID, event: "section_offline", detail: "reason=\(reason)")
         }
+        // A loaded local section means the daemon answered this snapshot, so tell the probe the daemon
+        // is back and re-arm detection. The reload a lost-contact report triggers runs through
+        // `TerminalService.ensureRunning`, which restarts a dead daemon — the probe never sees that
+        // recovery as an answering ping, and without this the next death of a crash-looping daemon
+        // would be swallowed as a verdict it already reported, leaving the section falsely loaded with
+        // nothing left to request the reload that restarts it.
+        if localLoadState == .loaded { localDaemonReachabilityProbe.noteLocalSectionLoadedFromSnapshot() }
         // An unreachable local daemon answers with the offline placeholder overview, which carries no
         // rows. Keep this Mac's last known rows and overview for the whole outage — the contract
         // `applyRemoteDeviceSection`'s failure branch keeps for a remote device — so the subtree stays
@@ -588,11 +598,41 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
             DeviceLinkTrace.log(deviceID: record.id, event: "watchdog_pull")
             startRemoteOverviewPull(record: record, clientApp: clientApp, bypassesBackoff: false)
         }
-        // The local device has no stream to drop and no retry of its own. Re-run the snapshot that
-        // bootstraps and reads the local daemon — the same path the Reload command uses.
-        guard let localSection = host.deviceSections.first(where: { $0.isLocal }), localSection.loadState != .loaded else { return }
-        DeviceLinkTrace.log(deviceID: localSection.deviceID, event: "watchdog_local_reload")
-        requestSidebarReload()
+        // The local device has no stream to drop and no retry of its own. A local section already known
+        // to be offline re-runs the snapshot that bootstraps and reads the local daemon — the same path
+        // the Reload command uses. One that still claims to be loaded has to be checked against the
+        // daemon before there is anything to recover from.
+        guard let localSection = host.deviceSections.first(where: { $0.isLocal }) else { return }
+        guard localSection.loadState == .loaded else {
+            DeviceLinkTrace.log(deviceID: localSection.deviceID, event: "watchdog_local_reload")
+            requestSidebarReload()
+            return
+        }
+        probeLocalDaemonReachability(deviceID: localSection.deviceID)
+    }
+
+    /// Checks that a local section claiming to be loaded is still backed by a live daemon, and reloads
+    /// when it is not.
+    ///
+    /// Nothing else can contradict that claim: the section only becomes `.offline` through a snapshot,
+    /// snapshots run on `IPCNotification.databaseDidChange`, and a dead daemon commits nothing — so
+    /// without this the section stays `.loaded` forever and the recovery branch above, gated on the
+    /// section *not* being loaded, never runs. Reloading unconditionally instead would rebuild the whole
+    /// sidebar every tick on a perfectly healthy Mac, so the tick pays a liveness ping (see
+    /// `LocalDaemonReachabilityProbe`) and asks for the reload only when the ping contradicts the
+    /// section. The probe is skipped entirely once the section is offline, where the branch above is
+    /// already reloading on every tick.
+    private func probeLocalDaemonReachability(deviceID: String) {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            switch await self.localDaemonReachabilityProbe.run() {
+            case .noChange: break
+            case .lostContact(let error):
+                DeviceLinkTrace.log(deviceID: deviceID, event: "local_probe_unreachable", detail: "error=\(String(describing: error))")
+                self.requestSidebarReload()
+            case .regainedContact: DeviceLinkTrace.log(deviceID: deviceID, event: "local_probe_reachable")
+            }
+        }
     }
 
     /// Reconciles open subscriptions to the set of credentialed paired remotes:
