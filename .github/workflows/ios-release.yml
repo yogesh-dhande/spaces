@@ -8,30 +8,44 @@
 #
 # In both cases the build number is GITHUB_RUN_NUMBER.
 #
-# Signing imports one long-lived Apple Distribution certificate from secrets into a
-# temporary keychain, the same shape release-build.yml uses for the macOS Developer ID
-# certificate. xcodebuild still runs with -allowProvisioningUpdates and an App Store
-# Connect API key so it can create and refresh the *provisioning profile*, but it finds
-# a usable signing identity already in the keychain and does not mint a certificate.
+# Signing imports two long-lived certificates from secrets into a temporary keychain,
+# the same shape release-build.yml uses for the macOS Developer ID certificate.
+# xcodebuild still runs with -allowProvisioningUpdates and an App Store Connect API key
+# so it can create and refresh *provisioning profiles*, which Apple does not cap, but it
+# finds both signing identities already present and mints no certificate.
 #
-# Letting it mint one is what this avoids. A certificate is bound to the private key
-# that generated its CSR, and a runner's keychain is destroyed with the runner, so
-# cloud-managed signing issued a fresh certificate on every run and left the previous
-# one behind — unusable by anyone, since its key no longer existed, but still counted
-# against Apple's per-team certificate cap. Nine releases exhausted the cap, and the
-# archive step then failed with "Your account has reached the maximum number of
-# certificates" on a tag whose commit had every check green.
+# Both are needed because the two build phases sign with different identities. The target
+# signs automatically, so `xcodebuild archive` signs the archive for *development* and
+# `-exportArchive` re-signs it for *distribution*. Supplying only the distribution half
+# left the archive asking Apple for a development certificate on every run, which is
+# exactly what the log showed:
 #
-# Renewing: the certificate is valid for one year. Export a new Apple Distribution
-# .p12 (certificate plus private key) before it expires and update the two secrets;
-# docs/dev.md carries the procedure.
+#     Signing Identity: "Apple Development: Created via API"
+#
+# Forcing the archive onto the distribution identity instead is not an option: with
+# automatic signing, a manually specified CODE_SIGN_IDENTITY makes xcodebuild fail during
+# provisioning-input gathering with "automatically signed for development, but a
+# conflicting code signing identity Apple Distribution has been manually specified".
+#
+# Why storing them matters: a certificate is bound to the private key that generated its
+# CSR, and a runner's keychain is destroyed with the runner, so every minted certificate
+# was orphaned the moment the run ended — unusable by anyone, since its key no longer
+# existed, but still counted against Apple's per-team cap. Nine releases exhausted it, and
+# the archive step then failed with "Your account has reached the maximum number of
+# certificates" on tags whose commits had every check green.
+#
+# Renewing: both are valid for one year. Export fresh .p12 bundles (certificate plus
+# private key) before they expire and update the four secrets; docs/dev.md has the
+# procedure.
 #
 # Required secrets:
-#   APP_STORE_CONNECT_KEY_ID        - App Store Connect API key identifier.
-#   APP_STORE_CONNECT_ISSUER_ID     - App Store Connect API key issuer identifier.
-#   APP_STORE_CONNECT_API_KEY_P8    - Raw contents of the App Store Connect API .p8 key.
-#   IOS_CODESIGN_CERTIFICATE_P12    - Base64-encoded Apple Distribution .p12 (certificate + key).
+#   APP_STORE_CONNECT_KEY_ID          - App Store Connect API key identifier.
+#   APP_STORE_CONNECT_ISSUER_ID       - App Store Connect API key issuer identifier.
+#   APP_STORE_CONNECT_API_KEY_P8      - Raw contents of the App Store Connect API .p8 key.
+#   IOS_CODESIGN_CERTIFICATE_P12      - Base64 Apple Distribution .p12 (certificate + key).
 #   IOS_CODESIGN_CERTIFICATE_PASSWORD - Password used when exporting that .p12.
+#   IOS_CODESIGN_DEV_CERTIFICATE_P12  - Base64 Apple Development .p12 (certificate + key).
+#   IOS_CODESIGN_DEV_CERTIFICATE_PASSWORD - Password used when exporting that .p12.
 
 name: iOS Release
 
@@ -120,36 +134,52 @@ jobs:
             echo "::error::Missing required secret IOS_CODESIGN_CERTIFICATE_PASSWORD." >&2
             exit 1
           fi
+          if [[ -z "$IOS_CODESIGN_DEV_CERTIFICATE_P12" ]]; then
+            echo "::error::Missing required secret IOS_CODESIGN_DEV_CERTIFICATE_P12. Set it to the base64-encoded Apple Development .p12 bundle." >&2
+            exit 1
+          fi
+          if [[ -z "$IOS_CODESIGN_DEV_CERTIFICATE_PASSWORD" ]]; then
+            echo "::error::Missing required secret IOS_CODESIGN_DEV_CERTIFICATE_PASSWORD." >&2
+            exit 1
+          fi
 
-      - name: Import signing certificate
+      - name: Import signing certificates
         env:
           IOS_CODESIGN_CERTIFICATE_P12: ${{ secrets.IOS_CODESIGN_CERTIFICATE_P12 }}
           IOS_CODESIGN_CERTIFICATE_PASSWORD: ${{ secrets.IOS_CODESIGN_CERTIFICATE_PASSWORD }}
+          IOS_CODESIGN_DEV_CERTIFICATE_P12: ${{ secrets.IOS_CODESIGN_DEV_CERTIFICATE_P12 }}
+          IOS_CODESIGN_DEV_CERTIFICATE_PASSWORD: ${{ secrets.IOS_CODESIGN_DEV_CERTIFICATE_PASSWORD }}
         run: |
           keychain_path="$RUNNER_TEMP/ios-codesign.keychain-db"
           keychain_password="$(uuidgen)"
-          certificate_path="$RUNNER_TEMP/ios-codesign.p12"
+          distribution_path="$RUNNER_TEMP/ios-codesign-distribution.p12"
+          development_path="$RUNNER_TEMP/ios-codesign-development.p12"
 
-          echo "$IOS_CODESIGN_CERTIFICATE_P12" | base64 -D -o "$certificate_path"
+          echo "$IOS_CODESIGN_CERTIFICATE_P12" | base64 -D -o "$distribution_path"
+          echo "$IOS_CODESIGN_DEV_CERTIFICATE_P12" | base64 -D -o "$development_path"
 
           security create-keychain -p "$keychain_password" "$keychain_path"
           security unlock-keychain -p "$keychain_password" "$keychain_path"
           security set-keychain-settings -lut 21600 "$keychain_path"
-          security import "$certificate_path" -k "$keychain_path" -P "$IOS_CODESIGN_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          security import "$distribution_path" -k "$keychain_path" -P "$IOS_CODESIGN_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          security import "$development_path" -k "$keychain_path" -P "$IOS_CODESIGN_DEV_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain_path"
           security list-keychains -d user -s "$keychain_path" $(security list-keychains -d user | tr -d '"')
           security default-keychain -d user -s "$keychain_path"
 
-          # Fail here rather than inside xcodebuild if the .p12 carried no usable identity
-          # (a certificate exported without its private key is the common mistake): the archive
-          # step would otherwise ask Apple for a new certificate and reintroduce the leak this
-          # stored certificate exists to stop.
+          # Fail here rather than inside xcodebuild if a .p12 carried no usable identity (a
+          # certificate exported without its private key is the common mistake). Both halves are
+          # asserted because a missing one is silent: xcodebuild would ask Apple for whichever
+          # identity it could not find and reintroduce the per-run certificate leak these stored
+          # certificates exist to stop, while the run still reported success.
           identities="$(security find-identity -v -p codesigning "$keychain_path")"
           echo "$identities"
-          if ! grep -q "Apple Distribution" <<<"$identities"; then
-            echo "::error::No Apple Distribution signing identity in the imported keychain. Export the .p12 with its private key." >&2
-            exit 1
-          fi
+          for required in "Apple Distribution" "Apple Development"; do
+            if ! grep -q "$required" <<<"$identities"; then
+              echo "::error::No $required signing identity in the imported keychain. Export that .p12 with its private key." >&2
+              exit 1
+            fi
+          done
 
       - name: Write App Store Connect API key
         id: asc_key
