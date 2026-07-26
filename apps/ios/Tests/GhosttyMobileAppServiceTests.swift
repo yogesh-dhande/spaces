@@ -1955,7 +1955,6 @@
 
             XCTAssertLessThan(keyboardViewport.rows, keyboardOnlyViewport.rows)
             XCTAssertEqual(hostView.visibleRenderBoundsForTesting().height, 334, accuracy: 0.5)
-            XCTAssertEqual(hostView.surfaceHostFrameForTesting().height, phoneBounds.height, accuracy: 0.5)
             XCTAssertEqual(try XCTUnwrap(reportedViewports.last).rows, keyboardViewport.rows)
 
             let longSnapshot = promptAtBottomSnapshot(columns: 80, rows: fullViewport.rows + 20)
@@ -2139,28 +2138,15 @@
             window.isHidden = true
         }
 
-        func testRemoteTerminalHostViewTeardownRetiresNativeMirrorWithoutBlocking() throws {
+        func testRemoteTerminalHostViewTeardownParksTheSharedMirrorWithoutBlocking() throws {
             GhosttyRemoteTerminalHostView.nativeMirrorEnabledForTesting = true
             let window = UIWindow(frame: UIScreen.main.bounds)
             let viewController = UIViewController()
             window.rootViewController = viewController
-
-            let hostView = GhosttyRemoteTerminalHostView(frame: CGRect(x: 0, y: 0, width: 640, height: 480))
-            viewController.view.addSubview(hostView)
             window.isHidden = false
-            viewController.view.frame = window.bounds
-            hostView.frame = viewController.view.bounds
-            viewController.view.layoutIfNeeded()
+            defer { window.isHidden = true }
 
-            hostView.update(
-                snapshot: sampleSnapshot(), renderStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0|screen=native-teardown",
-                fallbackText: "Waiting for terminal state...")
-
-            let mirrorDeadline = Date().addingTimeInterval(2)
-            while !hostView.hasMirrorSurfaceForTesting && Date() < mirrorDeadline { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
-            XCTAssertTrue(hostView.hasMirrorSurfaceForTesting)
-
-            let retiredMirrorCount = GhosttyRemoteTerminalHostView.retiredMirrorCountForTesting
+            let hostView = try mountNativeMirrorHostView(in: viewController, window: window, screenKey: "native-teardown")
 
             let startedAt = Date()
             hostView.prepareForDismantle()
@@ -2170,9 +2156,153 @@
             XCTAssertFalse(hostView.hasActiveSessionForTesting)
             XCTAssertFalse(hostView.hasMirrorSurfaceForTesting)
             XCTAssertFalse(hostView.hasRetainedSessionStandardInputWriteDescriptorForTesting)
-            XCTAssertEqual(GhosttyRemoteTerminalHostView.retiredMirrorCountForTesting, retiredMirrorCount + 1)
+            // The mirror survives the teardown parked and unattached rather than being leaked into a
+            // per-teardown pile or freed on a user-facing path.
+            XCTAssertEqual(GhosttySharedTerminalMirror.shared.liveMirrorCountForTesting, 1)
+            XCTAssertFalse(GhosttySharedTerminalMirror.shared.isSurfaceHostAttachedForTesting)
+        }
 
-            window.isHidden = true
+        /// Opening a terminal and leaving it, over and over, is the navigation that used to charge the
+        /// process a whole new mirror and IOSurface per visit. Every visit must land on the same
+        /// native surface instead, so the footprint is bounded no matter how many sessions are opened.
+        func testRepeatedTerminalVisitsReuseOneMirrorAndOneSurface() throws {
+            GhosttyRemoteTerminalHostView.nativeMirrorEnabledForTesting = true
+            let window = UIWindow(frame: UIScreen.main.bounds)
+            let viewController = UIViewController()
+            window.rootViewController = viewController
+            window.isHidden = false
+            defer { window.isHidden = true }
+
+            var surfaceIdentities: [UInt] = []
+            for visit in 0..<4 {
+                let hostView = try mountNativeMirrorHostView(in: viewController, window: window, screenKey: "revisit-\(visit)")
+                surfaceIdentities.append(try XCTUnwrap(GhosttySharedTerminalMirror.shared.mirrorSurfaceIdentityForTesting))
+                hostView.removeFromSuperview()
+
+                XCTAssertFalse(hostView.hasMirrorSurfaceForTesting)
+                XCTAssertEqual(GhosttySharedTerminalMirror.shared.liveMirrorCountForTesting, 1)
+            }
+
+            XCTAssertEqual(Set(surfaceIdentities).count, 1)
+        }
+
+        /// A terminal view can mount while the outgoing one is still in the hierarchy — a session
+        /// swap on the same route does exactly this. The newcomer takes the mirror over, so the two
+        /// never render into the same surface, and only one mirror exists across the handover.
+        func testMirrorMovesToTheTerminalViewThatMountsWhileAnotherHoldsIt() throws {
+            GhosttyRemoteTerminalHostView.nativeMirrorEnabledForTesting = true
+            let window = UIWindow(frame: UIScreen.main.bounds)
+            let viewController = UIViewController()
+            window.rootViewController = viewController
+            window.isHidden = false
+            defer { window.isHidden = true }
+
+            let firstHostView = try mountNativeMirrorHostView(in: viewController, window: window, screenKey: "handover-first")
+            let secondHostView = try mountNativeMirrorHostView(in: viewController, window: window, screenKey: "handover-second")
+
+            XCTAssertTrue(secondHostView.hasMirrorSurfaceForTesting)
+            XCTAssertFalse(firstHostView.hasMirrorSurfaceForTesting)
+            XCTAssertEqual(GhosttySharedTerminalMirror.shared.liveMirrorCountForTesting, 1)
+
+            // The surrendering view keeps its place in the hierarchy without clawing the mirror back,
+            // so an outgoing view cannot trade it with the incoming one for the whole transition.
+            firstHostView.setNeedsLayout()
+            firstHostView.layoutIfNeeded()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+            XCTAssertTrue(secondHostView.hasMirrorSurfaceForTesting)
+            XCTAssertFalse(firstHostView.hasMirrorSurfaceForTesting)
+
+            firstHostView.removeFromSuperview()
+            secondHostView.removeFromSuperview()
+        }
+
+        /// Two sessions in succession share one surface, so the surface must stay hidden from the
+        /// moment it is handed over until the new holder has drawn its own session onto it.
+        func testRebindHidesTheSharedSurfaceUntilTheNewHolderRendersIt() throws {
+            let window = UIWindow(frame: UIScreen.main.bounds)
+            let viewController = UIViewController()
+            window.rootViewController = viewController
+            window.isHidden = false
+            defer { window.isHidden = true }
+
+            let firstHostView = GhosttyRemoteTerminalHostView(frame: viewController.view.bounds)
+            let secondHostView = GhosttyRemoteTerminalHostView(frame: viewController.view.bounds)
+            viewController.view.addSubview(firstHostView)
+            viewController.view.addSubview(secondHostView)
+            viewController.view.layoutIfNeeded()
+            defer {
+                firstHostView.removeFromSuperview()
+                secondHostView.removeFromSuperview()
+            }
+
+            let mirror = GhosttySharedTerminalMirror.shared
+            _ = try mirror.acquire(for: firstHostView, fontSize: .default, scaleFactor: 2)
+            XCTAssertFalse(mirror.isSurfaceHostVisibleForTesting)
+
+            mirror.revealSurface(from: firstHostView)
+            XCTAssertTrue(mirror.isSurfaceHostVisibleForTesting)
+
+            _ = try mirror.acquire(for: secondHostView, fontSize: .default, scaleFactor: 2)
+            XCTAssertFalse(mirror.isSurfaceHostVisibleForTesting)
+            XCTAssertTrue(mirror.isSurfaceHostAttachedForTesting)
+            // The surface spans the whole holder, which is what the renderer sizes its target from.
+            XCTAssertEqual(secondHostView.surfaceHostFrameForTesting(), secondHostView.bounds)
+
+            // A late release from the view that already lost the mirror must not disturb the holder.
+            mirror.release(from: firstHostView)
+            XCTAssertTrue(mirror.isSurfaceHostAttachedForTesting)
+
+            mirror.release(from: secondHostView)
+            XCTAssertFalse(mirror.isSurfaceHostAttachedForTesting)
+            XCTAssertFalse(mirror.isSurfaceHostVisibleForTesting)
+        }
+
+        /// Changing the font size retunes the live surface rather than building a second mirror, and
+        /// the daemon still sees the resize as a new grid.
+        func testChangingFontSizeRetunesTheSharedMirrorWithoutBuildingAnother() throws {
+            GhosttyRemoteTerminalHostView.nativeMirrorEnabledForTesting = true
+            let window = UIWindow(frame: UIScreen.main.bounds)
+            let viewController = UIViewController()
+            window.rootViewController = viewController
+            window.isHidden = false
+            defer { window.isHidden = true }
+
+            var reportedColumns: [Int] = []
+            let hostView = try mountNativeMirrorHostView(in: viewController, window: window, screenKey: "font-size") { hostView in
+                hostView.onViewportSizeChanged = { columns, _ in reportedColumns.append(columns) }
+            }
+            defer { hostView.removeFromSuperview() }
+
+            let surfaceIdentity = try XCTUnwrap(GhosttySharedTerminalMirror.shared.mirrorSurfaceIdentityForTesting)
+            let columnsAtDefaultSize = try XCTUnwrap(reportedColumns.last)
+
+            hostView.setTerminalFontSize(.nine)
+
+            XCTAssertEqual(GhosttySharedTerminalMirror.shared.liveMirrorCountForTesting, 1)
+            XCTAssertEqual(GhosttySharedTerminalMirror.shared.appliedFontSizeForTesting, .nine)
+            XCTAssertEqual(GhosttySharedTerminalMirror.shared.mirrorSurfaceIdentityForTesting, surfaceIdentity)
+            XCTAssertGreaterThan(try XCTUnwrap(reportedColumns.last), columnsAtDefaultSize)
+        }
+
+        /// Mounts a terminal host view with a live native mirror and waits until it holds one.
+        private func mountNativeMirrorHostView(
+            in viewController: UIViewController, window: UIWindow, screenKey: String, configure: (GhosttyRemoteTerminalHostView) -> Void = { _ in }
+        ) throws -> GhosttyRemoteTerminalHostView {
+            viewController.view.frame = window.bounds
+            let hostView = GhosttyRemoteTerminalHostView(frame: viewController.view.bounds)
+            configure(hostView)
+            viewController.view.addSubview(hostView)
+            hostView.frame = viewController.view.bounds
+            viewController.view.layoutIfNeeded()
+
+            hostView.update(
+                snapshot: sampleSnapshot(), renderStateKey: "viewer|runtime=4x2|snapshot=4x2|interactive=0|screen=\(screenKey)",
+                fallbackText: "Waiting for terminal state...")
+
+            let deadline = Date().addingTimeInterval(2)
+            while !hostView.hasMirrorSurfaceForTesting && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+            XCTAssertTrue(hostView.hasMirrorSurfaceForTesting)
+            return hostView
         }
 
         func testRemoteTerminalHostViewDoesNotRepublishInputReadinessWhenInstallingCallback() throws {
