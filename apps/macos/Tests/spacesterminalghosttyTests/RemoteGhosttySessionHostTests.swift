@@ -2167,7 +2167,16 @@ final class RemoteGhosttySessionHostTests: XCTestCase {
                 return true
             })
 
+        // The container has to be in a visible window. A resize is only sent for a viewport the mirror
+        // can measure, and an off-screen pane deliberately reports no size at all rather than an
+        // estimate from a font Ghostty does not render with, so a windowless container guards the send
+        // out and the failure this test is about is never attempted.
         let container = NSView(frame: NSRect(x: 0, y: 0, width: 420, height: 180))
+        let window = KeyTestWindow(contentRect: container.bounds, styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = container
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
         let client = TerminalClient(kind: .localWindow, identity: TerminalClientIdentity(label: "Spaces window"), connectedAt: "2026-07-24T00:00:02Z")
         try host.attach(client: client, mode: .owner, into: container)
         // `attach` already sends the initial viewport size for an owner; drain that attempt (whether or
