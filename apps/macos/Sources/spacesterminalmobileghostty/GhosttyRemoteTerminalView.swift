@@ -381,6 +381,17 @@ import Foundation
         /// its own black background and stops asking for the mirror until it re-enters a window,
         /// so an outgoing view still in the hierarchy during a navigation transition cannot trade
         /// the mirror back and forth with the incoming one.
+        ///
+        /// Re-entering a window is the *only* thing that lifts this latch, which is safe because a
+        /// view can only surrender while some other view is in the window, and every way to present
+        /// a terminal takes the previous one out of the window in the same update: the terminal is a
+        /// single `navigationDestination(item:)` per stack, so one can never be pushed over another,
+        /// and a switch between sessions replaces that destination outright. A presentation that
+        /// instead left the surrendering view parented — a terminal in a sheet or a non-fullscreen
+        /// cover over another terminal, or two terminals side by side in a split layout — would
+        /// leave this view latched and permanently black once the newcomer went away, since nothing
+        /// re-offers a parked mirror to the view that gave it up. Adding one means giving the latch
+        /// a second release edge here, not just adding the new screen.
         func surrenderSharedMirror() {
             mirror = nil
             lastSurfaceGeometry = nil
