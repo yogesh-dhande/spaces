@@ -45,6 +45,9 @@ private final class StoreOpenErrors: @unchecked Sendable {
 }
 
 final class StoreTests: XCTestCase {
+
+    override func setUpWithError() throws { try useIsolatedSpacesProfile() }
+
     // Tests a fresh store bootstraps the current schema and version by arranging an empty DB path and asserting the resulting shape.
     func testFreshStoreBootstrapsCurrentSchema() throws {
         let root = try makeTempDirectory()

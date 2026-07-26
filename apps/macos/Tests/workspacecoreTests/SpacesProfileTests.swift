@@ -36,6 +36,41 @@ final class SpacesProfileTests: XCTestCase {
         XCTAssertEqual(profile.databasePath, tempHomeURL.appendingPathComponent(".spaces/spaces.db").path)
     }
 
+    /// Test targets create and mutate real terminal-session state through the resolved profile, so a test
+    /// process that reaches the installed profile writes fixture sessions into the user's installed
+    /// database. Resolution refuses that instead of falling through to it.
+    func testResolveRefusesInstalledProfileForTestHost() throws {
+        let accountHomeURL = URL(fileURLWithPath: try XCTUnwrap(currentUserAccountHomePath()), isDirectory: true)
+
+        XCTAssertThrowsError(
+            try SpacesProfile.resolve(
+                environment: [:], homeDirectoryURL: accountHomeURL, currentDirectoryPath: tempHomeURL.path,
+                executablePath: "/tmp/spacesPackageTests.xctest/Contents/MacOS/spacesPackageTests", gitProbe: StubGitProfileProbe(context: nil))
+        ) { error in
+            guard case SpacesProfileResolutionError.testHostRefusedInstalledProfile(let profileRoot) = error else {
+                return XCTFail("Expected testHostRefusedInstalledProfile, got \(error).")
+            }
+            XCTAssertEqual(profileRoot, accountHomeURL.appendingPathComponent(".spaces").path)
+            XCTAssertEqual(error.localizedDescription, String(describing: error))
+        }
+    }
+
+    /// The refusal has to hold for the profile the process actually uses, not only for a directly called
+    /// `resolve`: every persistence path reaches the database through `current()`.
+    func testCurrentProfileRefusesInstalledProfileForTestHost() throws {
+        let accountHomePath = try XCTUnwrap(currentUserAccountHomePath())
+
+        try withEnvironmentValues([
+            SpacesProfile.databasePathEnvironmentVariable: nil, SpacesProfile.runtimeDirectoryEnvironmentVariable: nil, "HOME": accountHomePath,
+        ]) {
+            SpacesProfile.resetCacheForTesting()
+            defer { SpacesProfile.resetCacheForTesting() }
+
+            XCTAssertThrowsError(try SpacesProfile.current())
+            XCTAssertThrowsError(try DatabaseLocator.defaultPath())
+        }
+    }
+
     func testResolveExplicitDatabaseOverrideWins() throws {
         let overridePath = tempHomeURL.appendingPathComponent("profiles/custom/spaces.db").path
 

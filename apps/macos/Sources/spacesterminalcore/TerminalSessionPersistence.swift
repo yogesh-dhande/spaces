@@ -202,7 +202,7 @@ public enum TerminalSessionPersistence {
     public static func writeLaunchConfiguration(_ configuration: TerminalSessionLaunchConfiguration, paths: TerminalSessionPaths) throws {
         try paths.ensureDirectories()
         let root = normalizedRootDirectory(paths.rootDirectory)
-        try withDatabase(paths: paths) { database in
+        try withProfileDatabase { database in
             try database.withImmediateTransaction {
                 try database.execute(
                     sql: "DELETE FROM terminal_sessions WHERE root_directory = ? AND session_id <> ?", bindings: [root, configuration.sessionID])
@@ -237,7 +237,7 @@ public enum TerminalSessionPersistence {
     /// the auto-updated runtime title when the session's effective title is computed.
     public static func writeUserTitle(_ userTitle: String, sessionID: String, paths: TerminalSessionPaths) throws {
         let root = normalizedRootDirectory(paths.rootDirectory)
-        try withDatabase(paths: paths) { database in
+        try withProfileDatabase { database in
             try database.withImmediateTransaction {
                 let canonicalSessionID = try existingSessionID(rootDirectory: root, database: database)
                 guard canonicalSessionID == sessionID else { throw TerminalSessionPersistenceError.unknownSession(sessionID) }
@@ -251,7 +251,7 @@ public enum TerminalSessionPersistence {
         try paths.ensureDirectories()
         let root = normalizedRootDirectory(paths.rootDirectory)
         let foregroundArgvJSON = try encodeForegroundArgv(state.foregroundArgv)
-        try withDatabase(paths: paths) { database in
+        try withProfileDatabase { database in
             try database.withImmediateTransaction {
                 try database.execute(
                     sql: "DELETE FROM terminal_runtime_states WHERE root_directory = ? AND session_id <> ?", bindings: [root, state.sessionID])
@@ -302,7 +302,7 @@ public enum TerminalSessionPersistence {
         guard let payloadJSON = String(data: encodedPayload, encoding: .utf8) else {
             throw TerminalSessionPersistenceError.invalidValue("payload_json", "<non-utf8>")
         }
-        try withDatabase(paths: paths) { database in
+        try withProfileDatabase { database in
             try database.withImmediateTransaction {
                 let sessionID = try existingSessionID(rootDirectory: root, database: database)
                 guard sessionID == payload.sessionID else { throw TerminalSessionPersistenceError.unknownSession(payload.sessionID) }
@@ -324,7 +324,7 @@ public enum TerminalSessionPersistence {
     public static func writeAttachmentSnapshot(_ snapshot: TerminalSessionAttachmentSnapshot, paths: TerminalSessionPaths) throws {
         try paths.ensureDirectories()
         let root = normalizedRootDirectory(paths.rootDirectory)
-        try withDatabase(paths: paths) { database in
+        try withProfileDatabase { database in
             try database.withImmediateTransaction {
                 let sessionID = try existingSessionID(rootDirectory: root, database: database)
                 for attachment in snapshot.attachments where attachment.sessionID != sessionID {
@@ -358,7 +358,7 @@ public enum TerminalSessionPersistence {
 
     public static func readLaunchConfiguration(paths: TerminalSessionPaths) throws -> TerminalSessionLaunchConfiguration {
         let root = normalizedRootDirectory(paths.rootDirectory)
-        return try withDatabase(paths: paths) { database in
+        return try withProfileDatabase { database in
             let row = try database.queryRow(
                 sql: """
                     SELECT session_id, backend, lifetime_policy, workspace_id, kind, title, working_directory, shell, COALESCE(command, ''),
@@ -373,7 +373,7 @@ public enum TerminalSessionPersistence {
 
     public static func readRuntimeState(paths: TerminalSessionPaths) throws -> TerminalSessionRuntimeState {
         let root = normalizedRootDirectory(paths.rootDirectory)
-        return try withDatabase(paths: paths) { database in
+        return try withProfileDatabase { database in
             let row = try database.queryRow(
                 sql: """
                     SELECT session_id, backend, service_pid, COALESCE(child_pid, ''), COALESCE(title, ''), COALESCE(working_directory, ''),
@@ -392,7 +392,7 @@ public enum TerminalSessionPersistence {
 
     public static func readAttachmentSnapshot(paths: TerminalSessionPaths) throws -> TerminalSessionAttachmentSnapshot {
         let root = normalizedRootDirectory(paths.rootDirectory)
-        return try withDatabase(paths: paths) { database in
+        return try withProfileDatabase { database in
             let clients = try database.queryRows(
                 sql: """
                     SELECT client_id, kind, identity_label, COALESCE(identity_host_name, ''), COALESCE(identity_device_name, ''),
@@ -416,7 +416,7 @@ public enum TerminalSessionPersistence {
 
     public static func readRemoteSessionState(paths: TerminalSessionPaths) throws -> GhosttyRemoteSessionStatePayload {
         let root = normalizedRootDirectory(paths.rootDirectory)
-        return try withDatabase(paths: paths) { database in
+        return try withProfileDatabase { database in
             let row = try database.queryRow(
                 sql: """
                     SELECT payload_json
@@ -433,7 +433,7 @@ public enum TerminalSessionPersistence {
         try paths.ensureDirectories()
         let root = normalizedRootDirectory(paths.rootDirectory)
         let environmentKeysJSON = try encodeEnvironmentKeys(event.environmentKeys)
-        try withDatabase(paths: paths) { database in
+        try withProfileDatabase { database in
             try database.withImmediateTransaction {
                 let sessionID = try existingSessionID(rootDirectory: root, database: database)
                 guard sessionID == event.sessionID else { throw TerminalSessionPersistenceError.unknownSession(event.sessionID) }
@@ -467,7 +467,7 @@ public enum TerminalSessionPersistence {
 
     public static func pendingAgentSignals(sessionID: String, paths: TerminalSessionPaths) throws -> [TerminalServiceAgentSignalEvent] {
         let root = normalizedRootDirectory(paths.rootDirectory)
-        return try withDatabase(paths: paths) { database in
+        return try withProfileDatabase { database in
             let canonicalSessionID = try existingSessionID(rootDirectory: root, database: database)
             guard canonicalSessionID == sessionID else { throw TerminalSessionPersistenceError.unknownSession(sessionID) }
             let rows = try database.queryRows(
@@ -487,7 +487,7 @@ public enum TerminalSessionPersistence {
         let normalizedIDs = ids.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
         guard !normalizedIDs.isEmpty else { return }
         let root = normalizedRootDirectory(paths.rootDirectory)
-        try withDatabase(paths: paths) { database in
+        try withProfileDatabase { database in
             try database.withImmediateTransaction {
                 let canonicalSessionID = try existingSessionID(rootDirectory: root, database: database)
                 guard canonicalSessionID == sessionID else { throw TerminalSessionPersistenceError.unknownSession(sessionID) }
@@ -506,7 +506,7 @@ public enum TerminalSessionPersistence {
 
     public static func upsertClient(_ client: TerminalClient, paths: TerminalSessionPaths) throws {
         let root = normalizedRootDirectory(paths.rootDirectory)
-        try withDatabase(paths: paths) { database in
+        try withProfileDatabase { database in
             try database.withImmediateTransaction {
                 let sessionID = try existingSessionID(rootDirectory: root, database: database)
                 try upsertClient(client, sessionID: sessionID, rootDirectory: root, leaseRefreshedAt: client.connectedAt, database: database)
@@ -520,7 +520,7 @@ public enum TerminalSessionPersistence {
     /// alive by heartbeating. Returns `true` only when a live client's lease was refreshed.
     @discardableResult public static func touchClient(id clientID: String, paths: TerminalSessionPaths, touchedAt: String) throws -> Bool {
         let root = normalizedRootDirectory(paths.rootDirectory)
-        return try withDatabase(paths: paths) { database in
+        return try withProfileDatabase { database in
             try database.withImmediateTransaction {
                 let changes = try database.executeReturningChanges(
                     sql: """
@@ -538,7 +538,7 @@ public enum TerminalSessionPersistence {
     ) throws {
         let root = normalizedRootDirectory(paths.rootDirectory)
         try paths.ensureDirectories()
-        try withDatabase(paths: paths) { database in
+        try withProfileDatabase { database in
             try database.withImmediateTransaction {
                 let canonicalSessionID = try existingSessionID(rootDirectory: root, database: database)
                 guard canonicalSessionID == sessionID else { throw TerminalSessionPersistenceError.unknownSession(sessionID) }
@@ -584,7 +584,7 @@ public enum TerminalSessionPersistence {
 
     public static func detachClient(id clientID: String, paths: TerminalSessionPaths, detachedAt: String) throws {
         let root = normalizedRootDirectory(paths.rootDirectory)
-        try withDatabase(paths: paths) { database in
+        try withProfileDatabase { database in
             try database.withImmediateTransaction {
                 try database.execute(
                     sql: """
@@ -604,7 +604,7 @@ public enum TerminalSessionPersistence {
 
     public static func detachActiveClients(paths: TerminalSessionPaths, detachedAt: String) throws {
         let root = normalizedRootDirectory(paths.rootDirectory)
-        try withDatabase(paths: paths) { database in
+        try withProfileDatabase { database in
             try database.withImmediateTransaction {
                 try database.execute(
                     sql: """
@@ -637,7 +637,7 @@ public enum TerminalSessionPersistence {
         try paths.ensureDirectories()
         let root = normalizedRootDirectory(paths.rootDirectory)
         let foregroundArgvJSON = try encodeForegroundArgv(runtimeState.foregroundArgv)
-        try withDatabase(paths: paths) { database in
+        try withProfileDatabase { database in
             try database.withImmediateTransaction {
                 try database.execute(
                     sql: "DELETE FROM terminal_runtime_states WHERE root_directory = ? AND session_id <> ?", bindings: [root, runtimeState.sessionID])
@@ -732,7 +732,7 @@ public enum TerminalSessionPersistence {
         // filter and `liveAttachments` cannot disagree about which kinds the lease governs.
         let leaseExemptKinds = TerminalClientKind.allCases.filter { !$0.livenessDependsOnLease }.map(\.rawValue)
         let leaseExemptPlaceholders = Array(repeating: "?", count: leaseExemptKinds.count).joined(separator: ", ")
-        return try withDatabase(paths: paths) { database in
+        return try withProfileDatabase { database in
             let rows = try database.queryRows(
                 sql: """
                     SELECT c.client_id, c.lease_refreshed_at
@@ -761,7 +761,7 @@ public enum TerminalSessionPersistence {
 
     public static func transferOwnership(sessionID: String, newOwnerClientID: String, paths: TerminalSessionPaths, transferredAt: String) throws {
         let root = normalizedRootDirectory(paths.rootDirectory)
-        try withDatabase(paths: paths) { database in
+        try withProfileDatabase { database in
             try database.withImmediateTransaction {
                 let canonicalSessionID = try existingSessionID(rootDirectory: root, database: database)
                 guard canonicalSessionID == sessionID else { throw TerminalSessionPersistenceError.unknownSession(sessionID) }
@@ -825,7 +825,7 @@ public enum TerminalSessionPersistence {
     public static func purgeSession(paths: TerminalSessionPaths, fileManager: FileManager = .default) throws {
         if fileManager.fileExists(atPath: paths.rootDirectory) { try fileManager.removeItem(atPath: paths.rootDirectory) }
         let root = normalizedRootDirectory(paths.rootDirectory)
-        try withDatabase(paths: paths) { database in
+        try withProfileDatabase { database in
             try database.withImmediateTransaction {
                 for table in [
                     "terminal_agent_signal_events", "terminal_attachments", "terminal_clients", "terminal_remote_session_states",
@@ -879,7 +879,7 @@ public enum TerminalSessionPersistence {
         detachedAt: String, heartbeatGate: TerminalClientHeartbeatGenerationGate, observedHeartbeatGenerations: [String: UInt64]
     ) throws -> ExpireClientsOutcome {
         let root = normalizedRootDirectory(paths.rootDirectory)
-        return try withDatabase(paths: paths) { database in
+        return try withProfileDatabase { database in
             try database.withImmediateTransaction {
                 var worldMoved = false
                 // Client IDs whose per-client detach compare-and-set actually landed in THIS transaction. The
@@ -1127,18 +1127,11 @@ public enum TerminalSessionPersistence {
             id: row[0], sessionID: row[1], clientID: row[2], mode: mode, attachedAt: row[4], detachedAt: row[5].isEmpty ? nil : row[5])
     }
 
-    private static func withDatabase<T>(paths: TerminalSessionPaths, _ body: (SpacesSQLiteDatabase) throws -> T) throws -> T {
-        let databasePath = try databasePath(for: paths)
-        let database = try SpacesSQLiteDatabase(
-            path: databasePath,
-            withMigrationAuthorization: { migration in
-                try ProfileDatabaseMigrationGuard.withMigrationAuthorization(databasePath: databasePath, migration)
-            })
-        return try body(database)
-    }
-
+    /// Every terminal-session read and write goes through here. The terminal database is profile-scoped,
+    /// never session-scoped, so this is the single place the database path is resolved and therefore the
+    /// single place the test override has to be honoured.
     private static func withProfileDatabase<T>(_ body: (SpacesSQLiteDatabase) throws -> T) throws -> T {
-        let databasePath = try SpacesProfile.current().databasePath
+        let databasePath = try profileDatabasePath()
         let database = try SpacesSQLiteDatabase(
             path: databasePath,
             withMigrationAuthorization: { migration in
@@ -1152,7 +1145,7 @@ public enum TerminalSessionPersistence {
     /// task-local so concurrent test suites never observe each other's binding.
     @TaskLocal static var databasePathOverrideForTesting: String?
 
-    private static func databasePath(for _: TerminalSessionPaths) throws -> String {
+    private static func profileDatabasePath() throws -> String {
         if let databasePathOverrideForTesting { return databasePathOverrideForTesting }
         return try SpacesProfile.current().databasePath
     }

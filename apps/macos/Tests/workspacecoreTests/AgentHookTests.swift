@@ -8,6 +8,9 @@ private final class AgentHookTerminalCloseCapture: @unchecked Sendable { var ses
 private final class AgentHookTerminalTerminateCapture: @unchecked Sendable { var sessionIDs: [String] = [] }
 
 final class AgentHookTests: XCTestCase {
+
+    override func setUpWithError() throws { try useIsolatedSpacesProfile() }
+
     func testRegisterAgentWindowCreatesDedicatedWindowRecord() throws {
         let store = try makeTemporaryStore()
         let orchestrator = makeTestOrchestrator(store: store)

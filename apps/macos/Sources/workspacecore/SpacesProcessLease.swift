@@ -212,7 +212,7 @@ public enum SpacesLeaseCoordinator {
     /// (Carbon hotkeys, etc.) is machine-wide, so exactly one process — across every dev and
     /// installed profile — may hold this lease at a time.
     static func desktopControlLeaseDirectory(homeDirectoryURL: URL? = nil, fileManager: FileManager = .default) -> String {
-        let resolvedHomeDirectoryURL = homeDirectoryURL ?? currentUserHomeDirectoryURL(fileManager: fileManager)
+        let resolvedHomeDirectoryURL = homeDirectoryURL ?? SpacesProfile.accountHomeDirectoryURL(fileManager: fileManager)
         return resolvedHomeDirectoryURL.appendingPathComponent(".spaces", isDirectory: true).appendingPathComponent("leases", isDirectory: true)
             .appendingPathComponent("desktop-control", isDirectory: true).path
     }
@@ -257,24 +257,6 @@ public enum SpacesLeaseCoordinator {
         URL(fileURLWithPath: profileRoot, isDirectory: true).appendingPathComponent("leases", isDirectory: true).appendingPathComponent(
             "app-owner", isDirectory: true
         ).path
-    }
-
-    private static func currentUserHomeDirectoryURL(fileManager: FileManager) -> URL {
-        if let accountHomePath = currentUserAccountHomePath() { return URL(fileURLWithPath: accountHomePath, isDirectory: true) }
-        return fileManager.homeDirectoryForCurrentUser
-    }
-
-    private static func currentUserAccountHomePath() -> String? {
-        let uid = getuid()
-        let rawSize = sysconf(Int32(_SC_GETPW_R_SIZE_MAX))
-        let bufferSize = rawSize > 0 ? Int(rawSize) : 16_384
-        var buffer = [CChar](repeating: 0, count: bufferSize)
-        var record = passwd()
-        var result: UnsafeMutablePointer<passwd>?
-        let status = getpwuid_r(uid, &record, &buffer, buffer.count, &result)
-        guard status == 0, let entry = result else { return nil }
-        let path = String(cString: entry.pointee.pw_dir)
-        return path.isEmpty ? nil : path
     }
 
     private static func metadataPath(forLeaseDirectoryPath leaseDirectoryPath: String) -> String {

@@ -407,12 +407,19 @@ final class SpacesCommandTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
 
         let originalRuntimeDir = ProcessInfo.processInfo.environment[SpacesProfile.runtimeDirectoryEnvironmentVariable]
+        let originalDatabasePath = ProcessInfo.processInfo.environment[SpacesProfile.databasePathEnvironmentVariable]
         setenv(SpacesProfile.runtimeDirectoryEnvironmentVariable, root.path, 1)
+        setenv(SpacesProfile.databasePathEnvironmentVariable, root.appendingPathComponent("spaces.db").path, 1)
         defer {
             if let originalRuntimeDir {
                 setenv(SpacesProfile.runtimeDirectoryEnvironmentVariable, originalRuntimeDir, 1)
             } else {
                 unsetenv(SpacesProfile.runtimeDirectoryEnvironmentVariable)
+            }
+            if let originalDatabasePath {
+                setenv(SpacesProfile.databasePathEnvironmentVariable, originalDatabasePath, 1)
+            } else {
+                unsetenv(SpacesProfile.databasePathEnvironmentVariable)
             }
         }
 

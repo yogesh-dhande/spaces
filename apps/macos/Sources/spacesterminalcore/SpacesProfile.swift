@@ -125,6 +125,16 @@ public struct SpacesProfile: Sendable, Equatable {
         }
 
         let productionRoot = homeDirectoryURL.appendingPathComponent(".spaces", isDirectory: true)
+        // A test process must never resolve the user's installed profile. Test targets create and mutate
+        // real terminal-session state through this profile, so an unisolated test run writes fixture
+        // sessions into the database the installed app serves. This refuses loudly rather than silently
+        // redirecting to a scratch profile: a redirect would hide the missing isolation and leave the test
+        // asserting against a profile it never chose. Only the account's own `~/.spaces` is refused — a test
+        // that redirected `HOME` is already isolated, and the installed profile lives under the account home
+        // regardless of what `HOME` says.
+        if SpacesTestHost.isRunningUnderXCTest(), canonicalPath(productionRoot.path) == canonicalPath(installedProfileRootDirectory().path) {
+            throw SpacesProfileResolutionError.testHostRefusedInstalledProfile(profileRoot: productionRoot.path)
+        }
         try fileManager.createDirectory(at: productionRoot, withIntermediateDirectories: true)
         let runtimeDirectory = try resolvedRuntimeDirectory(
             environment: environment, currentDirectoryPath: currentDirectoryPath, profileRoot: productionRoot, fileManager: fileManager)
@@ -138,6 +148,30 @@ public struct SpacesProfile: Sendable, Equatable {
         let directory = homeDirectoryURL.appendingPathComponent(".spaces", isDirectory: true)
         try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
         return directory.appendingPathComponent("spaces.db", isDirectory: false).path
+    }
+
+    /// The installed profile's root, resolved from the account home rather than `HOME`. The installed app
+    /// and daemon run under the account's own home, so this is the one location that must stay off-limits
+    /// to processes that redirect `HOME` for isolation.
+    private static func installedProfileRootDirectory() -> URL {
+        accountHomeDirectoryURL().appendingPathComponent(".spaces", isDirectory: true)
+    }
+
+    /// The account's home directory from the password database, deliberately ignoring `HOME` so a process
+    /// that redirected the environment cannot disguise the account's real home as somewhere else.
+    public static func accountHomeDirectoryURL(fileManager: FileManager = .default) -> URL {
+        let uid = getuid()
+        let rawSize = sysconf(Int32(_SC_GETPW_R_SIZE_MAX))
+        let bufferSize = rawSize > 0 ? Int(rawSize) : 16_384
+        var buffer = [CChar](repeating: 0, count: bufferSize)
+        var record = passwd()
+        var result: UnsafeMutablePointer<passwd>?
+        let status = getpwuid_r(uid, &record, &buffer, buffer.count, &result)
+        if status == 0, let entry = result {
+            let path = String(cString: entry.pointee.pw_dir)
+            if !path.isEmpty { return URL(fileURLWithPath: path, isDirectory: true) }
+        }
+        return fileManager.homeDirectoryForCurrentUser
     }
 
     public static func ipcObject(profileRoot: String) -> String { "spaces.profile.\(shortStableHash(canonicalPath(profileRoot)))" }
@@ -321,6 +355,9 @@ public enum SpacesProfileResolutionError: Error, CustomStringConvertible, Locali
     /// executable path, the detected repo root, and the underlying git failure (when there was one).
     case repoBuiltGitProbeFailed(executablePath: String, repoRoot: String, underlyingError: (any Error)?)
 
+    /// A test process resolved the installed profile. Carries the refused profile root.
+    case testHostRefusedInstalledProfile(profileRoot: String)
+
     public var description: String {
         switch self {
         case .repoBuiltGitProbeFailed(let executablePath, let repoRoot, let underlyingError):
@@ -328,6 +365,10 @@ public enum SpacesProfileResolutionError: Error, CustomStringConvertible, Locali
             return "repo-built executable \(executablePath) could not resolve its development profile from repo root \(repoRoot): "
                 + "\(reason). Refusing to fall back to the installed profile (~/.spaces) so a development build cannot open the "
                 + "installed daemon's database."
+        case .testHostRefusedInstalledProfile(let profileRoot):
+            return "a test process resolved the installed profile at \(profileRoot). Refusing it so tests cannot read or write the "
+                + "user's installed database. Isolate the test by setting \(SpacesProfile.databasePathEnvironmentVariable) to a "
+                + "temporary profile for the whole test, including any work its background queues finish later."
         }
     }
 

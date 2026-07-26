@@ -13,6 +13,9 @@ import spacesterminalcore
 /// Behavior coverage for the schema-v2 orchestration surface: explicit notes, subscription edges,
 /// hook-signal readiness, and the v1→v2 migration carrying existing agent rows forward.
 final class AgentOrchestrationStoreTests: XCTestCase {
+
+    override func setUpWithError() throws { try useIsolatedSpacesProfile() }
+
     func testAnnotatedNoteSurvivesStatusSignalCycle() throws {
         let store = try makeTemporaryStore()
         let orchestrator = makeTestOrchestrator(store: store)
