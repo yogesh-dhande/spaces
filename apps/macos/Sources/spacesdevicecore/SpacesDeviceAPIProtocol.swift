@@ -670,6 +670,7 @@ public struct SpacesDeviceOverviewPayload: Codable, Sendable, Equatable {
         case projects
         case workspaces
         case sessions
+        case retainedTerminalSessionIDs
         case daemonStatus
         case automations
         case automationRuns
@@ -685,6 +686,7 @@ public struct SpacesDeviceOverviewPayload: Codable, Sendable, Equatable {
         projects = try container.decodeIfPresent([SpacesDeviceProjectSummary].self, forKey: .projects) ?? []
         workspaces = try container.decode([SpacesDeviceWorkspaceSummary].self, forKey: .workspaces)
         sessions = try container.decode([SpacesDeviceTerminalSessionSummary].self, forKey: .sessions)
+        retainedTerminalSessionIDs = try container.decodeIfPresent([String].self, forKey: .retainedTerminalSessionIDs) ?? []
         daemonStatus = try container.decode(TerminalServiceDaemonStatus.self, forKey: .daemonStatus)
         automations = try container.decodeIfPresent([TerminalServiceAutomationSummary].self, forKey: .automations) ?? []
         automationRuns = try container.decodeIfPresent([TerminalServiceAutomationRunSummary].self, forKey: .automationRuns) ?? []
