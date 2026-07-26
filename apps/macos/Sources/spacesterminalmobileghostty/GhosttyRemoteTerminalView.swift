@@ -378,26 +378,45 @@ import Foundation
         }
 
         /// Called when another terminal view takes the shared mirror over. This view drops back to
-        /// its own black background and stops asking for the mirror until it re-enters a window,
-        /// so an outgoing view still in the hierarchy during a navigation transition cannot trade
-        /// the mirror back and forth with the incoming one.
+        /// its own black background and stops asking for the mirror while the newcomer holds it, so
+        /// an outgoing view still in the hierarchy during a navigation transition cannot trade the
+        /// mirror back and forth with the incoming one.
         ///
-        /// Re-entering a window is the *only* thing that lifts this latch, which is safe because a
-        /// view can only surrender while some other view is in the window, and every way to present
-        /// a terminal takes the previous one out of the window in the same update: the terminal is a
-        /// single `navigationDestination(item:)` per stack, so one can never be pushed over another,
-        /// and a switch between sessions replaces that destination outright. A presentation that
-        /// instead left the surrendering view parented — a terminal in a sheet or a non-fullscreen
-        /// cover over another terminal, or two terminals side by side in a split layout — would
-        /// leave this view latched and permanently black once the newcomer went away, since nothing
-        /// re-offers a parked mirror to the view that gave it up. Adding one means giving the latch
-        /// a second release edge here, not just adding the new screen.
+        /// The latch lifts on exactly two edges, and both mean "this view is entitled to the mirror
+        /// again": re-entering a window, which is what makes this the terminal on screen after a
+        /// route change; and being offered the mirror back once it is parked with no holder at all,
+        /// which is what happens when the view that took it over goes away while this one stayed
+        /// parented — a terminal in a sheet or a non-fullscreen cover over another terminal, or two
+        /// terminals side by side in a split layout. Neither edge can fire while another view holds
+        /// the mirror, which is what keeps the latch doing its job.
         func surrenderSharedMirror() {
             mirror = nil
             lastSurfaceGeometry = nil
             didSurrenderSharedMirror = true
             setNeedsDisplay()
             reportInputReadinessIfNeeded()
+        }
+
+        /// Takes the shared mirror back after the view that took it over gave it up, reporting
+        /// whether this view actually took it. Being in a window with something to render is the
+        /// same entitlement every other acquisition goes through, so a view with nothing on screen
+        /// declines and the offer moves on to the view beneath it.
+        ///
+        /// The hand-back completes here, synchronously, rather than lifting the latch and letting
+        /// the render path schedule an acquisition: an entitlement checked when the offer is made
+        /// but acted on a turn later is no entitlement at all. A terminal that mounted in the same
+        /// update has its own acquisition already queued, and once that lands it is the terminal the
+        /// user is looking at — a deferred hand-back would take the mirror straight off it. Because
+        /// nothing suspends between the mirror parking and this call returning, an acquisition can
+        /// only run before the offer (and then there is a holder, so no offer is made) or after it
+        /// (and then it is an ordinary takeover by the newer view).
+        func reclaimSurrenderedSharedMirror() -> Bool {
+            guard didSurrenderSharedMirror, window != nil else { return false }
+            didSurrenderSharedMirror = false
+            acquireMirrorIfNeeded()
+            renderLatestSnapshot()
+            reportViewportSizeIfNeeded()
+            return mirror != nil
         }
 
         public func setTerminalVisible(_ visible: Bool) {
@@ -750,11 +769,20 @@ import Foundation
             emitHostRenderEvent("host_view_render_end", dedupeKey: lastRenderKey)
         }
 
-        private func scheduleMirrorAcquisitionIfNeeded() {
-            guard mirror == nil, mirrorAcquisitionTask == nil, window != nil, !didSurrenderSharedMirror else { return }
+        /// Whether this view may take the shared mirror right now: it is the terminal on screen, it
+        /// is not latched out by a newer holder, and it has somewhere to render. The render area has
+        /// to be non-empty because Ghostty sizes its render target from the host layer's bounds and a
+        /// layer bound at zero size never grows back. Checked again at acquisition rather than only
+        /// when one is scheduled, since a view can lose any of this in between.
+        private var isEntitledToSharedMirror: Bool {
+            guard mirror == nil, window != nil, !didSurrenderSharedMirror else { return false }
+            guard Self.nativeMirrorEnabledForTesting else { return false }
             let renderBounds = visibleRenderBounds()
-            guard renderBounds.width > 0, renderBounds.height > 0 else { return }
-            guard Self.nativeMirrorEnabledForTesting else { return }
+            return renderBounds.width > 0 && renderBounds.height > 0
+        }
+
+        private func scheduleMirrorAcquisitionIfNeeded() {
+            guard mirrorAcquisitionTask == nil, isEntitledToSharedMirror else { return }
             emitHostRenderEvent("host_view_mirror_acquire_scheduled", dedupeKey: lastRenderKey)
             mirrorAcquisitionTask = Task { @MainActor [weak self] in
                 await Task.yield()
@@ -772,8 +800,7 @@ import Foundation
         }
 
         private func acquireMirrorIfNeeded() {
-            guard mirror == nil, window != nil, !didSurrenderSharedMirror else { return }
-            guard Self.nativeMirrorEnabledForTesting else { return }
+            guard isEntitledToSharedMirror else { return }
             do {
                 emitHostRenderEvent("host_view_mirror_acquire_begin", dedupeKey: lastRenderKey)
                 let acquired = try GhosttySharedTerminalMirror.shared.acquire(
