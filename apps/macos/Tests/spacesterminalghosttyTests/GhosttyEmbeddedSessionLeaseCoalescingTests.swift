@@ -5,7 +5,8 @@ import XCTest
 @testable import spacesterminalghostty
 
 /// Lease-touch coalescing on the embedded core's send path (issue #212): typing must not spend one durable
-/// `BEGIN IMMEDIATE` lease write per keystroke on the shared profile database.
+/// `BEGIN IMMEDIATE` lease write per keystroke on the shared profile database, and a client whose liveness
+/// the lease does not decide must not spend one at all.
 ///
 /// Each test writes a sentinel lease value straight into the durable mirror after the core's own lease write
 /// has committed, then drives another send: the sentinel surviving means the core skipped the write, the
@@ -70,18 +71,21 @@ final class GhosttyEmbeddedSessionLeaseCoalescingTests: XCTestCase {
         try TerminalSessionPersistence.readAttachmentSnapshot(paths: box.paths).clients.first { $0.id == clientID }?.leaseRefreshedAt
     }
 
-    /// Successive keystrokes inside the coalescing window perform one lease write between them.
+    /// A client the lease speaks for writes on the coalescing schedule: its first send refreshes the durable
+    /// lease, and the keystrokes that follow inside the window ride on that one write.
     func testRepeatedSendsWithinTheCoalescingWindowPerformOneLeaseWrite() async throws {
         let owner = TerminalClient(
-            id: "owner-client", kind: .localWindow, identity: .init(label: "Spaces window"), connectedAt: "2026-07-21T00:00:00Z")
+            id: "owner-client", kind: .remoteViewer, identity: .init(label: "iPhone", deviceName: "iPhone"), connectedAt: "2026-07-21T00:00:00Z")
         let box = try await makeStartedCore(owner: owner)
         defer {
             TerminalEngineActor.runSynchronously { box.core.terminate() }
             try? FileManager.default.removeItem(at: box.root)
         }
 
+        try writeSentinelLease(for: owner.id, on: box)
         send("first", from: owner.id, on: box)
-        XCTAssertNotEqual(try durableLease(for: owner.id, on: box), Self.sentinelLease)
+        XCTAssertNotEqual(
+            try durableLease(for: owner.id, on: box), Self.sentinelLease, "the first send from a lease-judged client must refresh its durable lease")
         try writeSentinelLease(for: owner.id, on: box)
 
         for index in 0..<10 { send("burst-\(index)", from: owner.id, on: box) }
@@ -89,6 +93,43 @@ final class GhosttyEmbeddedSessionLeaseCoalescingTests: XCTestCase {
         XCTAssertEqual(
             try durableLease(for: owner.id, on: box), Self.sentinelLease,
             "sends inside the coalescing window must not each write the lease — the first send's write already covers them")
+    }
+
+    /// A local window client's liveness is decided by its attachment, never by its lease, so typing in a
+    /// Spaces window must spend no lease write at all — not even the first one of an interval — while the
+    /// client stays live and attached for every reader that consults the durable mirror.
+    func testLocalWindowClientSendsPerformNoLeaseWrite() async throws {
+        let owner = TerminalClient(
+            id: "window-client", kind: .localWindow, identity: .init(label: "Spaces window"), connectedAt: "2026-07-21T00:00:00Z")
+        let box = try await makeStartedCore(owner: owner)
+        defer {
+            TerminalEngineActor.runSynchronously { box.core.terminate() }
+            try? FileManager.default.removeItem(at: box.root)
+        }
+
+        try writeSentinelLease(for: owner.id, on: box)
+        for index in 0..<10 { send("burst-\(index)", from: owner.id, on: box) }
+
+        XCTAssertEqual(
+            try durableLease(for: owner.id, on: box), Self.sentinelLease,
+            "a local window client's lease has no reader, so its sends must not write it")
+
+        // The pane heartbeats on its own cadence too; the core answers that from in-memory attachment state,
+        // so it must not fall back to writing the lease either.
+        heartbeat(from: owner.id, on: box)
+        XCTAssertEqual(
+            try durableLease(for: owner.id, on: box), Self.sentinelLease, "a local window client's heartbeat must not write the lease either")
+
+        // Read the durable mirror the way a reseeding reader does — the daemon's inactive-session reaper, the
+        // session garbage collector, and a core rebuilt by a handoff all judge from these rows alone — long
+        // after the sentinel lease lapsed.
+        let wellPastTheLease = Date().addingTimeInterval(TerminalSessionPersistence.remoteClientLeaseInterval * 100)
+        XCTAssertEqual(
+            try TerminalSessionPersistence.liveAttachments(paths: box.paths, now: wellPastTheLease).map(\.clientID), [owner.id],
+            "an attached local window client must stay live however old its unwritten lease is")
+        XCTAssertTrue(
+            try TerminalSessionPersistence.staleRemoteClientIDs(paths: box.paths, now: wellPastTheLease).isEmpty,
+            "a local window client must never be expired for a lapsed lease")
     }
 
     /// A re-attached client must not inherit the previous attachment's write record: the first lease touch of

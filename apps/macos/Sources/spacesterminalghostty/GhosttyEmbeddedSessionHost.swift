@@ -654,10 +654,12 @@
         /// reflect it without a disk hit, then enqueues a coalesced durable write. Lease expiry runs on a
         /// multi-second scale, so durable staleness of a coalesced touch between writes is harmless.
         ///
-        /// The in-memory half runs on EVERY touch — it is what keeps this session's own stale-client expiry
-        /// and owner gating honest. Only the durable write is rate-limited (`leaseTouchCoalescer`), and only
-        /// the off-device readers of `lease_refreshed_at` (the daemon's inactive-session reaper, the session
-        /// garbage collector, a fresh core reseeding after handoff) see that lag.
+        /// The in-memory half runs on EVERY touch, for every client kind — it is what keeps this session's own
+        /// stale-client expiry and owner gating honest. The durable write is performed only for a client whose
+        /// liveness the lease actually decides, and then only once per coalescing interval
+        /// (`leaseTouchCoalescer`); only the off-device readers of `lease_refreshed_at` (the daemon's
+        /// inactive-session reaper, the session garbage collector, a fresh core reseeding after handoff) see
+        /// that lag.
         private func enqueueClientLeaseTouch(clientID: String) {
             let touchedAtDate = Date()
             let touchedAt = TerminalSessionTimestamp.string(from: touchedAtDate)
@@ -668,6 +670,7 @@
             // detach sits FIFO-ahead of this touch — vetoes detaching this client when it commits (finding R7-2).
             heartbeatGenerationGate.recordHeartbeat(forClientID: clientID)
             recordClientLeaseTouchInCache(clientID: clientID, leaseRefreshedAt: touchedAt)
+            guard clientLivenessDependsOnLease(clientID: clientID) else { return }
             guard leaseTouchCoalescer.isDurableTouchDue(clientID: clientID, now: touchedAtDate) else { return }
             let paths = paths
             enqueueCoalescedPersistenceWrite(key: "lease:\(clientID)") {
@@ -675,6 +678,19 @@
                 // client, so a stray touch enqueued for one can never resurrect its lease; the result is unused.
                 _ = try? TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: touchedAt)
             }
+        }
+
+        /// Whether `clientID`'s durable lease has any reader (`TerminalClientKind.livenessDependsOnLease`).
+        ///
+        /// A local window client is judged live by its attachment row alone: `liveAttachments` counts it live
+        /// while attached whatever its lease says, `staleRemoteClients` never returns it, and this core answers
+        /// its heartbeats from in-memory attachment state rather than from the write's result. Its
+        /// `lease_refreshed_at` is therefore read by nobody, so writing it is contention on the profile
+        /// database for no information. Unknown clients keep writing: a client with no row in the snapshot has
+        /// no kind to exempt it, and the write is a no-op against a row that does not exist.
+        private func clientLivenessDependsOnLease(clientID: String) -> Bool {
+            guard let kind = currentAttachmentSnapshot()?.clients.first(where: { $0.id == clientID })?.kind else { return true }
+            return kind.livenessDependsOnLease
         }
 
         /// Updates the cached attachment snapshot's client lease in place (no disk read). No-op when the cache
