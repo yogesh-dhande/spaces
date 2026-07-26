@@ -4,6 +4,19 @@ public enum TerminalClientKind: String, Codable, Sendable, CaseIterable {
     case localWindow
     case cliObserver
     case remoteViewer
+
+    /// Whether a client of this kind is judged live by its attachment lease.
+    ///
+    /// A client that can vanish without sending a detach — anything reaching the session over a network or a
+    /// separate process — proves it is still there by refreshing `lease_refreshed_at`. A local window client
+    /// runs inside the app that talks to the daemon on the same machine, so its attachment row alone says
+    /// whether it is there: `TerminalSessionAttachmentSnapshot.liveAttachments` counts it live while attached
+    /// regardless of its lease, and `staleRemoteClients` never considers it for expiry.
+    ///
+    /// This is the single declaration of that rule. Every reader of `lease_refreshed_at` derives its
+    /// kind filter from it, and the embedded core skips the durable lease write for a kind that answers
+    /// `false` — a write no reader would consult.
+    public var livenessDependsOnLease: Bool { self != .localWindow }
 }
 
 public struct TerminalClientIdentity: Codable, Sendable, Equatable {

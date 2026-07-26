@@ -172,12 +172,13 @@ public struct TerminalSessionAttachmentSnapshot: Codable, Sendable, Equatable {
     }
 
     /// Attachments backed by a still-present client. An attachment counts as live only
-    /// when it is not detached, its client is not disconnected, and — for remote clients,
-    /// which can vanish without sending a detach — its lease was refreshed within
-    /// `remoteClientLeaseInterval`. Local window clients have no lease and are always live
-    /// while attached. This is the single source of truth for liveness; the persistence
-    /// query and any off-device consumer both judge attachments through this rule, so an
-    /// expired remote viewer is never mistaken for a live attachment.
+    /// when it is not detached, its client is not disconnected, and — for the kinds whose
+    /// liveness the lease decides (`TerminalClientKind.livenessDependsOnLease`, i.e. those
+    /// that can vanish without sending a detach) — its lease was refreshed within
+    /// `remoteClientLeaseInterval`. A local window client is always live while attached, and
+    /// its lease is never even read. This is the single source of truth for liveness; the
+    /// persistence query and any off-device consumer both judge attachments through this rule,
+    /// so an expired remote viewer is never mistaken for a live attachment.
     public func liveAttachments(now: Date = Date(), remoteClientLeaseInterval: TimeInterval = TerminalSessionPersistence.remoteClientLeaseInterval)
         -> [TerminalAttachment]
     {
@@ -185,7 +186,7 @@ public struct TerminalSessionAttachmentSnapshot: Codable, Sendable, Equatable {
         let clientsByID = Dictionary(clients.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         return attachments.filter { attachment in
             guard attachment.detachedAt == nil, let client = clientsByID[attachment.clientID], client.disconnectedAt == nil else { return false }
-            guard client.kind != .localWindow else { return true }
+            guard client.kind.livenessDependsOnLease else { return true }
             guard let lastSeenAt = TerminalSessionPersistence.parseISO8601(client.leaseRefreshedAt ?? ""), lastSeenAt >= cutoff else { return false }
             return true
         }
@@ -726,6 +727,11 @@ public enum TerminalSessionPersistence {
         remoteClientLeaseInterval: TimeInterval = TerminalSessionPersistence.remoteClientLeaseInterval
     ) throws -> [StaleRemoteClient] {
         let root = normalizedRootDirectory(paths.rootDirectory)
+        // Kinds whose liveness the lease does not decide are excluded outright rather than compared against
+        // the cutoff — their rows carry no meaningful lease. Derived from `livenessDependsOnLease` so this
+        // filter and `liveAttachments` cannot disagree about which kinds the lease governs.
+        let leaseExemptKinds = TerminalClientKind.allCases.filter { !$0.livenessDependsOnLease }.map(\.rawValue)
+        let leaseExemptPlaceholders = Array(repeating: "?", count: leaseExemptKinds.count).joined(separator: ", ")
         return try withDatabase(paths: paths) { database in
             let rows = try database.queryRows(
                 sql: """
@@ -735,9 +741,9 @@ public enum TerminalSessionPersistence {
                     WHERE c.root_directory = ?
                       AND a.detached_at IS NULL
                       AND c.disconnected_at IS NULL
-                      AND c.kind <> ?
+                      AND c.kind NOT IN (\(leaseExemptPlaceholders))
                     ORDER BY c.client_id
-                    """, bindings: [root, TerminalClientKind.localWindow.rawValue])
+                    """, bindings: [root] + leaseExemptKinds)
             let cutoff = now.addingTimeInterval(-remoteClientLeaseInterval)
             return rows.compactMap { row in
                 guard let lastSeenAt = parseISO8601(row[1]), lastSeenAt >= cutoff else {

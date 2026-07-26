@@ -362,6 +362,12 @@
         /// while the expiry's durable write was stuck FIFO-behind that heartbeat's own touch. Lock-guarded so the
         /// persistence-queue thread can read it from inside `expireClients` (see `TerminalClientHeartbeatGenerationGate`).
         private let heartbeatGenerationGate = TerminalClientHeartbeatGenerationGate()
+        /// Rate-limits the durable half of the lease touches above (see `TerminalClientLeaseTouchCoalescer`),
+        /// so a stream of keystrokes costs one lease write per coalescing interval instead of one per
+        /// keystroke. Reset for a client wherever this core rewrites that client's durable row — attach,
+        /// detach, stale expiry — and wholesale on termination, so no attachment inherits the previous
+        /// attachment's write record.
+        private var leaseTouchCoalescer = TerminalClientLeaseTouchCoalescer()
         /// Remote clients whose expiry (detach, and possibly ownership transfer) has already been enqueued
         /// but whose durable detach has not yet committed. Skipped on subsequent timer ticks so a burst of
         /// ticks cannot enqueue duplicate detach/transfer writes — or bump `ownerEpoch` repeatedly — for the
@@ -447,6 +453,7 @@
                 try TerminalSessionPersistence.attachClient(
                     sessionID: launchConfiguration.sessionID, client: client, mode: mode, paths: paths,
                     attachedAt: TerminalSessionTimestamp.string(from: Date()))
+                leaseTouchCoalescer.forget(clientID: client.id)
                 if mode == .owner, previousOwnerClientID != client.id { advanceOwnerEpoch(reason: "attach") }
                 postAttachmentStateDidChange()
             }
@@ -456,6 +463,9 @@
         public func detach(clientID: String) throws {
             let detachedClientWasOwner = isOwner(clientID: clientID)
             try TerminalSessionPersistence.detachClient(id: clientID, paths: paths, detachedAt: TerminalSessionTimestamp.string(from: Date()))
+            // The detach rewrote this client's durable row, so its coalesced-write record no longer describes
+            // anything: were the same client to re-attach, the first touch of the new attachment must write.
+            leaseTouchCoalescer.forget(clientID: clientID)
             // Derive the ownership successor from the current in-memory snapshot (enforcement's source), treating
             // the just-detached client as gone — NOT by reseeding from the durable mirror. During a pending
             // queued stale-client expiry the mirror is still pre-expiry, so a reseed here would see the
@@ -538,6 +548,9 @@
             persistExitedRuntimeState(exitedState)
             let detachPaths = paths
             enqueuePersistenceWrite { try? TerminalSessionPersistence.detachActiveClients(paths: detachPaths, detachedAt: now) }
+            // Every client's durable row is being detached, so no coalesced-write record survives this run:
+            // a relaunch of this core re-attaches from scratch and its first touch per client must write.
+            leaseTouchCoalescer.forgetAll()
             // Reflect the detach in memory (NOT by re-reading the not-yet-committed durable mirror) so the
             // terminated payload, built from `currentAttachmentSnapshot`, advertises no active owner —
             // matching the enqueued durable detach above.
@@ -640,6 +653,13 @@
         /// Records a client's heartbeat-lease touch: refreshes the in-memory cache lease so on-engine reads
         /// reflect it without a disk hit, then enqueues a coalesced durable write. Lease expiry runs on a
         /// multi-second scale, so durable staleness of a coalesced touch between writes is harmless.
+        ///
+        /// The in-memory half runs on EVERY touch, for every client kind — it is what keeps this session's own
+        /// stale-client expiry and owner gating honest. The durable write is performed only for a client whose
+        /// liveness the lease actually decides, and then only once per coalescing interval
+        /// (`leaseTouchCoalescer`); only the off-device readers of `lease_refreshed_at` (the daemon's
+        /// inactive-session reaper, the session garbage collector, a fresh core reseeding after handoff) see
+        /// that lag.
         private func enqueueClientLeaseTouch(clientID: String) {
             let touchedAtDate = Date()
             let touchedAt = TerminalSessionTimestamp.string(from: touchedAtDate)
@@ -650,12 +670,27 @@
             // detach sits FIFO-ahead of this touch — vetoes detaching this client when it commits (finding R7-2).
             heartbeatGenerationGate.recordHeartbeat(forClientID: clientID)
             recordClientLeaseTouchInCache(clientID: clientID, leaseRefreshedAt: touchedAt)
+            guard clientLivenessDependsOnLease(clientID: clientID) else { return }
+            guard leaseTouchCoalescer.isDurableTouchDue(clientID: clientID, now: touchedAtDate) else { return }
             let paths = paths
             enqueueCoalescedPersistenceWrite(key: "lease:\(clientID)") {
                 // `disconnected_at IS NULL` inside `touchClient` makes this a no-op for an already-detached
                 // client, so a stray touch enqueued for one can never resurrect its lease; the result is unused.
                 _ = try? TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: touchedAt)
             }
+        }
+
+        /// Whether `clientID`'s durable lease has any reader (`TerminalClientKind.livenessDependsOnLease`).
+        ///
+        /// A local window client is judged live by its attachment row alone: `liveAttachments` counts it live
+        /// while attached whatever its lease says, `staleRemoteClients` never returns it, and this core answers
+        /// its heartbeats from in-memory attachment state rather than from the write's result. Its
+        /// `lease_refreshed_at` is therefore read by nobody, so writing it is contention on the profile
+        /// database for no information. Unknown clients keep writing: a client with no row in the snapshot has
+        /// no kind to exempt it, and the write is a no-op against a row that does not exist.
+        private func clientLivenessDependsOnLease(clientID: String) -> Bool {
+            guard let kind = currentAttachmentSnapshot()?.clients.first(where: { $0.id == clientID })?.kind else { return true }
+            return kind.livenessDependsOnLease
         }
 
         /// Updates the cached attachment snapshot's client lease in place (no disk read). No-op when the cache
@@ -997,6 +1032,9 @@
                 let appearanceChanged = request.appearance.map { GhosttyEmbeddedAppService.shared.applyColorScheme($0) } ?? false
                 let previousOwnerClientID = activeOwnerClientID()
                 try TerminalSessionPersistence.upsertClient(authoritativeClient, paths: paths)
+                // The upsert rewrote this client's durable lease, so any coalesced-write record from an
+                // earlier attachment of the same client id is void; the first touch of this attachment writes.
+                leaseTouchCoalescer.forget(clientID: authoritativeClient.id)
                 invalidateAttachmentSnapshotCache()
                 let currentAttachment = currentActiveAttachments().first { $0.clientID == authoritativeClient.id }
                 if currentAttachment?.mode != mode {
@@ -1437,7 +1475,13 @@
             }
             guard !staleClientIDs.isEmpty else { return [] }
             expiredRemoteClientIDs.formUnion(staleClientIDs)
-            for clientID in staleClientIDs { latestRemoteClientHeartbeat[clientID] = nil }
+            for clientID in staleClientIDs {
+                latestRemoteClientHeartbeat[clientID] = nil
+                // The queued expiry rewrites these clients' durable rows; drop their coalesced-write records
+                // so a client that comes back (or vetoes its own expiry by heartbeating) writes its lease
+                // rather than resting on a record the expiry invalidated.
+                leaseTouchCoalescer.forget(clientID: clientID)
+            }
             let activeAttachmentsBeforeExpiry = (try? TerminalSessionPersistence.activeAttachments(paths: paths)) ?? []
             let staleClientIDSet = Set(staleClientIDs)
             let detachedClientWasOwner = activeAttachmentsBeforeExpiry.contains {
