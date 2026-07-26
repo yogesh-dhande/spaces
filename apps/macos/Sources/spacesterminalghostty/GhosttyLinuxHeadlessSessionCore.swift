@@ -105,6 +105,10 @@
         // client's appearance on attach.
         private var currentAppearance: ThemeAppearance = .dark
         private var ownerEpoch: UInt64 = 0
+        /// Rate-limits the durable client lease writes this core performs inline on the engine (see
+        /// `touchClientLeaseIfDue`). Reset for a client on attach and detach — the only ways this core
+        /// changes that client's durable row — and wholesale on termination's detach-all.
+        private var leaseTouchCoalescer = TerminalClientLeaseTouchCoalescer()
         private var screenStateRevision: UInt64 = 0
         /// Set for the brief exec-in-place quiesce window so no late resync turn
         /// broadcasts a frame while the session is being handed to the staged daemon.
@@ -186,6 +190,8 @@
             let detachPaths = paths
             let detachedAt = nowISO8601()
             persistence.enqueueWrite { try? TerminalSessionPersistence.detachActiveClients(paths: detachPaths, detachedAt: detachedAt) }
+            // Every client's durable row is being detached, so no coalescing record survives this run.
+            leaseTouchCoalescer.forgetAll()
             if let finalPayload {
                 let payloadPaths = paths
                 persistence.enqueueWrite { try? TerminalSessionPersistence.writeRemoteSessionState(finalPayload, paths: payloadPaths) }
@@ -586,6 +592,9 @@
                 let previousOwner = activeOwnerClientID()
                 try TerminalSessionPersistence.attachClient(
                     sessionID: launchConfiguration.sessionID, client: client, mode: mode, paths: paths, attachedAt: nowISO8601())
+                // The attach wrote this client's lease and revived its durable row, so any coalescing record
+                // from an earlier attachment of the same client id is void.
+                leaseTouchCoalescer.forget(clientID: client.id)
                 if mode == .owner, previousOwner != client.id { advanceOwnerEpoch() }
                 writeRuntimeState(state: .running)
                 broadcastCurrentState(reason: TerminalRemoteSessionStateReason.attachmentState)
@@ -600,6 +609,7 @@
             do {
                 let detachedOwner = activeOwnerClientID() == clientID
                 try TerminalSessionPersistence.detachClient(id: clientID, paths: paths, detachedAt: nowISO8601())
+                leaseTouchCoalescer.forget(clientID: clientID)
                 if detachedOwner { advanceOwnerEpoch() }
                 writeRuntimeState(state: .running)
                 broadcastCurrentState(reason: TerminalRemoteSessionStateReason.attachmentState)
@@ -612,11 +622,34 @@
                 return TerminalControlResponse(ok: false, message: "Missing client ID.", errorCode: .invalidArgument)
             }
             do {
-                guard try TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: nowISO8601()) else {
+                guard try touchClientLeaseIfDue(clientID: clientID) else {
                     return TerminalControlResponse(ok: false, message: "Terminal client is no longer attached.", errorCode: .notFound)
                 }
                 return TerminalControlResponse(ok: true, message: "Refreshed terminal client lease.")
             } catch { return TerminalControlResponse(ok: false, message: String(describing: error)) }
+        }
+
+        /// Refreshes `clientID`'s durable lease unless it was refreshed within the coalescing window, and
+        /// reports whether the client is still attached.
+        ///
+        /// A skipped write answers from the coalescing record rather than from the database. That is sound
+        /// because this core is the only writer of its session's client rows and it drops a client's record
+        /// whenever it attaches or detaches that client: a surviving record therefore means the client was
+        /// attached at the recorded write and nothing has detached it since. A write that reports the client
+        /// gone — or fails outright — drops the record so the next heartbeat asks the database again.
+        private func touchClientLeaseIfDue(clientID: String) throws -> Bool {
+            let now = Date()
+            guard leaseTouchCoalescer.isDurableTouchDue(clientID: clientID, now: now) else { return true }
+            let attached: Bool
+            do {
+                attached = try TerminalSessionPersistence.touchClient(
+                    id: clientID, paths: paths, touchedAt: GhosttyRemoteSessionStateTimestamp.string(from: now))
+            } catch {
+                leaseTouchCoalescer.forget(clientID: clientID)
+                throw error
+            }
+            if !attached { leaseTouchCoalescer.forget(clientID: clientID) }
+            return attached
         }
 
         private func takeover(_ request: TerminalControlRequest) -> TerminalControlResponse {
@@ -624,7 +657,7 @@
                 return TerminalControlResponse(ok: false, message: "Missing client ID.", errorCode: .invalidArgument)
             }
             do {
-                _ = try? TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: nowISO8601())
+                _ = try? touchClientLeaseIfDue(clientID: clientID)
                 let previousOwner = activeOwnerClientID()
                 try TerminalSessionPersistence.transferOwnership(
                     sessionID: launchConfiguration.sessionID, newOwnerClientID: clientID, paths: paths, transferredAt: nowISO8601())
