@@ -247,11 +247,11 @@ public enum TerminalSessionPersistence {
         }
     }
 
-    public static func writeRuntimeState(_ state: TerminalSessionRuntimeState, paths: TerminalSessionPaths) throws {
+    public static func writeRuntimeState(_ state: TerminalSessionRuntimeState, paths: TerminalSessionPaths, databasePath: String? = nil) throws {
         try paths.ensureDirectories()
         let root = normalizedRootDirectory(paths.rootDirectory)
         let foregroundArgvJSON = try encodeForegroundArgv(state.foregroundArgv)
-        try withProfileDatabase { database in
+        try withProfileDatabase(at: databasePath) { database in
             try database.withImmediateTransaction {
                 try database.execute(
                     sql: "DELETE FROM terminal_runtime_states WHERE root_directory = ? AND session_id <> ?", bindings: [root, state.sessionID])
@@ -295,14 +295,16 @@ public enum TerminalSessionPersistence {
         }
     }
 
-    public static func writeRemoteSessionState(_ payload: GhosttyRemoteSessionStatePayload, paths: TerminalSessionPaths) throws {
+    public static func writeRemoteSessionState(_ payload: GhosttyRemoteSessionStatePayload, paths: TerminalSessionPaths, databasePath: String? = nil)
+        throws
+    {
         try paths.ensureDirectories()
         let root = normalizedRootDirectory(paths.rootDirectory)
         let encodedPayload = try JSONEncoder().encode(payload)
         guard let payloadJSON = String(data: encodedPayload, encoding: .utf8) else {
             throw TerminalSessionPersistenceError.invalidValue("payload_json", "<non-utf8>")
         }
-        try withProfileDatabase { database in
+        try withProfileDatabase(at: databasePath) { database in
             try database.withImmediateTransaction {
                 let sessionID = try existingSessionID(rootDirectory: root, database: database)
                 guard sessionID == payload.sessionID else { throw TerminalSessionPersistenceError.unknownSession(payload.sessionID) }
@@ -518,9 +520,11 @@ public enum TerminalSessionPersistence {
     /// NULL` guard makes a lease touch for a durably disconnected client a no-op (returning `false`) rather than
     /// silently resurrecting its lease: a client that was expired/detached must not be able to keep a corpse
     /// alive by heartbeating. Returns `true` only when a live client's lease was refreshed.
-    @discardableResult public static func touchClient(id clientID: String, paths: TerminalSessionPaths, touchedAt: String) throws -> Bool {
+    @discardableResult public static func touchClient(
+        id clientID: String, paths: TerminalSessionPaths, touchedAt: String, databasePath: String? = nil
+    ) throws -> Bool {
         let root = normalizedRootDirectory(paths.rootDirectory)
-        return try withProfileDatabase { database in
+        return try withProfileDatabase(at: databasePath) { database in
             try database.withImmediateTransaction {
                 let changes = try database.executeReturningChanges(
                     sql: """
@@ -602,9 +606,9 @@ public enum TerminalSessionPersistence {
         }
     }
 
-    public static func detachActiveClients(paths: TerminalSessionPaths, detachedAt: String) throws {
+    public static func detachActiveClients(paths: TerminalSessionPaths, detachedAt: String, databasePath: String? = nil) throws {
         let root = normalizedRootDirectory(paths.rootDirectory)
-        try withProfileDatabase { database in
+        try withProfileDatabase(at: databasePath) { database in
             try database.withImmediateTransaction {
                 try database.execute(
                     sql: """
@@ -876,10 +880,11 @@ public enum TerminalSessionPersistence {
     /// `detachClient`/`transferOwnership`, which still serve their own single-purpose callers.
     @discardableResult public static func expireClients(
         _ clients: [StaleRemoteClient], transferOwnershipTo newOwnerClientID: String?, sessionID: String, paths: TerminalSessionPaths,
-        detachedAt: String, heartbeatGate: TerminalClientHeartbeatGenerationGate, observedHeartbeatGenerations: [String: UInt64]
+        detachedAt: String, heartbeatGate: TerminalClientHeartbeatGenerationGate, observedHeartbeatGenerations: [String: UInt64],
+        databasePath: String? = nil
     ) throws -> ExpireClientsOutcome {
         let root = normalizedRootDirectory(paths.rootDirectory)
-        return try withProfileDatabase { database in
+        return try withProfileDatabase(at: databasePath) { database in
             try database.withImmediateTransaction {
                 var worldMoved = false
                 // Client IDs whose per-client detach compare-and-set actually landed in THIS transaction. The
@@ -1127,27 +1132,29 @@ public enum TerminalSessionPersistence {
             id: row[0], sessionID: row[1], clientID: row[2], mode: mode, attachedAt: row[4], detachedAt: row[5].isEmpty ? nil : row[5])
     }
 
+    /// The active profile's terminal database. Callers that run in the same breath as the state they are
+    /// persisting get this implicitly; work that commits later than it was decided resolves it up front
+    /// (see `withProfileDatabase(at:)`).
+    public static func currentDatabasePath() throws -> String { try SpacesProfile.current().databasePath }
+
     /// Every terminal-session read and write goes through here. The terminal database is profile-scoped,
-    /// never session-scoped, so this is the single place the database path is resolved and therefore the
-    /// single place the test override has to be honoured.
-    private static func withProfileDatabase<T>(_ body: (SpacesSQLiteDatabase) throws -> T) throws -> T {
-        let databasePath = try profileDatabasePath()
+    /// never session-scoped, so this is the single place the database path is resolved.
+    ///
+    /// `databasePath` is the database this unit of work belongs to, and resolving the active profile is its
+    /// only default. Deferred work — the per-core persistence queue, whose closures commit long after the
+    /// engine decided them — resolves the path when the write is *enqueued* and passes it here, so a write
+    /// commits to the profile that was current when the state was produced rather than to whatever profile
+    /// happens to be current when the queue reaches it. A daemon's profile never changes mid-process, so
+    /// this is inert in production; it is what makes a test's isolation hold for writes that outlive the
+    /// test that produced them.
+    private static func withProfileDatabase<T>(at databasePath: String? = nil, _ body: (SpacesSQLiteDatabase) throws -> T) throws -> T {
+        let resolvedPath = try databasePath ?? currentDatabasePath()
         let database = try SpacesSQLiteDatabase(
-            path: databasePath,
+            path: resolvedPath,
             withMigrationAuthorization: { migration in
-                try ProfileDatabaseMigrationGuard.withMigrationAuthorization(databasePath: databasePath, migration)
+                try ProfileDatabaseMigrationGuard.withMigrationAuthorization(databasePath: resolvedPath, migration)
             })
         return try body(database)
-    }
-
-    /// Test-only seam: when bound, terminal-session persistence resolves its database here instead of the
-    /// active profile, letting tests isolate state without mutating the process-global SPACES_DB_PATH. It is
-    /// task-local so concurrent test suites never observe each other's binding.
-    @TaskLocal static var databasePathOverrideForTesting: String?
-
-    private static func profileDatabasePath() throws -> String {
-        if let databasePathOverrideForTesting { return databasePathOverrideForTesting }
-        return try SpacesProfile.current().databasePath
     }
 
     private static func normalizedRootDirectory(_ rootDirectory: String) -> String {

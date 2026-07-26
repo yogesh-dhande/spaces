@@ -132,7 +132,7 @@ public struct SpacesProfile: Sendable, Equatable {
         // asserting against a profile it never chose. Only the account's own `~/.spaces` is refused — a test
         // that redirected `HOME` is already isolated, and the installed profile lives under the account home
         // regardless of what `HOME` says.
-        if SpacesTestHost.isRunningUnderXCTest(), canonicalPath(productionRoot.path) == canonicalPath(installedProfileRootDirectory().path) {
+        if SpacesTestHost.isRunningUnderXCTest(), isInstalledProfileRoot(productionRoot) {
             throw SpacesProfileResolutionError.testHostRefusedInstalledProfile(profileRoot: productionRoot.path)
         }
         try fileManager.createDirectory(at: productionRoot, withIntermediateDirectories: true)
@@ -150,16 +150,28 @@ public struct SpacesProfile: Sendable, Equatable {
         return directory.appendingPathComponent("spaces.db", isDirectory: false).path
     }
 
-    /// The installed profile's root, resolved from the account home rather than `HOME`. The installed app
-    /// and daemon run under the account's own home, so this is the one location that must stay off-limits
-    /// to processes that redirect `HOME` for isolation.
-    private static func installedProfileRootDirectory() -> URL {
-        accountHomeDirectoryURL().appendingPathComponent(".spaces", isDirectory: true)
+    /// Whether `profileRoot` is the installed profile — `.spaces` under the account's own home. The
+    /// installed app and daemon run under the account's home, so this is the one location that must stay
+    /// off-limits to a test process, whatever that process pointed `HOME` at.
+    ///
+    /// An unreadable password database answers `true`. This is the safety decision, not a convenience:
+    /// the caller uses this to refuse the installed profile, so "the account home could not be
+    /// identified" must never be reported as "this is not the installed profile" — that would silently
+    /// stop protecting the user's database in exactly the case where nothing can vouch for the path.
+    private static func isInstalledProfileRoot(_ profileRoot: URL) -> Bool {
+        guard let accountHomePath = accountHomeDirectoryPath() else { return true }
+        let installedRoot = URL(fileURLWithPath: accountHomePath, isDirectory: true).appendingPathComponent(".spaces", isDirectory: true)
+        return canonicalPath(profileRoot.path) == canonicalPath(installedRoot.path)
     }
 
     /// The account's home directory from the password database, deliberately ignoring `HOME` so a process
     /// that redirected the environment cannot disguise the account's real home as somewhere else.
-    public static func accountHomeDirectoryURL(fileManager: FileManager = .default) -> URL {
+    ///
+    /// `nil` when the password database has no readable entry for this uid. There is deliberately no
+    /// substitute: every Foundation home-directory API honours `HOME`, so falling back to one would
+    /// return the very value this function exists to avoid — and each caller's correct response to "the
+    /// account home is unknown" differs, so it is theirs to make rather than something to paper over here.
+    public static func accountHomeDirectoryPath() -> String? {
         let uid = getuid()
         let rawSize = sysconf(Int32(_SC_GETPW_R_SIZE_MAX))
         let bufferSize = rawSize > 0 ? Int(rawSize) : 16_384
@@ -167,11 +179,9 @@ public struct SpacesProfile: Sendable, Equatable {
         var record = passwd()
         var result: UnsafeMutablePointer<passwd>?
         let status = getpwuid_r(uid, &record, &buffer, buffer.count, &result)
-        if status == 0, let entry = result {
-            let path = String(cString: entry.pointee.pw_dir)
-            if !path.isEmpty { return URL(fileURLWithPath: path, isDirectory: true) }
-        }
-        return fileManager.homeDirectoryForCurrentUser
+        guard status == 0, let entry = result else { return nil }
+        let path = String(cString: entry.pointee.pw_dir)
+        return path.isEmpty ? nil : path
     }
 
     public static func ipcObject(profileRoot: String) -> String { "spaces.profile.\(shortStableHash(canonicalPath(profileRoot)))" }

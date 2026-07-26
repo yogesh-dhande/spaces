@@ -112,18 +112,34 @@ public final class TerminalCorePersistenceQueue: Sendable {
         self.sleep = sleep
     }
 
+    /// The database every write enqueued from here belongs to, resolved at ENQUEUE time and handed to the
+    /// closure so it commits to the profile that was current when the engine decided the write — not to
+    /// whatever profile is current whenever the serial queue reaches it. A daemon's profile never changes
+    /// mid-process, so this is inert in production; it is what keeps a test's final writes (a core's
+    /// `terminate()` returns with them still queued) inside the profile that test bound.
+    ///
+    /// `nil` when the profile cannot be resolved at all, which passes the same "resolve the active profile"
+    /// default every inline caller uses down to the write itself, where it fails the same way rather than
+    /// being silently attributed to a profile this work never belonged to.
+    private static func enqueueTimeDatabasePath() -> String? { try? TerminalSessionPersistence.currentDatabasePath() }
+
     /// Enqueue a durable write with no coalescing (unique mutations: expiry detaches, ownership transfer,
-    /// the terminated payload). Runs on the serial persistence queue in enqueue (FIFO) order.
-    public func enqueueWrite(_ write: @escaping @Sendable () -> Void) { queue.async(execute: write) }
+    /// the terminated payload). Runs on the serial persistence queue in enqueue (FIFO) order. The closure
+    /// receives the database resolved at enqueue time and must pass it to the persistence call it makes.
+    public func enqueueWrite(_ write: @escaping @Sendable (String?) -> Void) {
+        let databasePath = Self.enqueueTimeDatabasePath()
+        queue.async { write(databasePath) }
+    }
 
     /// Enqueue a latest-wins coalesced durable write for `key`: only the newest enqueue runs; a burst
     /// collapses to one write of the newest value (see `PersistenceCoalescingGate`). FIFO order across keys.
-    public func enqueueCoalescedWrite(key: String, _ write: @escaping @Sendable () -> Void) {
+    public func enqueueCoalescedWrite(key: String, _ write: @escaping @Sendable (String?) -> Void) {
         let generation = coalescingGate.nextGeneration(forKey: key)
         let gate = coalescingGate
+        let databasePath = Self.enqueueTimeDatabasePath()
         queue.async {
             guard gate.isLatest(generation, forKey: key) else { return }
-            write()
+            write(databasePath)
         }
     }
 
@@ -164,11 +180,12 @@ public final class TerminalCorePersistenceQueue: Sendable {
         let sleep = self.sleep
         let gate = coalescingGate
         let generation = gate.nextGeneration(forKey: key)
+        let databasePath = Self.enqueueTimeDatabasePath()
         queue.async {
             var attempt = 0
             while true {
                 guard gate.isLatest(generation, forKey: key) else { return }
-                do { try TerminalSessionPersistence.writeRuntimeState(state, paths: paths) } catch {
+                do { try TerminalSessionPersistence.writeRuntimeState(state, paths: paths, databasePath: databasePath) } catch {
                     attempt += 1
                     guard attempt < maxAttempts else { return }
                     sleep(retryDelay)

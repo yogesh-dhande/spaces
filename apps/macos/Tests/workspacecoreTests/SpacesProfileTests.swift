@@ -291,7 +291,7 @@ final class SpacesProfileTests: XCTestCase {
         defer { if let originalHome { setenv("HOME", originalHome, 1) } else { unsetenv("HOME") } }
 
         let accountHomePath = try XCTUnwrap(currentUserAccountHomePath())
-        let leaseDirectory = SpacesLeaseCoordinator.desktopControlLeaseDirectory()
+        let leaseDirectory = try SpacesLeaseCoordinator.desktopControlLeaseDirectory()
 
         XCTAssertEqual(leaseDirectory, "\(accountHomePath)/.spaces/leases/desktop-control")
         XCTAssertNotEqual(leaseDirectory, "\(tempHomeURL!.path)/.spaces/leases/desktop-control")

@@ -1,41 +1,14 @@
 import Foundation
 import Testing
-import spacesterminalcore
 
 @testable import workspacecore
 
-// Opening a workspace store authorizes schema migration against the active profile, so this suite pins
-// an isolated database and runtime root for its lifetime and runs serialized to keep those
-// process-global overrides race-free.
-@Suite(.serialized) final class WorktreeDiscoveryServiceTests {
-    private let originalDatabasePath: String?
-    private let originalRuntimeDirectory: String?
-    private let profileRoot: URL
-
-    init() throws {
-        originalDatabasePath = ProcessInfo.processInfo.environment[SpacesProfile.databasePathEnvironmentVariable]
-        originalRuntimeDirectory = ProcessInfo.processInfo.environment[SpacesProfile.runtimeDirectoryEnvironmentVariable]
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        profileRoot = root
-        setenv(SpacesProfile.databasePathEnvironmentVariable, root.appendingPathComponent("spaces.db", isDirectory: false).path, 1)
-        setenv(SpacesProfile.runtimeDirectoryEnvironmentVariable, root.appendingPathComponent("runtime", isDirectory: true).path, 1)
-    }
-
-    deinit {
-        if let originalDatabasePath {
-            setenv(SpacesProfile.databasePathEnvironmentVariable, originalDatabasePath, 1)
-        } else {
-            unsetenv(SpacesProfile.databasePathEnvironmentVariable)
-        }
-        if let originalRuntimeDirectory {
-            setenv(SpacesProfile.runtimeDirectoryEnvironmentVariable, originalRuntimeDirectory, 1)
-        } else {
-            unsetenv(SpacesProfile.runtimeDirectoryEnvironmentVariable)
-        }
-        try? FileManager.default.removeItem(at: profileRoot)
-    }
-
+// Every test here hands the store and the service an explicit database path, and
+// `WorktreeDiscoveryService` never resolves a profile, so this suite binds no profile environment. That
+// is deliberate: `.serialized` orders tests only within a suite, and Swift Testing runs distinct suites
+// concurrently in one process, so a suite that mutated the process-global `SPACES_*` here could be
+// clobbered by — and could clobber — a sibling suite.
+@Suite struct WorktreeDiscoveryServiceTests {
     /// Stand-in for a real watcher whose FSEvents/inotify setup is stalled by a busy
     /// system: `start()` blocks a background thread for `delay` (never the main actor)
     /// and signals when it has entered the blocking region, so the test can measure

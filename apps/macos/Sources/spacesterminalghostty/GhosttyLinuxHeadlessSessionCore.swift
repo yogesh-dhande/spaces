@@ -189,12 +189,16 @@
             enqueueRuntimeStateWrite(exitedState)
             let detachPaths = paths
             let detachedAt = nowISO8601()
-            persistence.enqueueWrite { try? TerminalSessionPersistence.detachActiveClients(paths: detachPaths, detachedAt: detachedAt) }
+            persistence.enqueueWrite { databasePath in
+                try? TerminalSessionPersistence.detachActiveClients(paths: detachPaths, detachedAt: detachedAt, databasePath: databasePath)
+            }
             // Every client's durable row is being detached, so no coalescing record survives this run.
             leaseTouchCoalescer.forgetAll()
             if let finalPayload {
                 let payloadPaths = paths
-                persistence.enqueueWrite { try? TerminalSessionPersistence.writeRemoteSessionState(finalPayload, paths: payloadPaths) }
+                persistence.enqueueWrite { databasePath in
+                    try? TerminalSessionPersistence.writeRemoteSessionState(finalPayload, paths: payloadPaths, databasePath: databasePath)
+                }
                 stateStreamServer?.broadcast(finalPayload)
             }
             // Termination fence: the exited-state, detach-all, and terminated-payload writes are enqueued
@@ -211,7 +215,7 @@
             // fires nothing. This closure captures only the session id (a value type), so it survives the
             // core's release. A benign duplicate notification when the core stays alive is acceptable.
             let terminatedSessionID = launchConfiguration.sessionID
-            persistence.enqueueWrite {
+            persistence.enqueueWrite { _ in
                 Task { @TerminalEngineActor in
                     TerminalSessionNotification.post(.spacesTerminalRuntimeStateDidChange, sessionID: terminatedSessionID)
                     TerminalSessionNotification.post(.spacesTerminalAttachmentStateDidChange, sessionID: terminatedSessionID)

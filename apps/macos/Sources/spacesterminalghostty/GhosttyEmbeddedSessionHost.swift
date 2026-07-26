@@ -547,7 +547,9 @@
             // value types), so the durable mirror converges even if the core is dropped right after.
             persistExitedRuntimeState(exitedState)
             let detachPaths = paths
-            enqueuePersistenceWrite { try? TerminalSessionPersistence.detachActiveClients(paths: detachPaths, detachedAt: now) }
+            enqueuePersistenceWrite { databasePath in
+                try? TerminalSessionPersistence.detachActiveClients(paths: detachPaths, detachedAt: now, databasePath: databasePath)
+            }
             // Every client's durable row is being detached, so no coalesced-write record survives this run:
             // a relaunch of this core re-attaches from scratch and its first touch per client must write.
             leaseTouchCoalescer.forgetAll()
@@ -558,7 +560,9 @@
             let finalPayload = currentRemoteSessionState(reason: TerminalRemoteSessionStateReason.terminated, outputByteCount: nil)
             if let finalPayload {
                 let payloadPaths = paths
-                enqueuePersistenceWrite { try? TerminalSessionPersistence.writeRemoteSessionState(finalPayload, paths: payloadPaths) }
+                enqueuePersistenceWrite { databasePath in
+                    try? TerminalSessionPersistence.writeRemoteSessionState(finalPayload, paths: payloadPaths, databasePath: databasePath)
+                }
                 broadcastRemoteStatePayload(finalPayload, startedAt: Date(), ownerClient: nil, outputByteCount: nil)
             }
             // Termination fence: the exited-state, detach-all, and terminated-payload writes are enqueued
@@ -571,7 +575,7 @@
             // to post the notifications (persistence closures return to the engine only via async Task). It
             // captures only the session id (a value type), so it survives this core's release.
             let terminatedSessionID = launchConfiguration.sessionID
-            enqueuePersistenceWrite {
+            enqueuePersistenceWrite { _ in
                 Task { @TerminalEngineActor in
                     TerminalSessionNotification.post(.spacesTerminalRuntimeStateDidChange, sessionID: terminatedSessionID)
                     TerminalSessionNotification.post(.spacesTerminalAttachmentStateDidChange, sessionID: terminatedSessionID)
@@ -596,11 +600,11 @@
 
         /// Enqueue a durable write with no coalescing (unique mutations: expiry detaches, ownership transfer,
         /// the terminated payload). Runs on the serial persistence queue in enqueue (FIFO) order.
-        private func enqueuePersistenceWrite(_ write: @escaping @Sendable () -> Void) { persistence.enqueueWrite(write) }
+        private func enqueuePersistenceWrite(_ write: @escaping @Sendable (String?) -> Void) { persistence.enqueueWrite(write) }
 
         /// Enqueue a latest-wins coalesced durable write for `key`: only the newest enqueue runs; a burst
         /// collapses to one write of the newest value. FIFO order across keys.
-        private func enqueueCoalescedPersistenceWrite(key: String, _ write: @escaping @Sendable () -> Void) {
+        private func enqueueCoalescedPersistenceWrite(key: String, _ write: @escaping @Sendable (String?) -> Void) {
             persistence.enqueueCoalescedWrite(key: key, write)
         }
 
@@ -673,10 +677,10 @@
             guard clientLivenessDependsOnLease(clientID: clientID) else { return }
             guard leaseTouchCoalescer.isDurableTouchDue(clientID: clientID, now: touchedAtDate) else { return }
             let paths = paths
-            enqueueCoalescedPersistenceWrite(key: "lease:\(clientID)") {
+            enqueueCoalescedPersistenceWrite(key: "lease:\(clientID)") { databasePath in
                 // `disconnected_at IS NULL` inside `touchClient` makes this a no-op for an already-detached
                 // client, so a stray touch enqueued for one can never resurrect its lease; the result is unused.
-                _ = try? TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: touchedAt)
+                _ = try? TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: touchedAt, databasePath: databasePath)
             }
         }
 
@@ -1528,11 +1532,11 @@
             //     (`reconcileStaleClientExpiryAfterSupersededDecision`), letting the next tick derive a FRESH
             //     decision. Keeping these paths separate is load-bearing: routing supersession through the
             //     failure retry would re-apply a stale decision and could stomp a legitimate new owner.
-            enqueuePersistenceWrite { [weak self] in
+            enqueuePersistenceWrite { [weak self] databasePath in
                 do {
                     let outcome = try TerminalSessionPersistence.expireClients(
                         expiringClients, transferOwnershipTo: ownershipTransferTarget, sessionID: sessionID, paths: paths, detachedAt: detachedAt,
-                        heartbeatGate: heartbeatGate, observedHeartbeatGenerations: observedHeartbeatGenerations)
+                        heartbeatGate: heartbeatGate, observedHeartbeatGenerations: observedHeartbeatGenerations, databasePath: databasePath)
                     if outcome == .superseded {
                         Task { @TerminalEngineActor in self?.reconcileStaleClientExpiryAfterSupersededDecision(clientIDs: staleClientIDs) }
                     }
@@ -2291,7 +2295,7 @@
         /// work runs. Signal the semaphore to release the queue.
         func debugHoldPersistenceQueue() -> DispatchSemaphore {
             let gate = DispatchSemaphore(value: 0)
-            enqueuePersistenceWrite { gate.wait() }
+            enqueuePersistenceWrite { _ in gate.wait() }
             return gate
         }
         func debugSetLastKnownChildPID(_ pid: Int32?) { lastKnownChildPID = pid }
