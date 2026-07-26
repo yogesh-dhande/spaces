@@ -142,7 +142,8 @@ func makeTestOrchestrator(
     builtInTerminalWindowCloser: WorkspaceOrchestrator.BuiltInTerminalWindowCloser? = nil,
     builtInTerminalSessionTerminator: WorkspaceOrchestrator.BuiltInTerminalSessionTerminator? = nil,
     builtInTerminalSessionLauncher: WorkspaceOrchestrator.BuiltInTerminalSessionLauncher? = nil,
-    daemonHandoffInProgress: (@Sendable () -> Bool)? = nil, currentDate: @escaping () -> Date = Date.init
+    daemonHandoffInProgress: (@Sendable () -> Bool)? = nil, profileDatabasePath: (() throws -> String)? = nil,
+    currentDate: @escaping () -> Date = Date.init
 ) -> WorkspaceOrchestrator {
     WorkspaceOrchestrator(
         store: store, projectsRootDirectory: projectsRootDirectory, workspacesRootDirectory: workspacesRootDirectory,
@@ -150,5 +151,5 @@ func makeTestOrchestrator(
         builtInTerminalWindowOpener: builtInTerminalWindowOpener, builtInTerminalWindowFocuser: builtInTerminalWindowFocuser,
         builtInTerminalWindowCloser: builtInTerminalWindowCloser, builtInTerminalSessionTerminator: builtInTerminalSessionTerminator,
         builtInTerminalSessionLauncher: builtInTerminalSessionLauncher, daemonHandoffInProgress: daemonHandoffInProgress,
-        currentDate: currentDate)
+        profileDatabasePath: profileDatabasePath ?? { try DatabaseLocator.defaultPath() }, currentDate: currentDate)
 }

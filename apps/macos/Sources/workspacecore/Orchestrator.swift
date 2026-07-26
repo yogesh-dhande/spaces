@@ -241,6 +241,10 @@ public final class WorkspaceOrchestrator {
     /// the profile orchestrator's handoff gate) and otherwise defaults to `{ false }` for every non-daemon
     /// orchestrator (GUI, CLI, tests), which never hands off.
     let daemonHandoffInProgress: @Sendable () -> Bool
+    /// Database path of the profile this orchestrator serves. `terminalLaunchEnvironment` exports it into
+    /// every terminal it launches, so the profile is resolved here rather than read from the process
+    /// environment. Injectable so tests bind a fixture path instead of resolving a live profile root.
+    let profileDatabasePath: () throws -> String
     private let projectsRootDirectoryURL: URL?
     private let workspacesRootDirectoryURL: URL?
     private let workspaceLifecycleGate = PerKeyGate()
@@ -252,9 +256,10 @@ public final class WorkspaceOrchestrator {
         builtInTerminalWindowFocuser: BuiltInTerminalWindowFocuser? = nil, builtInTerminalWindowCloser: BuiltInTerminalWindowCloser? = nil,
         builtInTerminalSessionTerminator: BuiltInTerminalSessionTerminator? = nil,
         builtInTerminalSessionLauncher: BuiltInTerminalSessionLauncher? = nil, daemonHandoffInProgress: (@Sendable () -> Bool)? = nil,
-        currentDate: @escaping () -> Date = Date.init
+        profileDatabasePath: @escaping () throws -> String = { try DatabaseLocator.defaultPath() }, currentDate: @escaping () -> Date = Date.init
     ) {
         self.store = store
+        self.profileDatabasePath = profileDatabasePath
         projectsRootDirectoryURL = projectsRootDirectory
         self.git = git
         self.daemonHandoffInProgress = daemonHandoffInProgress ?? Self.daemonHandoffInProgressOverrideStore.get() ?? { false }
@@ -1264,7 +1269,7 @@ public final class WorkspaceOrchestrator {
         let trimmedTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines)
         let sessionTitle = (trimmedTitle?.isEmpty == false) ? trimmedTitle! : defaultTitle
         let runtimeManifest = workspaceRuntimeManifest(project: project, workspace: workspace, assignedPorts: assignedPorts)
-        let env = terminalLaunchEnvironment(
+        let env = try terminalLaunchEnvironment(
             base: buildWorkspaceEnv(
                 project: project, workspace: workspace, namedPorts: assignedPorts.map { (port: $0.port, name: $0.name) },
                 runtimeManifest: runtimeManifest
@@ -1317,7 +1322,7 @@ public final class WorkspaceOrchestrator {
         let assignedPorts = try store.workspacePortsAssigned(workspaceID: workspaceID)
         let sessionID = UUID().uuidString
         let runtimeManifest = workspaceRuntimeManifest(project: project, workspace: workspace, assignedPorts: assignedPorts)
-        let env = terminalLaunchEnvironment(
+        let env = try terminalLaunchEnvironment(
             base: buildWorkspaceEnv(
                 project: project, workspace: workspace, namedPorts: assignedPorts.map { (port: $0.port, name: $0.name) },
                 runtimeManifest: runtimeManifest
