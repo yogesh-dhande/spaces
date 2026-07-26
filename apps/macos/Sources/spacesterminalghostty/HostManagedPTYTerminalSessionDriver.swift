@@ -55,11 +55,10 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
     /// read loop's natural-exit path defers child reaping to `reapWhenTerminated`, so the two never race
     /// a double `waitpid` (and a signal to a reused pid).
     private var terminating = false
-    /// Set once the PTY read loop has exited — its `read()` returned (EOF, i.e. every descendant holding
-    /// the slave has died) and `finishAfterReadLoop` has closed the master fd. The termination escalation
-    /// keys its stages on THIS, not on the leader being reaped: a backgrounded descendant that outlives the
-    /// leader keeps the slave open, so escalation must continue signaling the process group until the reader
-    /// actually exits, otherwise the fd and this driver leak forever. Only touched under `lock`.
+    /// Set once the PTY read loop has exited — its `read()` returned (every descriptor on the slave has
+    /// been closed) and `finishAfterReadLoop` has closed the master fd. This is one of the two conditions
+    /// the termination escalation requires before it stops signaling; reaping the leader is the other, and
+    /// neither implies the other (see `escalationWaitForTeardown`). Only touched under `lock`.
     private var readLoopFinished = false
     /// Where the read loop delivers PTY bytes. The exec-in-place handoff walks this
     /// through `.handler` → `.buffer` → `.file` so that not one byte is lost,
@@ -520,12 +519,22 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
         if shouldNotify { Task { @TerminalEngineActor in closeHandler?() } }
     }
 
-    /// Non-blocking collection of the PTY leader's exit status. Retries only on EINTR; a leader that has
-    /// not exited yet (`0`) or was already collected (`-1`/ECHILD) both return without waiting, so callers
-    /// can invoke this repeatedly and unconditionally.
-    private func reap(childPID: Int32) {
+    /// Non-blocking attempt to collect the PTY leader's exit status. Never waits, so callers can invoke
+    /// it repeatedly. Returns whether the leader is gone for good: either this call collected it, or it
+    /// is no longer a child of ours (`ECHILD` — an earlier call already collected it). A leader that
+    /// exists but has not exited yet reports false, so a polling caller knows to keep trying.
+    @discardableResult
+    private func reap(childPID: Int32) -> Bool {
         var status: Int32 = 0
-        while waitpid(childPID, &status, WNOHANG) == -1, errno == EINTR {}
+        while true {
+            let collected = waitpid(childPID, &status, WNOHANG)
+            if collected > 0 { return true }
+            if collected == 0 { return false }
+            if errno == EINTR { continue }
+            // Any error other than ECHILD is not recoverable by retrying, and reporting "not collected"
+            // leaves the escalation running rather than declaring a teardown that did not happen.
+            return errno == ECHILD
+        }
     }
 
     private func reapWhenTerminated(childPID: Int32, processGroupID: Int32) {
@@ -534,19 +543,17 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
         let intervals = terminationEscalationIntervals
         Task.detached(priority: .utility) { [weak self] in
             guard let self else { return }
-            // SIGHUP was already sent by terminate(). Escalate to SIGTERM then SIGKILL, but key each stage on
-            // the READ LOOP exiting — not merely on the leader being reaped. Reaping the leader is necessary
-            // (else it zombies) but not sufficient: a backgrounded descendant that survives the leader (e.g.
-            // a `nohup` job) keeps the PTY slave open, so `read()` stays blocked, and the master fd and this
-            // driver leak while the closed handler never fires. Each stage signals the child's PROCESS GROUP
-            // so such descendants die too; the wait helper reaps the leader opportunistically.
-            if self.escalationWaitForReadLoopExit(reapingLeader: childPID, timeout: intervals.hupGrace) { return }
+            // SIGHUP was already sent by terminate(). Escalate to SIGTERM then SIGKILL, keying each stage on
+            // the full teardown — the read loop exited AND the leader was collected — because either alone
+            // can hold while the other does not (see `escalationWaitForTeardown`). Each stage signals the
+            // child's PROCESS GROUP so descendants holding the slave die too.
+            if self.escalationWaitForTeardown(reapingLeader: childPID, timeout: intervals.hupGrace) { return }
             Self.signalTerminatedPTYProcess(
                 childPID: childPID, processGroupID: processGroupID, signal: SIGTERM, signalProcessGroup: shouldSignalProcessGroup)
-            if self.escalationWaitForReadLoopExit(reapingLeader: childPID, timeout: intervals.termGrace) { return }
+            if self.escalationWaitForTeardown(reapingLeader: childPID, timeout: intervals.termGrace) { return }
             Self.signalTerminatedPTYProcess(
                 childPID: childPID, processGroupID: processGroupID, signal: SIGKILL, signalProcessGroup: shouldSignalProcessGroup)
-            _ = self.escalationWaitForReadLoopExit(reapingLeader: childPID, timeout: intervals.killGrace)
+            _ = self.escalationWaitForTeardown(reapingLeader: childPID, timeout: intervals.killGrace)
             // A group SIGKILL releases the slave from every process still in the child's group, which unblocks
             // read(). We deliberately do NOT force-close the master as a further bound: the read loop owns the
             // fd's close (guarded by `masterFDGeneration`), and closing it from here would race that read/close
@@ -556,29 +563,43 @@ final class HostManagedPTYTerminalSessionDriver: @unchecked Sendable {
         }
     }
 
-    /// Polls until the PTY read loop has exited (`read()` returned and `finishAfterReadLoop` closed the
-    /// master fd, setting `readLoopFinished`), reaping the leader `childPID` along the way so it never
-    /// zombies. Returns true once the read loop has finished within `timeout`. Only `reapWhenTerminated`
-    /// reaps during termination (the read loop defers to it while `terminating`), so these `waitpid` calls
-    /// cannot double-reap.
-    private func escalationWaitForReadLoopExit(reapingLeader childPID: Int32, timeout: TimeInterval) -> Bool {
+    /// Polls until this session's teardown is complete within `timeout`, which takes BOTH:
+    ///
+    /// - the PTY read loop has exited — `read()` returned and `finishAfterReadLoop` closed the master fd,
+    ///   setting `readLoopFinished`; and
+    /// - the leader `childPID` has been collected by `waitpid`.
+    ///
+    /// Returns true once both hold, false to escalate to the next signal stage.
+    ///
+    /// A stage cannot key on either condition alone, because neither implies the other:
+    ///
+    /// - The read loop can stay blocked after the leader is gone. A backgrounded descendant (a `nohup`
+    ///   job, say) inherits the PTY slave and holds it open, so `read()` never returns. Stopping on the
+    ///   reap alone would leak the master fd and this driver, and the closed handler would never fire.
+    /// - The leader can stay uncollected after the read loop exits, in two ways. A process that closes its
+    ///   stdio and keeps running releases the slave while alive; and even an ordinary exit closes the
+    ///   process's descriptors before the kernel marks it a zombie, so a `waitpid` racing that transition
+    ///   truthfully reports "not exited yet". Stopping on the read loop alone would leave a live process or
+    ///   a zombie with no later reaper: `finishAfterReadLoop` defers reaping to this escalation for the
+    ///   whole of an explicit `terminate()` (`shouldReap = !terminating`), so a stage that returns without
+    ///   collecting the leader is the last look anything takes at it.
+    ///
+    /// Requiring both makes each the other's backstop — whichever lags, the stage runs to its deadline and
+    /// escalates, and the eventual SIGKILL of the process group ends both a slave-holding descendant and a
+    /// leader that ignored the gentler signals.
+    ///
+    /// Because only this escalation reaps while `terminating`, these `waitpid` calls cannot double-reap.
+    private func escalationWaitForTeardown(reapingLeader childPID: Int32, timeout: TimeInterval) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
+        var leaderCollected = false
         while true {
-            // Reap before the poll so a leader that exits while a descendant still holds the PTY slave
-            // (keeping the read loop blocked) does not sit as a zombie for the whole wait.
-            reap(childPID: childPID)
+            // Reap on every pass, not just once the read loop has exited, so a leader that dies while a
+            // descendant still holds the slave does not sit as a zombie for the rest of the wait.
+            if !leaderCollected { leaderCollected = reap(childPID: childPID) }
             lock.lock()
-            let finished = readLoopFinished
+            let readLoopExited = readLoopFinished
             lock.unlock()
-            if finished {
-                // Reap again before returning: the leader can exit between the reap above and this
-                // observation, and this is the last look any reaper takes on a successful return. A set
-                // `readLoopFinished` means `read()` hit EOF, which means every slave holder — the leader
-                // included — has exited, so the leader is reapable here; if the reap above already
-                // collected it this `waitpid` simply fails with ECHILD and reaps nothing.
-                reap(childPID: childPID)
-                return true
-            }
+            if readLoopExited, leaderCollected { return true }
             if Date() >= deadline { return false }
             usleep(50_000)
         }

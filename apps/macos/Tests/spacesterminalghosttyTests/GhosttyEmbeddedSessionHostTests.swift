@@ -374,15 +374,69 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         driver.terminate()
 
         // The ordinary teardown path: the child dies on the graceful SIGHUP, so the escalation's first
-        // stage observes the read loop finished. That success return is the only reaper during an explicit
-        // terminate(), so the leader must be collected before it returns.
+        // stage completes. That stage is the only reaper during an explicit terminate(), so the leader
+        // must be collected before it returns.
+        try await waitUntilChildIsReaped(childPID)
+    }
+
+    /// A leader that releases the PTY slave while it is still alive. `read()` on the master returns as
+    /// soon as the last slave descriptor closes, so `readLoopFinished` is set with the leader running --
+    /// the read loop exiting does not imply the leader is collectable. An escalation stage that stopped
+    /// there would report the session torn down and leave this process running forever, unreaped and
+    /// unsignalled, because the graceful SIGHUP is ignored and nothing escalates past it.
+    func testHostManagedPTYTerminateEscalatesWhenTheLeaderReleasesThePTYButSurvives() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let markerPath = root.appendingPathComponent("released-marker")
+        // Python rather than a shell script: closing exactly the three stdio descriptors and then staying
+        // alive has to be precise, and a shell may keep its own descriptor on the tty for job control,
+        // which would leave the slave open and test nothing. `exec` makes this process the PTY leader.
+        //
+        // The slave is released from inside the SIGHUP handler, not at startup, so the read loop finishes
+        // while terminate() is unwinding -- the escalation's own window. Releasing it earlier would end the
+        // session through the natural-exit path and terminate() would return at its `closed` guard, so no
+        // escalation stage would run at all.
+        let script = """
+        import os, signal, time
+
+        def release_pty_and_survive(signum, frame):
+            for fd in (0, 1, 2):
+                os.close(fd)
+
+        signal.signal(signal.SIGHUP, release_pty_and_survive)
+        with open("\(markerPath.path)", "w") as marker:
+            marker.write("ready")
+        time.sleep(120)
+        """
+        let scriptPath = root.appendingPathComponent("release-pty.py")
+        try script.write(to: scriptPath, atomically: true, encoding: .utf8)
+
+        let driver = HostManagedPTYTerminalSessionDriver(
+            launchConfiguration: TerminalSessionLaunchConfiguration(
+                sessionID: "terminate-released-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "terminate-released",
+                workingDirectory: root.path, shell: "/bin/zsh", command: "exec /usr/bin/python3 \(scriptPath.path)",
+                createdAt: "2026-07-26T00:00:00Z", workspaceID: "workspace-1", kind: .shell),
+            terminationEscalationIntervals: .init(hupGrace: 0.2, termGrace: 2.0, killGrace: 2.0))
+        defer { driver.terminate() }
+
+        try driver.startIfNeeded()
+        try await waitUntil { FileManager.default.fileExists(atPath: markerPath.path) }
+        let childPID = try XCTUnwrap(driver.childPID())
+
+        driver.terminate()
+
+        // SIGHUP is ignored, so only escalation ends this: the first stage must run to its deadline
+        // despite the finished read loop, and the SIGTERM that follows -- which the process does not
+        // ignore -- kills it. Then it must be collected.
         try await waitUntilChildIsReaped(childPID)
     }
 
     /// Asserts the PTY leader was genuinely collected, not merely killed. The exit itself is waited on
-    /// generously; the reap that follows it is bounded tightly because the escalation task reaps in the
-    /// same poll iteration that observes the read loop's exit. A leaked zombie therefore fails in seconds
-    /// and says so, instead of masquerading as a live process until a liveness poll times out.
+    /// generously; the reap that follows it is bounded tightly because a stage only reports success once
+    /// it has collected the leader. A leaked zombie therefore fails in seconds and says so, instead of
+    /// masquerading as a live process until a liveness poll times out.
     private func waitUntilChildIsReaped(_ childPID: Int32, file: StaticString = #filePath, line: UInt = #line) async throws {
         try await waitUntil(file: file, line: line, diagnostics: { "child pid \(childPID) never exited" }) {
             Self.processLifecycle(childPID) != .running
