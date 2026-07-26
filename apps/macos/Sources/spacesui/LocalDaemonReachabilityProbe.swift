@@ -16,6 +16,15 @@ import spacesterminalcore
 /// loaded→unreachable transition only: the reload is what decides what the section becomes, so it
 /// installs the offline section and the watchdog's not-loaded branch owns every retry from there,
 /// and a probe that was wrong costs exactly one reload rather than one per tick.
+///
+/// That suppression is scoped to one epoch of the section's claim, not to the app session. It holds
+/// only while the reload the report asked for has not yet re-derived the section — repeated failures
+/// in that window must coalesce into the one reload. A local snapshot that leaves the section loaded
+/// ends the epoch and re-arms detection (`noteLocalSectionLoadedFromSnapshot`), because such a
+/// snapshot is itself first-hand evidence the daemon answered. Without that, a daemon the reload
+/// restarted and that then died again would be reported by nothing: the section would claim `.loaded`
+/// while every probe of the corpse was swallowed as "already known", and the reload is the only thing
+/// that restarts it.
 @MainActor final class LocalDaemonReachabilityProbe {
     /// One liveness attempt: `nil` when the daemon answered, otherwise why it did not. Blocking on a
     /// socket round-trip, so the probe always runs it off the main actor.
@@ -35,10 +44,17 @@ import spacesterminalcore
     /// can outlast a watchdog tick; without this, a run of ticks would stack probes on it.
     private var isProbing = false
     /// Seeded as answering: the watchdog is only armed after background services start, which follows
-    /// a local snapshot the daemon had to answer for the section to be `.loaded` at all.
+    /// a local snapshot the daemon had to answer for the section to be `.loaded` at all — the same
+    /// evidence every later loaded snapshot carries (see `noteLocalSectionLoadedFromSnapshot`).
     private var daemonAnsweredLastAttempt = true
 
     init(attempt: @escaping LivenessAttempt = LocalDaemonReachabilityProbe.pingLocalDaemon) { self.attempt = attempt }
+
+    /// A local sidebar snapshot left this Mac's section `.loaded`. The daemon had to answer that
+    /// snapshot for the section to be loaded, so this is the verdict the probe would otherwise have to
+    /// spend a tick discovering: record it, which closes the suppression window an outage report opened
+    /// and lets the next failure be reported as a fresh loss of contact.
+    func noteLocalSectionLoadedFromSnapshot() { daemonAnsweredLastAttempt = true }
 
     func run() async -> Outcome {
         guard !isProbing else { return .noChange }

@@ -281,6 +281,13 @@ private enum RemoteOverviewDisconnectError: LocalizedError {
         if case .offline(let reason) = localLoadState, previousLocalSection?.loadState != localLoadState {
             DeviceLinkTrace.log(deviceID: snapshot.localDeviceID, event: "section_offline", detail: "reason=\(reason)")
         }
+        // A loaded local section means the daemon answered this snapshot, so tell the probe the daemon
+        // is back and re-arm detection. The reload a lost-contact report triggers runs through
+        // `TerminalService.ensureRunning`, which restarts a dead daemon — the probe never sees that
+        // recovery as an answering ping, and without this the next death of a crash-looping daemon
+        // would be swallowed as a verdict it already reported, leaving the section falsely loaded with
+        // nothing left to request the reload that restarts it.
+        if localLoadState == .loaded { localDaemonReachabilityProbe.noteLocalSectionLoadedFromSnapshot() }
         // An unreachable local daemon answers with the offline placeholder overview, which carries no
         // rows. Keep this Mac's last known rows and overview for the whole outage — the contract
         // `applyRemoteDeviceSection`'s failure branch keeps for a remote device — so the subtree stays

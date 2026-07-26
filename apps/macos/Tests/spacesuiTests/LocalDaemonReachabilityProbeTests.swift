@@ -78,7 +78,8 @@ private final class StubDaemon: @unchecked Sendable {
     /// The cost constraint. Acting on the standing verdict rather than the change would rebuild the
     /// whole sidebar every 15s for as long as the daemon stays down; the reload the first report
     /// triggers is what installs the offline section, and the watchdog's not-loaded branch owns the
-    /// retries from there.
+    /// retries from there. With no snapshot loading the section in between, the reload the first
+    /// report asked for has not re-derived anything yet, so every later failure must coalesce into it.
     @Test func anOutageIsReportedOnceRatherThanOnEveryProbe() async {
         let daemon = StubDaemon(failure: StubPingFailure(reason: "connection refused"))
         let probe = LocalDaemonReachabilityProbe(attempt: daemon.attempt)
@@ -92,6 +93,32 @@ private final class StubDaemon: @unchecked Sendable {
                 Issue.record("a daemon that stays down must not be re-reported; the reload it already triggered owns the recovery")
                 return
             }
+        }
+    }
+
+    /// The wedge the snapshot re-arm exists for. The reload a lost-contact report triggers runs the
+    /// local snapshot, which routes through `TerminalService.ensureRunning` and *starts* the daemon
+    /// back up, so the section returns to loaded without the probe ever seeing an answering ping. If
+    /// that restarted daemon dies again before the next tick — a crash loop — the verdict left over
+    /// from the first outage would suppress every later report, and since the reload is the only thing
+    /// that restarts the daemon, the section would claim to be loaded against a dead daemon for the
+    /// rest of the session. A loaded local snapshot is itself first-hand evidence the daemon answered,
+    /// so it must end the suppression the first report opened.
+    @Test func anOutageAfterALoadedSnapshotIsReportedAgain() async {
+        let daemon = StubDaemon(failure: StubPingFailure(reason: "connection refused"))
+        let probe = LocalDaemonReachabilityProbe(attempt: daemon.attempt)
+
+        guard case .lostContact = await probe.run() else {
+            Issue.record("the first probe of a dead daemon must report the outage")
+            return
+        }
+
+        probe.noteLocalSectionLoadedFromSnapshot()
+
+        guard case .lostContact = await probe.run() else {
+            Issue.record(
+                "a daemon that died again after a snapshot loaded the section must be reported, or nothing ever asks for the reload that restarts it")
+            return
         }
     }
 
