@@ -49,9 +49,9 @@ Read memory with `vmmap --summary <pid>`, not `ps` RSS alone — they disagree s
 
 Measure how long things take, not only how much they cost.
 
-- **Establish the CLI floor first**: `spaces --version` is ~7 ms. Never attribute command cost to "CLI startup" without it — `terminal list` at ~147 ms is almost entirely daemon work.
-- **Interaction latency**: `spaces terminal send bytes <sid> <byte>` then poll `terminal tail` until the character appears. Measured ~44 ms median, minus an ~11 ms `tail` polling floor measured in the same run, so ~33 ms true.
-- **Never use `--submit` for latency.** It sends a deliberately *spaced* Enter (`docs/spec.md:423`) and measured 636 ms end to end. It tests submission, not latency.
+- **Establish the CLI floor first** by timing `spaces --version`, which does no daemon work. It is small. Never attribute a command's cost to "CLI startup" without measuring it — commands that look client-bound usually are not.
+- **Interaction latency**: `spaces terminal send bytes <sid> <byte>`, then poll `terminal tail` until the character appears. Measure a bare `tail` call in the same run and subtract it; the polling floor is a large fraction of the result.
+- **Never use `--submit` for latency.** It sends a deliberately *spaced* Enter (`docs/spec.md:423`), which dominates the measurement by an order of magnitude. It tests submission, not latency.
 
 ## 5. Leak checks
 
@@ -69,10 +69,10 @@ Look for **drift and degradation**, not absolute values: does RSS trend up after
 
 ## 7. Multi-device — check this before trusting any idle measurement
 
-A paired phone or second Mac is a **live overview subscriber**, and it is the single most valuable probe in the sweep. With a subscriber attached and **zero terminal sessions open**, the daemon measured **7.9% of a core continuously** against a 0.6% no-subscriber baseline, attributable to per-row SQLite open/parse/close.
+A paired phone or second Mac is a **live overview subscriber**, and it is the single most valuable probe in the sweep. With a subscriber attached and **zero terminal sessions open**, the daemon does continuous overview-rebuild work — enough to dominate the idle baseline entirely — attributable by `sample` to per-row SQLite open/parse/close.
 
 - Detect one: `lsof -nP -p <daemon> | grep ESTABLISHED` on port 47847.
-- Always state whether a subscriber was attached. A cost that looks dormant without one becomes a steady-state battery drain with one.
+- Always state whether a subscriber was attached. A cost that looks dormant without one becomes a steady-state drain with one, so the two configurations are not comparable and must never be reported as a single baseline.
 
 Scope limits, both established by trying:
 
@@ -94,7 +94,7 @@ Drive the product through panes with live Ghostty surfaces — a headless daemon
 
 - Parallel `terminal command` (12 at once): all succeed, list delta matches exactly. Assert no lost writes.
 - Concurrent `terminal show` on one session: owner attachments must stay ≤ 1.
-- Hold the DB write lock from a separate connection. Under the 5 s busy timeout, nothing is disturbed. **Past it, reads still succeed (WAL) but a CLI write hangs ~30 s and fails with "Resource temporarily unavailable"** — 30 s is an RPC timeout, not the SQLite busy timeout, and the message names no cause.
+- Hold the DB write lock from a separate connection. Within the 5 s busy timeout (a code constant), nothing is disturbed. **Past it, reads still succeed (WAL) but a CLI write blocks for far longer than that timeout and then fails with "Resource temporarily unavailable"** — it is waiting on an RPC timeout, not the SQLite busy timeout, and the message names neither cause nor remedy.
 - Churn create/exit and check for runtime rows with no session row.
 
 ## 10. Resilience: handoff and crash
@@ -102,9 +102,9 @@ Drive the product through panes with live Ghostty surfaces — a headless daemon
 Test the two paths separately; they have opposite expected outcomes.
 
 **Graceful handoff — sessions must survive.** Create marker sessions (`sh -c 'echo MARK-N; sleep 600'`) so the marker proves the same pty survived rather than a fresh session appearing. Record the daemon pid and each `child_pid`, run `spaces daemon apply-update`, wait ~8 s, then assert: daemon pid **unchanged** (exec-in-place), every `child_pid` unchanged **and alive**, and every pre-handoff marker still in `terminal tail`. Session count alone passes trivially — `child_pid` equality is the load-bearing assertion.
-`apply-update` is async (returns in ~62 ms). Confirm a handoff actually happened in `~/.spaces/runtime/spacesd.launchd.err.log`: `handoff_preflight_ok` → `handoff_quiesced` → `handoff_exec` → `handoff_resume`. Otherwise a no-op is indistinguishable from a pass.
+`apply-update` is async — it returns almost immediately, long before the handoff completes, so asserting straight away reads pre-handoff state. Wait, then confirm a handoff actually happened in `~/.spaces/runtime/spacesd.launchd.err.log`: `handoff_preflight_ok` → `handoff_quiesced` → `handoff_exec` → `handoff_resume`. Otherwise a no-op is indistinguishable from a pass.
 
-**SIGKILL — sessions must die, state must repair.** launchd restarts the daemon in ~2 s with a new pid. Sessions cannot survive (the pty master fds die with the process); that is inherent, not a defect. Assert instead that every profile-owned row moved `running` → **`failed`** with its dead `child_pid` retained, and that the daemon is healthy afterwards. Rows still claiming `running` after recovery indicate rows the repair cannot see.
+**SIGKILL — sessions must die, state must repair.** launchd restarts the daemon within a few seconds under a new pid, so do not conclude it is gone without waiting. Sessions cannot survive (the pty master fds die with the process); that is inherent, not a defect. Assert instead that every profile-owned row moved `running` → **`failed`** with its dead `child_pid` retained, and that the daemon is healthy afterwards. Rows still claiming `running` after recovery indicate rows the repair cannot see.
 
 ## 11. Migrations and data integrity
 
@@ -122,14 +122,14 @@ Step back only **one** version. Forcing to v1 on a current-shaped DB does not re
 
 `powermetrics` needs a sudo password and will block an unattended run — reach for it only when the user is present, and say so rather than skipping silently.
 
-The non-sudo proxy works and is already installed: `psutil.Process(pid).cpu_times()` and `.num_ctx_switches()` (context switches **are** available on macOS). Report the wakeup **rate** next to CPU% — a low-CPU, high-wakeup process still drains battery. Measured at idle: daemon 8.7% of a core with ~539 ctx switches/s; app 0.0% with ~3/s.
+The non-sudo proxy works and is already installed: `psutil.Process(pid).cpu_times()` and `.num_ctx_switches()` (context switches **are** available on macOS). Report the wakeup **rate** next to CPU% — a low-CPU, high-wakeup process still drains battery, and the daemon's wakeup rate is the number to trend across runs.
 
 ## 13. Prove it, or drop it
 
 Most of the value is here. A plausible mechanism is not a finding.
 
-1. **Run the control.** Before attributing a cost to X, build the same workload without X. Process churn was blamed for a 10× CPU cost until fork-heavy and fork-free workloads of equal byte volume both measured 3%.
-2. **Warm the cache and repeat the operation.** A microbenchmark that never repeats measures cache-miss cost. Probing unique non-existent filenames against a cold directory overstated a lookup penalty 50×; warm and repeated, it was 1.4×.
+1. **Run the control.** Before attributing a cost to X, build the same workload without X. Process churn was once blamed for a large CPU cost until fork-heavy and fork-free workloads of equal byte volume measured the same — the real cause was elsewhere.
+2. **Warm the cache and repeat the operation.** A microbenchmark that never repeats an operation measures cache-miss cost, not the steady state the product actually pays. Probing unique non-existent filenames against a cold directory once overstated a lookup penalty by more than an order of magnitude; warmed and repeated, the effect nearly vanished.
 3. **Ask whether a clean install would hit this.** A dev machine carries many profiles, stale global config, and test residue. If the mechanism needs any of that, it is an environment artifact — say so and do not file it.
 4. **Check the docs before calling something a bug.** `docs/spec.md` may define the behaviour deliberately. If the user disagrees with documented behaviour, raise the conflict rather than silently changing course.
 5. **Correct yourself in place.** When a measurement is refuted, amend the issue and tell the user plainly. A retracted finding costs far less than a wrong one someone acts on.
