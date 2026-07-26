@@ -208,8 +208,12 @@ import workspacecore
         guard let (project, workspace) = host.findWorkspace(id: workspaceID) else { return completion(false) }
         Task { @MainActor [weak self] in
             guard let self else { return completion(false) }
-            guard let device = host.deviceRecord(forDeviceID: host.deviceID(forWorkspaceID: workspaceID)) else {
-                host.showDeviceNotLoadedError()
+            // Route by the owning project's device: hide/unhide is a daemon mutation, and the
+            // wrong daemon would either reject it or hide a same-id row it does not own. It also
+            // goes through the mutation chokepoint, so an unreachable device refuses it up front
+            // instead of stopping the workspace against a daemon that is not there.
+            guard let device = host.deviceForWorkspaceMutation(workspaceID: workspaceID) else {
+                host.showWorkspaceDeviceUnavailableError(workspaceID: workspaceID)
                 return completion(false)
             }
             // Decide the "Stop and Hide" prompt and the stop from fresh daemon state,

@@ -55,6 +55,22 @@
         private(set) var currentAttachmentSnapshot: TerminalSessionAttachmentSnapshot?
         private(set) var latestRemoteStatePayload: GhosttyRemoteSessionStatePayload?
 
+        /// True while the model wants a live subscription for this session but does not have one: the
+        /// stream dropped or a connect failed and a retry is armed (see `scheduleReconnect`).
+        ///
+        /// Kept out of `currentRuntimeState` deliberately. The device's last report stays exactly as the
+        /// device made it, so a session running on a device that went away reads as running-but-
+        /// unreachable rather than as a session that changed state — a pane can then keep the device's
+        /// last frame and say why it is frozen, instead of claiming the session ended.
+        ///
+        /// Published as a session-scoped notification rather than through the listener fan-out. Listeners
+        /// are deliberately never told about a disconnect (see `handleStreamDisconnect`), because the
+        /// render host would re-register and accumulate duplicate listeners on the one shared
+        /// subscription; a notification observers re-read this property on keeps that hazard out of the
+        /// disconnect path entirely, and any number of observers can watch it without touching the
+        /// fan-out.
+        private(set) var isStateStreamDisconnected = false
+
         private struct Listener {
             let id: UUID
             let onUpdate: @MainActor (GhosttyRemoteSessionStatePayload) -> Void
@@ -62,6 +78,9 @@
         }
 
         private var listeners: [Listener] = []
+        // Paces this session's reconnects. Internal (not `private`) so behavior tests can shorten its
+        // delays instead of waiting out real seconds.
+        let reconnectBackoff = TerminalStateStreamReconnectBackoff()
         private var streamClient: (any TerminalRemoteStateStreamClient)?
         // Bumped every time a stream client is installed. `onEvent`/`onDisconnect` callbacks carry the
         // generation they were created under, so a superseded client's late callback (an immediate
@@ -75,6 +94,14 @@
         // semaphore, so it must never run on the main actor; while a connect is in flight this guards
         // `ensureSubscriptionStarted` from starting a second one.
         private var subscriptionConnectTask: Task<Void, Never>?
+        // Holds `scheduleReconnect`'s delayed retry so a second call while one is already pending is a
+        // no-op instead of stacking a competing timer and doubling the backoff. Both
+        // `establishStateStreamConnection`'s own failure paths and the connect-completion check in
+        // `ensureSubscriptionStarted` can each decide the same failed connect owes a retry, so
+        // `scheduleReconnect` has to tolerate being called twice for one failure. Cleared when the retry
+        // fires (or the model is torn down); nothing else clears it early, so a connect that installs a
+        // client on its own simply leaves the stale retry to find `streamClient` set and no-op when it runs.
+        private var reconnectTask: Task<Void, Never>?
 
         // Emission time of the newest payload already applied. The catch-up `.state`
         // request runs in parallel with the live subscription, so a catch-up response
@@ -121,6 +148,7 @@
                 streamClient?.stop()
                 stateRefreshRetryTask?.cancel()
                 subscriptionConnectTask?.cancel()
+                reconnectTask?.cancel()
                 requestClientBox.current.client.cancel()
             }
         }
@@ -316,6 +344,10 @@
         }
 
         private func ensureSubscriptionStarted(now: Date = Date()) {
+            // Test seam: fires on every call, including one the guard below immediately turns away, so
+            // `spacesuiTests` can observe a delayed retry actually running (and being eaten by the
+            // in-flight guard) instead of guessing whether real time has passed. Nil in production.
+            ensureSubscriptionStartedInvokedForTesting?()
             if streamClient != nil || subscriptionConnectTask != nil { return }
             if let lastSubscriptionAttemptAt, now.timeIntervalSince(lastSubscriptionAttemptAt) < 0.5 { return }
             lastSubscriptionAttemptAt = now
@@ -326,7 +358,19 @@
             refreshState()
             subscriptionConnectTask = Task { @MainActor [weak self] in
                 await self?.establishStateStreamConnection()
-                self?.subscriptionConnectTask = nil
+                guard let self else { return }
+                self.subscriptionConnectTask = nil
+                // Establishes the invariant a connect that finishes without leaving `streamClient`
+                // installed always leaves a retry armed. `establishStateStreamConnection`'s own failure
+                // paths already call `scheduleReconnect()` before returning, so this only does new work
+                // when the connect reported success (`openStateStream` returned true) while a competing
+                // disconnect — e.g. a failed input send racing the connect (`reportFailedInputSend`) —
+                // had already cleared `streamClient` and lost its own retry to the
+                // `subscriptionConnectTask != nil` guard above, which is still armed for as long as this
+                // task is in flight. Without this, that race leaves the pane connected to nothing with no
+                // retry coming. `scheduleReconnect()` is idempotent, so the common case — a retry is
+                // already pending from one of those failure paths — is a no-op here.
+                if self.streamClient == nil { self.scheduleReconnect() }
             }
         }
 
@@ -388,18 +432,33 @@
                     })
             } catch { return false }
             streamClient = client
-            let started = await Task.detached(priority: .userInitiated) { () -> Bool in
-                do {
-                    try client.start()
-                    return true
-                } catch { return false }
-            }.value
+            let started: Bool
+            if let connectOverrideForTesting = stateStreamConnectOverrideForTesting {
+                // Test seam: lets `spacesuiTests` control exactly when and how the blocking connect
+                // resolves, so it can reproduce `start()` succeeding for a client a competing disconnect
+                // already stopped without racing real network timing. See the property's doc comment.
+                started = await connectOverrideForTesting()
+            } else {
+                started = await Task.detached(priority: .userInitiated) { () -> Bool in
+                    do {
+                        try client.start()
+                        return true
+                    } catch { return false }
+                }.value
+            }
             guard started else {
                 // Only clear the installed client if it is still this one; a racing disconnect (or a newer
                 // connect) may already have replaced it, and clearing then would drop a healthy stream.
                 if streamClient === client { streamClient = nil }
                 client.stop()
                 return false
+            }
+            // A `true` result does not prove this client is still the current one (see the note above), so
+            // only a client that is still installed declares the link healthy. Clearing the flag from a
+            // client a racing disconnect already tore down would hide an outage that is still on.
+            if streamClient === client {
+                reconnectBackoff.reset()
+                setStateStreamDisconnected(false)
             }
             return true
         }
@@ -490,8 +549,15 @@
             // Keep listeners attached through a subscribe drop: the asynchronous catch-up
             // `.state` (the final render for an ended session) must still reach them, and
             // not notifying listeners keeps the render host from re-registering and
-            // accumulating duplicates. The model owns reconnection.
+            // accumulating duplicates. The model owns reconnection, and publishes the drop
+            // itself through `isStateStreamDisconnected` — observable without any listener
+            // being notified, so the pane can report the outage while the fan-out stays put.
+            // Stop the dropped client before dropping the reference: its pinned-TLS connection is
+            // released only by an explicit cancel, so a bare `nil` would orphan the connection and its
+            // dispatch queue for the life of the process while the reconnect mints a fresh one.
+            let disconnectedClient = streamClient
             streamClient = nil
+            disconnectedClient?.stop()
             // Gate strictly on `.unauthorized` for the local device: an unauthorized subscribe rejection means
             // the daemon is reachable but the boxed token is stale, recoverable only by re-bootstrapping.
             // Ended-session rejections (session-not-running/not-available) and remote devices must never
@@ -508,6 +574,60 @@
                 return
             }
             scheduleReconnect()
+        }
+
+        /// Reports that a terminal input send for this session failed, so the link state follows the
+        /// client's own first-hand evidence instead of waiting on the subscription.
+        ///
+        /// Input travels on a different connection than the state stream. When a network path dies
+        /// silently, nothing tears the subscription's socket down until TCP keepalive gives up 60–90
+        /// seconds later, but the very next keystroke's request fails immediately — so a failed send is
+        /// the earliest proof the device is unreachable, and dropping that evidence leaves the pane
+        /// looking live for a minute while every keystroke goes nowhere.
+        ///
+        /// Only a transport failure qualifies (`isTransportFailureEvidenceOfLostLink`). The reaction is
+        /// the ordinary disconnect one — drop the subscription and arm the paced reconnect — rather than
+        /// only raising the flag, so the claim stays falsifiable: the reconnect either succeeds and clears
+        /// the notice, or keeps failing and the notice is right. `scheduleReconnect` owns the rest, which
+        /// is also why an ended session (no stream wanted) and a pane with no listeners report nothing.
+        ///
+        /// Returns whether this failure proves the link is gone — `isTransportFailureEvidenceOfLostLink`'s
+        /// verdict on `error`, unconditionally — which is also this method's own `RemoteGhosttyInputFailureHandler`
+        /// wiring contract: the render host discards its queued input backlog exactly when this is `true`.
+        /// The two early-return guards below must not change that answer:
+        ///  - a non-transport error (the daemon answered) returns `false` — the link is fine and its input must
+        ///    still be delivered;
+        ///  - an already-disconnected link (a retry is already armed, so there is nothing new to do here)
+        ///    still returns `true` — the link is still gone, so every keystroke of an ongoing outage, not
+        ///    only the first, must keep dropping its queued input rather than buffering.
+        @discardableResult func reportFailedInputSend(_ error: any Error) -> Bool {
+            guard Self.isTransportFailureEvidenceOfLostLink(error) else { return false }
+            // Typing produces one of these per keystroke for as long as the outage lasts. A link already
+            // reported down has a retry armed, so re-reporting it must add no reconnect and no notice.
+            guard !isStateStreamDisconnected else { return true }
+            // Retire this client's generation before stopping it: `stop()` cancels the connection, whose
+            // receive loop then delivers one final disconnect callback, and that callback must not arm a
+            // second reconnect on top of the one below.
+            streamClientGeneration &+= 1
+            let deadClient = streamClient
+            streamClient = nil
+            deadClient?.stop()
+            scheduleReconnect()
+            return true
+        }
+
+        /// Whether a failed request proves this session's link is gone. True only for a transport failure:
+        /// the request never reached the daemon.
+        ///
+        /// A reachable daemon that answers with a coded rejection — the session is not running, another
+        /// client owns it, the token was revoked — says nothing about the link, and reporting one as a
+        /// dropped connection would put a false notice on the pane and dial a device that is answering.
+        /// The classification is `SpacesDeviceClient`'s, shared with the reachability degrade the sidebar
+        /// uses, so "the transport failed" means one thing across the app; a rejection the render host has
+        /// already flattened into an opaque message error is not a transport failure by type and stays out
+        /// without any message matching.
+        nonisolated static func isTransportFailureEvidenceOfLostLink(_ error: any Error) -> Bool {
+            SpacesDeviceClient.isDeviceAPITransportFailure(error)
         }
 
         /// Applies a live stream event only when it belongs to the current stream generation, so a
@@ -530,19 +650,79 @@
 
         var hasActiveStreamClientForTesting: Bool { streamClient != nil }
 
-        /// Re-subscribes after a short delay — only while the session may still be
-        /// interactive and listeners remain. The delay avoids a tight reconnect loop;
-        /// an ended session needs no live stream, so it is left disconnected.
+        /// Overrides the blocking pinned-TLS connect `openStateStream` normally runs in a detached task,
+        /// so a test can control exactly when and how it resolves instead of racing real network timing.
+        /// `spacesuiTests` uses it to reproduce the connect-vs-disconnect race the post-connect check in
+        /// `ensureSubscriptionStarted` guards against: resolving the connect only after a competing
+        /// `reportFailedInputSend` has already cleared `streamClient` reproduces `start()` succeeding for
+        /// a client that was concurrently stopped, deterministically. Nil in production, where the real
+        /// detached connect always runs.
+        var stateStreamConnectOverrideForTesting: (@MainActor () async -> Bool)?
+
+        /// See the call site in `ensureSubscriptionStarted`.
+        var ensureSubscriptionStartedInvokedForTesting: (@MainActor () -> Void)?
+
+        /// The delay `scheduleReconnect` last actually armed a retry with, or nil once that retry has
+        /// fired. A call that no-ops because a retry is already pending leaves this untouched, so
+        /// `spacesuiTests` can prove a competing call never stacks a second timer or silently doubles the
+        /// backoff on top of the one already armed.
+        private(set) var lastReconnectDelayForTesting: Duration?
+
+        /// Whether a delayed reconnect is currently armed and waiting to fire.
+        var hasArmedReconnectForTesting: Bool { reconnectTask != nil }
+
+        /// Awaits the in-flight connect `ensureSubscriptionStarted` started, if any, so a test can observe
+        /// its outcome deterministically instead of polling.
+        func drainPendingConnectForTesting() async { await subscriptionConnectTask?.value }
+
+        /// Awaits an armed reconnect through its (test-shortened) backoff delay and the connect it starts,
+        /// so a test can drive a real retry to completion deterministically instead of polling or sleeping
+        /// out the interval. A no-op when no reconnect is armed.
+        func drainPendingReconnectForTesting() async {
+            guard let reconnectTask else { return }
+            await reconnectTask.value
+            await subscriptionConnectTask?.value
+        }
+
+        /// Re-subscribes after a backoff delay — only while the session may still be interactive and
+        /// listeners remain. An ended session needs no live stream, so it is left disconnected, and it is
+        /// also not reported as disconnected: the daemon streams live sessions only, so refusing an ended
+        /// one is the expected answer rather than a link the user should be told about.
+        ///
+        /// The delay grows with the run of failures (`reconnectBackoff`) instead of retrying flat forever:
+        /// a pane outlives its device going away, and a fixed cadence is a reconnect storm against a device
+        /// that is genuinely down. Marking the link down here rather than in `handleStreamDisconnect` keeps
+        /// the flag meaning exactly what the banner tells the user — the connection dropped and a retry is
+        /// coming.
+        ///
+        /// Idempotent while a retry is already pending (`reconnectTask != nil`): more than one caller can
+        /// decide the same failed connect owes a retry (see the connect-completion check in
+        /// `ensureSubscriptionStarted`), and a second call here must not stack a competing timer or double
+        /// the backoff on top of the one already armed.
         private func scheduleReconnect() {
+            guard reconnectTask == nil else { return }
             guard !listeners.isEmpty, currentRuntimeState?.state.isInteractive != false else { return }
-            Task { @MainActor [weak self] in
-                try? await Task.sleep(for: .milliseconds(500))
-                guard let self, self.streamClient == nil, !self.listeners.isEmpty, self.currentRuntimeState?.state.isInteractive != false else {
+            setStateStreamDisconnected(true)
+            let delay = reconnectBackoff.nextDelay()
+            lastReconnectDelayForTesting = delay
+            reconnectTask = Task { @MainActor [weak self] in
+                try? await Task.sleep(for: delay)
+                guard let self else { return }
+                self.reconnectTask = nil
+                guard self.streamClient == nil, !self.listeners.isEmpty, self.currentRuntimeState?.state.isInteractive != false else {
                     return
                 }
                 self.lastSubscriptionAttemptAt = nil
                 self.ensureSubscriptionStarted()
             }
+        }
+
+        /// Publishes a change in link state to this session's observers. Posted only on a flip, so a
+        /// persistently down device does not wake every pane on every retry.
+        private func setStateStreamDisconnected(_ isDisconnected: Bool) {
+            guard isStateStreamDisconnected != isDisconnected else { return }
+            isStateStreamDisconnected = isDisconnected
+            TerminalSessionNotification.post(.spacesTerminalStateStreamConnectionDidChange, sessionID: sessionID)
         }
 
         private func scheduleStateRefreshRetry() {
@@ -598,6 +778,43 @@
             } catch { return .failure(error) }
         }
 
+        /// Deadline for the interactive control commands on the hot per-keystroke path (typed input, key,
+        /// scroll, resize, clear-screen), used in place of the Device API's 10s default. Measured healthy
+        /// sends over the tailnet relay run 0.7-1.5s, so 5s keeps well over 3x headroom while halving the
+        /// worst-case stall a keystroke would otherwise wait out on a dead link.
+        ///
+        /// This deadline also gates how fast `reportFailedInputSend` learns the link is gone and drops the
+        /// pane's queued input (see `RemoteGhosttySessionHost.reportInputFailure`) — a keystroke typed into
+        /// a dead pane sits behind this timeout before that verdict lands and the backlog is discarded. Do
+        /// not tighten it toward the healthy-latency range without re-measuring actual send latency first:
+        /// too tight and a merely slow (not dead) link starts misreporting itself as gone and dropping
+        /// input a user is still waiting to land.
+        nonisolated static let interactiveControlRequestTimeoutSeconds: TimeInterval = 5
+
+        /// Whether `request` is one of the interactive control commands that ride the hot per-keystroke
+        /// path and so use `interactiveControlRequestTimeoutSeconds` in place of the default. Attach,
+        /// detach, heartbeat, takeover, and appearance changes are infrequent session-management calls
+        /// made off that path and keep the default deadline.
+        private nonisolated static func isInteractiveControlCommand(_ request: TerminalControlRequest) -> Bool {
+            switch TerminalControlCommand(request: request) {
+            case .send, .key, .clearScreen, .resize, .scroll: true
+            case .attach, .detach, .heartbeat, .takeover, .setAppearance, .unsupported: false
+            }
+        }
+
+        /// The deadline `sendTerminalServiceRequest` uses for a `.control` command's Device API send:
+        /// `interactiveControlRequestTimeoutSeconds` for the hot per-keystroke commands,
+        /// `SpacesDeviceClient`'s own per-command default for everything else. Pulled out as its own pure
+        /// function (not `private`) so `spacesuiTests` can assert the split deterministically — no real
+        /// send, no waiting out either deadline — instead of only through an integration test that would
+        /// have to time out for real to observe which one was used.
+        nonisolated static func controlRequestTimeoutSeconds(for controlRequest: TerminalControlRequest, command: SpacesDeviceAPICommand)
+            -> TimeInterval
+        {
+            isInteractiveControlCommand(controlRequest)
+                ? interactiveControlRequestTimeoutSeconds : SpacesDeviceClient.requestTimeoutSeconds(for: command)
+        }
+
         /// Internal (not `private`) so `spacesuiTests` can drive it directly through
         /// `@testable import spacesui` against a real `SpacesDeviceAPIRequestSessionClient`
         /// pointed at an in-process `SpacesDeviceAPIServer`. `SpacesDeviceAPIRequestSessionClient`
@@ -618,8 +835,9 @@
             case .control(let payload):
                 let deviceRequest = try AppKitController.deviceTerminalControlRequest(
                     sessionID: payload.sessionID, controlRequest: payload.controlRequest)
-                let response = try requestClient.send(
-                    SpacesDeviceAPIRequest(command: .terminalControl(deviceRequest), authToken: authToken, clientApp: clientApp))
+                let controlAPIRequest = SpacesDeviceAPIRequest(command: .terminalControl(deviceRequest), authToken: authToken, clientApp: clientApp)
+                let timeoutSeconds = Self.controlRequestTimeoutSeconds(for: payload.controlRequest, command: controlAPIRequest.command)
+                let response = try requestClient.send(controlAPIRequest, timeoutSeconds: timeoutSeconds)
                 return TerminalServiceResponse(
                     ok: response.ok, message: response.message, sessionState: response.sessionState,
                     controlResponse: TerminalControlResponse(ok: response.ok, message: response.message))

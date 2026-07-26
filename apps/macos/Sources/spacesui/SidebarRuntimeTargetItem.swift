@@ -190,7 +190,7 @@ extension AppKitController {
         workspaceID: String, _ mutation: @escaping @Sendable (SpacesPairedDeviceRecord, SpacesDeviceClientApp) throws -> SpacesDeviceAPIResponse
     ) {
         guard let device = deviceForWorkspaceMutation(workspaceID: workspaceID) else {
-            showDeviceNotLoadedError()
+            showWorkspaceDeviceUnavailableError(workspaceID: workspaceID)
             return
         }
         Task { @MainActor [weak self] in

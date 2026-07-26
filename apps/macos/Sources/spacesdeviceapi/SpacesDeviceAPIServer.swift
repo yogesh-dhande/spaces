@@ -454,6 +454,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                         try Self.setCloseOnExec(clientFD)
                         try Self.setBlocking(clientFD)
                         Self.setSocketTimeout(clientFD, seconds: 120)
+                        SpacesTCPKeepalive.apply(to: clientFD)
                         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                             guard let self else {
                                 close(clientFD)
@@ -823,6 +824,10 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     #endif
     private var terminalLinkTransferAuthorizations: [String: TerminalLinkTransferAuthorization] = [:]
     private var running = false
+    /// When the listener entered its waiting state, cleared whenever it reaches a definite state.
+    /// Only the `NWListener` transport reports waiting; `SpacesDeviceAPIListenerHealth` turns a wait
+    /// that outlasts its grace period into a not-running verdict for the supervisor's health check.
+    private var listenerWaitingSince: Date?
     private var acceptingRequests = false
 
     public init(
@@ -894,9 +899,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
 
     public var isRunning: Bool {
         stateLock.lock()
-        let value = running
-        stateLock.unlock()
-        return value
+        defer { stateLock.unlock() }
+        return SpacesDeviceAPIListenerHealth.isRunning(listenerStarted: running, waitingSince: listenerWaitingSince, now: Date())
     }
 
     var requestConnectionCountForTesting: Int {
@@ -922,7 +926,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             sec_protocol_options_set_peer_authentication_required(securityOptions, false)
             guard let secIdentity = sec_identity_create(identity.identity) else { throw TerminalServiceTLSError.identityImportFailed(errSecParam) }
             sec_protocol_options_set_local_identity(securityOptions, secIdentity)
-            let parameters = NWParameters(tls: tlsOptions, tcp: NWProtocolTCP.Options())
+            let parameters = NWParameters(tls: tlsOptions, tcp: SpacesTCPKeepalive.makeTCPOptions())
             if !SpacesDeviceAPIDefaults.isWildcardHost(host) {
                 parameters.requiredLocalEndpoint = .hostPort(host: NWEndpoint.Host(host), port: nwPort)
             }
@@ -959,6 +963,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 case .cancelled:
                     self.acceptingRequests = false
                     self.setRunning(false)
+                case .waiting(let error):
+                    self.trace("listener_waiting error=\(error)")
+                    self.markListenerWaiting()
                 default: break
                 }
             }
@@ -3130,6 +3137,15 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     private func setRunning(_ value: Bool) {
         stateLock.lock()
         running = value
+        listenerWaitingSince = nil
+        stateLock.unlock()
+    }
+
+    /// Starts the waiting clock on the first waiting report and keeps the original timestamp for
+    /// repeats, so a listener that keeps re-reporting the same wait cannot postpone the verdict.
+    private func markListenerWaiting() {
+        stateLock.lock()
+        if listenerWaitingSince == nil { listenerWaitingSince = Date() }
         stateLock.unlock()
     }
 }
