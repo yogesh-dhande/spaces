@@ -160,6 +160,14 @@ private final class NotificationObserverBag: @unchecked Sendable {
     var ghosttyRendererHost: (any TerminalGhosttyRendererHosting)?
     var ghosttySessionInfoProvider: (any TerminalGhosttySessionInfoProviding)?
     var visibleRenderer: VisibleRenderer = .textView
+    /// Whether the session host had a renderable surface when this pane last resolved what to
+    /// present; `nil` until it has resolved one. `refreshNow` records it on every exit — including
+    /// the owner-surface early return and the failure path — so it always describes the surface the
+    /// currently presented renderer was chosen from, across ownership changes, renderer transitions,
+    /// and a host that is swapped or released underneath the pane. Screen-content payloads compare
+    /// against it (`screenContentCanChangePresentation`) to tell a first frame arriving from an
+    /// unchanged blank pane.
+    private var surfaceAvailabilityAtLastPresentation: Bool?
     private var lastObservedOwnerClientID: String?
     var lastObservedRuntimeState: TerminalSessionRuntimeState?
     var shouldShowOwnerStateLabel = true
@@ -468,6 +476,10 @@ private final class NotificationObserverBag: @unchecked Sendable {
     }
 
     func refreshNow(allowGhosttyOwnerAttach: Bool = true) {
+        // A refresh is where the pane resolves what it presents, so it is also where the surface
+        // availability that resolution was made from is recorded. Recording on exit captures a
+        // surface this refresh attached or released.
+        defer { surfaceAvailabilityAtLastPresentation = hasRenderableGhosttySurface }
         do {
             let currentLaunchConfiguration: TerminalSessionLaunchConfiguration
             if let launchConfiguration {
@@ -843,7 +855,39 @@ private final class NotificationObserverBag: @unchecked Sendable {
     func ownerRendererReadyForInitialPresentation() -> Bool {
         guard backend == .ghosttyEmbedded, preferredAttachmentMode == .owner else { return true }
         guard !isExplicitlyNonInteractiveRuntimeState(lastObservedRuntimeState) else { return true }
-        return visibleRenderer == .ghosttyOwner && ghosttyRendererHost?.hasRenderableSurface() == true
+        return isPresentingLiveGhosttyMirror
+    }
+
+    private var hasRenderableGhosttySurface: Bool { ghosttyRendererHost?.hasRenderableSurface() == true }
+
+    /// True when the pane is already showing the live Ghostty mirror: it holds the owner surface
+    /// and that surface has a frame. Every other renderer state is either presenting something
+    /// derived elsewhere (the plain-text tail, the frozen final render) or waiting for a first
+    /// frame it cannot see until the pane re-resolves its renderer.
+    private var isPresentingLiveGhosttyMirror: Bool { visibleRenderer == .ghosttyOwner && hasRenderableGhosttySurface }
+
+    /// Whether a screen-content payload can change what this pane presents, and so whether it is
+    /// worth a refresh. Screen content arrives at interaction frequency, and a refresh re-resolves
+    /// attachment, ownership, and the renderer and re-derives every title in the panel, so a pane
+    /// that would present exactly what it already presents must not pay for one.
+    ///
+    /// - The live mirror has painted the payload itself.
+    /// - The takeover status screen presents no session content at all: a mostly blank pane behind
+    ///   a Take Over button, shown to a viewer watching a session another client owns and to an
+    ///   owner whose first frame has not landed. Its message is derived from runtime state,
+    ///   ownership, and metadata, each broadcast under its own state reason, so the only change a
+    ///   screen-content payload can make to it is the surface becoming renderable — which promotes
+    ///   the pane to the mirror. While surface availability is unchanged there is nothing to
+    ///   re-present, however chatty the session is.
+    /// - Every other renderer re-derives what it presents from the session host on each refresh, so
+    ///   it keeps refreshing: the ended session's final render refills the pane's copy buffer from
+    ///   the host snapshot as an ended-scrollback replay scrolls it, and the "render unavailable"
+    ///   and plain-text screens are waiting for a final render that reaches them as a host snapshot
+    ///   without the pane ever holding a renderable surface of its own.
+    private var screenContentCanChangePresentation: Bool {
+        if isPresentingLiveGhosttyMirror { return false }
+        if visibleRenderer == .ghosttyTakeoverStatus { return hasRenderableGhosttySurface != surfaceAvailabilityAtLastPresentation }
+        return true
     }
 
     private func startObservingApplicationActivation() {
@@ -907,7 +951,14 @@ private final class NotificationObserverBag: @unchecked Sendable {
                 let changedSessionID = TerminalSessionNotification.sessionID(from: notification)
                 MainActor.assumeIsolated {
                     guard let self, let changedSessionID, changedSessionID == self.sessionID else { return }
-                    guard self.visibleRenderer == .ghosttyEndedFinalRender || self.visibleRenderer == .textView else { return }
+                    // Screen content changed. Refresh only when that can change what this pane
+                    // presents: typing, scrolling, and resizing must stay off the refresh path both
+                    // for the pane whose mirror painted them and for a pane parked on the takeover
+                    // screen, which shows no session content. A pane still waiting for its first
+                    // renderable frame does pick it up here — the payload that supplies it arrives
+                    // under a screen-content reason (the catch-up `.state` response is stamped
+                    // `state_change`).
+                    guard self.screenContentCanChangePresentation else { return }
                     self.refreshNow()
                 }
             })

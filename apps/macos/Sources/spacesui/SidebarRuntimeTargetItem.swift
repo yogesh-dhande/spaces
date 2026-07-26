@@ -104,11 +104,19 @@ extension AppKitController {
         return Self.sidebarRuntimeTargetItems(detail: context.detail, browserSessions: context.browserSessions)
     }
 
-    /// The runtime target's display name for a terminal session (what the sidebar row
-    /// shows), so pane and tab titles match the target list instead of the terminal's
-    /// own window title.
-    func runtimeTargetTitle(forSessionID sessionID: String, workspaceID: String) -> String? {
-        sidebarRuntimeTargetItems(workspaceID: workspaceID).first { $0.sessionID == sessionID }?.title
+    /// The runtime targets' display names (what the sidebar rows show) for a workspace's
+    /// terminal sessions, so pane and tab titles match the target list instead of the
+    /// terminal's own window title. Returned as a map because a caller titling a panel
+    /// needs a name per open session, and one target-list build answers all of them.
+    /// When two targets claim the same session, the first in target order wins — the
+    /// order the sidebar rows and numbered shortcuts use.
+    func runtimeTargetTitlesBySessionID(workspaceID: String) -> [String: String] {
+        var titles: [String: String] = [:]
+        for item in sidebarRuntimeTargetItems(workspaceID: workspaceID) {
+            guard let sessionID = item.sessionID, titles[sessionID] == nil else { continue }
+            titles[sessionID] = item.title
+        }
+        return titles
     }
 
     /// Opens or focuses a sidebar runtime target through the same resolution pipeline the
