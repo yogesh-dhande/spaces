@@ -38,12 +38,21 @@ final class TerminalSessionGarbageCollectorTests: XCTestCase {
     /// Renders a whole-second ISO8601 stamp the way the runtime writes `exitedAt`, for age-relative seeds.
     private func iso(_ date: Date) -> String { TerminalSessionTimestamp.string(from: date) }
 
-    @discardableResult
-    private func seedSession(
-        id: String, state: TerminalSessionState, servicePID: Int32, attachment: Bool = false, remoteState: Bool = false,
-        exitedAt: String? = "2026-07-19T00:00:01Z"
+    /// The persisted final-render payload a seeded session carries. `padding` inflates the encoded JSON so
+    /// a test can size the retention budget against the bytes the row actually holds; the test measures the
+    /// same value by encoding this payload itself, so the budget never depends on JSON overhead guesses.
+    private func remoteStatePayload(id: String, padding: Int) -> GhosttyRemoteSessionStatePayload {
+        GhosttyRemoteSessionStatePayload(
+            sessionID: id, reason: "final", emittedAt: "2026-07-19T00:00:01Z", sessionStateRevision: nil, sessionStateFlags: nil,
+            screenStateRevision: nil, runtimeState: nil, attachmentSnapshot: nil, title: String(repeating: "x", count: padding),
+            workingDirectory: root.path, outputByteCount: 10)
+    }
+
+    @discardableResult private func seedSession(
+        id: String, state: TerminalSessionState, servicePID: Int32, attachment: Bool = false, remoteState: Bool = false, remoteStatePadding: Int = 1,
+        exitedAt: String? = "2026-07-19T00:00:01Z", rootDirectory: String? = nil
     ) throws -> TerminalSessionPaths {
-        let paths = try TerminalSessionPaths.forSession(id: id)
+        let paths = try rootDirectory.map { TerminalSessionPaths(rootDirectory: $0) } ?? TerminalSessionPaths.forSession(id: id)
         try paths.ensureDirectories()
         try TerminalSessionPersistence.writeLaunchConfiguration(
             TerminalSessionLaunchConfiguration(
@@ -55,16 +64,14 @@ final class TerminalSessionGarbageCollectorTests: XCTestCase {
                 exitedAt: state.isInteractive ? nil : exitedAt), paths: paths)
         FileManager.default.createFile(atPath: paths.outputPath, contents: Data("transcript".utf8))
         if attachment {
-            let client = TerminalClient(id: "client-\(id)", kind: .localWindow, identity: TerminalClientIdentity(label: "Mac"), connectedAt: "2026-07-19T00:00:00Z")
+            let client = TerminalClient(
+                id: "client-\(id)", kind: .localWindow, identity: TerminalClientIdentity(label: "Mac"), connectedAt: "2026-07-19T00:00:00Z")
             let attach = TerminalAttachment(sessionID: id, clientID: client.id, mode: .owner, attachedAt: "2026-07-19T00:00:00Z")
             try TerminalSessionPersistence.writeAttachmentSnapshot(
                 TerminalSessionAttachmentSnapshot(clients: [client], attachments: [attach]), paths: paths)
         }
         if remoteState {
-            let payload = GhosttyRemoteSessionStatePayload(
-                sessionID: id, reason: "final", emittedAt: "2026-07-19T00:00:01Z", sessionStateRevision: nil, sessionStateFlags: nil,
-                screenStateRevision: nil, runtimeState: nil, attachmentSnapshot: nil, title: "T", workingDirectory: root.path, outputByteCount: 10)
-            try TerminalSessionPersistence.writeRemoteSessionState(payload, paths: paths)
+            try TerminalSessionPersistence.writeRemoteSessionState(remoteStatePayload(id: id, padding: remoteStatePadding), paths: paths)
         }
         return paths
     }
@@ -76,13 +83,11 @@ final class TerminalSessionGarbageCollectorTests: XCTestCase {
     /// was (or was not) called, or that a release failure is contained, pass an explicit closure.
     private func collect(
         active: Set<String> = [], referenced: Set<String> = [], fileManager: FileManager = .default,
-        release: @escaping (String) throws -> Void = { _ in },
-        onPurgeFailure: (String, any Error) -> Void = { _, _ in }
+        release: @escaping (String) throws -> Void = { _ in }, onPurgeFailure: (String, any Error) -> Void = { _, _ in }
     ) throws -> [String] {
         try TerminalSessionGarbageCollector.collectRemovedSessions(
-            activeSessionIDs: active, isReferencedByProduct: { referenced.contains($0) }, releaseExpiredReferences: release,
-            fileManager: fileManager, now: now, onPurgeFailure: onPurgeFailure,
-            onBudgetExceeded: { XCTFail("onBudgetExceeded called unexpectedly with \($0)") })
+            activeSessionIDs: active, isReferencedByProduct: { referenced.contains($0) }, releaseExpiredReferences: release, fileManager: fileManager,
+            now: now, onPurgeFailure: onPurgeFailure, onBudgetExceeded: { XCTFail("onBudgetExceeded called unexpectedly with \($0)") })
     }
 
     /// Stands in for a `removeItem` failure (e.g. a permissions error or a busy file handle) so purge
@@ -327,7 +332,10 @@ final class TerminalSessionGarbageCollectorTests: XCTestCase {
 
         let purged = try TerminalSessionGarbageCollector.collectRemovedSessions(
             activeSessionIDs: [], isReferencedByProduct: { referenced.contains($0) },
-            releaseExpiredReferences: { released.append($0); referenced.remove($0) }, now: now)
+            releaseExpiredReferences: {
+                released.append($0)
+                referenced.remove($0)
+            }, now: now)
 
         XCTAssertEqual(released, ["old"], "An ended session at the age limit must have its product rows released.")
         XCTAssertEqual(purged, ["old"], "Once the release clears the last reference the session must be purged.")
@@ -337,8 +345,7 @@ final class TerminalSessionGarbageCollectorTests: XCTestCase {
     // Tier 2 (age): a referenced ended session that ended 6d23h ago is inside the retention window, so it
     // must not be released or purged.
     func testEndedSessionYoungerThanMaxAgeDoesNotExpire() throws {
-        let paths = try seedSession(
-            id: "young", state: .exited, servicePID: 999_999, exitedAt: iso(now.addingTimeInterval(-(7 * 86_400 - 3_600))))
+        let paths = try seedSession(id: "young", state: .exited, servicePID: 999_999, exitedAt: iso(now.addingTimeInterval(-(7 * 86_400 - 3_600))))
 
         let purged = try TerminalSessionGarbageCollector.collectRemovedSessions(
             activeSessionIDs: [], isReferencedByProduct: { _ in true },
@@ -358,7 +365,10 @@ final class TerminalSessionGarbageCollectorTests: XCTestCase {
 
         let purged = try TerminalSessionGarbageCollector.collectRemovedSessions(
             activeSessionIDs: [], isReferencedByProduct: { referenced.contains($0) },
-            releaseExpiredReferences: { released.append($0); referenced.remove($0) }, now: Date().addingTimeInterval(8 * 86_400))
+            releaseExpiredReferences: {
+                released.append($0)
+                referenced.remove($0)
+            }, now: Date().addingTimeInterval(8 * 86_400))
 
         XCTAssertEqual(released, ["nostamp"], "A missing exitedAt must fall back to file mtime to drive expiry.")
         XCTAssertEqual(purged, ["nostamp"])
@@ -379,8 +389,10 @@ final class TerminalSessionGarbageCollectorTests: XCTestCase {
 
         let purged = try TerminalSessionGarbageCollector.collectRemovedSessions(
             activeSessionIDs: [], isReferencedByProduct: { referenced.contains($0) },
-            releaseExpiredReferences: { released.append($0); referenced.remove($0) }, now: now,
-            onBudgetExceeded: { XCTFail("onBudgetExceeded called unexpectedly with \($0)") })
+            releaseExpiredReferences: {
+                released.append($0)
+                referenced.remove($0)
+            }, now: now, onBudgetExceeded: { XCTFail("onBudgetExceeded called unexpectedly with \($0)") })
 
         XCTAssertEqual(released, ["stale-attached"], "A stale attachment must not keep an expired ended session's product rows from being released.")
         XCTAssertEqual(purged, ["stale-attached"], "An expired ended session with only a crash-leftover attachment must be purged by the age tier.")
@@ -434,15 +446,16 @@ final class TerminalSessionGarbageCollectorTests: XCTestCase {
         let oldPaths = try seedSession(id: "old", state: .exited, servicePID: 999_999, exitedAt: iso(now.addingTimeInterval(-3 * 86_400)))
         let midPaths = try seedSession(id: "mid", state: .exited, servicePID: 999_998, exitedAt: iso(now.addingTimeInterval(-2 * 86_400)))
         let newPaths = try seedSession(id: "new", state: .exited, servicePID: 999_997, exitedAt: iso(now.addingTimeInterval(-1 * 86_400)))
-        for paths in [oldPaths, midPaths, newPaths] {
-            try Data(repeating: 0, count: 1_000).write(to: URL(fileURLWithPath: paths.outputPath))
-        }
+        for paths in [oldPaths, midPaths, newPaths] { try Data(repeating: 0, count: 1_000).write(to: URL(fileURLWithPath: paths.outputPath)) }
         var referenced: Set<String> = ["old", "mid", "new"]
         var released: [String] = []
 
         let purged = try TerminalSessionGarbageCollector.collectRemovedSessions(
             activeSessionIDs: [], isReferencedByProduct: { referenced.contains($0) },
-            releaseExpiredReferences: { released.append($0); referenced.remove($0) }, retentionPolicy: policy, now: now,
+            releaseExpiredReferences: {
+                released.append($0)
+                referenced.remove($0)
+            }, retentionPolicy: policy, now: now,
             onBudgetExceeded: { XCTFail("total should be back under budget after evicting the oldest, got \($0)") })
 
         XCTAssertEqual(purged, ["old"], "Only the oldest ended session is evicted once the total drops under budget.")
@@ -464,15 +477,16 @@ final class TerminalSessionGarbageCollectorTests: XCTestCase {
             id: "mid", state: .exited, servicePID: 999_998, attachment: true, exitedAt: iso(now.addingTimeInterval(-2 * 86_400)))
         let newPaths = try seedSession(
             id: "new", state: .exited, servicePID: 999_997, attachment: true, exitedAt: iso(now.addingTimeInterval(-1 * 86_400)))
-        for paths in [oldPaths, midPaths, newPaths] {
-            try Data(repeating: 0, count: 1_000).write(to: URL(fileURLWithPath: paths.outputPath))
-        }
+        for paths in [oldPaths, midPaths, newPaths] { try Data(repeating: 0, count: 1_000).write(to: URL(fileURLWithPath: paths.outputPath)) }
         var referenced: Set<String> = ["old", "mid", "new"]
         var released: [String] = []
 
         let purged = try TerminalSessionGarbageCollector.collectRemovedSessions(
             activeSessionIDs: [], isReferencedByProduct: { referenced.contains($0) },
-            releaseExpiredReferences: { released.append($0); referenced.remove($0) }, retentionPolicy: policy, now: now,
+            releaseExpiredReferences: {
+                released.append($0)
+                referenced.remove($0)
+            }, retentionPolicy: policy, now: now,
             onBudgetExceeded: { XCTFail("total should be back under budget after evicting the oldest, got \($0)") })
 
         XCTAssertEqual(purged, ["old"], "A stale local-window attachment must not protect an ended session from budget eviction.")
@@ -480,6 +494,84 @@ final class TerminalSessionGarbageCollectorTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: oldPaths.rootDirectory))
         XCTAssertTrue(FileManager.default.fileExists(atPath: midPaths.rootDirectory), "Younger sessions must survive once under budget.")
         XCTAssertTrue(FileManager.default.fileExists(atPath: newPaths.rootDirectory))
+    }
+
+    // A session whose row stores a root this profile does not own — a runtime directory that moved, or rows
+    // a predecessor daemon left behind — must still be collectable. The sweep reads each session through
+    // its stored root, so the phantom `running` row (dead pid, so not shown) and every row keyed to that
+    // root are reclaimed on the first sweep instead of being skipped forever.
+    func testCollectsSessionWhoseStoredRootIsOutsideTheProfile() throws {
+        let foreignRoot = root.appendingPathComponent("foreign-runtime", isDirectory: true).appendingPathComponent("stray", isDirectory: true)
+        let paths = try seedSession(
+            id: "stray", state: .running, servicePID: 999_999, remoteState: true, exitedAt: nil, rootDirectory: foreignRoot.path)
+
+        let purged = try collect()
+
+        XCTAssertEqual(purged, ["stray"])
+        XCTAssertTrue(try TerminalSessionPersistence.listKnownSessions().isEmpty, "terminal_sessions row must be reclaimed.")
+        XCTAssertThrowsError(try TerminalSessionPersistence.readRuntimeState(paths: paths), "Runtime row must be reclaimed.")
+        XCTAssertThrowsError(try TerminalSessionPersistence.readRemoteSessionState(paths: paths), "Final-render row must be reclaimed.")
+    }
+
+    // The stored root is trusted for identity but never for deletion: a row naming a directory outside the
+    // profile is reclaimed rows-only, so a garbage-collection sweep can never delete a user directory that
+    // a stale or mis-keyed row happens to point at.
+    func testPurgingAForeignRootNeverTouchesTheFilesystemOutsideTheProfile() throws {
+        let foreignRoot = root.appendingPathComponent("foreign-runtime", isDirectory: true).appendingPathComponent("stray", isDirectory: true)
+        _ = try seedSession(id: "stray", state: .exited, servicePID: 999_999, remoteState: true, rootDirectory: foreignRoot.path)
+        let sentinel = foreignRoot.appendingPathComponent("keep-me.txt")
+        try Data("user data".utf8).write(to: sentinel)
+
+        let purged = try collect()
+
+        XCTAssertEqual(purged, ["stray"])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: foreignRoot.path), "A root outside the profile must never be removed.")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: sentinel.path), "Nothing under a root outside the profile may be removed.")
+        XCTAssertTrue(try TerminalSessionPersistence.listKnownSessions().isEmpty, "The rows must still be reclaimed.")
+    }
+
+    // A row naming a root that no longer exists on disk is reclaimed rows-only too: nothing is created to
+    // delete, and the sweep must not stall on the missing directory.
+    func testCollectsSessionWhoseStoredRootNoLongerExists() throws {
+        let vanishedRoot = root.appendingPathComponent("foreign-runtime", isDirectory: true).appendingPathComponent("vanished", isDirectory: true)
+        _ = try seedSession(id: "vanished", state: .exited, servicePID: 999_999, remoteState: true, rootDirectory: vanishedRoot.path)
+        try FileManager.default.removeItem(at: vanishedRoot)
+
+        let purged = try collect()
+
+        XCTAssertEqual(purged, ["vanished"])
+        XCTAssertTrue(try TerminalSessionPersistence.listKnownSessions().isEmpty)
+    }
+
+    // Tier 3 (budget): an ended session's footprint accumulates in the profile database, not under its
+    // directory — the directory holds a few bytes of transcript once the process is gone while the
+    // persisted final-render row holds a full grid snapshot. The budget must weigh those bytes, or it
+    // measures a quantity that does not grow and can never fire. The budget here is sized from the exact
+    // encoded payload, so only the oldest is evicted before the total drops back under it.
+    func testByteBudgetWeighsPersistedFinalRenderPayload() throws {
+        let padding = 4_000
+        let payloadBytes = try JSONEncoder().encode(remoteStatePayload(id: "old", padding: padding)).count
+        let policy = TerminalSessionRetentionPolicy(
+            endedSessionMaxAge: 7 * 86_400, endedTranscriptByteBudget: Int64(2 * payloadBytes + 1_000), orphanGracePeriod: 3_600)
+        for (id, daysAgo) in [("old", 3), ("mid", 2), ("new", 1)] {
+            _ = try seedSession(
+                id: id, state: .exited, servicePID: 999_999, remoteState: true, remoteStatePadding: padding,
+                exitedAt: iso(now.addingTimeInterval(TimeInterval(-daysAgo) * 86_400)))
+        }
+        var referenced: Set<String> = ["old", "mid", "new"]
+        var released: [String] = []
+
+        let purged = try TerminalSessionGarbageCollector.collectRemovedSessions(
+            activeSessionIDs: [], isReferencedByProduct: { referenced.contains($0) },
+            releaseExpiredReferences: {
+                released.append($0)
+                referenced.remove($0)
+            }, retentionPolicy: policy, now: now,
+            onBudgetExceeded: { XCTFail("total should be back under budget after evicting the oldest, got \($0)") })
+
+        XCTAssertEqual(purged, ["old"], "The oldest ended session must be evicted once the persisted payload bytes are counted.")
+        XCTAssertEqual(released, ["old"])
+        XCTAssertEqual(Set(try TerminalSessionPersistence.listKnownSessions().map(\.sessionID)), ["mid", "new"])
     }
 
     // First sweep after deploy: a whole backlog of expired sessions is released and purged in one pass, with
@@ -493,7 +585,10 @@ final class TerminalSessionGarbageCollectorTests: XCTestCase {
 
         let purged = try TerminalSessionGarbageCollector.collectRemovedSessions(
             activeSessionIDs: [], isReferencedByProduct: { referenced.contains($0) },
-            releaseExpiredReferences: { released.append($0); referenced.remove($0) }, now: now)
+            releaseExpiredReferences: {
+                released.append($0)
+                referenced.remove($0)
+            }, now: now)
 
         XCTAssertEqual(Set(purged), Set(ids), "Every expired session must be purged in the same sweep.")
         XCTAssertEqual(Set(released), Set(ids))

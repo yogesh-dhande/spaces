@@ -67,6 +67,23 @@ func seedTerminalSessionWindow(store: SQLiteStore, workspaceID: String, sessionI
             terminalTrackingID: sessionID, role: "terminal", orderIndex: 200, lastSeenAt: "now"))
 }
 
+/// Writes the `terminal_sessions` row that has to exist before any runtime state is persisted for a
+/// session.
+///
+/// Production establishes it inside the session host: `startIfNeeded` writes the launch configuration as
+/// its first persistence action, before the host's first runtime-state write, and every other per-session
+/// table is keyed off that row. The real `builtInTerminalWindowOpener` writes nothing durable at all — it
+/// posts an IPC notification asking the app to open a pane — so a fixture that uses the opener as a
+/// stand-in for a live session host must seed the row the host would have written.
+func seedTerminalSessionRow(
+    sessionID: String, paths: TerminalSessionPaths, workspaceID: String = "workspace-1", createdAt: String = "2026-05-09T17:00:00Z"
+) throws {
+    try TerminalSessionPersistence.writeLaunchConfiguration(
+        TerminalSessionLaunchConfiguration(
+            sessionID: sessionID, title: sessionID, workingDirectory: "/tmp", shell: "/bin/zsh", command: nil, createdAt: createdAt,
+            workspaceID: workspaceID, kind: .shell), paths: paths)
+}
+
 /// Marks a built-in terminal session as live for window-reconciliation purposes. Window liveness is
 /// session-based: a control socket must be present, an active owner attachment must exist, and the
 /// service PID must be alive. Tests that exercise `refreshWorkspaceWindows` must establish those session

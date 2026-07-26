@@ -100,6 +100,10 @@ final class TerminalOutputTailTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: sessionRoot) }
         let paths = TerminalSessionPaths(rootDirectory: sessionRoot.path)
         let url = URL(fileURLWithPath: paths.outputPath)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            TerminalSessionLaunchConfiguration(
+                sessionID: "session-home", title: "Tail fixture", workingDirectory: sessionRoot.path, shell: "/bin/zsh", command: nil,
+                createdAt: "2026-05-15T00:00:00Z", workspaceID: "tail-fixture-workspace", kind: .shell), paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             TerminalSessionRuntimeState(
                 sessionID: "session-home", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-05-15T00:00:00Z",
@@ -143,6 +147,10 @@ final class TerminalOutputTailTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: sessionRoot) }
 
         let paths = TerminalSessionPaths(rootDirectory: sessionRoot.path)
+        try TerminalSessionPersistence.writeLaunchConfiguration(
+            TerminalSessionLaunchConfiguration(
+                sessionID: "session-size", title: "Tail fixture", workingDirectory: sessionRoot.path, shell: "/bin/zsh", command: nil,
+                createdAt: "2026-05-15T00:00:00Z", workspaceID: "tail-fixture-workspace", kind: .shell), paths: paths)
         try TerminalSessionPersistence.writeRuntimeState(
             TerminalSessionRuntimeState(
                 sessionID: "session-size", backend: .ghosttyEmbedded, servicePID: 1, childPID: 2, state: .running, updatedAt: "2026-05-15T00:00:00Z",

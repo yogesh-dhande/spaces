@@ -265,6 +265,7 @@ extension OrchestratorTests {
                 let paths = try! TerminalSessionPaths.forSession(id: sessionID)
                 try! paths.ensureDirectories()
                 FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
+                try! seedTerminalSessionRow(sessionID: sessionID, paths: paths)
                 try! TerminalSessionPersistence.writeRuntimeState(
                     .init(
                         sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 101, childPID: 5432, state: .running,
@@ -317,6 +318,7 @@ extension OrchestratorTests {
                 let paths = try! TerminalSessionPaths.forSession(id: sessionID)
                 try! paths.ensureDirectories()
                 FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
+                try! seedTerminalSessionRow(sessionID: sessionID, paths: paths)
                 try! TerminalSessionPersistence.writeRuntimeState(
                     .init(
                         sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: 101, childPID: 5432, state: .running,

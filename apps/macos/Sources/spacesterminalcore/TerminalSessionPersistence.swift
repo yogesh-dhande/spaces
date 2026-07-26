@@ -247,12 +247,17 @@ public enum TerminalSessionPersistence {
         }
     }
 
+    /// Persists the session's runtime state. Requires the session's own `terminal_sessions` row, the way
+    /// every other per-session write does: a runtime row that outlives (or precedes) its session row is
+    /// invisible to every session-driven sweep, so it can never be repaired or reclaimed.
     public static func writeRuntimeState(_ state: TerminalSessionRuntimeState, paths: TerminalSessionPaths, databasePath: String? = nil) throws {
         try paths.ensureDirectories()
         let root = normalizedRootDirectory(paths.rootDirectory)
         let foregroundArgvJSON = try encodeForegroundArgv(state.foregroundArgv)
         try withProfileDatabase(at: databasePath) { database in
             try database.withImmediateTransaction {
+                let existingSessionID = try existingSessionID(rootDirectory: root, database: database)
+                guard existingSessionID == state.sessionID else { throw TerminalSessionPersistenceError.unknownSession(state.sessionID) }
                 try database.execute(
                     sql: "DELETE FROM terminal_runtime_states WHERE root_directory = ? AND session_id <> ?", bindings: [root, state.sessionID])
                 try database.execute(
@@ -304,6 +309,10 @@ public enum TerminalSessionPersistence {
         guard let payloadJSON = String(data: encodedPayload, encoding: .utf8) else {
             throw TerminalSessionPersistenceError.invalidValue("payload_json", "<non-utf8>")
         }
+        // Stored alongside the payload so readers answer "can this ended pane replay?" without decoding
+        // it. The writer already holds the decoded update (the render-update decode cache was seeded by
+        // whoever materialized this frame), so computing it here costs nothing.
+        let hasFinalRender = payload.renderSnapshot != nil
         try withProfileDatabase(at: databasePath) { database in
             try database.withImmediateTransaction {
                 let sessionID = try existingSessionID(rootDirectory: root, database: database)
@@ -313,12 +322,13 @@ public enum TerminalSessionPersistence {
                     bindings: [root, payload.sessionID])
                 try database.execute(
                     sql: """
-                        INSERT INTO terminal_remote_session_states(session_id, root_directory, payload_json)
-                        VALUES (?, ?, ?)
+                        INSERT INTO terminal_remote_session_states(session_id, root_directory, payload_json, has_final_render)
+                        VALUES (?, ?, ?, ?)
                         ON CONFLICT(session_id) DO UPDATE SET
                           root_directory = excluded.root_directory,
-                          payload_json = excluded.payload_json
-                        """, bindings: [payload.sessionID, root, payloadJSON])
+                          payload_json = excluded.payload_json,
+                          has_final_render = excluded.has_final_render
+                        """, bindings: [payload.sessionID, root, payloadJSON, hasFinalRender ? 1 : 0])
             }
         }
     }
@@ -350,12 +360,6 @@ public enum TerminalSessionPersistence {
                 }
             }
         }
-    }
-
-    public static func writeRemoteStateMirror(_ payload: GhosttyRemoteSessionStatePayload, paths: TerminalSessionPaths) throws {
-        if let runtimeState = payload.runtimeState { try writeRuntimeState(runtimeState, paths: paths) }
-        if let attachmentSnapshot = payload.attachmentSnapshot { try writeAttachmentSnapshot(attachmentSnapshot, paths: paths) }
-        try writeRemoteSessionState(payload, paths: paths)
     }
 
     public static func readLaunchConfiguration(paths: TerminalSessionPaths) throws -> TerminalSessionLaunchConfiguration {
@@ -637,8 +641,11 @@ public enum TerminalSessionPersistence {
     /// untouched, leaving the row in its prior live state so the next restart genuinely heals it via the
     /// dead-pid branch. Kept separate from `writeRuntimeState`/`detachActiveClients`, which still serve
     /// their own single-purpose callers.
+    ///
+    /// The repair writes rows only and deliberately does not create the session's directory: it runs
+    /// against sessions discovered from their stored root, whose directory may be gone or outside this
+    /// profile, and recreating one would litter a path the profile does not own.
     public static func finalizeSessionRepair(_ runtimeState: TerminalSessionRuntimeState, detachedAt: String, paths: TerminalSessionPaths) throws {
-        try paths.ensureDirectories()
         let root = normalizedRootDirectory(paths.rootDirectory)
         let foregroundArgvJSON = try encodeForegroundArgv(runtimeState.foregroundArgv)
         try withProfileDatabase { database in
@@ -826,8 +833,16 @@ public enum TerminalSessionPersistence {
     /// then fails, the next sweep still lists the session, still reads its runtime/attachment state (those
     /// are rows, not files), and skips the already-removed directory via the `fileExists` guard below before
     /// retrying the row deletion.
+    ///
+    /// Only a directory this profile owns is ever removed. Sessions are discovered from the root their
+    /// row stores, so a row can name a path outside the profile — a runtime directory that moved, rows a
+    /// predecessor daemon left behind — and deleting an arbitrary stored path would put user directories
+    /// behind a garbage-collection sweep. Such a session is reclaimed rows-only, which is the whole of
+    /// what it still costs.
     public static func purgeSession(paths: TerminalSessionPaths, fileManager: FileManager = .default) throws {
-        if fileManager.fileExists(atPath: paths.rootDirectory) { try fileManager.removeItem(atPath: paths.rootDirectory) }
+        if try TerminalSessionPaths.isProfileOwnedSessionRoot(paths.rootDirectory), fileManager.fileExists(atPath: paths.rootDirectory) {
+            try fileManager.removeItem(atPath: paths.rootDirectory)
+        }
         let root = normalizedRootDirectory(paths.rootDirectory)
         try withProfileDatabase { database in
             try database.withImmediateTransaction {
@@ -988,16 +1003,59 @@ public enum TerminalSessionPersistence {
         }
     }
 
-    public static func listKnownSessions(fileManager _: FileManager = .default) throws -> [TerminalSessionLaunchConfiguration] {
+    /// Every known session, each paired with the paths its own stored `root_directory` names. The root
+    /// is read from the row rather than re-derived from the current profile so a session the profile no
+    /// longer derives a matching path for is still readable, repairable, and collectable.
+    public static func listKnownSessions(fileManager _: FileManager = .default) throws -> [KnownTerminalSession] {
         try withProfileDatabase { database in
             try database.queryRows(
                 sql: """
                     SELECT session_id, backend, lifetime_policy, workspace_id, kind, title, working_directory, shell, COALESCE(command, ''),
-                           created_at, COALESCE(user_title, '')
+                           created_at, COALESCE(user_title, ''), root_directory
                     FROM terminal_sessions
                     ORDER BY created_at, session_id
                     """
-            ).map(decodeLaunchConfiguration(row:))
+            ).map { row in
+                guard row.count >= 12 else { throw TerminalSessionPersistenceError.invalidRow("terminal_sessions") }
+                let launchConfiguration = try decodeLaunchConfiguration(row: row)
+                return KnownTerminalSession(
+                    launchConfiguration: launchConfiguration,
+                    paths: try TerminalSessionPaths.forStoredSession(id: launchConfiguration.sessionID, rootDirectory: row[11]))
+            }
+        }
+    }
+
+    /// Whether the session's persisted final-render state carries a replayable frame. Reads the stored
+    /// answer rather than decoding `payload_json`, which is a ~36 KB base64 grid snapshot.
+    public static func hasFinalRender(paths: TerminalSessionPaths) throws -> Bool {
+        let root = normalizedRootDirectory(paths.rootDirectory)
+        return try withProfileDatabase { database in
+            let row = try database.queryRow(
+                sql: "SELECT has_final_render FROM terminal_remote_session_states WHERE root_directory = ?", bindings: [root])
+            guard let raw = row?.first else { return false }
+            return (Int(raw) ?? 0) != 0
+        }
+    }
+
+    /// Every session whose persisted final-render state carries a replayable frame, as one query. The
+    /// device overview asks this for each of its rows on every build, several times a second, so it
+    /// reads the whole set once instead of opening a connection per session.
+    public static func sessionIDsWithFinalRender() throws -> Set<String> {
+        try withProfileDatabase { database in
+            Set(try database.queryRows(sql: "SELECT session_id FROM terminal_remote_session_states WHERE has_final_render <> 0").compactMap(\.first))
+        }
+    }
+
+    /// The stored byte count of each session's persisted final-render payload, keyed by root directory.
+    /// The retention budget weighs these bytes alongside the session directory because they are where an
+    /// ended session's footprint actually accumulates. Read as one query per sweep rather than per
+    /// session, since each read otherwise opens its own connection.
+    public static func finalRenderPayloadByteCountsByRootDirectory() throws -> [String: Int64] {
+        try withProfileDatabase { database in
+            var counts: [String: Int64] = [:]
+            for row in try database.queryRows(sql: "SELECT root_directory, length(CAST(payload_json AS BLOB)) FROM terminal_remote_session_states")
+            where row.count >= 2 { counts[row[0]] = Int64(row[1]) ?? 0 }
+            return counts
         }
     }
 

@@ -223,6 +223,7 @@ extension OrchestratorTests {
             let sessionID = "session-\(UUID().uuidString)"
             let paths = try TerminalSessionPaths.forSession(id: sessionID)
             try paths.ensureDirectories()
+            try seedTerminalSessionRow(sessionID: sessionID, paths: paths)
             // childPID is a live pid (this test process); the DB record carries no pid yet.
             try TerminalSessionPersistence.writeRuntimeState(
                 .init(
@@ -491,6 +492,7 @@ extension OrchestratorTests {
             let paths = try TerminalSessionPaths.forSession(id: sessionID)
             try paths.ensureDirectories()
             FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
+            try seedTerminalSessionRow(sessionID: sessionID, paths: paths)
             try TerminalSessionPersistence.writeRuntimeState(
                 .init(
                     sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: Int32(ProcessInfo.processInfo.processIdentifier), childPID: 4321,
@@ -518,6 +520,7 @@ extension OrchestratorTests {
                 if let paths = try? TerminalSessionPaths.forSession(id: sessionID) {
                     try? paths.ensureDirectories()
                     FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
+                    try? seedTerminalSessionRow(sessionID: sessionID, paths: paths)
                     try? TerminalSessionPersistence.writeRuntimeState(
                         .init(
                             sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 4321, state: .running,
@@ -576,6 +579,7 @@ extension OrchestratorTests {
                 if let paths = try? TerminalSessionPaths.forSession(id: sessionID) {
                     try? paths.ensureDirectories()
                     FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
+                    try? seedTerminalSessionRow(sessionID: sessionID, paths: paths)
                     try? TerminalSessionPersistence.writeRuntimeState(
                         .init(
                             sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 4321, state: .running,
@@ -641,6 +645,7 @@ extension OrchestratorTests {
                 if let paths = try? TerminalSessionPaths.forSession(id: sessionID) {
                     try? paths.ensureDirectories()
                     FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
+                    try? seedTerminalSessionRow(sessionID: sessionID, paths: paths)
                     try? TerminalSessionPersistence.writeRuntimeState(
                         .init(
                             sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 4321, state: .running,
@@ -698,6 +703,7 @@ extension OrchestratorTests {
                 if let paths = try? TerminalSessionPaths.forSession(id: sessionID) {
                     try? paths.ensureDirectories()
                     FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
+                    try? seedTerminalSessionRow(sessionID: sessionID, paths: paths)
                     try? TerminalSessionPersistence.writeRuntimeState(
                         .init(
                             sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 9876, state: .running,

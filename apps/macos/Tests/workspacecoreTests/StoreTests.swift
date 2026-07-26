@@ -178,6 +178,48 @@ final class StoreTests: XCTestCase {
         }
     }
 
+    // Upgrading a profile that already holds ended sessions must not cost them their replayable final
+    // frame: a session whose stored payload carries a frame still reports one afterwards, a session whose
+    // payload carries none still reports none, and both payloads survive byte-for-byte.
+    func testUpgradeKeepsEndedSessionsFinalRenderAvailability() throws {
+        let root = try makeTempDirectory()
+        let dbURL = root.appendingPathComponent("spaces.db")
+        let withFramePayload =
+            #"{"sessionID":"with-frame","reason":"terminated","emittedAt":"2026-07-19T00:00:00Z","title":"t","workingDirectory":"/tmp","renderUpdate":"AAECAw=="}"#
+        let withoutFramePayload =
+            #"{"sessionID":"without-frame","reason":"terminated","emittedAt":"2026-07-19T00:00:00Z","title":"t","workingDirectory":"/tmp"}"#
+        try runSQLiteExec(
+            dbURL: dbURL,
+            sql: """
+                CREATE TABLE migration_state (current_version INTEGER NOT NULL);
+                INSERT INTO migration_state(current_version) VALUES (7);
+                CREATE TABLE terminal_remote_session_states (
+                  session_id TEXT PRIMARY KEY,
+                  root_directory TEXT NOT NULL UNIQUE,
+                  payload_json TEXT NOT NULL
+                );
+                INSERT INTO terminal_remote_session_states(session_id, root_directory, payload_json)
+                VALUES ('with-frame', '/tmp/sessions/with-frame', '\(withFramePayload)'),
+                       ('without-frame', '/tmp/sessions/without-frame', '\(withoutFramePayload)');
+                """)
+
+        try withEnvironmentValues([
+            SpacesProfile.databasePathEnvironmentVariable: dbURL.path,
+            SpacesProfile.runtimeDirectoryEnvironmentVariable: root.appendingPathComponent("runtime", isDirectory: true).path,
+        ]) {
+            _ = try SQLiteStore(path: dbURL.path)
+
+            XCTAssertEqual(try readSingleInteger(dbURL: dbURL, sql: "SELECT current_version FROM migration_state"), DatabaseSchema.currentVersion)
+            XCTAssertEqual(try TerminalSessionPersistence.sessionIDsWithFinalRender(), ["with-frame"])
+            XCTAssertEqual(
+                try readSingleText(dbURL: dbURL, sql: "SELECT payload_json FROM terminal_remote_session_states WHERE session_id = 'with-frame'"),
+                withFramePayload)
+            XCTAssertEqual(
+                try readSingleText(dbURL: dbURL, sql: "SELECT payload_json FROM terminal_remote_session_states WHERE session_id = 'without-frame'"),
+                withoutFramePayload)
+        }
+    }
+
     // Tests opening a current-version database is a no-op by arranging a fresh current DB and asserting no migration backup is created on reopen.
     func testOpeningCurrentVersionDoesNotCreateMigrationBackup() throws {
         let root = try makeTempDirectory()

@@ -90,6 +90,7 @@ final class OrchestratorTests: XCTestCase {
                     let paths = try TerminalSessionPaths.forSession(id: sessionID)
                     try paths.ensureDirectories()
                     FileManager.default.createFile(atPath: paths.controlSocketPath, contents: Data())
+                    try seedTerminalSessionRow(sessionID: sessionID, paths: paths)
                     try TerminalSessionPersistence.writeRuntimeState(
                         .init(
                             sessionID: sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: 4321, state: .running,
