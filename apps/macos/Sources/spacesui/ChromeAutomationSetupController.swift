@@ -140,12 +140,9 @@ import systembridge
     /// the poll, which latches ask-derived denials (see `pollTick`).
     private func applyStatus(_ status: ChromeAutomationStatus) {
         switch status {
-        case .granted, .unavailable:
-            complete()
-        case .notDetermined:
-            enter(.needsGrant)
-        case .denied:
-            enter(.denied)
+        case .granted, .unavailable: complete()
+        case .notDetermined: enter(.needsGrant)
+        case .denied: enter(.denied)
         }
     }
 
@@ -187,9 +184,7 @@ import systembridge
 
     private func startPolling() {
         pollTimer?.invalidate()
-        let timer = Timer(timeInterval: 1.5, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.pollTick() }
-        }
+        let timer = Timer(timeInterval: 1.5, repeats: true) { [weak self] _ in Task { @MainActor in self?.pollTick() } }
         RunLoop.main.add(timer, forMode: .common)
         pollTimer = timer
     }
@@ -203,16 +198,12 @@ import systembridge
         guard !isRequestingAccess else { return }
         let status = statusProvider()
         switch status {
-        case .granted, .unavailable:
-            complete()
-        case .denied:
-            enter(.denied)
+        case .granted, .unavailable: complete()
+        case .denied: enter(.denied)
         case .notDetermined:
             // Only offer the grant path when no ask-derived denial is latched. Leave `denied`/
             // `promptSuppressed` untouched.
-            if mode == nil || mode == .needsGrant {
-                enter(.needsGrant)
-            }
+            if mode == nil || mode == .needsGrant { enter(.needsGrant) }
         }
     }
 
@@ -229,12 +220,9 @@ import systembridge
         }
         let outcome = await Task.detached { [askProvider] in askProvider() }.value
         switch outcome {
-        case .granted:
-            complete()
-        case .deniedByUser:
-            enter(.denied)
-        case .promptSuppressed:
-            enter(.promptSuppressed)
+        case .granted: complete()
+        case .deniedByUser: enter(.denied)
+        case .promptSuppressed: enter(.promptSuppressed)
         }
     }
 
@@ -245,12 +233,9 @@ import systembridge
 
     @objc private func primaryAction() {
         switch mode {
-        case .needsGrant:
-            Task { @MainActor in await self.performGrantAccess() }
-        case .denied, .promptSuppressed:
-            openSystemSettings()
-        case nil:
-            break
+        case .needsGrant: Task { @MainActor in await self.performGrantAccess() }
+        case .denied, .promptSuppressed: openSystemSettings()
+        case nil: break
         }
     }
 

@@ -223,17 +223,33 @@ struct OverviewPollingModifier: ViewModifier {
 
     func body(content: Content) -> some View {
         content.task(id: taskID) {
+            // Every end of this task is a boundary where the connection stops being watched from here —
+            // a detail route opening, another tab taking over, the app leaving the foreground, the device
+            // going unpaired. The connection-error alert times how long refreshes have been failing, so
+            // that clock must not keep running across a gap in which nothing refreshed at all.
+            defer { model.noteConnectionMonitoringPaused() }
             guard shouldPoll else { return }
-            await model.refresh()
+            if !isPaused { await model.refresh() }
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(2))
                 guard !Task.isCancelled, shouldPoll else { return }
+                if isPaused { continue }
                 await model.refresh()
             }
         }
     }
 
     private var shouldPoll: Bool { scenePhase == .active && model.selectedTab == tab && activeDetailRouteID == nil && model.settings.isPaired }
+
+    /// A daemon update deliberately takes its device offline mid-handoff, and `requestDaemonUpdate()`
+    /// runs its own poll across that outage, treating the unreachable window as expected rather than as
+    /// an error. A routine overview refresh landing in that window would take the normal failure path
+    /// and raise a connection error for an outage the app already knows about.
+    ///
+    /// This skips the refresh and keeps looping rather than joining `shouldPoll`, whose conditions end
+    /// the task outright: the task only restarts when `taskID` changes, so returning here would leave
+    /// polling dead after the update instead of resuming it.
+    private var isPaused: Bool { model.isApplyingDaemonUpdate }
 }
 
 extension View {

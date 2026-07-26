@@ -13,55 +13,65 @@
     /// create/start/stop allocate or change ports) plus an initial pass at startup. Every pass asks
     /// CaddyService to ensure the router is still alive, so service URLs recover even if Caddy exits
     /// between route changes.
+    ///
+    /// Database writes are themselves what raise `databaseDidChange`, so this loop runs often enough
+    /// that a connection per pass made every pass pay a WAL checkpoint and fsync on close. Its
+    /// connection is therefore long-lived and owned by `DaemonReconcileStore`, which also serializes
+    /// the passes onto the one queue allowed to touch it.
     @MainActor final class CaddyRouterService {
-        private let databasePath: String
         private let onError: @Sendable (String) -> Void
         private let lifecycle = CaddyRouterLifecycle()
+        private let reconcileStore: DaemonReconcileStore
         private var reconcileTask: Task<Void, Never>?
         private var pending = false
+        /// Latched by `stop()`. A reconcile task created just before the stop has not necessarily
+        /// begun its first pass, and `runPass` is not cancellable, so clearing the task handle alone
+        /// would not stop it from submitting one.
+        private var stopped = false
 
         init(databasePath: String, onError: @escaping @Sendable (String) -> Void) {
-            self.databasePath = databasePath
             self.onError = onError
+            let lifecycle = lifecycle
+            reconcileStore = DaemonReconcileStore(label: "spaces.daemon.caddy-router-reconcile", databasePath: databasePath) { store in
+                let orchestrator = WorkspaceOrchestrator(store: store)
+                let routes = CaddyRouteRegistry.mergedRoutes(
+                    localRoutes: try orchestrator.caddyRouteTable(),
+                    registryRoutes: try CaddyRouteRegistry.routes(path: try CaddyService.routeRegistryPath()))
+                let routerPort = (try? orchestrator.appConfig().routerPort) ?? AppConfig.defaultRouterPort
+                let adminSocketPath = try CaddyService.adminSocketPath()
+                let configJSON = CaddyConfigBuilder.makeJSON(routes: routes, listenPort: routerPort, adminSocketPath: adminSocketPath)
+                try lifecycle.ensureRunning(configJSON: configJSON)
+            }
         }
 
         func start() { reconcile() }
 
         func reconcile() {
+            guard !stopped else { return }
             guard reconcileTask == nil else {
                 pending = true
                 return
             }
-            let databasePath = databasePath
-            let lifecycle = lifecycle
-            let onError = onError
             reconcileTask = Task { @MainActor [weak self] in
                 guard let self else { return }
-                repeat {
+                while !self.stopped {
                     self.pending = false
-                    await Task.detached(priority: .utility) { @Sendable in
-                        do {
-                            let store = try SQLiteStore(path: databasePath)
-                            let orchestrator = WorkspaceOrchestrator(store: store)
-                            let routes = CaddyRouteRegistry.mergedRoutes(
-                                localRoutes: try orchestrator.caddyRouteTable(),
-                                registryRoutes: try CaddyRouteRegistry.routes(path: try CaddyService.routeRegistryPath()))
-                            let routerPort = (try? orchestrator.appConfig().routerPort) ?? AppConfig.defaultRouterPort
-                            let adminSocketPath = try CaddyService.adminSocketPath()
-                            let configJSON = CaddyConfigBuilder.makeJSON(routes: routes, listenPort: routerPort, adminSocketPath: adminSocketPath)
-                            try lifecycle.ensureRunning(configJSON: configJSON)
-                        } catch { onError("\(error)") }
-                    }.value
-                } while self.pending
+                    do { try await self.reconcileStore.runPass() } catch { self.onError("\(error)") }
+                    guard self.pending else { break }
+                }
                 self.reconcileTask = nil
             }
         }
 
+        /// Quiesces the loop and releases the database connection, taking its final WAL checkpoint.
+        /// Every gate the loop consults is on the main actor along with this, so once `stopped` is
+        /// set no further pass can be submitted and the close is the last thing the store ever does.
         func stop() {
-            reconcileTask?.cancel()
-            reconcileTask = nil
+            stopped = true
             pending = false
+            reconcileTask = nil
             lifecycle.stop()
+            reconcileStore.close()
         }
     }
 

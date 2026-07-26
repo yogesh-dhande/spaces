@@ -73,8 +73,7 @@ final class DeviceTerminalSessionStateModelRecoveryTests: XCTestCase {
             device: device, sessionID: "session-\(UUID().uuidString)",
             launchConfiguration: TerminalSessionLaunchConfiguration(
                 sessionID: "session", title: "t", workingDirectory: "/tmp", shell: "/bin/zsh", command: nil, createdAt: "2026-07-20T00:00:00Z",
-                workspaceID: "workspace", kind: .shell),
-            clientApp: clientApp,
+                workspaceID: "workspace", kind: .shell), clientApp: clientApp,
             preparedCredentials: .init(certificateFingerprint: identity.certificateFingerprint, authToken: pairingStore.authToken))
 
         // Vend the sender BEFORE any recovery, as the render host does.
@@ -122,8 +121,7 @@ final class DeviceTerminalSessionStateModelRecoveryTests: XCTestCase {
             device: device, sessionID: "session-\(UUID().uuidString)",
             launchConfiguration: TerminalSessionLaunchConfiguration(
                 sessionID: "session", title: "t", workingDirectory: "/tmp", shell: "/bin/zsh", command: nil, createdAt: "2026-07-20T00:00:00Z",
-                workspaceID: "workspace", kind: .shell),
-            clientApp: clientApp,
+                workspaceID: "workspace", kind: .shell), clientApp: clientApp,
             preparedCredentials: .init(certificateFingerprint: identity.certificateFingerprint, authToken: storeA.authToken))
 
         // Vend the sender BEFORE any recovery, as the render host does.
@@ -164,8 +162,7 @@ final class DeviceTerminalSessionStateModelRecoveryTests: XCTestCase {
             device: unreachableDevice, sessionID: "session-\(UUID().uuidString)",
             launchConfiguration: TerminalSessionLaunchConfiguration(
                 sessionID: "session", title: "t", workingDirectory: "/tmp", shell: "/bin/zsh", command: nil, createdAt: "2026-07-20T00:00:00Z",
-                workspaceID: "workspace", kind: .shell),
-            clientApp: Self.makeClientApp(installationID: "INSTALLATION-GUARD-\(UUID().uuidString)"),
+                workspaceID: "workspace", kind: .shell), clientApp: Self.makeClientApp(installationID: "INSTALLATION-GUARD-\(UUID().uuidString)"),
             preparedCredentials: .init(certificateFingerprint: "SHA256:" + String(repeating: "0", count: 64), authToken: "token"))
 
         let staleClient = FakeStreamClient()
@@ -209,8 +206,7 @@ final class DeviceTerminalSessionStateModelRecoveryTests: XCTestCase {
         let received = DisconnectErrorBox()
         let client = try SpacesDeviceAPIStateStreamClient(
             request: request, host: "127.0.0.1", port: server.listeningPort, certificateFingerprint: identity.certificateFingerprint,
-            onEvent: { _ in },
-            onDisconnect: { error in if received.storeFirst(error) { disconnected.fulfill() } })
+            onEvent: { _ in }, onDisconnect: { error in if received.storeFirst(error) { disconnected.fulfill() } })
         try client.start()
         defer { client.stop() }
         wait(for: [disconnected], timeout: 5)
@@ -244,12 +240,9 @@ final class DeviceTerminalSessionStateModelRecoveryTests: XCTestCase {
         // `.unauthorized` response rather than a connection failure.
         XCTAssertThrowsError(
             try DeviceTerminalSessionStateModel.fetchTranscript(
-                sessionID: "session-\(UUID().uuidString)", maxBytes: 1000, requestClient: client, authToken: "revoked-token",
-                clientApp: clientApp)
+                sessionID: "session-\(UUID().uuidString)", maxBytes: 1000, requestClient: client, authToken: "revoked-token", clientApp: clientApp)
         ) { error in
-            guard case SpacesDeviceClientError.requestRejected(_, let code) = error else {
-                return XCTFail("expected requestRejected, got \(error)")
-            }
+            guard case SpacesDeviceClientError.requestRejected(_, let code) = error else { return XCTFail("expected requestRejected, got \(error)") }
             XCTAssertEqual(code, .unauthorized)
         }
     }
@@ -270,9 +263,7 @@ final class DeviceTerminalSessionStateModelRecoveryTests: XCTestCase {
 
 /// `TerminalRemoteStateStreamClient` requires only `stop()`; the model treats any conforming object as an
 /// installed stream, which is all the generation-guard test needs.
-private final class FakeStreamClient: TerminalRemoteStateStreamClient, @unchecked Sendable {
-    func stop() {}
-}
+private final class FakeStreamClient: TerminalRemoteStateStreamClient, @unchecked Sendable { func stop() {} }
 
 /// Captures the first error the stream client reports to `onDisconnect`, thread-safely because that
 /// callback runs off the test thread. Only the first error is kept: after surfacing the coded rejection the
@@ -308,8 +299,8 @@ private final class AlwaysAuthorizedRecoveryPairingStore: SpacesDevicePairingSto
     func authorize(clientApp: SpacesDeviceClientApp?, authToken: String?) throws {
         guard clientApp != nil, authToken == self.authToken else {
             throw NSError(
-                domain: "DeviceTerminalSessionStateModelRecoveryTests", code: 401,
-                userInfo: [NSLocalizedDescriptionKey: "Invalid device auth token."])
+                domain: "DeviceTerminalSessionStateModelRecoveryTests", code: 401, userInfo: [NSLocalizedDescriptionKey: "Invalid device auth token."]
+            )
         }
     }
     func validate(clientApp _: SpacesDeviceClientApp) throws {}
@@ -332,8 +323,8 @@ private final class RecordingRecoveryPairingStore: SpacesDevicePairingStoreProto
         lock.withLock { tokens.append(authToken) }
         guard clientApp != nil else {
             throw NSError(
-                domain: "DeviceTerminalSessionStateModelRecoveryTests", code: 401,
-                userInfo: [NSLocalizedDescriptionKey: "Missing device client app."])
+                domain: "DeviceTerminalSessionStateModelRecoveryTests", code: 401, userInfo: [NSLocalizedDescriptionKey: "Missing device client app."]
+            )
         }
     }
     func validate(clientApp _: SpacesDeviceClientApp) throws {}

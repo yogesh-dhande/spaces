@@ -105,6 +105,10 @@
         // client's appearance on attach.
         private var currentAppearance: ThemeAppearance = .dark
         private var ownerEpoch: UInt64 = 0
+        /// Rate-limits the durable client lease writes this core performs inline on the engine (see
+        /// `touchClientLeaseIfDue`). Reset for a client on attach and detach — the only ways this core
+        /// changes that client's durable row — and wholesale on termination's detach-all.
+        private var leaseTouchCoalescer = TerminalClientLeaseTouchCoalescer()
         private var screenStateRevision: UInt64 = 0
         /// Set for the brief exec-in-place quiesce window so no late resync turn
         /// broadcasts a frame while the session is being handed to the staged daemon.
@@ -186,6 +190,8 @@
             let detachPaths = paths
             let detachedAt = nowISO8601()
             persistence.enqueueWrite { try? TerminalSessionPersistence.detachActiveClients(paths: detachPaths, detachedAt: detachedAt) }
+            // Every client's durable row is being detached, so no coalescing record survives this run.
+            leaseTouchCoalescer.forgetAll()
             if let finalPayload {
                 let payloadPaths = paths
                 persistence.enqueueWrite { try? TerminalSessionPersistence.writeRemoteSessionState(finalPayload, paths: payloadPaths) }
@@ -459,11 +465,34 @@
 
         @discardableResult private func appendTranscript(_ data: Data) -> Bool {
             guard let outputHandle else { return false }
+            // The write is the only step that can fail the append: if the durable bytes never landed, the
+            // caller must know (it keys live-renderer application off this return value).
+            do { try outputHandle.write(contentsOf: data) } catch { return false }
+            outputByteCount += data.count
+            // Head-truncate the durable transcript once it grows past the live-transcript bound so a
+            // long-running session stops accumulating disk without bound; `outputByteCount` tracks the
+            // (possibly reduced) end offset. See `TerminalTranscriptTrim`.
             do {
-                try outputHandle.write(contentsOf: data)
-                outputByteCount += data.count
-                return true
-            } catch { return false }
+                let trim = try TerminalTranscriptTrim.trimIfNeeded(
+                    outputPath: paths.outputPath, writeHandle: outputHandle, currentEndOffset: UInt64(outputByteCount), columns: terminalSize.columns,
+                    rows: terminalSize.rows)
+                if trim.writeHandle !== outputHandle {
+                    // A trim replaced output.log with a fresh inode; adopt its handle before closing the
+                    // old one so the stored property always holds a valid handle even if the close fails.
+                    self.outputHandle = trim.writeHandle
+                    try? outputHandle.close()
+                }
+                outputByteCount = Int(trim.endOffset)
+            } catch {
+                // A trim failure AFTER the write already committed must not fail the append. The
+                // just-appended bytes are already durable in output.log — TerminalTranscriptTrim
+                // guarantees no post-commit failure path: on any throw the original file and this write
+                // handle are untouched, so `outputByteCount` (already advanced by the write) stays
+                // correct and the skipped trim simply retries on the next append. Returning false here
+                // would make callers drop the mutation from the live renderer while it stays in the
+                // transcript, diverging live state from a future replay.
+            }
+            return true
         }
 
         private func ensureOutputHandle() throws {
@@ -563,6 +592,9 @@
                 let previousOwner = activeOwnerClientID()
                 try TerminalSessionPersistence.attachClient(
                     sessionID: launchConfiguration.sessionID, client: client, mode: mode, paths: paths, attachedAt: nowISO8601())
+                // The attach wrote this client's lease and revived its durable row, so any coalescing record
+                // from an earlier attachment of the same client id is void.
+                leaseTouchCoalescer.forget(clientID: client.id)
                 if mode == .owner, previousOwner != client.id { advanceOwnerEpoch() }
                 writeRuntimeState(state: .running)
                 broadcastCurrentState(reason: TerminalRemoteSessionStateReason.attachmentState)
@@ -577,6 +609,7 @@
             do {
                 let detachedOwner = activeOwnerClientID() == clientID
                 try TerminalSessionPersistence.detachClient(id: clientID, paths: paths, detachedAt: nowISO8601())
+                leaseTouchCoalescer.forget(clientID: clientID)
                 if detachedOwner { advanceOwnerEpoch() }
                 writeRuntimeState(state: .running)
                 broadcastCurrentState(reason: TerminalRemoteSessionStateReason.attachmentState)
@@ -589,11 +622,34 @@
                 return TerminalControlResponse(ok: false, message: "Missing client ID.", errorCode: .invalidArgument)
             }
             do {
-                guard try TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: nowISO8601()) else {
+                guard try touchClientLeaseIfDue(clientID: clientID) else {
                     return TerminalControlResponse(ok: false, message: "Terminal client is no longer attached.", errorCode: .notFound)
                 }
                 return TerminalControlResponse(ok: true, message: "Refreshed terminal client lease.")
             } catch { return TerminalControlResponse(ok: false, message: String(describing: error)) }
+        }
+
+        /// Refreshes `clientID`'s durable lease unless it was refreshed within the coalescing window, and
+        /// reports whether the client is still attached.
+        ///
+        /// A skipped write answers from the coalescing record rather than from the database. That is sound
+        /// because this core is the only writer of its session's client rows and it drops a client's record
+        /// whenever it attaches or detaches that client: a surviving record therefore means the client was
+        /// attached at the recorded write and nothing has detached it since. A write that reports the client
+        /// gone — or fails outright — drops the record so the next heartbeat asks the database again.
+        private func touchClientLeaseIfDue(clientID: String) throws -> Bool {
+            let now = Date()
+            guard leaseTouchCoalescer.isDurableTouchDue(clientID: clientID, now: now) else { return true }
+            let attached: Bool
+            do {
+                attached = try TerminalSessionPersistence.touchClient(
+                    id: clientID, paths: paths, touchedAt: GhosttyRemoteSessionStateTimestamp.string(from: now))
+            } catch {
+                leaseTouchCoalescer.forget(clientID: clientID)
+                throw error
+            }
+            if !attached { leaseTouchCoalescer.forget(clientID: clientID) }
+            return attached
         }
 
         private func takeover(_ request: TerminalControlRequest) -> TerminalControlResponse {
@@ -601,7 +657,7 @@
                 return TerminalControlResponse(ok: false, message: "Missing client ID.", errorCode: .invalidArgument)
             }
             do {
-                _ = try? TerminalSessionPersistence.touchClient(id: clientID, paths: paths, touchedAt: nowISO8601())
+                _ = try? touchClientLeaseIfDue(clientID: clientID)
                 let previousOwner = activeOwnerClientID()
                 try TerminalSessionPersistence.transferOwnership(
                     sessionID: launchConfiguration.sessionID, newOwnerClientID: clientID, paths: paths, transferredAt: nowISO8601())
@@ -677,11 +733,22 @@
             guard ownerRequestIsCurrent(request) else {
                 return TerminalControlResponse(ok: false, message: "Only the active owner can send input.", errorCode: .ownershipRejected)
             }
-            guard let key = request.key, let bytes = TerminalKeyInput.bytes(for: key) else {
+            guard let key = request.key, let resolution = TerminalKeyInput.resolve(key) else {
                 return TerminalControlResponse(ok: false, message: "Unsupported terminal key.", errorCode: .invalidArgument)
             }
-            if bytes.contains(0x0D) { markLocalOwnerCommandInputOutputResyncPending() }
-            enqueueControlInputWrite(Data(bytes))
+            switch resolution {
+            case .hostAction(.clearScreenAndScrollback): return clearScreen(request)
+            case .lineEditingBytes(let bytes): enqueueControlInputWrite(Data(bytes))
+            case .keyPress(let spec):
+                // The vt session is the live terminal state the encoding depends on, so a key press has
+                // nowhere to be encoded without it.
+                guard let vtSession, let bytes = GhosttyLinuxKeyEncoder.encode(spec, session: vtSession) else {
+                    return TerminalControlResponse(ok: false, message: "Unable to encode terminal key.", errorCode: .sessionNotAvailable)
+                }
+                if spec.key == .enter { markLocalOwnerCommandInputOutputResyncPending() }
+                // Some presses legitimately encode to nothing; that is a successful no-op, not a failure.
+                if !bytes.isEmpty { enqueueControlInputWrite(bytes) }
+            }
             return TerminalControlResponse(ok: true, message: "Sent key.")
         }
 
@@ -705,9 +772,21 @@
             guard let columns = request.columns, let rows = request.rows, columns > 0, rows > 0 else {
                 return TerminalControlResponse(ok: false, message: "Missing terminal size.", errorCode: .invalidArgument)
             }
-            do { try recreateVTRenderer(columns: columns, rows: rows) } catch {
-                return TerminalControlResponse(ok: false, message: "Unable to resize the terminal renderer: \(error)")
+            guard let vtSession else { return TerminalControlResponse(ok: false, message: "Terminal renderer is unavailable.") }
+            // Resize transforms the LIVE renderer in place (libghostty reflow), never by
+            // replaying output.log at the new size: the session already holds the accumulated
+            // state, and the transcript's bytes (including any trim-time state preamble) are
+            // laid out for the grid they were produced on, so a replay at another width
+            // garbles the screen. Replay is reserved for the handoff paths, where renderer
+            // memory genuinely did not survive the exec.
+            guard spaces_ghostty_vt_session_resize(vtSession, UInt16(clamping: columns), UInt16(clamping: rows)) else {
+                return TerminalControlResponse(ok: false, message: "Unable to resize the terminal renderer.")
             }
+            // The reflow rewrote every row: drop the diff baseline and force the next
+            // broadcast to a self-contained full frame, the same way a renderer swap does.
+            renderUpdateBaseline = nil
+            forceNextBroadcastFullRenderUpdate = true
+            screenStateRevision &+= 1
             terminalSize = (columns, rows)
             _ = ptyDriver.resizeCellGrid(columns: columns, rows: rows)
             writeRuntimeState(state: .running)
@@ -828,6 +907,9 @@
         /// materializing the whole file in memory. Replay happens into a replacement
         /// session first, so a read or VT-write failure leaves the current renderer
         /// intact and handoff resume can fail before adopting the inherited PTY.
+        /// Only the handoff resume paths use this — renderer memory did not survive the
+        /// exec there, so the transcript is the sole source of truth. A live resize never
+        /// comes here: it resizes the existing vt session in place (reflow) instead.
         private func recreateVTRenderer(columns: Int, rows: Int) throws {
             guard let replacementSession = makeVTSession(columns: columns, rows: rows) else {
                 throw GhosttyLinuxHeadlessSessionError.vtSessionUnavailable
@@ -956,25 +1038,21 @@
             guard let payload = makeStatePayload(reason: reason, exportMode: .streamDeltaAllowed) else { return }
             stateStreamServer?.broadcast(payload)
             guard performanceLoggingEnabled, let startedAt else { return }
-            let payloadEncodeStartedAt = Date()
-            let encodedPayload = try? GhosttyRemoteSessionStateCodec.encodeLine(payload)
-            let payloadEncodeMS = TerminalPerformance.elapsedMS(since: payloadEncodeStartedAt)
-            let payloadBytes = encodedPayload?.count ?? 0
             let decodedUpdate = payload.decodedRenderUpdate
             let attributes = GhosttyRenderFrameMetrics.attributes(
-                reason: payload.reason, frame: decodedUpdate?.fullFrame, payloadByteCount: payloadBytes, payloadEncodeMS: payloadEncodeMS,
-                outputByteCount: outputByteCount, screenStateRevision: payload.screenStateRevision, frameKind: decodedUpdate?.frameKindMetricValue,
+                reason: payload.reason, frame: decodedUpdate?.fullFrame, outputByteCount: outputByteCount,
+                screenStateRevision: payload.screenStateRevision, frameKind: decodedUpdate?.frameKindMetricValue,
                 baseRevision: decodedUpdate?.baseRevision, targetRevision: decodedUpdate?.targetRevision ?? payload.screenStateRevision,
                 operationCount: decodedUpdate?.operationCount, changedCellCount: decodedUpdate?.changedCellCount,
                 scrollOperationCount: decodedUpdate?.scrollOperationCount, fullFrameFallbackReason: decodedUpdate?.fallbackReason)
             logMobileTakeoverPerformance(
-                name: "remote_state_publish", count: payloadBytes,
+                name: "remote_state_publish", count: payload.renderUpdate?.count,
                 attributes: [
-                    "reason": payload.reason, "owner_kind": activeOwnerClient()?.kind.rawValue ?? "nil", "payload_bytes": String(payloadBytes),
+                    "reason": payload.reason, "owner_kind": activeOwnerClient()?.kind.rawValue ?? "nil",
                     "render_update": payload.renderUpdate == nil ? "0" : "1", "render_update_bytes": String(payload.renderUpdate?.count ?? 0),
                 ])
             logMobileTakeoverPerformance(
-                name: "render_frame_payload_publish", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), count: payloadBytes,
+                name: "render_frame_payload_publish", elapsedMS: TerminalPerformance.elapsedMS(since: startedAt), count: payload.renderUpdate?.count,
                 attributes: attributes)
         }
 

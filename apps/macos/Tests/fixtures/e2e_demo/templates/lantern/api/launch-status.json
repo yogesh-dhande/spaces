@@ -1,0 +1,6 @@
+{
+  "workspace": "lantern-api",
+  "status": "warning",
+  "open_errors": 3,
+  "next_action": "Investigate the 500 spike on the /api/checkout route."
+}

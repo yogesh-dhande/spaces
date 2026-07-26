@@ -317,14 +317,18 @@ final class TerminalServiceProtocolTests: XCTestCase {
         let queue = DispatchQueue(label: "terminal-service-liveness-test")
         let handleRequestCalled = LockedFlag()
 
-        // A handleRequest that would block for well beyond the ping timeout if a ping ever reached it,
-        // and records that it was called at all.
+        // A handleRequest that blocks indefinitely if a ping ever reached it (proving the liveness
+        // fast path is what answered, not a slow handler that happened to return before the assertions
+        // ran), and records that it was called at all. Signalled unconditionally at the end of the test
+        // so a buggy routing that did invoke this closure doesn't leak a permanently blocked work-queue
+        // thread past this test.
+        let handleRequestGate = DispatchSemaphore(value: 0)
+        defer { handleRequestGate.signal() }
         let server = TerminalServiceServer(
-            socketPath: socketPath, queue: queue,
-            livenessResponder: { TerminalServiceResponse(ok: true, message: "pong", servicePID: 4242) }
+            socketPath: socketPath, queue: queue, livenessResponder: { TerminalServiceResponse(ok: true, message: "pong", servicePID: 4242) }
         ) { _ in
             handleRequestCalled.set()
-            Thread.sleep(forTimeInterval: 5)
+            handleRequestGate.wait()
             return TerminalServiceResponse(ok: false, message: "should not be used for ping")
         }
         try server.start()
@@ -348,25 +352,29 @@ final class TerminalServiceProtocolTests: XCTestCase {
         let socketPath = root.appendingPathComponent("service.sock").path
         let queue = DispatchQueue(label: "terminal-service-concurrency-test")
 
-        // handleRequest simulates a heavy `.create` holding for longer than a client's ping timeout.
+        // handleRequest simulates a heavy `.create` that holds the work queue until the test releases
+        // it. `slowRequestStarted` is signalled once the handler actually begins, which is the precise
+        // moment the request has reached and occupied the server's worker (replacing a guess at how long
+        // that takes). `releaseSlowRequest` is signalled unconditionally via defer so the handler (and the
+        // background client send below) always unblocks, even if an assertion fails first.
+        let slowRequestStarted = DispatchSemaphore(value: 0)
+        let releaseSlowRequest = DispatchSemaphore(value: 0)
+        defer { releaseSlowRequest.signal() }
         let server = TerminalServiceServer(
-            socketPath: socketPath, queue: queue,
-            livenessResponder: { TerminalServiceResponse(ok: true, message: "pong", servicePID: 7) }
+            socketPath: socketPath, queue: queue, livenessResponder: { TerminalServiceResponse(ok: true, message: "pong", servicePID: 7) }
         ) { _ in
-            Thread.sleep(forTimeInterval: 3)
+            slowRequestStarted.signal()
+            releaseSlowRequest.wait()
             return TerminalServiceResponse(ok: true, message: "slow-done")
         }
         try server.start()
         defer { server.stop() }
 
         // Start a slow non-ping request that occupies a connection worker, without waiting for it.
-        let slowStarted = expectation(description: "slow request dispatched")
         DispatchQueue.global().async {
-            slowStarted.fulfill()
             _ = try? TerminalServiceClient.send(request: TerminalServiceRequest(command: .list), socketPath: socketPath, timeout: 10)
         }
-        wait(for: [slowStarted], timeout: 2)
-        Thread.sleep(forTimeInterval: 0.3)  // let the slow request reach the server and occupy its worker
+        XCTAssertEqual(slowRequestStarted.wait(timeout: .now() + 2), .success, "Slow request never reached the server")
 
         let start = Date()
         let ping = try TerminalServiceClient.send(request: TerminalServiceRequest(command: .ping), socketPath: socketPath, timeout: 2)
@@ -458,31 +466,31 @@ final class TerminalServiceProtocolTests: XCTestCase {
         lock.release()
     }
 
-    func testPinnedTLSClientCanSendRequestToRemoteService() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-
-        let identity = try TerminalServiceTLSIdentityStore.loadOrCreate(root: root)
-        let queue = DispatchQueue(label: "terminal-service-tls-protocol-test")
-        let received = expectation(description: "received pinned TLS request")
-        let server = TerminalServiceTLSServer(host: "127.0.0.1", port: 0, authToken: "SECRET", identity: identity, queue: queue) { request in
-            XCTAssertEqual(request, TerminalServiceRequest(command: .ping, authToken: "SECRET"))
-            received.fulfill()
-            return TerminalServiceResponse(ok: true, message: "pong")
-        }
-        try server.start()
-        defer { server.stop() }
-
-        let response = try TerminalServiceClient.sendPinnedTLS(
-            request: TerminalServiceRequest(command: .ping), host: "127.0.0.1", port: server.listeningPort, authToken: "SECRET",
-            certificateFingerprint: identity.certificateFingerprint)
-
-        wait(for: [received], timeout: 5)
-        XCTAssertEqual(response, TerminalServiceResponse(ok: true, message: "pong"))
-    }
-
     #if canImport(Network) && canImport(Security)
+        func testPinnedTLSClientCanSendRequestToRemoteService() throws {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+
+            let identity = try TerminalServiceTLSIdentityStore.loadOrCreate(root: root)
+            let queue = DispatchQueue(label: "terminal-service-tls-protocol-test")
+            let received = expectation(description: "received pinned TLS request")
+            let server = TerminalServiceTLSServer(host: "127.0.0.1", port: 0, authToken: "SECRET", identity: identity, queue: queue) { request in
+                XCTAssertEqual(request, TerminalServiceRequest(command: .ping, authToken: "SECRET"))
+                received.fulfill()
+                return TerminalServiceResponse(ok: true, message: "pong")
+            }
+            try server.start()
+            defer { server.stop() }
+
+            let response = try TerminalServiceClient.sendPinnedTLS(
+                request: TerminalServiceRequest(command: .ping), host: "127.0.0.1", port: server.listeningPort, authToken: "SECRET",
+                certificateFingerprint: identity.certificateFingerprint)
+
+            wait(for: [received], timeout: 5)
+            XCTAssertEqual(response, TerminalServiceResponse(ok: true, message: "pong"))
+        }
+
         func testPinnedTLSServerKeepsConnectionOpenForMultipleRequests() throws {
             let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -624,47 +632,60 @@ final class TerminalServiceProtocolTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("identity.keychain.passphrase").path))
     }
 
-    func testPinnedTLSClientRejectsCertificateMismatch() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
+    #if canImport(Network) && canImport(Security)
+        func testPinnedTLSClientRejectsCertificateMismatch() throws {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
 
-        let identity = try TerminalServiceTLSIdentityStore.loadOrCreate(root: root)
-        let queue = DispatchQueue(label: "terminal-service-tls-pin-test")
-        let server = TerminalServiceTLSServer(host: "127.0.0.1", port: 0, authToken: "SECRET", identity: identity, queue: queue) { _ in
-            XCTFail("A mismatched certificate pin should not reach the handler.")
-            return TerminalServiceResponse(ok: true, message: "unexpected")
-        }
-        try server.start()
-        defer { server.stop() }
+            let identity = try TerminalServiceTLSIdentityStore.loadOrCreate(root: root)
+            let queue = DispatchQueue(label: "terminal-service-tls-pin-test")
+            let server = TerminalServiceTLSServer(host: "127.0.0.1", port: 0, authToken: "SECRET", identity: identity, queue: queue) { _ in
+                XCTFail("A mismatched certificate pin should not reach the handler.")
+                return TerminalServiceResponse(ok: true, message: "unexpected")
+            }
+            try server.start()
+            defer { server.stop() }
 
-        XCTAssertThrowsError(
-            try TerminalServiceClient.sendPinnedTLS(
-                request: TerminalServiceRequest(command: .ping), host: "127.0.0.1", port: server.listeningPort, authToken: "SECRET",
-                certificateFingerprint: "SHA256:0000000000000000000000000000000000000000000000000000000000000000")
-        ) { error in
-            guard case TerminalServiceTLSError.certificatePinMismatch = error else {
-                XCTFail("Expected certificate pin mismatch, got \(error)")
-                return
+            XCTAssertThrowsError(
+                try TerminalServiceClient.sendPinnedTLS(
+                    request: TerminalServiceRequest(command: .ping), host: "127.0.0.1", port: server.listeningPort, authToken: "SECRET",
+                    certificateFingerprint: "SHA256:0000000000000000000000000000000000000000000000000000000000000000")
+            ) { error in
+                guard case TerminalServiceTLSError.certificatePinMismatch = error else {
+                    XCTFail("Expected certificate pin mismatch, got \(error)")
+                    return
+                }
             }
         }
+    #endif
+}
+
+/// File-scope and unguarded so both the Network/Security-only tests and the cross-platform
+/// identity-store tests can assert on-disk permission modes.
+private func posixPermissions(at url: URL) throws -> Int {
+    guard let value = try FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as? NSNumber else {
+        XCTFail("Missing POSIX permissions for \(url.path)")
+        return -1
+    }
+    return value.intValue & 0o777
+}
+
+/// File-scope thread-safe flag usable from the `@Sendable` service-server handler on macOS and Linux.
+private final class LockedFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedValue = false
+
+    var value: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedValue
     }
 
-    private final class LockedFlag: @unchecked Sendable {
-        private let lock = NSLock()
-        private var storedValue = false
-
-        var value: Bool {
-            lock.lock()
-            defer { lock.unlock() }
-            return storedValue
-        }
-
-        func set() {
-            lock.lock()
-            storedValue = true
-            lock.unlock()
-        }
+    func set() {
+        lock.lock()
+        storedValue = true
+        lock.unlock()
     }
 }
 
@@ -767,14 +788,6 @@ private final class ThreadSafeCounter: @unchecked Sendable {
             guard semaphore.wait(timeout: .now() + 5) == .success else { throw TerminalServiceTLSError.requestTimedOut }
             return try result.value.get()
         }
-    }
-
-    private func posixPermissions(at url: URL) throws -> Int {
-        guard let value = try FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as? NSNumber else {
-            XCTFail("Missing POSIX permissions for \(url.path)")
-            return -1
-        }
-        return value.intValue & 0o777
     }
 
     private final class LockedCounter: @unchecked Sendable {

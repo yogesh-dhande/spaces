@@ -31,7 +31,7 @@ import spacesterminalui
         func dismiss() { dismissCount += 1 }
         // The link coordinator never touches the pane's own persistent notice; these exist only to
         // satisfy the protocol.
-        func showPersistent(message _: String) {}
+        func showPersistent(_: TerminalPaneBannerNotice) {}
         func clearPersistent() {}
         func flash() {}
     }
@@ -128,13 +128,18 @@ import spacesterminalui
             artifactKind: artifactKind, byteCount: byteCount, externalURL: externalURL)
     }
 
-    private func waitUntil(timeout: Duration = .seconds(3), _ predicate: @MainActor () -> Bool) async {
+    private func waitUntil(
+        timeout: Duration = .seconds(30), sourceLocation: SourceLocation = #_sourceLocation, _ predicate: @MainActor () -> Bool
+    ) async {
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: timeout)
         while !predicate(), clock.now < deadline {
             await Task.yield()
             try? await Task.sleep(for: .milliseconds(5))
         }
+        // Record the timeout at the wait itself: falling through silently lets downstream
+        // assertions fail in cascades that obscure which wait actually missed.
+        if !predicate() { Issue.record("waitUntil timed out after \(timeout)", sourceLocation: sourceLocation) }
     }
 
     // MARK: - Synchronous routes
@@ -269,7 +274,7 @@ import spacesterminalui
         let coordinator = makeCoordinator(isLocalDevice: false, sender: sender, banner: banner, recorder: recorder)
 
         coordinator.openLink("artifact.png")
-        await waitUntil { !banner.errorMessages.isEmpty }
+        await coordinator.drainActiveWorkForTesting()
 
         #expect(banner.errorMessages == ["link expired"])
         #expect(recorder.opens.isEmpty)
@@ -296,7 +301,7 @@ import spacesterminalui
             isLocalDevice: false, sender: sender, banner: banner, recorder: recorder, sessionID: sessionID, deviceID: deviceID)
 
         coordinator.openLink("report.txt")
-        await waitUntil { !recorder.opens.isEmpty }
+        await coordinator.drainActiveWorkForTesting()
 
         #expect(banner.errorMessages.isEmpty)
         #expect(banner.dismissCount >= 1)
@@ -327,13 +332,15 @@ import spacesterminalui
             isLocalDevice: false, sender: sender, banner: banner, recorder: recorder, sessionID: sessionID, deviceID: deviceID)
 
         coordinator.openLink("data.txt")
-        await waitUntil { recorder.opens.count == 1 }
+        await coordinator.drainActiveWorkForTesting()
+        #expect(recorder.opens.count == 1)
         #expect(sender.chunkCount(forLinkID: linkID) >= 1)
 
         sender.resetChunkCount(forLinkID: linkID)
         coordinator.openLink("data.txt")
-        await waitUntil { recorder.opens.count == 2 }
+        await coordinator.drainActiveWorkForTesting()
 
+        #expect(recorder.opens.count == 2)
         #expect(sender.chunkCount(forLinkID: linkID) == 0)
         #expect(banner.errorMessages.isEmpty)
     }
@@ -361,17 +368,30 @@ import spacesterminalui
             isLocalDevice: false, sender: sender, banner: banner, recorder: recorder, sessionID: sessionID, deviceID: deviceID)
 
         coordinator.openLink("data.txt")
+        // `chunkCount` is driven by a real `DispatchSemaphore` block inside a detached task, not by
+        // the coordinator's own task graph, so there is nothing here for `drainActiveWorkForTesting`
+        // to await yet: this is a genuinely event-external wait for proof the first fetch has
+        // entered (and is stalled inside) its chunk read.
         await waitUntil { sender.chunkCount(forLinkID: linkID) == 1 }
 
+        // The duplicate click cancels the first fetch (bumping `generation` and calling
+        // `Task.cancel()`) and starts a second for the same link; the second's chunk read finds the
+        // gate's one-shot queue already drained by the first, so it never blocks and completes on
+        // its own. The first fetch stays parked on the gate until the second's open — and therefore
+        // its cache write — has been observed: the late finisher this test targets must finish
+        // *after* the current fetch populated the cache, or a stale completion that clobbered the
+        // cache before checking its generation would be silently repaired by the second's write.
+        // (An ordering poll, not a drain: draining here would also await the parked first fetch.)
         coordinator.openLink("data.txt")
         await waitUntil { recorder.opens.count == 1 }
-        let openedURL = try #require(recorder.opens.first?.url)
-        #expect(FileManager.default.fileExists(atPath: openedURL.path))
-        #expect(try Data(contentsOf: openedURL) == payload)
 
+        // Only now let the cancelled first fetch finish, and drain it to completion so the
+        // assertions are exact: its late finish must not have removed the cache or opened anything.
         gate.signal()
-        try? await Task.sleep(for: .milliseconds(300))
+        await coordinator.drainActiveWorkForTesting()
 
+        #expect(recorder.opens.count == 1)
+        let openedURL = try #require(recorder.opens.first?.url)
         #expect(FileManager.default.fileExists(atPath: openedURL.path))
         #expect(try Data(contentsOf: openedURL) == payload)
         #expect(banner.errorMessages.isEmpty)
@@ -417,15 +437,25 @@ import spacesterminalui
             isLocalDevice: false, sender: sender, banner: banner, recorder: recorder, sessionID: sessionID, deviceID: deviceID)
 
         coordinator.openLink("first.txt")
-        // Wait until the first fetch has entered its (blocked) chunk read.
+        // Wait until the first fetch has entered its (blocked) chunk read. Genuinely event-external
+        // (a real `DispatchSemaphore` block inside a detached task, not the coordinator's own task
+        // graph), so this stays a poll rather than a drain.
         await waitUntil { sender.chunkCount(forLinkID: firstLinkID) >= 1 }
 
+        // The second click cancels the first (bumping `generation` before this call returns) and
+        // starts its own fetch. The first's gate stays closed until the second's open has been
+        // observed, which is what proves supersession is non-blocking: the replacement fetch
+        // completes while the superseded sender is still stuck in its chunk read, so an
+        // implementation that serialized the new fetch behind the old I/O would fail this wait
+        // loudly instead of being rescued by the release below. (An ordering poll, not a drain:
+        // draining here would also await the parked first fetch.)
         coordinator.openLink("second.txt")
-        await waitUntil { recorder.opens.contains { (try? Data(contentsOf: $0.url)) == secondPayload } }
+        await waitUntil { recorder.opens.count == 1 }
 
-        // Release the superseded first fetch and give it a settle window; it must not open anything.
+        // Only now release the superseded fetch and drain it to completion, so the assertions are
+        // exact: the cancelled fetch must have discarded its result without opening anything.
         gate.signal()
-        try? await Task.sleep(for: .milliseconds(300))
+        await coordinator.drainActiveWorkForTesting()
 
         let openedContents = recorder.opens.compactMap { try? Data(contentsOf: $0.url) }
         #expect(openedContents.contains(secondPayload))

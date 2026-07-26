@@ -5,10 +5,13 @@ import Foundation
 #endif
 
 public final class ChromeAdapter {
-    private static let appleScriptTimeoutSeconds = 10
     private static let chromeBundleID = "com.google.Chrome"
 
-    public init() {}
+    private let appleScriptTimeoutSeconds: Int
+
+    /// The timeout only exists as a parameter so tests exercising mocked osascript output can
+    /// widen it beyond spawn latency on a loaded machine; production callers use the default.
+    public init(appleScriptTimeoutSeconds: Int = 10) { self.appleScriptTimeoutSeconds = appleScriptTimeoutSeconds }
 
     public func isAvailable() -> Bool { (try? runChromeScript("tell application \"Google Chrome\" to version")) != nil }
 
@@ -500,5 +503,5 @@ public final class ChromeAdapter {
         return parsed
     }
 
-    private func runChromeScript(_ script: String) throws -> String { try AppleScript.run(script, timeoutSeconds: Self.appleScriptTimeoutSeconds) }
+    private func runChromeScript(_ script: String) throws -> String { try AppleScript.run(script, timeoutSeconds: appleScriptTimeoutSeconds) }
 }

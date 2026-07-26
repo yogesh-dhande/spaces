@@ -454,6 +454,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                         try Self.setCloseOnExec(clientFD)
                         try Self.setBlocking(clientFD)
                         Self.setSocketTimeout(clientFD, seconds: 120)
+                        SpacesTCPKeepalive.apply(to: clientFD)
                         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                             guard let self else {
                                 close(clientFD)
@@ -826,6 +827,10 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     #endif
     private var terminalLinkTransferAuthorizations: [String: TerminalLinkTransferAuthorization] = [:]
     private var running = false
+    /// When the listener entered its waiting state, cleared whenever it reaches a definite state.
+    /// Only the `NWListener` transport reports waiting; `SpacesDeviceAPIListenerHealth` turns a wait
+    /// that outlasts its grace period into a not-running verdict for the supervisor's health check.
+    private var listenerWaitingSince: Date?
     private var acceptingRequests = false
 
     public init(
@@ -901,9 +906,8 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
 
     public var isRunning: Bool {
         stateLock.lock()
-        let value = running
-        stateLock.unlock()
-        return value
+        defer { stateLock.unlock() }
+        return SpacesDeviceAPIListenerHealth.isRunning(listenerStarted: running, waitingSince: listenerWaitingSince, now: Date())
     }
 
     var requestConnectionCountForTesting: Int {
@@ -929,7 +933,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             sec_protocol_options_set_peer_authentication_required(securityOptions, false)
             guard let secIdentity = sec_identity_create(identity.identity) else { throw TerminalServiceTLSError.identityImportFailed(errSecParam) }
             sec_protocol_options_set_local_identity(securityOptions, secIdentity)
-            let parameters = NWParameters(tls: tlsOptions, tcp: NWProtocolTCP.Options())
+            let parameters = NWParameters(tls: tlsOptions, tcp: SpacesTCPKeepalive.makeTCPOptions())
             if !SpacesDeviceAPIDefaults.isWildcardHost(host) {
                 parameters.requiredLocalEndpoint = .hostPort(host: NWEndpoint.Host(host), port: nwPort)
             }
@@ -966,6 +970,9 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
                 case .cancelled:
                     self.acceptingRequests = false
                     self.setRunning(false)
+                case .waiting(let error):
+                    self.trace("listener_waiting error=\(error)")
+                    self.markListenerWaiting()
                 default: break
                 }
             }
@@ -1099,20 +1106,20 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         }
     }
 
-    public func openPairingWindow(host linkHost: String, name: String, duration: TimeInterval = SpacesDevicePairingCoordinator.defaultWindowDuration)
-        -> SpacesDevicePairingWindow
-    {
+    public func openPairingWindow(
+        hosts linkHosts: [String], name: String, duration: TimeInterval = SpacesDevicePairingCoordinator.defaultWindowDuration
+    ) -> SpacesDevicePairingWindow {
         pairingCoordinator.openWindow(
-            host: linkHost, port: listeningPort > 0 ? listeningPort : port, certificateFingerprint: identity.certificateFingerprint, name: name,
+            hosts: linkHosts, port: listeningPort > 0 ? listeningPort : port, certificateFingerprint: identity.certificateFingerprint, name: name,
             protocolVersion: SpacesWireProtocol.version, appVersion: AppVersion.short, duration: duration)
     }
 
     public func openPairingWindow(
-        host linkHost: String, name: String, duration: TimeInterval = SpacesDevicePairingCoordinator.defaultWindowDuration, code: String,
+        hosts linkHosts: [String], name: String, duration: TimeInterval = SpacesDevicePairingCoordinator.defaultWindowDuration, code: String,
         nonce: String? = nil
     ) -> SpacesDevicePairingWindow {
         pairingCoordinator.openWindow(
-            host: linkHost, port: listeningPort > 0 ? listeningPort : port, certificateFingerprint: identity.certificateFingerprint, name: name,
+            hosts: linkHosts, port: listeningPort > 0 ? listeningPort : port, certificateFingerprint: identity.certificateFingerprint, name: name,
             protocolVersion: SpacesWireProtocol.version, appVersion: AppVersion.short, duration: duration, code: code, nonce: nonce)
     }
 
@@ -1590,7 +1597,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
             }
         }
         let liveTerminals = (try? TerminalSessionCatalog.listLiveSessions().count) ?? 0
-        return Self.makeDaemonStatus(activeSessionCount: liveTerminals, impact: impact)
+        return makeDaemonStatus(activeSessionCount: liveTerminals, impact: impact)
     }
 
     /// Restart-impact tallies a daemon restart would destroy. Shared by the standalone frozen-core
@@ -1626,11 +1633,15 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         return "This device runs Spaces \(AppVersion.short), which is older than the pairing device; update Spaces on this device, then pair again."
     }
 
-    private static func makeDaemonStatus(activeSessionCount: Int, impact: RestartImpactCounts) -> TerminalServiceDaemonStatus {
+    // Instance method (not static) so it can read `self.host`: the daemon status this server reports
+    // must advertise the same addresses a pairing link opened from this server would offer, derived
+    // from the identical `pairingLinkHosts(boundHost:)` call.
+    private func makeDaemonStatus(activeSessionCount: Int, impact: RestartImpactCounts) -> TerminalServiceDaemonStatus {
         TerminalServiceDaemonStatus(
             version: AppVersion.current, installedVersion: InstalledSpacesVersion.current(), certificateFingerprint: nil,
             activeSessionCount: activeSessionCount, runningProcesses: impact.runningProcesses, activeAgents: impact.activeAgents,
-            waitingAgents: impact.waitingAgents, timeZoneIdentifier: TerminalServiceDaemonStatus.currentTimeZoneIdentifier)
+            waitingAgents: impact.waitingAgents, timeZoneIdentifier: TerminalServiceDaemonStatus.currentTimeZoneIdentifier,
+            deviceAPIAddresses: SpacesDeviceAPINetworkInterfaces.pairingLinkHosts(boundHost: host))
     }
 
     /// Builds the device overview. Request handlers pass their shared per-request `store` so a
@@ -1689,7 +1700,7 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
         // handshake costs no extra store work on the refresh hot path.
         var impact = RestartImpactCounts()
         for descriptor in workspaces { impact.accumulate(runningProcesses: descriptor.runningProcesses, agentWindows: descriptor.agentWindows) }
-        let daemonStatus = Self.makeDaemonStatus(activeSessionCount: localSessions.count, impact: impact)
+        let daemonStatus = makeDaemonStatus(activeSessionCount: localSessions.count, impact: impact)
         let (automationSummaries, automationRunSummaries) = try loadAutomationOverview(store: store, liveSessions: localSessions)
         return SpacesDeviceOverviewBuilder.build(
             projects: projects, workspaces: workspaces, workspaceRows: workspaceRows, liveSessions: sessions, daemonStatus: daemonStatus,
@@ -3296,6 +3307,15 @@ public final class SpacesDeviceAPIServer: @unchecked Sendable {
     private func setRunning(_ value: Bool) {
         stateLock.lock()
         running = value
+        listenerWaitingSince = nil
+        stateLock.unlock()
+    }
+
+    /// Starts the waiting clock on the first waiting report and keeps the original timestamp for
+    /// repeats, so a listener that keeps re-reporting the same wait cannot postpone the verdict.
+    private func markListenerWaiting() {
+        stateLock.lock()
+        if listenerWaitingSince == nil { listenerWaitingSince = Date() }
         stateLock.unlock()
     }
 }

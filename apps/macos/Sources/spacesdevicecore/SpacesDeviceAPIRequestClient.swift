@@ -188,6 +188,11 @@ public final class SpacesDeviceAPIStateStreamClient: TerminalRemoteStateStreamCl
         self.onDisconnect = onDisconnect
     }
 
+    /// The receive loop holds this client weakly, so dropping the last reference to a live stream
+    /// leaves its pinned-TLS connection running until something cancels it. Cancelling here makes the
+    /// reference-drop path safe by construction, matching `SpacesDeviceAPIRequestSessionClient`.
+    deinit { stop() }
+
     public func start(timeoutSeconds: TimeInterval = 10) throws {
         let createdConnection = try SpacesPinnedTLSConnector.connect(
             host: host, port: port, certificateFingerprint: certificateFingerprint, timeout: timeoutSeconds)
@@ -249,6 +254,11 @@ public final class SpacesDeviceAPIOverviewStreamClient: @unchecked Sendable {
         self.onOverview = onOverview
         self.onDisconnect = onDisconnect
     }
+
+    /// The receive loop holds this client weakly, so dropping the last reference to a live stream
+    /// leaves its pinned-TLS connection running until something cancels it. Cancelling here makes the
+    /// reference-drop path safe by construction, matching `SpacesDeviceAPIRequestSessionClient`.
+    deinit { stop() }
 
     public func start(timeoutSeconds: TimeInterval = 10) throws {
         let createdConnection = try SpacesPinnedTLSConnector.connect(

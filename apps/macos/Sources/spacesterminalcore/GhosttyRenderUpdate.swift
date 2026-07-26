@@ -398,33 +398,38 @@ public enum GhosttyRenderUpdateBinaryCodec {
     }
 
     public static func decode(_ data: Data) throws -> GhosttyRenderUpdate {
-        var reader = BinaryReader(data: data)
-        guard try reader.readBytes(count: magic.count) == magic else { throw BinaryCodecError.invalidMagic }
-        let version = Int(try reader.readUInt8())
-        guard version == GhosttyRenderUpdate.currentVersion else { throw BinaryCodecError.unsupportedVersion }
-        let kind = try kind(for: reader.readUInt8())
-        _ = try reader.readUInt16()
-        let sessionRevision = try reader.readOptionalRevision()
-        let baseRevision = try reader.readOptionalRevision()
-        let targetRevision = try reader.readOptionalRevision()
-        let ownerEpoch = try reader.readUInt64()
-        let columns = Int(try reader.readUInt16())
-        let rows = Int(try reader.readUInt16())
-        let fallbackReason = try reader.readString()
-        switch kind {
-        case .full:
-            let snapshot = try reader.readSnapshot(columns: columns, rows: rows)
-            let frame = GhosttyRenderFrame(
-                version: GhosttyRenderFrame.currentVersion, sessionRevision: sessionRevision, ownerEpoch: ownerEpoch, snapshot: snapshot)
-            return .full(frame, fallbackReason: fallbackReason.isEmpty ? nil : fallbackReason)
-        case .delta:
-            let delta = try reader.readDelta(
-                baseRevision: baseRevision, targetRevision: targetRevision, ownerEpoch: ownerEpoch, columns: columns, rows: rows)
-            return .delta(delta)
-        case .resyncRequired:
-            return .resyncRequired(
-                sessionRevision: sessionRevision, ownerEpoch: ownerEpoch, columns: columns, rows: rows,
-                fallbackReason: fallbackReason.isEmpty ? nil : fallbackReason)
+        // Decode the whole frame inside a single withUnsafeBytes so fixed-width integer reads use
+        // loadUnaligned over a raw pointer, avoiding the per-integer generic copyBytes churn that
+        // dominated main-thread CPU on grid-sized (columns×rows cells × 4 reads) snapshots.
+        try data.withUnsafeBytes { raw in
+            var reader = BinaryReader(raw: raw)
+            guard try reader.readBytes(count: magic.count) == magic else { throw BinaryCodecError.invalidMagic }
+            let version = Int(try reader.readUInt8())
+            guard version == GhosttyRenderUpdate.currentVersion else { throw BinaryCodecError.unsupportedVersion }
+            let kind = try kind(for: reader.readUInt8())
+            _ = try reader.readUInt16()
+            let sessionRevision = try reader.readOptionalRevision()
+            let baseRevision = try reader.readOptionalRevision()
+            let targetRevision = try reader.readOptionalRevision()
+            let ownerEpoch = try reader.readUInt64()
+            let columns = Int(try reader.readUInt16())
+            let rows = Int(try reader.readUInt16())
+            let fallbackReason = try reader.readString()
+            switch kind {
+            case .full:
+                let snapshot = try reader.readSnapshot(columns: columns, rows: rows)
+                let frame = GhosttyRenderFrame(
+                    version: GhosttyRenderFrame.currentVersion, sessionRevision: sessionRevision, ownerEpoch: ownerEpoch, snapshot: snapshot)
+                return .full(frame, fallbackReason: fallbackReason.isEmpty ? nil : fallbackReason)
+            case .delta:
+                let delta = try reader.readDelta(
+                    baseRevision: baseRevision, targetRevision: targetRevision, ownerEpoch: ownerEpoch, columns: columns, rows: rows)
+                return .delta(delta)
+            case .resyncRequired:
+                return .resyncRequired(
+                    sessionRevision: sessionRevision, ownerEpoch: ownerEpoch, columns: columns, rows: rows,
+                    fallbackReason: fallbackReason.isEmpty ? nil : fallbackReason)
+            }
         }
     }
 
@@ -461,25 +466,17 @@ public enum GhosttyRenderUpdateBinaryCodec {
         mutating func appendBytes(_ bytes: [UInt8]) { data.append(contentsOf: bytes) }
         mutating func appendUInt8(_ value: UInt8) { data.append(value) }
 
-        mutating func appendUInt16(_ value: UInt16) {
+        // Append the little-endian bytes via Data's pointer overload, which memcpys instead of
+        // walking the raw buffer byte-wise through the Sequence path.
+        private mutating func appendLittleEndian<T: FixedWidthInteger>(_ value: T) {
             var littleEndian = value.littleEndian
-            withUnsafeBytes(of: &littleEndian) { data.append(contentsOf: $0) }
+            withUnsafeBytes(of: &littleEndian) { data.append($0.baseAddress!.assumingMemoryBound(to: UInt8.self), count: $0.count) }
         }
 
-        mutating func appendUInt32(_ value: UInt32) {
-            var littleEndian = value.littleEndian
-            withUnsafeBytes(of: &littleEndian) { data.append(contentsOf: $0) }
-        }
-
-        mutating func appendUInt64(_ value: UInt64) {
-            var littleEndian = value.littleEndian
-            withUnsafeBytes(of: &littleEndian) { data.append(contentsOf: $0) }
-        }
-
-        mutating func appendInt32(_ value: Int32) {
-            var littleEndian = value.littleEndian
-            withUnsafeBytes(of: &littleEndian) { data.append(contentsOf: $0) }
-        }
+        mutating func appendUInt16(_ value: UInt16) { appendLittleEndian(value) }
+        mutating func appendUInt32(_ value: UInt32) { appendLittleEndian(value) }
+        mutating func appendUInt64(_ value: UInt64) { appendLittleEndian(value) }
+        mutating func appendInt32(_ value: Int32) { appendLittleEndian(value) }
 
         mutating func appendOptionalRevision(_ revision: UInt64?) { appendUInt64(revision ?? nilRevision) }
 
@@ -512,6 +509,8 @@ public enum GhosttyRenderUpdateBinaryCodec {
         }
 
         mutating func appendSnapshot(_ snapshot: GhosttyTerminalSnapshot) throws {
+            // Snapshot header is 17 bytes; each cell is 14 bytes (see appendCell).
+            data.reserveCapacity(data.count + 17 + snapshot.cells.count * 14)
             try appendUInt16Clamped(snapshot.cursorColumn)
             try appendUInt16Clamped(snapshot.cursorRow)
             appendUInt8(snapshot.cursorVisible ? 1 : 0)
@@ -522,6 +521,11 @@ public enum GhosttyRenderUpdateBinaryCodec {
         }
 
         mutating func appendDelta(_ delta: GhosttyRenderDeltaFrame) throws {
+            // Header 21 bytes, each scroll rect 16 bytes, run-count 4 bytes, each run header 6 bytes,
+            // each cell 14 bytes (see appendCell).
+            let runCells = delta.replaceCellRuns.reduce(0) { $0 + $1.cells.count }
+            data.reserveCapacity(
+                data.count + 21 + delta.scrollRects.count * 16 + 4 + delta.replaceCellRuns.count * 6 + runCells * 14)
             try appendUInt16Clamped(delta.cursorColumn)
             try appendUInt16Clamped(delta.cursorRow)
             appendUInt8(delta.cursorVisible ? 1 : 0)
@@ -547,20 +551,22 @@ public enum GhosttyRenderUpdateBinaryCodec {
         }
     }
 
+    // Reads over a raw buffer (already relative to the sliced Data's start, so it is slice-correct
+    // regardless of the source Data's startIndex).
     private struct BinaryReader {
-        let data: Data
+        let raw: UnsafeRawBufferPointer
         var offset = 0
 
         mutating func readBytes(count: Int) throws -> [UInt8] {
-            guard count >= 0, offset + count <= data.count else { throw BinaryCodecError.truncated }
+            guard count >= 0, offset + count <= raw.count else { throw BinaryCodecError.truncated }
             defer { offset += count }
-            return Array(data[offset..<(offset + count)])
+            return Array(raw[offset..<(offset + count)])
         }
 
         mutating func readUInt8() throws -> UInt8 {
-            guard offset < data.count else { throw BinaryCodecError.truncated }
+            guard offset < raw.count else { throw BinaryCodecError.truncated }
             defer { offset += 1 }
-            return data[offset]
+            return raw[offset]
         }
 
         mutating func readUInt16() throws -> UInt16 { UInt16(littleEndian: try readFixedWidthInteger()) }
@@ -575,8 +581,10 @@ public enum GhosttyRenderUpdateBinaryCodec {
 
         mutating func readString() throws -> String {
             let count = Int(try readUInt16())
-            let bytes = try readBytes(count: count)
-            guard let value = String(bytes: bytes, encoding: .utf8) else { throw BinaryCodecError.invalidUTF8 }
+            guard count >= 0, offset + count <= raw.count else { throw BinaryCodecError.truncated }
+            defer { offset += count }
+            // String(bytes:encoding:) validates UTF-8 and returns nil on failure, preserving .invalidUTF8.
+            guard let value = String(bytes: raw[offset..<(offset + count)], encoding: .utf8) else { throw BinaryCodecError.invalidUTF8 }
             return value
         }
 
@@ -638,11 +646,9 @@ public enum GhosttyRenderUpdateBinaryCodec {
 
         private mutating func readFixedWidthInteger<T: FixedWidthInteger>() throws -> T {
             let size = MemoryLayout<T>.size
-            guard offset + size <= data.count else { throw BinaryCodecError.truncated }
-            var value: T = 0
-            _ = withUnsafeMutableBytes(of: &value) { buffer in data.copyBytes(to: buffer, from: offset..<(offset + size)) }
-            offset += size
-            return value
+            guard offset + size <= raw.count else { throw BinaryCodecError.truncated }
+            defer { offset += size }
+            return raw.loadUnaligned(fromByteOffset: offset, as: T.self)
         }
     }
 }

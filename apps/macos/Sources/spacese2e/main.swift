@@ -33,10 +33,10 @@ struct SpacesE2ECommand: ParsableCommand {
             OpenRemoteDevicePairingWindowCommand.self, RecordScreenCommand.self, ProfileShowCommand.self, ProfileAppOwnerCommand.self,
             MacClientInstallationIDCommand.self, ProfileSocketPathsCommand.self, ProfileDesktopControlOwnerCommand.self,
             ProfileWaitForDesktopControlCommand.self, MobileStatusCommand.self, MobileServeCommand.self, MobileRequestCommand.self,
-            ServiceTunnelCommand.self, RenderUpdateTextCommand.self, ScrollApplicationWindowCommand.self, TypeApplicationWindowCommand.self,
-            DragApplicationWindowCommand.self, AutomationCreateCommand.self, AutomationUpdateCommand.self, AutomationDeleteCommand.self,
-            AutomationListCommand.self, AutomationRunsCommand.self, AutomationTriggerCommand.self, AutomationCancelCommand.self,
-            AutomationEndAgentsCommand.self,
+            ServiceTunnelCommand.self, RenderUpdateTextCommand.self, RecordMobileDemoCommand.self, ScrollApplicationWindowCommand.self,
+            TypeApplicationWindowCommand.self, DragApplicationWindowCommand.self, AutomationCreateCommand.self, AutomationUpdateCommand.self,
+            AutomationDeleteCommand.self, AutomationListCommand.self, AutomationRunsCommand.self, AutomationTriggerCommand.self,
+            AutomationCancelCommand.self, AutomationEndAgentsCommand.self,
         ])
 }
 
@@ -553,7 +553,7 @@ private struct MobileRequestCommand: ParsableCommand {
 
     func run() throws {
         let link = try pairingLink.map { try SpacesDevicePairingLink.parse($0) }
-        let resolvedHost = host ?? link?.host ?? "127.0.0.1"
+        let resolvedHost = host ?? link?.hosts.first ?? "127.0.0.1"
         guard let resolvedPort = port ?? link?.port else { throw ValidationError("Provide --port or a pairing link.") }
         guard (1...65_535).contains(resolvedPort) else { throw ValidationError("Port must be between 1 and 65535.") }
         guard let resolvedFingerprint = certificateFingerprint ?? link?.certificateFingerprint else {
@@ -722,6 +722,416 @@ private struct RenderUpdateTextLine: Encodable {
     let error: String?
 }
 
+/// Records the bundled iOS Demo Mode recording from a live daemon: the real device-API overview plus
+/// full-frame Ghostty terminal payloads captured at iOS-native grids. The output is deterministic and
+/// idempotent — daemon session IDs are rewritten to stable slugs, temp paths are rewritten to fixed
+/// placeholders, and every timestamp is normalized to a signed second-offset from a reference date the
+/// demo backend rebases to "now" at load. See `apps/macos/Tests/record_ios_demo_recording.sh`.
+private struct RecordMobileDemoCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "record-mobile-demo",
+        abstract: "Record the bundled iOS Demo Mode recording (overview + full-frame terminal payloads) from a live daemon.",
+        discussion: """
+            Attaches to every terminal session in the seeded fixture workspaces as an owner-capable device \
+            client, resizes each interactive session to each requested iOS-native grid, subscribes, collapses \
+            the streamed delta frames into a single steady-state FULL frame, and writes \
+            grids/<cols>x<rows>/<stable-id>.ndjson. Fetches the overview once into overview.json and writes a \
+            manifest.json describing the schema version, reference date, grids, sessions, and the daemon→slug \
+            session-id map. Post-processing rewrites session IDs to stable slugs, rewrites --path-rewrite \
+            prefixes to fixed placeholders, strips browser sessions / assigned ports / workspace environment, \
+            and rebases every ISO8601 timestamp to a signed second-offset from --reference-date so the output \
+            is deterministic across runs.
+            """)
+
+    @Option(help: "Output directory for the recording bundle (manifest.json, overview.json, grids/).") var output: String
+    @Option(name: .customLong("grid"), parsing: .singleValue, help: "Target grid as <cols>x<rows>. Repeat for multiple device classes.") var grids:
+        [String] = []
+    @Option(help: "Device API host. Defaults to 127.0.0.1.") var host: String = "127.0.0.1"
+    @Option(help: "Device API port.") var port: Int
+    @Option(help: "Expected daemon certificate fingerprint.") var certificateFingerprint: String
+    @Option(help: "Paired-device auth token.") var authToken: String
+    @Option(help: "Installation ID the auth token was paired with.") var clientInstallationID: String
+    @Option(help: "ISO8601 reference date offsets are measured from. Defaults to the recorder's start instant.") var referenceDate: String?
+    @Option(help: "Recording schema version written to the manifest.") var schemaVersion: Int = 1
+    @Option(
+        name: .customLong("path-rewrite"), parsing: .singleValue,
+        help: "Rewrite a path prefix as <from>=<to> in overview and payloads for determinism. Repeatable.") var pathRewrites: [String] = []
+    @Option(help: "Idle time in milliseconds with no new stream frames before a session is considered settled.") var settleMS: Int = 1200
+    @Option(help: "Overall per-session capture timeout in milliseconds.") var overallTimeoutMS: Int = 20000
+
+    func run() throws {
+        guard (1...65_535).contains(port) else { throw ValidationError("Port must be between 1 and 65535.") }
+        guard !grids.isEmpty else { throw ValidationError("Provide at least one --grid <cols>x<rows>.") }
+        let parsedGrids = try grids.map(Self.parseGrid)
+        let rewrites = try pathRewrites.map(Self.parsePathRewrite)
+        let reference: Date
+        if let referenceDate {
+            guard let parsed = e2eISO8601Formatter.date(from: referenceDate) ?? ISO8601DateFormatter().date(from: referenceDate) else {
+                throw ValidationError("--reference-date must be ISO8601.")
+            }
+            reference = parsed
+        } else {
+            reference = Date()
+        }
+
+        let outputURL = URL(fileURLWithPath: normalizePath(output), isDirectory: true)
+        let recorder = DemoRecorder(
+            host: host, port: port, certificateFingerprint: certificateFingerprint, authToken: authToken, clientInstallationID: clientInstallationID,
+            settleSeconds: Double(settleMS) / 1000, overallSeconds: Double(overallTimeoutMS) / 1000)
+
+        let overviewResponseData = try recorder.fetchOverviewResponseData()
+        let overviewResponse = try SpacesDeviceAPICodec.decodeResponse(overviewResponseData)
+        guard let overview = overviewResponse.overview else {
+            throw ValidationError("Device API overview response did not include an overview payload: \(overviewResponse.message)")
+        }
+        let plans = DemoRecorder.buildSessionPlans(overview: overview)
+        guard !plans.isEmpty else { throw ValidationError("The seeded fixture has no terminal sessions to record.") }
+        let sessionIDMap = Dictionary(uniqueKeysWithValues: plans.map { ($0.daemonSessionID, $0.slug) })
+        let transform = DemoRecordingTransform(sessionIDMap: sessionIDMap, pathRewrites: rewrites, referenceDate: reference)
+
+        let fileManager = FileManager.default
+        try? fileManager.removeItem(at: outputURL.appendingPathComponent("grids", isDirectory: true))
+        try fileManager.createDirectory(at: outputURL, withIntermediateDirectories: true)
+
+        var capturedSummaries: [DemoRecordedSessionSummary] = []
+        for plan in plans {
+            capturedSummaries.append(
+                DemoRecordedSessionSummary(stableID: plan.slug, workspaceName: plan.workspaceName, title: plan.title, kind: plan.kind))
+        }
+
+        for grid in parsedGrids {
+            let gridDir = outputURL.appendingPathComponent("grids/\(grid.columns)x\(grid.rows)", isDirectory: true)
+            try fileManager.createDirectory(at: gridDir, withIntermediateDirectories: true)
+            for plan in plans {
+                let payload = try recorder.captureSession(plan: plan, columns: grid.columns, rows: grid.rows)
+                let renderText = payload.renderText ?? ""
+                if renderText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    throw ValidationError("Captured empty terminal frame for \(plan.slug) at \(grid.columns)x\(grid.rows).")
+                }
+                let lineData = try transform.transformedPayloadLine(payload)
+                try lineData.write(to: gridDir.appendingPathComponent("\(plan.slug).ndjson"))
+            }
+        }
+
+        let overviewJSON = try transform.transformedOverviewResponse(overviewResponseData)
+        try overviewJSON.write(to: outputURL.appendingPathComponent("overview.json"))
+
+        let manifest = DemoRecordingManifest(
+            schemaVersion: schemaVersion, referenceDate: GhosttyRemoteSessionStateTimestamp.string(from: reference),
+            rebasingContract:
+                "All ISO8601 timestamp fields in overview.json and every payload are replaced with signed integer second-offset strings relative to referenceDate; the demo backend adds each offset to load-time now. daemonStatus.protocolVersion is patched to the client's expected wire protocol version at load.",
+            grids: parsedGrids.map { DemoRecordingGrid(columns: $0.columns, rows: $0.rows) },
+            sessions: capturedSummaries.sorted { $0.stableID < $1.stableID }, sessionIDMap: sessionIDMap)
+        let manifestEncoder = JSONEncoder()
+        manifestEncoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        try manifestEncoder.encode(manifest).write(to: outputURL.appendingPathComponent("manifest.json"))
+
+        try emitJSON(
+            DemoRecordingResult(
+                sessionCount: plans.count, gridCount: parsedGrids.count, sessions: capturedSummaries.map(\.stableID).sorted(),
+                grids: parsedGrids.map { "\($0.columns)x\($0.rows)" }))
+    }
+
+    private static func parseGrid(_ raw: String) throws -> (columns: Int, rows: Int) {
+        let parts = raw.lowercased().split(separator: "x", maxSplits: 1)
+        guard parts.count == 2, let columns = Int(parts[0]), let rows = Int(parts[1]), columns > 0, rows > 0, columns <= 1000, rows <= 1000 else {
+            throw ValidationError("Invalid --grid '\(raw)'. Use <cols>x<rows>, e.g. 55x52.")
+        }
+        return (columns, rows)
+    }
+
+    private static func parsePathRewrite(_ raw: String) throws -> (from: String, to: String) {
+        guard let separatorIndex = raw.firstIndex(of: "="), separatorIndex != raw.startIndex else {
+            throw ValidationError("Invalid --path-rewrite '\(raw)'. Use <from>=<to>.")
+        }
+        return (String(raw[raw.startIndex..<separatorIndex]), String(raw[raw.index(after: separatorIndex)...]))
+    }
+}
+
+private struct DemoRecordedSessionSummary: Codable {
+    let stableID: String
+    let workspaceName: String
+    let title: String
+    let kind: String
+}
+
+private struct DemoRecordingGrid: Codable {
+    let columns: Int
+    let rows: Int
+}
+
+private struct DemoRecordingManifest: Codable {
+    let schemaVersion: Int
+    let referenceDate: String
+    let rebasingContract: String
+    let grids: [DemoRecordingGrid]
+    let sessions: [DemoRecordedSessionSummary]
+    let sessionIDMap: [String: String]
+}
+
+private struct DemoRecordingResult: Codable {
+    let sessionCount: Int
+    let gridCount: Int
+    let sessions: [String]
+    let grids: [String]
+}
+
+/// One terminal session to record, resolved from the overview with a deterministic stable slug.
+private struct DemoSessionPlan {
+    let daemonSessionID: String
+    let slug: String
+    let workspaceName: String
+    let title: String
+    let kind: String
+    let isInteractive: Bool
+}
+
+/// Drives the device API to capture each session's settled full frame. Mirrors the iOS viewer's
+/// attach → takeover → resize → subscribe sequence so the daemon renders each session at the exact
+/// iOS-native grid before the frame is captured (never a Mac-sized grid).
+private struct DemoRecorder {
+    let host: String
+    let port: Int
+    let certificateFingerprint: String
+    let authToken: String
+    let clientInstallationID: String
+    let settleSeconds: Double
+    let overallSeconds: Double
+
+    private let recorderClientID = UUID().uuidString
+    private let client: DeviceAPIRequestClient
+
+    init(
+        host: String, port: Int, certificateFingerprint: String, authToken: String, clientInstallationID: String, settleSeconds: Double,
+        overallSeconds: Double
+    ) {
+        self.host = host
+        self.port = port
+        self.certificateFingerprint = certificateFingerprint
+        self.authToken = authToken
+        self.clientInstallationID = clientInstallationID
+        self.settleSeconds = settleSeconds
+        self.overallSeconds = overallSeconds
+        client = DeviceAPIRequestClient(host: host, port: UInt16(port), certificateFingerprint: certificateFingerprint)
+    }
+
+    private var clientApp: SpacesDeviceClientApp {
+        SpacesDeviceClientApp(
+            installationID: clientInstallationID, bundleID: SpacesDeviceFirstPartyPolicy.iosBundleID, platform: "ios",
+            deviceName: "Spaces Demo Recorder", appVersion: AppVersion.short)
+    }
+
+    private var recorderClient: TerminalClient {
+        TerminalClient(
+            id: recorderClientID, kind: .remoteViewer,
+            identity: TerminalClientIdentity(label: "Spaces Demo Recorder", deviceName: "Spaces Demo Recorder", networkAddress: host),
+            connectedAt: nowISO8601())
+    }
+
+    func fetchOverviewResponseData() throws -> Data { try request(command: .overview) }
+
+    private func request(command: SpacesDeviceAPICommand) throws -> Data {
+        let request = SpacesDeviceAPIRequest(command: command, authToken: authToken, clientApp: clientApp)
+        return try client.request(requestData: try SpacesDeviceAPICodec.encodeRequest(request))
+    }
+
+    private func sendControl(_ payload: SpacesDeviceTerminalControlRequest) throws -> SpacesDeviceAPIResponse {
+        try SpacesDeviceAPICodec.decodeResponse(try request(command: .terminalControl(payload)))
+    }
+
+    /// Attaches (view-only), takes ownership, resizes to the target grid, subscribes, and collapses the
+    /// streamed frames into one steady-state FULL-frame payload. Ended (non-interactive) sessions skip the
+    /// owner/resize path and subscribe directly for their persisted final frame.
+    func captureSession(plan: DemoSessionPlan, columns: Int, rows: Int) throws -> GhosttyRemoteSessionStatePayload {
+        let sessionID = plan.daemonSessionID
+        if plan.isInteractive {
+            let attachResponse = try sendControl(
+                SpacesDeviceTerminalControlRequest(
+                    action: .attach, sessionID: sessionID, client: recorderClient, attachmentMode: .viewer, appearance: .dark))
+            guard attachResponse.ok else { throw ValidationError("attach failed for \(plan.slug): \(attachResponse.message)") }
+            let takeoverResponse = try sendControl(
+                SpacesDeviceTerminalControlRequest(action: .takeover, sessionID: sessionID, clientID: recorderClientID))
+            guard takeoverResponse.ok else { throw ValidationError("takeover failed for \(plan.slug): \(takeoverResponse.message)") }
+            var ownerEpoch = takeoverResponse.sessionState?.renderOwnerEpoch
+            if ownerEpoch == nil {
+                ownerEpoch = try? SpacesDeviceAPICodec.decodeResponse(request(command: .state(.init(sessionID: sessionID)))).sessionState?
+                    .renderOwnerEpoch
+            }
+            let resizeResponse = try sendControl(
+                SpacesDeviceTerminalControlRequest(
+                    action: .resize, sessionID: sessionID, clientID: recorderClientID, columns: columns, rows: rows, ownerEpoch: ownerEpoch,
+                    resizeSerial: 1))
+            guard resizeResponse.ok else { throw ValidationError("resize failed for \(plan.slug): \(resizeResponse.message)") }
+            let payload = try collectSteadyState(sessionID: sessionID)
+            _ = try? sendControl(SpacesDeviceTerminalControlRequest(action: .detach, sessionID: sessionID, clientID: recorderClientID))
+            return payload
+        }
+        return try collectSteadyState(sessionID: sessionID)
+    }
+
+    private func collectSteadyState(sessionID: String) throws -> GhosttyRemoteSessionStatePayload {
+        let subscribeRequest = SpacesDeviceAPIRequest(
+            command: .subscribe(.init(sessionID: sessionID, clientID: recorderClientID)), authToken: authToken, clientApp: clientApp)
+        let lines = try client.collectStream(
+            requestData: try SpacesDeviceAPICodec.encodeRequest(subscribeRequest), settleSeconds: settleSeconds, overallSeconds: overallSeconds)
+        var baseline: GhosttyRenderUpdateBaseline?
+        var lastPayload: GhosttyRemoteSessionStatePayload?
+        for line in lines {
+            guard let payload = try? GhosttyRemoteSessionStateCodec.decodeLine(line) else { continue }
+            lastPayload = payload
+            if let update = payload.decodedRenderUpdate {
+                if let applied = try? GhosttyRenderUpdateApplier.apply(update, to: baseline) { baseline = applied }
+            }
+        }
+        guard let baseline, let lastPayload else { throw ValidationError("No render frames received for session \(sessionID).") }
+        let frame = GhosttyRenderFrame(sessionRevision: baseline.sessionRevision, ownerEpoch: baseline.ownerEpoch, snapshot: baseline.snapshot)
+        let fullUpdate = GhosttyRenderUpdate.full(frame)
+        let encoded = try GhosttyRenderUpdateBinaryCodec.encode(fullUpdate)
+        return lastPayload.replacingRenderUpdate(encoded)
+    }
+
+    /// Resolves a stable slug per session from its workspace role (process name, coding agent, or plain
+    /// terminal). Slugs are role-derived so they are identical across runs even though daemon session IDs
+    /// are random. Deterministically ordered by slug.
+    static func buildSessionPlans(overview: SpacesDeviceOverviewPayload) -> [DemoSessionPlan] {
+        let workspacesByID = Dictionary(uniqueKeysWithValues: overview.workspaces.map { ($0.id, $0) })
+        var usedSlugs: Set<String> = []
+        var plans: [DemoSessionPlan] = []
+        for session in overview.sessions {
+            let workspace = workspacesByID[session.workspaceID]
+            let projectName = session.projectName ?? workspace?.projectName ?? "demo"
+            let projectSlug = slugComponent(projectName.split(separator: "-").first.map(String.init) ?? projectName)
+            let kind: String
+            let role: String
+            if let workspace, workspace.codingAgentRows.contains(where: { $0.sessionID == session.id }) {
+                kind = "agent"
+                role = "agent"
+            } else if let workspace, let process = workspace.processRows.first(where: { $0.sessionID == session.id }) {
+                kind = "process"
+                role = slugComponent(process.name)
+            } else {
+                kind = "terminal"
+                role = "terminal"
+            }
+            var slug = "demo-\(projectSlug)-\(role)"
+            if usedSlugs.contains(slug) {
+                var index = 2
+                while usedSlugs.contains("\(slug)-\(index)") { index += 1 }
+                slug = "\(slug)-\(index)"
+            }
+            usedSlugs.insert(slug)
+            plans.append(
+                DemoSessionPlan(
+                    daemonSessionID: session.id, slug: slug, workspaceName: workspace?.displayName ?? projectName, title: session.title, kind: kind,
+                    isInteractive: session.state.isInteractive))
+        }
+        return plans.sorted { $0.slug < $1.slug }
+    }
+
+    private static func slugComponent(_ raw: String) -> String {
+        let lowered = raw.lowercased()
+        let mapped = lowered.map { character -> Character in character.isLetter || character.isNumber ? character : "-" }
+        let collapsed = String(mapped).split(separator: "-").joined(separator: "-")
+        return collapsed.isEmpty ? "session" : collapsed
+    }
+}
+
+/// Deterministic post-processing shared by overview.json and each payload line: rewrite daemon session
+/// IDs to stable slugs, rewrite temp-path prefixes to fixed placeholders, drop volatile/irrelevant keys,
+/// and rebase every ISO8601 timestamp to a signed second-offset string from the reference date.
+private struct DemoRecordingTransform {
+    let sessionIDMap: [String: String]
+    let pathRewrites: [(from: String, to: String)]
+    let referenceDate: Date
+
+    // Volatile / machine-specific keys dropped wholesale. `environment` and `assignedPorts` carry
+    // run-specific ports; the foreground* fields carry the resolved process argv/executable paths
+    // (real ports and absolute paths) that must never ship in a committed demo bundle. All are optional
+    // in their decoded types, so dropping them decodes back to nil.
+    private static let strippedKeys: Set<String> = [
+        "browserSessions", "resolvedBrowserSessions", "assignedPorts", "environment", "foregroundArgv", "foregroundExecutablePath",
+        "foregroundExecutableName",
+    ]
+    private static let clearedArrayKeys: Set<String> = ["attachments"]
+
+    nonisolated(unsafe) private static let fractionalFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+    nonisolated(unsafe) private static let plainFormatter = ISO8601DateFormatter()
+
+    func transformedOverviewResponse(_ data: Data) throws -> Data {
+        try serialize(transform(JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])), pretty: true)
+    }
+
+    /// Emits one compact (single-line) JSON object plus a trailing newline so the file is valid ndjson
+    /// the production `GhosttyRemoteSessionStateCodec.decodeLine` reads one payload per line.
+    func transformedPayloadLine(_ payload: GhosttyRemoteSessionStatePayload) throws -> Data {
+        let data = try JSONEncoder().encode(payload)
+        var out = try serialize(transform(JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])), pretty: false)
+        out.append(0x0A)
+        return out
+    }
+
+    private func serialize(_ object: Any, pretty: Bool) throws -> Data {
+        var options: JSONSerialization.WritingOptions = [.sortedKeys, .withoutEscapingSlashes]
+        if pretty { options.insert(.prettyPrinted) }
+        return try JSONSerialization.data(withJSONObject: object, options: options)
+    }
+
+    private func transform(_ value: Any) -> Any {
+        switch value {
+        case let dictionary as [String: Any]:
+            var result: [String: Any] = [:]
+            for (key, element) in dictionary {
+                if Self.strippedKeys.contains(key) { continue }
+                if Self.clearedArrayKeys.contains(key) {
+                    result[key] = []
+                    continue
+                }
+                result[key] = transform(element)
+            }
+            return result
+        case let array as [Any]: return array.map(transform)
+        case let string as String: return transformString(string)
+        default: return value
+        }
+    }
+
+    private func transformString(_ string: String) -> String {
+        if let slug = sessionIDMap[string] { return slug }
+        if let sanitized = sanitizedLaunchCommand(string) { return sanitized }
+        var rewritten = string
+        for rewrite in pathRewrites { rewritten = rewritten.replacingOccurrences(of: rewrite.from, with: rewrite.to) }
+        if let offset = timestampOffset(rewritten) { return offset }
+        return rewritten
+    }
+
+    /// The daemon persists each session's fully-resolved launch command — a shell wrapper that exports
+    /// the real PATH, per-run ports, the workspace slug, and temp paths before exec'ing the process. None
+    /// of that belongs in a shipped, deterministic demo bundle, so any string carrying that resolved
+    /// wrapper is replaced with a clean command reconstructed from the fixture role (or a plain shell).
+    /// Returns nil for ordinary strings (including the clean template command on process rows, which uses
+    /// literal `$SPACES_APP_PORT`), leaving them to the path/timestamp passes.
+    private func sanitizedLaunchCommand(_ string: String) -> String? {
+        guard string.contains("export PATH=") || string.contains("exec /bin/zsh") else { return nil }
+        if let range = string.range(of: "spaces_e2e_demo", options: .backwards) {
+            let role = string[range.upperBound...].drop { !$0.isLetter }.prefix { $0.isLetter }
+            if !role.isEmpty { return "python3 -m spaces_e2e_demo \(role)" }
+        }
+        return "/bin/zsh -l"
+    }
+
+    /// Rebases an ISO8601 datetime string to a signed integer second offset from the reference date.
+    /// Guards on datetime shape (`YYYY-MM-DDThh:...`) so ordinary strings are never misread as timestamps.
+    private func timestampOffset(_ string: String) -> String? {
+        guard string.count >= 19, string.contains("T"), string.prefix(4).allSatisfy(\.isNumber), string.dropFirst(4).first == "-" else { return nil }
+        guard let date = Self.fractionalFormatter.date(from: string) ?? Self.plainFormatter.date(from: string) else { return nil }
+        return String(Int(date.timeIntervalSince(referenceDate).rounded()))
+    }
+}
+
 /// Shared resolve + post + emit flow for commands that look up a workspace and tell the
 /// running app to act on one named target inside it (a configured process or coding agent).
 /// The four call sites differ only in which notification to post, the label used in the
@@ -861,9 +1271,20 @@ private struct StopFixturesCommand: ParsableCommand {
 }
 
 private struct SeedFixtureCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "seed-fixture")
+    static let configuration = CommandConfiguration(
+        commandName: "seed-fixture", abstract: "Register a local git repo as a Spaces project and seed deterministic browser/process defaults.",
+        discussion: """
+            The seeded project serves one of the hand-authored Lighthouse demo templates \
+            (harbor, lantern, atlas). Pass --template to pick which one; when the project \
+            directory has no pre-seeded .spaces-e2e-demo payload the matching template is \
+            materialized into it. The primary `harbor` template additionally wires a coding-agent \
+            launcher (`spaces_e2e_demo agent`) so the workspace can produce an agent-waiting-on-input \
+            state for the mobile demo recording and E2E suite.
+            """)
 
     @Option(name: .long) var projectDir: String
+    @Option(name: .long, help: "Demo template to seed: harbor (primary web app), lantern (API service), or atlas (docs site).") var template: String =
+        "harbor"
     @Option(name: .long) var docsURL: String
     @Option(name: .long) var adminURL: String
 
@@ -872,7 +1293,7 @@ private struct SeedFixtureCommand: ParsableCommand {
     func run() throws {
         let orchestrator = try makeOrchestrator()
         let normalizedProjectDir = normalizePath(projectDir)
-        try materializeDemoFixtureIfNeeded(projectDir: normalizedProjectDir, variant: "beacon")
+        try materializeDemoFixtureIfNeeded(projectDir: normalizedProjectDir, variant: template)
         let project = try orchestrator.project(dir: normalizedProjectDir) ?? orchestrator.addProject(dir: normalizedProjectDir)
         let frontendCommand = fixtureServiceCommand(
             executable: "/usr/bin/env",
@@ -890,7 +1311,17 @@ private struct SeedFixtureCommand: ParsableCommand {
             ProcessTemplate(name: "frontend", command: frontendCommand), ProcessTemplate(name: "backend", command: backendCommand),
         ]
         let fixtureBrowserSessions = [BrowserSession(name: "docs", url: docsURL), BrowserSession(name: "admin", url: adminURL)]
-        let fixtureAgentLaunchers: [AgentLauncher] = []
+        // Only the primary harbor project carries a coding-agent launcher. Launching it
+        // runs the scripted `spaces_e2e_demo agent`, which prints agent-style output and
+        // then blocks on stdin, settling the workspace into an "agent waiting on input"
+        // state for the mobile demo recording and the macOS E2E suite.
+        let fixtureAgentLaunchers: [AgentLauncher]
+        if template == "harbor" {
+            let agentCommand = fixtureServiceCommand(executable: "/usr/bin/env", arguments: ["python3", "-m", "spaces_e2e_demo", "agent"])
+            fixtureAgentLaunchers = [AgentLauncher(name: "Fix checkout 500", command: agentCommand)]
+        } else {
+            fixtureAgentLaunchers = []
+        }
 
         try orchestrator.updateProjectConfig(projectID: project.id) { config in
             config.ports = fixturePorts
@@ -2006,7 +2437,7 @@ private final class MobileServePairingWindowEmitter: @unchecked Sendable {
         nextPairingCode = nil
         lock.unlock()
 
-        let window = server.openPairingWindow(host: linkHost, name: "Spaces Standalone", code: code)
+        let window = server.openPairingWindow(hosts: [linkHost], name: "Spaces Standalone", code: code)
         print(
             "\(label)\thost=\(bindHost)\tport=\(server.listeningPort)\tpairing_link=\(window.linkString)\tpairing_code=\(window.code)\texpires_at=\(e2eISO8601Formatter.string(from: window.expiresAt))\tbundle=\(SpacesDeviceFirstPartyPolicy.allowedBundleID)"
         )
@@ -2039,6 +2470,45 @@ private final class DeviceAPIRequestClient: @unchecked Sendable {
         try send(requestData: requestData, connection: connection)
         receiveStream(from: connection, buffered: LineFrameBuffer())
         dispatchMain()
+    }
+
+    /// Opens a subscription stream, collects every newline-delimited payload line, and returns once the
+    /// stream has been idle for `settleSeconds` (with at least one line received) or `overallSeconds`
+    /// elapses. Used by the demo recorder to capture a session's settled steady-state frames.
+    func collectStream(requestData: Data, settleSeconds: Double, overallSeconds: Double) throws -> [Data] {
+        let connection = makeConnection()
+        defer { connection.cancel() }
+        try waitUntilReady(connection)
+        try send(requestData: requestData, connection: connection)
+        let box = StreamCollectorBox()
+        receiveCollectStream(from: connection, buffered: LineFrameBuffer(), box: box)
+        let startedAt = Date()
+        while true {
+            Thread.sleep(forTimeInterval: 0.05)
+            let snapshot = box.snapshot()
+            if let error = snapshot.error, snapshot.lineCount == 0 { throw error }
+            let now = Date()
+            if snapshot.lineCount > 0, let lastActivity = snapshot.lastActivity, now.timeIntervalSince(lastActivity) >= settleSeconds { break }
+            if now.timeIntervalSince(startedAt) >= overallSeconds { break }
+        }
+        return box.lines()
+    }
+
+    private func receiveCollectStream(from connection: NWConnection, buffered buffer: LineFrameBuffer, box: StreamCollectorBox) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { content, _, isComplete, error in
+            if let error {
+                box.setError(error)
+                return
+            }
+            var nextBuffer = buffer
+            if let content { nextBuffer.append(content) }
+            while let line = nextBuffer.popLine() { box.append(line) }
+            if isComplete {
+                box.markComplete()
+                return
+            }
+            self.receiveCollectStream(from: connection, buffered: nextBuffer, box: box)
+        }
     }
 
     /// Sends one tunnel-opening request line and reads exactly one response line, returning the
@@ -2276,6 +2746,47 @@ private final class DeviceAPIRequestResultBox: @unchecked Sendable {
     }
 }
 
+/// Thread-safe accumulator for a subscription stream: collects newline-delimited payload lines and
+/// tracks the wall-clock time of the most recent line so a poller can detect the stream has settled.
+private final class StreamCollectorBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedLines: [Data] = []
+    private var storedError: Error?
+    private var storedLastActivity: Date?
+    private var storedComplete = false
+
+    func append(_ line: Data) {
+        lock.lock()
+        storedLines.append(line)
+        storedLastActivity = Date()
+        lock.unlock()
+    }
+
+    func setError(_ error: Error) {
+        lock.lock()
+        storedError = error
+        lock.unlock()
+    }
+
+    func markComplete() {
+        lock.lock()
+        storedComplete = true
+        lock.unlock()
+    }
+
+    func snapshot() -> (lineCount: Int, lastActivity: Date?, error: Error?, complete: Bool) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (storedLines.count, storedLastActivity, storedError, storedComplete)
+    }
+
+    func lines() -> [Data] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedLines
+    }
+}
+
 /// A service tunnel opened over the Device API: the raw pipe connection, the single response
 /// line the daemon issued before the handover, and any pipe bytes that arrived with it.
 private struct OpenedTunnel {
@@ -2340,7 +2851,9 @@ private final class TunnelChunkBox: @unchecked Sendable {
     }
 }
 
-private func mobileServePairingLinkHost(host: String) -> String { SpacesDeviceAPINetworkInterfaces.pairingLinkHost(boundHost: host) }
+private func mobileServePairingLinkHost(host: String) -> String {
+    SpacesDeviceAPINetworkInterfaces.pairingLinkHosts(boundHost: host).first ?? SpacesDeviceAPIDefaults.loopbackHost
+}
 
 private func profileShellQuoted(_ value: String) -> String {
     let escaped = value.replacingOccurrences(of: "'", with: #"'\"'\"'"#)

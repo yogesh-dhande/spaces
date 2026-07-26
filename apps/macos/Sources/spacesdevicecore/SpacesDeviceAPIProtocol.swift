@@ -630,6 +630,15 @@ public struct SpacesDeviceOverviewPayload: Codable, Sendable, Equatable {
     public let projects: [SpacesDeviceProjectSummary]
     public let workspaces: [SpacesDeviceWorkspaceSummary]
     public let sessions: [SpacesDeviceTerminalSessionSummary]
+    /// Every terminal session id whose pane and transcript the daemon still retains — the keep-set a
+    /// client prunes open panes against. The daemon publishes its own retention rule here (the union of
+    /// live interactive sessions and sessions referenced by a `running_processes`, `agent_sessions`, or
+    /// `runtime_targets` row, matching `SQLiteStore.terminalSessionIsReferencedByProduct` and the session
+    /// garbage collector) so a client never has to re-derive it from the row surfaces. It is a superset
+    /// of `sessions`: a session referenced only by a `runtime_targets` row drops out of `sessions` the
+    /// moment its shell exits but stays here until that row is removed, keeping its ended pane open for
+    /// scrollback until the transcript is actually collectable. Ids are whitespace-trimmed and sorted.
+    public let retainedTerminalSessionIDs: [String]
     /// Frozen-core handshake (wire protocol version + restart-impact counts) for the daemon that
     /// produced this overview. Carried inline so a compatible client reads the compatibility verdict
     /// from the same round-trip as the overview, instead of paying a second `daemonStatus` call on
@@ -645,12 +654,13 @@ public struct SpacesDeviceOverviewPayload: Codable, Sendable, Equatable {
 
     public init(
         projects: [SpacesDeviceProjectSummary] = [], workspaces: [SpacesDeviceWorkspaceSummary], sessions: [SpacesDeviceTerminalSessionSummary],
-        daemonStatus: TerminalServiceDaemonStatus, automations: [TerminalServiceAutomationSummary] = [],
-        automationRuns: [TerminalServiceAutomationRunSummary] = []
+        retainedTerminalSessionIDs: [String] = [], daemonStatus: TerminalServiceDaemonStatus,
+        automations: [TerminalServiceAutomationSummary] = [], automationRuns: [TerminalServiceAutomationRunSummary] = []
     ) {
         self.projects = projects
         self.workspaces = workspaces
         self.sessions = sessions
+        self.retainedTerminalSessionIDs = retainedTerminalSessionIDs
         self.daemonStatus = daemonStatus
         self.automations = automations
         self.automationRuns = automationRuns

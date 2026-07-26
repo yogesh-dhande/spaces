@@ -9,7 +9,7 @@ final class ProcessOnExitTests: XCTestCase {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
 
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id)
@@ -39,7 +39,7 @@ final class ProcessOnExitTests: XCTestCase {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(
+        let orchestrator = makeTestOrchestrator(
             store: store,
             notificationDeliverer: { title, body, subtitle in deliveredNotifications.append((title: title, body: body, subtitle: subtitle)) })
 

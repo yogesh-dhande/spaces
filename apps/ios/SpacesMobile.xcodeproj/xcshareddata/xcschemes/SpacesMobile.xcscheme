@@ -116,7 +116,7 @@
       <CommandLineArguments>
       </CommandLineArguments>
       <StoreKitConfigurationFileReference
-         identifier = "../../SpacesMobile.storekit">
+         identifier = "../apps/ios/SpacesMobile.storekit">
       </StoreKitConfigurationFileReference>
    </LaunchAction>
    <ProfileAction

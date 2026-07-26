@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lantern Admin</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --paper: #faf7f4;
+      --panel: #ffffff;
+      --ink: #1a1410;
+      --ink-2: #4a4038;
+      --muted: #6f6459;
+      --line: #efe9e2;
+      --line-2: #e0d7cc;
+      --accent: #ea580c;
+      --accent-ink: #c2410c;
+      --accent-wash: rgba(234, 88, 12, 0.10);
+      --ok: #0ea371;
+      --warn: #b8860b;
+      --warn-wash: rgba(184, 134, 11, 0.14);
+      --down: #dc2f36;
+      --down-wash: rgba(220, 47, 54, 0.10);
+      --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    }
+    * { box-sizing: border-box; }
+    html { -webkit-text-size-adjust: 100%; }
+    body {
+      margin: 0; font-family: var(--sans); color: var(--ink);
+      background: var(--paper); -webkit-font-smoothing: antialiased;
+    }
+    .shell { max-width: 1240px; margin: 0 auto; padding: 22px 26px 40px; }
+
+    .rail { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-bottom: 14px; }
+    .brand { display: flex; align-items: baseline; gap: 11px; }
+    .brand .glyph { width: 14px; height: 14px; position: relative; align-self: center; }
+    .brand .glyph::before {
+      content: ""; position: absolute; inset: 2px; border-radius: 50%;
+      background: var(--accent); box-shadow: 0 0 0 3px var(--accent-wash);
+    }
+    .wordmark { font-weight: 700; font-size: 15px; letter-spacing: -0.01em; }
+    .brand .sep { color: var(--line-2); }
+    .brand .product {
+      font-family: var(--mono); font-size: 12px; font-weight: 600;
+      letter-spacing: 0.14em; text-transform: uppercase; color: var(--accent-ink);
+    }
+    .brand .role {
+      font-family: var(--mono); font-size: 11px; letter-spacing: 0.1em;
+      text-transform: uppercase; color: var(--muted);
+    }
+    .rail-right { display: flex; align-items: center; gap: 12px; }
+    .live {
+      font-family: var(--mono); font-size: 11px; letter-spacing: 0.12em;
+      text-transform: uppercase; font-weight: 600; color: var(--down);
+      display: inline-flex; align-items: center; gap: 7px;
+      padding: 6px 11px; border-radius: 7px; background: var(--down-wash);
+    }
+    .live .led {
+      width: 7px; height: 7px; border-radius: 50%; background: var(--down);
+      animation: pulse 2s infinite;
+    }
+    @keyframes pulse {
+      0% { box-shadow: 0 0 0 0 rgba(220, 47, 54, 0.45); }
+      70% { box-shadow: 0 0 0 6px rgba(220, 47, 54, 0); }
+      100% { box-shadow: 0 0 0 0 rgba(220, 47, 54, 0); }
+    }
+    @media (prefers-reduced-motion: reduce) { .live .led { animation: none; } }
+    .tag {
+      font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.06em;
+      color: var(--muted); border: 1px solid var(--line-2);
+      border-radius: 6px; padding: 5px 9px; background: var(--panel);
+    }
+
+    .beam {
+      height: 2px; border-radius: 2px; margin-bottom: 20px;
+      background: linear-gradient(90deg, var(--down) 0%, var(--accent) 28%, rgba(234,88,12,0) 74%);
+    }
+
+    .console { display: grid; grid-template-columns: 1.3fr 0.7fr; gap: 20px; }
+    .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; }
+    .panel-head {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 16px 20px; border-bottom: 1px solid var(--line);
+    }
+    .panel-head h2 {
+      margin: 0; font-family: var(--mono); font-size: 12px; letter-spacing: 0.12em;
+      text-transform: uppercase; color: var(--muted); font-weight: 600;
+    }
+    .spark { display: block; }
+
+    .readout { display: grid; grid-template-columns: repeat(3, 1fr); border-bottom: 1px solid var(--line); }
+    .metric { padding: 18px 20px; border-right: 1px solid var(--line); }
+    .metric:last-child { border-right: 0; }
+    .metric span {
+      display: block; font-family: var(--mono); font-size: 10.5px;
+      letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); margin-bottom: 8px;
+    }
+    .metric b { font-size: 28px; letter-spacing: -0.03em; font-weight: 680; }
+    .metric.alert b { color: var(--down); }
+
+    .board { padding: 6px 20px 12px; }
+    table { width: 100%; border-collapse: collapse; }
+    thead th {
+      font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.08em;
+      text-transform: uppercase; color: var(--muted); font-weight: 600;
+      text-align: left; padding: 14px 0 12px;
+    }
+    tbody td { padding: 13px 0; border-top: 1px solid var(--line); font-size: 14px; }
+    td.err { font-family: var(--mono); font-size: 12.5px; color: var(--ink); }
+    .num { font-family: var(--mono); font-size: 13px; color: var(--ink-2); }
+    th.r, td.r { text-align: right; }
+    .status {
+      display: inline-flex; align-items: center; gap: 7px;
+      font-family: var(--mono); font-size: 11px; font-weight: 600;
+      letter-spacing: 0.04em; text-transform: uppercase;
+    }
+    .status::before { content: ""; width: 8px; height: 8px; border-radius: 50%; }
+    .status.open { color: var(--down); } .status.open::before { background: var(--down); }
+    .status.inv { color: var(--warn); } .status.inv::before { background: var(--warn); }
+
+    .telemetry-card {
+      margin: 4px 20px 20px; padding: 14px 16px; border-radius: 12px;
+      background: #1a1410; border: 1px solid #2c231b;
+    }
+    .telemetry-card .th {
+      font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.1em;
+      text-transform: uppercase; color: #9a8b7c; margin-bottom: 10px;
+      display: flex; align-items: center; gap: 7px;
+    }
+    .telemetry-card .th::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+    .telemetry-card code {
+      display: block; font-family: var(--mono); font-size: 12.5px; line-height: 1.65;
+      color: #e2d6c8; white-space: pre-wrap; word-break: break-word;
+    }
+
+    .side { padding: 6px 20px 18px; }
+    .side .sh {
+      margin: 12px 0 4px; font-family: var(--mono); font-size: 12px;
+      letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); font-weight: 600;
+    }
+    .note { padding: 16px 0; border-top: 1px solid var(--line); }
+    .note:first-of-type { border-top: 0; }
+    .note b { display: flex; align-items: center; gap: 8px; margin-bottom: 7px; font-size: 14px; }
+    .note b::before { content: ""; width: 5px; height: 16px; border-radius: 2px; background: var(--down); }
+    .note.ctx b::before { background: var(--line-2); }
+    .note p { margin: 0; color: var(--ink-2); font-size: 13.5px; line-height: 1.55; }
+    .note code { font-family: var(--mono); font-size: 12.5px; color: var(--accent-ink); }
+
+    @media (max-width: 900px) { .console { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header class="rail">
+      <div class="brand">
+        <span class="glyph"></span>
+        <span class="wordmark">Lighthouse</span>
+        <span class="sep">/</span>
+        <span class="product">Lantern</span>
+        <span class="role">Error console</span>
+      </div>
+      <div class="rail-right">
+        <span class="live"><span class="led"></span>3 open</span>
+        <span class="tag">Lantern admin sentinel</span>
+      </div>
+    </header>
+    <div class="beam"></div>
+
+    <div class="console">
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Active errors</h2>
+          <svg class="spark" width="96" height="22" viewBox="0 0 96 22" fill="none" aria-hidden="true">
+            <polyline points="0,17 12,16 24,14 36,15 48,9 60,10 72,4 84,6 96,3" stroke="#ea580c" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"/>
+          </svg>
+        </div>
+        <div class="readout">
+          <div class="metric alert"><span>Open errors</span><b>3</b></div>
+          <div class="metric"><span>Occurrences</span><b>1,062</b></div>
+          <div class="metric"><span>Affected</span><b>443</b></div>
+        </div>
+        <div class="board">
+          <table>
+            <thead>
+              <tr><th>Error</th><th class="r">Occ.</th><th class="r">Users</th><th class="r">Status</th></tr>
+            </thead>
+            <tbody>
+              <tr><td class="err">TypeError: cannot read null</td><td class="num r">847</td><td class="num r">340</td><td class="r"><span class="status open">Open</span></td></tr>
+              <tr><td class="err">500 /api/checkout</td><td class="num r">203</td><td class="num r">91</td><td class="r"><span class="status open">Open</span></td></tr>
+              <tr><td class="err">DB connection timeout</td><td class="num r">12</td><td class="num r">12</td><td class="r"><span class="status inv">Investigating</span></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="telemetry-card">
+          <div class="th">Backend health · /api/launch-status</div>
+          <code id="api-status">connecting…</code>
+        </div>
+      </section>
+
+      <aside class="panel side">
+        <div class="sh">Triage notes</div>
+        <div class="note">
+          <b>Top priority</b>
+          <p>The TypeError: null spike traces to the checkout handler dereferencing a missing payment token — the root cause of the Harbor checkout incident. Open a Lantern workspace on the redesign-hero branch to reproduce and fix.</p>
+        </div>
+        <div class="note ctx">
+          <b>Context</b>
+          <p>Atlas shows a surge of readers on the "Payment declined" troubleshooting page in the same window — customers hitting the failing <code>/api/checkout</code> route and searching for help.</p>
+        </div>
+      </aside>
+    </div>
+  </div>
+  <script>
+    fetch("/api/launch-status")
+      .then((response) => response.json())
+      .then((payload) => {
+        document.getElementById("api-status").textContent = JSON.stringify(payload, null, 2);
+      })
+      .catch((error) => {
+        document.getElementById("api-status").textContent = "Backend unavailable: " + error;
+      });
+  </script>
+</body>
+</html>

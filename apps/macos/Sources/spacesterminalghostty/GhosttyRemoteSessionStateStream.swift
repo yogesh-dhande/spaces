@@ -215,6 +215,16 @@ final class GhosttyRemoteSessionStateStreamServer: @unchecked Sendable {
     }
 }
 
+/// One connection's partial-line accumulator, held by reference so the read source's event handler can
+/// own it.
+///
+/// Ownership is the point: the drain runs on the client's private serial queue while `stop()` runs on
+/// whatever thread tore the session down, so a buffer reachable from both is an unsynchronized mutation
+/// of non-`Sendable` `Data` — a teardown landing mid-drain emptied the buffer under a live index and
+/// trapped the process. Living inside the handler closure makes that unrepresentable: only the queue can
+/// reach it, and cancelling the source releases it instead of anyone clearing it from outside.
+private final class GhosttyRemoteSessionStateReadBuffer { var lines = LineFrameBuffer() }
+
 final class GhosttyRemoteSessionStateStreamClient: @unchecked Sendable {
     private let socketPath: String
     private let onEvent: @MainActor @Sendable (GhosttyRemoteSessionStatePayload) -> Void
@@ -223,7 +233,6 @@ final class GhosttyRemoteSessionStateStreamClient: @unchecked Sendable {
     private let eventLock = NSLock()
     private var socketFD: Int32 = -1
     private var readSource: DispatchSourceRead?
-    private var readBuffer = Data()
     private var pendingEvents: [GhosttyRemoteSessionStatePayload] = []
     private var eventDeliveryScheduled = false
 
@@ -260,7 +269,12 @@ final class GhosttyRemoteSessionStateStreamClient: @unchecked Sendable {
         try GhosttyRemoteSessionStateStreamServer.setNonBlocking(socketFD)
         self.socketFD = socketFD
         let source = DispatchSource.makeReadSource(fileDescriptor: socketFD, queue: queue)
-        source.setEventHandler { [weak self] in self?.readAvailableEvents() }
+        // The descriptor and the read buffer are handed to the handler rather than read back off the
+        // client, so the drain touches nothing the stopping thread can mutate underneath it. The
+        // descriptor stays valid for every handler invocation because dispatch runs the cancel handler
+        // that closes it after all pending event handlers on this serial queue.
+        let readBuffer = GhosttyRemoteSessionStateReadBuffer()
+        source.setEventHandler { [weak self] in self?.readAvailableEvents(socketFD: socketFD, readBuffer: readBuffer) }
         source.setCancelHandler { close(socketFD) }
         readSource = source
         source.resume()
@@ -272,7 +286,6 @@ final class GhosttyRemoteSessionStateStreamClient: @unchecked Sendable {
         readSource = nil
         let socketFD = self.socketFD
         self.socketFD = -1
-        readBuffer.removeAll(keepingCapacity: false)
         eventLock.lock()
         pendingEvents.removeAll(keepingCapacity: false)
         eventDeliveryScheduled = false
@@ -282,8 +295,10 @@ final class GhosttyRemoteSessionStateStreamClient: @unchecked Sendable {
         Task { @MainActor [onDisconnect] in onDisconnect() }
     }
 
-    private func readAvailableEvents() {
-        guard socketFD >= 0 else { return }
+    /// Runs only on `queue`. `stop()` unblocks and cancels the source rather than reaching in here, so a
+    /// teardown concurrent with a drain shuts the socket down (further reads return 0) and lets this
+    /// invocation finish against state nobody else can touch.
+    private func readAvailableEvents(socketFD: Int32, readBuffer: GhosttyRemoteSessionStateReadBuffer) {
         var buffer = [UInt8](repeating: 0, count: GhosttyRemoteSessionStateStreamServer.ioBufferSize)
         while true {
             let count = read(socketFD, &buffer, buffer.count)
@@ -296,13 +311,11 @@ final class GhosttyRemoteSessionStateStreamClient: @unchecked Sendable {
                 Task { @MainActor [weak self] in self?.stop() }
                 return
             }
-            readBuffer.append(buffer, count: count)
+            readBuffer.lines.append(Data(buffer[..<count]))
         }
 
-        while let newlineIndex = readBuffer.firstIndex(of: 0x0A) {
-            let line = readBuffer.prefix(upTo: newlineIndex)
-            readBuffer.removeSubrange(...newlineIndex)
-            guard !line.isEmpty, let payload = try? GhosttyRemoteSessionStateCodec.decodeLine(Data(line)) else { continue }
+        while let line = readBuffer.lines.popLine() {
+            guard !line.isEmpty, let payload = try? GhosttyRemoteSessionStateCodec.decodeLine(line) else { continue }
             enqueueEvent(payload)
         }
     }

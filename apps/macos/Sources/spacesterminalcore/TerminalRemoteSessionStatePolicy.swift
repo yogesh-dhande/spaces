@@ -96,7 +96,10 @@ public struct TerminalRemoteStateReducer: Sendable {
         var payload = resolved.payload
         var dropReason = resolved.dropReason
         var frameToApply: GhosttyRenderFrame?
-        if let frame = payload.decodedRenderUpdate?.fullFrame {
+        // `resolved.frame` is the materialized full frame — the same value a
+        // `payload.decodedRenderUpdate?.fullFrame` read on the resolved payload would return,
+        // handed back directly so the reducer does not re-decode the blob it just encoded.
+        if let frame = resolved.frame {
             if shouldUseFrame(frame, payload) {
                 frameToApply = frame
             } else {
@@ -113,19 +116,28 @@ public struct TerminalRemoteStateReducer: Sendable {
     }
 
     private mutating func payloadByResolvingRenderUpdate(_ payload: GhosttyRemoteSessionStatePayload) -> (
-        payload: GhosttyRemoteSessionStatePayload, decodedUpdate: GhosttyRenderUpdate?, dropReason: String?
+        payload: GhosttyRemoteSessionStatePayload, decodedUpdate: GhosttyRenderUpdate?, frame: GhosttyRenderFrame?, dropReason: String?
     ) {
-        guard payload.renderUpdate != nil else { return (payload, nil, nil) }
-        guard let decodedUpdate = payload.decodedRenderUpdate else { return (payload.replacingRenderUpdate(nil), nil, "render_update_decode_failed") }
+        guard payload.renderUpdate != nil else { return (payload, nil, nil, nil) }
+        guard let decodedUpdate = payload.decodedRenderUpdate else {
+            return (payload.replacingRenderUpdate(nil), nil, nil, "render_update_decode_failed")
+        }
         do {
             let baseline = try GhosttyRenderUpdateApplier.apply(decodedUpdate, to: renderUpdateBaseline)
             renderUpdateBaseline = baseline
             let frame = GhosttyRenderFrame(sessionRevision: baseline.sessionRevision, ownerEpoch: baseline.ownerEpoch, snapshot: baseline.snapshot)
-            let materializedUpdate = try? GhosttyRenderUpdateBinaryCodec.encode(.full(frame))
-            return (payload.replacingRenderUpdate(materializedUpdate), decodedUpdate, nil)
+            // Encoding can fail only for a malformed frame; when it does, drop the render update and
+            // let `reduce` report `decode_failed`, matching a nil materialized-frame read.
+            guard let materializedUpdate = try? GhosttyRenderUpdateBinaryCodec.encode(.full(frame)) else {
+                return (payload.replacingRenderUpdate(nil), decodedUpdate, nil, nil)
+            }
+            // Seed the cache with the frame we just encoded so later reads on the stored payload
+            // (renderSnapshot, renderOwnerEpoch, currentRenderStateKey) hit without decoding.
+            GhosttyRenderUpdateDecodeCache.seed(.full(frame), for: materializedUpdate)
+            return (payload.replacingRenderUpdate(materializedUpdate), decodedUpdate, frame, nil)
         } catch {
             renderUpdateBaseline = nil
-            return (payload.replacingRenderUpdate(nil), decodedUpdate, Self.renderUpdateDropReason(for: error))
+            return (payload.replacingRenderUpdate(nil), decodedUpdate, nil, Self.renderUpdateDropReason(for: error))
         }
     }
 

@@ -6,7 +6,7 @@ import spacesterminalcore
 final class CaddyRouteTableTests: XCTestCase {
     func testRouteTableHasRoutePerServiceWithDerivedHosts() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let project = makeProjectRecord(dir: "/projects/app")
         try store.upsert(project: project)
         let workspace = makeWorkspaceRecord(projectID: project.id, dir: "/projects/app")
@@ -27,7 +27,7 @@ final class CaddyRouteTableTests: XCTestCase {
 
     func testRouteTableIsEmptyWhenNoServicesAssigned() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let project = makeProjectRecord(dir: "/projects/app")
         try store.upsert(project: project)
         let workspace = makeWorkspaceRecord(projectID: project.id, dir: "/projects/app")
@@ -38,7 +38,7 @@ final class CaddyRouteTableTests: XCTestCase {
 
     func testRouteTableKeepsWorkspacesWithSameLongBranchPrefixDistinct() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let firstProject = makeProjectRecord(id: "project-one", dir: "/projects/app-one")
         let secondProject = makeProjectRecord(id: "project-two", dir: "/projects/app-two")
         try store.upsert(project: firstProject)

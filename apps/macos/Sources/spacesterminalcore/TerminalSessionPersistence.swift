@@ -180,12 +180,13 @@ public struct TerminalSessionAttachmentSnapshot: Codable, Sendable, Equatable {
     }
 
     /// Attachments backed by a still-present client. An attachment counts as live only
-    /// when it is not detached, its client is not disconnected, and — for remote clients,
-    /// which can vanish without sending a detach — its lease was refreshed within
-    /// `remoteClientLeaseInterval`. Local window clients have no lease and are always live
-    /// while attached. This is the single source of truth for liveness; the persistence
-    /// query and any off-device consumer both judge attachments through this rule, so an
-    /// expired remote viewer is never mistaken for a live attachment.
+    /// when it is not detached, its client is not disconnected, and — for the kinds whose
+    /// liveness the lease decides (`TerminalClientKind.livenessDependsOnLease`, i.e. those
+    /// that can vanish without sending a detach) — its lease was refreshed within
+    /// `remoteClientLeaseInterval`. A local window client is always live while attached, and
+    /// its lease is never even read. This is the single source of truth for liveness; the
+    /// persistence query and any off-device consumer both judge attachments through this rule,
+    /// so an expired remote viewer is never mistaken for a live attachment.
     public func liveAttachments(now: Date = Date(), remoteClientLeaseInterval: TimeInterval = TerminalSessionPersistence.remoteClientLeaseInterval)
         -> [TerminalAttachment]
     {
@@ -193,7 +194,7 @@ public struct TerminalSessionAttachmentSnapshot: Codable, Sendable, Equatable {
         let clientsByID = Dictionary(clients.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         return attachments.filter { attachment in
             guard attachment.detachedAt == nil, let client = clientsByID[attachment.clientID], client.disconnectedAt == nil else { return false }
-            guard client.kind != .localWindow else { return true }
+            guard client.kind.livenessDependsOnLease else { return true }
             guard let lastSeenAt = TerminalSessionPersistence.parseISO8601(client.leaseRefreshedAt ?? ""), lastSeenAt >= cutoff else { return false }
             return true
         }
@@ -736,6 +737,11 @@ public enum TerminalSessionPersistence {
         remoteClientLeaseInterval: TimeInterval = TerminalSessionPersistence.remoteClientLeaseInterval
     ) throws -> [StaleRemoteClient] {
         let root = normalizedRootDirectory(paths.rootDirectory)
+        // Kinds whose liveness the lease does not decide are excluded outright rather than compared against
+        // the cutoff — their rows carry no meaningful lease. Derived from `livenessDependsOnLease` so this
+        // filter and `liveAttachments` cannot disagree about which kinds the lease governs.
+        let leaseExemptKinds = TerminalClientKind.allCases.filter { !$0.livenessDependsOnLease }.map(\.rawValue)
+        let leaseExemptPlaceholders = Array(repeating: "?", count: leaseExemptKinds.count).joined(separator: ", ")
         return try withDatabase(paths: paths) { database in
             let rows = try database.queryRows(
                 sql: """
@@ -745,9 +751,9 @@ public enum TerminalSessionPersistence {
                     WHERE c.root_directory = ?
                       AND a.detached_at IS NULL
                       AND c.disconnected_at IS NULL
-                      AND c.kind <> ?
+                      AND c.kind NOT IN (\(leaseExemptPlaceholders))
                     ORDER BY c.client_id
-                    """, bindings: [root, TerminalClientKind.localWindow.rawValue])
+                    """, bindings: [root] + leaseExemptKinds)
             let cutoff = now.addingTimeInterval(-remoteClientLeaseInterval)
             return rows.compactMap { row in
                 guard let lastSeenAt = parseISO8601(row[1]), lastSeenAt >= cutoff else {
@@ -805,6 +811,36 @@ public enum TerminalSessionPersistence {
                             VALUES (?, ?, ?, ?, 'owner', ?, NULL)
                             """, bindings: [UUID().uuidString, root, sessionID, newOwnerClientID, transferredAt])
                 }
+            }
+        }
+    }
+
+    /// Reclaims a removed session's persisted footprint: every `terminal_*` row keyed by its root
+    /// directory, plus the on-disk session directory (`output.log`, `service.log`). Control/subscription
+    /// sockets live outside this directory and are already removed at terminate; this drops what
+    /// terminate deliberately keeps for ended-pane replay, and is therefore only safe once the session is
+    /// no longer shown by the product (see `TerminalSessionGarbageCollector`). Removing every table's row
+    /// for the root — not just `terminal_remote_session_states` — keeps the persisted footprint from
+    /// outliving the session it belongs to.
+    ///
+    /// The directory is removed before the rows, not after, so a failure stays retryable: sessions are
+    /// discovered by `listKnownSessions`, which is DB-driven, so a `terminal_sessions` row is what makes a
+    /// session visible to the next collection sweep. If `removeItem` threw after the rows were already
+    /// deleted, the directory would be orphaned with nothing left to rediscover it — a permanent leak. With
+    /// the directory removed first, a `removeItem` failure leaves the rows intact and the whole purge (not
+    /// just the row deletion) is retried on the next sweep; if `removeItem` succeeds but the row deletion
+    /// then fails, the next sweep still lists the session, still reads its runtime/attachment state (those
+    /// are rows, not files), and skips the already-removed directory via the `fileExists` guard below before
+    /// retrying the row deletion.
+    public static func purgeSession(paths: TerminalSessionPaths, fileManager: FileManager = .default) throws {
+        if fileManager.fileExists(atPath: paths.rootDirectory) { try fileManager.removeItem(atPath: paths.rootDirectory) }
+        let root = normalizedRootDirectory(paths.rootDirectory)
+        try withDatabase(paths: paths) { database in
+            try database.withImmediateTransaction {
+                for table in [
+                    "terminal_agent_signal_events", "terminal_attachments", "terminal_clients", "terminal_remote_session_states",
+                    "terminal_runtime_states", "terminal_sessions",
+                ] { try database.execute(sql: "DELETE FROM \(table) WHERE root_directory = ?", bindings: [root]) }
             }
         }
     }

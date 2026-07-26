@@ -450,6 +450,16 @@
             GhosttyEmbeddedAppService.shared.tick()
         }
 
+        /// Sends a key press through ghostty's own key encoder, which reads the live terminal state
+        /// (Kitty keyboard flags, DECCKM, `modifyOtherKeys`) to pick the right sequence.
+        func sendKey(_ event: ghostty_input_key_s) {
+            guard let surface else { return }
+            _ = ghostty_surface_key(surface, event)
+            GhosttyEmbeddedAppService.shared.tick()
+            requestSurfaceRefresh()
+            GhosttyEmbeddedAppService.shared.tick()
+        }
+
         func sendTextAsPaste(_ text: String) {
             guard let surface = surface, !text.isEmpty else { return }
             let data = Data(text.utf8)

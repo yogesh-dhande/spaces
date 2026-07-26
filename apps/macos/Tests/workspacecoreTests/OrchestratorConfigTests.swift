@@ -12,7 +12,7 @@ extension OrchestratorTests {
     func testUpdateProjectConfigAcceptsShellVariableSyntaxAtSaveTime() throws {
         let root = try makeTempDirectory()
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let project = try orchestrator.addProject(dir: root.path)
 
         try orchestrator.updateProjectConfig(projectID: project.id) { project in
@@ -27,7 +27,7 @@ extension OrchestratorTests {
     func testUpdateWorkspaceSettingsAcceptsShellVariableSyntaxAtSaveTime() throws {
         let root = try makeTempDirectory()
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let project = try orchestrator.addProject(dir: root.path)
         let workspace = try XCTUnwrap(try store.workspaces(projectID: project.id).first)
 
@@ -63,7 +63,7 @@ extension OrchestratorTests {
         let root = try makeTempDirectory()
         let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+        let orchestrator = makeTestOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
         let project = try orchestrator.addProject(dir: repo.path)
         try orchestrator.updateProjectConfig(projectID: project.id) { config in
             config.setupScript = "echo setup"
@@ -109,7 +109,7 @@ extension OrchestratorTests {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(
+        let orchestrator = makeTestOrchestrator(
             store: store, builtInTerminalWindowOpener: { _, _ in }, builtInTerminalWindowCloser: { _ in },
             builtInTerminalSessionLauncher: { _ in throw WorkspaceError.invalidArgument(message: "launcher failed") })
         let project = try orchestrator.addProject(dir: projectDir.path)
@@ -135,7 +135,7 @@ extension OrchestratorTests {
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let store = try makeTemporaryStore()
         let launchCapture = TerminalLaunchAttemptCapture()
-        let orchestrator = WorkspaceOrchestrator(
+        let orchestrator = makeTestOrchestrator(
             store: store, builtInTerminalWindowOpener: { _, _ in }, builtInTerminalWindowCloser: { _ in },
             builtInTerminalSessionLauncher: { _ in
                 launchCapture.count += 1
@@ -190,7 +190,7 @@ extension OrchestratorTests {
         let dbPath = root.appendingPathComponent("spaces.db").path
 
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(
+        let orchestrator = makeTestOrchestrator(
             store: store,
             builtInTerminalWindowOpener: { sessionID, mode in
                 XCTAssertEqual(mode, .owner)
@@ -218,7 +218,7 @@ extension OrchestratorTests {
         let store = try makeTemporaryStore()
         let launchCapture = TerminalLaunchConfigurationCapture()
         let terminateCapture = TerminalTerminateCapture()
-        let orchestrator = WorkspaceOrchestrator(
+        let orchestrator = makeTestOrchestrator(
             store: store, builtInTerminalSessionTerminator: { sessionID in terminateCapture.sessionIDs.append(sessionID) },
             builtInTerminalSessionLauncher: { configuration in
                 launchCapture.append(configuration)
@@ -290,7 +290,7 @@ extension OrchestratorTests {
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let store = try makeTemporaryStore()
         let terminateCapture = TerminalTerminateCapture()
-        let orchestrator = WorkspaceOrchestrator(
+        let orchestrator = makeTestOrchestrator(
             store: store,
             builtInTerminalSessionTerminator: { sessionID in
                 terminateCapture.sessionIDs.append(sessionID)
@@ -330,7 +330,7 @@ extension OrchestratorTests {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id)
 
@@ -349,7 +349,7 @@ extension OrchestratorTests {
         let dbPath = root.appendingPathComponent("spaces.db").path
 
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(
+        let orchestrator = makeTestOrchestrator(
             store: store,
             builtInTerminalWindowOpener: { sessionID, mode in
                 XCTAssertEqual(mode, .owner)
@@ -388,7 +388,7 @@ extension OrchestratorTests {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db")
         let store = try SQLiteStore(path: dbPath.path)
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
@@ -431,7 +431,7 @@ extension OrchestratorTests {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db")
         let store = try SQLiteStore(path: dbPath.path)
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
@@ -474,7 +474,7 @@ extension OrchestratorTests {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db")
         let store = try SQLiteStore(path: dbPath.path)
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
@@ -613,7 +613,7 @@ extension OrchestratorTests {
         let root = try makeTempDirectory()
         let workspacesRoot = root.appendingPathComponent("workspaces", isDirectory: true)
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
+        let orchestrator = makeTestOrchestrator(store: store, workspacesRootDirectory: workspacesRoot)
 
         let project = try orchestrator.addProject(dir: repo.path)
         let defaultWorkspace = try XCTUnwrap(
@@ -725,7 +725,7 @@ extension OrchestratorTests {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let project = try orchestrator.addProject(dir: projectDir.path)
         let defaultWorkspace = try XCTUnwrap(
             try orchestrator.listWorkspaces(projectID: project.id, includeArchived: true).first(where: { $0.isDefault }))
@@ -748,7 +748,7 @@ extension OrchestratorTests {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let project = try orchestrator.addProject(dir: projectDir.path)
         let defaultWorkspace = try XCTUnwrap(
             try orchestrator.listWorkspaces(projectID: project.id, includeArchived: true).first(where: { $0.isDefault }))
@@ -783,7 +783,7 @@ extension OrchestratorTests {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id)
 
@@ -805,7 +805,7 @@ extension OrchestratorTests {
         let dbPath = root.appendingPathComponent("spaces.db").path
         let store = try SQLiteStore(path: dbPath)
         let terminateCapture = TerminalTerminateCapture()
-        let orchestrator = WorkspaceOrchestrator(
+        let orchestrator = makeTestOrchestrator(
             store: store, builtInTerminalSessionTerminator: { sessionID in terminateCapture.sessionIDs.append(sessionID) })
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
@@ -835,7 +835,7 @@ extension OrchestratorTests {
         let dbPath = root.appendingPathComponent("spaces.db").path
         let store = try SQLiteStore(path: dbPath)
         let terminateCapture = TerminalTerminateCapture()
-        let orchestrator = WorkspaceOrchestrator(
+        let orchestrator = makeTestOrchestrator(
             store: store, builtInTerminalSessionTerminator: { sessionID in terminateCapture.sessionIDs.append(sessionID) })
         let parentDir = root.appendingPathComponent("project", isDirectory: true)
         let childDir = parentDir.appendingPathComponent("child", isDirectory: true)
@@ -878,7 +878,7 @@ extension OrchestratorTests {
         let dbPath = root.appendingPathComponent("spaces.db").path
         let store = try SQLiteStore(path: dbPath)
         let terminateCapture = TerminalTerminateCapture()
-        let orchestrator = WorkspaceOrchestrator(
+        let orchestrator = makeTestOrchestrator(
             store: store, builtInTerminalSessionTerminator: { sessionID in terminateCapture.sessionIDs.append(sessionID) })
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
@@ -906,7 +906,7 @@ extension OrchestratorTests {
     func testResolveWorkspaceIDForTerminalCommandPrefersExplicitID() throws {
         let root = try makeTempDirectory()
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
@@ -920,7 +920,7 @@ extension OrchestratorTests {
     func testResolveWorkspaceIDForTerminalCommandMatchesDeepestContainingWorkspace() throws {
         let root = try makeTempDirectory()
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let parentDir = root.appendingPathComponent("project", isDirectory: true)
         let childDir = parentDir.appendingPathComponent("child", isDirectory: true)
         try FileManager.default.createDirectory(at: childDir, withIntermediateDirectories: true)
@@ -940,7 +940,7 @@ extension OrchestratorTests {
     func testResolveWorkspaceIDForTerminalCommandThrowsOutsideAnyWorkspace() throws {
         let root = try makeTempDirectory()
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         _ = try orchestrator.addProject(dir: projectDir.path)
@@ -954,7 +954,7 @@ extension OrchestratorTests {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
         let store = try SQLiteStore(path: dbPath)
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
@@ -1005,7 +1005,7 @@ extension OrchestratorTests {
         let root = try makeTempDirectory()
         let dbPath = root.appendingPathComponent("spaces.db").path
         let store = try SQLiteStore(path: dbPath)
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let project = try orchestrator.addProject(dir: projectDir.path)
@@ -1058,7 +1058,7 @@ extension OrchestratorTests {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
 
         let project = try orchestrator.addProject(dir: projectDir.path)
         try orchestrator.updateProjectConfig(projectID: project.id) { p in
@@ -1080,7 +1080,7 @@ extension OrchestratorTests {
     // Tests refreshAllWorkspaceWindows iterates all projects and workspaces by arranging representative inputs and asserting the expected result.
     func testRefreshAllWorkspaceWindowsIteratesAllWorkspaces() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
 
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
@@ -1105,7 +1105,7 @@ extension OrchestratorTests {
     // Tests syncConfig returns the current app config by arranging representative inputs and asserting the expected result.
     func testSyncConfigReturnsCurrentAppConfig() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
 
         let config = try orchestrator.syncConfig()
         XCTAssertEqual(config.portRange.start, 20000)
@@ -1123,7 +1123,7 @@ extension OrchestratorTests {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
 
         let project = try orchestrator.addProject(dir: projectDir.path)
         let defaultWorkspace = try store.workspaces(projectID: project.id).first(where: \.isDefault)!
@@ -1144,7 +1144,7 @@ extension OrchestratorTests {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
 
         let project = makeProjectRecord(dir: projectDir.path)
         try store.upsert(project: project)
@@ -1179,7 +1179,7 @@ extension OrchestratorTests {
     // Tests ensureDefaultWorkspace revives an archived default workspace via updateProjectConfig by arranging representative inputs and asserting the expected result.
     func testEnsureDefaultWorkspaceRevivesArchivedDefaultViaUpdateProjectConfig() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let root = try makeTempDirectory()
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
@@ -1221,7 +1221,7 @@ extension OrchestratorTests {
         try store.upsert(workspace: workspaceRecord)
         XCTAssertFalse(try store.workspaceSettingsExists(workspaceID: workspaceID))
 
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         try orchestrator.updateProjectConfig(projectID: normalizedDir) { _ in }
 
         XCTAssertFalse(try store.workspaceSettingsExists(workspaceID: workspaceID))
@@ -1233,7 +1233,7 @@ extension OrchestratorTests {
         let projectDir = root.appendingPathComponent("project", isDirectory: true)
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let project = try orchestrator.addProject(dir: projectDir.path)
         let workspace = try orchestrator.createWorkspace(projectID: project.id)
 
@@ -1248,7 +1248,7 @@ extension OrchestratorTests {
     // Tests updateProjectConfig throws missingProject when the project ID does not exist in the store.
     func testUpdateProjectConfigThrowsForMissingProject() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
 
         XCTAssertThrowsError(try orchestrator.updateProjectConfig(projectID: "/nonexistent/\(UUID().uuidString)") { _ in }) { error in
             guard case WorkspaceError.missingProject = error else { return XCTFail("Expected missingProject, got \(error)") }
@@ -1260,7 +1260,7 @@ extension OrchestratorTests {
     // Tests resolvedWorkspaceBrowserSessions returns sessions with static URLs unchanged.
     func testResolvedWorkspaceBrowserSessionsReturnsStaticURLsUnchanged() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let project = makeProjectRecord(dir: "/projects/app")
         try store.upsert(project: project)
         let workspace = makeWorkspaceRecord(projectID: project.id, dir: "/projects/app")
@@ -1280,7 +1280,7 @@ extension OrchestratorTests {
     // Tests passive resolvedWorkspaceBrowserSessions resolves device-local browser display without opening SSH forwards.
     func testResolvedWorkspaceBrowserSessionsPassiveLocalDoesNotOpenForward() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let project = makeProjectRecord(dir: "/projects/app")
         let workspace = WorkspaceRecord(
             id: "workspace-a", projectID: project.id, dir: "/projects/app", dirname: nil, branch: "main", baseBranch: "main", isDefault: false,
@@ -1298,7 +1298,7 @@ extension OrchestratorTests {
     // Tests resolvedWorkspaceBrowserSessions deduplicates sessions that resolve to the same URL.
     func testResolvedWorkspaceBrowserSessionsDeduplicatesSameResolvedURL() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let project = makeProjectRecord(dir: "/projects/app")
         try store.upsert(project: project)
         let workspace = makeWorkspaceRecord(projectID: project.id, dir: "/projects/app")
@@ -1320,7 +1320,7 @@ extension OrchestratorTests {
     // Tests resolvedWorkspaceBrowserSessions omits sessions with empty or nil URLs.
     func testResolvedWorkspaceBrowserSessionsOmitsSessionsWithEmptyURL() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let project = makeProjectRecord(dir: "/projects/app")
         try store.upsert(project: project)
         let workspace = makeWorkspaceRecord(projectID: project.id, dir: "/projects/app")
@@ -1336,7 +1336,7 @@ extension OrchestratorTests {
     // Tests resolvedWorkspaceBrowserSessions resolved URLs enable longest-prefix name matching.
     func testResolvedWorkspaceBrowserSessionsEnablesLongestPrefixNameMatching() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let project = makeProjectRecord(dir: "/projects/app")
         try store.upsert(project: project)
         let workspace = makeWorkspaceRecord(projectID: project.id, dir: "/projects/app")

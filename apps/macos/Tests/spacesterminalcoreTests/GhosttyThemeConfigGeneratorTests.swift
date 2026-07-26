@@ -26,27 +26,17 @@ final class GhosttyThemeConfigGeneratorTests: XCTestCase {
         XCTAssertTrue(contents.contains("font-size = 12"))
     }
 
-    func testWriteConfigurationGeneratesProfileScopedFilesAndRegenerates() throws {
+    func testWriteConfigurationGeneratesFilesUnderConfigRootAndRegenerates() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
+        let configRoot = root.appendingPathComponent("ghostty", isDirectory: true)
 
-        let keys = [SpacesProfile.databasePathEnvironmentVariable, SpacesProfile.runtimeDirectoryEnvironmentVariable]
-        let originalValues = keys.map { ($0, ProcessInfo.processInfo.environment[$0]) }
-        defer {
-            for (name, value) in originalValues { if let value { setenv(name, value, 1) } else { unsetenv(name) } }
-            SpacesProfile.resetCacheForTesting()
-        }
-        setenv(SpacesProfile.databasePathEnvironmentVariable, root.appendingPathComponent("spaces.db").path, 1)
-        setenv(SpacesProfile.runtimeDirectoryEnvironmentVariable, root.appendingPathComponent("runtime").path, 1)
-        SpacesProfile.resetCacheForTesting()
+        let configPath = try GhosttyThemeConfigGenerator.writeConfiguration(theme: ThemeRegistry.spacesBrand, configRootDirectory: configRoot)
 
-        let configPath = try GhosttyThemeConfigGenerator.writeConfiguration(theme: ThemeRegistry.spacesBrand)
-
-        XCTAssertEqual(configPath, root.appendingPathComponent("ghostty/config").path)
+        XCTAssertEqual(configPath, configRoot.appendingPathComponent("config").path)
         let config = try String(contentsOfFile: configPath, encoding: .utf8)
-        let lightPath = root.appendingPathComponent("ghostty/themes/spaces-brand-light").path
-        let darkPath = root.appendingPathComponent("ghostty/themes/spaces-brand-dark").path
+        let lightPath = configRoot.appendingPathComponent("themes/spaces-brand-light").path
+        let darkPath = configRoot.appendingPathComponent("themes/spaces-brand-dark").path
         XCTAssertTrue(config.contains("theme = light:\(lightPath),dark:\(darkPath)"))
         XCTAssertEqual(
             try String(contentsOfFile: lightPath, encoding: .utf8),
@@ -57,7 +47,7 @@ final class GhosttyThemeConfigGeneratorTests: XCTestCase {
 
         // Regeneration overwrites in place so stale hand edits never leak into the loaded config.
         try "tampered".write(toFile: darkPath, atomically: true, encoding: .utf8)
-        _ = try GhosttyThemeConfigGenerator.writeConfiguration(theme: ThemeRegistry.spacesBrand)
+        _ = try GhosttyThemeConfigGenerator.writeConfiguration(theme: ThemeRegistry.spacesBrand, configRootDirectory: configRoot)
         XCTAssertEqual(
             try String(contentsOfFile: darkPath, encoding: .utf8),
             GhosttyThemeConfigGenerator.themeFileContents(ThemeRegistry.spacesBrand.dark.terminal))

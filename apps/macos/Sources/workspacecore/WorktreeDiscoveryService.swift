@@ -38,6 +38,28 @@ extension FileSystemWatcher: FileSystemWatching {}
         let watcher: any FileSystemWatching
     }
 
+    /// A project whose watcher install failed, held out of the install path until its
+    /// directory becomes reachable again.
+    ///
+    /// Without this, every `databaseDidChange`-driven `refreshWatchers()` pass retried each
+    /// failed install: a `git rev-parse --git-common-dir` spawn, a watcher create, and an
+    /// error report per unwatchable project per pass, for as long as the daemon ran.
+    private struct Quarantine {
+        /// The project directory the failed install targeted. A refresh that sees a different
+        /// directory for this project drops the quarantine: the project row points somewhere
+        /// else, so the recorded failure no longer describes it.
+        let projectDir: String
+        /// Whether `projectDir` existed when the install failed. Re-arming keys off the
+        /// *transition* from absent to present, not off "currently reachable": a project that
+        /// was reachable when it failed — a directory that is no longer a git repo, or a
+        /// watcher the OS refused for reasons other than the path (FSEvents capacity
+        /// exhaustion) — reads as reachable on every later pass, so a "currently reachable"
+        /// rule would retry the expensive path forever, which is the storm this exists to
+        /// stop. Such a project is re-armed only by its project row changing or by the daemon
+        /// restarting.
+        var directoryExists: Bool
+    }
+
     /// Builds a watcher for a project's directories. Injected so tests can substitute
     /// a slow-starting watcher; production always uses `liveWatcherFactory`.
     typealias WatcherFactory =
@@ -55,7 +77,17 @@ extension FileSystemWatcher: FileSystemWatching {}
     // the first suspension and cleared when the install settles, so a project installs
     // exactly once regardless of how many passes overlap.
     private var installingProjectIDs: Set<String> = []
+    // Projects whose last install attempt failed, keyed by project id. Entries are skipped by
+    // `refreshWatchers` and cost one `stat`-class directory check per pass until their
+    // directory reappears; see `Quarantine`.
+    private var quarantines: [String: Quarantine] = [:]
     private var started = false
+    // Every `spawnTrackedTask` call not yet finished, keyed by a token minted at spawn time and
+    // cleared in the task's own `defer` when it returns. `refreshWatchers`, a watcher's on-change
+    // callback, and `scan()` each fire an untracked-looking `Task` that this dictionary makes
+    // observable, so `drainInFlightWorkForTesting()` can await the service down to quiescence
+    // instead of a test polling watcher counts against a settle window.
+    private var inFlightTasks: [UUID: Task<Void, Never>] = [:]
     // Scans are serialized: a worktree mutation emits several filesystem events in
     // quick succession, and overlapping scans would race to create the same
     // workspace row (a UNIQUE (project_id, branch) violation). A scan requested
@@ -89,15 +121,20 @@ extension FileSystemWatcher: FileSystemWatching {}
         started = false
         for watch in watchers.values { watch.watcher.stop() }
         watchers.removeAll()
+        quarantines.removeAll()
     }
 
     /// Reconciles the installed watchers to the current set of local git projects.
     /// The daemon calls this on `databaseDidChange` so a newly created or removed
     /// git project starts or stops being watched. A freshly added project is also
     /// scanned once, since it may already contain worktrees.
+    ///
+    /// A project whose install failed is quarantined and skipped here, so a project that
+    /// cannot be watched costs one directory check per pass instead of a git spawn, a
+    /// watcher create, an error report, and a scan.
     public func refreshWatchers() {
         guard started else { return }
-        Task { @MainActor [weak self] in
+        spawnTrackedTask { [weak self] in
             guard let self else { return }
             let desired = await Self.localGitProjectDirsByID(databasePath: self.databasePath)
             guard self.started else { return }
@@ -105,12 +142,73 @@ extension FileSystemWatcher: FileSystemWatching {}
                 watch.watcher.stop()
                 self.watchers[projectID] = nil
             }
-            for (projectID, projectDir) in desired where self.watchers[projectID] == nil {
+            // A quarantine describes one project row pointing at one directory, so a project
+            // that was removed or repointed no longer has a recorded failure to honor.
+            self.quarantines = self.quarantines.filter { desired[$0.key] == $0.value.projectDir }
+            await self.rearmQuarantinesForReturnedDirectories()
+            guard self.started else { return }
+            for (projectID, projectDir) in desired where self.watchers[projectID] == nil && self.quarantines[projectID] == nil {
                 await self.installWatcher(projectID: projectID, projectDir: projectDir)
                 self.scan(projectID: projectID)
             }
         }
     }
+
+    /// The entire per-pass cost of a quarantined project: one directory-existence check,
+    /// batched with every other quarantined project into a single off-main-actor task
+    /// (deliberately off the actor because even `stat` can block on a wedged mount — the very
+    /// situation that produces quarantines). Lifts the quarantine on the transition from
+    /// absent to present, so a deleted or unmounted project directory that returns is
+    /// installed on that same pass without a restart, while a project whose directory never
+    /// went away is never re-attempted from here.
+    private func rearmQuarantinesForReturnedDirectories() async {
+        guard !quarantines.isEmpty else { return }
+        let existsByProjectID = await Self.directoriesExist(quarantines.mapValues(\.projectDir))
+        for (projectID, exists) in existsByProjectID {
+            guard var quarantine = quarantines[projectID] else { continue }
+            if exists, !quarantine.directoryExists {
+                quarantines[projectID] = nil
+            } else {
+                quarantine.directoryExists = exists
+                quarantines[projectID] = quarantine
+            }
+        }
+    }
+
+    /// Records a failed install so later refresh passes skip it, capturing whether the project
+    /// directory exists at the moment of failure — the baseline the re-arm transition is
+    /// measured against.
+    private func quarantineFailedInstall(projectID: String, projectDir: String) async {
+        let directoryExists = await Self.directoryExists(projectDir)
+        guard started, watchers[projectID] == nil else { return }
+        quarantines[projectID] = Quarantine(projectDir: projectDir, directoryExists: directoryExists)
+    }
+
+    /// Spawns a task tracked in `inFlightTasks`, keyed by a token minted before the task exists and
+    /// removed in a `defer` once the body returns. The token is generated first, then the task is
+    /// created and immediately stored under it in one synchronous main-actor statement — the task
+    /// never needs to reference its own `Task` handle (a self-referencing `var task; task = Task {
+    /// ... task ... }` capture is what Swift 6 strict concurrency flags as a data race, since a
+    /// mutable local captured by an escaping `Sendable` closure is assumed reachable from another
+    /// thread even though, isolation-wise, it never actually is here). Callable only from the main
+    /// actor: a non-isolated caller (a filesystem watcher's on-change closure, which fires on its own
+    /// queue) must hop onto the main actor first, e.g. `Task { @MainActor in self?.spawnTrackedTask
+    /// { ... } } }`.
+    private func spawnTrackedTask(_ body: @escaping @Sendable @MainActor () async -> Void) {
+        let taskID = UUID()
+        inFlightTasks[taskID] = Task { @MainActor [weak self] in
+            defer { self?.inFlightTasks[taskID] = nil }
+            await body()
+        }
+    }
+
+    /// Awaits every task this service has spawned and not yet finished. Loops because completing
+    /// one can enqueue another — a refresh that discovers a new project also schedules its install
+    /// and scan; a scan with `scanPending` set re-schedules a trailing full re-scan — so a single
+    /// snapshot of the dictionary is not enough to know the service is quiescent. Returns once none
+    /// remain: the seam a test drains after storming `refreshWatchers()` instead of polling watcher
+    /// counts against a settle window.
+    func drainInFlightWorkForTesting() async { while let (_, task) = inFlightTasks.first { await task.value } }
 
     /// Installs a watcher for one project. The git common-dir lookup, directory-list
     /// computation, and the watcher's `start()` all run off the main actor (each can
@@ -122,16 +220,31 @@ extension FileSystemWatcher: FileSystemWatching {}
     /// once instead of each racing to build (and leak) a second stream. The
     /// `started` / `watchers[projectID] == nil` invariants are also re-checked after
     /// every suspension as defense in depth.
+    ///
+    /// Both ways the install can fail — the project is not a resolvable git repo, or the
+    /// watcher's stream cannot be created — quarantine the project, so this expensive path
+    /// runs once per failure rather than once per refresh pass.
     private func installWatcher(projectID: String, projectDir: String) async {
         guard started, watchers[projectID] == nil, installingProjectIDs.insert(projectID).inserted else { return }
         defer { installingProjectIDs.remove(projectID) }
-        guard let commonDirectory = await Self.commonDirectory(projectDir: projectDir) else { return }
+        guard let commonDirectory = await Self.commonDirectory(projectDir: projectDir) else {
+            await quarantineFailedInstall(projectID: projectID, projectDir: projectDir)
+            return
+        }
         guard started, watchers[projectID] == nil else { return }
         let watchedDirectories = await Self.watchDirectories(commonDirectory: commonDirectory)
         guard started, watchers[projectID] == nil else { return }
         let watcher = makeWatcher(watchedDirectories, 1) { [weak self] changedPaths in
             guard Self.changedPathsAffectWorktrees(changedPaths, commonDirectory: commonDirectory) else { return }
-            Task { @MainActor [weak self] in await self?.handleChange(projectID: projectID) }
+            // This callback fires on the watcher's own queue (FSEvents/inotify), never the main
+            // actor, so it hops over before calling the main-actor-only `spawnTrackedTask`. The hop
+            // itself is a scheduling gap, not a data race (only main-actor code ever touches
+            // `inFlightTasks`), but it means a change delivered in the instant between this call and
+            // the hop actually running is not yet visible to `drainInFlightWorkForTesting()`. No test
+            // exercises `drainInFlightWorkForTesting()` against a live filesystem watcher's onChange,
+            // only against `refreshWatchers()`/`scan()`, which spawn their tracked task directly on
+            // the main actor with no such gap.
+            Task { @MainActor [weak self] in self?.spawnTrackedTask { [weak self] in await self?.handleChange(projectID: projectID) } }
         }
         do {
             try await watcher.start()
@@ -149,7 +262,13 @@ extension FileSystemWatcher: FileSystemWatching {}
             // changes are frequent, so the window self-heals quickly.
             watchers[projectID] = Watch(
                 projectDir: projectDir, commonDirectory: commonDirectory, watchedDirectories: watchedDirectories, watcher: watcher)
-        } catch { onError?(error) }
+        } catch {
+            // Reported here, once per real install attempt. Quarantining is what keeps that
+            // bounded: an unwatchable project is not attempted again until its directory
+            // returns, so a persistent failure cannot produce an unbounded error stream.
+            onError?(error)
+            await quarantineFailedInstall(projectID: projectID, projectDir: projectDir)
+        }
     }
 
     /// The `started` guard is the stop() safety net: a watcher callback that fires
@@ -200,6 +319,18 @@ extension FileSystemWatcher: FileSystemWatching {}
         }.value
     }
 
+    /// Existence check for one project directory, run off the main actor for the same reason
+    /// the batch check is.
+    private nonisolated static func directoryExists(_ path: String) async -> Bool {
+        await Task.detached(priority: .utility) { isDirectory(path) }.value
+    }
+
+    /// Existence check for every quarantined project's directory in one off-main-actor task,
+    /// so a refresh pass pays one hop regardless of how many projects are quarantined.
+    private nonisolated static func directoriesExist(_ pathsByProjectID: [String: String]) async -> [String: Bool] {
+        await Task.detached(priority: .utility) { pathsByProjectID.mapValues { isDirectory($0) } }.value
+    }
+
     private nonisolated static func isDirectory(_ path: String) -> Bool {
         var isDirectory: ObjCBool = false
         return FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) && isDirectory.boolValue
@@ -228,7 +359,7 @@ extension FileSystemWatcher: FileSystemWatching {}
         scanInFlight = true
         let databasePath = databasePath
         let onError = onError
-        Task { @MainActor [weak self] in
+        spawnTrackedTask { [weak self] in
             await Task.detached(priority: .utility) {
                 do {
                     let store = try SQLiteStore(path: databasePath)

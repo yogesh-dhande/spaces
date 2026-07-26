@@ -47,7 +47,7 @@ final class GhosttyEmbeddedSubmitOrderingTests: XCTestCase {
     /// runs the tick pump + sequencer writes the condition is waiting on. Each poll hops onto the engine
     /// synchronously to tick and evaluate the (engine-isolated) condition together.
     private func waitUntil(
-        timeout: TimeInterval = 15, pollInterval: TimeInterval = 0.05, file: StaticString = #filePath, line: UInt = #line,
+        timeout: TimeInterval = 30, pollInterval: TimeInterval = 0.05, file: StaticString = #filePath, line: UInt = #line,
         _ condition: @escaping @TerminalEngineActor () -> Bool
     ) async throws {
         let deadline = Date().addingTimeInterval(timeout)

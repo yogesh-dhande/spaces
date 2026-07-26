@@ -92,6 +92,57 @@ final class GhosttyRenderUpdateTests: XCTestCase {
         XCTAssertLessThan(scrollRectBytes, cellRunOnlyBytes)
     }
 
+    func testDecodeAcceptsDataSliceWithNonZeroStartIndex() throws {
+        let snapshot = makeSnapshot(lines: ["hello", "world"])
+        let frame = GhosttyRenderFrame(sessionRevision: 4, ownerEpoch: 9, snapshot: snapshot)
+        let update = GhosttyRenderUpdate.full(frame)
+        let encoded = try GhosttyRenderUpdateBinaryCodec.encode(update)
+
+        var padded = Data([0x11, 0x22, 0x33])
+        padded.append(encoded)
+        padded.append(contentsOf: [0x44, 0x55])
+        let slice = padded[3..<(3 + encoded.count)]
+        XCTAssertNotEqual(slice.startIndex, 0)
+
+        let decoded = try GhosttyRenderUpdateBinaryCodec.decode(slice)
+        XCTAssertEqual(decoded, update)
+        XCTAssertEqual(decoded.fullFrame?.snapshot, snapshot)
+    }
+
+    func testTruncatedDataThrowsTruncatedAtEveryCutPoint() throws {
+        let snapshot = makeSnapshot(lines: ["hello", "world"])
+        let frame = GhosttyRenderFrame(sessionRevision: 4, ownerEpoch: 9, snapshot: snapshot)
+        let encoded = try GhosttyRenderUpdateBinaryCodec.encode(GhosttyRenderUpdate.full(frame))
+
+        // Every prefix shorter than the full frame must throw .truncated rather than crash. The magic
+        // check requires the first magic.count bytes to match, so a zero-length prefix throws too.
+        for cut in 0..<encoded.count {
+            let prefix = encoded.prefix(cut)
+            XCTAssertThrowsError(try GhosttyRenderUpdateBinaryCodec.decode(prefix)) { error in
+                let codecError = error as? GhosttyRenderUpdateBinaryCodec.BinaryCodecError
+                XCTAssertTrue(
+                    codecError == .truncated || codecError == .invalidMagic, "cut \(cut) threw \(String(describing: codecError))")
+            }
+        }
+    }
+
+    func testTruncatedSliceWithNonZeroStartIndexThrowsTruncated() throws {
+        let previous = makeSnapshot(lines: ["one ", "two ", "tre "])
+        let target = makeSnapshot(lines: ["two ", "tre ", "for "])
+        let frame = GhosttyRenderFrame(sessionRevision: 12, ownerEpoch: 5, snapshot: target)
+        let baseline = GhosttyRenderUpdateBaseline(snapshot: previous, sessionRevision: 11, ownerEpoch: 5)
+        let update = GhosttyRenderUpdateFactory.makeUpdate(target: frame, baseline: baseline)
+        let encoded = try GhosttyRenderUpdateBinaryCodec.encode(update)
+
+        var padded = Data([0x11, 0x22, 0x33])
+        padded.append(encoded)
+        // Cut inside the body (well past the magic) so the reader hits an out-of-bounds read on a slice.
+        let slice = padded[3..<(3 + encoded.count - 4)]
+        XCTAssertThrowsError(try GhosttyRenderUpdateBinaryCodec.decode(slice)) { error in
+            XCTAssertEqual(error as? GhosttyRenderUpdateBinaryCodec.BinaryCodecError, .truncated)
+        }
+    }
+
     func testDeltaRejectsBaseRevisionMismatch() throws {
         let previous = makeSnapshot(lines: ["abc"])
         let target = makeSnapshot(lines: ["abd"])

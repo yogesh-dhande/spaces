@@ -32,7 +32,7 @@ private enum SpacesMobileSettingsStore {
     {
         var resolved = settings
 
-        if let host = trimmed(environment["SPACES_MOBILE_TEST_HOST"]) { resolved.host = host }
+        if let host = trimmed(environment["SPACES_MOBILE_TEST_HOST"]) { resolved.hosts = [host] }
         if let port = trimmed(environment["SPACES_MOBILE_TEST_PORT"]).flatMap(Int.init), (1...65535).contains(port) { resolved.port = port }
         if let authToken = trimmed(environment["SPACES_MOBILE_TEST_AUTH_TOKEN"]) { resolved.authToken = authToken }
         if let certificateFingerprint = trimmed(environment["SPACES_MOBILE_TEST_CERTIFICATE_FINGERPRINT"]) {
@@ -435,6 +435,10 @@ private enum SpacesMobileMutationTimeoutRecovery {
     var settings: SpacesMobileConnectionSettings
     var pairedDevices: [SpacesMobilePairedDeviceRecord]
     var activeDeviceID: String?
+    /// Whether Demo Mode is on. While on, the device list shows only the synthetic Demo Mac and the
+    /// active client is backed by the in-memory `DemoDeviceBackend`; the real paired devices are parked
+    /// in memory and left untouched on disk. Persisted across launches via `DemoModeStore`.
+    private(set) var isDemoModeEnabled: Bool
     var overview: SpacesDeviceOverviewPayload?
     /// Wire-protocol status of the active device, read on each successful refresh. `nil` until the
     /// first handshake. Drives the compatibility banner and blocks incompatible interaction.
@@ -442,6 +446,12 @@ private enum SpacesMobileMutationTimeoutRecovery {
     var compatibility: SpacesWireCompatibility?
     var isLoading = false
     var isMutating = false
+    /// True while a requested daemon update has been sent and this app is polling the device for the
+    /// update to land (see `requestDaemonUpdate()`). Kept separate from `isMutating`: that flag gates
+    /// one-shot mutations and is released as soon as their single RPC returns, but the update poll runs
+    /// for up to `daemonUpdateTimeout`, and holding `isMutating` for that whole window would freeze
+    /// every other mutating control in the app. Only the Update Daemon button reads this flag.
+    var isApplyingDaemonUpdate = false
     var isShowingConnectionSettings = false
     var isShowingWorkspaceCreateSheet = false
     var connectionNotice: String?
@@ -464,6 +474,17 @@ private enum SpacesMobileMutationTimeoutRecovery {
     var dismissedAlertIDs: Set<String> = []
     @ObservationIgnored private var bridgeClient: SpacesDeviceAPIClient
     @ObservationIgnored private var commandChannel: SpacesDeviceAPICommandChannel
+    /// The real device-store state (records, active id, settings) parked in memory when Demo Mode is
+    /// enabled, so turning it off restores exactly what was on screen. `nil` when Demo Mode is off, or
+    /// when the app launched straight into Demo Mode — in that case turning it off reloads the real
+    /// state from `SpacesMobileDeviceStore` instead. Never written to disk.
+    @ObservationIgnored private var parkedRealDeviceState: SpacesMobileDeviceStoreState?
+    /// Shown when a device-management action is attempted while Demo Mode is on.
+    private static let demoModeGuardNotice = "Turn off Demo Mode to pair or switch devices."
+    /// The client bound to the active device, exposed so screens that open their own request/stream
+    /// paths (e.g. `TerminalViewerModel`) reuse the same backend instead of building a parallel client
+    /// from `settings`. Reflects the current device after a switch.
+    var deviceClient: SpacesDeviceAPIClient { bridgeClient }
     /// Monotonic identity of the connection the published overview belongs to. Bumped whenever the
     /// active connection changes (device switch or removal, new settings, auth reset) so an overview
     /// fetch begun against the previous connection can neither publish its stale payload nor satisfy
@@ -472,6 +493,16 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// The in-flight overview fetch, tagged with the identity it serves. `refresh()` joins it when
     /// the identity still matches, and re-fetches after it completes when the identity moved on.
     @ObservationIgnored private var refreshInFlight: (identity: Int, task: Task<Void, Never>)?
+    /// When the current run of failed overview fetches began, gating the connection-error alert (see
+    /// `refreshFailureAlertDelay`). Tagged with the connection identity it was gathered against, so any
+    /// change of connection restarts the run without every reset site having to clear it. `nil` once a
+    /// refresh succeeds.
+    @ObservationIgnored private var refreshFailureStreak: (identity: Int, startedAt: ContinuousClock.Instant)?
+    /// Bumped every time the app stops watching this connection (see `noteConnectionMonitoringPaused`).
+    /// A refresh attempt captures it at the start and records nothing about failure timing if it changed,
+    /// because an attempt spanning a pause has no meaningful duration: the clock keeps advancing while
+    /// the app is suspended or idle, so most of what it measured is time nothing was being watched.
+    @ObservationIgnored private var connectionMonitoringGeneration = 0
     /// On-device loopback reverse proxy WKWebView browser sessions load through. Owned for the app's
     /// lifetime (its installation identity is stable across device switches), started/stopped by
     /// `RootTabView`'s scene-phase observation.
@@ -483,6 +514,28 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// In-memory holding spot for a screenshot staged for paste into a terminal session, shared across
     /// the app so the staging flow and the terminal viewer can both reach the same pending image.
     let stagedScreenshots = StagedScreenshotStore()
+    /// Interval between daemon-status polls in `requestDaemonUpdate()`. Injectable so tests can shrink
+    /// it instead of sleeping through the production wait.
+    @ObservationIgnored private let daemonUpdatePollInterval: Duration
+    /// Bumped by each `requestDaemonUpdate()` call so an invocation can tell whether it still owns
+    /// `isApplyingDaemonUpdate` when it exits. See that method's ownership comment.
+    @ObservationIgnored private var daemonUpdateGeneration = 0
+    /// Wall-clock budget `requestDaemonUpdate()` polls for before giving up (production default 30s).
+    /// Expressed as time rather than an attempt count because each attempt's own request timeout
+    /// (`fetchDaemonStatus`'s 8s) means the two are not proportional — a fixed attempt count against an
+    /// unreachable device would cost attempts × (interval + request timeout), several times the stated
+    /// budget. Injectable so tests can shrink it instead of sleeping through the production wait.
+    @ObservationIgnored private let daemonUpdateTimeout: Duration
+    /// How long overview fetches must keep failing before the connection-error alert is raised (production
+    /// default 5s). Long enough to cover a blip and the poll's retry two seconds later, short enough that
+    /// a device that is actually unreachable is reported promptly. Injectable so tests can shrink it
+    /// instead of sleeping through the production wait.
+    @ObservationIgnored private let refreshFailureAlertDelay: Duration
+    /// Source of "now" for the refresh-failure streak's start time and elapsed-time check. The streak is
+    /// pure bookkeeping against a clock — no real waiting happens between reading it twice — so tests
+    /// inject a fake that advances on command instead of sleeping past `refreshFailureAlertDelay` in
+    /// real time. Production always uses the real clock.
+    @ObservationIgnored private let now: @Sendable () -> ContinuousClock.Instant
 
     init() {
         #if DEBUG
@@ -494,23 +547,54 @@ private enum SpacesMobileMutationTimeoutRecovery {
         // that call does a blocking reverse-DNS lookup and previously ran on this init's main thread,
         // tripping the launch watchdog on every fresh install.
         let deviceName = UIDevice.current.name
+        browserProxy = SpacesMobileBrowserProxy(installationID: deviceState.settings.installationID, deviceName: deviceName)
+        daemonUpdatePollInterval = .seconds(3)
+        daemonUpdateTimeout = .seconds(30)
+        refreshFailureAlertDelay = .seconds(5)
+        now = { ContinuousClock.now }
+        // The real settings are persisted regardless of Demo Mode; the demo device is never written to
+        // disk, so a launch that lands in Demo Mode still keeps the real records and settings intact.
+        SpacesMobileSettingsStore.save(deviceState.settings)
+
+        // When the persisted flag is on, construct the demo state directly and leave the real records
+        // parked on disk (parkedRealDeviceState stays nil, so disabling reloads them from the store).
+        if DemoModeStore.load(), let backend = try? DemoDeviceBackend.makeDefault() {
+            let demoSettings = SpacesMobileDemoDevice.settings(installationID: deviceState.settings.installationID)
+            let bridgeClient = SpacesDeviceAPIClient(settings: demoSettings, deviceName: deviceName, backend: backend)
+            settings = demoSettings
+            pairedDevices = [SpacesMobileDemoDevice.record()]
+            activeDeviceID = SpacesMobileDemoDevice.id
+            isDemoModeEnabled = true
+            self.bridgeClient = bridgeClient
+            commandChannel = bridgeClient.makeCommandChannel()
+            return
+        }
+
         let bridgeClient = SpacesDeviceAPIClient(settings: deviceState.settings, deviceName: deviceName)
         settings = deviceState.settings
         pairedDevices = deviceState.devices
         activeDeviceID = deviceState.activeDeviceID
+        isDemoModeEnabled = false
         self.bridgeClient = bridgeClient
         commandChannel = bridgeClient.makeCommandChannel()
-        browserProxy = SpacesMobileBrowserProxy(installationID: deviceState.settings.installationID, deviceName: deviceName)
-        SpacesMobileSettingsStore.save(deviceState.settings)
     }
 
-    init(settings: SpacesMobileConnectionSettings, bridgeClient: SpacesDeviceAPIClient, browserProxy: SpacesMobileBrowserProxy? = nil) {
+    init(
+        settings: SpacesMobileConnectionSettings, bridgeClient: SpacesDeviceAPIClient, browserProxy: SpacesMobileBrowserProxy? = nil,
+        daemonUpdatePollInterval: Duration = .seconds(3), daemonUpdateTimeout: Duration = .seconds(30),
+        refreshFailureAlertDelay: Duration = .seconds(5), now: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now }
+    ) {
         self.settings = settings
         pairedDevices = []
         activeDeviceID = nil
+        isDemoModeEnabled = false
         self.bridgeClient = bridgeClient
         commandChannel = bridgeClient.makeCommandChannel()
         self.browserProxy = browserProxy ?? SpacesMobileBrowserProxy(installationID: settings.installationID)
+        self.daemonUpdatePollInterval = daemonUpdatePollInterval
+        self.daemonUpdateTimeout = daemonUpdateTimeout
+        self.refreshFailureAlertDelay = refreshFailureAlertDelay
+        self.now = now
     }
 
     /// The workspaces this client lists: neither archived nor hidden, matching the Mac sidebar's
@@ -674,23 +758,34 @@ private enum SpacesMobileMutationTimeoutRecovery {
     }
 
     /// The active device cannot be used until its daemon is restarted/updated or this app updates.
+    /// Stays keyed on wire compatibility rather than `daemonUpdateRemedy`: `.applyStagedUpdate` covers
+    /// both a blocking (`daemonTooOld`) and a non-blocking (`compatible`) case, so only compatibility —
+    /// not the remedy alone — can tell them apart.
     var isActiveDeviceBlocked: Bool {
         guard let compatibility else { return false }
         return !compatibility.isCompatible
     }
 
+    /// The action a client should offer about the active device's daemon, computed once via the shared
+    /// `DaemonUpdateRemedy` rule so this app never re-derives the decision from raw compatibility or
+    /// version fields itself. `nil` until the first successful handshake, mirroring `daemonStatus`.
+    var daemonUpdateRemedy: DaemonUpdateRemedy? {
+        guard let daemonStatus else { return nil }
+        return DaemonUpdateRemedy.remedy(for: daemonStatus)
+    }
+
     /// Compatible, but a newer Spaces is installed on the active device than the build its daemon is
-    /// running — a non-blocking hint that the update applies on the daemon's next restart. The daemon
-    /// reports this about its own device; this app's own version says nothing about what is installed
-    /// over there, so it is deliberately not part of the comparison.
+    /// running — the non-blocking shape of `.applyStagedUpdate` (see `isActiveDeviceBlocked`'s doc). A
+    /// restart applies the update; the daemon reports this about its own device, so no version
+    /// comparison happens on this client.
     var daemonUpdatePending: Bool {
-        guard compatibility == .compatible else { return false }
-        return daemonStatus?.isUpdatePending ?? false
+        guard case .applyStagedUpdate = daemonUpdateRemedy else { return false }
+        return !isActiveDeviceBlocked
     }
 
     var connectionSummary: String {
         if let activeDeviceName { return activeDeviceName }
-        return "\(settings.trimmedHost):\(settings.port)"
+        return "\(settings.primaryHost):\(settings.port)"
     }
 
     var activeDeviceName: String? {
@@ -725,6 +820,20 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// Stops the loopback browser proxy and all live tunnels. Call when the app enters the background.
     func browserProxyStop() { Task { await browserProxy.stop() } }
 
+    /// Ends the current run of failed refreshes because the app stopped watching this connection — it
+    /// backgrounded, or the overview poll paused (a terminal or browser detail opened, another tab took
+    /// over, the device became unpaired). The alert gate reads wall-clock time between failures, and
+    /// nothing polls during a pause, so a failure recorded before it and one recorded after are far apart
+    /// with no evidence of anything in between. Without this, that pair reads as a long-running outage
+    /// and the first blip on the way back raises the alert — the very interruption the gate exists to
+    /// prevent. Attempts already in flight are covered too: they resume with a start time from before the
+    /// pause, so `performRefresh` drops their failure timing rather than letting it rebuild the run this
+    /// just ended.
+    func noteConnectionMonitoringPaused() {
+        refreshFailureStreak = nil
+        connectionMonitoringGeneration += 1
+    }
+
     /// The URL a `WKWebView` should load for a browser session row, rebuilt against the proxy's fixed
     /// loopback port. `nil` only if the route's identity host somehow fails to form a valid URL.
     func browserSessionProxyURL(for row: SpacesMobileBrowserSessionRow) -> URL? {
@@ -744,13 +853,46 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// browser-session rows are read straight back out of `overview` by `workspaceRuntimeRows(for:)`,
     /// but the proxy needs its own copy of the host->target mapping to route requests independently of
     /// the SwiftUI refresh cycle.
-    private func updateBrowserRoutes(overview: SpacesDeviceOverviewPayload) async {
+    /// `identity` is the caller's `overviewIdentity` snapshot, captured before its own await chain
+    /// started — the same guard every caller already re-checks right after this returns, needed here
+    /// too because this method can itself publish into `pairedDevices` (see below) before that
+    /// downstream guard runs.
+    private func updateBrowserRoutes(overview: SpacesDeviceOverviewPayload, identity: Int) async {
         guard let activeDeviceID else { return }
+        // The raw-byte service tunnel has to reach the daemon over the path the command channel that just
+        // fetched `overview` actually proved reachable, so ask the live client's resolver directly rather
+        // than trusting the persisted record: `pairedDevices` is an in-memory snapshot that can lag the
+        // resolver by a beat — e.g. immediately after a LAN→Tailscale failover, before `recordActiveHost`
+        // gets around to persisting the new winner — and handing the proxy a stale LAN address here would
+        // dial an endpoint the command channel just proved unreachable. Fall back to the paired device
+        // record's `activeHost`, then `settings.primaryHost`, only for a device with no live-resolved
+        // address yet (freshly paired, no request issued through this client).
+        let activeDeviceRecord = pairedDevices.first(where: { $0.id == activeDeviceID })
+        let liveResolvedHost = await bridgeClient.currentResolvedHost()
+        // The user can switch or remove the active device while that await is suspended. Everything
+        // captured above belongs to the previous connection, while `settings` and `activeDeviceName` below
+        // already read the new one — merging that mixture would register routes keyed to the old device
+        // carrying the new device's port and fingerprint, or resurrect routes for a device just removed.
+        guard identity == overviewIdentity else { return }
+        let resolvedHost = liveResolvedHost ?? activeDeviceRecord?.activeHost ?? settings.primaryHost
         browserRoutingTable.merge(
-            deviceID: activeDeviceID, deviceName: activeDeviceName ?? settings.trimmedHost, host: settings.trimmedHost, port: settings.port,
+            deviceID: activeDeviceID, deviceName: activeDeviceName ?? settings.primaryHost, host: resolvedHost, port: settings.port,
             certificateFingerprint: settings.certificateFingerprint, overview: overview)
         let table = browserRoutingTable
         await browserProxy.updateRoutes(table)
+        // Keeps `ConnectionSettingsView`'s "Local network"/"Tailscale" address label in sync with the
+        // address the live client is actually using. `recordActiveHost` (called by the resolver once
+        // its cached winner changes) writes straight to `UserDefaults`; `pairedDevices` is a separate
+        // in-memory snapshot the view reads and nothing else refreshes it after a failover, so without
+        // this the label would keep showing the pre-failover address for the rest of the session. Only
+        // a real, resolver-confirmed address (`liveResolvedHost`, not the `resolvedHost` fallback chain
+        // above) counts as a change worth reloading for; cheap in the common case since a reload only
+        // happens when that address actually differs from what `pairedDevices` currently holds, and the
+        // identity re-check keeps a stale refresh from publishing into a connection the user has since
+        // switched away from.
+        if let liveResolvedHost, activeDeviceRecord?.activeHost != liveResolvedHost, identity == overviewIdentity {
+            pairedDevices = SpacesMobileDeviceStore.load(fallbackSettings: settings).devices
+        }
     }
 
     /// Fetches and publishes the active device's overview. Reentrant: a call while a fetch for the
@@ -775,6 +917,12 @@ private enum SpacesMobileMutationTimeoutRecovery {
     /// overwrite the reset state the identity change just established.
     private func performRefresh(identity: Int) async {
         isLoading = true
+        // When this attempt began, not when it failed: a request that burns its whole timeout against an
+        // unreachable device has already been failing for that long by the time it throws. Paired with
+        // the monitoring generation it was measured in, since durations are only comparable within one
+        // uninterrupted stretch of watching the connection.
+        let attemptStartedAt = now()
+        let monitoringGeneration = connectionMonitoringGeneration
         defer {
             isLoading = false
             refreshInFlight = nil
@@ -786,14 +934,26 @@ private enum SpacesMobileMutationTimeoutRecovery {
             let overview = try await bridgeClient.fetchOverview(commandChannel: commandChannel)
             guard identity == overviewIdentity else { return }
             applyCompatibility(overview.daemonStatus)
+            // The daemon reports the addresses it is currently reachable at on every connection. This is
+            // how a device paired before its Mac ever had Tailscale silently gains the tailnet fallback
+            // the moment the Mac gets one — no rescan needed, unlike the pre-existing QR-rescan path.
+            let hostsChanged = SpacesMobileDeviceStore.mergeAdvertisedHosts(
+                overview.daemonStatus.deviceAPIAddresses, certificateFingerprint: settings.certificateFingerprint)
             // A decodable overview whose daemon nonetheless reports an incompatible protocol is blocked;
             // show the restart/update block, not its stale workspace data.
             let acceptedOverview = isActiveDeviceBlocked ? nil : overview
-            if let acceptedOverview { await updateBrowserRoutes(overview: acceptedOverview) }
+            if let acceptedOverview { await updateBrowserRoutes(overview: acceptedOverview, identity: identity) }
             guard identity == overviewIdentity else { return }
             self.overview = acceptedOverview
             connectionNotice = nil
             errorMessage = nil
+            refreshFailureStreak = nil
+            // Rebuilds the live client only after the overview above is already published, deliberately:
+            // this runs mid-refresh, and racing the rebuild against the `overviewIdentity` guards earlier
+            // in this method could drop the very overview the user is waiting for. Publishing first means
+            // there is nothing left in this refresh for a rebuild to corrupt — the identity guard just
+            // above already confirmed no device switch happened in between.
+            if hostsChanged { rebuildLiveClientAfterHostsBackfill() }
         } catch is CancellationError { return } catch {
             guard identity == overviewIdentity else { return }
             // The overview did not decode (a wire-incompatible daemon) or the device is unreachable. The
@@ -813,21 +973,135 @@ private enum SpacesMobileMutationTimeoutRecovery {
                 handleAuthenticationFailure(message: recoveryMessage)
                 return
             }
+            // A requested daemon update takes the device offline on purpose, and `requestDaemonUpdate()`
+            // is already watching across that outage. Pausing the overview poll keeps most refreshes out
+            // of the window, but not one already awaiting its overview when the user taps Update, nor a
+            // pull-to-refresh during it — so the suppression has to live here, where the failure lands,
+            // rather than only at the call sites that start a refresh. An authentication failure above
+            // still surfaces: that is not an outage and does not resolve itself when the daemon returns.
+            guard !isApplyingDaemonUpdate else { return }
+            // A single failed round trip is routinely recoverable — a Wi-Fi blip, or a socket the OS
+            // dropped out from under the app while it was suspended — and the poll retries every two
+            // seconds, so raising the modal alert on the first one interrupts the user for something that
+            // heals itself before they can read it. The alert instead waits until failures have persisted
+            // for `refreshFailureAlertDelay`.
+            //
+            // Measured in wall-clock time rather than failure count because the two kinds of failure are
+            // not comparable in duration: a dead socket throws immediately, while an unreachable host
+            // burns the request's full eight-second timeout (twice, counting the compatibility handshake
+            // above) before it throws even once. Counting attempts would report the fast case in a few
+            // seconds and the slow case only after a minute; timing the run reports both within one
+            // window. User-initiated work (mutations, deep links) does not come through here — it still
+            // reports on its first failure.
+            // This attempt started before the app last stopped watching, so its elapsed time is mostly
+            // time nothing was polling. It cannot start or extend a run — that would resurrect, dated
+            // before the pause, exactly the run `noteConnectionMonitoringPaused` ended.
+            guard monitoringGeneration == connectionMonitoringGeneration else { return }
+            let streakStartedAt = refreshFailureStreak?.identity == identity ? refreshFailureStreak?.startedAt : nil
+            let startedAt = streakStartedAt ?? attemptStartedAt
+            refreshFailureStreak = (identity: identity, startedAt: startedAt)
+            guard now() - startedAt >= refreshFailureAlertDelay else { return }
             errorMessage = error.localizedDescription
         }
     }
 
     /// Requests the active device's daemon exec-in-place handoff: it quiesces sessions, applies any
     /// staged update, and re-execs at the same pid, so running terminals, agents, and processes survive.
-    /// After the daemon comes back up, the next refresh re-runs the handshake.
-    func requestDaemonRestart() async {
-        guard !isMutating else { return }
+    /// Polls the device's frozen-core status afterward until it reports the update applied, so the
+    /// compatibility banner clears itself instead of sitting on "Updating…" forever if nothing else
+    /// looks back. The daemon is expected to be briefly unreachable mid-handoff, so fetch failures
+    /// during the poll are swallowed rather than surfaced as a connection error — they just mean "not
+    /// back yet."
+    ///
+    /// The poll is bounded by `daemonUpdateTimeout`, checked against a `ContinuousClock` deadline before
+    /// each attempt rather than a fixed attempt count — see `daemonUpdateTimeout`'s doc comment. That
+    /// bound is not exact: one probe already in flight when the deadline passes still runs to
+    /// completion (or its own request timeout), because the loop has no way to abandon a request it is
+    /// already awaiting, so the wall-clock cost of a fully unreachable device can exceed the stated
+    /// budget by up to one request's timeout.
+    ///
+    /// Every step is guarded against `overviewIdentity`, captured once up front: a device switch or
+    /// removal mid-poll must not publish the old device's status onto whatever is now active.
+    func requestDaemonUpdate() async {
+        guard !isMutating, !isApplyingDaemonUpdate else { return }
+        let identity = overviewIdentity
+        // The in-flight flag is released before this invocation's final refresh (see the timeout path
+        // below), so a retry can legitimately start while this one is still finishing. Claim a
+        // generation and only surrender the flag while still holding it, or a slow predecessor's exit
+        // would clear a live successor's state — re-enabling the button mid-update and resuming the
+        // overview poll straight into the handoff this flag exists to protect.
+        daemonUpdateGeneration += 1
+        let generation = daemonUpdateGeneration
+        isApplyingDaemonUpdate = true
+        defer { if daemonUpdateGeneration == generation { isApplyingDaemonUpdate = false } }
+
+        // This flow runs on its own command channel rather than the shared one. The shared channel
+        // carries the overview poll and every user mutation, and the transport does not serialize whole
+        // request/response round trips (issue #248): two callers can interleave on its single connection
+        // and consume each other's responses. The mutation gate below covers the restart RPC, but the
+        // polling phase deliberately runs with mutations enabled for up to `daemonUpdateTimeout`, so a
+        // shared channel would put a half-minute stream of probes alongside whatever the user does next.
+        // A private channel keeps that traffic on its own connection for the life of the update.
+        let updateChannel = bridgeClient.makeCommandChannel()
+        defer { Task { await updateChannel.close() } }
+
+        // The restart RPC holds the app-wide mutation gate like every other one-shot mutation, so another
+        // mutation cannot be sent into the daemon while it is being told to quiesce and re-exec. The gate
+        // is released before the polling phase: that runs for up to `daemonUpdateTimeout`, and holding it
+        // there would freeze every mutating control in the app for the whole wait.
         isMutating = true
-        defer { isMutating = false }
+        let restartError: Error?
         do {
-            try await bridgeClient.requestDaemonRestart(commandChannel: commandChannel)
-            connectionNotice = "Restarting the daemon…"
-        } catch is CancellationError { return } catch { errorMessage = error.localizedDescription }
+            try await bridgeClient.requestDaemonRestart(commandChannel: updateChannel)
+            restartError = nil
+        } catch { restartError = error }
+        isMutating = false
+        if let restartError {
+            if restartError is CancellationError { return }
+            guard identity == overviewIdentity else { return }
+            errorMessage = restartError.localizedDescription
+            return
+        }
+        guard identity == overviewIdentity else { return }
+        connectionNotice = "Updating the daemon…"
+
+        let clock = ContinuousClock()
+        let deadline = clock.now + daemonUpdateTimeout
+        while clock.now < deadline {
+            // Cancellation exits the poll rather than being swallowed like a fetch failure: a cancelled
+            // sleep would otherwise let every remaining attempt run back-to-back with no wait, spinning
+            // the whole budget in one turn of the loop.
+            do { try await Task.sleep(for: daemonUpdatePollInterval) } catch { return }
+            // The deadline can pass during that sleep. Re-check before probing: launching a request here
+            // would add its whole timeout on top of the budget, on top of the sleep that just overran it.
+            guard clock.now < deadline else { break }
+            guard identity == overviewIdentity else { return }
+            guard let status = try? await bridgeClient.fetchDaemonStatus(commandChannel: updateChannel) else { continue }
+            guard identity == overviewIdentity else { return }
+            if case .applyStagedUpdate = DaemonUpdateRemedy.remedy(for: status) { continue }
+            // The device no longer reports a staged update: publish the fresh status, then let a full
+            // refresh repopulate the overview before clearing the notice.
+            applyCompatibility(status)
+            await refresh()
+            guard identity == overviewIdentity else { return }
+            connectionNotice = nil
+            return
+        }
+
+        // Timed out. Drop the progress notice and re-enable the action, leaving the banner showing the
+        // last thing the device actually said — a slow restart and a refused handoff look identical from
+        // here, and neither is worth inventing a failure message for.
+        //
+        // Deliberately does not reconcile with a refresh. Against a device that is still down, that
+        // fetch would take the ordinary failure path — clearing the status the banner renders from and
+        // raising a connection error — which is the opposite of leaving the warning in place. It cannot
+        // run under the expected-outage suppression either, because that keys off the same flag this
+        // path has to release to re-enable the button. Releasing the flag resumes the overview poll,
+        // which reconciles on its own cadence and reports a genuinely unreachable device the ordinary
+        // way, so nothing is left stale.
+        guard identity == overviewIdentity else { return }
+        connectionNotice = nil
+        isApplyingDaemonUpdate = false
     }
 
     private func applyCompatibility(_ status: TerminalServiceDaemonStatus) {
@@ -847,6 +1121,11 @@ private enum SpacesMobileMutationTimeoutRecovery {
             applyCompatibility(status)
         } catch is CancellationError { return } catch {
             guard identity == overviewIdentity else { return }
+            // A requested update takes the device offline on purpose. Clearing the status there would
+            // drop the banner (it renders off `daemonStatus`) and unblock the device (blocking reads
+            // `compatibility`), flashing stale workspace controls back mid-update; keep the last known
+            // facts until the poll learns otherwise.
+            guard !isApplyingDaemonUpdate else { return }
             // Could not read the handshake; leave compatibility unknown rather than blocking.
             daemonStatus = nil
             compatibility = nil
@@ -854,10 +1133,14 @@ private enum SpacesMobileMutationTimeoutRecovery {
     }
 
     func applyConnectionSettings(_ settings: SpacesMobileConnectionSettings, deviceName: String? = nil) {
+        guard !isDemoModeEnabled else {
+            connectionNotice = Self.demoModeGuardNotice
+            return
+        }
         let previousCommandChannel = commandChannel
         let deviceState =
             settings.isPaired
-            ? SpacesMobileDeviceStore.upsert(settings: settings, name: deviceName ?? settings.trimmedHost)
+            ? SpacesMobileDeviceStore.upsert(settings: settings, name: deviceName ?? settings.primaryHost)
             : SpacesMobileDeviceStore.load(fallbackSettings: settings)
         self.settings = deviceState.settings
         pairedDevices = deviceState.devices
@@ -875,7 +1158,62 @@ private enum SpacesMobileMutationTimeoutRecovery {
         Task { await previousCommandChannel.close() }
     }
 
+    /// Rebuilds the live client and command channel after `mergeAdvertisedHosts` backfills a newly
+    /// learned address into the active device's `hosts` — most commonly a Mac paired before it had
+    /// Tailscale gaining the tailnet candidate the moment its daemon starts advertising one. Reloads
+    /// settings from the device store, which now carries the widened `hosts` list, and swaps in a fresh
+    /// client so the resolver embedded in it races the new candidate list starting on this refresh
+    /// instead of waiting for the app to relaunch or the device to be reselected.
+    ///
+    /// Deliberately does not touch `overview`, `daemonStatus`, `compatibility`, or `overviewIdentity` the
+    /// way a device switch does: the payload this same refresh just published is still current — the
+    /// daemon did not change, only the addresses it can be reached at did — so nothing about the
+    /// already-accepted result needs to be discarded or invalidated.
+    private func rebuildLiveClientAfterHostsBackfill() {
+        let deviceState = SpacesMobileDeviceStore.load(fallbackSettings: settings)
+        // The caller already re-checked `overviewIdentity` right before this runs, so the active device
+        // should still be this one; this is an extra guard in case the store's active device moved on for
+        // some other reason in between, so a rebuild can never point this model at a different device.
+        guard deviceState.activeDeviceID == activeDeviceID else { return }
+        let previousCommandChannel = commandChannel
+        settings = deviceState.settings
+        pairedDevices = deviceState.devices
+        bridgeClient = SpacesDeviceAPIClient(settings: deviceState.settings, deviceName: UIDevice.current.name)
+        commandChannel = bridgeClient.makeCommandChannel()
+        Task { await previousCommandChannel.close() }
+    }
+
+    /// Foreground re-preference for the active connection: clears the live resolver's cached winner and
+    /// closes the shared command channel's current connection, so the very next overview poll or
+    /// mutation re-races every candidate address — preferring the LAN address again when this device is
+    /// back on it — instead of continuing on whatever address it settled on while away. Reuses
+    /// `SpacesDeviceAPICommandChannel.close()` rather than a parallel teardown path.
+    ///
+    /// Deliberately touches only this app-wide command channel, never a `TerminalViewerModel`'s own
+    /// channel or its live session stream: a working terminal session must not be interrupted just to
+    /// re-prefer a lower-latency path. An open viewer keeps its stream, which re-races on its own the next
+    /// time it actually disconnects (see `SpacesDeviceNetworkBackend.openSessionStream`'s disconnect
+    /// handling).
+    ///
+    /// Accepted race: a connect already suspended inside `connectIfNeeded` when this runs can install its
+    /// connection and repopulate the resolver's cache afterwards, leaving the app on the address it had
+    /// rather than re-preferring the LAN one. The overview poll runs every couple of seconds, so the
+    /// window is real but the consequence is only staying on a path that already works, and the next
+    /// foreground clears it again. Not worth generation-stamping every connect to close.
+    func resetActiveConnectionEndpoint() {
+        let client = bridgeClient
+        let channel = commandChannel
+        Task {
+            await client.resetEndpointResolution()
+            await channel.close()
+        }
+    }
+
     func selectDevice(id: String) {
+        guard !isDemoModeEnabled else {
+            connectionNotice = Self.demoModeGuardNotice
+            return
+        }
         guard let deviceState = SpacesMobileDeviceStore.select(deviceID: id, installationID: settings.installationID) else { return }
         let previousCommandChannel = commandChannel
         settings = deviceState.settings
@@ -895,6 +1233,15 @@ private enum SpacesMobileMutationTimeoutRecovery {
     }
 
     func removeDevice(id: String) {
+        // The demo device is not a stored device; "removing" it means leaving Demo Mode.
+        if id == SpacesMobileDemoDevice.id {
+            setDemoMode(false)
+            return
+        }
+        guard !isDemoModeEnabled else {
+            connectionNotice = Self.demoModeGuardNotice
+            return
+        }
         let previousCommandChannel = commandChannel
         let deviceState = SpacesMobileDeviceStore.remove(deviceID: id, fallbackSettings: settings)
         settings = deviceState.settings
@@ -916,8 +1263,74 @@ private enum SpacesMobileMutationTimeoutRecovery {
     }
 
     func renameDevice(id: String, name: String) {
+        // The rename path reloads the on-disk device list, which would replace the synthetic
+        // Demo Mac with the parked real records mid-demo.
+        if isDemoModeEnabled {
+            connectionNotice = Self.demoModeGuardNotice
+            return
+        }
         let deviceState = SpacesMobileDeviceStore.rename(deviceID: id, name: name, fallbackSettings: settings)
         pairedDevices = deviceState.devices
+    }
+
+    /// Turns Demo Mode on or off, swapping the active client the same way a device switch does (close and
+    /// rebuild the client and command channel, bump `overviewIdentity`, and clear the published overview,
+    /// status, and notices). Turning it on parks the real device-store state in memory and swaps in the
+    /// synthetic Demo Mac backed by `DemoDeviceBackend`, writing nothing to the device store or Keychain;
+    /// turning it off restores the parked state (or reloads it from the store when the app launched
+    /// straight into Demo Mode). The enabled flag itself is persisted via `DemoModeStore`.
+    func setDemoMode(_ enabled: Bool) {
+        guard enabled != isDemoModeEnabled else { return }
+        if enabled { enableDemoMode() } else { disableDemoMode() }
+    }
+
+    private func enableDemoMode() {
+        let backend: DemoDeviceBackend
+        do { backend = try DemoDeviceBackend.makeDefault() } catch {
+            // The recording could not load; leave the real connection exactly as it was.
+            errorMessage = error.localizedDescription
+            return
+        }
+        parkedRealDeviceState = SpacesMobileDeviceStoreState(devices: pairedDevices, activeDeviceID: activeDeviceID, settings: settings)
+        let previousCommandChannel = commandChannel
+        let demoSettings = SpacesMobileDemoDevice.settings(installationID: settings.installationID)
+        settings = demoSettings
+        pairedDevices = [SpacesMobileDemoDevice.record()]
+        activeDeviceID = SpacesMobileDemoDevice.id
+        isDemoModeEnabled = true
+        bridgeClient = SpacesDeviceAPIClient(settings: demoSettings, deviceName: UIDevice.current.name, backend: backend)
+        commandChannel = bridgeClient.makeCommandChannel()
+        overviewIdentity += 1
+        DemoModeStore.save(true)
+        clearActiveConnectionState()
+        Task { await previousCommandChannel.close() }
+    }
+
+    private func disableDemoMode() {
+        let restored = parkedRealDeviceState ?? SpacesMobileDeviceStore.load(fallbackSettings: SpacesMobileSettingsStore.load())
+        parkedRealDeviceState = nil
+        let previousCommandChannel = commandChannel
+        settings = restored.settings
+        pairedDevices = restored.devices
+        activeDeviceID = restored.activeDeviceID
+        isDemoModeEnabled = false
+        bridgeClient = SpacesDeviceAPIClient(settings: restored.settings, deviceName: UIDevice.current.name)
+        commandChannel = bridgeClient.makeCommandChannel()
+        overviewIdentity += 1
+        DemoModeStore.save(false)
+        clearActiveConnectionState()
+        Task { await previousCommandChannel.close() }
+    }
+
+    /// Clears every piece of published state tied to the previous active connection, matching what a
+    /// device switch resets so no stale overview, status, or notice bleeds across the swap.
+    private func clearActiveConnectionState() {
+        overview = nil
+        daemonStatus = nil
+        compatibility = nil
+        workspaceCreateOptions = nil
+        connectionNotice = nil
+        errorMessage = nil
     }
 
     func dismissError() { errorMessage = nil }
@@ -940,9 +1353,20 @@ private enum SpacesMobileMutationTimeoutRecovery {
         Task { await previousCommandChannel.close() }
     }
 
-    func preparePairingLink(_ url: URL) {
+    func preparePairingLink(_ url: URL) { stagePairingLink { try SpacesDevicePairingLink.parse(url) } }
+
+    /// A QR payload scanned from the Spaces tab's not-paired empty state rides the same
+    /// confirm-and-pair flow as a `spaces://pair` deep link: stage the link and raise the
+    /// connection-settings surface, which presents the pairing confirmation.
+    func prepareScannedPairingLink(_ payload: String) { stagePairingLink { try SpacesDevicePairingLink.parse(payload) } }
+
+    private func stagePairingLink(_ parse: () throws -> SpacesDevicePairingLink) {
+        guard !isDemoModeEnabled else {
+            connectionNotice = Self.demoModeGuardNotice
+            return
+        }
         do {
-            pendingPairingLink = try SpacesDevicePairingLink.parse(url)
+            pendingPairingLink = try parse()
             connectionNotice = nil
             errorMessage = nil
             isShowingConnectionSettings = true
@@ -982,13 +1406,18 @@ private enum SpacesMobileMutationTimeoutRecovery {
         guard !isMutating else { return }
         isMutating = true
         defer { isMutating = false }
+        let identity = overviewIdentity
         do {
             let response = try await bridgeClient.createWorkspace(
                 projectID: projectID, branch: branch, baseBranch: baseBranch, directoryName: directoryName,
                 allowExistingBranchReuse: allowExistingBranchReuse, commandChannel: commandChannel)
-            await applyMutationResponse(response)
+            await applyMutationResponse(response, identity: identity)
+            guard identity == overviewIdentity else { return }
             isShowingWorkspaceCreateSheet = false
-        } catch { handleBridgeError(error) }
+        } catch {
+            guard identity == overviewIdentity else { return }
+            handleBridgeError(error)
+        }
     }
 
     func openWorkspaceTerminal(workspaceID: String) async -> SpacesDeviceTerminalSessionSummary? {
@@ -1026,6 +1455,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         guard !isMutating else { return }
         isMutating = true
         defer { isMutating = false }
+        let identity = overviewIdentity
         do {
             let response: SpacesDeviceAPIResponse
             switch row.source {
@@ -1043,8 +1473,11 @@ private enum SpacesMobileMutationTimeoutRecovery {
                     workspaceID: terminal.workspaceID, sessionID: sessionID, commandChannel: commandChannel)
             case .browserSession: return
             }
-            await applyMutationResponse(response)
-        } catch { handleBridgeError(error) }
+            await applyMutationResponse(response, identity: identity)
+        } catch {
+            guard identity == overviewIdentity else { return }
+            handleBridgeError(error)
+        }
     }
 
     func restart(row: SpacesMobileWorkspaceRuntimeRow) async -> SpacesDeviceTerminalSessionSummary? {
@@ -1099,7 +1532,11 @@ private enum SpacesMobileMutationTimeoutRecovery {
         guard !isMutating else { return }
         isMutating = true
         defer { isMutating = false }
-        do { await applyMutationResponse(try await operation()) } catch { handleBridgeError(error) }
+        let identity = overviewIdentity
+        do { await applyMutationResponse(try await operation(), identity: identity) } catch {
+            guard identity == overviewIdentity else { return }
+            handleBridgeError(error)
+        }
     }
 
     // MARK: - Renaming runtime rows
@@ -1121,8 +1558,12 @@ private enum SpacesMobileMutationTimeoutRecovery {
 
     /// Whether the row has a name the daemon can rename. A process or coding agent running without a
     /// configured entry has no name to edit — its name comes from the running process — and a terminal row
-    /// whose session has ended has no session to rename, so those rows offer no Rename.
-    func canRename(row: SpacesMobileWorkspaceRuntimeRow) -> Bool { renameTarget(for: row) != nil }
+    /// whose session has ended has no session to rename, so those rows offer no Rename. Demo Mode's backend
+    /// rejects config edits, so no row is renamable while it is on.
+    func canRename(row: SpacesMobileWorkspaceRuntimeRow) -> Bool {
+        guard !isDemoModeEnabled else { return false }
+        return renameTarget(for: row) != nil
+    }
 
     /// Renames a runtime row. Renaming a configured process, coding agent, or browser session edits its
     /// workspace-config entry, so a running process keeps its current name until it is restarted — the same
@@ -1308,30 +1749,45 @@ private enum SpacesMobileMutationTimeoutRecovery {
         guard !isMutating else { return nil }
         isMutating = true
         defer { isMutating = false }
+        let identity = overviewIdentity
         do {
             let response = try await operation()
-            await applyMutationResponse(response)
+            await applyMutationResponse(response, identity: identity)
+            // The connection changed while the mutation was in flight: the published overview belongs to
+            // the previous backend, so resolving a session from it would hand back the wrong device's row.
+            guard identity == overviewIdentity else { return nil }
             if let sessionID = response.sessionID { return overview?.sessions.first(where: { $0.id == sessionID }) }
             if let fallbackRowID { return refreshedSession(forRowID: fallbackRowID) }
             return nil
         } catch {
+            guard identity == overviewIdentity else { return nil }
             if let fallbackRowID, isMutationTimeout(error),
-                let session = await reconciledSessionAfterMutationTimeout(rowID: fallbackRowID, timeoutRecovery: timeoutRecovery)
+                let session = await reconciledSessionAfterMutationTimeout(rowID: fallbackRowID, timeoutRecovery: timeoutRecovery, identity: identity)
             {
                 return session
             }
+            guard identity == overviewIdentity else { return nil }
             handleBridgeError(error)
             return nil
         }
     }
 
-    private func applyMutationResponse(_ response: SpacesDeviceAPIResponse) async {
-        if let overview = response.overview {
-            await updateBrowserRoutes(overview: overview)
-            self.overview = overview
-            connectionNotice = nil
-            errorMessage = nil
-        }
+    /// Publishes a mutation's refreshed overview, but only while the connection it was issued against is
+    /// still active. `identity` is captured before the mutation's await; a device switch, removal, auth
+    /// reset, or Demo Mode toggle bumps `overviewIdentity`, so a mutation that lands after one of those
+    /// must not overwrite the new connection's state with the previous backend's overview.
+    private func applyMutationResponse(_ response: SpacesDeviceAPIResponse, identity: Int) async {
+        guard let overview = response.overview, identity == overviewIdentity else { return }
+        await updateBrowserRoutes(overview: overview, identity: identity)
+        guard identity == overviewIdentity else { return }
+        self.overview = overview
+        connectionNotice = nil
+        errorMessage = nil
+        // A mutation's refreshed overview is proof the device answered, so it ends any run of failed
+        // refreshes exactly as a successful poll does. Otherwise a run interrupted by a successful
+        // mutation keeps its original start time, and the next isolated failure alerts on the strength
+        // of an outage that demonstrably ended.
+        refreshFailureStreak = nil
     }
 
     private func handleBridgeError(_ error: Error) {
@@ -1343,7 +1799,7 @@ private enum SpacesMobileMutationTimeoutRecovery {
         errorMessage = error.localizedDescription
     }
 
-    private func reconciledSessionAfterMutationTimeout(rowID: String, timeoutRecovery: SpacesMobileMutationTimeoutRecovery) async
+    private func reconciledSessionAfterMutationTimeout(rowID: String, timeoutRecovery: SpacesMobileMutationTimeoutRecovery, identity: Int) async
         -> SpacesDeviceTerminalSessionSummary?
     {
         if timeoutRecovery.acceptsCachedOverview, let session = refreshedSession(forRowID: rowID) {
@@ -1353,10 +1809,15 @@ private enum SpacesMobileMutationTimeoutRecovery {
         }
         do {
             let refreshedOverview = try await bridgeClient.fetchOverview(commandChannel: commandChannel)
-            await updateBrowserRoutes(overview: refreshedOverview)
+            // The connection changed while reconciling: this overview is the previous backend's, so it must
+            // not be published as the current connection's state.
+            guard identity == overviewIdentity else { return nil }
+            await updateBrowserRoutes(overview: refreshedOverview, identity: identity)
+            guard identity == overviewIdentity else { return nil }
             overview = refreshedOverview
             errorMessage = nil
             connectionNotice = nil
+            refreshFailureStreak = nil
             return timeoutRecovery.acceptsFreshSession(refreshedSession(forRowID: rowID))
         } catch { return nil }
     }

@@ -20,6 +20,9 @@ struct ConnectionSettingsView: View {
     let pairedDevices: [SpacesMobilePairedDeviceRecord]
     let activeDeviceID: String?
     let noticeMessage: String?
+    /// While Demo Mode is on the device list is the single synthetic Demo Mac, so pairing is disabled and
+    /// removing that row means leaving Demo Mode rather than forgetting a real device.
+    let isDemoMode: Bool
     let onPairingLinkConsumed: () -> Void
     let onSelectDevice: (String) -> Void
     let onRemoveDevice: (String) -> Void
@@ -28,7 +31,7 @@ struct ConnectionSettingsView: View {
 
     init(
         initialSettings: SpacesMobileConnectionSettings, initialPairingLink: SpacesDevicePairingLink? = nil,
-        pairedDevices: [SpacesMobilePairedDeviceRecord] = [], activeDeviceID: String? = nil, noticeMessage: String? = nil,
+        pairedDevices: [SpacesMobilePairedDeviceRecord] = [], activeDeviceID: String? = nil, noticeMessage: String? = nil, isDemoMode: Bool = false,
         onPairingLinkConsumed: @escaping () -> Void = {}, onSelectDevice: @escaping (String) -> Void = { _ in },
         onRemoveDevice: @escaping (String) -> Void = { _ in }, onRenameDevice: @escaping (String, String) -> Void = { _, _ in },
         onSave: @escaping (SpacesMobileConnectionSettings, String) -> Void
@@ -38,12 +41,15 @@ struct ConnectionSettingsView: View {
         self.pairedDevices = pairedDevices
         self.activeDeviceID = activeDeviceID
         self.noticeMessage = noticeMessage
+        self.isDemoMode = isDemoMode
         self.onPairingLinkConsumed = onPairingLinkConsumed
         self.onSelectDevice = onSelectDevice
         self.onRemoveDevice = onRemoveDevice
         self.onRenameDevice = onRenameDevice
         self.onSave = onSave
     }
+
+    private var isDemoDevicePendingRemoval: Bool { devicePendingRemoval?.id == SpacesMobileDemoDevice.id }
 
     var body: some View {
         Form {
@@ -61,8 +67,9 @@ struct ConnectionSettingsView: View {
                     } else {
                         Label("Scan QR Code to Pair", systemImage: "qrcode.viewfinder")
                     }
-                }.disabled(isPairing)
+                }.disabled(isPairing || isDemoMode)
 
+                if isDemoMode { Text("Turn off Demo Mode to pair a device.").font(.footnote).foregroundStyle(.secondary) }
                 if let noticeMessage { Text(noticeMessage).font(.footnote).foregroundStyle(.orange) }
                 if let errorMessage { Text(errorMessage).font(.footnote).foregroundStyle(.red) }
 
@@ -79,12 +86,19 @@ struct ConnectionSettingsView: View {
             }
             Button("Cancel", role: .cancel) { pendingPairingLink = nil }
         } message: {
-            if let pendingPairingLink { Text("\(pendingPairingLink.host):\(pendingPairingLink.port)") }
+            if let pendingPairingLink {
+                Text(
+                    pendingPairingLink.hosts.map { "\(SpacesDeviceHostAddressKind(host: $0).label) · \($0):\(pendingPairingLink.port)" }.joined(
+                        separator: "\n")
+                ).font(.caption.monospaced())
+            }
         }.confirmationDialog(
-            devicePendingRemoval.map { "Remove \($0.name)?" } ?? "Remove Device?", isPresented: removalConfirmationBinding, titleVisibility: .visible,
-            presenting: devicePendingRemoval
+            isDemoDevicePendingRemoval ? "Turn Off Demo Mode?" : devicePendingRemoval.map { "Remove \($0.name)?" } ?? "Remove Device?",
+            isPresented: removalConfirmationBinding, titleVisibility: .visible, presenting: devicePendingRemoval
         ) { device in
-            Button("Remove Device", role: .destructive) {
+            // Removing the synthetic Demo Mac is not a device removal — the model maps it to leaving Demo
+            // Mode — so the action label says so honestly.
+            Button(device.id == SpacesMobileDemoDevice.id ? "Turn Off Demo Mode" : "Remove Device", role: .destructive) {
                 onRemoveDevice(device.id)
                 devicePendingRemoval = nil
             }
@@ -101,31 +115,61 @@ struct ConnectionSettingsView: View {
         } else {
             HStack(spacing: 10) {
                 Button {
-                    settings.host = device.host
+                    settings.hosts = device.hosts
                     settings.port = device.port
                     settings.certificateFingerprint = device.certificateFingerprint
                     onSelectDevice(device.id)
                 } label: {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(device.name).foregroundStyle(.primary)
-                        Text("\(device.host):\(device.port)").font(.caption.monospaced()).foregroundStyle(.secondary).lineLimit(1).truncationMode(
-                            .middle)
+                        HStack(spacing: 6) {
+                            Text(device.name).foregroundStyle(.primary)
+                            if device.id == SpacesMobileDemoDevice.id { demoTag }
+                        }
+                        // Show the address actually in use, not necessarily the most-preferred
+                        // candidate: `activeHost` is the one that most recently connected. Labeled by
+                        // kind ("Local network" / "Tailscale") rather than shown as a bare host:port —
+                        // which network path a device is reachable over is the useful signal here, not
+                        // its literal port (every device uses the same default port, so it was only ever
+                        // incidental detail). Not monospaced: `docs/design.md` reserves that treatment
+                        // for path-like content (paths, commands, branches, ports), not this row's
+                        // now-prose label.
+                        Text(activeHostLabel(for: device)).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                     }
                 }
                 Spacer(minLength: 0)
                 Button(role: .destructive) {
                     devicePendingRemoval = device
                 } label: {
-                    Image(systemName: "trash")
-                }.buttonStyle(.borderless)
+                    // The Demo Mac is not a stored device; removing it leaves Demo Mode, so the control reads
+                    // as turning the feature off rather than as forgetting a pairing.
+                    Image(systemName: device.id == SpacesMobileDemoDevice.id ? "xmark.circle" : "trash")
+                }.buttonStyle(.borderless).accessibilityLabel(device.id == SpacesMobileDemoDevice.id ? "Turn Off Demo Mode" : "Remove Device")
             }.contextMenu {
-                Button {
-                    beginRename(for: device)
-                } label: {
-                    Label("Rename", systemImage: "pencil")
+                // The Demo Mac is synthetic and has no stored name to edit, so it offers no Rename.
+                if device.id != SpacesMobileDemoDevice.id {
+                    Button {
+                        beginRename(for: device)
+                    } label: {
+                        Label("Rename", systemImage: "pencil")
+                    }
                 }
             }
         }
+    }
+
+    /// "Tailscale · 100.86.197.104" / "Local network · 192.168.50.5" for the device's in-use address —
+    /// matching the labeling `SpacesDeviceHostAddressKind` already gives the Mac pairing pane. Empty
+    /// when the device has no known address at all (should not happen for a paired device, but a blank
+    /// row is the honest degenerate case rather than a fabricated label).
+    private func activeHostLabel(for device: SpacesMobilePairedDeviceRecord) -> String {
+        guard let host = device.activeHost ?? device.hosts.first else { return "" }
+        return "\(SpacesDeviceHostAddressKind(host: host).label) · \(host)"
+    }
+
+    /// Compact chip marking the synthetic Demo Mac in the device list.
+    private var demoTag: some View {
+        Text("Demo").font(.caption2.weight(.semibold)).foregroundStyle(Theme.accent).padding(.horizontal, 6).padding(.vertical, 2).background(
+            Theme.accentTint, in: Capsule())
     }
 
     @MainActor private func beginRename(for device: SpacesMobilePairedDeviceRecord) {
@@ -178,7 +222,7 @@ struct ConnectionSettingsView: View {
         defer { isPairing = false }
         do {
             var pairedSettings = settings
-            pairedSettings.host = pairingLink.host
+            pairedSettings.hosts = pairingLink.hosts
             pairedSettings.port = pairingLink.port
             pairedSettings.certificateFingerprint = pairingLink.certificateFingerprint
             let bridgeClient = SpacesDeviceAPIClient(settings: pairedSettings, deviceName: UIDevice.current.name)

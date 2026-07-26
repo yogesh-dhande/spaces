@@ -18,7 +18,7 @@ import spacesterminalghostty
     func dismiss()
     /// Sets the pane's persistent notice — shown whenever no transient banner is up, and never
     /// auto-dismissed. Replaces any previous persistent notice.
-    func showPersistent(message: String)
+    func showPersistent(_ notice: TerminalPaneBannerNotice)
     /// Clears the persistent notice, hiding the banner when no transient banner is up.
     func clearPersistent()
     /// Draws attention to the banner without changing what it says. Used when the user acts on a
@@ -31,8 +31,8 @@ import spacesterminalghostty
 /// `TerminalLinkOpenCoordinator`.
 ///
 /// The banner holds two independent layers of state:
-/// - a *persistent* notice describing the pane itself (today: the session ended or failed), which
-///   stays until the pane clears it, and
+/// - a *persistent* notice describing the pane itself (the session ended or failed, or the client
+///   lost its state subscription to the owning device), which stays until the pane clears it, and
 /// - a *transient* banner describing the pane's current action (link fetch progress, an error, a
 ///   notice), which auto-dismisses.
 ///
@@ -79,13 +79,29 @@ import spacesterminalghostty
     private let clickRecognizer = NSClickGestureRecognizer()
 
     private var transientMode: TransientMode?
-    private var persistentMessage: String?
+    private var persistentNotice: TerminalPaneBannerNotice?
     private var onCancel: (@MainActor () -> Void)?
-    private var autoDismissTask: Task<Void, Never>?
+    // `nonisolated(unsafe)` so deinit can cancel without asserting main-actor isolation: the last
+    // release of a banner (via its owning pane controller) can land on a background thread when an
+    // async task holds the final reference. `Task.cancel()` is thread-safe and deinit has
+    // exclusive access to self, so the opt-out is sound; every other access stays on the main actor.
+    private nonisolated(unsafe) var autoDismissTask: Task<Void, Never>?
+    // An extra retain on the banner's view-hierarchy root, dropped on the main queue by deinit so an
+    // off-main last release of the banner cannot deallocate AppKit objects on a background thread.
+    // The root suffices — it transitively retains every subview and the gesture recognizer, so
+    // releasing the stored properties off-main drops none of them to zero, and views added later
+    // are covered without touching this.
+    private nonisolated(unsafe) var mainThreadReleaseBag: [AnyObject] = []
 
-    public init(hostView: NSView) { buildUI(in: hostView) }
+    public init(hostView: NSView) {
+        buildUI(in: hostView)
+        mainThreadReleaseBag = [container]
+    }
 
-    deinit { MainActor.assumeIsolated { autoDismissTask?.cancel() } }
+    deinit {
+        autoDismissTask?.cancel()
+        MainThreadRelease.release(mainThreadReleaseBag)
+    }
 
     // MARK: - TerminalPaneBannerPresenting
 
@@ -114,15 +130,15 @@ import spacesterminalghostty
         render()
     }
 
-    public func showPersistent(message: String) {
-        guard persistentMessage != message else { return }
-        persistentMessage = message
+    public func showPersistent(_ notice: TerminalPaneBannerNotice) {
+        guard persistentNotice != notice else { return }
+        persistentNotice = notice
         render()
     }
 
     public func clearPersistent() {
-        guard persistentMessage != nil else { return }
-        persistentMessage = nil
+        guard persistentNotice != nil else { return }
+        persistentNotice = nil
         render()
     }
 
@@ -158,18 +174,18 @@ import spacesterminalghostty
             container.isHidden = false
             return
         }
-        guard let persistentMessage else {
+        guard let persistentNotice else {
             spinner.stopAnimation(nil)
             container.isHidden = true
             return
         }
-        label.stringValue = persistentMessage
-        applyPersistentChrome()
+        label.stringValue = persistentNotice.message
+        applyPersistentChrome(persistentNotice.kind)
         container.isHidden = false
     }
 
     private func applyTransientChrome(_ mode: TransientMode) {
-        applyBorder(isStopped: false)
+        applyBorder(emphasized: false)
         let showsSpinner = mode == .progress
         spinner.isHidden = !showsSpinner
         if showsSpinner { spinner.startAnimation(nil) } else { spinner.stopAnimation(nil) }
@@ -187,21 +203,31 @@ import spacesterminalghostty
     /// rest of the app does not make; the message carries which one it was. A warning glyph, not a
     /// stop/pause mark — a filled square in a circle reads as a button on a pane where nothing is
     /// clickable.
-    private func applyPersistentChrome() {
-        applyBorder(isStopped: true)
+    ///
+    /// A dropped connection is drawn as an ordinary notice instead — neutral glyph, neutral tint,
+    /// hairline border. It is not a failure of the session, it resolves itself on reconnect, and the
+    /// sidebar likewise dims an unreachable device rather than tinting it like a crash.
+    private func applyPersistentChrome(_ kind: TerminalPaneBannerNotice.Kind) {
         spinner.stopAnimation(nil)
         spinner.isHidden = true
         iconView.isHidden = false
-        applyIcon("exclamationmark.triangle.fill", description: "Session stopped", tint: .activeTheme(\.statusFailed))
+        switch kind {
+        case .stopped:
+            applyBorder(emphasized: true)
+            applyIcon("exclamationmark.triangle.fill", description: "Session stopped", tint: .activeTheme(\.statusFailed))
+        case .disconnected:
+            applyBorder(emphasized: false)
+            applyIcon("antenna.radiowaves.left.and.right.slash", description: "Connection lost", tint: .secondaryLabelColor)
+        }
         // A persistent notice has no action to cancel and no timer to wait out; the pane clears it.
         cancelButton.isHidden = true
     }
 
     /// The stopped banner outlines itself in the same tint as its glyph, so it separates from the
-    /// terminal behind it instead of reading as one more HUD.
-    private func applyBorder(isStopped: Bool) {
-        container.layer?.borderWidth = isStopped ? Self.stoppedBorderWidth : Self.idleBorderWidth
-        container.borderColor = isStopped ? .activeTheme(\.statusFailed) : .separatorColor
+    /// terminal behind it instead of reading as one more HUD. Every other banner keeps the hairline.
+    private func applyBorder(emphasized: Bool) {
+        container.layer?.borderWidth = emphasized ? Self.stoppedBorderWidth : Self.idleBorderWidth
+        container.borderColor = emphasized ? .activeTheme(\.statusFailed) : .separatorColor
     }
 
     private func applyIcon(_ symbolName: String, description: String, tint: NSColor) {
@@ -309,5 +335,5 @@ import spacesterminalghostty
 
     var debugIsVisible: Bool { !container.isHidden }
     var debugMessage: String { container.isHidden ? "" : label.stringValue }
-    var debugHasPersistentNotice: Bool { persistentMessage != nil }
+    var debugHasPersistentNotice: Bool { persistentNotice != nil }
 }

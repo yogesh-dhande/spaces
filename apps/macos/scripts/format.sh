@@ -11,6 +11,7 @@ if swift format --help >/dev/null 2>&1; then
     --in-place \
     --parallel \
     --recursive \
+    "$@" \
     "$repo_root/apps/macos/Sources" \
     "$repo_root/apps/macos/Tests" \
     "$repo_root/apps/ios/Sources" \

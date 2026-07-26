@@ -40,7 +40,12 @@ public enum TerminalSessionStaleRecovery {
     /// seconds under a sustained storage fault is acceptable; each attempt already gets SQLite's own
     /// ~5s busy handling, so the loop only matters for a fault that persists past that window.
     static let repairWriteMaxAttempts = 5
-    static let repairWriteRetryDelay: TimeInterval = 0.2
+    /// Production back-off between repair-write retry attempts. Injectable through `reconcile`'s
+    /// `repairWriteRetryDelay`/`sleep` parameters so tests can virtualize the wait instead of paying the
+    /// real wall-clock cost of a synchronous `reconcile()` call retrying against an injected failure.
+    /// Public because it is the default value of a public function's parameter, which Swift inlines
+    /// into callers.
+    public static let repairWriteRetryDelay: TimeInterval = 0.2
 
     /// One repaired row: the session and the terminal state it was rewritten to.
     public struct FinalizedSession: Sendable, Equatable {
@@ -78,8 +83,15 @@ public enum TerminalSessionStaleRecovery {
     ///   - isProcessAlive: liveness probe for a foreign pid, injected so the daemon shares its own
     ///     `kill(pid, 0)` implementation and tests can drive the foreign-pid branch deterministically.
     ///   - now: repair timestamp, injected for testability.
+    ///   - repairWriteRetryDelay: back-off between repair-write retry attempts, defaulting to production's
+    ///     `repairWriteRetryDelay`. Injectable so a test exercising the retry-exhaustion path does not pay
+    ///     real wall-clock time for it.
+    ///   - sleep: the back-off primitive itself, defaulting to a real `Thread.sleep`. Tests can inject a
+    ///     non-blocking closure alongside a near-zero delay to virtualize the wait entirely.
     @discardableResult public static func reconcile(
-        ownPID: Int32, adoptedSessionIDs: Set<String>, isProcessAlive: (Int32) -> Bool, now: Date = Date()
+        ownPID: Int32, adoptedSessionIDs: Set<String>, isProcessAlive: (Int32) -> Bool, now: Date = Date(),
+        repairWriteRetryDelay: TimeInterval = TerminalSessionStaleRecovery.repairWriteRetryDelay,
+        sleep: (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) }
     ) throws -> ReconcileResult {
         let nowString = ISO8601DateFormatter().string(from: now)
         var finalized: [FinalizedSession] = []
@@ -115,7 +127,9 @@ public enum TerminalSessionStaleRecovery {
             // exited-state write), do NOT report the session as finalized: leave the row in its prior
             // live state so nothing observes a false terminal state, record it as unrepaired for the
             // caller to log, and let the next daemon restart heal it via the dead-pid branch.
-            guard commitRepair(finalizedState, detachedAt: nowString, paths: paths) else {
+            guard commitRepair(
+                finalizedState, detachedAt: nowString, paths: paths, retryDelay: repairWriteRetryDelay, sleep: sleep
+            ) else {
                 unrepaired.append(launchConfiguration.sessionID)
                 continue
             }
@@ -127,15 +141,18 @@ public enum TerminalSessionStaleRecovery {
     }
 
     /// Writes the finalized runtime state and detaches active clients as one repair, retrying in place
-    /// up to `repairWriteMaxAttempts` with a `repairWriteRetryDelay` back-off between attempts (mirroring
-    /// the persistence queue's exited-write pattern). Returns `true` once the repair commits, `false` if
-    /// every attempt fails. The runtime-state write and the client detach are performed inside a single
-    /// `finalizeSessionRepair` transaction, so the repair is all-or-nothing: on failure neither half has
-    /// altered durable state and the row stays in its prior live state. This atomicity is what lets a
-    /// failed repair heal at the next daemon restart via the dead-pid branch — a partial commit (row
-    /// finalized but clients left attached) would strand ghost attachments the terminal-row-skipping
+    /// up to `repairWriteMaxAttempts` with the given `retryDelay`/`sleep` back-off between attempts
+    /// (mirroring the persistence queue's exited-write pattern). Returns `true` once the repair commits,
+    /// `false` if every attempt fails. The runtime-state write and the client detach are performed inside
+    /// a single `finalizeSessionRepair` transaction, so the repair is all-or-nothing: on failure neither
+    /// half has altered durable state and the row stays in its prior live state. This atomicity is what
+    /// lets a failed repair heal at the next daemon restart via the dead-pid branch — a partial commit
+    /// (row finalized but clients left attached) would strand ghost attachments the terminal-row-skipping
     /// sweep could never revisit.
-    private static func commitRepair(_ finalizedState: TerminalSessionRuntimeState, detachedAt: String, paths: TerminalSessionPaths) -> Bool {
+    private static func commitRepair(
+        _ finalizedState: TerminalSessionRuntimeState, detachedAt: String, paths: TerminalSessionPaths, retryDelay: TimeInterval,
+        sleep: (TimeInterval) -> Void
+    ) -> Bool {
         var attempt = 0
         while true {
             do {
@@ -144,7 +161,7 @@ public enum TerminalSessionStaleRecovery {
             } catch {
                 attempt += 1
                 guard attempt < repairWriteMaxAttempts else { return false }
-                Thread.sleep(forTimeInterval: repairWriteRetryDelay)
+                sleep(retryDelay)
             }
         }
     }

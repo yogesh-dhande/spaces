@@ -50,11 +50,13 @@ extension AppKitController {
             // Route by this dialog's workspace, not the sidebar selection: the dialog is
             // free-standing, so the selection may have moved to another device or
             // workspace by the time an auto-save fires.
+            // The dialog itself stays readable while the owning device is unreachable; only the
+            // commit needs the daemon, so it is refused here with the device's own reason.
             do {
                 if deviceForWorkspaceMutation(workspaceID: workspaceID) != nil {
                     try updateDeviceWorkspaceConfig(workspaceID: workspaceID, update: update)
                 } else {
-                    showDeviceNotLoadedError()
+                    showWorkspaceDeviceUnavailableError(workspaceID: workspaceID)
                 }
             } catch { showError(error) }
         }
@@ -107,6 +109,21 @@ extension AppKitController {
             stack.addArrangedSubview(section)
             constrainFormFieldToFillWidth(section, in: stack)
         }
+
+        // Edits already commit live (see the type comment), so this is a "Done" close affordance, not a
+        // save: it just dismisses the window. Labeled Done — not Save — so it doesn't imply the edits
+        // were unsaved until now. Matches the project dialog closing on its Save.
+        let doneButton = actionButton(
+            title: "Done", symbol: nil, tooltip: "Close workspace settings (⌘S)", action: #selector(closeWorkspaceSettingsWindow), primary: true)
+        doneButton.setAccessibilityIdentifier("workspace-settings-done")
+        doneButton.keyEquivalent = "\r"
+        let doneRow = NSStackView()
+        doneRow.orientation = .horizontal
+        doneRow.spacing = 8
+        doneRow.addArrangedSubview(NSView())
+        doneRow.addArrangedSubview(doneButton)
+        stack.addArrangedSubview(doneRow)
+        constrainFormFieldToFillWidth(doneRow, in: stack)
 
         workspaceSettingsWorkspaceID = workspace.id
         let title = project.isGitRepo ? "\(project.name) / \(workspace.displayName)" : workspace.displayName

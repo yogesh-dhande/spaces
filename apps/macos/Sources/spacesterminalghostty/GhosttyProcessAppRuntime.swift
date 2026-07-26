@@ -47,7 +47,9 @@
         /// user's `~/.config/ghostty` files — so the look is owned by the active Spaces theme.
         static func makeThemeConfiguration() throws -> ghostty_config_t {
             guard let config = ghostty_config_new() else { throw GhosttyEmbeddedAppServiceError.configuration("ghostty_config_new failed") }
-            try GhosttyThemeConfigGenerator.writeConfiguration(theme: ActiveTheme.descriptor).withCString { path in
+            let configRoot = URL(fileURLWithPath: try SpacesProfile.current().rootDirectory, isDirectory: true).appendingPathComponent(
+                "ghostty", isDirectory: true)
+            try GhosttyThemeConfigGenerator.writeConfiguration(theme: ActiveTheme.descriptor, configRootDirectory: configRoot).withCString { path in
                 ghostty_config_load_file(config, path)
             }
             ghostty_config_finalize(config)

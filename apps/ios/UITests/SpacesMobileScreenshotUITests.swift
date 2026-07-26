@@ -18,14 +18,25 @@ final class SpacesMobileScreenshotUITests: XCTestCase {
     /// holds the app foreground and idle so the host can screenshot it.
     func testScreenshotStaging() throws {
         let environment = ProcessInfo.processInfo.environment
-        let configuration = try ScreenshotUITestConfiguration.load(environment: environment)
         let showsPaywall = environment["SPACES_MOBILE_SCREENSHOT_PAYWALL"] == "1"
+        // Demo Mode staging needs no daemon and no paired-device config: the bundled sample recording
+        // supplies every tab's content, so the App Store screenshot set can be produced from a plain
+        // simulator. The daemon-backed lane below is untouched.
+        let usesDemoMode = environment["SPACES_MOBILE_SCREENSHOT_DEMO"] == "1"
 
         let app = XCUIApplication()
-        applyLaunchEnvironment(to: app, configuration: configuration, includePaywallBypass: !showsPaywall)
+        if usesDemoMode {
+            app.launchEnvironment["SPACES_MOBILE_PAYWALL_BYPASS"] = "1"
+            applyCleanSlateLaunchArguments(to: app)
+        } else {
+            let configuration = try ScreenshotUITestConfiguration.load(environment: environment)
+            applyLaunchEnvironment(to: app, configuration: configuration, includePaywallBypass: !showsPaywall)
+        }
         app.launch()
         XCUIDevice.shared.orientation = .portrait
         RunLoop.current.run(until: Date().addingTimeInterval(2))
+
+        if usesDemoMode { XCTAssertTrue(enableDemoMode(in: app, timeout: 20), "Timed out enabling Demo Mode for screenshot staging") }
 
         // The paywall gates the whole app shell, so there is no tab bar to navigate while it is
         // showing: the screenshot is just the paywall itself, held idle below.
@@ -43,6 +54,27 @@ final class SpacesMobileScreenshotUITests: XCTestCase {
 
         let holdSeconds = environment["SPACES_MOBILE_SCREENSHOT_HOLD_SECONDS"].flatMap(Double.init) ?? 45
         RunLoop.current.run(until: Date().addingTimeInterval(max(holdSeconds, 0)))
+    }
+
+    /// Shadows the persistence keys through the argument domain so a demo-mode screenshot launch
+    /// starts not-paired and Demo-off regardless of prior simulator state, matching
+    /// `SpacesMobileDemoModeUITests`. The non-Data string "unset" makes `UserDefaults.data(forKey:)`
+    /// return nil; the value must not start with "-" or `NSArgumentDomain` parses it as the next
+    /// option key and the shadow silently never registers.
+    private func applyCleanSlateLaunchArguments(to app: XCUIApplication) {
+        app.launchArguments += [
+            "-spaces.mobile.demo-mode-enabled", "0", "-spaces.mobile.paired-devices", "unset", "-spaces.mobile.connection-settings", "unset",
+        ]
+    }
+
+    /// Taps Try Demo Mode from the unpaired Spaces empty state and waits for the Demo Mode banner.
+    private func enableDemoMode(in app: XCUIApplication, timeout: TimeInterval) -> Bool {
+        let tryDemo = app.buttons["spaces.tryDemoMode"]
+        guard tryDemo.waitForExistence(timeout: timeout) else { return false }
+        tryDemo.tap()
+        // Match the banner across the whole hierarchy: SwiftUI may surface the identified container as
+        // an `other` element or fold it, so a type-specific query is unreliable.
+        return app.descendants(matching: .any)["demo.banner"].waitForExistence(timeout: timeout)
     }
 
     private func applyLaunchEnvironment(to app: XCUIApplication, configuration: ScreenshotUITestConfiguration, includePaywallBypass: Bool) {

@@ -110,7 +110,7 @@ export const docsPageLinks: DocsPageLink[] = [
     href: "/docs/ios",
     title: "iOS App",
     summary:
-      "Pair the Spaces iOS app directly with a Mac or Linux device — no desktop app in between — to browse live terminal sessions, watch coding agents, run workspace processes, open browser sessions in an in-app web view, and create workspaces from your phone.",
+      "Pair the Spaces iOS app directly with a Mac or Linux device — no desktop app in between — to browse live terminal sessions, watch coding agents, run workspace processes, open browser sessions in an in-app web view, and create workspaces from your phone, or tour the app with sample data in Demo Mode before you pair.",
   },
 ];
 

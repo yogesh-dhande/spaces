@@ -42,6 +42,12 @@ final class DaemonLivenessState: @unchecked Sendable {
     /// HUP-immune child plus a `.running` row that lingers until the next daemon start's stale-session
     /// repair). Monotonic: the process exits, so it is never cleared.
     private var shutdownInProgress = false
+    /// The host string the Device API is configured to bind on (typically the wildcard address),
+    /// cached once at startup (see `startSharedServices()`). This setting doesn't change during a
+    /// daemon's lifetime, unlike the *live addresses* it resolves to (e.g. Tailscale connecting or
+    /// disconnecting), which is why only the setting is cached — `currentDeviceAPIAddresses()` still
+    /// recomputes the live interface walk fresh on every call.
+    private var deviceAPIBoundHost: String?
 
     func storeSessionCount(_ value: Int) {
         lock.lock()
@@ -67,10 +73,35 @@ final class DaemonLivenessState: @unchecked Sendable {
         shutdownInProgress = value
     }
 
+    func storeDeviceAPIBoundHost(_ value: String?) {
+        lock.lock()
+        defer { lock.unlock() }
+        deviceAPIBoundHost = value
+    }
+
     func snapshot() -> (sessionCount: Int, certificateFingerprint: String?, handoffInProgress: Bool, shutdownInProgress: Bool) {
         lock.lock()
         defer { lock.unlock() }
         return (sessionCount, certificateFingerprint, handoffInProgress, shutdownInProgress)
+    }
+
+    /// The addresses this daemon is currently reachable at, in the same order a pairing link would
+    /// advertise them (LAN first, then Tailscale) — see `TerminalServiceDaemonStatus.deviceAPIAddresses`.
+    /// Computed fresh on every call: the interface walk is a cheap syscall with no disk or network I/O,
+    /// so recomputing it here (rather than caching it alongside `deviceAPIBoundHost`) is what lets this
+    /// off-actor fast path reflect a network change (e.g. Tailscale connecting) without ever touching
+    /// the main actor. Returns `[]` — "reported nothing" — before the bound host is learned (a ping that
+    /// races daemon startup) or when spacesdeviceapi is unavailable on this platform.
+    func currentDeviceAPIAddresses() -> [String] {
+        lock.lock()
+        let boundHost = deviceAPIBoundHost
+        lock.unlock()
+        #if canImport(spacesdeviceapi)
+            guard let boundHost else { return [] }
+            return SpacesDeviceAPINetworkInterfaces.pairingLinkHosts(boundHost: boundHost)
+        #else
+            return []
+        #endif
     }
 
     /// Admission decision shared by every session-CREATING gate: the off-actor early-out in
@@ -106,7 +137,8 @@ final class DaemonLivenessState: @unchecked Sendable {
         }
         let status = TerminalServiceDaemonStatus(
             version: AppVersion.current, installedVersion: InstalledSpacesVersion.current(), certificateFingerprint: snapshot.certificateFingerprint,
-            activeSessionCount: snapshot.sessionCount, timeZoneIdentifier: TerminalServiceDaemonStatus.currentTimeZoneIdentifier)
+            activeSessionCount: snapshot.sessionCount, timeZoneIdentifier: TerminalServiceDaemonStatus.currentTimeZoneIdentifier,
+            deviceAPIAddresses: currentDeviceAPIAddresses())
         return TerminalServiceResponse(ok: true, message: "pong", servicePID: getpid(), daemonStatus: status)
     }
 }
@@ -270,6 +302,13 @@ enum SpacesDaemonErrorClassification {
     }
     private var terminalLinkTransferAuthorizations: [String: TerminalLinkTransferAuthorization] = [:]
     private var lifecycleTimer: Timer?
+    /// Throttles the ended-session garbage-collection sweep to a coarse cadence: the lifecycle timer fires
+    /// every second for attachment reaping, but collecting removed sessions scans every known session and
+    /// need not run that often. `nil` until the first sweep.
+    /// Engine-isolated: touched only from the garbage-collection sweep (which reads `sessionCores`) and
+    /// seeded on the engine actor at lifecycle-timer start.
+    @TerminalEngineActor private var lastSessionGarbageCollectionAt: Date?
+    private nonisolated static let sessionGarbageCollectionInterval: TimeInterval = 600
     #if os(Linux)
         private let databaseChangeSignalQueue = DispatchQueue(label: "spaces.database-change.signal")
     #endif
@@ -373,6 +412,14 @@ enum SpacesDaemonErrorClassification {
         // Seed the off-actor liveness snapshot before the socket accepts connections so the very first
         // `.ping` already carries this daemon's identity. Runs on both fresh start and handoff resume.
         livenessState.storeFingerprint(daemonIdentityFingerprint)
+        // Seed the Device API's configured bind host so `livenessState.currentDeviceAPIAddresses()` can
+        // report real addresses from its very first call. Read directly from the settings store (not
+        // through `deviceAPISupervisor`, which is main-actor-isolated) because this value must be usable
+        // from the liveness ping's off-actor fast path; it does not require the Device API server to be
+        // running yet, only its configured host.
+        #if canImport(spacesdeviceapi)
+            livenessState.storeDeviceAPIBoundHost((try? SpacesDeviceAPISettingsStore().loadOrCreate())?.host)
+        #endif
         // The session count is already mirrored into `livenessState` by `sessionCores.didSet` on every
         // mutation (including the handoff-resume inserts that ran before this), so there is nothing to seed
         // here — and reading `sessionCores` from this main-actor context would be an illegal sync wait on
@@ -788,7 +835,11 @@ enum SpacesDaemonErrorClassification {
             version: AppVersion.current, installedVersion: InstalledSpacesVersion.current(), certificateFingerprint: daemonIdentityFingerprint,
             // Reads the off-actor liveness mirror rather than the now engine-isolated `sessionCores`
             // directly, so this main-actor status read never needs to hop onto the engine actor.
-            activeSessionCount: livenessState.snapshot().sessionCount, timeZoneIdentifier: TerminalServiceDaemonStatus.currentTimeZoneIdentifier)
+            activeSessionCount: livenessState.snapshot().sessionCount,
+            timeZoneIdentifier: TerminalServiceDaemonStatus.currentTimeZoneIdentifier,
+            // Same off-actor helper the liveness ping uses, so both status paths agree on this daemon's
+            // addresses without duplicating the bound-host cache.
+            deviceAPIAddresses: livenessState.currentDeviceAPIAddresses())
     }
 
     // Exec-in-place update trigger: after a short grace so the already-sent RPC response can flush,
@@ -2538,10 +2589,19 @@ enum SpacesDaemonErrorClassification {
 
     private func startLifecycleTimer() {
         lifecycleTimer?.invalidate()
+        // Defer the first garbage-collection sweep by a full interval so clients re-attaching and handoff
+        // resume completing after a daemon (re)start are never mistaken for a removed session. The deferral
+        // marker is engine-isolated (it belongs to the GC path), so seed it on the engine actor; this hop
+        // completes well before the first 1s timer tick reaches the same actor.
+        Task { @TerminalEngineActor [weak self] in self?.lastSessionGarbageCollectionAt = Date() }
         lifecycleTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            // `reapInactiveSessions` is engine-isolated (Step 1), so this hops onto the engine actor
-            // directly rather than the main actor the timer callback fires on.
-            Task { @TerminalEngineActor [weak self] in self?.reapInactiveSessions() }
+            // `reapInactiveSessions` and `garbageCollectRemovedSessionsIfDue` are both engine-isolated
+            // (they read `sessionCores`), so this hops onto the engine actor directly rather than the main
+            // actor the timer callback fires on.
+            Task { @TerminalEngineActor [weak self] in
+                self?.reapInactiveSessions()
+                self?.garbageCollectRemovedSessionsIfDue()
+            }
         }
         if let lifecycleTimer { RunLoop.main.add(lifecycleTimer, forMode: .common) }
     }
@@ -2554,6 +2614,49 @@ enum SpacesDaemonErrorClassification {
             }
             _ = terminateSession(id: sessionID)
         }
+    }
+
+    /// Reclaims the directory, transcript, and rows of sessions the product no longer shows, on a coarse
+    /// cadence. The daemon is the sole owner of each session's on-disk footprint and the only party that
+    /// can see authoritative attachment state across every client, so this GC lives here rather than in a
+    /// client. `TerminalSessionGarbageCollector` enforces the safety gates (ended, unattached, unreferenced
+    /// / age-expired / over-budget); the in-memory `sessionCores` are handed in so a live session the daemon
+    /// owns is never collected. Age-expiry releases a long-ended session's product rows through the
+    /// orchestrator's `releaseEndedTerminalSessionReferences` (agent rows via the finalization chokepoint),
+    /// so the orchestrator is built lazily: the common sweep — nothing expired — never constructs it.
+    /// The orphan sweep runs after collection so its "known" set reflects the rows that survived it.
+    /// Engine-isolated because it reads `sessionCores`, which now lives on `TerminalEngineActor`.
+    @TerminalEngineActor private func garbageCollectRemovedSessionsIfDue(now: Date = Date()) {
+        if let lastSessionGarbageCollectionAt, now.timeIntervalSince(lastSessionGarbageCollectionAt) < Self.sessionGarbageCollectionInterval {
+            return
+        }
+        lastSessionGarbageCollectionAt = now
+        do {
+            let store = try SQLiteStore(path: try DatabaseLocator.defaultPath())
+            var expiryOrchestrator: WorkspaceOrchestrator?
+            try TerminalSessionGarbageCollector.collectRemovedSessions(
+                activeSessionIDs: Set(sessionCores.keys), isReferencedByProduct: { try store.terminalSessionIsReferencedByProduct($0) },
+                releaseExpiredReferences: { [self] sessionID in
+                    let orchestrator = try expiryOrchestrator ?? makeProfileOrchestrator()
+                    expiryOrchestrator = orchestrator
+                    try orchestrator.releaseEndedTerminalSessionReferences(sessionID: sessionID)
+                }, now: now,
+                onPurgeFailure: { sessionID, error in
+                    writeStandardError("spaces: terminal session garbage collection failed to purge \(sessionID), will retry next sweep: \(error)\n")
+                },
+                onBudgetExceeded: { totalBytes in
+                    writeStandardError(
+                        "spaces: ended terminal sessions hold \(totalBytes) bytes, over the \(TerminalSessionRetentionPolicy.standard.endedTranscriptByteBudget)-byte budget with no evictable session; will retry next sweep\n"
+                    )
+                })
+            let knownSessionIDs = Set(try TerminalSessionPersistence.listKnownSessions().map(\.sessionID))
+            try TerminalSessionOrphanSweep.sweep(
+                knownSessionIDs: knownSessionIDs, activeSessionIDs: Set(sessionCores.keys),
+                gracePeriod: TerminalSessionRetentionPolicy.standard.orphanGracePeriod, now: now,
+                onFailure: { path, error in
+                    writeStandardError("spaces: terminal session orphan sweep failed to remove \(path), will retry next sweep: \(error)\n")
+                })
+        } catch { writeStandardError("spaces: terminal session garbage collection failed: \(error)\n") }
     }
 
     /// Single startup repair chokepoint for durable runtime rows a predecessor daemon image (or a

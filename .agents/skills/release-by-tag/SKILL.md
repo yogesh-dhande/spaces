@@ -7,14 +7,14 @@ description: Prepare and publish a Spaces release through the repository's tag-t
 
 ## Inspect release state
 
-1. Read `AGENTS.md`, `docs/dev.md`, `.github/workflows/release.yml`, and the Version Metadata Rules before acting.
+1. Read `AGENTS.md`, `docs/dev.md`, `.github/workflows/release.yml` (a thin caller of the shared `.github/workflows/release-build.yml`), and the Version Metadata Rules before acting.
 2. Confirm `gh` authentication and inspect the current branch, worktree, remote default branch, open PRs, existing releases, and local and remote tags.
 3. Require the release commit to be on `main`, with a clean worktree and all required GitHub checks passing. Do not tag an unmerged branch or bypass a failed check.
 4. Treat `apps/macos/AppVersion.plist` as the authored version source. Never hand-edit generated version files.
 
 ## Suggest and confirm a tag
 
-1. Compare the version in `apps/macos/AppVersion.plist`, the highest published Spaces version, and the user-visible changes since the preceding release.
+1. Compare the version in `apps/macos/AppVersion.plist`, the highest published stable Spaces version, and the user-visible changes since the preceding release. The nightly channel publishes prereleases tagged with a fourth numeric component (`v0.5.1.202607250900`); ignore them when picking a stable version, and never tag a stable release in that form — `release.yml` excludes it.
 2. Suggest one SemVer tag in `vMAJOR.MINOR.PATCH` form. Explain briefly whether the scope supports a patch, minor, or major increment.
 3. Show the exact tag and commit SHA that would be tagged.
 4. Ask the user for explicit confirmation before creating or pushing the tag. Do not treat a general request to make a release as confirmation of the suggested tag.
@@ -40,7 +40,7 @@ Present the complete proposed notes alongside the tag confirmation. Apply the ap
 2. Create an annotated tag and push only that tag. The `Release` workflow is triggered by tags matching `v*`.
 3. Monitor every job in the resulting workflow until completion. Do not report success while jobs are queued, running, skipped because a dependency failed, or failed.
 4. If the workflow succeeds, apply the approved user-facing notes and read the release back.
-5. Verify that the release has the expected macOS and both Linux architecture assets, is marked appropriately as latest/prerelease, and that the published appcast serves the released version.
+5. Verify that the release has the expected macOS assets (DMG, Sparkle zip, `appcast.xml`) and both Linux architecture assets, is marked latest, and that the published appcast serves the released version. The website build stages its copy of the feed from `releases/latest/download`, so a release missing `appcast.xml` or the Sparkle zip breaks the next website deploy.
 6. If any step fails, preserve the tag and report the exact failure. Do not move or retry the tag workflow through destructive tag operations without explicit user approval.
 
 ## Existing failed releases

@@ -29,7 +29,7 @@ final class AgentNotificationEngineTests: XCTestCase {
 
     func testIdleSubscriberReceivesImmediateInjectionInExactFormat() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         let recorder = DeliveryRecorder()
         let engine = makeEngine(store: store, recorder: recorder, kind: "claude")
@@ -60,7 +60,7 @@ final class AgentNotificationEngineTests: XCTestCase {
     /// falls back to `coding agent`, and the label falls back to that same value when the agent has none.
     func testImmediateInjectionFallsBackToCodingAgentKindWhenUnresolved() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         let recorder = DeliveryRecorder()
         let engine = makeEngine(store: store, recorder: recorder, kind: nil)
@@ -86,7 +86,7 @@ final class AgentNotificationEngineTests: XCTestCase {
 
     func testImmediateInjectionRendersNoteWhenSet() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         let recorder = DeliveryRecorder()
         let engine = makeEngine(store: store, recorder: recorder, kind: "codex")
@@ -119,7 +119,7 @@ final class AgentNotificationEngineTests: XCTestCase {
     /// (branch nil, covered by the other cases) omit the `branch` line.
     func testImmediateInjectionRendersWorkspaceDirPathAndSlashedBranch() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
         let project = makeProjectRecord(dir: dir)
         try store.upsert(project: project)
@@ -155,7 +155,7 @@ final class AgentNotificationEngineTests: XCTestCase {
     /// status transition after an annotate must still render the note in the injected line.
     func testNoteSurvivesStatusTransitionRecordThroughTheLivePath() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         let recorder = DeliveryRecorder()
         let engine = makeEngine(store: store, recorder: recorder, kind: "claude")
@@ -189,7 +189,7 @@ final class AgentNotificationEngineTests: XCTestCase {
     /// `renderBlock` strips them from every free-text field before interpolation.
     func testRenderBlockNeutralizesShellMetacharactersInNoteAndBranch() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
         let project = makeProjectRecord(dir: dir)
         try store.upsert(project: project)
@@ -222,7 +222,7 @@ final class AgentNotificationEngineTests: XCTestCase {
     /// and backslashes never reach a rendered line.
     func testRenderBlockNeutralizesQuotesAndBackslashesInNote() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         let recorder = DeliveryRecorder()
         let engine = makeEngine(store: store, recorder: recorder, kind: "claude")
@@ -253,7 +253,7 @@ final class AgentNotificationEngineTests: XCTestCase {
     /// re-enqueue anything for the exited subscriber.
     func testSubscriberDidExitDropsQueueAndOutgoingEdgesSoLaterTransitionsNeverEnqueue() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         let recorder = DeliveryRecorder()
         let engine = makeEngine(store: store, recorder: recorder, kind: "claude")
@@ -290,7 +290,7 @@ final class AgentNotificationEngineTests: XCTestCase {
 
     func testBusySubscriberQueuesThenFlushesOnIdleInOrderExactlyOnce() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         let recorder = DeliveryRecorder()
         let engine = makeEngine(store: store, recorder: recorder, kind: "claude")
@@ -341,7 +341,7 @@ final class AgentNotificationEngineTests: XCTestCase {
     /// and the idle-time flush share the same rows, and each row is delivered by exactly one path.
     func testPiggybackConsumeRemovesRowSoIdleFlushDoesNotRedeliver() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         let recorder = DeliveryRecorder()
         let engine = makeEngine(store: store, recorder: recorder, kind: "claude")
@@ -368,7 +368,7 @@ final class AgentNotificationEngineTests: XCTestCase {
     /// FK cascade removes the subscription edges with it.
     func testKillAgentSessionDeliversExitedNoticeBeforeRowDeletion() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         let recorder = DeliveryRecorder()
         // `killAgentSession` routes through the stop chokepoint, which builds its engine from the
@@ -397,7 +397,7 @@ final class AgentNotificationEngineTests: XCTestCase {
     /// signal would; neither watch-edge table cascades on the subscriber column, so otherwise they leak.
     func testKillAgentSessionDropsItsOwnOutgoingWatchEdges() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
 
         _ = try orchestrator.registerAgentWindow(
@@ -422,7 +422,7 @@ final class AgentNotificationEngineTests: XCTestCase {
 
     func testBlockedThenDoneWhileBusyCoalescesToSingleDoneLine() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         let engine = makeEngine(store: store, recorder: DeliveryRecorder(), kind: "claude")
 
@@ -452,7 +452,7 @@ final class AgentNotificationEngineTests: XCTestCase {
     /// subscriber never receives stale misinformation, and going idle later delivers nothing.
     func testResumeAfterBlockedWithdrawsHeldBlockedLine() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         let recorder = DeliveryRecorder()
         let engine = makeEngine(store: store, recorder: recorder, kind: "claude")
@@ -476,7 +476,7 @@ final class AgentNotificationEngineTests: XCTestCase {
     /// line is a terminal fact and survives a resume call, while a sibling's blocked line is dropped.
     func testResumeWithdrawsOnlyBlockedLinesHeldDoneLineSurvives() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         let recorder = DeliveryRecorder()
         let engine = makeEngine(store: store, recorder: recorder, kind: "claude")
@@ -514,7 +514,7 @@ final class AgentNotificationEngineTests: XCTestCase {
     /// resume (waiting→spinning in the device listing) withdraws through the same engine entry point.
     func testRemoteResumeWithdrawsHeldBlockedLine() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         let recorder = DeliveryRecorder()
         let engine = makeEngine(store: store, recorder: recorder)
@@ -532,7 +532,7 @@ final class AgentNotificationEngineTests: XCTestCase {
 
     func testExitNotificationSurvivesAgentRowDeletionAndDroppedEdge() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         let recorder = DeliveryRecorder()
         let engine = makeEngine(store: store, recorder: recorder, kind: "codex")
@@ -566,7 +566,7 @@ final class AgentNotificationEngineTests: XCTestCase {
 
     func testNoAgentRowSubscriberIsTreatedAsIdle() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         let recorder = DeliveryRecorder()
         let engine = makeEngine(store: store, recorder: recorder)
@@ -585,7 +585,7 @@ final class AgentNotificationEngineTests: XCTestCase {
     /// inits in that terminal.
     func testExitedSubscriberQueuesRatherThanDelivers() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         let recorder = DeliveryRecorder()
         let engine = makeEngine(store: store, recorder: recorder)
@@ -608,7 +608,7 @@ final class AgentNotificationEngineTests: XCTestCase {
     /// is dropped in the same call, exactly as `subscriberDidExit` would do on an explicit exit signal.
     func testFailedImmediateDeliveryTearsDownSubscriberWideIncludingUnrelatedRemoteEdge() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         let recorder = DeliveryRecorder()
         recorder.failingSessionIDs = ["dead-sub"]
@@ -635,7 +635,7 @@ final class AgentNotificationEngineTests: XCTestCase {
     /// delivery to a subscriber watching a paired-device agent tears down that subscriber's local edges too.
     func testFailedRemoteImmediateDeliveryTearsDownSubscriberWideIncludingLocalEdge() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         let recorder = DeliveryRecorder()
         recorder.failingSessionIDs = ["dead-orch"]
@@ -664,7 +664,7 @@ final class AgentNotificationEngineTests: XCTestCase {
     /// subscriber-wide teardown for one dead subscriber runs entirely within its own loop iteration.
     func testOneSubscriberFailingDeliveryDoesNotAffectAnotherSubscriberOfTheSameChild() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         let recorder = DeliveryRecorder()
         recorder.failingSessionIDs = ["dead-sub"]
@@ -693,7 +693,7 @@ final class AgentNotificationEngineTests: XCTestCase {
     /// attempting the remaining rows against a subscriber that is already known to be gone.
     func testFailedQueueFlushTearsDownSubscriberWideAndPurgesRemainingPendingRows() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         let recorder = DeliveryRecorder()
         recorder.failingSessionIDs = ["dead-sub"]
@@ -724,7 +724,7 @@ final class AgentNotificationEngineTests: XCTestCase {
 
     func testSelfSubscriptionIsRejected() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         let agent = try orchestrator.registerAgentWindow(workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "term-A", status: .idle)
 
@@ -733,7 +733,7 @@ final class AgentNotificationEngineTests: XCTestCase {
 
     func testCycleClosingSubscriptionIsRejected() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         let agentA = try orchestrator.registerAgentWindow(workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "term-A", status: .idle)
         let agentB = try orchestrator.registerAgentWindow(workspaceID: workspace.id, provider: .spaces, terminalTrackingID: "term-B", status: .idle)
@@ -752,7 +752,7 @@ final class AgentNotificationEngineTests: XCTestCase {
     /// it once a signal lands.
     func testSubscribeToNeverSignaledDetectionRowIsRejectedUntilSignal() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         let sessionID = "detected-session"
         let detectionID = orchestrator.adHocDetectedAgentID(sessionID: sessionID)
@@ -852,7 +852,7 @@ final class AgentNotificationEngineTests: XCTestCase {
 
     func testBusySubscriberQueuesLocalAndRemoteThenFlushesBothInOrder() throws {
         let store = try makeTemporaryStore()
-        let orchestrator = WorkspaceOrchestrator(store: store)
+        let orchestrator = makeTestOrchestrator(store: store)
         let (_, workspace) = try makeProjectAndWorkspace(store: store)
         let recorder = DeliveryRecorder()
         let engine = makeEngine(store: store, recorder: recorder, kind: "claude")
