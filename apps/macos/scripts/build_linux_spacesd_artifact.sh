@@ -331,14 +331,21 @@ verify_artifact_cpu_baseline() {
     local binary
     for binary in "$bin_dir/spacesd-bin" "$bin_dir/spaces-bin" "$bin_dir"/libghostty-vt.so.*; do
         [[ -f "$binary" && ! -L "$binary" ]] || continue
-        local offenders
-        # objdump prints "<address>:\t<raw bytes>\t<mnemonic>"; requiring the mnemonic field
-        # skips the continuation lines that wrap a long instruction's remaining bytes, whose
-        # bytes could otherwise start with 62 and read as an EVEX prefix.
-        offenders="$(objdump -d "$binary" | awk -F'\t' 'NF >= 3 && $2 ~ /^62 / { print }')"
+        local disassembly decoded offenders
+        disassembly="$(objdump -d "$binary")"
+        # GNU objdump prints "<address>:\t<raw bytes>\t<mnemonic>". Requiring the mnemonic
+        # field skips the continuation lines that wrap a long instruction's remaining bytes,
+        # whose bytes could otherwise start with 62 and read as an EVEX prefix.
+        decoded="$(echo "$disassembly" | awk -F'\t' 'NF >= 3 && $2 ~ /^[0-9a-f][0-9a-f] / { n++ } END { print n + 0 }')"
+        # Other disassemblers lay the columns out differently -- llvm-objdump, for one, puts
+        # the raw bytes on the address's own field, so this parse would match nothing and
+        # report a clean binary no matter what it holds. A scan that cannot fail is worse
+        # than no scan, so an unparseable disassembly is a build failure rather than a pass.
+        [[ "$decoded" -gt 0 ]] || die "could not read instructions out of $(basename "$binary"); $(objdump --version | head -n 1) does not lay out disassembly the way this check parses it"
+        offenders="$(echo "$disassembly" | awk -F'\t' 'NF >= 3 && $2 ~ /^62 / { print }')"
         if [[ -n "$offenders" ]]; then
             echo "$offenders" | head -n 5 >&2
-            die "$(basename "$binary") carries AVX-512 code ($(echo "$offenders" | wc -l | tr -d ' ') EVEX-encoded instructions); it would SIGILL on x86-64 devices without AVX-512"
+            die "$(basename "$binary") carries AVX-512 code and would SIGILL on x86-64 devices without AVX-512 (EVEX-encoded instructions: $(echo "$offenders" | wc -l | tr -d ' '))"
         fi
     done
     echo "==> Verified packaged x86_64 binaries carry no AVX-512 instructions"
