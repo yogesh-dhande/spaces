@@ -338,7 +338,7 @@ apps/macos/Tests/e2e.sh terminal --scenario daemon-exec-handoff
 
 `e2e_daemon_exec_handoff.sh` launches a directly-supervised `spacesd` behind a `bin/spacesd` symlink, starts a long-lived shell session printing a marker then a steady tick output, flips the symlink to a second on-disk copy of the same build, and pokes the daemon with `spaces daemon apply-update`. It proves the daemon pid is unchanged (exec, not a supervisor respawn), the session's child pid survives, the expected `handoff_resume generation=N` line lands in the daemon log, the pre-handoff scrollback marker is still in `terminal tail`, live I/O keeps flowing (a freshly sent line round-trips), and no runtime state lands `.failed`. It repeats the flip-and-poke a second time to also cover a double handoff (`generation=2`) before a normal idle shutdown.
 
-For the coding-agent orchestration surface (`spaces agent` list/status/annotate/subscribe/interrupt/kill and notification injection):
+For the coding-agent orchestration surface (`spaces agent` list/status/annotate/subscribe/kill and notification injection):
 
 ```bash
 apps/macos/Tests/e2e.sh terminal --scenario agent-orchestration
@@ -346,7 +346,7 @@ apps/macos/Tests/e2e.sh terminal --scenario agent-orchestration
 apps/macos/Tests/e2e_agent_orchestration.sh
 ```
 
-`e2e_agent_orchestration.sh` is a daemon+CLI test (no app, desktop control, or hotkeys) that binds to the current worktree profile from `spacese2e profile-show --shell`, so it only ever drives this checkout's daemon and never another worktree's. Its always-runnable Part A opens two ordinary shell sessions and drives the lifecycle with explicit `spaces agent signal` events (spawn gates on installed hooks, so the core flow is exercised without real agents): it asserts that `init` produces a ready agent row, an annotation survives a later `working` signal, a `subscribe` + `blocked` injects the `[spaces] … is blocked … open: spaces://terminal/<id>` line into the subscriber's tail, a `done` for a busy subscriber is queued and then flushed when the subscriber goes idle, a cycle-closing subscribe is rejected, `interrupt` succeeds, `kill` removes the row, and a nonexistent session id is a loud error. Part A cleans up the sessions it creates and leaves the shared daemon running.
+`e2e_agent_orchestration.sh` is a daemon+CLI test (no app, desktop control, or hotkeys) that binds to the current worktree profile from `spacese2e profile-show --shell`, so it only ever drives this checkout's daemon and never another worktree's. Its always-runnable Part A opens two ordinary shell sessions and drives the lifecycle with explicit `spaces agent signal` events (spawn gates on installed hooks, so the core flow is exercised without real agents): it asserts that `init` produces a ready agent row, an annotation survives a later `working` signal, a `subscribe` + `blocked` injects the `[spaces] … is blocked … open: spaces://terminal/<id>` line into the subscriber's tail, a `done` for a busy subscriber is queued and then flushed when the subscriber goes idle, a cycle-closing subscribe is rejected, `kill` removes the row, and a nonexistent session id is a loud error. Part A cleans up the sessions it creates and leaves the shared daemon running.
 
 Set `SPACES_E2E_AGENT_MATRIX=1` to also run the opt-in provider matrix (Part B), which is skipped by default:
 
@@ -354,7 +354,7 @@ Set `SPACES_E2E_AGENT_MATRIX=1` to also run the opt-in provider matrix (Part B),
 SPACES_E2E_AGENT_MATRIX=1 apps/macos/Tests/e2e_agent_orchestration.sh
 ```
 
-For each provider (`claude`, `codex`, `opencode`) whose binary is on `PATH` and whose Spaces hooks are current, Part B spawns the agent, records a `provider=… first_signal_observed=… ready_ms=… sequence=…` report line from `agent status --json` polling, submits a trivial prompt (text then carriage return), best-effort interrupts a working phase, and kills the session. It installs nothing: a provider whose binary is missing or whose hooks are not current is reported as `SKIP` (the loud spawn hook-gate error), leaving the user's real agent configs untouched. Skips do not fail the run; any attempted provider that fails makes the script exit non-zero.
+For each provider (`claude`, `codex`, `opencode`) whose binary is on `PATH` and whose Spaces hooks are current, Part B spawns the agent, records a `provider=… first_signal_observed=… ready_ms=… sequence=…` report line from `agent status --json` polling, submits a trivial prompt (text then carriage return), and kills the session. It installs nothing: a provider whose binary is missing or whose hooks are not current is reported as `SKIP` (the loud spawn hook-gate error), leaving the user's real agent configs untouched. Skips do not fail the run; any attempted provider that fails makes the script exit non-zero.
 
 The Spaces terminal `tail` path also depends on the local `libghostty-vt` artifacts. Set them up before building or profiling terminal changes:
 
