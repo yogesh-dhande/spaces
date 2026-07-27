@@ -151,8 +151,8 @@ final class SpacesCommandTests: XCTestCase {
         XCTAssertEqual(
             subcommands,
             [
-                "AgentSignalCommand", "AgentListCommand", "AgentStatusCommand", "AgentAnnotateCommand", "AgentSpawnCommand", "AgentInterruptCommand",
-                "AgentKillCommand", "AgentSubscribeCommand", "AgentUnsubscribeCommand",
+                "AgentSignalCommand", "AgentListCommand", "AgentStatusCommand", "AgentAnnotateCommand", "AgentSpawnCommand", "AgentKillCommand",
+                "AgentSubscribeCommand", "AgentUnsubscribeCommand",
             ])
         XCTAssertThrowsError(try AgentCommand.parseAsRoot(["hooks", "status"]))
     }
@@ -431,11 +431,14 @@ final class SpacesCommandTests: XCTestCase {
             [
                 "spaces_project_list", "spaces_workspace_list", "spaces_workspace_create", "spaces_workspace_start", "spaces_workspace_restart",
                 "spaces_terminal_list", "spaces_terminal_tail", "spaces_terminal_send", "spaces_agent_list", "spaces_agent_status",
-                "spaces_agent_annotate", "spaces_agent_spawn", "spaces_agent_interrupt", "spaces_agent_kill", "spaces_agent_subscribe",
-                "spaces_agent_unsubscribe", "spaces_device_list",
+                "spaces_agent_annotate", "spaces_agent_spawn", "spaces_agent_kill", "spaces_agent_subscribe", "spaces_agent_unsubscribe",
+                "spaces_device_list",
             ])
         // `agent signal` is CLI-only forever: an orchestrating agent may read peers' status but must not forge it.
         XCTAssertFalse(names.contains("spaces_agent_signal"))
+        // Sending a key is a keystroke, not a lifecycle event. There is no agent-scoped tool that claims to
+        // interrupt a turn: an orchestrator sends ESC (or any other key) with `spaces_terminal_send`.
+        XCTAssertFalse(names.contains("spaces_agent_interrupt"))
 
         let createTool = try XCTUnwrap(tools.first { ($0["name"] as? String) == "spaces_workspace_create" })
         let schema = try XCTUnwrap(createTool["inputSchema"] as? [String: Any])
@@ -486,8 +489,8 @@ final class SpacesCommandTests: XCTestCase {
         let tools = try XCTUnwrap((toolsList["result"] as? [String: Any])?["tools"] as? [[String: Any]])
         let names = Set(tools.compactMap { $0["name"] as? String })
         let agentTools = [
-            "spaces_agent_list", "spaces_agent_status", "spaces_agent_annotate", "spaces_agent_spawn", "spaces_agent_interrupt", "spaces_agent_kill",
-            "spaces_agent_subscribe", "spaces_agent_unsubscribe",
+            "spaces_agent_list", "spaces_agent_status", "spaces_agent_annotate", "spaces_agent_spawn", "spaces_agent_kill", "spaces_agent_subscribe",
+            "spaces_agent_unsubscribe",
         ]
         XCTAssertTrue(agentTools.allSatisfy(names.contains), "expected all agent tools, got \(names.sorted())")
     }

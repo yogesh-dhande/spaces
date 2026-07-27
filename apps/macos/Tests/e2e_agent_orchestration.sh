@@ -11,7 +11,7 @@
 # `spaces agent signal` events against two ordinary shell sessions (orchestrator O and child C). It does
 # not use `agent spawn` — spawn readiness is foreground detection of a real coding agent, which is not
 # hermetic, and these flows (list/annotate/status, subscribe + notification injection, busy-subscriber
-# queue/flush, cycle rejection, interrupt, kill) need deterministic signal control that real agents
+# queue/flush, cycle rejection, kill) need deterministic signal control that real agents
 # cannot give. Spawn's detection readiness is covered by unit tests and the opt-in Part B matrix.
 #
 # Part B (opt-in, real coding agents; SPACES_E2E_AGENT_MATRIX=1): for each provider whose binary is on
@@ -238,20 +238,18 @@ part_a() {
   printf '%s' "$cycle_err" | grep -Fqi "cycle" || fail "cycle rejection lacked a cycle message: $cycle_err"
   pass "step 4: cycle-closing subscribe was rejected"
 
-  # Step 5: interrupt succeeds; kill notifies watchers and removes the row; a bogus session id is a
-  # loud error. C is sitting `.done` (turn-complete, still live) from step 3 — the most common kill
-  # scenario — so the kill must still deliver O exactly one exited notice: `.done` is a live resting
-  # state, not a finalized one.
-  "$SPACES_CLI" agent interrupt "$C" >/dev/null || fail "interrupt C failed"
-  pass "step 5a: interrupt C succeeded"
+  # Step 5: kill notifies watchers and removes the row; a bogus session id is a loud error. C is
+  # sitting `.done` (turn-complete, still live) from step 3 — the most common kill scenario — so the
+  # kill must still deliver O exactly one exited notice: `.done` is a live resting state, not a
+  # finalized one.
   "$SPACES_CLI" agent kill "$C" >/dev/null || fail "kill C failed"
   wait_for_notification "$O" exited "$C" || fail "exited notification never reached O after killing turn-complete C"
-  pass "step 5b-exit: killing turn-complete (.done) C delivered the exited notice to O"
+  pass "step 5a-exit: killing turn-complete (.done) C delivered the exited notice to O"
   sleep 1
   local still_present
   still_present="$(json_field "$("$SPACES_CLI" agent list --json)" '"yes" if any(r.get("terminalSessionID")=="'"$C"'" for r in d) else "no"')"
   [[ "$still_present" == "no" ]] || fail "C still present in agent list after kill"
-  pass "step 5b: kill C removed its row from agent list"
+  pass "step 5a: kill C removed its row from agent list"
   # A session that never existed has neither an agent row nor an on-disk terminal record, so it hits
   # the loud "no agent session" error. (Re-killing C itself is not a loud error: the killed session's
   # on-disk record lingers, so a second kill re-terminates it and returns success -- see the report.)
@@ -260,7 +258,7 @@ part_a() {
     fail "killing a nonexistent session unexpectedly succeeded: $bogus_err"
   fi
   printf '%s' "$bogus_err" | grep -Fqi "no agent session" || fail "bogus kill lacked the expected error: $bogus_err"
-  pass "step 5c: killing a nonexistent session errored loudly"
+  pass "step 5b: killing a nonexistent session errored loudly"
 
   printf '=== Part A passed ===\n'
 }
@@ -309,12 +307,11 @@ matrix_provider() {
   "$SPACES_CLI" terminal send text "$child" 'reply with exactly: pong' --submit >/dev/null 2>&1 || true
 
   # Poll the hook status sequence (distinct consecutive statuses), the first-signal marker (lastSignalAt
-  # becomes set on the agent's first hook signal), best-effort interrupt once during a working phase, and
-  # watch the tail for the reply. Signals enrich this record but are not required — spawn already
-  # unblocked on detection alone.
+  # becomes set on the agent's first hook signal), and watch the tail for the reply. Signals enrich this
+  # record but are not required — spawn already unblocked on detection alone.
   local sequence="" seq_start last=""
   seq_start="$(now_ms)"
-  local interrupted=0 saw_reply=0 first_signal=no
+  local saw_reply=0 first_signal=no
   while true; do
     local status_json st
     status_json="$("$SPACES_CLI" agent status --session "$child" --json 2>/dev/null || echo '{}')"
@@ -325,11 +322,6 @@ matrix_provider() {
     if [[ "$st" != "$last" && "$st" != "?" ]]; then
       sequence="${sequence:+$sequence,}$st"
       last="$st"
-    fi
-    # Best-effort interrupt during a working phase; only attempt once.
-    if [[ "$st" == "spinning" && "$interrupted" == "0" ]]; then
-      "$SPACES_CLI" agent interrupt "$child" >/dev/null 2>&1 || true
-      interrupted=1
     fi
     if "$SPACES_CLI" terminal tail "$child" --lines 120 2>/dev/null | grep -Fqi "pong"; then
       saw_reply=1
@@ -343,8 +335,8 @@ matrix_provider() {
     sleep 0.5
   done
 
-  printf 'provider=%s detected=%s spawn_ms=%s first_signal=%s signal_sequence=%s saw_reply=%s interrupted=%s\n' \
-    "$binary" "$detected" "$spawn_ms" "$first_signal" "${sequence:-none}" "$saw_reply" "$interrupted"
+  printf 'provider=%s detected=%s spawn_ms=%s first_signal=%s signal_sequence=%s saw_reply=%s\n' \
+    "$binary" "$detected" "$spawn_ms" "$first_signal" "${sequence:-none}" "$saw_reply"
 
   "$SPACES_CLI" agent kill "$child" >/dev/null 2>&1 || true
   sleep 1
