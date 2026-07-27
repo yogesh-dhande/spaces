@@ -20,6 +20,25 @@ verify_stall_seconds="${SPACES_VERIFY_STALL_SECONDS:-600}"
 # handle_interrupt() can tear it down. Empty until that lane is launched.
 ios_lane_pid=""
 
+# Prints the closing report: which lanes this run executed, with their results, and what no lane here
+# covers. A pass otherwise reads as "everything is checked", which is how a green local run coexists
+# with a CI lane that rejects the same commit. Printed on failure as well, so a failing run still
+# says how wide its coverage was.
+print_lane_summary() {
+  local coverage_result="$1"
+  local ios_result="$2"
+
+  printf '\n'
+  printf '========================================================================\n'
+  printf 'verify.sh lane summary\n'
+  printf '  macOS build, lint, unit tests   RAN   %s\n' "$coverage_result"
+  printf '  iOS unit tests                  RAN   %s\n' "$ios_result"
+  printf 'Not covered by any verify.sh lane:\n'
+  printf '  the desktop, mobile, and remote-daemon E2E suites\n'
+  printf '  the Linux daemon unit lane and the Linux artifact smoke test (CI only)\n'
+  printf '========================================================================\n'
+}
+
 run_verify_steps() {
   cd "$root"
 
@@ -53,6 +72,12 @@ run_verify_steps() {
   else
     echo "iOS unit test lane: FAILED (exit $ios_status)"
   fi
+
+  local coverage_result="PASSED"
+  [ "$coverage_status" -eq 0 ] || coverage_result="FAILED (exit $coverage_status)"
+  local ios_result="PASSED"
+  [ "$ios_status" -eq 0 ] || ios_result="FAILED (exit $ios_status)"
+  print_lane_summary "$coverage_result" "$ios_result"
 
   if [ "$coverage_status" -ne 0 ]; then
     exit "$coverage_status"
