@@ -223,7 +223,7 @@ The comparison writes `remote-terminal-latency-compare-summary.json` with Mac- a
 
 Remote Device API runs cache the Linux daemon archive under `apps/macos/.build/linux-e2e-cache/artifacts/` using a source fingerprint, skip re-upload when the remote archive checksum already matches, and reuse the installed remote daemon when the artifact checksum and Device API port marker match and the daemon is healthy.
 
-Linux daemon-side unit suites (the `#if os(Linux)` tests in `spacesterminalcoreTests` and `spacesterminalghosttyTests`) run inside Docker via `apps/macos/scripts/run_linux_tests.sh`:
+Linux daemon-side unit suites (the `#if os(Linux)` tests in `spacesterminalcoreTests` and `spacesterminalghosttyTests`, plus `SpacesTestHostDetectionTests`, which is cross-platform because test-host detection rests on a different signal per platform) run inside Docker via `apps/macos/scripts/run_linux_tests.sh`:
 
 ```bash
 docker run --rm --init --platform linux/amd64 \

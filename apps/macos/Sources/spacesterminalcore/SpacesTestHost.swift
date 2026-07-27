@@ -1,24 +1,31 @@
 import Foundation
 
 /// Whether this process is a test host. Used by code that must behave differently when it cannot
-/// be allowed to touch real user state — most importantly profile resolution, which refuses the
-/// installed profile in a test process.
+/// be allowed to touch real user state — most importantly profile resolution, which refuses any live
+/// user profile in a test process.
 public enum SpacesTestHost {
-    /// Checks every way a test bundle announces itself, because no single one covers every runner.
-    /// Xcode sets the configuration-file variable; `swift test`'s XCTest lane passes the `.xctest`
-    /// bundle on the command line and has it loaded in `Bundle.allBundles`.
+    /// Checks every way a test host announces itself, because no single signal covers every lane. Each
+    /// of these was measured on the lane it covers rather than assumed:
     ///
-    /// `swift test`'s Swift Testing lane exhibits NONE of those: it runs under
-    /// `swiftpm-testing-helper` with no `.xctest` in either the arguments or `Bundle.allBundles`, so
-    /// the linked-in `XCTestCase` class is the only signal left and is what makes profile resolution
-    /// refuse the installed profile for that lane's suites. Removing that check would silently drop
-    /// the guard for every Swift Testing suite; `SpacesTestHostDetectionTests` fails if it does.
+    /// - Xcode sets `XCTestConfigurationFilePath`.
+    /// - macOS `swift test` runs both of its lanes out of the toolchain — `xctest` for XCTest,
+    ///   `swiftpm-testing-helper` for Swift Testing — with no `.xctest` path among the arguments, so the
+    ///   linked-in `XCTestCase` class is the only signal there. Removing it silently drops the guard for
+    ///   every macOS Swift Testing suite; `SpacesTestHostDetectionTests` fails if it goes.
+    /// - Linux has no Objective-C runtime, so that check is compiled out. `swift test` there execs the
+    ///   test binary directly and its `argv[0]` is `<Package>PackageTests.xctest`, which is the only
+    ///   signal on that platform — hence the argument scan, and hence that suite runs in the Linux lane
+    ///   too.
+    ///
+    /// `Bundle.allBundles` is deliberately NOT consulted. On Linux (corelibs-foundation, Swift 6.2) it
+    /// dereferences null inside `CFBundleGetAllBundles` and takes the process down with SIGSEGV, and it
+    /// is every NON-test Linux process that reaches the end of this function — `spacesd` runs it on each
+    /// profile resolution, so consulting it there is a daemon crash on startup. No lane needs it.
     public static func isRunningUnderXCTest() -> Bool {
         if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil { return true }
         #if canImport(ObjectiveC)
             if NSClassFromString("XCTestCase") != nil { return true }
         #endif
-        if CommandLine.arguments.contains(where: { $0.hasSuffix(".xctest") }) { return true }
-        return Bundle.allBundles.contains { $0.bundlePath.hasSuffix(".xctest") }
+        return CommandLine.arguments.contains { $0.hasSuffix(".xctest") }
     }
 }
