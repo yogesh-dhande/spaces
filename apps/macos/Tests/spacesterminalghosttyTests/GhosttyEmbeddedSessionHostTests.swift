@@ -346,7 +346,13 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
                 workspaceID: "workspace-1", kind: .shell), terminationEscalationIntervals: .init(hupGrace: 0.05, termGrace: 2.0, killGrace: 2.0))
 
         try driver.startIfNeeded()
-        try await waitUntil { FileManager.default.fileExists(atPath: markerPath.path) }
+        // Wait for `ready` to be IN the marker, not for the marker to exist. Both traps are installed before
+        // the script writes anything, so a terminate() taken on `fileExists` can deliver SIGHUP into the gap
+        // between the `>` redirection creating the file and `printf` writing it — and that redirection then
+        // TRUNCATES the handler's `hup` line back out, failing the assertion below for a reason that is
+        // entirely the test's own scheduling. Once `ready` is there the truncating write has already
+        // happened, so every trap's append survives it.
+        try await waitUntil { (try? String(contentsOf: markerPath, encoding: .utf8))?.contains("ready") == true }
         let childPID = try XCTUnwrap(driver.childPID())
 
         driver.terminate()
@@ -378,9 +384,14 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         defer { driver.terminate() }
 
         try driver.startIfNeeded()
-        // The marker means the login shell finished starting up and `exec`ed, so the leader is the sleep
-        // itself and SIGHUP alone ends it — no escalation stage involved.
-        try await waitUntil { FileManager.default.fileExists(atPath: markerPath.path) }
+        // The marker means the login shell is up and has run the `printf`. It does NOT mean the `exec` that
+        // follows has happened — the marker is written by the shell, one command earlier — so the leader may
+        // still be zsh rather than the sleep when terminate() lands. That does not change what this test
+        // asserts: `exec` keeps the pid, so `childPID` names the leader either way, and neither image ignores
+        // SIGHUP, so the graceful stage ends and reaps it without escalating. Wait for the content rather
+        // than the file so the marker at least means the shell reached that command: the `>` redirection
+        // creates the file before `printf` writes into it.
+        try await waitUntil { (try? String(contentsOf: markerPath, encoding: .utf8))?.contains("ready") == true }
         let childPID = try XCTUnwrap(driver.childPID())
 
         driver.terminate()
@@ -434,6 +445,10 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         defer { driver.terminate() }
 
         try driver.startIfNeeded()
+        // Existence is the whole signal here, unlike the marker waits above: this marker is created by the
+        // python leader itself, after it has installed the SIGHUP handler and therefore after zsh has already
+        // `exec`ed it. Nothing this test does next depends on the marker's contents, so there is no
+        // created-before-written gap to fall into.
         try await waitUntil { FileManager.default.fileExists(atPath: markerPath.path) }
         let childPID = try XCTUnwrap(driver.childPID())
 
@@ -479,19 +494,23 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         let scriptPath = root.appendingPathComponent("release-pty-at-startup.py")
         try script.write(to: scriptPath, atomically: true, encoding: .utf8)
 
-        let closedBox = MutableBox<Bool>(false)
+        // The close is a callback the driver makes, so wait on the callback itself rather than polling a flag
+        // it sets: the poller would suspend on the cooperative pool and hop onto the shared engine actor once
+        // per tick, neither of which this observation needs, and both of which can strand it for tens of
+        // seconds while the machine is saturated (#236) even though the session closed on time.
+        let sessionClosed = DispatchSemaphore(value: 0)
         var driver: HostManagedPTYTerminalSessionDriver? = HostManagedPTYTerminalSessionDriver(
             launchConfiguration: TerminalSessionLaunchConfiguration(
                 sessionID: "natural-exit-released-\(UUID().uuidString)", backend: .ghosttyEmbedded, title: "natural-exit-released",
                 workingDirectory: root.path, shell: "/bin/zsh", command: "exec /usr/bin/python3 \(scriptPath.path)",
                 createdAt: "2026-07-26T00:00:00Z", workspaceID: "workspace-1", kind: .shell),
             terminationEscalationIntervals: .init(hupGrace: 0.2, termGrace: 2.0, killGrace: 2.0))
-        driver?.setSessionClosedHandler { closedBox.value = true }
+        driver?.setSessionClosedHandler { sessionClosed.signal() }
 
         try driver?.startIfNeeded()
         // The session closes as soon as the slave is released, which is also the point the pid file is
         // guaranteed to be there: the leader writes it before closing its descriptors.
-        try await waitUntil { closedBox.value }
+        XCTAssertEqual(sessionClosed.wait(timeout: .now() + 30), .success, "the session must report closed once the leader releases the PTY slave")
         let recordedPID = try String(contentsOf: pidPath, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
         let childPID = try XCTUnwrap(Int32(recordedPID))
         // A failing run must not leave the leader behind: it sleeps far longer than the test does, so kill
@@ -516,13 +535,39 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
     /// it has collected the leader. A leaked zombie therefore fails in seconds and says so, instead of
     /// masquerading as a live process until a liveness poll times out.
     private func waitUntilChildIsReaped(_ childPID: Int32, file: StaticString = #filePath, line: UInt = #line) async throws {
-        try await waitUntil(file: file, line: line, diagnostics: { "child pid \(childPID) never exited" }) {
+        try await waitForProcess(file: file, line: line, diagnostics: { "child pid \(childPID) never exited" }) {
             Self.processLifecycle(childPID) != .running
         }
-        try await waitUntil(
+        try await waitForProcess(
             timeout: 5, file: file, line: line,
             diagnostics: { "child pid \(childPID) is \(Self.processLifecycle(childPID).rawValue): terminate() left it unreaped" }
         ) { Self.processLifecycle(childPID) == .reaped }
+    }
+
+    /// Polls a kernel-level condition without going anywhere near the cooperative executor's shared state.
+    ///
+    /// `waitUntil` suspends on `Task.sleep` between ticks too, but it also evaluates its condition with a
+    /// synchronous hop onto the shared terminal engine actor. A process's state read through `sysctl` needs
+    /// no such hop, and taking one anyway couples the observation to a resource the thing being observed
+    /// does not use: a sibling test occupying the engine actor would block every tick here for no reason.
+    /// `Task.sleep` itself only ever suspends the calling task, so unlike `Thread.sleep` it never pins a
+    /// cooperative-executor worker while it waits — that pinning is exactly how a saturated pool starved
+    /// this same wait and blew a 30s timeout under load (#236) even though the reaper (a `Task.detached` in
+    /// `HostManagedPTYTerminalSessionDriver.escalateUntilLeaderIsCollected`) had already finished its work.
+    private func waitForProcess(
+        timeout: TimeInterval = 30, file: StaticString = #filePath, line: UInt = #line, diagnostics: (() -> String)? = nil, _ condition: () -> Bool
+    ) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if condition() { return }
+            try? await Task.sleep(for: .seconds(0.02))
+        }
+        if condition() { return }
+
+        var message = "Timed out waiting for condition."
+        if let diagnostics { message += " \(diagnostics())" }
+        XCTFail(message, file: file, line: line)
+        throw NSError(domain: "GhosttyEmbeddedSessionHostTests", code: 1)
     }
 
     func testHostManagedPTYForegroundPIDFallsBackToLiveChildPID() {
@@ -1377,7 +1422,18 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         try await waitUntil(timeout: 30) {
             receivedPayloads.snapshot.contains { $0.reason == "output" && $0.outputByteCount == output.count && $0.renderUpdate != nil }
         }
-        try? await Task.sleep(for: .milliseconds(100))
+        // Order the absence assertion behind the resync rather than timing it out. A delayed input/output
+        // resync is a `DispatchWorkItem` the scheduler puts on the engine's serial queue with a short fixed
+        // deadline, taken while the output above was drained — so it is already scheduled by the time that
+        // payload arrives. This marker goes on the same serial queue afterwards with a strictly later
+        // deadline, so a scheduled resync runs first, and its broadcast reaches the subscriber first as well
+        // (every broadcast is serialized through one stream queue onto one socket). Seeing the marker
+        // therefore means an `input_output` payload would already be here if one were ever coming.
+        let settleMarker = "settle_marker"
+        TerminalEngineActor.shared.queue.asyncAfter(deadline: .now() + .milliseconds(50)) {
+            TerminalEngineActor.assumeIsolated { hostBox.value.debugBroadcastCurrentStateForTesting(reason: settleMarker) }
+        }
+        try await waitUntil(timeout: 30) { receivedPayloads.snapshot.contains { $0.reason == settleMarker } }
         XCTAssertFalse(receivedPayloads.snapshot.contains { $0.reason == "input_output" })
     }
 
@@ -1532,8 +1588,11 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             host.debugBroadcastCurrentStateForTesting(reason: TerminalRemoteSessionStateReason.stateChange)
         }
 
+        // No settle window is needed for the negative below. The flush this test is about happens INSIDE the
+        // state export, before the stateChange payload is built, so a nested output broadcast would be handed
+        // to the stream server ahead of it — and both travel the same serial stream queue and socket in
+        // order. Once the stateChange payload has arrived, a nested output payload would already have.
         try await waitUntil(timeout: 30) { receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.stateChange } }
-        try? await Task.sleep(for: .milliseconds(50))
 
         XCTAssertFalse(
             receivedPayloads.snapshot.contains { $0.reason == TerminalRemoteSessionStateReason.output && $0.outputByteCount == output.count })
@@ -3445,6 +3504,23 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
     /// `.running` forever while the final payload says terminated. Termination cancels the runtime-state
     /// timer, so nothing else re-persists. Breaking the database makes terminate()'s exited write fail;
     /// restoring it lets the bounded retry land the exited state.
+    ///
+    /// This test is bounded by a real interval rather than by an interleaving it constructs, which no wait on
+    /// a signal can fix here: the retry loop's only synchronization point is the `sleep` closure the
+    /// persistence queue is built with, and a session host builds its own queue, so nothing at this level can
+    /// park a retry attempt or observe that one failed. `TerminalCorePersistenceQueueTests` drives the queue
+    /// directly and has that seam; its `testFailingRuntimeStateWriteFencesTheDetachQueuedBehindIt` asserts
+    /// this same "the retried exited write commits once the database recovers" contract against a retry
+    /// parked in a `RetryGate`, so the mechanism is covered deterministically there. What is left here is the
+    /// end-to-end path: that `terminate()`'s exited write is the one that retries.
+    ///
+    /// So the remaining timing dependence is deliberately kept to the narrowest shape available. The restore
+    /// is the next straight-line statement on this thread after `terminate()` returns, with no suspension
+    /// between them, and `breakDatabase`/`restoreDatabase` change only a file mode — a single syscall with no
+    /// window in which a concurrent write attempt can be observed half-restored. The write's five attempts
+    /// span roughly 0.8s, so only a thread preemption longer than that between the two statements could fail
+    /// this, and a restore that instead wins the race against the FIRST attempt costs the test its retry
+    /// coverage rather than failing it.
     func testFailedExitedRuntimeStateWriteRetriesUntilItLands() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -3489,7 +3565,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
 
     /// Fix 1: `drainPersistenceForShutdown` — the awaitable drain SpacesdMain runs after terminating a core in
     /// `shutdown()` and the nil-quiesce handoff branch — must not return until every write `terminate()`
-    /// enqueued has committed, including an exited runtime-state write a competing transaction delayed. Without
+    /// enqueued has committed, including an exited runtime-state write the queue has not reached yet. Without
     /// it, `exit(0)`/`execv` destroys the still-queued exited write and strands the durable row at `.running`
     /// (and, across `execv`, the unchanged pid makes `recoverStaleSessions` skip that `.running` row forever).
     func testDrainPersistenceForShutdownAwaitsDelayedExitedWrite() async throws {
@@ -3508,24 +3584,58 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         try TerminalSessionPersistence.writeRuntimeState(runningState, paths: paths)
         XCTAssertEqual(try TerminalSessionPersistence.readRuntimeState(paths: paths).state, .running)
 
-        let lockHolder = CompetingWriteLockHolder(databasePath: try SpacesProfile.current().databasePath)
-        lockHolder.startHolding(maxHoldSeconds: 10)
-        lockHolder.waitUntilHolding()
-
         let box = TerminalEngineActor.runSynchronously { () -> Box<GhosttyEmbeddedSessionHost> in
-            let host = GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths)
-            host.terminate()
-            return Box(host)
+            Box(GhosttyEmbeddedSessionHost(launchConfiguration: launchConfiguration, paths: paths))
         }
-        // Hold the competing transaction long enough for the enqueued exited write to be blocking on it, then
-        // release so the write can commit. The drain must not return until it does.
-        try await Task.sleep(nanoseconds: 200_000_000)
-        lockHolder.release()
-
-        await box.value.core.drainPersistenceForShutdown()
+        // Park the persistence queue before terminating and keep it parked across the drain call. The delay
+        // this test needs is then a fact rather than a guess: whatever else is happening on the machine, the
+        // exited runtime-state write terminate() enqueues has demonstrably NOT committed when the drain is
+        // entered. (Delaying it with a competing SQLite transaction instead means guessing how long to hold
+        // that transaction: hold too briefly and the write commits before the drain is even called; hold past
+        // SQLite's 5s busy timeout — which a saturated machine can turn a 200ms sleep into — and the write
+        // fails, exhausts its retries and is abandoned, failing the test for no product reason.)
+        let gate = TerminalEngineActor.runSynchronously { box.value.debugHoldPersistenceQueue() }
+        TerminalEngineActor.runSynchronously { box.value.terminate() }
         XCTAssertEqual(
-            try TerminalSessionPersistence.readRuntimeState(paths: paths).state, .exited,
-            "drainPersistenceForShutdown must block until the competing-delayed exited write commits")
+            try TerminalSessionPersistence.readRuntimeState(paths: paths).state, .running,
+            "the exited write must still be queued behind the parked persistence queue when the drain is entered")
+
+        // Release the park only once `drainPersistenceForShutdown()` has already reached ITS OWN suspension
+        // point — inside `drainAsync()`, after it has enqueued its completion continuation onto the
+        // persistence queue — rather than once the surrounding `Task` has merely started running. A signal
+        // set by the caller before invoking the drain (the previous version of this test) fires as soon as
+        // the `Task` body starts, which races the actor hop into `drainPersistenceForShutdown()`: the
+        // detached thread releasing the park is not ordered against that hop at all, so it could let the
+        // exited write commit before the drain call has even been entered — and a no-op/broken drain would
+        // still observe `.exited` on read, false-passing exactly the regression this test exists to catch.
+        //
+        // The fix exploits a fact stated in `TerminalEngineActor.swift`'s own doc comment: the actor's
+        // executor and `TerminalEngineActor.runSynchronously` share one literal `DispatchSerialQueue`, which
+        // gives a hard FIFO guarantee (not a heuristic) — jobs submitted to it run in submission order, one
+        // at a time, to completion or to a genuine suspension. Creating the drain task from INSIDE a
+        // `runSynchronously` closure submits its job onto that queue while this thread is already running on
+        // it, so the drain task cannot even begin until this closure returns. A second, empty
+        // `runSynchronously` call made immediately after cannot itself return until every job ahead of it on
+        // that queue — including the drain task — has run to completion or suspended. The drain task's only
+        // suspension point is the one described above, so by the time the second call returns the persistence
+        // queue is guaranteed to already hold the drain's completion barrier — or, if the implementation never
+        // touches the queue at all, the drain has already finished, which fails the assertion below instead
+        // of hanging.
+        let exitedAtDrainReturn = MutableBox<Bool>(false)
+        let drainTaskBox = MutableBox<Task<Void, Never>?>(nil)
+        TerminalEngineActor.runSynchronously {
+            drainTaskBox.value = Task { @TerminalEngineActor in
+                await box.value.core.drainPersistenceForShutdown()
+                exitedAtDrainReturn.value = (try? TerminalSessionPersistence.readRuntimeState(paths: paths))?.state == .exited
+            }
+        }
+        TerminalEngineActor.runSynchronously {}
+        gate.signal()
+        await drainTaskBox.value?.value
+
+        XCTAssertTrue(
+            exitedAtDrainReturn.value, "drainPersistenceForShutdown must not return until the exited write enqueued ahead of it has committed")
+        XCTAssertEqual(try TerminalSessionPersistence.readRuntimeState(paths: paths).state, .exited)
         _ = box
     }
 
@@ -3829,30 +3939,28 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         XCTAssertTrue(after.contains { $0.clientID == remoteOwner.id }, "R must remain attached")
     }
 
-    /// Replaces the SQLite database (and its WAL sidecars) with a directory so every write fails to open it,
-    /// preserving the real files aside so `restoreDatabase` can bring the committed data back intact.
+    /// Makes every open of the SQLite database fail, and `restoreDatabase` makes them succeed again. The
+    /// database file itself is never moved or replaced, so the committed data comes back exactly as it was.
     ///
-    /// The process's own connections are released on both sides of the injection. Moving the files aside is
-    /// invisible to a connection already open on them — it holds the file, not the path — so without this
-    /// the injection would be partial: a write could still commit into the moved-aside file. Releasing is
-    /// also what a database that genuinely went away would force.
+    /// Breaking it by moving the file aside and putting a directory in its place — the obvious alternative —
+    /// leaves the path with nothing at it for the width of the restore, which is a real hazard rather than a
+    /// theoretical one: a retrying writer that opens the path in that gap CREATES an empty database there,
+    /// and the restore's move onto an existing path then fails, so the test reports a mangled restore or an
+    /// `unknownSession` read instead of what it was actually asserting. Permissions have no such gap: the
+    /// file exists throughout, and an open either runs before the mode changes or after it.
+    ///
+    /// The process's own connections are released on both sides, and that is what makes a mode change bite
+    /// at all. A connection's access is decided when it is opened, so the long-lived read and write
+    /// connections would carry their existing permission straight through the injection and the fault would
+    /// never reach the code under test. Releasing is also what a database that genuinely became unusable
+    /// would force.
     private static func breakDatabase(at databasePath: String) throws {
         TerminalSessionPersistence.closeDatabaseConnection()
-        let fileManager = FileManager.default
-        for suffix in ["", "-wal", "-shm"] {
-            let path = databasePath + suffix
-            if fileManager.fileExists(atPath: path) { try fileManager.moveItem(atPath: path, toPath: path + ".b4bak") }
-        }
-        try fileManager.createDirectory(atPath: databasePath, withIntermediateDirectories: false)
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: databasePath)
     }
 
     private static func restoreDatabase(at databasePath: String) throws {
-        let fileManager = FileManager.default
-        try? fileManager.removeItem(atPath: databasePath)
-        for suffix in ["", "-wal", "-shm"] {
-            let backup = databasePath + suffix + ".b4bak"
-            if fileManager.fileExists(atPath: backup) { try fileManager.moveItem(atPath: backup, toPath: databasePath + suffix) }
-        }
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: databasePath)
         TerminalSessionPersistence.closeDatabaseConnection()
     }
 
