@@ -125,7 +125,7 @@ import spacesterminalcore
     }
 
     func testRerenderingATabsPaneTreeKeepsEveryPaneWarmAndIntact() throws {
-        // A tab holding more panes than the warm limit — a four-way split.
+        // A tab holding more panes than the warm limit — a split.
         let panes = (0...GhosttyMirrorSurfaceMRU.warmSurfaceLimit).map { makePane(index: $0) }
         let tabHost = NSView(frame: NSRect(x: 0, y: 0, width: 640, height: 400))
         window?.contentView?.addSubview(tabHost)
