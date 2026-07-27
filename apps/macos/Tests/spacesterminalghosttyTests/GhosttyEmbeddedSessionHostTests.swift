@@ -361,7 +361,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             guard let markerText = try? String(contentsOf: markerPath, encoding: .utf8) else { return false }
             return markerText.contains("term")
         }
-        try waitUntilChildIsReaped(childPID)
+        try await waitUntilChildIsReaped(childPID)
 
         let markerText = try String(contentsOf: markerPath, encoding: .utf8)
         XCTAssertTrue(markerText.contains("hup"))
@@ -399,7 +399,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         // The ordinary teardown path: the child dies on the graceful SIGHUP, so the escalation's first
         // stage completes. That stage is the only reaper during an explicit terminate(), so the leader
         // must be collected before it returns.
-        try waitUntilChildIsReaped(childPID)
+        try await waitUntilChildIsReaped(childPID)
     }
 
     /// A leader that releases the PTY slave while it is still alive. `read()` on the master returns as
@@ -457,7 +457,7 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         // SIGHUP is ignored, so only escalation ends this: the first stage must run to its deadline
         // despite the finished read loop, and the SIGTERM that follows -- which the process does not
         // ignore -- kills it. Then it must be collected.
-        try waitUntilChildIsReaped(childPID)
+        try await waitUntilChildIsReaped(childPID)
     }
 
     /// The same leader that outlives its PTY, reached through the NATURAL-exit path: it releases the slave
@@ -527,38 +527,40 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
         // teardown cannot depend on a caller still holding the driver.
         driver = nil
 
-        try waitUntilChildIsReaped(childPID)
+        try await waitUntilChildIsReaped(childPID)
     }
 
     /// Asserts the PTY leader was genuinely collected, not merely killed. The exit itself is waited on
     /// generously; the reap that follows it is bounded tightly because a stage only reports success once
     /// it has collected the leader. A leaked zombie therefore fails in seconds and says so, instead of
     /// masquerading as a live process until a liveness poll times out.
-    private func waitUntilChildIsReaped(_ childPID: Int32, file: StaticString = #filePath, line: UInt = #line) throws {
-        try waitForProcess(file: file, line: line, diagnostics: { "child pid \(childPID) never exited" }) {
+    private func waitUntilChildIsReaped(_ childPID: Int32, file: StaticString = #filePath, line: UInt = #line) async throws {
+        try await waitForProcess(file: file, line: line, diagnostics: { "child pid \(childPID) never exited" }) {
             Self.processLifecycle(childPID) != .running
         }
-        try waitForProcess(
+        try await waitForProcess(
             timeout: 5, file: file, line: line,
             diagnostics: { "child pid \(childPID) is \(Self.processLifecycle(childPID).rawValue): terminate() left it unreaped" }
         ) { Self.processLifecycle(childPID) == .reaped }
     }
 
-    /// Polls a kernel-level condition on the calling thread instead of through `waitUntil`.
+    /// Polls a kernel-level condition without going anywhere near the cooperative executor's shared state.
     ///
-    /// `waitUntil` suspends on `Task.sleep` between ticks and evaluates its condition with a synchronous hop
-    /// onto the shared terminal engine actor. A process's state read through `sysctl` needs neither, and both
-    /// couple the observation to resources the thing being observed does not use: a saturated cooperative
-    /// pool can strand the poller for tens of seconds (#236), and a sibling test occupying the engine blocks
-    /// every tick. This loop touches nothing but the kernel and its own thread, so a timeout here means the
-    /// process really was not collected rather than that the harness could not look.
+    /// `waitUntil` suspends on `Task.sleep` between ticks too, but it also evaluates its condition with a
+    /// synchronous hop onto the shared terminal engine actor. A process's state read through `sysctl` needs
+    /// no such hop, and taking one anyway couples the observation to a resource the thing being observed
+    /// does not use: a sibling test occupying the engine actor would block every tick here for no reason.
+    /// `Task.sleep` itself only ever suspends the calling task, so unlike `Thread.sleep` it never pins a
+    /// cooperative-executor worker while it waits — that pinning is exactly how a saturated pool starved
+    /// this same wait and blew a 30s timeout under load (#236) even though the reaper (a `Task.detached` in
+    /// `HostManagedPTYTerminalSessionDriver.escalateUntilLeaderIsCollected`) had already finished its work.
     private func waitForProcess(
         timeout: TimeInterval = 30, file: StaticString = #filePath, line: UInt = #line, diagnostics: (() -> String)? = nil, _ condition: () -> Bool
-    ) throws {
+    ) async throws {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             if condition() { return }
-            Thread.sleep(forTimeInterval: 0.02)
+            try? await Task.sleep(for: .seconds(0.02))
         }
         if condition() { return }
 
@@ -3598,21 +3600,38 @@ final class GhosttyEmbeddedSessionHostTests: XCTestCase {
             try TerminalSessionPersistence.readRuntimeState(paths: paths).state, .running,
             "the exited write must still be queued behind the parked persistence queue when the drain is entered")
 
-        // Release the park only once the drain is running, and record what the durable row said at the instant
-        // the drain returned: a drain that does not wait returns with the write still parked behind it and so
-        // observes `.running`, while a drain that honors its contract can only ever observe `.exited`.
-        let drainStarted = DispatchSemaphore(value: 0)
+        // Release the park only once `drainPersistenceForShutdown()` has already reached ITS OWN suspension
+        // point — inside `drainAsync()`, after it has enqueued its completion continuation onto the
+        // persistence queue — rather than once the surrounding `Task` has merely started running. A signal
+        // set by the caller before invoking the drain (the previous version of this test) fires as soon as
+        // the `Task` body starts, which races the actor hop into `drainPersistenceForShutdown()`: the
+        // detached thread releasing the park is not ordered against that hop at all, so it could let the
+        // exited write commit before the drain call has even been entered — and a no-op/broken drain would
+        // still observe `.exited` on read, false-passing exactly the regression this test exists to catch.
+        //
+        // The fix exploits a fact stated in `TerminalEngineActor.swift`'s own doc comment: the actor's
+        // executor and `TerminalEngineActor.runSynchronously` share one literal `DispatchSerialQueue`, which
+        // gives a hard FIFO guarantee (not a heuristic) — jobs submitted to it run in submission order, one
+        // at a time, to completion or to a genuine suspension. Creating the drain task from INSIDE a
+        // `runSynchronously` closure submits its job onto that queue while this thread is already running on
+        // it, so the drain task cannot even begin until this closure returns. A second, empty
+        // `runSynchronously` call made immediately after cannot itself return until every job ahead of it on
+        // that queue — including the drain task — has run to completion or suspended. The drain task's only
+        // suspension point is the one described above, so by the time the second call returns the persistence
+        // queue is guaranteed to already hold the drain's completion barrier — or, if the implementation never
+        // touches the queue at all, the drain has already finished, which fails the assertion below instead
+        // of hanging.
         let exitedAtDrainReturn = MutableBox<Bool>(false)
-        Thread.detachNewThread {
-            drainStarted.wait()
-            gate.signal()
+        let drainTaskBox = MutableBox<Task<Void, Never>?>(nil)
+        TerminalEngineActor.runSynchronously {
+            drainTaskBox.value = Task { @TerminalEngineActor in
+                await box.value.core.drainPersistenceForShutdown()
+                exitedAtDrainReturn.value = (try? TerminalSessionPersistence.readRuntimeState(paths: paths))?.state == .exited
+            }
         }
-        let drain = Task {
-            drainStarted.signal()
-            await box.value.core.drainPersistenceForShutdown()
-            exitedAtDrainReturn.value = (try? TerminalSessionPersistence.readRuntimeState(paths: paths))?.state == .exited
-        }
-        await drain.value
+        TerminalEngineActor.runSynchronously {}
+        gate.signal()
+        await drainTaskBox.value?.value
 
         XCTAssertTrue(
             exitedAtDrainReturn.value, "drainPersistenceForShutdown must not return until the exited write enqueued ahead of it has committed")

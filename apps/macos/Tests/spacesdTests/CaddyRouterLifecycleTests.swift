@@ -80,30 +80,41 @@ import XCTest
             SpacesProfile.resetCacheForTesting()
 
             let lifecycle = CaddyRouterLifecycle()
-            // Which of the two calls returned first is the ordering under test, so record it directly rather
-            // than inferring it from what had happened by some arbitrary instant.
-            let completionOrder = LockedLog()
             let ensureResult = LockedResult()
             let ensureThread = Thread {
                 do {
                     try lifecycle.ensureRunning(configJSON: Data("{}".utf8))
                     ensureResult.set(.success(()))
                 } catch { ensureResult.set(.failure(error)) }
-                completionOrder.append("ensureRunning")
             }
             ensureThread.start()
             XCTAssertTrue(waitForFile(at: runStarted.path, timeout: 30))
 
             let stopEntered = LockedFlag()
             let stopFinished = LockedFlag()
+            // Set from INSIDE `stop()` (its returning does not race capturing whether `ensureRunning()`'s
+            // own thread had already finished), the fact this test needs: "stop() must not return before the
+            // ensureRunning it interrupted has finished." `Thread.isFinished` is the right property to read
+            // for that -- Foundation guarantees it only ever becomes true once the thread's closure (which
+            // includes the `ensureResult.set` above) has actually returned. A self-reported order instead
+            // (each thread appending its own name to a shared log immediately after its own call returns,
+            // as this test used to) is not equivalent: once `ensureRunning()` releases `stop()`'s lock, the
+            // two threads are racing independently for CPU time to run their OWN bookkeeping, and stop()'s
+            // remaining work can finish first even though it was serialized correctly -- a false failure,
+            // not a real one.
+            let ensureRunningFinishedBeforeStopReturned = LockedFlag()
             let stopThread = Thread {
-                stopEntered.set()
-                lifecycle.stop()
-                completionOrder.append("stop")
+                // `stop(debugOnEnter:)` fires the instant this call is made, before it can even attempt to
+                // acquire the internal lock -- see its doc comment for why a flag set by the caller right
+                // before the call cannot serve the same purpose (a preemption there can let this test
+                // release the fake Caddy's `run` loop while `stop()` has not been entered at all, so a
+                // `stop()` that does not wait for an in-flight call could still pass).
+                lifecycle.stop(debugOnEnter: { stopEntered.set() })
+                if ensureThread.isFinished { ensureRunningFinishedBeforeStopReturned.set() }
                 stopFinished.set()
             }
             stopThread.start()
-            // Wait for the stop thread to have entered `stop()` — a signal the thread emits — instead of
+            // Wait for the stop thread to have entered `stop()` — a signal the call itself emits — instead of
             // sleeping for a guessed interval and hoping it got that far. `ensureRunning` is still blocked in
             // the fake caddy's run loop until `releaseRun` is written below, so a `stop()` that honors the
             // in-flight call cannot have returned.
@@ -115,8 +126,8 @@ import XCTest
             XCTAssertTrue(waitForThreadToFinish(ensureThread, timeout: 10))
             XCTAssertTrue(waitForThreadToFinish(stopThread, timeout: 10))
             try XCTUnwrap(ensureResult.value).get()
-            XCTAssertEqual(
-                completionOrder.entries, ["ensureRunning", "stop"], "stop() must not return until the ensureRunning it interrupted has finished")
+            XCTAssertTrue(
+                ensureRunningFinishedBeforeStopReturned.value, "stop() must not return until the ensureRunning it interrupted has finished")
             XCTAssertFalse(FileManager.default.fileExists(atPath: socket.path))
 
             let eventsBeforeStoppedEnsure = readEvents(at: events)
@@ -157,25 +168,6 @@ import XCTest
         func set() {
             lock.lock()
             storedValue = true
-            lock.unlock()
-        }
-    }
-
-    /// Records the order two threads completed in, so the ordering assertion is about what happened rather
-    /// than about what had happened by the time the test looked.
-    private final class LockedLog: @unchecked Sendable {
-        private let lock = NSLock()
-        private var storedEntries: [String] = []
-
-        var entries: [String] {
-            lock.lock()
-            defer { lock.unlock() }
-            return storedEntries
-        }
-
-        func append(_ entry: String) {
-            lock.lock()
-            storedEntries.append(entry)
             lock.unlock()
         }
     }

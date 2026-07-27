@@ -103,7 +103,15 @@
             try CaddyService.ensureRunning(configJSON: configJSON)
         }
 
-        func stop() {
+        /// `debugOnEnter` fires the instant this call is made, before it can even attempt to acquire
+        /// `lock` -- a hook `CaddyRouterLifecycleTests` uses to prove `stop()` was genuinely invoked (and
+        /// is now racing an in-flight `ensureRunning()` for the lock) before it lets that `ensureRunning()`
+        /// proceed. A flag the test sets immediately before making the call cannot serve the same purpose:
+        /// a preemption between setting the flag and actually calling `stop()` would let the test read the
+        /// flag as true and release the in-flight call before `stop()` was ever entered, so a `stop()` that
+        /// does not wait for it could still pass. No production caller passes this.
+        func stop(debugOnEnter: (() -> Void)? = nil) {
+            debugOnEnter?()
             lock.lock()
             stopped = true
             defer { lock.unlock() }
