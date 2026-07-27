@@ -253,6 +253,119 @@ final class SpacesProfileTests: XCTestCase {
         }
     }
 
+    /// Issue #322: the distinguishing rule callers need is "resolve, or nil if there is genuinely no
+    /// profile, rethrowing a refusal" — `nilUnlessRefused` is that rule, isolated from `current()`/`resolve()`
+    /// so both directions are provable without touching the filesystem, `HOME`, or account state.
+    func testNilUnlessRefusedDegradesAGenuineResolutionFailureToNil() throws {
+        let result = try SpacesProfile.nilUnlessRefused { () throws -> Int in
+            throw SpacesProfileResolutionError.repoBuiltGitProbeFailed(executablePath: "/tmp/spacesd", repoRoot: "/tmp", underlyingError: nil)
+        }
+        XCTAssertNil(result)
+    }
+
+    /// The other half of the same rule: a refusal is not a "no profile" outcome and must come back out as
+    /// a thrown error even though every other `SpacesProfileResolutionError` case collapses to `nil` here.
+    func testNilUnlessRefusedRethrowsTestHostRefusalInsteadOfDegradingToNil() {
+        XCTAssertThrowsError(
+            try SpacesProfile.nilUnlessRefused { () throws -> Int in
+                throw SpacesProfileResolutionError.testHostRefusedLiveUserProfile(component: .database, path: "/Users/tester/.spaces/spaces.db")
+            }
+        ) { error in
+            guard case SpacesProfileResolutionError.testHostRefusedLiveUserProfile = error else {
+                return XCTFail("Expected testHostRefusedLiveUserProfile, got \(error).")
+            }
+        }
+    }
+
+    /// Wires the mechanism above to the real entry point every product call site uses. Before issue
+    /// #322's fix, every one of those seven call sites wrapped `SpacesProfile.current()` directly in
+    /// `try?`, which — proven by the commented-out line below — silently takes the same "no profile"
+    /// branch on a refusal that it takes on a database that plain does not exist yet. This test fails
+    /// every run against that old shape, because `try?` on a throwing call can never satisfy
+    /// `XCTAssertThrowsError`.
+    func testCurrentOrNilIfUnresolvedRethrowsTestHostRefusalInsteadOfDegradingToNil() throws {
+        let accountHomePath = try XCTUnwrap(currentUserAccountHomePath())
+
+        try withEnvironmentValues([
+            SpacesProfile.databasePathEnvironmentVariable: nil, SpacesProfile.runtimeDirectoryEnvironmentVariable: nil, "HOME": accountHomePath,
+        ]) {
+            SpacesProfile.resetCacheForTesting()
+            defer { SpacesProfile.resetCacheForTesting() }
+
+            // The bug this guards against: `let profile = try? SpacesProfile.currentOrNilIfUnresolved()`
+            // here would compile and pass with `profile == nil`, exactly like the seven call sites did
+            // before the fix. `currentOrNilIfUnresolved()` must be called with `try` and observed to throw.
+            XCTAssertThrowsError(try SpacesProfile.currentOrNilIfUnresolved()) { error in
+                guard case SpacesProfileResolutionError.testHostRefusedLiveUserProfile = error else {
+                    return XCTFail("Expected testHostRefusedLiveUserProfile, got \(error).")
+                }
+            }
+        }
+    }
+
+    /// The legitimate use of `currentOrNilIfUnresolved()` — an isolated profile resolves normally, exactly
+    /// like `current()` — must keep working, so the fix has not turned a non-fatal "no profile" path into
+    /// a crash for every other test in the suite.
+    func testCurrentOrNilIfUnresolvedResolvesNormallyForAnIsolatedProfile() throws {
+        let databasePath = tempHomeURL.appendingPathComponent("profiles/current-or-nil-if-unresolved/spaces.db").path
+
+        try withEnvironmentValues([
+            SpacesProfile.databasePathEnvironmentVariable: databasePath, SpacesProfile.runtimeDirectoryEnvironmentVariable: nil,
+        ]) {
+            SpacesProfile.resetCacheForTesting()
+            defer { SpacesProfile.resetCacheForTesting() }
+
+            let profile = try SpacesProfile.currentOrNilIfUnresolved()
+            XCTAssertEqual(profile?.databasePath, databasePath)
+        }
+    }
+
+    /// Issue #322 follow-up: `TerminalOverviewSignal.post` and `SpacesDevicePairingClient.localMacClientInstallationID`
+    /// cannot use `currentOrNilIfUnresolved()`'s throw-the-refusal shape — neither is in a `throws`
+    /// context, and unlike the `spacesui` sites neither can safely trap either (see
+    /// `currentOrNilLoggingRefusal`'s doc comment). `currentOrNilLoggingRefusal()` is their mechanism:
+    /// still `nil` on a refusal (so the caller's existing degrade fires unchanged), but the refusal is
+    /// reported through `diagnoseRefusal` instead of vanishing indistinguishably into the same `nil` a
+    /// `repoBuiltGitProbeFailed` would produce. A bare `try?` — what both call sites carried before this
+    /// fix — can never invoke that callback, so this test fails every run against that old shape.
+    func testCurrentOrNilLoggingRefusalReportsTheRefusalInsteadOfSilentlyDegrading() throws {
+        let accountHomePath = try XCTUnwrap(currentUserAccountHomePath())
+        let reportedError = LockedValueBox<SpacesProfileResolutionError>()
+
+        try withEnvironmentValues([
+            SpacesProfile.databasePathEnvironmentVariable: nil, SpacesProfile.runtimeDirectoryEnvironmentVariable: nil, "HOME": accountHomePath,
+        ]) {
+            SpacesProfile.resetCacheForTesting()
+            defer { SpacesProfile.resetCacheForTesting() }
+
+            let profile = SpacesProfile.currentOrNilLoggingRefusal(diagnoseRefusal: { reportedError.set($0) })
+
+            XCTAssertNil(profile, "A refusal must still degrade to nil for the caller's existing no-profile branch.")
+            guard case .testHostRefusedLiveUserProfile = try XCTUnwrap(reportedError.value) else {
+                return XCTFail("Expected diagnoseRefusal to report testHostRefusedLiveUserProfile, got \(String(describing: reportedError.value)).")
+            }
+        }
+    }
+
+    /// The companion direction: an ordinary successful resolution must not spuriously invoke
+    /// `diagnoseRefusal` — it exists for the refusal only, not as a general resolution-completed hook.
+    func testCurrentOrNilLoggingRefusalDoesNotReportOnASuccessfulResolution() throws {
+        let databasePath = tempHomeURL.appendingPathComponent("profiles/current-or-nil-logging-refusal/spaces.db").path
+        let diagnoseWasCalled = LockedValueBox<Bool>()
+
+        try withEnvironmentValues([
+            SpacesProfile.databasePathEnvironmentVariable: databasePath, SpacesProfile.runtimeDirectoryEnvironmentVariable: nil,
+        ]) {
+            SpacesProfile.resetCacheForTesting()
+            defer { SpacesProfile.resetCacheForTesting() }
+
+            let profile = SpacesProfile.currentOrNilLoggingRefusal(diagnoseRefusal: { _ in diagnoseWasCalled.set(true) })
+
+            XCTAssertEqual(profile?.databasePath, databasePath)
+            XCTAssertNil(diagnoseWasCalled.value, "diagnoseRefusal must not run for a successful resolution.")
+        }
+    }
+
     func testResolveExplicitDatabaseOverrideWins() throws {
         let overridePath = tempHomeURL.appendingPathComponent("profiles/custom/spaces.db").path
 

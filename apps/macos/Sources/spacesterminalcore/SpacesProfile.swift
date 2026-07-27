@@ -90,6 +90,69 @@ public struct SpacesProfile: Sendable, Equatable {
         cachedProfileLock.unlock()
     }
 
+    /// `current()`, except a genuine "no profile could be resolved" collapses to `nil` instead of
+    /// throwing, for the product call sites that predate the test-host refusal and read a missing
+    /// profile as a normal, render-anyway outcome (reasonable — a repo-built binary whose git probe
+    /// failed, say, is rare and callers already have a sensible degraded state for it).
+    ///
+    /// A refusal is deliberately excluded from that collapse. It is not "no profile" — it is "this
+    /// process is not allowed to resolve one" — so callers must never be able to fold it into the same
+    /// `nil` branch by reaching for the same `try?`/no-profile idiom they already use for every other
+    /// failure. This is the one place that draws that line; every one of #322's nine call sites goes
+    /// through here directly (a `throws` call site), through `currentOrNilOnFailureFatalOnRefusal()` in
+    /// `spacesui` (a call site with no `throws` to propagate through, where trapping is safe and cheap
+    /// because it runs once per user action), or through `currentOrNilLoggingRefusal()` (a call site that
+    /// is both non-throwing and too hot or too widely shared to trap on) — instead of repeating the
+    /// distinction inline.
+    public static func currentOrNilIfUnresolved() throws -> SpacesProfile? { try nilUnlessRefused { try current() } }
+
+    /// The single decision of what counts as a refusal versus a genuine "no profile," shared by every
+    /// caller that needs it rather than re-implemented per call site. Generic over the wrapped result so
+    /// both `currentOrNilIfUnresolved()` and tests can drive it directly without needing a whole resolved
+    /// `SpacesProfile`.
+    static func nilUnlessRefused<T>(_ body: () throws -> T) throws -> T? {
+        do {
+            return try body()
+        } catch let error as SpacesProfileResolutionError {
+            if case .testHostRefusedLiveUserProfile = error { throw error }
+            return nil
+        } catch {
+            return nil
+        }
+    }
+
+    /// Non-throwing counterpart of `currentOrNilIfUnresolved()` for a call site that is not `throws` and,
+    /// unlike a `spacesui` UI action, cannot safely trap on a refusal either: the call sits on a path that
+    /// is either evaluated on every tick of a hot, background-driven loop (`TerminalOverviewSignal.post`,
+    /// fired on every terminal runtime-state change from a detached engine-actor task with no test or
+    /// assertion to attribute a crash to) or baked into a default parameter value fanned out across dozens
+    /// of call sites, some inside the shared XCTest binary (`SpacesDevicePairingClient.localMacClientInstallationID`,
+    /// which a default argument cannot make `throws` — Swift rejects a throwing expression in a default
+    /// argument outright). Trapping either would abort the one process hosting every currently running
+    /// suite over a resolution failure that may not even belong to whichever test happens to be mid-flight
+    /// when a lingering background task reaches this code (a session's queued persistence work can still
+    /// be running after that test's own environment override has been restored — see the profile
+    /// resolution notes in `docs/implementation.md`).
+    ///
+    /// So a refusal here is reported, not hidden or trapped: `diagnoseRefusal` runs (by default, writes to
+    /// stderr, matching this codebase's existing non-fatal diagnostic convention) and the caller's
+    /// existing "no profile" degrade applies exactly as it would for any other resolution failure.
+    public static func currentOrNilLoggingRefusal(diagnoseRefusal: (SpacesProfileResolutionError) -> Void = logRefusalToStandardError) -> SpacesProfile?
+    {
+        do {
+            return try nilUnlessRefused { try current() }
+        } catch let error as SpacesProfileResolutionError {
+            diagnoseRefusal(error)
+            return nil
+        } catch {
+            return nil
+        }
+    }
+
+    public static func logRefusalToStandardError(_ error: SpacesProfileResolutionError) {
+        FileHandle.standardError.write(Data("spaces: profile resolution refused on a path that cannot safely propagate or trap: \(error)\n".utf8))
+    }
+
     public static func resolve(
         environment: [String: String], homeDirectoryURL: URL, currentDirectoryPath: String, executablePath: String? = nil,
         fileManager: FileManager = .default, gitProbe: SpacesGitProfileProbe = LiveSpacesGitProfileProbe()

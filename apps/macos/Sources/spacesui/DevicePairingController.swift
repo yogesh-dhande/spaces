@@ -627,7 +627,7 @@ import workspacecore
         Task { [weak self] in
             do {
                 let appVersion = AppVersion.short
-                let profile = try? SpacesProfile.current()
+                let profile = SpacesProfile.currentOrNilOnFailureFatalOnRefusal()
                 let result = try await Task.detached(priority: .userInitiated) {
                     try SpacesDevicePairingClient.openRemotePairingWindow(for: device, appVersion: appVersion, profile: profile)
                 }.value
@@ -659,7 +659,7 @@ import workspacecore
         Task { [weak self] in
             do {
                 let sshPort = try Self.parsedSSHPort(sshPortText)
-                let profile = try? SpacesProfile.current()
+                let profile = SpacesProfile.currentOrNilOnFailureFatalOnRefusal()
                 let clientInstallationID = SpacesDevicePairingClient.localMacClientInstallationID(profile: profile)
                 let result = try await Task.detached(priority: .userInitiated) {
                     try SpacesDevicePairingClient.pairRemoteDevice(
@@ -714,7 +714,7 @@ import workspacecore
         Task { [weak self] in
             do {
                 let sshPort = try Self.parsedSSHPort(sshPortText)
-                let profile = try? SpacesProfile.current()
+                let profile = SpacesProfile.currentOrNilOnFailureFatalOnRefusal()
                 let clientInstallationID = SpacesDevicePairingClient.localMacClientInstallationID(profile: profile)
                 let result = try await Task.detached(priority: .userInitiated) {
                     try SpacesDevicePairingClient.installSpacesOnRemoteDeviceAndPair(
