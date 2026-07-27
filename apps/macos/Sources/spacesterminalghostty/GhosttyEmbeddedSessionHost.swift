@@ -2319,11 +2319,19 @@
             return "\(columns)x\(rows)"
         }
 
-        private func logMobileTakeoverPerformance(name: String, elapsedMS: Int? = nil, count: Int? = nil, attributes: [String: String] = [:]) {
+        /// `elapsedMS`/`count`/`attributes` are `@autoclosure` so a disabled logger never evaluates the
+        /// dictionary literals callers build inline (e.g. `applySessionStateChange`'s "state_change" event,
+        /// which fires on every `.screen` change — i.e. every terminal output tick) — the `isEnabled()`
+        /// guard below runs first, and only then are the closures forced.
+        private func logMobileTakeoverPerformance(
+            name: String, elapsedMS: @autoclosure () -> Int? = nil, count: @autoclosure () -> Int? = nil,
+            attributes: @autoclosure () -> [String: String] = [:]
+        ) {
+            guard SpacesDeviceTerminalPerformanceLogger.isEnabled() else { return }
             SpacesDeviceTerminalPerformanceLogger.emit(
                 .init(
-                    sessionID: launchConfiguration.sessionID, source: "mac-host", name: name, elapsedMS: elapsedMS, count: count,
-                    attributes: attributes))
+                    sessionID: launchConfiguration.sessionID, source: "mac-host", name: name, elapsedMS: elapsedMS(), count: count(),
+                    attributes: attributes()))
         }
 
     }

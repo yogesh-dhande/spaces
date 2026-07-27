@@ -1172,11 +1172,18 @@
 
         private func nowISO8601() -> String { GhosttyRemoteSessionStateTimestamp.string(from: Date()) }
 
-        private func logMobileTakeoverPerformance(name: String, elapsedMS: Int? = nil, count: Int? = nil, attributes: [String: String] = [:]) {
+        /// `elapsedMS`/`count`/`attributes` are `@autoclosure` so a disabled logger never evaluates the
+        /// dictionary literals callers build inline (e.g. per output tick in the session-state-change path)
+        /// — the `isEnabled()` guard below runs first, and only then are the closures forced.
+        private func logMobileTakeoverPerformance(
+            name: String, elapsedMS: @autoclosure () -> Int? = nil, count: @autoclosure () -> Int? = nil,
+            attributes: @autoclosure () -> [String: String] = [:]
+        ) {
+            guard SpacesDeviceTerminalPerformanceLogger.isEnabled() else { return }
             SpacesDeviceTerminalPerformanceLogger.emit(
                 .init(
-                    sessionID: launchConfiguration.sessionID, source: "linux-host", name: name, elapsedMS: elapsedMS, count: count,
-                    attributes: attributes))
+                    sessionID: launchConfiguration.sessionID, source: "linux-host", name: name, elapsedMS: elapsedMS(), count: count(),
+                    attributes: attributes()))
         }
     }
 #endif
