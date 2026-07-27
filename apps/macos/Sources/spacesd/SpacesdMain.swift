@@ -510,10 +510,23 @@ enum SpacesDaemonProfileCommandRouting {
     /// stops intake here and then quiesces (rather than terminates) the session cores.
     ///
     /// Async because stopping a reconcile loop awaits the release of its database connection instead of
-    /// blocking the main thread on it. Every notification source that could re-arm a loop is torn down
-    /// before the first await, so the suspensions cannot let new work in; a reconcile task already
-    /// committed before the stop only submits a pass the stopped loop's store discards.
+    /// blocking the main thread on it. Everything that can bring NEW work in is therefore torn down
+    /// before the first await: both request acceptors, and every notification source that could re-arm a
+    /// reconcile loop. A reconcile task already committed before the stop only submits a pass the stopped
+    /// loop's store discards, and nothing torn down after the awaits is something an already-accepted
+    /// request needs — each request builds its own orchestrator and store, and the reconcile loops' stores
+    /// are private to them.
     private func stopSharedServices() async {
+        // Intake first, and specifically before the awaits below: `shutdownInProgress` gates session
+        // CREATES only, so during a shutdown every other request kind — `.runWorkspaceCommand` can launch
+        // an arbitrary command — is admitted right up until the acceptors stop. Draining the reconcile
+        // stores can take a whole in-flight pass, and a request accepted into that window would start work
+        // the imminent `exit(0)` abandons half-done. (An exec handoff does not depend on this: it latches
+        // `handoffInProgress` before calling here, and that flag makes `handle` reject every command.)
+        // This narrows the window rather than closing it: `acceptSource.cancel()` propagates
+        // asynchronously, which is exactly why the create path has an admission gate as well.
+        deviceAPISupervisor.stop()
+        server.stop()
         lifecycleTimer?.invalidate()
         lifecycleTimer = nil
         if let databaseChangeObserver {
@@ -546,8 +559,6 @@ enum SpacesDaemonProfileCommandRouting {
             await caddyRouterService?.stop()
             caddyRouterService = nil
         #endif
-        deviceAPISupervisor.stop()
-        server.stop()
     }
 
     @TerminalEngineActor private func terminateAllSessions() { for sessionID in Array(sessionCores.keys) { _ = terminateSession(id: sessionID) } }
