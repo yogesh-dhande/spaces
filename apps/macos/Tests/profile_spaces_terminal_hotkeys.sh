@@ -1,4 +1,18 @@
 #!/bin/bash
+# Profiles and guards the Spaces window hotkey (cmd-opt-=) against a running workspace.
+#
+# The workspace is started through the CLI, which summons the Spaces window with the workspace's
+# processes running as terminal panes, and the workspace's `frontend` process pane is focused. From
+# that state the hotkey drives a two-phase cycle that the scenario repeats and times:
+#
+#   dismiss — the Spaces window is visible and key, so the hotkey orders it out and hides the app
+#   summon  — Spaces is in the background, so the hotkey reveals the window and refreshes the selection
+#
+# Each phase asserts the toggle's own perf metric including the window/app state it observed before
+# acting, so an iteration only passes if the window really alternated; the summon phase additionally
+# asserts the reveal and the deferred selection refresh that complete that path. The summon leaves
+# the window key and the app active again, which is the dismiss phase's precondition, so the cycle
+# sustains itself across iterations without the harness re-fronting the app.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -22,8 +36,8 @@ PROJECT_DIR="$WORK_ROOT/repo"
 WORKSPACE_INFO_JSON="$WORK_ROOT/workspace.json"
 SUMMARY_PATH="$WORK_ROOT/summary.txt"
 METRICS_PATH="$WORK_ROOT/metrics.json"
-SHOW_TOGGLE_WALL_SAMPLES="$WORK_ROOT/show-toggle-wall-samples.txt"
-HIDE_TOGGLE_WALL_SAMPLES="$WORK_ROOT/hide-toggle-wall-samples.txt"
+DISMISS_WALL_SAMPLES="$WORK_ROOT/dismiss-toggle-wall-samples.txt"
+SUMMON_WALL_SAMPLES="$WORK_ROOT/summon-toggle-wall-samples.txt"
 PROCESS_FOCUS_LOG="$WORK_ROOT/process-focus.log"
 APP_PID=""
 
@@ -212,86 +226,99 @@ wait_for_spaces_frontmost_ready
 env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" DEBUG=1 "$SPACES_CLI" workspace start --workspace "$WORKSPACE_ID" >/dev/null
 wait_for_app_log_pattern "spaces: perf metric=process_focus .*target=frontend .*success=1|spaces: perf metric=terminal_window_summon .*mode=owner" 30 || true
 env SPACES_DB_PATH="$DB_PATH" SPACES_RUNTIME_DIR="$RUNTIME_DIR" DEBUG=1 "$SPACES_E2E_CLI" focus-workspace-process --workspace-dir "$WORKSPACE_DIR" --process-name frontend >/dev/null 2>"$PROCESS_FOCUS_LOG"
-wait_for_spaces_frontmost_ready
+# The focus lands asynchronously over IPC; its own metric is the signal that the frontend pane is
+# focused and the Spaces window is key, which is the dismiss phase's precondition. Waiting on the
+# metric rather than re-fronting the app keeps the harness from raising a window the app did not
+# choose, which would change which phase the first hotkey takes.
+wait_for_app_log_pattern "spaces: perf metric=process_focus target=frontend success=1" 30
 
+# Every wait below is baseline-relative: the baselines are recomputed at the top of each iteration
+# and each wait requires the count to grow, so a line left by an earlier iteration cannot satisfy a
+# later one. The `*_before=` fields pin the state the toggle observed, so a phase that fires in the
+# wrong window state does not match.
 for iteration in $(seq 1 "$ITERATIONS"); do
-  toggle_show_pattern="spaces: perf metric=toggle_window target=action=show .*app_active_before=1 .*success=1 elapsed_ms="
-  toggle_hide_pattern="spaces: perf metric=toggle_window target=action=hide .*app_active_before=1 .*success=1 elapsed_ms="
-  lookup_pattern="spaces: perf metric=toggle_window_terminal_workspace_lookup target=session=.* success=[01] elapsed_ms="
+  # The dismiss asserts all three state fields: they restate the branch's own precondition (the app
+  # was active with the window up), so they are stable. The summon asserts only `app_active_before=0`
+  # — that Spaces really was in the background when the hotkey arrived. Its `app_hidden_before` and
+  # `main_visible_before` are deliberately left unasserted because AppKit settles the hide
+  # asynchronously: the window can be ordered back in and made key again while the app is still
+  # hidden, so those two fields legitimately read either way depending on when the hotkey lands.
+  toggle_dismiss_pattern="spaces: perf metric=toggle_window target=action=hide app_active_before=1 app_hidden_before=0 main_visible_before=1 .*success=1 elapsed_ms="
+  toggle_summon_pattern="spaces: perf metric=toggle_window target=action=show app_active_before=0 .*success=1 elapsed_ms="
+  reveal_pattern="spaces: perf metric=toggle_window_reveal_target target=main success=1 elapsed_ms="
   refresh_pattern="spaces: perf metric=toggle_window_selection_refresh target=workspace=.* success=1 elapsed_ms="
-  return_pattern="spaces: perf metric=toggle_window_return_terminal_focus target=session=.* success=1 elapsed_ms="
-  toggle_show_baseline="$(grep -Ec "$toggle_show_pattern" "$APP_LOG" || true)"
-  toggle_hide_baseline="$(grep -Ec "$toggle_hide_pattern" "$APP_LOG" || true)"
-  lookup_baseline="$(grep -Ec "$lookup_pattern" "$APP_LOG" || true)"
+  toggle_dismiss_baseline="$(grep -Ec "$toggle_dismiss_pattern" "$APP_LOG" || true)"
+  toggle_summon_baseline="$(grep -Ec "$toggle_summon_pattern" "$APP_LOG" || true)"
+  reveal_baseline="$(grep -Ec "$reveal_pattern" "$APP_LOG" || true)"
   refresh_baseline="$(grep -Ec "$refresh_pattern" "$APP_LOG" || true)"
-  return_baseline="$(grep -Ec "$return_pattern" "$APP_LOG" || true)"
 
-  started_at="$(python3 - <<'PY'
+  dismiss_started_at="$(python3 - <<'PY'
 import time
 print(time.time())
 PY
 )"
   send_spaces_toggle_hotkey
-  wait_for_log_pattern_count_greater_than "$toggle_show_pattern" "$toggle_show_baseline" 30
-  wait_for_log_pattern_count_greater_than "$lookup_pattern" "$lookup_baseline" 30
+  wait_for_log_pattern_count_greater_than "$toggle_dismiss_pattern" "$toggle_dismiss_baseline" 30
+  printf 'iteration=%s dismiss_toggle_wall_ms=%s\n' "$iteration" "$(ms_since "$dismiss_started_at")" >>"$DISMISS_WALL_SAMPLES"
+
+  summon_started_at="$(python3 - <<'PY'
+import time
+print(time.time())
+PY
+)"
+  send_spaces_toggle_hotkey
+  wait_for_log_pattern_count_greater_than "$toggle_summon_pattern" "$toggle_summon_baseline" 30
+  wait_for_log_pattern_count_greater_than "$reveal_pattern" "$reveal_baseline" 30
+  # The selection refresh is scheduled as a cancellable deferred task at the end of the summon path,
+  # so its metric also proves the summon ran to completion and was not superseded. It lands after the
+  # window has become key and the app active again, so waiting for it settles the next iteration's
+  # dismiss precondition.
   wait_for_log_pattern_count_greater_than "$refresh_pattern" "$refresh_baseline" 30
-  wait_for_spaces_frontmost_ready
-  printf 'iteration=%s terminal_to_main_toggle_wall_ms=%s\n' "$iteration" "$(ms_since "$started_at")" >>"$SHOW_TOGGLE_WALL_SAMPLES"
-
-  hide_started_at="$(python3 - <<'PY'
-import time
-print(time.time())
-PY
-)"
-  send_spaces_toggle_hotkey
-  wait_for_log_pattern_count_greater_than "$toggle_hide_pattern" "$toggle_hide_baseline" 30
-  wait_for_log_pattern_count_greater_than "$return_pattern" "$return_baseline" 30
-  printf 'iteration=%s main_to_terminal_toggle_wall_ms=%s\n' "$iteration" "$(ms_since "$hide_started_at")" >>"$HIDE_TOGGLE_WALL_SAMPLES"
+  printf 'iteration=%s summon_toggle_wall_ms=%s\n' "$iteration" "$(ms_since "$summon_started_at")" >>"$SUMMON_WALL_SAMPLES"
 done
 
-python3 - "$APP_LOG" "$ITERATIONS" "$SHOW_TOGGLE_WALL_SAMPLES" "$HIDE_TOGGLE_WALL_SAMPLES" "$METRICS_PATH" <<'PY' >"$SUMMARY_PATH"
+python3 - "$APP_LOG" "$ITERATIONS" "$DISMISS_WALL_SAMPLES" "$SUMMON_WALL_SAMPLES" "$METRICS_PATH" <<'PY' >"$SUMMARY_PATH"
 import json, math, re, statistics, sys
 
-log_path, iterations, show_wall_samples_path, hide_wall_samples_path, metrics_path = sys.argv[1:6]
+log_path, iterations, dismiss_wall_samples_path, summon_wall_samples_path, metrics_path = sys.argv[1:6]
 iterations = int(iterations)
 pattern = re.compile(r"spaces: perf metric=(?P<metric>\S+) target=(?P<target>.*?) success=(?P<success>[01]) elapsed_ms=(?P<elapsed>\d+)(?: (?P<detail>.*))?$")
 metrics = {
-    "toggle_window_show": [],
-    "toggle_window_hide": [],
+    "toggle_window_summon": [],
+    "toggle_window_dismiss": [],
     "toggle_window_reveal_target": [],
-    "toggle_window_focused_window_workspace_lookup": [],
-    "toggle_window_terminal_workspace_lookup": [],
     "toggle_window_selection_refresh": [],
-    "toggle_window_return_terminal_focus": [],
 }
 
 with open(log_path, "r", encoding="utf-8", errors="replace") as handle:
     for raw_line in handle:
         line = raw_line.strip()
-        match = pattern.match(line)
+        # `search`, not `match`: perf lines carry a `HH:MM:SS.mmm ` prefix, which anchoring at
+        # `spaces:` would reject, leaving every metric row empty.
+        match = pattern.search(line)
         if not match or match.group("success") != "1":
             continue
         metric = match.group("metric")
-        if metric == "toggle_window" and "action=show" in match.group("target") and "app_active_before=1" in match.group("target"):
-            metrics["toggle_window_show"].append(int(match.group("elapsed")))
+        if metric == "toggle_window" and "action=show" in match.group("target") and "app_active_before=0" in match.group("target"):
+            metrics["toggle_window_summon"].append(int(match.group("elapsed")))
         elif metric == "toggle_window" and "action=hide" in match.group("target") and "app_active_before=1" in match.group("target"):
-            metrics["toggle_window_hide"].append(int(match.group("elapsed")))
+            metrics["toggle_window_dismiss"].append(int(match.group("elapsed")))
         elif metric in metrics:
             metrics[metric].append(int(match.group("elapsed")))
 
-show_wall_samples = []
-with open(show_wall_samples_path, "r", encoding="utf-8") as handle:
+dismiss_wall_samples = []
+with open(dismiss_wall_samples_path, "r", encoding="utf-8") as handle:
     for line in handle:
-        if "terminal_to_main_toggle_wall_ms=" not in line:
+        if "dismiss_toggle_wall_ms=" not in line:
             continue
-        show_wall_samples.append(int(line.strip().split("terminal_to_main_toggle_wall_ms=", 1)[1]))
+        dismiss_wall_samples.append(int(line.strip().split("dismiss_toggle_wall_ms=", 1)[1]))
 
-hide_wall_samples = []
-with open(hide_wall_samples_path, "r", encoding="utf-8") as handle:
+summon_wall_samples = []
+with open(summon_wall_samples_path, "r", encoding="utf-8") as handle:
     for line in handle:
-        if "main_to_terminal_toggle_wall_ms=" not in line:
+        if "summon_toggle_wall_ms=" not in line:
             continue
-        hide_wall_samples.append(int(line.strip().split("main_to_terminal_toggle_wall_ms=", 1)[1]))
+        summon_wall_samples.append(int(line.strip().split("summon_toggle_wall_ms=", 1)[1]))
 
 def summarize(values):
     avg = round(statistics.mean(values), 1)
@@ -307,15 +334,12 @@ def summarize(values):
     }
 
 ordered = [
-    ("terminal_to_main_toggle_wall", show_wall_samples),
-    ("main_to_terminal_toggle_wall", hide_wall_samples),
-    ("toggle_window_show", metrics["toggle_window_show"]),
-    ("toggle_window_hide", metrics["toggle_window_hide"]),
+    ("dismiss_toggle_wall", dismiss_wall_samples),
+    ("summon_toggle_wall", summon_wall_samples),
+    ("toggle_window_dismiss", metrics["toggle_window_dismiss"]),
+    ("toggle_window_summon", metrics["toggle_window_summon"]),
     ("toggle_window_reveal_target", metrics["toggle_window_reveal_target"]),
-    ("toggle_window_focused_window_workspace_lookup", metrics["toggle_window_focused_window_workspace_lookup"]),
-    ("toggle_window_terminal_workspace_lookup", metrics["toggle_window_terminal_workspace_lookup"]),
     ("toggle_window_selection_refresh", metrics["toggle_window_selection_refresh"]),
-    ("toggle_window_return_terminal_focus", metrics["toggle_window_return_terminal_focus"]),
 ]
 
 payload = {"iterations": iterations, "metrics": {}}
