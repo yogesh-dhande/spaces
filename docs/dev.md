@@ -620,20 +620,18 @@ apps/macos/Tests/e2e.sh terminal --scenario edit-shortcuts
 
 That scenario runs the debug app against an isolated `SPACES_DB_PATH`, opens a `cat` session, verifies `Cmd+V` through `spaces terminal tail`, verifies mouse selection plus `Cmd+C` through `pbpaste`, and verifies `Cmd+F`, `Cmd+G`, `Cmd+Shift+G`, and `Esc` through the terminal-window debug dump. It requires the same Accessibility permissions as the other desktop-control E2E scenarios.
 
-For repeatable profiling of the built-in `Spaces terminal -> main window -> tracked process terminal` hotkey loop:
+For repeatable profiling of the Spaces window hotkey dismiss/summon cycle:
 
 ```bash
 apps/macos/Tests/e2e.sh terminal --scenario spaces-terminal-hotkeys --samples 3
 ```
 
-That profiler runs against an isolated `SPACES_DB_PATH`, enables `DEBUG=1`, focuses a tracked built-in process terminal, repeatedly toggles back to the main window with `Cmd+Opt+=`, then refocuses the tracked terminal through the normal workspace-process path while summarizing:
-- `terminal_to_main_toggle_wall`
-- `main_to_terminal_toggle_wall`
-- `toggle_window_show`
-- `toggle_window_hide`
-- `toggle_window_return_terminal_focus`
+That profiler runs against an isolated `SPACES_DB_PATH`, enables `DEBUG=1`, focuses a tracked built-in process terminal pane, then repeatedly drives `Cmd+Opt+=` through a two-phase cycle — dismiss (the window is up and the app active, so the hotkey hides both) then summon (the app is in the background, so the hotkey reveals the window and refreshes the selection) — while summarizing:
+- `dismiss_toggle_wall`
+- `summon_toggle_wall`
+- `toggle_window_dismiss`
+- `toggle_window_summon`
 - `toggle_window_reveal_target`
-- `toggle_window_terminal_workspace_lookup`
 - `toggle_window_selection_refresh`
 
 For repeatable profiling of the built-in `Spaces terminal -> command palette -> tracked process terminal` hotkey loop:
