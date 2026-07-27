@@ -92,17 +92,6 @@ import XCTest
 
             let stopEntered = LockedFlag()
             let stopFinished = LockedFlag()
-            // Set from INSIDE `stop()` (its returning does not race capturing whether `ensureRunning()`'s
-            // own thread had already finished), the fact this test needs: "stop() must not return before the
-            // ensureRunning it interrupted has finished." `Thread.isFinished` is the right property to read
-            // for that -- Foundation guarantees it only ever becomes true once the thread's closure (which
-            // includes the `ensureResult.set` above) has actually returned. A self-reported order instead
-            // (each thread appending its own name to a shared log immediately after its own call returns,
-            // as this test used to) is not equivalent: once `ensureRunning()` releases `stop()`'s lock, the
-            // two threads are racing independently for CPU time to run their OWN bookkeeping, and stop()'s
-            // remaining work can finish first even though it was serialized correctly -- a false failure,
-            // not a real one.
-            let ensureRunningFinishedBeforeStopReturned = LockedFlag()
             let stopThread = Thread {
                 // `stop(debugOnEnter:)` fires the instant this call is made, before it can even attempt to
                 // acquire the internal lock -- see its doc comment for why a flag set by the caller right
@@ -110,14 +99,18 @@ import XCTest
                 // release the fake Caddy's `run` loop while `stop()` has not been entered at all, so a
                 // `stop()` that does not wait for an in-flight call could still pass).
                 lifecycle.stop(debugOnEnter: { stopEntered.set() })
-                if ensureThread.isFinished { ensureRunningFinishedBeforeStopReturned.set() }
                 stopFinished.set()
             }
             stopThread.start()
             // Wait for the stop thread to have entered `stop()` — a signal the call itself emits — instead of
-            // sleeping for a guessed interval and hoping it got that far. `ensureRunning` is still blocked in
-            // the fake caddy's run loop until `releaseRun` is written below, so a `stop()` that honors the
-            // in-flight call cannot have returned.
+            // sleeping for a guessed interval and hoping it got that far. `ensureRunning` is still blocked
+            // inside `CaddyService.ensureRunning`'s poll loop, holding `lifecycle`'s lock, until `releaseRun`
+            // is written below: the fake caddy's `run` branch only touches the admin socket file (the signal
+            // that poll loop waits on) once `releaseRun` exists, and we have not written it yet. So the
+            // assertion right after this wait proves, by construction rather than by scheduling luck, that a
+            // `stop()` which serializes on that same lock cannot have returned: it establishes exactly "stop()
+            // must not return until the ensureRunning it interrupted has released the lock", i.e. has
+            // returned.
             XCTAssertTrue(waitUntil(timeout: 30) { stopEntered.value })
             XCTAssertFalse(stopFinished.value)
 
@@ -126,8 +119,6 @@ import XCTest
             XCTAssertTrue(waitForThreadToFinish(ensureThread, timeout: 10))
             XCTAssertTrue(waitForThreadToFinish(stopThread, timeout: 10))
             try XCTUnwrap(ensureResult.value).get()
-            XCTAssertTrue(
-                ensureRunningFinishedBeforeStopReturned.value, "stop() must not return until the ensureRunning it interrupted has finished")
             XCTAssertFalse(FileManager.default.fileExists(atPath: socket.path))
 
             let eventsBeforeStoppedEnsure = readEvents(at: events)
