@@ -112,7 +112,9 @@ public enum SpacesRemoteDevicePairingError: LocalizedError, Equatable {
 
 public enum SpacesDevicePairingClient {
     private static let sshPath = "/usr/bin/ssh"
-    static let baseRemotePairCommand = "~/.spaces/bin/spaces device pair --json"
+    static let devicePairSubcommand = "device pair --json"
+    /// The pairing command for a remote installed profile: the CLI installed beside the daemon it pairs.
+    static let installedRemotePairCommand = "~/.spaces/bin/spaces \(devicePairSubcommand)"
     /// The remote installer downloads a release artifact and restarts the systemd user service, which
     /// needs far more headroom than the short pairing SSH calls (12-15s).
     static let remoteInstallTimeoutSeconds: TimeInterval = 600
@@ -234,9 +236,8 @@ public enum SpacesDevicePairingClient {
         let database = try SpacesClientDatabase.defaultDatabase()
         try database.upsert(
             device: SpacesPairedDeviceRecord(
-                id: deviceID, name: link.name, platform: "remote", host: host, port: link.port,
-                certificateFingerprint: link.certificateFingerprint, sshHost: nil, sshUser: nil, sshPort: nil, createdAt: now, updatedAt: now,
-                lastSelectedAt: now))
+                id: deviceID, name: link.name, platform: "remote", host: host, port: link.port, certificateFingerprint: link.certificateFingerprint,
+                sshHost: nil, sshUser: nil, sshPort: nil, createdAt: now, updatedAt: now, lastSelectedAt: now))
         try SpacesDeviceCredentialStore.saveToken(authToken, deviceID: deviceID, profile: profile)
         return SpacesRemoteDevicePairingResult(deviceID: deviceID, name: link.name, host: host, port: link.port)
     }
@@ -455,25 +456,42 @@ public enum SpacesDevicePairingClient {
     private static func loadRemotePairingMetadata(
         destination: String, port: Int?, probe: RemoteInstallProbe, appVersion: String?, profile: SpacesProfile?
     ) throws -> RemotePairingMetadata {
-        let result = try runSSH(destination: destination, port: port, remoteCommand: remotePairCommand(profile: profile), timeoutSeconds: 15)
-        return try parseRemotePairingMetadataResult(result, destination: destination, probe: probe, appVersion: appVersion)
+        let pairCommand = try remotePairCommand(profile: profile)
+        let result = try runSSH(destination: destination, port: port, remoteCommand: pairCommand, timeoutSeconds: 15)
+        return try parseRemotePairingMetadataResult(result, destination: destination, probe: probe, appVersion: appVersion, pairCommand: pairCommand)
     }
 
+    /// The `spaces device pair --json` command run on the remote device, named by the CLI that belongs to
+    /// the profile being paired.
+    ///
+    /// A development profile pairs through ITS OWN deployed CLI, addressed by path inside that profile's
+    /// root, with NO environment prefix: a deployed `spaces` binary states which profile it serves by
+    /// where it lives, so it opens that profile's database and runtime by itself. Pointing the installed
+    /// CLI at a development database with `SPACES_DB_PATH`/`SPACES_RUNTIME_DIR` instead only ever worked
+    /// because a development deploy overwrote the installed binaries; a device now carries the installed
+    /// profile and every development profile side by side, each with its own binaries and daemon.
+    ///
+    /// The command reaches that profile's CLI, whose `ensureRunning` starts that profile's own daemon unit
+    /// — so pairing brings up a development daemon that is down without any pairing-specific code.
     static func remotePairCommand(profile: SpacesProfile?) throws -> String {
-        guard let remoteProfileRoot = try remoteDevelopmentProfileRoot(profile: profile) else { return baseRemotePairCommand }
-        let databasePath = remoteProfileRoot.hasSuffix("/") ? "\(remoteProfileRoot)spaces.db" : "\(remoteProfileRoot)/spaces.db"
-        let runtimePath = remoteProfileRoot.hasSuffix("/") ? "\(remoteProfileRoot)runtime" : "\(remoteProfileRoot)/runtime"
-        return "\(SpacesProfile.databasePathEnvironmentVariable)=\(remoteShellPathExpression(databasePath)) "
-            + "\(SpacesProfile.runtimeDirectoryEnvironmentVariable)=\(remoteShellPathExpression(runtimePath)) \(baseRemotePairCommand)"
+        guard let remoteProfileRoot = try remoteDevelopmentProfileRoot(profile: profile) else { return installedRemotePairCommand }
+        let separator = remoteProfileRoot.hasSuffix("/") ? "" : "/"
+        let cliPath = "\(remoteProfileRoot)\(separator)daemon/current/bin/spaces"
+        return "\(remoteShellPathExpression(cliPath)) \(devicePairSubcommand)"
     }
 
+    /// The remote development profile root this client pairs with, derived only from the local profile's
+    /// own directory name: one worktree owns exactly one remote profile, named after it, at the single
+    /// layout the installer creates. There is deliberately no way to name a root anywhere else — a root
+    /// outside `~/.spaces-dev/profiles/spaces/<name>` has no unit instance and no CLI of its own, so
+    /// pairing against it could not work.
+    ///
     /// Falls back to `SpacesProfile.currentOrNilIfUnresolved()` — not `current()` swallowed with `try?`
     /// — when the caller passed no profile: a genuine "no profile could be resolved" still degrades to
     /// `nil` here (this function already treats `nil` as "no development profile, use the installed
     /// command"), but a test-host refusal is not that, and this whole call chain already `throws`, so
     /// there is no reason for it to be silenced instead of propagated like every other resolution error.
     private static func remoteDevelopmentProfileRoot(profile providedProfile: SpacesProfile?) throws -> String? {
-        if let override = normalized(ProcessInfo.processInfo.environment["SPACES_E2E_REMOTE_DEVICE_ROOT"]) { return override }
         let profile = try providedProfile ?? SpacesProfile.currentOrNilIfUnresolved()
         guard let profile else { return nil }
         let marker = "/.spaces-dev/profiles/spaces/"
@@ -484,8 +502,10 @@ public enum SpacesDevicePairingClient {
         return "~/.spaces-dev/profiles/spaces/\(profileName)"
     }
 
+    /// `pairCommand` is the command that actually ran, so a failure message names the CLI the pairing
+    /// attempt used — the installed one or a development profile's own — instead of a hardcoded path.
     private static func parseRemotePairingMetadataResult(
-        _ result: SSHCommandResult, destination: String, probe: RemoteInstallProbe, appVersion: String?
+        _ result: SSHCommandResult, destination: String, probe: RemoteInstallProbe, appVersion: String?, pairCommand: String
     ) throws -> RemotePairingMetadata {
         if result.timedOut { throw SpacesRemoteDevicePairingError.remotePairCommandTimedOut(destination) }
         // A successful `spaces device pair --json` exits 0 with pairing JSON on stdout; only a failed
@@ -501,7 +521,7 @@ public enum SpacesDevicePairingClient {
             }
             throw SpacesRemoteDevicePairingError.remotePairCommandFailed(
                 remotePairCommandFailureMessage(
-                    destination: destination, standardError: result.standardError, standardOutput: result.standardOutput,
+                    destination: destination, command: pairCommand, standardError: result.standardError, standardOutput: result.standardOutput,
                     exitStatus: result.exitStatus))
         }
         let trimmedOutput = result.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -731,7 +751,7 @@ public enum SpacesDevicePairingClient {
 
     /// True when command output carries the shell's missing-binary signature ("no such file" / "not
     /// found"). The remote exit code is not always trustworthy — Tailscale SSH (and some other transports)
-    /// return 0 regardless of the remote command's real status — so a missing `~/.spaces/bin/spaces` can
+    /// return 0 regardless of the remote command's real status — so a missing `spaces` binary can
     /// surface only as this stderr text under a reported exit 0. This content check backstops the exit
     /// code so a not-installed remote is still recognized.
     static func outputReportsMissingBinary(_ output: String) -> Bool {
@@ -741,8 +761,11 @@ public enum SpacesDevicePairingClient {
 
     /// Message for a `spaces device pair` failure that is not the not-installed case (which is handled
     /// earlier with actionable install instructions). Covers a runnable-but-broken install: a permission
-    /// problem, or any other nonzero exit.
-    static func remotePairCommandFailureMessage(destination: String, standardError: String, standardOutput: String, exitStatus: Int32) -> String {
+    /// problem, or any other nonzero exit. `command` is the command that ran, so the message names the
+    /// CLI the user can reproduce the failure with.
+    static func remotePairCommandFailureMessage(
+        destination: String, command: String, standardError: String, standardOutput: String, exitStatus: Int32
+    ) -> String {
         let detail = [standardError, standardOutput].map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }.joined(
             separator: "\n")
         let lowercased = detail.lowercased()
@@ -750,7 +773,7 @@ public enum SpacesDevicePairingClient {
             return "SSH connected to \(destination), but Spaces cannot be run by that remote user. Fix the install permissions, then retry."
         }
         let suffix = detail.isEmpty ? "Exit status \(exitStatus)." : detail
-        return "SSH connected to \(destination), but `\(baseRemotePairCommand)` failed. \(suffix)"
+        return "SSH connected to \(destination), but `\(command)` failed. \(suffix)"
     }
 
     /// Message for a nonzero-exit remote install. The installer script's `die` messages are user-facing,

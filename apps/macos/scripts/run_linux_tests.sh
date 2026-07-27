@@ -49,6 +49,7 @@ suite_log="$(mktemp)"
 trap 'rm -f "$suite_log"' EXIT
 for suite in \
   SpacesTestHostDetectionTests \
+  TerminalServiceSystemdUnitTests \
   GhosttyLinuxHeadlessKeyEncodingTests \
   GhosttyLinuxHeadlessSessionResizeTests \
   GhosttyLinuxHeadlessSessionTranscriptTrimTests \

@@ -27,8 +27,12 @@ device_api_port="${SPACES_MOBILE_DEMO_PORT:-47847}"
 remote_ssh_host="${SPACES_E2E_REMOTE_SSH_HOST:-}"
 remote_ssh_user="${SPACES_E2E_REMOTE_SSH_USER:-}"
 remote_ssh_port="${SPACES_E2E_REMOTE_SSH_PORT:-}"
-remote_demo_daemon_port="${SPACES_E2E_REMOTE_DAEMON_PORT:-47847}"
-remote_demo_device_root="${SPACES_E2E_REMOTE_DEVICE_ROOT:-~/.spaces/remote-device-e2e}"
+# The demo pairs with the remote account's INSTALLED daemon: pairing runs through
+# `spacese2e open-remote-device-pairing-window`, which drives the installed profile's CLI. So the
+# artifact is installed with no profile selector, and the daemon answers on the canonical Device API
+# port every installed profile binds by default. Only the extraction scratch root is E2E-scoped.
+remote_demo_daemon_port=47847
+remote_demo_install_root="~/.spaces/remote-demo-e2e"
 remote_demo_workspace_root="${SPACES_E2E_REMOTE_WORKSPACE_ROOT:-~/.spaces/e2e-workspaces}"
 if [[ "${SPACES_E2E_RUN_REMOTE:-0}" == "1" ]]; then
   spaces_e2e_require_remote_host_env "$repo_root"
@@ -770,10 +774,6 @@ PY
 }
 
 prepare_remote_demo_daemon() {
-  [[ "$remote_demo_daemon_port" =~ ^[0-9]+$ ]] || {
-    echo "SPACES_E2E_REMOTE_DAEMON_PORT must be numeric, got: $remote_demo_daemon_port" >&2
-    exit 1
-  }
   command -v ssh >/dev/null 2>&1 || {
     echo "ssh is required to prepare the remote demo daemon." >&2
     exit 1
@@ -781,10 +781,8 @@ prepare_remote_demo_daemon() {
 
   local artifact_assignments artifact_url archive_path install_root quoted_archive quoted_install
   echo "Preparing remote demo spacesd at $remote_ssh_host..."
-  SPACES_E2E_REMOTE_DAEMON_PORT="$remote_demo_daemon_port" \
-    SPACES_E2E_REMOTE_WORKSPACE_ROOT="$remote_demo_workspace_root" \
-    SPACES_E2E_REMOTE_INSTALL_ROOT="$remote_demo_device_root" \
-    SPACES_E2E_REMOTE_DEVICE_ROOT="$remote_demo_device_root" \
+  SPACES_E2E_REMOTE_WORKSPACE_ROOT="$remote_demo_workspace_root" \
+    SPACES_E2E_REMOTE_INSTALL_ROOT="$remote_demo_install_root" \
     "$repo_root/apps/macos/scripts/cleanup_linux_spacesd_e2e.sh" >/dev/null
 
   artifact_assignments="$("$repo_root/apps/macos/scripts/deploy_linux_spacesd_e2e.sh")"
@@ -796,10 +794,10 @@ prepare_remote_demo_daemon() {
   }
 
   archive_path="${artifact_url#file://}"
-  install_root="$(remote_expand_path "$remote_demo_device_root/install")"
+  install_root="$(remote_expand_path "$remote_demo_install_root/install")"
   quoted_archive="$(shell_quote "$archive_path")"
   quoted_install="$(shell_quote "$install_root")"
-  remote_ssh "rm -rf $quoted_install && mkdir -p $quoted_install && tar -xzf $quoted_archive -C $quoted_install --strip-components=1 && SPACES_DEVICE_API_HOST=0.0.0.0 SPACES_DEVICE_API_PORT=$remote_demo_daemon_port $quoted_install/install.sh" >/dev/null
+  remote_ssh "rm -rf $quoted_install && mkdir -p $quoted_install && tar -xzf $quoted_archive -C $quoted_install --strip-components=1 && $quoted_install/install.sh" >/dev/null
   wait_for_remote_demo_daemon
 }
 

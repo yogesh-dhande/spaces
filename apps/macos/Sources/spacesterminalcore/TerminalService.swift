@@ -523,7 +523,7 @@ import Foundation
             appendCandidate(bundledResourceDirectory.appendingPathComponent("spacesd", isDirectory: false).path(percentEncoded: false))
             switch profile.source {
             case .installedFallback: for linkURL in installedLinkURLs { appendCandidate(linkURL.path) }
-            case .developmentWorktree, .explicitDatabasePath:
+            case .developmentWorktree, .deployedDevelopmentProfile, .explicitDatabasePath:
                 for relativePath in [
                     "apps/macos/.build/debug/spacesd", "apps/macos/.build/release/spacesd", ".build/debug/spacesd", ".build/release/spacesd",
                 ] { appendCandidate(currentDirectory.appendingPathComponent(relativePath, isDirectory: false).path(percentEncoded: false)) }
@@ -565,7 +565,7 @@ import Foundation
                             "An installed profile starts only the daemon shipped with the running build or installed beside it, never a development "
                                 + "build from the current directory. Reinstall Spaces or set SPACESD_EXECUTABLE."
                         )
-                    case .developmentWorktree, .explicitDatabasePath:
+                    case .developmentWorktree, .deployedDevelopmentProfile, .explicitDatabasePath:
                         (
                             "development",
                             "A development profile never starts the installed daemon (~/.spaces/bin/spacesd, /usr/local/bin/spacesd), which is a "
@@ -630,18 +630,81 @@ import Foundation
         ///   an adopted already-running daemon must speak this build's wire protocol or this throws.
         ///   `relaunch` passes `false`: it sends a best-effort `.shutdown` and then waits here, so the
         ///   outgoing stale daemon still answering ping during its shutdown grace must not abort the wait.
+        ///
+        /// A Linux daemon is owned by user systemd, not by this process: every profile on the device has its
+        /// own user unit, so starting one is asking systemd to start that profile's unit rather than spawning
+        /// a daemon here the way macOS does. This still adopts a live daemon without going near systemd, so
+        /// the common case costs one ping.
         @discardableResult public static func ensureRunning(timeout: TimeInterval = 5, requireWireCompatibility: Bool = true) throws -> Bool {
             let socketPath = try TerminalServicePaths.socketPath()
+            if FileManager.default.fileExists(atPath: socketPath), let response = try? pingResponse(timeout: min(timeout, 1)), response.ok {
+                if requireWireCompatibility { try assertDaemonWireCompatible(response) }
+                return false
+            }
+
+            // Linux is the only platform that hosts a daemon under user systemd. This half of the file is
+            // everything that is not macOS, which includes iOS — a platform with no daemon of its own, no
+            // systemd, and no `Process` to reach one with — so the start attempt is Linux-only and iOS waits
+            // for a socket exactly as it did before, then reports the same unavailability.
+            #if os(Linux)
+                let startedUnit = startSystemdUnit(for: try SpacesProfile.current())
+            #else
+                let startedUnit: String? = nil
+            #endif
+            // The wait starts after the start attempt so the daemon gets the caller's whole window to come
+            // up, rather than however much of it dispatching to systemd happened to leave.
             let deadline = Date().addingTimeInterval(timeout)
             repeat {
                 if FileManager.default.fileExists(atPath: socketPath), let response = try? pingResponse(timeout: min(timeout, 1)), response.ok {
                     if requireWireCompatibility { try assertDaemonWireCompatible(response) }
-                    return false
+                    return startedUnit != nil
                 }
                 Thread.sleep(forTimeInterval: 0.05)
             } while Date() < deadline
-            throw TerminalServiceError.serviceUnavailable(socketPath)
+            throw TerminalServiceError.serviceUnavailable(socketPath: socketPath, startedUnit: startedUnit)
         }
+
+        #if os(Linux)
+            /// The user systemd unit that owns this profile's daemon on a Linux device.
+            ///
+            /// `nil` means no unit exists for the profile, so there is nothing to start and a missing daemon stays
+            /// the caller's error. That is the honest answer for a repo-built worktree profile or an explicit
+            /// database path: both belong to a developer-driven process on a machine with a Spaces checkout, where
+            /// the daemon is started by whatever launched the build, and inventing a unit name for them would only
+            /// ask systemd to start something that was never installed.
+            static func systemdUnitName(for profile: SpacesProfile) -> String? {
+                switch profile.source {
+                case .installedFallback: return "spacesd.service"
+                case .deployedDevelopmentProfile:
+                    return "spacesd@\(URL(fileURLWithPath: profile.rootDirectory, isDirectory: true).lastPathComponent).service"
+                case .developmentWorktree, .explicitDatabasePath: return nil
+                }
+            }
+
+            /// Asks user systemd to start this profile's daemon unit, and returns the unit it asked about — `nil`
+            /// when the profile has no unit or the command could not be run at all.
+            ///
+            /// A failing start is not fatal here: the caller's poll below decides the outcome, because whether a
+            /// daemon ends up answering is the only thing that matters and systemd reports plenty of non-failures
+            /// (an already-active unit, a unit still starting) that say nothing about that. The wait is bounded so
+            /// an unresponsive user systemd instance cannot stall a caller past its own deadline.
+            private static func startSystemdUnit(for profile: SpacesProfile) -> String? {
+                guard let unitName = systemdUnitName(for: profile) else { return nil }
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+                process.arguments = ["systemctl", "--user", "start", unitName]
+                process.standardInput = FileHandle.nullDevice
+                process.standardOutput = FileHandle.nullDevice
+                process.standardError = FileHandle.nullDevice
+                do { try process.run() } catch { return nil }
+                let deadline = Date().addingTimeInterval(systemdStartTimeout)
+                while process.isRunning, Date() < deadline { Thread.sleep(forTimeInterval: 0.05) }
+                if process.isRunning { process.terminate() }
+                return unitName
+            }
+
+            private static let systemdStartTimeout: TimeInterval = 5
+        #endif
 
         @discardableResult public static func relaunch(timeout: TimeInterval = 5) throws -> Bool {
             let socketPath = try TerminalServicePaths.socketPath()
@@ -693,13 +756,19 @@ import Foundation
     public enum TerminalServiceError: LocalizedError {
         case daemonWireIncompatible(TerminalServiceDaemonWireIncompatibility)
         case requestFailed(String)
-        case serviceUnavailable(String)
+        /// No daemon answered for this profile. `startedUnit` names the user systemd unit that was started
+        /// and still produced no socket, so the report distinguishes "systemd was asked and did not deliver"
+        /// from a profile that has no unit to ask about at all.
+        case serviceUnavailable(socketPath: String, startedUnit: String?)
 
         public var errorDescription: String? {
             switch self {
-            case .daemonWireIncompatible(let incompatibility): incompatibility.message
-            case .requestFailed(let message): message
-            case .serviceUnavailable(let socketPath): "spacesd is not running for this user. Expected daemon socket at \(socketPath)."
+            case .daemonWireIncompatible(let incompatibility): return incompatibility.message
+            case .requestFailed(let message): return message
+            case .serviceUnavailable(let socketPath, let startedUnit):
+                var message = "spacesd is not running for this user. Expected daemon socket at \(socketPath)."
+                if let startedUnit { message += " Started \(startedUnit), which produced no daemon socket." }
+                return message
             }
         }
     }

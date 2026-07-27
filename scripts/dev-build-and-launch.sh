@@ -41,13 +41,6 @@ remote_expand_path() {
   ssh "${ssh_args[@]}" "$ssh_destination" "python3 -c 'import os, sys; print(os.path.abspath(os.path.expanduser(sys.argv[1])))' $quoted_path"
 }
 
-configured_remote_device_root_override() (
-  set -euo pipefail
-  source "$repo_root/scripts/spaces-e2e-env.sh"
-  spaces_e2e_load_env "$repo_root"
-  printf '%s\n' "${SPACES_E2E_REMOTE_DEVICE_ROOT:-}"
-)
-
 print_failure_diagnostics() {
   echo "Spaces exited; last log lines:"
   tail -n 80 "$LOG_FILE" || true
@@ -103,11 +96,6 @@ deploy_remote_linux_spacesd_if_configured() (
 
   local remote_user="${SPACES_E2E_REMOTE_SSH_USER:-}"
   local remote_port="${SPACES_E2E_REMOTE_SSH_PORT:-}"
-  local remote_daemon_port="${SPACES_E2E_REMOTE_DAEMON_PORT:-47847}"
-  [[ "$remote_daemon_port" =~ ^[0-9]+$ ]] || {
-    echo "SPACES_E2E_REMOTE_DAEMON_PORT must be numeric, got: $remote_daemon_port" >&2
-    exit 1
-  }
 
   local ssh_destination="$remote_host"
   if [[ -n "$remote_user" ]]; then
@@ -121,7 +109,7 @@ deploy_remote_linux_spacesd_if_configured() (
 
   echo "Preparing remote Linux spacesd from current checkout at $ssh_destination..."
   local artifact_assignments artifact_url archive_path install_root quoted_archive quoted_install
-  local remote_profile_name remote_profile_root remote_db_path remote_runtime_dir quoted_remote_db_path quoted_remote_runtime_dir
+  local remote_profile_name remote_profile_root quoted_profile_name quoted_profile_root remote_device_api_port
   artifact_assignments="$("$repo_root/apps/macos/scripts/deploy_linux_spacesd_e2e.sh")"
   eval "$artifact_assignments"
   artifact_url="${artifact_url:-}"
@@ -134,35 +122,49 @@ deploy_remote_linux_spacesd_if_configured() (
   install_root="$(dirname "$archive_path")/dev-launch-install"
   quoted_archive="$(remote_shell_quote "$archive_path")"
   quoted_install="$(remote_shell_quote "$install_root")"
+  # The remote development profile is named after this worktree's local profile, so one worktree owns
+  # exactly one remote daemon and the app's own remote pairing derives the same profile without being
+  # handed a path. The installer needs the name and nothing else: no database, runtime, host, or port
+  # environment reaches it, because a profile-rooted binary resolves all of that from its own path.
   remote_profile_name="$(basename "$(dirname "${SPACES_DB_PATH:?}")")"
-  remote_profile_root="${SPACES_E2E_REMOTE_DEVICE_ROOT:-~/.spaces-dev/profiles/spaces/$remote_profile_name}"
-  remote_db_path="$(remote_expand_path "$remote_profile_root/spaces.db")"
-  remote_runtime_dir="$(remote_expand_path "$remote_profile_root/runtime")"
-  quoted_remote_db_path="$(remote_shell_quote "$remote_db_path")"
-  quoted_remote_runtime_dir="$(remote_shell_quote "$remote_runtime_dir")"
+  remote_profile_root="$(remote_expand_path "~/.spaces-dev/profiles/spaces/$remote_profile_name")"
+  quoted_profile_name="$(remote_shell_quote "$remote_profile_name")"
+  quoted_profile_root="$(remote_shell_quote "$remote_profile_root")"
   ssh "${ssh_args[@]}" "$ssh_destination" \
-    "rm -rf $quoted_install && mkdir -p $quoted_install && tar -xzf $quoted_archive -C $quoted_install --strip-components=1 && SPACES_DB_PATH=$quoted_remote_db_path SPACES_RUNTIME_DIR=$quoted_remote_runtime_dir SPACES_DEVICE_API_HOST=0.0.0.0 SPACES_DEVICE_API_PORT=$remote_daemon_port $quoted_install/install.sh" >/dev/null
+    "rm -rf $quoted_install && mkdir -p $quoted_install && tar -xzf $quoted_archive -C $quoted_install --strip-components=1 && $quoted_install/install.sh --profile $quoted_profile_name" >/dev/null
 
-  ssh "${ssh_args[@]}" "$ssh_destination" "python3 - $(remote_shell_quote "$remote_daemon_port")" <<'PY'
-import socket
+  # Readiness is the profile's own two facts: systemd holds its unit instance active, and its own CLI
+  # gets an answer out of it. There is no well-known port to probe -- the daemon assigns its own.
+  ssh "${ssh_args[@]}" "$ssh_destination" "bash -s $quoted_profile_name $quoted_profile_root" <<'REMOTE_WAIT'
+set -euo pipefail
+profile_name="$1"
+profile_root="$2"
+deadline=$((SECONDS + 60))
+while [ "$SECONDS" -lt "$deadline" ]; do
+    if systemctl --user is-active --quiet "spacesd@$profile_name.service" \
+        && "$profile_root/daemon/current/bin/spaces" terminal list >/dev/null 2>&1; then
+        exit 0
+    fi
+    sleep 0.5
+done
+echo "remote spacesd for profile $profile_name did not become ready within 60s" >&2
+systemctl --user status "spacesd@$profile_name.service" --no-pager >&2 || true
+exit 1
+REMOTE_WAIT
+
+  remote_device_api_port="$(ssh "${ssh_args[@]}" "$ssh_destination" "python3 - $quoted_profile_root" <<'PY'
+import json
+import pathlib
 import sys
-import time
 
-port = int(sys.argv[1])
-deadline = time.time() + 60
-last_error = None
-while time.time() < deadline:
-    try:
-        with socket.create_connection(("127.0.0.1", port), timeout=1):
-            raise SystemExit(0)
-    except OSError as exc:
-        last_error = exc
-        time.sleep(0.5)
-raise SystemExit(f"remote spacesd Device API port {port} did not open: {last_error}")
+# The daemon records the Device API port it assigned itself for this profile here at first start.
+settings_path = pathlib.Path(sys.argv[1]) / "runtime" / "terminal" / "device-api.json"
+print(json.loads(settings_path.read_text())["port"])
 PY
+  )"
   echo "Remote Linux spacesd is running the current checkout artifact on $ssh_destination."
-  echo "Using remote profile database: $remote_db_path"
-  echo "Using remote runtime root: $remote_runtime_dir"
+  echo "Using remote profile root: $remote_profile_root"
+  echo "Remote Device API port: $remote_device_api_port"
 )
 
 "$repo_root/apps/macos/scripts/setup_ghostty.sh"
@@ -188,12 +190,6 @@ if [[ -n "${SPACES_DEV_DB_PATH:-}" ]]; then
   export SPACES_DB_PATH="$SPACES_DEV_DB_PATH"
   if [[ -z "${SPACES_RUNTIME_DIR:-}" ]]; then
     export SPACES_RUNTIME_DIR="$(dirname "$SPACES_DB_PATH")/runtime"
-  fi
-fi
-if [[ "$LOCAL_ONLY" == "0" && -z "${SPACES_E2E_REMOTE_DEVICE_ROOT:-}" ]]; then
-  remote_device_root_override="$(configured_remote_device_root_override)"
-  if [[ -n "$remote_device_root_override" ]]; then
-    export SPACES_E2E_REMOTE_DEVICE_ROOT="$remote_device_root_override"
   fi
 fi
 if [[ "$LOCAL_ONLY" == "0" ]]; then

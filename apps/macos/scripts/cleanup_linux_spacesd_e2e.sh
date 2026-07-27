@@ -11,11 +11,14 @@ spaces_e2e_require_remote_host_env "$repo_root"
 remote_host="${SPACES_E2E_REMOTE_SSH_HOST:-}"
 remote_user="${SPACES_E2E_REMOTE_SSH_USER:-}"
 remote_port="${SPACES_E2E_REMOTE_SSH_PORT:-}"
-remote_daemon_port="${SPACES_E2E_REMOTE_DAEMON_PORT:-7443}"
 remote_workspace_root="${SPACES_E2E_REMOTE_WORKSPACE_ROOT:-~/.spaces/e2e-workspaces}"
 remote_git_root="${SPACES_E2E_REMOTE_GIT_ROOT:-~/.spaces/e2e-git}"
 remote_install_root="${SPACES_E2E_REMOTE_INSTALL_ROOT:-~/.spaces/remote-artifact-e2e}"
-remote_device_root="${SPACES_E2E_REMOTE_DEVICE_ROOT:-~/.spaces/remote-device-e2e}"
+# The remote E2E daemon is a development profile, so its name is the only fact cleanup needs: the
+# profile root and the systemd instance both follow from it. The instance is stopped and disabled
+# before the root is removed, because the unit restarts on failure and would otherwise be brought
+# straight back up against a half-deleted profile.
+remote_device_profile_name="remote-device-e2e"
 remote_legacy_install_root="~/.spaces/e2e-tools"
 
 if [[ -z "$remote_host" ]]; then
@@ -85,11 +88,10 @@ cleanup_local_ssh_forwards
 
 echo "==> Cleaning remote E2E host $ssh_destination"
 ssh "${ssh_args[@]}" "$ssh_destination" \
-  "SPACES_E2E_REMOTE_DAEMON_PORT='$remote_daemon_port' \
-   SPACES_E2E_REMOTE_WORKSPACE_ROOT='$remote_workspace_root' \
+  "SPACES_E2E_REMOTE_WORKSPACE_ROOT='$remote_workspace_root' \
    SPACES_E2E_REMOTE_GIT_ROOT='$remote_git_root' \
    SPACES_E2E_REMOTE_INSTALL_ROOT='$remote_install_root' \
-   SPACES_E2E_REMOTE_DEVICE_ROOT='$remote_device_root' \
+   SPACES_E2E_REMOTE_DEVICE_PROFILE_NAME='$remote_device_profile_name' \
    SPACES_E2E_REMOTE_LEGACY_INSTALL_ROOT='$remote_legacy_install_root' \
    bash -s" <<'REMOTE_CLEANUP'
 set -euo pipefail
@@ -103,13 +105,20 @@ print(os.path.abspath(os.path.expanduser(sys.argv[1])))
 PY
 }
 
-daemon_port="${SPACES_E2E_REMOTE_DAEMON_PORT:?}"
+device_profile_name="${SPACES_E2E_REMOTE_DEVICE_PROFILE_NAME:?}"
+device_root="$(expand_path "${HOME}/.spaces-dev/profiles/spaces/$device_profile_name")"
 workspace_root="$(expand_path "${SPACES_E2E_REMOTE_WORKSPACE_ROOT:?}")"
 git_root="$(expand_path "${SPACES_E2E_REMOTE_GIT_ROOT:?}")"
 install_root="$(expand_path "${SPACES_E2E_REMOTE_INSTALL_ROOT:?}")"
-device_root="$(expand_path "${SPACES_E2E_REMOTE_DEVICE_ROOT:?}")"
 legacy_install_root="$(expand_path "${SPACES_E2E_REMOTE_LEGACY_INSTALL_ROOT:?}")"
 spaces_root="$(expand_path "${HOME}/.spaces")"
+
+# Stop the E2E profile's daemon through its own systemd instance. Only this instance is touched, so
+# the account's installed daemon (spacesd.service) and every other development profile keep running.
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl --user disable --now "spacesd@${device_profile_name}.service" >/dev/null 2>&1 || true
+  systemctl --user reset-failed "spacesd@${device_profile_name}.service" >/dev/null 2>&1 || true
+fi
 
 mapfile -t e2e_roots < <(
   python3 - "$spaces_root" "$workspace_root" "$git_root" "$install_root" "$device_root" "$legacy_install_root" <<'PY'
@@ -202,39 +211,6 @@ for pid in sorted(matches):
     except ProcessLookupError:
         pass
 PY
-
-if command -v lsof >/dev/null 2>&1 && [[ "$daemon_port" =~ ^[0-9]+$ ]]; then
-  pids="$(lsof -tiTCP:"$daemon_port" -sTCP:LISTEN 2>/dev/null || true)"
-  if [ -n "$pids" ]; then
-    for pid in $pids; do
-      command_line="$(ps -p "$pid" -o args= 2>/dev/null || true)"
-      should_kill=0
-      for root in "${e2e_roots[@]}"; do
-        if [[ -n "$root" && "$command_line" == *"$root"* ]]; then
-          should_kill=1
-          break
-        fi
-      done
-      if [[ "$should_kill" == "1" ]]; then
-        kill "$pid" >/dev/null 2>&1 || true
-      else
-        echo "leaving non-E2E listener on remote daemon port $daemon_port: pid=$pid command=$command_line" >&2
-      fi
-    done
-    sleep 0.5
-    for pid in $pids; do
-      command_line="$(ps -p "$pid" -o args= 2>/dev/null || true)"
-      should_kill=0
-      for root in "${e2e_roots[@]}"; do
-        if [[ -n "$root" && "$command_line" == *"$root"* ]]; then
-          should_kill=1
-          break
-        fi
-      done
-      [[ "$should_kill" == "1" ]] && kill -0 "$pid" >/dev/null 2>&1 && kill -9 "$pid" >/dev/null 2>&1 || true
-    done
-  fi
-fi
 
 for link in "${HOME}/bin/spacesd" "${HOME}/bin/spaces"; do
   if [ -L "$link" ]; then

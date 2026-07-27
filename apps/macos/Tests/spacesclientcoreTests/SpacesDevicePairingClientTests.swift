@@ -146,7 +146,8 @@ final class SpacesDevicePairingClientTests: XCTestCase {
 
     func testRemotePairCommandFailureMessageIsUserFacing() {
         let message = SpacesDevicePairingClient.remotePairCommandFailureMessage(
-            destination: "builder.local", standardError: "sh: 1: ~/.spaces/bin/spaces: not found", standardOutput: "", exitStatus: 127)
+            destination: "builder.local", command: SpacesDevicePairingClient.installedRemotePairCommand,
+            standardError: "sh: 1: ~/.spaces/bin/spaces: not found", standardOutput: "", exitStatus: 127)
 
         XCTAssertFalse(message.contains("automatic setup"))
         XCTAssertFalse(message.contains("spacesd"))
@@ -154,49 +155,46 @@ final class SpacesDevicePairingClientTests: XCTestCase {
     }
 
     func testRemotePairCommandUsesInstalledProfileCommandByDefault() throws {
-        try withRemoteDeviceRootOverride(nil) {
-            let profile = SpacesProfile(
-                source: .installedFallback, databasePath: "/Users/tester/.spaces/spaces.db", rootDirectory: "/Users/tester/.spaces",
-                runtimeDirectory: "/Users/tester/.spaces/runtime", ipcNotificationObject: "spaces.profile.installed", developmentContext: nil,
-                branchSlug: nil, worktreeHash: nil)
+        let profile = SpacesProfile(
+            source: .installedFallback, databasePath: "/Users/tester/.spaces/spaces.db", rootDirectory: "/Users/tester/.spaces",
+            runtimeDirectory: "/Users/tester/.spaces/runtime", ipcNotificationObject: "spaces.profile.installed", developmentContext: nil,
+            branchSlug: nil, worktreeHash: nil)
 
-            XCTAssertEqual(try SpacesDevicePairingClient.remotePairCommand(profile: profile), SpacesDevicePairingClient.baseRemotePairCommand)
-        }
+        XCTAssertEqual(try SpacesDevicePairingClient.remotePairCommand(profile: profile), SpacesDevicePairingClient.installedRemotePairCommand)
     }
 
+    /// A development profile pairs through its own deployed CLI inside the matching remote profile root,
+    /// with no environment prefix: that binary resolves its own profile from where it lives, so pairing
+    /// never points the installed CLI at a development database.
     func testRemotePairCommandTargetsMatchingRemoteDevelopmentProfile() throws {
-        try withRemoteDeviceRootOverride(nil) {
-            let profileName = "schema-squash-v1-154418a8e022"
-            let root = "/Users/tester/.spaces-dev/profiles/spaces/\(profileName)"
-            let profile = SpacesProfile(
-                source: .explicitDatabasePath, databasePath: "\(root)/spaces.db", rootDirectory: root, runtimeDirectory: "\(root)/runtime",
-                ipcNotificationObject: "spaces.profile.dev", developmentContext: nil, branchSlug: nil, worktreeHash: nil)
+        let profileName = "schema-squash-v1-154418a8e022"
+        let root = "/Users/tester/.spaces-dev/profiles/spaces/\(profileName)"
+        let profile = SpacesProfile(
+            source: .explicitDatabasePath, databasePath: "\(root)/spaces.db", rootDirectory: root, runtimeDirectory: "\(root)/runtime",
+            ipcNotificationObject: "spaces.profile.dev", developmentContext: nil, branchSlug: nil, worktreeHash: nil)
 
-            XCTAssertEqual(
-                try SpacesDevicePairingClient.remotePairCommand(profile: profile),
-                #"SPACES_DB_PATH="$HOME/.spaces-dev/profiles/spaces/schema-squash-v1-154418a8e022/spaces.db" SPACES_RUNTIME_DIR="$HOME/.spaces-dev/profiles/spaces/schema-squash-v1-154418a8e022/runtime" ~/.spaces/bin/spaces device pair --json"#
-            )
-        }
+        let command = try SpacesDevicePairingClient.remotePairCommand(profile: profile)
+        XCTAssertEqual(command, #""$HOME/.spaces-dev/profiles/spaces/schema-squash-v1-154418a8e022/daemon/current/bin/spaces" device pair --json"#)
+        XCTAssertFalse(command.contains(SpacesProfile.databasePathEnvironmentVariable))
+        XCTAssertFalse(command.contains(SpacesProfile.runtimeDirectoryEnvironmentVariable))
     }
 
     /// Issue #322: `remoteDevelopmentProfileRoot`'s `providedProfile ?? SpacesProfile.current()` fallback
     /// used to discard a test-host refusal with `try?`, so a caller that passed no profile (or a test
     /// exercising this function directly, as here) would silently get `nil` — indistinguishable from
-    /// "this account genuinely has no development profile" — and fall through to `baseRemotePairCommand`,
+    /// "this account genuinely has no development profile" — and fall through to `installedRemotePairCommand`,
     /// the installed-profile command. `remotePairCommand`/`remoteDevelopmentProfileRoot` already `throw`
     /// end to end, so nothing but the fix itself stands between the refusal and the caller now.
     func testRemotePairCommandRethrowsTestHostRefusalInsteadOfDegradingToInstalledDefault() throws {
         let accountHomePath = try XCTUnwrap(SpacesProfile.accountHomeDirectoryPath())
 
-        try withRemoteDeviceRootOverride(nil) {
-            try withProfileEnvironmentOverride(home: accountHomePath) {
-                SpacesProfile.resetCacheForTesting()
-                defer { SpacesProfile.resetCacheForTesting() }
+        try withProfileEnvironmentOverride(home: accountHomePath) {
+            SpacesProfile.resetCacheForTesting()
+            defer { SpacesProfile.resetCacheForTesting() }
 
-                XCTAssertThrowsError(try SpacesDevicePairingClient.remotePairCommand(profile: nil)) { error in
-                    guard case SpacesProfileResolutionError.testHostRefusedLiveUserProfile = error else {
-                        return XCTFail("Expected testHostRefusedLiveUserProfile, got \(error).")
-                    }
+            XCTAssertThrowsError(try SpacesDevicePairingClient.remotePairCommand(profile: nil)) { error in
+                guard case SpacesProfileResolutionError.testHostRefusedLiveUserProfile = error else {
+                    return XCTFail("Expected testHostRefusedLiveUserProfile, got \(error).")
                 }
             }
         }
@@ -358,7 +356,7 @@ final class SpacesDevicePairingClientTests: XCTestCase {
         let script = try String(contentsOf: scriptURL, encoding: .utf8)
 
         let lingerRange = try XCTUnwrap(script.range(of: "ensure_user_linger"))
-        let restartRange = try XCTUnwrap(script.range(of: "systemctl --user restart spacesd.service"))
+        let restartRange = try XCTUnwrap(script.range(of: #"systemctl --user restart "$service_unit""#))
         XCTAssertLessThan(lingerRange.lowerBound, restartRange.lowerBound)
         XCTAssertTrue(script.contains("loginctl enable-linger"))
         XCTAssertTrue(script.contains("keep background services running after SSH disconnects"))
@@ -372,7 +370,55 @@ final class SpacesDevicePairingClientTests: XCTestCase {
         XCTAssertTrue(script.contains(#"ln -sfn "$release_dir/bin/spacesd" "$bin_root/spacesd""#))
         XCTAssertTrue(script.contains(#"ln -sfn "$release_dir/bin/spaces" "$bin_root/spaces""#))
         XCTAssertTrue(script.contains("ExecStart=%h/.spaces/bin/spacesd"))
-        XCTAssertTrue(script.contains("systemctl --user restart spacesd.service"))
+        // Every systemd action is scoped to the unit the selected target owns, so installing one profile
+        // never restarts another profile's daemon.
+        XCTAssertTrue(script.contains(#"systemctl --user restart "$service_unit""#))
+        XCTAssertTrue(script.contains(#"systemctl --user enable "$service_unit""#))
+        XCTAssertFalse(script.contains("systemctl --user restart spacesd.service"))
+    }
+
+    /// A development profile is installed as an instance of one shared template unit whose `ExecStart` is
+    /// resolved from the instance name alone. The template carries no per-profile content — no `Environment=`
+    /// assignment of a database, runtime root, host, or port — because a profile-rooted binary resolves all
+    /// of that from where it lives; baking a profile into the unit is what previously pinned a device's one
+    /// daemon to one developer's worktree.
+    func testLinuxArtifactInstallerInstallsOneTemplateUnitPerDevelopmentProfile() throws {
+        let scriptURL = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("scripts/build_linux_spacesd_artifact.sh")
+        let script = try String(contentsOf: scriptURL, encoding: .utf8)
+
+        XCTAssertTrue(script.contains(#"profile_root="$HOME/.spaces-dev/profiles/spaces/$profile_name""#))
+        XCTAssertTrue(script.contains(#"service_unit="spacesd@$profile_name.service""#))
+        XCTAssertTrue(script.contains(#"service_path="$service_dir/spacesd@.service""#))
+        XCTAssertTrue(script.contains("ExecStart=%h/.spaces-dev/profiles/spaces/%i/daemon/current/bin/spacesd"))
+        for bakedInEnvironment in [
+            "Environment=SPACES_DB_PATH", "Environment=SPACES_RUNTIME_DIR", "Environment=SPACES_DEVICE_API_HOST",
+            "Environment=SPACES_DEVICE_API_PORT",
+        ] {
+            XCTAssertFalse(script.contains(bakedInEnvironment), "A unit must not bake \(bakedInEnvironment) into a profile's daemon.")
+        }
+        // The performance log is the one per-instance setting, and it arrives as a drop-in for that instance
+        // rather than as content in the shared template.
+        XCTAssertTrue(script.contains(#"performance_log_drop_in_dir="$service_dir/$service_unit.d""#))
+        XCTAssertTrue(script.contains("Environment=SPACES_MOBILE_TERMINAL_PERFORMANCE_LOG_PATH=$performance_log_path"))
+        XCTAssertTrue(script.contains(#"rm -f "$performance_log_drop_in_path""#))
+    }
+
+    /// The installer's target is chosen by its own argument and by nothing else. Reading the installing
+    /// shell's `SPACES_*` variables is what let one worktree's profile become this device's single shared
+    /// daemon, so the installed layout must not depend on them at all.
+    func testLinuxArtifactInstallerIgnoresAmbientProfileEnvironment() throws {
+        let scriptURL = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("scripts/build_linux_spacesd_artifact.sh")
+        let script = try String(contentsOf: scriptURL, encoding: .utf8)
+
+        XCTAssertTrue(script.contains("Usage: install.sh [--profile NAME] [--performance-log PATH]"))
+        for ambientDefault in [
+            #"db_path="${SPACES_DB_PATH:-"#, #"runtime_dir="${SPACES_RUNTIME_DIR:-"#, #"device_api_host="${SPACES_DEVICE_API_HOST:-"#,
+            #"device_api_port="${SPACES_DEVICE_API_PORT:-"#, #"performance_log_path="${SPACES_MOBILE_TERMINAL_PERFORMANCE_LOG_PATH:-"#,
+        ] {
+            XCTAssertFalse(script.contains(ambientDefault), "install.sh must not take its layout from the installing shell (\(ambientDefault)).")
+        }
     }
 
     func testLinuxArtifactInstallerVerifiesHandoffAndRestartCompletion() throws {
@@ -428,6 +474,12 @@ final class SpacesDevicePairingClientTests: XCTestCase {
         XCTAssertTrue(script.contains("survives SSH setup disconnect"))
     }
 
+    /// The demo pairs with the remote account's INSTALLED daemon — pairing goes through
+    /// `open-remote-device-pairing-window`, which drives the installed profile's CLI — so the artifact is
+    /// installed with no profile selector and, crucially, with no environment prefix at all: the installed
+    /// profile resolves its database, runtime root, and canonical Device API port from where the binary
+    /// lives. Pinning the whole install command is what keeps a stray environment assignment from creeping
+    /// back and silently redirecting the daemon the demo then pairs with.
     func testMobileDemoPreparesRepoLocalLinuxArtifactBeforeRemotePairing() throws {
         let scriptURL = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent(
             "run_mobile_terminal_demo.sh")
@@ -437,24 +489,39 @@ final class SpacesDevicePairingClientTests: XCTestCase {
         let pairRange = try XCTUnwrap(script.range(of: #""$spacese2e" "${args[@]}" >"$remote_pairing_json""#))
         XCTAssertLessThan(prepareRange.lowerBound, pairRange.lowerBound)
         XCTAssertTrue(script.contains("deploy_linux_spacesd_e2e.sh"))
-        XCTAssertTrue(script.contains("SPACES_DEVICE_API_PORT=$remote_demo_daemon_port"))
+
+        let installLine = try XCTUnwrap(
+            script.split(separator: "\n").first { $0.contains("$quoted_install/install.sh") }, "The demo must install the deployed artifact.")
+        XCTAssertEqual(
+            installLine.trimmingCharacters(in: .whitespaces),
+            #"remote_ssh "rm -rf $quoted_install && mkdir -p $quoted_install && tar -xzf $quoted_archive -C $quoted_install --strip-components=1 && $quoted_install/install.sh" >/dev/null"#
+        )
+        // The demo waits on the canonical port because that is the port the installed profile binds; there is
+        // no configurable remote daemon port left for it to read.
+        XCTAssertTrue(script.contains("remote_demo_daemon_port=47847"))
+        XCTAssertFalse(script.contains("SPACES_E2E_REMOTE_DAEMON_PORT"))
         XCTAssertTrue(script.contains("remote demo daemon port {port} did not open"))
         XCTAssertFalse(script.contains("~/.spaces/bin/spaces mobile status"))
     }
 
-    func testDevBuildLaunchVerifiesRemoteLinuxDaemonWithTcpProbe() throws {
+    /// The remote development daemon a repo-local build deploys is the same profile this Mac's pairing
+    /// derives: named after the local profile, installed with the profile name alone, and verified through
+    /// its own unit instance and its own CLI. No database, runtime, host, or port environment reaches the
+    /// installer — a profile-rooted binary resolves all of that from where it lives — so a leftover
+    /// environment assignment here would silently recreate the coupling that pinned one shared daemon to
+    /// one developer's profile.
+    func testDevBuildLaunchDeploysRemoteProfileWithoutEnvironmentCoupling() throws {
         let scriptURL = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("scripts/dev-build-and-launch.sh")
         let script = try String(contentsOf: scriptURL, encoding: .utf8)
 
-        XCTAssertTrue(script.contains("remote spacesd Device API port {port} did not open"))
         XCTAssertTrue(script.contains(#"remote_profile_name="$(basename "$(dirname "${SPACES_DB_PATH:?}")")""#))
-        XCTAssertTrue(script.contains(#"remote_profile_root="${SPACES_E2E_REMOTE_DEVICE_ROOT:-~/.spaces-dev/profiles/spaces/$remote_profile_name}""#))
-        XCTAssertTrue(script.contains("SPACES_DB_PATH=$quoted_remote_db_path SPACES_RUNTIME_DIR=$quoted_remote_runtime_dir"))
-        let databaseRange = try XCTUnwrap(script.range(of: "SPACES_DB_PATH=$quoted_remote_db_path"))
-        let installRange = try XCTUnwrap(
-            script.range(of: "SPACES_DEVICE_API_HOST=0.0.0.0 SPACES_DEVICE_API_PORT=$remote_daemon_port $quoted_install/install.sh"))
-        XCTAssertLessThan(databaseRange.lowerBound, installRange.lowerBound)
+        XCTAssertTrue(script.contains(#"remote_profile_root="$(remote_expand_path "~/.spaces-dev/profiles/spaces/$remote_profile_name")""#))
+        XCTAssertTrue(script.contains("$quoted_install/install.sh --profile $quoted_profile_name"))
+        XCTAssertTrue(script.contains(#"systemctl --user is-active --quiet "spacesd@$profile_name.service""#))
+        XCTAssertTrue(script.contains(#""$profile_root/daemon/current/bin/spaces" terminal list"#))
+        XCTAssertFalse(script.contains("SPACES_DB_PATH=$quoted_remote_db_path"))
+        XCTAssertFalse(script.contains("SPACES_DEVICE_API_PORT=$remote_daemon_port"))
         XCTAssertFalse(script.contains("~/.local/bin/spaces mobile status"))
     }
 
@@ -474,14 +541,6 @@ final class SpacesDevicePairingClientTests: XCTestCase {
         let changedHostKey = SpacesDevicePairingClient.sshValidationFailureMessage(
             destination: "builder.local", detail: "WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!", exitStatus: 255)
         XCTAssertTrue(changedHostKey.contains("known_hosts entry changed"))
-    }
-
-    private func withRemoteDeviceRootOverride(_ value: String?, run: () throws -> Void) throws {
-        let name = "SPACES_E2E_REMOTE_DEVICE_ROOT"
-        let original = getenv(name).map { String(cString: $0) }
-        if let value { setenv(name, value, 1) } else { unsetenv(name) }
-        defer { if let original { setenv(name, original, 1) } else { unsetenv(name) } }
-        try run()
     }
 
     /// Points `HOME` at the real account home and clears both profile overrides, the shape a shell bound

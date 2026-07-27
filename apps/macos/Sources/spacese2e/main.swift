@@ -33,8 +33,8 @@ struct SpacesE2ECommand: ParsableCommand {
             OpenRemoteDevicePairingWindowCommand.self, RecordScreenCommand.self, ProfileShowCommand.self, ProfileAppOwnerCommand.self,
             MacClientInstallationIDCommand.self, ProfileSocketPathsCommand.self, ProfileDesktopControlOwnerCommand.self,
             ProfileWaitForDesktopControlCommand.self, MobileStatusCommand.self, MobileServeCommand.self, MobileRequestCommand.self,
-            ServiceTunnelCommand.self, RenderUpdateTextCommand.self, RecordMobileDemoCommand.self, ScrollApplicationWindowCommand.self,
-            TypeApplicationWindowCommand.self, DragApplicationWindowCommand.self,
+            ProfileCommand.self, ServiceTunnelCommand.self, RenderUpdateTextCommand.self, RecordMobileDemoCommand.self,
+            ScrollApplicationWindowCommand.self, TypeApplicationWindowCommand.self, DragApplicationWindowCommand.self,
         ])
 }
 
@@ -493,6 +493,351 @@ private struct ProfileWaitForDesktopControlCommand: ParsableCommand {
         let message = "Desktop control remained busy for \(Int(effectiveTimeoutSeconds)) seconds. \(detail) Retry this workflow once the owner exits."
         FileHandle.standardError.write(Data("\(message)\n".utf8))
         throw ExitCode.failure
+    }
+}
+
+/// Profile inventory and cleanup. Every profile on a machine — the installed one plus one development
+/// profile per worktree — owns its own root, database, Device API port, and daemon, so development
+/// profiles accumulate as worktrees come and go; on a shared Linux device they accumulate from several
+/// developers at once. These commands show that inventory and reclaim the abandoned parts of it.
+///
+/// They deliberately live in `spacese2e` rather than the `spaces` CLI: a user never manages development
+/// profiles, and the `spaces` surface is product behavior.
+private struct ProfileCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "profile", abstract: "Inspect and clean up Spaces development profiles.",
+        subcommands: [ProfileListCommand.self, ProfileStopCommand.self, ProfileRemoveCommand.self])
+}
+
+private struct ProfileListCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "list", abstract: "List the profiles on this Mac or on the remote device.")
+
+    @Flag(name: .long, help: "List the remote device's profiles instead of this Mac's.") var remote = false
+
+    func run() throws {
+        if remote {
+            let rows = try remoteProfileRows(device: try RemoteDevice.fromEnvironment())
+            printProfileTable(headers: ["PROFILE", "PORT", "DAEMON", "SESSIONS", "UPDATED"], rows: rows)
+            return
+        }
+        printProfileTable(headers: ["PROFILE", "PORT", "UPDATED"], rows: try localProfileRows())
+    }
+}
+
+private struct ProfileStopCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "stop", abstract: "Stop a development profile's daemon on the remote device, leaving the profile in place.")
+
+    @Flag(name: .long, help: "Required: this command acts on the remote device.") var remote = false
+
+    @Argument(help: "Development profile name, as shown by `profile list --remote`.") var profileName: String
+
+    func run() throws {
+        let device = try RemoteDevice.forDeviceOnlyCommand(remote: remote, command: "profile stop")
+        let name = try validatedDevelopmentProfileName(profileName)
+        print(try device.runReportingScript(stopDevelopmentProfileScript(profileName: name)).detail)
+    }
+}
+
+private struct ProfileRemoveCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "remove", abstract: "Stop, disable, and delete a development profile on the remote device.")
+
+    @Flag(name: .long, help: "Required: this command acts on the remote device.") var remote = false
+
+    @Argument(help: "Development profile name, as shown by `profile list --remote`.") var profileName: String
+
+    func run() throws {
+        let device = try RemoteDevice.forDeviceOnlyCommand(remote: remote, command: "profile remove")
+        let name = try validatedDevelopmentProfileName(profileName)
+        print(try device.runReportingScript(removeDevelopmentProfileScript(profileName: name)).detail)
+    }
+}
+
+/// How the installed profile is named in this tooling's output. It has no directory name of its own —
+/// it is the account's `~/.spaces` — so it needs a label, and the label doubles as the name `stop` and
+/// `remove` refuse.
+private let installedProfileLabel = "(installed)"
+
+private let developmentProfilesRelativePath = ".spaces-dev/profiles/spaces"
+
+/// Rejects anything that is not a plain development profile directory name.
+///
+/// The installed profile is refused by name: it is the profile clients pair with and the one profile on a
+/// device that is nobody's leftover, so neither stopping nor deleting it is ever this tooling's job. Path
+/// separators and relative segments are refused because the name is interpolated into a remote path that
+/// `remove` deletes.
+private func validatedDevelopmentProfileName(_ value: String) throws -> String {
+    let name = try required(value, label: "profile name")
+    guard name != installedProfileLabel else {
+        throw ValidationError("\(installedProfileLabel) is the installed profile. It is not a development profile and cannot be stopped or removed.")
+    }
+    guard !name.contains("/"), name != ".", name != ".." else {
+        throw ValidationError("'\(name)' is not a profile name. Pass a development profile name as shown by `profile list --remote`.")
+    }
+    return name
+}
+
+/// The remote device these commands act on, resolved from the repository `.env` variables that
+/// `scripts/spaces-e2e-env.sh` surfaces for every remote-device workflow. There is deliberately no second
+/// way to name a device: a caller binds that env first, exactly as the remote E2E scripts do.
+private struct RemoteDevice {
+    let destination: String
+    let sshPort: Int?
+
+    static func fromEnvironment() throws -> RemoteDevice {
+        let environment = ProcessInfo.processInfo.environment
+        guard let host = normalizedOptional(environment["SPACES_E2E_REMOTE_SSH_HOST"]) else {
+            throw ValidationError(
+                "SPACES_E2E_REMOTE_SSH_HOST is not set. Load the repository .env (as scripts/spaces-e2e-env.sh does) before using --remote.")
+        }
+        let user = normalizedOptional(environment["SPACES_E2E_REMOTE_SSH_USER"])
+        let port = try validOptionalPort(
+            normalizedOptional(environment["SPACES_E2E_REMOTE_SSH_PORT"]).flatMap(Int.init), label: "SPACES_E2E_REMOTE_SSH_PORT")
+        return RemoteDevice(destination: user.map { "\($0)@\(host)" } ?? host, sshPort: port)
+    }
+
+    /// Resolves the device for a command that only exists for a device. Stopping and removing a profile is
+    /// systemd's business — a profile's daemon on a device is a unit instance, and that is what makes the
+    /// lifecycle addressable at all — so there is no local counterpart to fall back to, and `--remote` is
+    /// required rather than assumed.
+    static func forDeviceOnlyCommand(remote: Bool, command: String) throws -> RemoteDevice {
+        guard remote else { throw ValidationError("`\(command)` acts on a device's systemd-managed daemon. Pass --remote.") }
+        return try fromEnvironment()
+    }
+
+    /// Runs a script whose last line is a `##ok`/`##error` marker, and returns the lines it printed before
+    /// that marker together with the marker's own detail message. An `##error` marker is raised as its
+    /// detail, which is a message written for the person running the command.
+    ///
+    /// The marker is the whole result protocol: these scripts report every outcome in it and always exit 0,
+    /// because an SSH exit status cannot carry the answer — Tailscale SSH reports 0 for every remote
+    /// command, so a nonzero exit is not required for a failure and a zero exit does not mean success. A
+    /// missing marker therefore means the script did not run to completion no matter what the transport
+    /// claims, and is itself a failure.
+    func runReportingScript(_ script: String) throws -> (lines: [String], detail: String) {
+        let output = try run(script: script)
+        var lines = output.split(whereSeparator: \.isNewline).map(String.init)
+        guard let markerIndex = lines.lastIndex(where: { $0.hasPrefix("\(Self.okMarker)\t") || $0.hasPrefix("\(Self.errorMarker)\t") }) else {
+            throw ValidationError("\(destination) did not report a result for this command. Output:\n\(output)")
+        }
+        let marker = lines[markerIndex]
+        lines.removeSubrange(markerIndex..<lines.endIndex)
+        let detail = String(marker.drop(while: { $0 != "\t" }).dropFirst())
+        guard marker.hasPrefix("\(Self.okMarker)\t") else { throw ValidationError(detail) }
+        return (lines, detail)
+    }
+
+    /// Runs `script` on the device with `sh -c`, returning its standard output.
+    ///
+    /// The scripts route their own diagnostics into the marker lines they print on stdout and silence
+    /// everything else, so stderr stays small enough to drain after stdout without deadlocking the pipe.
+    func run(script: String) throws -> String {
+        var arguments = ["ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=yes"]
+        if let sshPort { arguments += ["-p", String(sshPort)] }
+        arguments += [destination, "sh -c \(profileShellQuoted(script))"]
+        do { return try Shell.runAndCapture(arguments) } catch {
+            throw ValidationError("Running a profile command on \(destination) failed: \(error.localizedDescription)")
+        }
+    }
+
+    static let okMarker = "##ok"
+    static let errorMarker = "##error"
+}
+
+/// One row per profile on the device, read from the device itself.
+///
+/// `DAEMON` reports what user systemd holds for that profile's unit, and `SESSIONS` comes from asking that
+/// profile's OWN `spaces` binary — the same socket a client uses, so the count is the real one. The CLI is
+/// only run for a unit systemd already reports active: `spaces terminal list` starts a daemon that is
+/// down, which would resurrect every stopped profile just for listing them, and would contradict the very
+/// state this table exists to show. An active unit whose CLI does not answer therefore shows `up` with no
+/// session count, which is the honest reading of a daemon that is running but not serving.
+private func remoteProfileRows(device: RemoteDevice) throws -> [[String]] {
+    try device.runReportingScript(listProfilesScript()).lines.map { $0.components(separatedBy: "\t") }
+}
+
+/// Emits one tab-separated row per profile, then the completion marker. Everything the listing needs is a
+/// fact on disk or a fact systemd holds, except the session count, which only the profile's own daemon
+/// knows.
+private func listProfilesScript() -> String {
+    """
+    set -u
+    # Reports its outcome in a trailing ##ok/##error marker line and always exits 0; see runReportingScript.
+
+    report_profile() {
+        name="$1"
+        root="$2"
+        cli="$3"
+        unit="$4"
+        port="$(tr -d ' \\n' < "$root/runtime/terminal/device-api.json" 2>/dev/null | sed -n 's/.*"port":\\([0-9][0-9]*\\).*/\\1/p')"
+        [ -n "$port" ] || port='-'
+        # A development profile still recording the canonical port has never assigned itself one, so that
+        # value is not a port it would ever bind: it assigns a development-range port the next time its
+        # daemon starts. Reporting it verbatim would name the installed daemon's port for a profile that
+        # cannot use it, so it reads as unassigned instead.
+        if [ "$name" != '\(installedProfileLabel)' ] && [ "$port" = '\(SpacesDeviceAPIDefaults.port)' ]; then
+            port='-'
+        fi
+        daemon='down'
+        sessions='-'
+        if systemctl --user is-active --quiet "$unit" 2>/dev/null; then
+            daemon='up'
+            if listing="$("$cli" terminal list 2>/dev/null)"; then
+                sessions="$(printf '%s\\n' "$listing" | grep -c 'state=' || true)"
+            fi
+        fi
+        # Newest modification date directly inside the profile root: its database, runtime directory and
+        # deployed daemon all live there, so this is when the profile was last touched at all. The date
+        # format sorts lexically, so no separate timestamp column is needed to pick the newest.
+        updated="$(find "$root" -maxdepth 1 -printf '%TY-%Tm-%Td\\n' 2>/dev/null | sort -r | head -n 1)"
+        [ -n "$updated" ] || updated='-'
+        printf '%s\t%s\t%s\t%s\t%s\\n' "$name" "$port" "$daemon" "$sessions" "$updated"
+    }
+
+    report_profile '\(installedProfileLabel)' "$HOME/.spaces" "$HOME/.spaces/bin/spaces" 'spacesd.service'
+    for root in "$HOME/\(developmentProfilesRelativePath)"/*; do
+        [ -d "$root" ] || continue
+        name="$(basename "$root")"
+        report_profile "$name" "$root" "$root/daemon/current/bin/spaces" "spacesd@$name.service"
+    done
+    printf '\(RemoteDevice.okMarker)\tlisted every profile.\\n'
+    """
+}
+
+/// Stops the profile's unit instance and confirms it went inactive. Only this instance is touched, so the
+/// device's installed daemon and every other development profile keep running. The unit stays enabled: a
+/// stopped profile is one nobody is using right now, not one that may never run again.
+private func stopDevelopmentProfileScript(profileName: String) -> String {
+    """
+    set -u
+    # Reports its outcome in a trailing ##ok/##error marker line and always exits 0; see runReportingScript.
+    name=\(profileShellQuoted(profileName))
+    root="$HOME/\(developmentProfilesRelativePath)/$name"
+    unit="spacesd@$name.service"
+    if [ ! -d "$root" ]; then
+        printf '\(RemoteDevice.errorMarker)\tThere is no development profile at %s.\\n' "$root"
+        exit 0
+    fi
+    systemctl --user stop "$unit" >/dev/null 2>&1
+    if systemctl --user is-active --quiet "$unit" 2>/dev/null; then
+        printf '\(RemoteDevice.errorMarker)\t%s is still active after being asked to stop.\\n' "$unit"
+        exit 0
+    fi
+    printf '\(RemoteDevice.okMarker)\tStopped %s.\\n' "$unit"
+    """
+}
+
+/// Refuses a profile whose daemon still holds terminal sessions, then stops and disables its unit
+/// instance and deletes the profile root.
+///
+/// Disabling before deleting is what makes the deletion safe: the unit restarts on failure, so a unit left
+/// enabled comes straight back up against a half-deleted profile. The unit's inactivity is verified rather
+/// than assumed from a command's exit status.
+///
+/// A running daemon that does not answer its own CLI is also refused: idleness cannot be proven, and
+/// `profile stop` is the way through — once the unit is inactive it holds no sessions at all.
+private func removeDevelopmentProfileScript(profileName: String) -> String {
+    """
+    set -u
+    # Reports its outcome in a trailing ##ok/##error marker line and always exits 0; see runReportingScript.
+    name=\(profileShellQuoted(profileName))
+    root="$HOME/\(developmentProfilesRelativePath)/$name"
+    unit="spacesd@$name.service"
+    cli="$root/daemon/current/bin/spaces"
+    if [ ! -d "$root" ]; then
+        printf '\(RemoteDevice.errorMarker)\tThere is no development profile at %s.\\n' "$root"
+        exit 0
+    fi
+    if systemctl --user is-active --quiet "$unit" 2>/dev/null; then
+        if ! listing="$("$cli" terminal list 2>/dev/null)"; then
+            printf '\(RemoteDevice.errorMarker)\t%s is running but did not answer its own CLI, so it cannot be shown to be idle. Run: spacese2e profile stop --remote %s\\n' "$unit" "$name"
+            exit 0
+        fi
+        sessions="$(printf '%s\\n' "$listing" | grep -c 'state=' || true)"
+        if [ "$sessions" -gt 0 ]; then
+            printf '\(RemoteDevice.errorMarker)\tProfile %s still has %s live terminal session(s). End them first.\\n' "$name" "$sessions"
+            exit 0
+        fi
+    fi
+    systemctl --user disable --now "$unit" >/dev/null 2>&1
+    if systemctl --user is-active --quiet "$unit" 2>/dev/null; then
+        printf '\(RemoteDevice.errorMarker)\t%s is still active after being disabled, so %s was left in place.\\n' "$unit" "$root"
+        exit 0
+    fi
+    # Clears a leftover failed state for the instance, so a removed profile leaves nothing behind in
+    # systemd's view of the account's units.
+    systemctl --user reset-failed "$unit" >/dev/null 2>&1
+    rm -rf "$root"
+    printf '\(RemoteDevice.okMarker)\tRemoved %s and disabled %s.\\n' "$root" "$unit"
+    """
+}
+
+/// The profiles on this Mac: the installed one, then every development profile, with the port each has
+/// recorded for itself and when it was last touched.
+///
+/// There are deliberately no daemon or session columns here. A Mac has no per-profile unit to ask about
+/// another profile's daemon, and a profile's session count is only knowable through that profile's own
+/// daemon, which on a Mac means the running build of whichever worktree owns it — not something this
+/// process can address. The columns a Mac can answer honestly are the ones it prints.
+private func localProfileRows() throws -> [[String]] {
+    let homeDirectory = FileManager.default.homeDirectoryForCurrentUser
+    let installedRoot = homeDirectory.appendingPathComponent(".spaces", isDirectory: true)
+    let developmentProfilesRoot = homeDirectory.appendingPathComponent(developmentProfilesRelativePath, isDirectory: true)
+    let developmentRoots =
+        ((try? FileManager.default.contentsOfDirectory(
+            at: developmentProfilesRoot, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])) ?? []).filter {
+            (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+        }.sorted { $0.lastPathComponent < $1.lastPathComponent }
+    return [[installedProfileLabel, recordedDeviceAPIPort(profileRoot: installedRoot), lastTouchedDate(profileRoot: installedRoot)]]
+        + developmentRoots.map { [$0.lastPathComponent, recordedDeviceAPIPort(profileRoot: $0), lastTouchedDate(profileRoot: $0)] }
+}
+
+/// The Device API port a profile has recorded for itself, or `-` when it has never recorded one (a profile
+/// whose daemon has not started yet). This is the profile's assignment, which is what a daemon started for
+/// it binds unless an environment override names another port.
+private func recordedDeviceAPIPort(profileRoot: URL) -> String {
+    let settingsURL = profileRoot.appendingPathComponent("runtime/terminal/device-api.json", isDirectory: false)
+    guard let data = try? Data(contentsOf: settingsURL), let settings = try? JSONDecoder().decode(SpacesDeviceAPISettings.self, from: data) else {
+        return "-"
+    }
+    return String(settings.port)
+}
+
+/// The newest modification date directly inside a profile root — its database, runtime directory, and
+/// staged binaries all live there — so it reads as when the profile was last touched at all.
+private func lastTouchedDate(profileRoot: URL) -> String {
+    let children = (try? FileManager.default.contentsOfDirectory(at: profileRoot, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+    let modificationDates = ([profileRoot] + children).compactMap {
+        try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
+    }
+    guard let newest = modificationDates.max() else { return "-" }
+    return profileDateFormatter.string(from: newest)
+}
+
+private let profileDateFormatter: DateFormatter = {
+    let formatter = DateFormatter()
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+    formatter.dateFormat = "yyyy-MM-dd"
+    return formatter
+}()
+
+/// Prints a left-aligned table. Column widths follow the widest value so a profile name is never
+/// truncated — the names in this table are the arguments `stop` and `remove` take — with a floor on the
+/// profile column so the layout is stable across devices.
+private func printProfileTable(headers: [String], rows: [[String]]) {
+    let profileColumnFloor = 32
+    let widths = headers.indices.map { column in
+        max(column == 0 ? profileColumnFloor : 0, ([headers] + rows).map { $0.indices.contains(column) ? $0[column].count : 0 }.max() ?? 0)
+    }
+    for row in [headers] + rows {
+        // The last cell is never padded, and a cell is never padded shorter than its own value, so a row
+        // that carries more fields than the headers describe still prints intact.
+        let line = row.indices.map { column in
+            let width = column < widths.count ? widths[column] : 0
+            return column == row.count - 1 ? row[column] : row[column].padding(toLength: max(width, row[column].count), withPad: " ", startingAt: 0)
+        }.joined(separator: "  ")
+        print(line)
     }
 }
 
@@ -2713,8 +3058,11 @@ private func mobileServePairingLinkHost(host: String) -> String {
     SpacesDeviceAPINetworkInterfaces.pairingLinkHosts(boundHost: host).first ?? SpacesDeviceAPIDefaults.loopbackHost
 }
 
+/// Wraps a value in single quotes for a POSIX shell, ending and reopening the quoted run around each
+/// embedded quote (`'\''`). This is the escape the shell actually reverses; the `'\"'\"'` spelling yields
+/// `"\"` instead of a quote, which matters here because these values include whole remote scripts.
 private func profileShellQuoted(_ value: String) -> String {
-    let escaped = value.replacingOccurrences(of: "'", with: #"'\"'\"'"#)
+    let escaped = value.replacingOccurrences(of: "'", with: #"'\''"#)
     return "'\(escaped)'"
 }
 

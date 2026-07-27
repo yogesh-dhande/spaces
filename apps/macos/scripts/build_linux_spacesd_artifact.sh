@@ -351,14 +351,17 @@ artifact_root="\$(cd -P "\$bin_dir/.." && pwd)"
 
 # Drop any releases/<version>/lib entry from a prior invocation before prepending the current
 # one. Exec-in-place handoffs re-invoke this wrapper without ever restarting the shell, so
-# LD_LIBRARY_PATH would otherwise gain one stale entry per handoff.
+# LD_LIBRARY_PATH would otherwise gain one stale entry per handoff. The match is on the
+# release-directory shape alone, not on a profile root, so it strips stale entries for the
+# installed profile (~/.spaces/daemon/releases/...) and for a development profile
+# (~/.spaces-dev/profiles/spaces/<name>/daemon/releases/...) alike.
 ld_library_path_without_stale_releases=""
 if [ -n "\${LD_LIBRARY_PATH:-}" ]; then
     saved_ifs="\$IFS"
     IFS=':'
     for ld_library_path_entry in \$LD_LIBRARY_PATH; do
         case "\$ld_library_path_entry" in
-            *"/.spaces/daemon/releases/"*) ;;
+            *"/daemon/releases/"*) ;;
             *) ld_library_path_without_stale_releases="\${ld_library_path_without_stale_releases:+\$ld_library_path_without_stale_releases:}\$ld_library_path_entry" ;;
         esac
     done
@@ -376,6 +379,61 @@ write_linux_install_script() {
     cat > "$destination" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+
+usage() {
+    cat <<'USAGE'
+Usage: install.sh [--profile NAME] [--performance-log PATH]
+
+With no arguments, installs this device's one installed Spaces profile: the release lands under
+~/.spaces/daemon/releases/<version>/, ~/.spaces/bin and ~/.local/bin/spaces point at it, and the
+daemon runs as the spacesd.service user unit.
+
+  --profile NAME          Install into the development profile NAME instead. Everything that
+                          profile owns lives under ~/.spaces-dev/profiles/spaces/NAME/, and its
+                          daemon runs as the spacesd@NAME.service instance of the shared
+                          spacesd@.service template. Nothing under ~/.spaces is written and no
+                          ~/.local/bin alias is created.
+  --performance-log PATH  Record the target daemon's mobile-terminal performance events to PATH,
+                          through a systemd drop-in for the target unit.
+USAGE
+}
+
+profile_name=""
+performance_log_path=""
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --profile)
+            [ "$#" -ge 2 ] || { echo "--profile requires a development profile name." >&2; exit 1; }
+            profile_name="$2"
+            shift 2
+            ;;
+        --performance-log)
+            [ "$#" -ge 2 ] || { echo "--performance-log requires a file path." >&2; exit 1; }
+            performance_log_path="$2"
+            shift 2
+            ;;
+        --help|-h)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "unknown install.sh argument: $1" >&2
+            usage >&2
+            exit 1
+            ;;
+    esac
+done
+
+# A profile name becomes both a path component and a systemd instance name, so it is restricted to
+# characters that are literal in both.
+if [ -n "$profile_name" ]; then
+    case "$profile_name" in
+        .|..|*[!A-Za-z0-9._-]*)
+            echo "invalid --profile name: $profile_name (letters, digits, '.', '_', and '-' only)" >&2
+            exit 1
+            ;;
+    esac
+fi
 
 source_path="${BASH_SOURCE[0]:-$0}"
 while [ -L "$source_path" ]; do
@@ -398,20 +456,41 @@ if [[ -z "$version" ]]; then
     exit 1
 fi
 
-install_root="$HOME/.spaces/daemon"
+service_dir="$HOME/.config/systemd/user"
+# The target selector alone decides the layout. The installing shell's SPACES_DB_PATH,
+# SPACES_RUNTIME_DIR, SPACES_DEVICE_API_HOST, and SPACES_DEVICE_API_PORT are deliberately NOT
+# consulted: inheriting them is what let one developer's worktree profile be baked into this
+# device's single shared unit, which then pinned the installed daemon and every later deploy to
+# that one profile. Nothing installed here needs that environment. A spaces/spacesd binary states
+# which profile it serves by where it lives -- inside a profile root, or under ~/.spaces -- the
+# canonical Device API host and port are the code defaults the installed profile resolves to, and a
+# development profile's daemon assigns and persists its own port at first start.
+if [ -n "$profile_name" ]; then
+    profile_root="$HOME/.spaces-dev/profiles/spaces/$profile_name"
+    install_root="$profile_root/daemon"
+    service_unit="spacesd@$profile_name.service"
+    service_path="$service_dir/spacesd@.service"
+    # A development profile has no stable bin/ of its own: the release that `current` points at is
+    # itself the stable path, and it is what the template unit's ExecStart names.
+    daemon_path="$install_root/current/bin/spacesd"
+    cli_path="$install_root/current/bin/spaces"
+else
+    profile_root="$HOME/.spaces"
+    install_root="$profile_root/daemon"
+    service_unit="spacesd.service"
+    service_path="$service_dir/spacesd.service"
+    bin_root="$profile_root/bin"
+    user_bin_root="$HOME/.local/bin"
+    daemon_path="$bin_root/spacesd"
+    cli_path="$bin_root/spaces"
+fi
+runtime_dir="$profile_root/runtime"
 release_parent="$install_root/releases"
 release_dir="$release_parent/$version"
 release_staging_dir="$release_parent/.install-$version-$$"
 previous_release_dir="$release_parent/.previous-$version-$$"
-bin_root="$HOME/.spaces/bin"
-user_bin_root="$HOME/.local/bin"
-service_dir="$HOME/.config/systemd/user"
-service_path="$service_dir/spacesd.service"
-device_api_host="${SPACES_DEVICE_API_HOST:-0.0.0.0}"
-device_api_port="${SPACES_DEVICE_API_PORT:-47847}"
-db_path="${SPACES_DB_PATH:-$HOME/.spaces/spaces.db}"
-runtime_dir="${SPACES_RUNTIME_DIR:-$HOME/.spaces/runtime}"
-performance_log_path="${SPACES_MOBILE_TERMINAL_PERFORMANCE_LOG_PATH:-}"
+performance_log_drop_in_dir="$service_dir/$service_unit.d"
+performance_log_drop_in_path="$performance_log_drop_in_dir/performance-log.conf"
 
 cleanup_install_staging() {
     rm -rf "$release_staging_dir"
@@ -448,7 +527,11 @@ ensure_user_linger() {
     fi
 }
 
-mkdir -p "$release_parent" "$bin_root" "$user_bin_root" "$(dirname "$db_path")" "$runtime_dir" "$HOME/spaces/workspaces" "$HOME/spaces/repos" "$service_dir"
+if [ -n "$profile_name" ]; then
+    mkdir -p "$release_parent" "$runtime_dir" "$service_dir"
+else
+    mkdir -p "$release_parent" "$bin_root" "$user_bin_root" "$runtime_dir" "$HOME/spaces/workspaces" "$HOME/spaces/repos" "$service_dir"
+fi
 rm -rf "$release_staging_dir" "$previous_release_dir"
 mkdir -p "$release_staging_dir"
 cp -a "$artifact_root/." "$release_staging_dir/"
@@ -460,11 +543,32 @@ rm -rf "$previous_release_dir"
 trap - EXIT
 
 ln -sfn "$release_dir" "$install_root/current"
-ln -sfn "$release_dir/bin/spacesd" "$bin_root/spacesd"
-ln -sfn "$release_dir/bin/spaces" "$bin_root/spaces"
-ln -sfn "$bin_root/spaces" "$user_bin_root/spaces"
+if [ -z "$profile_name" ]; then
+    ln -sfn "$release_dir/bin/spacesd" "$bin_root/spacesd"
+    ln -sfn "$release_dir/bin/spaces" "$bin_root/spaces"
+    ln -sfn "$bin_root/spaces" "$user_bin_root/spaces"
+fi
 
-cat > "$service_path" <<SERVICE
+if [ -n "$profile_name" ]; then
+    # One template serves every development profile on the device, keyed by instance name. It is
+    # rewritten on every install, which is safe precisely because it carries no per-profile
+    # content: the instance name resolves the path, and the binary at that path resolves the rest.
+    cat > "$service_path" <<'SERVICE'
+[Unit]
+Description=Spaces development daemon for profile %i
+
+[Service]
+Type=simple
+ExecStart=%h/.spaces-dev/profiles/spaces/%i/daemon/current/bin/spacesd
+Restart=always
+RestartSec=2
+WorkingDirectory=%h
+
+[Install]
+WantedBy=default.target
+SERVICE
+else
+    cat > "$service_path" <<'SERVICE'
 [Unit]
 Description=Spaces daemon
 
@@ -474,29 +578,34 @@ ExecStart=%h/.spaces/bin/spacesd
 Restart=always
 RestartSec=2
 WorkingDirectory=%h
-Environment=SPACES_DB_PATH=$db_path
-Environment=SPACES_RUNTIME_DIR=$runtime_dir
-Environment=SPACES_DEVICE_API_HOST=$device_api_host
-Environment=SPACES_DEVICE_API_PORT=$device_api_port
-SERVICE
-if [ -n "$performance_log_path" ]; then
-    printf 'Environment=SPACES_MOBILE_TERMINAL_PERFORMANCE_LOG_PATH=%s\n' "$performance_log_path" >> "$service_path"
-fi
-cat >> "$service_path" <<SERVICE
 
 [Install]
 WantedBy=default.target
 SERVICE
+fi
+
+if [ -n "$performance_log_path" ]; then
+    mkdir -p "$performance_log_drop_in_dir"
+    cat > "$performance_log_drop_in_path" <<DROP_IN
+[Service]
+Environment=SPACES_MOBILE_TERMINAL_PERFORMANCE_LOG_PATH=$performance_log_path
+DROP_IN
+else
+    # No flag means no performance log for this target. Clearing a drop-in an earlier install wrote
+    # is what keeps the capability from surviving as ambient state into installs that never asked
+    # for it.
+    rm -f "$performance_log_drop_in_path"
+fi
 
 ensure_user_linger
 systemctl --user daemon-reload
-systemctl --user enable spacesd.service
-systemctl --user reset-failed spacesd.service >/dev/null 2>&1 || true
+systemctl --user enable "$service_unit"
+systemctl --user reset-failed "$service_unit" >/dev/null 2>&1 || true
 
 staged_daemon_identity="$(stat -Lc '%d:%i' "$release_dir/bin/spacesd-bin")"
 
 systemd_daemon_pid() {
-    systemctl --user show spacesd.service --property MainPID --value 2>/dev/null || true
+    systemctl --user show "$service_unit" --property MainPID --value 2>/dev/null || true
 }
 
 daemon_runs_staged_image() {
@@ -512,7 +621,7 @@ wait_for_staged_daemon() {
         daemon_pid="$(systemd_daemon_pid)"
         if { [ -z "$required_pid" ] || [ "$daemon_pid" = "$required_pid" ]; } \
             && daemon_runs_staged_image "$daemon_pid" \
-            && "$bin_root/spaces" terminal list >/dev/null 2>&1; then
+            && "$cli_path" terminal list >/dev/null 2>&1; then
             return 0
         fi
         sleep 0.1
@@ -527,9 +636,13 @@ wait_for_staged_daemon() {
 # and proof that the preserved pid is executing the staged binary. Once a running daemon accepts the
 # request, the installer never restarts it: the request may be quiescing or replaying sessions even
 # while the request socket is unavailable. A systemd start is only safe when there was no daemon pid.
+#
+# Every step here is scoped to the target: the pid comes from the target unit, and the request is
+# driven through the target profile's own `spaces` binary, which resolves that profile from its own
+# path and so reaches that profile's daemon and no other.
 handoff_pid="$(systemd_daemon_pid)"
 if [ -n "$handoff_pid" ] && [ "$handoff_pid" -gt 0 ] 2>/dev/null; then
-    if ! "$bin_root/spaces" daemon apply-update >/dev/null 2>&1; then
+    if ! "$cli_path" daemon apply-update >/dev/null 2>&1; then
         echo "spacesd did not accept the staged handoff; leaving the running daemon and its sessions untouched" >&2
         exit 1
     fi
@@ -543,18 +656,23 @@ if [ -n "$handoff_pid" ] && [ "$handoff_pid" -gt 0 ] 2>/dev/null; then
         fi
     fi
 else
-    systemctl --user restart spacesd.service
+    systemctl --user restart "$service_unit"
     if ! wait_for_staged_daemon; then
         echo "spacesd did not start the installed daemon image within 10s" >&2
         exit 1
     fi
 fi
 
+if [ -n "$profile_name" ]; then
+    printf 'profile_root=%s\n' "$profile_root"
+fi
 printf 'release_dir=%s\n' "$release_dir"
 printf 'current=%s\n' "$install_root/current"
-printf 'spacesd=%s\n' "$bin_root/spacesd"
-printf 'spaces=%s\n' "$bin_root/spaces"
-printf 'spaces_path_alias=%s\n' "$user_bin_root/spaces"
+printf 'spacesd=%s\n' "$daemon_path"
+printf 'spaces=%s\n' "$cli_path"
+if [ -z "$profile_name" ]; then
+    printf 'spaces_path_alias=%s\n' "$user_bin_root/spaces"
+fi
 printf 'service=%s\n' "$service_path"
 EOF
     chmod +x "$destination"
@@ -971,6 +1089,9 @@ fi
 exec /usr/bin/stat "$@"
 SHIM
         chmod +x "$install_shim_dir/loginctl" "$install_shim_dir/systemctl" "$install_shim_dir/stat"
+        # SPACES_DB_PATH/SPACES_RUNTIME_DIR here are for the `spaces` CLI install.sh invokes, not for
+        # install.sh itself: the installer ignores them entirely and lays out the installed profile,
+        # while the CLI it runs needs them to reach the smoke daemon's own profile.
         if ! PATH="$install_shim_dir:$PATH" HOME="$smoke_root/reinstall-home" \
             SPACES_SMOKE_DAEMON_PID="$daemon_pid" \
             SPACES_SMOKE_DAEMON_LOG="$smoke_root/spacesd.log" \
