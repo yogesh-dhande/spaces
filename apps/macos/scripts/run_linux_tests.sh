@@ -50,6 +50,7 @@ trap 'rm -f "$suite_log"' EXIT
 for suite in \
   SpacesTestHostDetectionTests \
   TerminalServiceSystemdUnitTests \
+  TerminalServiceSystemdStartDeadlineTests \
   GhosttyLinuxHeadlessKeyEncodingTests \
   GhosttyLinuxHeadlessSessionResizeTests \
   GhosttyLinuxHeadlessSessionTranscriptTrimTests \

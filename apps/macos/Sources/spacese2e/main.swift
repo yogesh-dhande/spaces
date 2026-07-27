@@ -705,13 +705,40 @@ private func listProfilesScript() -> String {
     """
 }
 
-/// Stops the profile's unit instance and confirms it went inactive. Only this instance is touched, so the
-/// device's installed daemon and every other development profile keep running. The unit stays enabled: a
-/// stopped profile is one nobody is using right now, not one that may never run again.
+/// Shell helpers that read a unit's state from user systemd, shared by the two lifecycle scripts.
+///
+/// `systemctl --user is-active --quiet` cannot serve as a boolean here: it exits nonzero BOTH when systemd
+/// answers "this unit is not running" AND when systemd cannot be asked at all — an SSH session that reaches
+/// no user service manager for the account (no `XDG_RUNTIME_DIR`/`DBUS_SESSION_BUS_ADDRESS`, no user
+/// manager, no systemd) fails exactly like an idle unit does. Reading that as "not running" is what would
+/// let a removal delete a profile root out from under a daemon that is still serving sessions, and a
+/// deleted root is unrecoverable. These helpers read the state systemd PRINTS instead: a state word means
+/// systemd answered, and empty output means it could not be reached, which the scripts refuse on rather
+/// than treating as idle.
+private let systemdUnitStateShellHelpers = """
+    # Prints the state user systemd holds for the unit, and nothing at all when systemd could not be asked.
+    unit_state() {
+        systemctl --user is-active "$1" 2>/dev/null
+    }
+
+    # True only for the states that mean the unit is not running. Every other answer — active, activating,
+    # deactivating, reloading — is a unit that still holds its daemon.
+    unit_is_stopped() {
+        [ "$1" = 'inactive' ] || [ "$1" = 'failed' ]
+    }
+    """
+
+/// Stops the profile's unit instance and confirms systemd reports it stopped. Only this instance is
+/// touched, so the device's installed daemon and every other development profile keep running. The unit
+/// stays enabled: a stopped profile is one nobody is using right now, not one that may never run again.
+///
+/// A systemd that cannot be asked about the unit is reported as such rather than counted as a successful
+/// stop; see `systemdUnitStateShellHelpers`.
 private func stopDevelopmentProfileScript(profileName: String) -> String {
     """
     set -u
     # Reports its outcome in a trailing ##ok/##error marker line and always exits 0; see runReportingScript.
+    \(systemdUnitStateShellHelpers)
     name=\(profileShellQuoted(profileName))
     root="$HOME/\(developmentProfilesRelativePath)/$name"
     unit="spacesd@$name.service"
@@ -720,8 +747,13 @@ private func stopDevelopmentProfileScript(profileName: String) -> String {
         exit 0
     fi
     systemctl --user stop "$unit" >/dev/null 2>&1
-    if systemctl --user is-active --quiet "$unit" 2>/dev/null; then
-        printf '\(RemoteDevice.errorMarker)\t%s is still active after being asked to stop.\\n' "$unit"
+    state="$(unit_state "$unit")"
+    if [ -z "$state" ]; then
+        printf '\(RemoteDevice.errorMarker)\tUser systemd could not be asked about %s over this SSH session, so it cannot be shown to have stopped.\\n' "$unit"
+        exit 0
+    fi
+    if ! unit_is_stopped "$state"; then
+        printf '\(RemoteDevice.errorMarker)\t%s is still %s after being asked to stop.\\n' "$unit" "$state"
         exit 0
     fi
     printf '\(RemoteDevice.okMarker)\tStopped %s.\\n' "$unit"
@@ -732,15 +764,20 @@ private func stopDevelopmentProfileScript(profileName: String) -> String {
 /// instance and deletes the profile root.
 ///
 /// Disabling before deleting is what makes the deletion safe: the unit restarts on failure, so a unit left
-/// enabled comes straight back up against a half-deleted profile. The unit's inactivity is verified rather
-/// than assumed from a command's exit status.
+/// enabled comes straight back up against a half-deleted profile. The unit's stopped state is verified
+/// rather than assumed from a command's exit status.
 ///
 /// A running daemon that does not answer its own CLI is also refused: idleness cannot be proven, and
-/// `profile stop` is the way through — once the unit is inactive it holds no sessions at all.
+/// `profile stop` is the way through — once the unit is stopped it holds no sessions at all.
+///
+/// Both state checks refuse when systemd itself cannot be asked, before and after disabling: an
+/// unanswerable systemd says nothing about whether the daemon is serving sessions, so nothing is deleted.
+/// See `systemdUnitStateShellHelpers`.
 private func removeDevelopmentProfileScript(profileName: String) -> String {
     """
     set -u
     # Reports its outcome in a trailing ##ok/##error marker line and always exits 0; see runReportingScript.
+    \(systemdUnitStateShellHelpers)
     name=\(profileShellQuoted(profileName))
     root="$HOME/\(developmentProfilesRelativePath)/$name"
     unit="spacesd@$name.service"
@@ -749,7 +786,12 @@ private func removeDevelopmentProfileScript(profileName: String) -> String {
         printf '\(RemoteDevice.errorMarker)\tThere is no development profile at %s.\\n' "$root"
         exit 0
     fi
-    if systemctl --user is-active --quiet "$unit" 2>/dev/null; then
+    state="$(unit_state "$unit")"
+    if [ -z "$state" ]; then
+        printf '\(RemoteDevice.errorMarker)\tUser systemd could not be asked whether %s is running over this SSH session, so %s was left in place.\\n' "$unit" "$root"
+        exit 0
+    fi
+    if ! unit_is_stopped "$state"; then
         if ! listing="$("$cli" terminal list 2>/dev/null)"; then
             printf '\(RemoteDevice.errorMarker)\t%s is running but did not answer its own CLI, so it cannot be shown to be idle. Run: spacese2e profile stop --remote %s\\n' "$unit" "$name"
             exit 0
@@ -761,8 +803,13 @@ private func removeDevelopmentProfileScript(profileName: String) -> String {
         fi
     fi
     systemctl --user disable --now "$unit" >/dev/null 2>&1
-    if systemctl --user is-active --quiet "$unit" 2>/dev/null; then
-        printf '\(RemoteDevice.errorMarker)\t%s is still active after being disabled, so %s was left in place.\\n' "$unit" "$root"
+    state="$(unit_state "$unit")"
+    if [ -z "$state" ]; then
+        printf '\(RemoteDevice.errorMarker)\tUser systemd could not be asked whether %s stopped over this SSH session, so %s was left in place.\\n' "$unit" "$root"
+        exit 0
+    fi
+    if ! unit_is_stopped "$state"; then
+        printf '\(RemoteDevice.errorMarker)\t%s is still %s after being disabled, so %s was left in place.\\n' "$unit" "$state" "$root"
         exit 0
     fi
     # Clears a leftover failed state for the instance, so a removed profile leaves nothing behind in

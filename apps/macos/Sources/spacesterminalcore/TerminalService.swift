@@ -636,6 +636,11 @@ import Foundation
         /// a daemon here the way macOS does. This still adopts a live daemon without going near systemd, so
         /// the common case costs one ping.
         @discardableResult public static func ensureRunning(timeout: TimeInterval = 5, requireWireCompatibility: Bool = true) throws -> Bool {
+            // `timeout` is the caller's whole budget for this call, so one deadline computed here bounds
+            // every step: asking systemd to start the unit is work inside the window, not a preamble to
+            // it. Callers that deliberately bound this call (`sendProfileCommand` passes `min(timeout, 5)`)
+            // must not be held past their own deadline by an unresponsive user systemd instance.
+            let deadline = Date().addingTimeInterval(timeout)
             let socketPath = try TerminalServicePaths.socketPath()
             if FileManager.default.fileExists(atPath: socketPath), let response = try? pingResponse(timeout: min(timeout, 1)), response.ok {
                 if requireWireCompatibility { try assertDaemonWireCompatible(response) }
@@ -647,13 +652,10 @@ import Foundation
             // systemd, and no `Process` to reach one with — so the start attempt is Linux-only and iOS waits
             // for a socket exactly as it did before, then reports the same unavailability.
             #if os(Linux)
-                let startedUnit = startSystemdUnit(for: try SpacesProfile.current())
+                let startedUnit = startSystemdUnit(for: try SpacesProfile.current(), deadline: deadline)
             #else
                 let startedUnit: String? = nil
             #endif
-            // The wait starts after the start attempt so the daemon gets the caller's whole window to come
-            // up, rather than however much of it dispatching to systemd happened to leave.
-            let deadline = Date().addingTimeInterval(timeout)
             repeat {
                 if FileManager.default.fileExists(atPath: socketPath), let response = try? pingResponse(timeout: min(timeout, 1)), response.ok {
                     if requireWireCompatibility { try assertDaemonWireCompatible(response) }
@@ -686,9 +688,11 @@ import Foundation
             ///
             /// A failing start is not fatal here: the caller's poll below decides the outcome, because whether a
             /// daemon ends up answering is the only thing that matters and systemd reports plenty of non-failures
-            /// (an already-active unit, a unit still starting) that say nothing about that. The wait is bounded so
-            /// an unresponsive user systemd instance cannot stall a caller past its own deadline.
-            private static func startSystemdUnit(for profile: SpacesProfile) -> String? {
+            /// (an already-active unit, a unit still starting) that say nothing about that.
+            ///
+            /// `deadline` is `ensureRunning`'s single deadline, so waiting on `systemctl` never outlives the
+            /// caller's own window.
+            private static func startSystemdUnit(for profile: SpacesProfile, deadline: Date) -> String? {
                 guard let unitName = systemdUnitName(for: profile) else { return nil }
                 let process = Process()
                 process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
@@ -697,10 +701,18 @@ import Foundation
                 process.standardOutput = FileHandle.nullDevice
                 process.standardError = FileHandle.nullDevice
                 do { try process.run() } catch { return nil }
-                let deadline = Date().addingTimeInterval(systemdStartTimeout)
-                while process.isRunning, Date() < deadline { Thread.sleep(forTimeInterval: 0.05) }
+                let startDeadline = systemdStartWaitDeadline(overallDeadline: deadline)
+                while process.isRunning, Date() < startDeadline { Thread.sleep(forTimeInterval: 0.05) }
                 if process.isRunning { process.terminate() }
                 return unitName
+            }
+
+            /// How long waiting on `systemctl --user start` may last: never past `overallDeadline`, and never
+            /// longer than `systemdStartTimeout` even when the caller allows more, so a systemd instance that
+            /// never answers cannot consume a generous window and leave nothing for the socket wait that
+            /// decides the outcome.
+            static func systemdStartWaitDeadline(overallDeadline: Date, now: Date = Date()) -> Date {
+                min(overallDeadline, now.addingTimeInterval(systemdStartTimeout))
             }
 
             private static let systemdStartTimeout: TimeInterval = 5

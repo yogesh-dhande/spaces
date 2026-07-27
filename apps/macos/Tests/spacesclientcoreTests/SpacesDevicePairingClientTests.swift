@@ -160,7 +160,9 @@ final class SpacesDevicePairingClientTests: XCTestCase {
             runtimeDirectory: "/Users/tester/.spaces/runtime", ipcNotificationObject: "spaces.profile.installed", developmentContext: nil,
             branchSlug: nil, worktreeHash: nil)
 
-        XCTAssertEqual(try SpacesDevicePairingClient.remotePairCommand(profile: profile), SpacesDevicePairingClient.installedRemotePairCommand)
+        let pairCommand = try SpacesDevicePairingClient.remotePairCommand(profile: profile)
+        XCTAssertEqual(pairCommand.command, SpacesDevicePairingClient.installedRemotePairCommand)
+        XCTAssertNil(pairCommand.developmentProfileName)
     }
 
     /// A development profile pairs through its own deployed CLI inside the matching remote profile root,
@@ -173,17 +175,60 @@ final class SpacesDevicePairingClientTests: XCTestCase {
             source: .explicitDatabasePath, databasePath: "\(root)/spaces.db", rootDirectory: root, runtimeDirectory: "\(root)/runtime",
             ipcNotificationObject: "spaces.profile.dev", developmentContext: nil, branchSlug: nil, worktreeHash: nil)
 
-        let command = try SpacesDevicePairingClient.remotePairCommand(profile: profile)
-        XCTAssertEqual(command, #""$HOME/.spaces-dev/profiles/spaces/schema-squash-v1-154418a8e022/daemon/current/bin/spaces" device pair --json"#)
-        XCTAssertFalse(command.contains(SpacesProfile.databasePathEnvironmentVariable))
-        XCTAssertFalse(command.contains(SpacesProfile.runtimeDirectoryEnvironmentVariable))
+        let pairCommand = try SpacesDevicePairingClient.remotePairCommand(profile: profile)
+        XCTAssertEqual(
+            pairCommand.command, #""$HOME/.spaces-dev/profiles/spaces/schema-squash-v1-154418a8e022/daemon/current/bin/spaces" device pair --json"#)
+        XCTAssertEqual(pairCommand.developmentProfileName, profileName)
+        XCTAssertFalse(pairCommand.command.contains(SpacesProfile.databasePathEnvironmentVariable))
+        XCTAssertFalse(pairCommand.command.contains(SpacesProfile.runtimeDirectoryEnvironmentVariable))
     }
 
-    /// Issue #322: `remoteDevelopmentProfileRoot`'s `providedProfile ?? SpacesProfile.current()` fallback
+    /// A development profile whose CLI is missing on the device must never be reported as "Spaces is not
+    /// installed": that error carries the production installer one-liner and drives the app's "Install
+    /// Spaces over SSH" affordance, which installs only `~/.spaces` and therefore could never make this
+    /// pairing succeed. The actionable answer is to deploy this worktree's profile to the device.
+    func testMissingDevelopmentProfileCLIReportsAnUndeployedProfileInsteadOfAMissingInstall() throws {
+        let probe = RemoteInstallProbe(operatingSystem: "Linux", architecture: "aarch64", linuxID: "ubuntu", linuxVersionID: "24.04")
+        let pairCommand = RemotePairCommand(
+            command: #""$HOME/.spaces-dev/profiles/spaces/feature-x-0123456789ab/daemon/current/bin/spaces" device pair --json"#,
+            developmentProfileName: "feature-x-0123456789ab")
+
+        let error = SpacesDevicePairingClient.remotePairCommandBinaryMissingError(
+            destination: "builder.local", pairCommand: pairCommand, probe: probe, appVersion: "0.1.0")
+
+        guard case .remoteDevelopmentProfileNotDeployed = error else { return XCTFail("expected remoteDevelopmentProfileNotDeployed, got \(error).") }
+        let message = try XCTUnwrap(error.errorDescription)
+        XCTAssertTrue(message.contains("builder.local"))
+        XCTAssertTrue(message.contains("feature-x-0123456789ab"))
+        XCTAssertTrue(message.contains("scripts/dev-build-and-launch.sh"))
+        // No install one-liner and no install guidance: neither would deploy this profile.
+        XCTAssertFalse(message.contains("install.sh"))
+        XCTAssertFalse(message.contains("not installed"))
+    }
+
+    /// The installed profile's missing CLI keeps the not-installed error exactly as it was, install command
+    /// and affordance included: that device really has no Spaces, and the installer is the way through.
+    func testMissingInstalledCLIStillReportsNotInstalledWithTheInstallCommand() throws {
+        let probe = RemoteInstallProbe(operatingSystem: "Linux", architecture: "aarch64", linuxID: "ubuntu", linuxVersionID: "24.04")
+        let pairCommand = RemotePairCommand(command: SpacesDevicePairingClient.installedRemotePairCommand, developmentProfileName: nil)
+
+        let error = SpacesDevicePairingClient.remotePairCommandBinaryMissingError(
+            destination: "builder.local", pairCommand: pairCommand, probe: probe, appVersion: "0.1.0")
+
+        guard case .remoteSpacesNotInstalled(_, let installCommand) = error else {
+            return XCTFail("expected remoteSpacesNotInstalled, got \(error).")
+        }
+        XCTAssertEqual(installCommand, "curl -fsSL https://usespaces.dev/install.sh | bash -s -- 0.1.0")
+        let message = try XCTUnwrap(error.errorDescription)
+        XCTAssertTrue(message.contains("Spaces is not installed for that user"))
+        XCTAssertTrue(message.contains("Ubuntu 24.04 device"))
+    }
+
+    /// Issue #322: `remoteDevelopmentProfileName`'s `providedProfile ?? SpacesProfile.current()` fallback
     /// used to discard a test-host refusal with `try?`, so a caller that passed no profile (or a test
     /// exercising this function directly, as here) would silently get `nil` — indistinguishable from
     /// "this account genuinely has no development profile" — and fall through to `installedRemotePairCommand`,
-    /// the installed-profile command. `remotePairCommand`/`remoteDevelopmentProfileRoot` already `throw`
+    /// the installed-profile command. `remotePairCommand`/`remoteDevelopmentProfileName` already `throw`
     /// end to end, so nothing but the fix itself stands between the refusal and the caller now.
     func testRemotePairCommandRethrowsTestHostRefusalInsteadOfDegradingToInstalledDefault() throws {
         let accountHomePath = try XCTUnwrap(SpacesProfile.accountHomeDirectoryPath())
@@ -394,9 +439,7 @@ final class SpacesDevicePairingClientTests: XCTestCase {
         for bakedInEnvironment in [
             "Environment=SPACES_DB_PATH", "Environment=SPACES_RUNTIME_DIR", "Environment=SPACES_DEVICE_API_HOST",
             "Environment=SPACES_DEVICE_API_PORT",
-        ] {
-            XCTAssertFalse(script.contains(bakedInEnvironment), "A unit must not bake \(bakedInEnvironment) into a profile's daemon.")
-        }
+        ] { XCTAssertFalse(script.contains(bakedInEnvironment), "A unit must not bake \(bakedInEnvironment) into a profile's daemon.") }
         // The performance log is the one per-instance setting, and it arrives as a drop-in for that instance
         // rather than as content in the shared template.
         XCTAssertTrue(script.contains(#"performance_log_drop_in_dir="$service_dir/$service_unit.d""#))
@@ -416,9 +459,7 @@ final class SpacesDevicePairingClientTests: XCTestCase {
         for ambientDefault in [
             #"db_path="${SPACES_DB_PATH:-"#, #"runtime_dir="${SPACES_RUNTIME_DIR:-"#, #"device_api_host="${SPACES_DEVICE_API_HOST:-"#,
             #"device_api_port="${SPACES_DEVICE_API_PORT:-"#, #"performance_log_path="${SPACES_MOBILE_TERMINAL_PERFORMANCE_LOG_PATH:-"#,
-        ] {
-            XCTAssertFalse(script.contains(ambientDefault), "install.sh must not take its layout from the installing shell (\(ambientDefault)).")
-        }
+        ] { XCTAssertFalse(script.contains(ambientDefault), "install.sh must not take its layout from the installing shell (\(ambientDefault)).") }
     }
 
     func testLinuxArtifactInstallerVerifiesHandoffAndRestartCompletion() throws {
