@@ -1074,9 +1074,13 @@ public enum TerminalSessionPersistence {
     /// device overview asks this for each of its rows on every build, several times a second, so it
     /// reads the whole set once instead of opening a connection per session.
     public static func sessionIDsWithFinalRender() throws -> Set<String> {
-        try withProfileDatabase { database in
-            Set(try database.queryRows(sql: "SELECT session_id FROM terminal_remote_session_states WHERE has_final_render <> 0").compactMap(\.first))
+        // The set is built outside the lane: assembling it is work proportional to every retained
+        // final-render row, and holding the read connection through it would queue a latency-sensitive
+        // engine read (owner gating, stale-client liveness) behind this sweep's post-processing.
+        let rows = try withProfileDatabase { database in
+            try database.queryRows(sql: "SELECT session_id FROM terminal_remote_session_states WHERE has_final_render <> 0")
         }
+        return Set(rows.compactMap(\.first))
     }
 
     /// The stored byte count of each session's persisted final-render payload, keyed by root directory.
@@ -1084,12 +1088,14 @@ public enum TerminalSessionPersistence {
     /// ended session's footprint actually accumulates. Read as one query per sweep rather than per
     /// session, since each read otherwise opens its own connection.
     public static func finalRenderPayloadByteCountsByRootDirectory() throws -> [String: Int64] {
-        try withProfileDatabase { database in
-            var counts: [String: Int64] = [:]
-            for row in try database.queryRows(sql: "SELECT root_directory, length(CAST(payload_json AS BLOB)) FROM terminal_remote_session_states")
-            where row.count >= 2 { counts[row[0]] = Int64(row[1]) ?? 0 }
-            return counts
+        // Keyed outside the lane, for the same reason as `sessionIDsWithFinalRender`: this runs on the
+        // garbage collector's sweep, and building the dictionary is proportional to every retained row.
+        let rows = try withProfileDatabase { database in
+            try database.queryRows(sql: "SELECT root_directory, length(CAST(payload_json AS BLOB)) FROM terminal_remote_session_states")
         }
+        var counts: [String: Int64] = [:]
+        for row in rows where row.count >= 2 { counts[row[0]] = Int64(row[1]) ?? 0 }
+        return counts
     }
 
     private static func upsertClient(
