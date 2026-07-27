@@ -485,7 +485,7 @@ enum SpacesDaemonProfileCommandRouting {
         // engine queue) and is refused instead of leaking a child `exit(0)` never reaps. Monotonic: the
         // process exits, so it is never cleared.
         shutdownInProgress = true
-        stopSharedServices()
+        await stopSharedServices()
         // `terminateAllSessions` is engine-isolated (it drives `terminateSession`/Ghostty per core). Hop
         // with the ASYNC `run` — a main-actor context must never sync-wait on the engine (the one-way
         // rule). `terminate()` no longer blocks (PTY teardown is deferred), so this returns promptly after
@@ -508,7 +508,34 @@ enum SpacesDaemonProfileCommandRouting {
     /// observers/receivers, device-runtime services, the Device API supervisor, and the main
     /// request-accepting socket server. Shared by `shutdown()` and the exec-in-place handoff, which
     /// stops intake here and then quiesces (rather than terminates) the session cores.
-    private func stopSharedServices() {
+    ///
+    /// Runs in two phases, and the split is the point. Draining a reconcile loop's database connection
+    /// suspends the main actor for as long as a pass takes, so any service still live across that
+    /// suspension can start fresh work into a daemon that is about to `exit(0)` or `execv` — a request
+    /// launching an arbitrary command, or a process-status reconcile committing an exit whose `onExit:
+    /// restart` the handoff gate then refuses, losing the restart. So: latch every producer of new work
+    /// first, and only then wait.
+    ///
+    /// `stopWorkProducers()` is not `async`, which is what enforces phase 1 rather than leaving it to the
+    /// reader — nothing in it can suspend, so nothing can slip between two latches. A service added later
+    /// belongs there by default; only a teardown that genuinely must be awaited goes in phase 2, and by
+    /// then everything is already latched.
+    private func stopSharedServices() async {
+        stopWorkProducers()
+        await releaseReconcileStores()
+    }
+
+    /// Phase 1: latch everything that could introduce new work. Synchronous by contract — see
+    /// `stopSharedServices()`.
+    private func stopWorkProducers() {
+        // Intake first: `shutdownInProgress` gates session CREATES only, so during a shutdown every other
+        // request kind — `.runWorkspaceCommand` can launch an arbitrary command — is admitted right up
+        // until the acceptors stop. (An exec handoff does not depend on this: it latches
+        // `handoffInProgress` before calling here, and that flag makes `handle` reject every command.)
+        // This narrows the window rather than closing it: `acceptSource.cancel()` propagates
+        // asynchronously, which is exactly why the create path has an admission gate as well.
+        deviceAPISupervisor.stop()
+        server.stop()
         lifecycleTimer?.invalidate()
         lifecycleTimer = nil
         if let databaseChangeObserver {
@@ -531,18 +558,27 @@ enum SpacesDaemonProfileCommandRouting {
         #endif
         worktreeDiscoveryService?.stop()
         worktreeDiscoveryService = nil
-        terminalForegroundAgentReconciler?.stop()
-        terminalForegroundAgentReconciler = nil
         remoteAgentWatchService?.stop()
         remoteAgentWatchService = nil
+        terminalForegroundAgentReconciler?.beginStop()
         #if os(macOS)
             processExitMonitor?.stop()
             processExitMonitor = nil
-            caddyRouterService?.stop()
+            caddyRouterService?.beginStop()
+        #endif
+    }
+
+    /// Phase 2: wait for each reconcile loop's database connection to be released and take its final WAL
+    /// checkpoint. Safe to suspend in here precisely because phase 1 has already run: nothing left alive
+    /// can submit work, and neither reconcile pass depends on a service phase 1 tore down — each builds
+    /// its own orchestrator over the store confined to its own queue.
+    private func releaseReconcileStores() async {
+        await terminalForegroundAgentReconciler?.releaseStore()
+        terminalForegroundAgentReconciler = nil
+        #if os(macOS)
+            await caddyRouterService?.releaseStore()
             caddyRouterService = nil
         #endif
-        deviceAPISupervisor.stop()
-        server.stop()
     }
 
     @TerminalEngineActor private func terminateAllSessions() { for sessionID in Array(sessionCores.keys) { _ = terminateSession(id: sessionID) } }
@@ -753,7 +789,7 @@ enum SpacesDaemonProfileCommandRouting {
         }
         writeStandardError("spacesd handoff_preflight_ok\n")
 
-        stopSharedServices()
+        await stopSharedServices()
         writeStandardError("spacesd handoff_intake_stopped\n")
 
         // Flush agent-notification lines already enqueued from main-actor callers (RemoteAgentWatchService

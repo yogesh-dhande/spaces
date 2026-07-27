@@ -351,6 +351,70 @@ final class TerminalCorePersistenceQueueTests: XCTestCase {
         XCTAssertEqual(try TerminalSessionPersistence.readRuntimeState(paths: paths).title, "new")
     }
 
+    /// The termination fence: a runtime-state write that cannot commit yet retries IN PLACE and so keeps its
+    /// slot on the serial queue, which is what makes the writes a core's `terminate()` enqueues behind it —
+    /// detach-all, terminated payload, durable-end notification — run only once it commits. The detach has no
+    /// retry of its own, so it lands durably only if it waited behind the retrying exited write until the
+    /// database recovered. Before the fix the failed write surrendered its FIFO slot via `asyncAfter`, so the
+    /// detach ran immediately against the broken database and was lost while the (deferred) exited retry still
+    /// landed.
+    ///
+    /// The `RetryGate` is what makes this an ordering test rather than a timing one: the database is restored
+    /// while the retry loop is parked inside the gate, so the restore cannot race an attempt opening the
+    /// database — a race that surfaces as a mangled restore or an `unknownSession` read, both of which look
+    /// like persistence bugs rather than the test's own scheduling.
+    func testFailingRuntimeStateWriteFencesTheDetachQueuedBehindIt() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = TerminalSessionPaths(rootDirectory: root.path)
+        try paths.ensureDirectories()
+        let launchConfiguration = TerminalSessionLaunchConfiguration(
+            sessionID: "session-fence", backend: .ghosttyEmbedded, title: "shell", workingDirectory: "/tmp/original", shell: "/bin/zsh",
+            command: "zsh", createdAt: "2026-05-17T00:00:00Z", workspaceID: "workspace-1", kind: .shell)
+        try TerminalSessionPersistence.writeLaunchConfiguration(launchConfiguration, paths: paths)
+        try TerminalSessionPersistence.attachClient(
+            sessionID: launchConfiguration.sessionID,
+            client: TerminalClient(
+                id: "remote-client", kind: .remoteViewer, identity: .init(label: "iPhone", deviceName: "iPhone"), connectedAt: "2026-05-17T00:00:00Z"),
+            mode: .viewer, paths: paths, attachedAt: "2026-05-17T00:00:00Z")
+        try TerminalSessionPersistence.writeRuntimeState(makeRunningState(sessionID: launchConfiguration.sessionID, title: "shell"), paths: paths)
+        XCTAssertFalse(try TerminalSessionPersistence.activeAttachments(paths: paths).isEmpty)
+
+        let databasePath = try SpacesProfile.current().databasePath
+        try Self.breakDatabase(at: databasePath, allowedRoot: XCTUnwrap(databaseRoot))
+
+        let retryGate = RetryGate()
+        let queue = TerminalCorePersistenceQueue(
+            label: "test.persistence.termination-fence", runtimeStateWriteRetryDelay: 0.001, sleep: retryGate.sleep)
+        let exitedState = TerminalSessionRuntimeState(
+            sessionID: launchConfiguration.sessionID, backend: .ghosttyEmbedded, servicePID: getpid(), childPID: nil, state: .exited,
+            updatedAt: "2026-05-17T00:01:00Z", exitedAt: "2026-05-17T00:01:00Z", title: "shell", workingDirectory: "/tmp/original")
+        // The two writes `terminate()` enqueues, in the order it enqueues them.
+        queue.enqueueRuntimeStateWrite(exitedState, at: Date(), paths: paths, onPersisted: { _, _ in })
+        queue.enqueueWrite { databasePath in
+            try? TerminalSessionPersistence.detachActiveClients(paths: paths, detachedAt: "2026-05-17T00:01:00Z", databasePath: databasePath)
+        }
+
+        XCTAssertTrue(retryGate.waitForRetry(), "the exited write must genuinely fail against the broken database before the fence is asserted")
+        try Self.restoreDatabase(at: databasePath)
+        // The fence, observed while it is being held: the exited write is still retrying, so the detach behind
+        // it has not run — even though the database is healthy again and it would now succeed.
+        XCTAssertFalse(
+            try TerminalSessionPersistence.activeAttachments(paths: paths).isEmpty,
+            "the detach must not run while the exited write ahead of it is still retrying")
+        XCTAssertEqual(try TerminalSessionPersistence.readRuntimeState(paths: paths).state, .running)
+
+        retryGate.releaseOneRetry()
+        await queue.drainAsync()
+        XCTAssertEqual(
+            try TerminalSessionPersistence.readRuntimeState(paths: paths).state, .exited,
+            "the retried exited write must commit once the database recovers")
+        XCTAssertTrue(
+            try TerminalSessionPersistence.activeAttachments(paths: paths).isEmpty,
+            "the detach released by the fence must commit after it, so it lands post-recovery instead of being lost")
+    }
+
     /// Replaces the SQLite database (and its WAL sidecars) with a directory so every write fails to open it,
     /// preserving the real files aside so `restoreDatabase` can bring the committed data back intact.
     ///
